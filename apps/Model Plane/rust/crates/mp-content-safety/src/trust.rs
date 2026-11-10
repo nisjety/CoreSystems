@@ -41,6 +41,8 @@ const TOOL_TRUST: &[(&str, TrustClass)] = &[
     ("web.read", TrustClass::ExternalWeb),
     // E3.7.10: the crawl tools return pages fetched from the open web through Quarry.
     ("knowledge.map", TrustClass::ExternalWeb),
+    // Q4-E4.3-055c1: the crawl planner returns mapped page URLs and titles from the open web.
+    ("knowledge.crawl_plan", TrustClass::ExternalWeb),
     ("knowledge.crawl_site", TrustClass::ExternalWeb),
     ("knowledge.batch", TrustClass::ExternalWeb),
     ("browser_agent", TrustClass::BrowserScraped),
@@ -178,6 +180,7 @@ mod tests {
             "browser.act",
             "browser.console",
             "knowledge.map",
+            "knowledge.crawl_plan",
             "knowledge.crawl_site",
             "knowledge.batch",
             "mcp__srv__anything",

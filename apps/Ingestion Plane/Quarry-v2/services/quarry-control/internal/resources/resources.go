@@ -638,6 +638,8 @@ func recordRobotsIgnored(ctx context.Context, sink RobotsAuditor, job store.Job,
 	})
 }
 
+// createJobInput is the POST /v1/jobs body. Preset was removed in Q4-E4.1-7: the
+// field is still decoded so resolveJobPolicy refuses it with a 400, not ignores it.
 type createJobInput struct {
 	Kind   string                     `json:"kind"`
 	Policy *quarrycontracts.RunPolicy `json:"policy"`
@@ -668,18 +670,16 @@ func resolveJobOrigin(in *store.JobOrigin) (store.JobOrigin, error) {
 	return store.JobOrigin{Type: t, Actor: in.Actor, Ref: in.Ref, CreatedBy: in.CreatedBy}, nil
 }
 
-// resolveJobPolicy honors the precedence: explicit policy > preset > default.
-// An unknown preset name is a 400 (BadRequest), not a silent fallback.
+// resolveJobPolicy honors the precedence: explicit policy > default. The Go job
+// presets were removed in Q4-E4.1-7, so a non-empty `preset` is refused with a
+// 400 before anything else, never ignored: a caller that still sends one must
+// send `policy` instead.
 func resolveJobPolicy(in createJobInput) (quarrycontracts.RunPolicy, error) {
+	if in.Preset != "" {
+		return quarrycontracts.RunPolicy{}, fmt.Errorf("preset was removed; send policy")
+	}
 	if in.Policy != nil {
 		return *in.Policy, nil
-	}
-	if in.Preset != "" {
-		p, ok := ResolvePreset(in.Preset)
-		if !ok {
-			return quarrycontracts.RunPolicy{}, fmt.Errorf("unknown preset: %s", in.Preset)
-		}
-		return p, nil
 	}
 	return quarrycontracts.DefaultRunPolicy(), nil
 }

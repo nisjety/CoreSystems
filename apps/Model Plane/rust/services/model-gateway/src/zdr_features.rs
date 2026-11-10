@@ -118,6 +118,11 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
         "research_plan",
         Treatment::Inert("read only on a deep-research turn, which a ZDR turn refuses through `deep_research`"),
     ),
+    // E4.6 062b: the run's budget, read only on a deep-research turn, as the two fields above are.
+    (
+        "research_budget",
+        Treatment::Inert("read only on a deep-research turn, which a ZDR turn refuses through `deep_research`"),
+    ),
     // `web_only` is refused. `auto` and `knowledge_only` are honored: grounding
     // then reads org knowledge only, and no web source was asked for. A
     // knowledge-only deep research (EP-2 S7) is still refused, through
@@ -283,6 +288,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         deep_research: _,
         research_phase: _,
         research_plan: _,
+        research_budget: _,
         retrieval_scope: _,
         connector_scope: _,
         regenerated: _,
@@ -346,6 +352,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "deep_research",
         "research_phase",
         "research_plan",
+        "research_budget",
         "retrieval_scope",
         "connector_scope",
         "regenerated",

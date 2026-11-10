@@ -1628,6 +1628,9 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         // tool classes; they stay unavailable until execution-core attests them).
         "knowledge.crawl_site" => "cap.web.crawl",
         "knowledge.map" => "cap.web.map",
+        // Q4-E4.3-055c1: the read-only crawl planner maps a site (the same `/v1/map` read) and drafts a scope
+        // for a person to approve, so it rides the map's capability; its seed row is Q4-E4.3-055c2.
+        "knowledge.crawl_plan" => "cap.web.map",
         "knowledge.batch" => "cap.web.batch",
         "knowledge_search" => "cap.retrieval.query",
         // The owner document inventory (WS24-S8) is a read of the same Data Plane corpus under the

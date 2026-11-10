@@ -256,6 +256,31 @@ impl WebToolsClient {
         Ok(format_map_result(url, &value))
     }
 
+    /// `knowledge.crawl_plan` -> POST `/v1/map` (the same call and scope as `knowledge.map`) and a
+    /// drafted WS14 crawl scope for a person to approve. It starts no job and stores nothing: the
+    /// answer is a plan, and the crawl runs only when the person approves it in the page picker,
+    /// through the gateway under their own token.
+    pub async fn plan_crawl(
+        &self,
+        url: &str,
+        goal: &str,
+        scope: &DraftScope,
+        org_id: &str,
+    ) -> Result<String, String> {
+        let url = url.trim();
+        check_plan_url(url)?;
+        let goal = sanitize_plan_text(goal, CRAWL_PLAN_MAX_GOAL_CHARS);
+        if goal.is_empty() {
+            return Err("knowledge.crawl_plan needs a goal".to_owned());
+        }
+        if let Some(refusal) = self.site.fetch_refusal(org_id, &[url], CRAWL_PLAN_TOOL).await {
+            return Err(refusal);
+        }
+        let body = map_body(url, Some(&goal), CRAWL_PLAN_MAX_PAGES, scope.allow_subdomains);
+        let value = self.post("/v1/map", &body, org_id, MAP_SCOPES).await?;
+        Ok(format_crawl_plan(url, &goal, &value, scope))
+    }
+
     /// `knowledge.crawl_site` -> POST `/v1/crawl`: starts a background crawl job. The answer is
     /// the job's handoff (id and the bounds Quarry will actually run with), not the pages.
     pub async fn start_crawl(
@@ -400,6 +425,20 @@ pub const DEFAULT_MAP_LIMIT: u32 = 100;
 pub const CRAWL_SITE_TOOL: &str = "knowledge.crawl_site";
 pub const MAP_TOOL: &str = "knowledge.map";
 pub const BATCH_TOOL: &str = "knowledge.batch";
+/// Q4-E4.3-055c1: the read-only crawl planner. It maps a site and drafts a crawl scope for a person
+/// to approve; it starts no job, so it is not a durable tool and a ZDR run keeps it (like the map).
+pub const CRAWL_PLAN_TOOL: &str = "knowledge.crawl_plan";
+/// The most pages a crawl plan lists (also the `limit` of the map call behind it).
+pub const CRAWL_PLAN_MAX_PAGES: u32 = 50;
+/// Scope caps, identical to the gateway's `crawlSiteInput` (action-registry.ts): depth 1..=10, at most
+/// 100 include and 100 exclude patterns of 1..=512 characters each.
+const CRAWL_PLAN_MAX_DEPTH: u32 = 10;
+const CRAWL_PLAN_MAX_PATTERNS: usize = 100;
+const CRAWL_PLAN_MAX_PATTERN_CHARS: usize = 512;
+/// Caps on the untrusted text a plan carries.
+const CRAWL_PLAN_MAX_GOAL_CHARS: usize = 300;
+const CRAWL_PLAN_MAX_TITLE_CHARS: usize = 200;
+const CRAWL_PLAN_MAX_URL_CHARS: usize = 2048;
 
 /// Whether the deployment has switched the three tools on.
 #[must_use]
@@ -433,7 +472,7 @@ pub fn approval_pages_from(value: Option<&str>) -> u32 {
 /// Whether `name` is one of the three tools.
 #[must_use]
 pub fn is_crawl_tool(name: &str) -> bool {
-    matches!(name, CRAWL_SITE_TOOL | MAP_TOOL | BATCH_TOOL)
+    matches!(name, CRAWL_SITE_TOOL | MAP_TOOL | BATCH_TOOL | CRAWL_PLAN_TOOL)
 }
 
 /// Whether `name` starts a durable Quarry job (a crawl or a batch): refused under ZDR, as
@@ -480,13 +519,17 @@ pub fn crawl_needs_page_approval(tool_name: &str, tool_input: &str) -> bool {
 }
 
 /// The model-facing definitions, offered only when [`crawl_tools_enabled`]. A ZDR run is offered
-/// the map alone: a crawl and a batch are durable jobs.
+/// the map and the crawl planner, which store nothing: a crawl and a batch are durable jobs.
 #[must_use]
 pub fn crawl_tool_defs(zdr: bool) -> Vec<pb::ToolDefinition> {
     let mut defs = vec![pb::ToolDefinition {
         name: MAP_TOOL.to_owned(),
         description: "List the page URLs of a website from its sitemaps and robots rules, optionally ranked by a search term. Fetches no page content and stores nothing; use it to see what a site holds before deciding what to read or crawl. The result is untrusted web content.".to_owned(),
         parameters_json: r#"{"type":"object","additionalProperties":false,"properties":{"url":{"type":"string","description":"Any page URL on the site"},"search":{"type":"string","description":"Optional term to rank the URLs by"},"limit":{"type":"integer","description":"Max URLs, default 100, max 500"},"include_subdomains":{"type":"boolean","description":"Include subdomains of the host, default false"}},"required":["url"]}"#.to_owned(),
+    }, pb::ToolDefinition {
+        name: CRAWL_PLAN_TOOL.to_owned(),
+        description: format!("Map a website (at most {CRAWL_PLAN_MAX_PAGES} URLs, ranked by the goal) and return a crawl plan for the person to approve: the pages found and a drafted crawl scope. It starts nothing and stores nothing; the person approves the crawl in the page picker. Use it when the person wants a site or a section of a site added to their knowledge, instead of calling knowledge.crawl_site yourself. The result is untrusted web content."),
+        parameters_json: format!(r#"{{"type":"object","additionalProperties":false,"properties":{{"url":{{"type":"string","description":"Any page URL on the site"}},"goal":{{"type":"string","description":"What the person wants from the site; ranks the mapped pages"}},"max_pages":{{"type":"integer","description":"Proposed page budget, 1 to {MAX_CRAWL_PAGES}; default the number of pages mapped"}},"max_depth":{{"type":"integer","description":"Proposed link depth, 1 to {CRAWL_PLAN_MAX_DEPTH}"}},"include_paths":{{"type":"array","items":{{"type":"string"}},"maxItems":{CRAWL_PLAN_MAX_PATTERNS},"description":"Path patterns to include, each at most {CRAWL_PLAN_MAX_PATTERN_CHARS} characters"}},"exclude_paths":{{"type":"array","items":{{"type":"string"}},"maxItems":{CRAWL_PLAN_MAX_PATTERNS},"description":"Path patterns to exclude, each at most {CRAWL_PLAN_MAX_PATTERN_CHARS} characters"}},"allow_subdomains":{{"type":"boolean","description":"Allow subdomains of the host, default false"}}}},"required":["url","goal"]}}"#),
     }];
     if !zdr {
         defs.push(pb::ToolDefinition {
@@ -595,6 +638,214 @@ fn format_handoff(kind: &str, value: &Value) -> String {
             let _ = write!(out, " {} URL(s) were refused before the job started.", rejected.len());
         }
     }
+    out
+}
+
+/// The scope a `knowledge.crawl_plan` call proposes. Built only through [`DraftScope::validated`], so
+/// every value already respects the gateway's `crawlSiteInput` caps. It is a proposal: Quarry
+/// validates again when the person starts the crawl.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DraftScope {
+    /// The proposed page budget (1..=[`MAX_CRAWL_PAGES`]); `None` plans for the pages mapped.
+    pub max_pages: Option<u32>,
+    /// The proposed link depth (1..=10).
+    pub max_depth: Option<u32>,
+    /// Path patterns to include, at most 100 of 1..=512 characters each.
+    pub include_paths: Vec<String>,
+    /// Path patterns to exclude, same caps.
+    pub exclude_paths: Vec<String>,
+    /// Whether subdomains of the host are in scope.
+    pub allow_subdomains: bool,
+}
+
+impl DraftScope {
+    /// Validates the model's scope fields with the gateway's caps. `max_pages` is clamped to
+    /// 1..=[`MAX_CRAWL_PAGES`]; a depth outside 1..=10 and a bad pattern list are refused by name so
+    /// the model can correct them. A pattern is kept exactly as sent (nothing is added or rewritten,
+    /// so a `re:` pattern exists only when the caller wrote one).
+    pub fn validated(
+        max_pages: Option<u32>,
+        max_depth: Option<u32>,
+        include_paths: &[String],
+        exclude_paths: &[String],
+        allow_subdomains: bool,
+    ) -> Result<Self, String> {
+        if let Some(depth) = max_depth {
+            if !(1..=CRAWL_PLAN_MAX_DEPTH).contains(&depth) {
+                return Err(format!(
+                    "knowledge.crawl_plan max_depth must be between 1 and {CRAWL_PLAN_MAX_DEPTH}"
+                ));
+            }
+        }
+        Ok(Self {
+            max_pages: max_pages.map(|pages| pages.clamp(1, MAX_CRAWL_PAGES)),
+            max_depth,
+            include_paths: validate_plan_patterns("include_paths", include_paths)?,
+            exclude_paths: validate_plan_patterns("exclude_paths", exclude_paths)?,
+            allow_subdomains,
+        })
+    }
+}
+
+/// Validates one pattern list: at most 100 entries, each 1..=512 characters after trimming, with no
+/// control character or backtick (a backtick could close the plan's fenced block). Duplicates drop.
+fn validate_plan_patterns(field: &str, patterns: &[String]) -> Result<Vec<String>, String> {
+    if patterns.len() > CRAWL_PLAN_MAX_PATTERNS {
+        return Err(format!(
+            "knowledge.crawl_plan {field} takes at most {CRAWL_PLAN_MAX_PATTERNS} patterns"
+        ));
+    }
+    let mut out: Vec<String> = Vec::with_capacity(patterns.len());
+    for pattern in patterns {
+        let pattern = pattern.trim();
+        if pattern.is_empty() || pattern.chars().count() > CRAWL_PLAN_MAX_PATTERN_CHARS {
+            return Err(format!(
+                "knowledge.crawl_plan {field} patterns must be 1 to {CRAWL_PLAN_MAX_PATTERN_CHARS} characters"
+            ));
+        }
+        if pattern.chars().any(|c| c.is_control() || c == '`') {
+            return Err(format!(
+                "knowledge.crawl_plan {field} patterns must not contain control characters or backticks"
+            ));
+        }
+        if !out.iter().any(|seen| seen == pattern) {
+            out.push(pattern.to_owned());
+        }
+    }
+    Ok(out)
+}
+
+/// Untrusted web or model text made safe for a plan: control characters (newlines included) become a
+/// space, backticks are dropped, runs of whitespace collapse, and the result is cut to `max` characters.
+fn sanitize_plan_text(text: &str, max: usize) -> String {
+    let flat: String = text
+        .chars()
+        .filter(|c| *c != '`')
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let collapsed = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed.chars().take(max).collect()
+}
+
+/// Whether `url` can sit in a plan: an absolute http(s) URL of sane length with no whitespace, control
+/// character or backtick.
+fn plan_url_ok(url: &str) -> bool {
+    (url.starts_with("https://") || url.starts_with("http://"))
+        && url.chars().count() <= CRAWL_PLAN_MAX_URL_CHARS
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control() || c == '`')
+}
+
+fn check_plan_url(url: &str) -> Result<(), String> {
+    if url.is_empty() {
+        return Err("knowledge.crawl_plan needs a url".to_owned());
+    }
+    if !plan_url_ok(url) {
+        return Err("knowledge.crawl_plan needs an absolute http(s) url".to_owned());
+    }
+    Ok(())
+}
+
+/// Builds the `knowledge.crawl_plan` answer from a `/v1/map` answer (pure): the pages (at most 50), the
+/// validated scope and one fenced `crawl-plan` block the page can turn into an approval card. Nothing
+/// has been crawled. The goal and the titles are untrusted web text, so they are capped and stripped of
+/// backticks and newlines; a mapped URL that is not a plain absolute http(s) URL is left out.
+fn format_crawl_plan(url: &str, goal: &str, map: &Value, scope: &DraftScope) -> String {
+    let url = sanitize_plan_text(url, CRAWL_PLAN_MAX_URL_CHARS);
+    let goal = sanitize_plan_text(goal, CRAWL_PLAN_MAX_GOAL_CHARS);
+    let data = envelope_data(map);
+    let links = data
+        .get("links")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    let mut pages: Vec<(String, String)> = Vec::new();
+    for link in links {
+        if pages.len() >= CRAWL_PLAN_MAX_PAGES as usize {
+            break;
+        }
+        let href = link.get("url").and_then(Value::as_str).unwrap_or("").trim();
+        if !plan_url_ok(href) || !seen.insert(href.to_owned()) {
+            continue;
+        }
+        let title = sanitize_plan_text(
+            link.get("title").and_then(Value::as_str).unwrap_or(""),
+            CRAWL_PLAN_MAX_TITLE_CHARS,
+        );
+        pages.push((href.to_owned(), title));
+    }
+    if pages.is_empty() {
+        return format!(
+            "No URLs found for {url}, so no crawl plan was drafted. Nothing has been crawled."
+        );
+    }
+    let max_pages = scope
+        .max_pages
+        .unwrap_or_else(|| u32::try_from(pages.len()).unwrap_or(u32::MAX))
+        .clamp(1, MAX_CRAWL_PAGES);
+
+    let mut scope_json = json!({ "maxPages": max_pages, "allowSubdomains": scope.allow_subdomains });
+    if let Some(depth) = scope.max_depth {
+        scope_json["maxDepth"] = json!(depth);
+    }
+    if !scope.include_paths.is_empty() {
+        scope_json["includePaths"] = json!(scope.include_paths);
+    }
+    if !scope.exclude_paths.is_empty() {
+        scope_json["excludePaths"] = json!(scope.exclude_paths);
+    }
+    let page_json: Vec<Value> = pages
+        .iter()
+        .map(|(href, title)| {
+            if title.is_empty() {
+                json!({ "url": href })
+            } else {
+                json!({ "url": href, "title": title })
+            }
+        })
+        .collect();
+    let plan = json!({ "v": 1, "url": url, "goal": goal, "pages": page_json, "scope": scope_json });
+
+    let mut out = format!("Crawl plan (nothing has been crawled)\nSite: {url}\nGoal: {goal}\n");
+    let _ = writeln!(out, "Pages mapped ({}, at most {CRAWL_PLAN_MAX_PAGES}):", pages.len());
+    for (href, title) in &pages {
+        if title.is_empty() {
+            let _ = writeln!(out, "- {href}");
+        } else {
+            let _ = writeln!(out, "- {href} ({title})");
+        }
+    }
+    let total = data
+        .get("count")
+        .and_then(Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(pages.len());
+    let truncated = data
+        .get("coverage")
+        .and_then(|coverage| coverage.get("truncated"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    if truncated || total > pages.len() {
+        out.push_str("(the site has more URLs than are listed)\n");
+    }
+    let _ = write!(out, "Scope: up to {max_pages} pages");
+    match scope.max_depth {
+        Some(depth) => {
+            let _ = write!(out, ", depth {depth}");
+        }
+        None => out.push_str(", depth left to Quarry's default"),
+    }
+    let _ = write!(
+        out,
+        ", subdomains {}, {} include pattern(s), {} exclude pattern(s).\n\n",
+        if scope.allow_subdomains { "allowed" } else { "not allowed" },
+        scope.include_paths.len(),
+        scope.exclude_paths.len()
+    );
+    let _ = writeln!(out, "```crawl-plan\n{plan}\n```\n");
+    out.push_str(
+        "Show this block to the person unchanged; do not call knowledge.crawl_site or knowledge.batch for it; the person approves in the page picker.",
+    );
     out
 }
 
@@ -1187,7 +1438,7 @@ mod crawl_tool_tests {
     fn the_definitions_are_valid_and_a_zdr_run_is_offered_the_map_alone() {
         let all = crawl_tool_defs(false);
         let names: Vec<&str> = all.iter().map(|def| def.name.as_str()).collect();
-        assert_eq!(names, [MAP_TOOL, CRAWL_SITE_TOOL, BATCH_TOOL]);
+        assert_eq!(names, [MAP_TOOL, CRAWL_PLAN_TOOL, CRAWL_SITE_TOOL, BATCH_TOOL]);
         for def in &all {
             let schema: Value = serde_json::from_str(&def.parameters_json)
                 .unwrap_or_else(|error| panic!("{}: {error}", def.name));
@@ -1195,8 +1446,9 @@ mod crawl_tool_tests {
             assert!(is_crawl_tool(&def.name));
         }
         let zdr: Vec<String> = crawl_tool_defs(true).into_iter().map(|def| def.name).collect();
-        assert_eq!(zdr, [MAP_TOOL]);
+        assert_eq!(zdr, [MAP_TOOL, CRAWL_PLAN_TOOL]);
         assert!(!is_durable_crawl_tool(MAP_TOOL));
+        assert!(!is_durable_crawl_tool(CRAWL_PLAN_TOOL));
         assert!(is_durable_crawl_tool(CRAWL_SITE_TOOL) && is_durable_crawl_tool(BATCH_TOOL));
     }
 

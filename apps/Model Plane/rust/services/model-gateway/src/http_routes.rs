@@ -11235,6 +11235,12 @@ pub struct InvokeRequest {
     /// every sub-query and bounds the answers before anything is searched.
     #[serde(default, alias = "researchPlan")]
     pub research_plan: Option<serde_json::Value>,
+    /// The caller's budget for a deep-research run (E4.6 062b): `max_pages`, `max_sub_queries`, `usd_ceiling` (USD,
+    /// 0.01 to 25) and `wall_clock_secs`, each optional, and each able only to lower a process cap. Kept as raw JSON
+    /// and read only on a deep-research turn while `MODEL_GATEWAY_RESEARCH_RUNS` is on
+    /// (`normalize::research_budget`), so a body carrying it is parsed exactly as before with the switch off.
+    #[serde(default, alias = "researchBudget")]
+    pub research_budget: Option<serde_json::Value>,
     /// Per-turn retrieval-source filter (Perplexity-Focus style). Absent/unknown
     /// → "auto" (today's behavior, byte-identical). Meaningless and ignored
     /// when `conversation_only` is in effect — that mode already excludes both

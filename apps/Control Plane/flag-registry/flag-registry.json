@@ -352,6 +352,17 @@
       "codePath": "apps/Model Plane/rust/services/inference-core/src/config.rs"
     },
     {
+      "name": "PROCEDURES_API",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Saved browser recipes on capability-core /api/v1/procedures. Off answers 404 procedures_disabled; only the literal true turns it on.",
+      "declarations": [
+        { "service": "capability-core", "env": "PROCEDURES_API", "default": "false" }
+      ]
+    },
+    {
       "name": "PROCESS_SWEEPER_ENABLED",
       "kind": "switch",
       "owner": "model-plane",

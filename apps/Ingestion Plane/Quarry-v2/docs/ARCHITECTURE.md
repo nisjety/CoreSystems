@@ -88,7 +88,7 @@ DriverPlan
 Selection inputs:
 
 - Requested formats and actions.
-- Policy preset (`fast`, `polite`, `careful`, `deterministic`, future custom; `stealth` is a deprecated alias of `careful` for one release).
+- Run policy: the job's `policy`, or the baseline default. The named Go presets (`fast`, `polite`, `careful`, `deterministic`, and the `stealth` alias) were removed in E4.1-7.
 - URL hints: file extension, known JS-required hosts, known static/API hosts.
 - Cache policy and age.
 - Session/profile requirement.

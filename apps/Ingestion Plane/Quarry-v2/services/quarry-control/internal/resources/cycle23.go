@@ -37,9 +37,9 @@ import (
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 	"github.com/triodelab/quarry-v2/pkg/quarryotel"
-	temporalclient "github.com/triodelab/quarry-v2/services/quarry-control/internal/temporal"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
+	temporalclient "github.com/triodelab/quarry-v2/services/quarry-control/internal/temporal"
 )
 
 // page mirrors Rust `quarry_core::pagination::Page<T>` exactly so the
@@ -109,13 +109,18 @@ var validSourceKinds = map[string]bool{"crawl": true, "scrape": true, "search": 
 //   - POST   /v1/sources      — create a source (mints src_<ulid>); optionally
 //     registers a change_monitor schedule so the orchestrator drives recurring
 //     refresh through Temporal. Accepts an optional tag (E3.5-6).
+//   - GET    /v1/sources/{id} — read one live source, its config included (E4.1-6b).
 //   - PATCH  /v1/sources/{id} — set the tag; "" clears it (E3.5-6).
 //   - DELETE /v1/sources/{id} — soft-delete (sets deleted_at), org-scoped.
+//   - PUT    /v1/sources/{id}/definition — replace the saved job definition in
+//     config.definition, or clear it with null (E4.1-6b).
 func MountSources(r chi.Router, db store.DB) {
 	r.Get("/v1/sources", listSourcesHandler(db))
 	r.Post("/v1/sources", createSourceHandler(db))
+	r.Get("/v1/sources/{id}", getSourceHandler(db))
 	r.Patch("/v1/sources/{id}", patchSourceHandler(db))
 	r.Delete("/v1/sources/{id}", deleteSourceHandler(db))
+	r.Put("/v1/sources/{id}/definition", putSourceDefinitionHandler(db))
 }
 
 // orgFromQuery reads the verified org the edge stamped as `?org_id`. Empty is
@@ -319,6 +324,29 @@ func createSourceHandler(db store.DB) http.HandlerFunc {
 	}
 }
 
+// getSourceHandler answers GET /v1/sources/{id} for the caller's org (E4.1-6b): the live
+// source, config included (a saved job definition sits at config.definition). A missing,
+// soft-deleted or cross-tenant id is the same 404.
+func getSourceHandler(db store.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		org, ok := orgOr400(w, r)
+		if !ok {
+			return
+		}
+		id := quarrycontracts.ID(chi.URLParam(r, "id"))
+		if err := id.MustKind(quarrycontracts.KindSource); err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
+			return
+		}
+		src, ok := db.Sources().GetByOrg(org, id)
+		if !ok {
+			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+			return
+		}
+		httpx.WriteJSON(w, r, http.StatusOK, src)
+	}
+}
+
 // patchSourceHandler answers PATCH /v1/sources/{id} for the caller's org (E3.5-6). The
 // body's tag replaces the source's tag ("" clears it) and bumps updated_at; the answer is
 // the updated source. A cross-tenant or soft-deleted id is a 404, as a missing one is.
@@ -376,6 +404,138 @@ func deleteSourceHandler(db store.DB) http.HandlerFunc {
 	}
 }
 
+// savedDefinitionKey is the config key a saved job definition lives under (E4.1-6b). The
+// definition is options only: the edge validates it deeply and canonicalises it before it
+// forwards it here, and control checks the shape alone.
+const savedDefinitionKey = "definition"
+
+// definitionVersion is the one saved definition version the structural check accepts.
+const definitionVersion = 1
+
+// maxDefinitionBytes bounds one saved definition as the caller encoded it (16 KiB, the bound
+// the edge applies too). maxDefinitionBodyBytes bounds the whole PUT body: the envelope around
+// the definition adds a little, so the body bound sits above the definition bound.
+const (
+	maxDefinitionBytes     = 16 << 10
+	maxDefinitionBodyBytes = 64 << 10
+)
+
+// definitionRefusal is a definition the structural check turns away. reason is the stable code
+// the 400 details carry, and message says what the shape must be without echoing the input.
+type definitionRefusal struct {
+	reason  string
+	message string
+}
+
+// putSourceDefinitionHandler answers PUT /v1/sources/{id}/definition for the caller's org
+// (E4.1-6b). The body's definition replaces config.definition of the source, and a body that
+// sends null removes it. A body that names no definition is refused, so a PUT never clears a
+// definition by omission. The check is structural only: version 1, job_kind scrape or crawl
+// equal to the source kind, an options object, at most 16 KiB encoded. The answer is the
+// updated source. A cross-tenant or soft-deleted id is a 404, as a missing one is.
+func putSourceDefinitionHandler(db store.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		org, ok := orgOr400(w, r)
+		if !ok {
+			return
+		}
+		id := quarrycontracts.ID(chi.URLParam(r, "id"))
+		if err := id.MustKind(quarrycontracts.KindSource); err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxDefinitionBodyBytes)
+		var body map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "decode body: "+err.Error(), nil)
+			return
+		}
+		raw, present := body["definition"]
+		if !present {
+			writeDefinitionRefusal(w, r, &definitionRefusal{
+				reason:  "definition_required",
+				message: `definition is required; send null to clear it`,
+			})
+			return
+		}
+		src, ok := db.Sources().GetByOrg(org, id)
+		if !ok {
+			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+			return
+		}
+		// The write replaces the whole config document, so it works on a copy: the config
+		// the store handed back is never edited in place.
+		cfg := make(map[string]any, len(src.Config)+1)
+		for k, v := range src.Config {
+			cfg[k] = v
+		}
+		if string(raw) == "null" {
+			delete(cfg, savedDefinitionKey)
+		} else {
+			def, refusal := checkSourceDefinition(raw, src.Kind)
+			if refusal != nil {
+				writeDefinitionRefusal(w, r, refusal)
+				return
+			}
+			cfg[savedDefinitionKey] = def
+		}
+		if err := db.Sources().UpdateConfigByOrg(org, id, cfg); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+				return
+			}
+			httpx.WriteErr(w, r, quarrycontracts.CodeInternal, err.Error(), nil)
+			return
+		}
+		updated, ok := db.Sources().GetByOrg(org, id)
+		if !ok {
+			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+			return
+		}
+		httpx.WriteJSON(w, r, http.StatusOK, updated)
+	}
+}
+
+// checkSourceDefinition is the structural check on a saved definition's raw JSON, for a source
+// of kind sourceKind. It answers the decoded object, or the refusal that names the stable reason.
+// The options are not validated here: the edge runs the crawl and scrape validators on them
+// before it forwards the definition.
+func checkSourceDefinition(raw json.RawMessage, sourceKind string) (map[string]any, *definitionRefusal) {
+	if len(raw) > maxDefinitionBytes {
+		return nil, &definitionRefusal{reason: "definition_too_large", message: "definition must be at most 16 KiB encoded"}
+	}
+	var def map[string]any
+	if err := json.Unmarshal(raw, &def); err != nil || def == nil {
+		return nil, &definitionRefusal{reason: "definition_not_object", message: "definition must be a JSON object"}
+	}
+	for key := range def {
+		if key != "version" && key != "job_kind" && key != "options" {
+			return nil, &definitionRefusal{reason: "unknown_key", message: "definition takes only version, job_kind and options"}
+		}
+	}
+	if v, ok := def["version"].(float64); !ok || v != definitionVersion {
+		return nil, &definitionRefusal{reason: "unsupported_version", message: "definition version must be 1"}
+	}
+	jobKind, _ := def["job_kind"].(string)
+	if jobKind != "scrape" && jobKind != "crawl" {
+		return nil, &definitionRefusal{reason: "unsupported_kind", message: "definition job_kind must be scrape or crawl"}
+	}
+	if jobKind != sourceKind {
+		return nil, &definitionRefusal{reason: "job_kind_mismatch", message: "definition job_kind must equal the source kind"}
+	}
+	if _, ok := def["options"].(map[string]any); !ok {
+		return nil, &definitionRefusal{reason: "options_not_object", message: "definition options must be a JSON object"}
+	}
+	return def, nil
+}
+
+// writeDefinitionRefusal answers a definition the structural check turns away: a 400 whose
+// details name the field and the stable reason.
+func writeDefinitionRefusal(w http.ResponseWriter, r *http.Request, refusal *definitionRefusal) {
+	httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, refusal.message,
+		map[string]any{"field": "definition", "reason": refusal.reason})
+}
+
 // =============================================================================
 // /v1/benchmarks — REMOVED (cycle 28 follow-up).
 //
@@ -387,7 +547,6 @@ func deleteSourceHandler(db store.DB) http.HandlerFunc {
 // benchmark corpus lands it gets re-introduced with a real
 // store-backed read.
 // =============================================================================
-
 
 func pickQuery(r *http.Request, name, def string) string {
 	v := r.URL.Query().Get(name)

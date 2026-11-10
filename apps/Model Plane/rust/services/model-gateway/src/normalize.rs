@@ -91,6 +91,36 @@ pub fn retrieval_scope(raw: Option<&str>) -> RetrievalScope {
     }
 }
 
+/// The smallest USD ceiling a research run may name, in US dollars (E4.6 062b).
+const RESEARCH_USD_CEILING_MIN: f64 = 0.01;
+
+/// The largest USD ceiling a research run may name, in US dollars (E4.6 062b).
+const RESEARCH_USD_CEILING_MAX: f64 = 25.0;
+
+/// The budget a deep-research turn asks for (E4.6 062b), from its `research_budget`: `max_pages`, `max_sub_queries`
+/// and `wall_clock_secs`, each a whole number of 1 or more, and `usd_ceiling`, in US dollars, clamped to 0.01 to 25.
+/// A value that is absent, malformed or below its floor is dropped, which leaves that cap as the process has it. A
+/// budget can only lower a cap: `RunCaps` lowers the process caps with the result and never raises one. Absent or
+/// unusable as a whole, the budget is the default, the run as it was before budgets.
+#[must_use]
+pub fn research_budget(raw: Option<&serde_json::Value>) -> crate::deep_research::ResearchBudget {
+    let whole = |key: &str| {
+        raw.and_then(|budget| budget.get(key))
+            .and_then(serde_json::Value::as_u64)
+            .filter(|value| *value >= 1)
+    };
+    crate::deep_research::ResearchBudget {
+        max_pages: whole("max_pages").and_then(|pages| usize::try_from(pages).ok()),
+        max_sub_queries: whole("max_sub_queries").and_then(|queries| usize::try_from(queries).ok()),
+        wall_clock_secs: whole("wall_clock_secs"),
+        usd_ceiling: raw
+            .and_then(|budget| budget.get("usd_ceiling"))
+            .and_then(serde_json::Value::as_f64)
+            .filter(|usd| usd.is_finite())
+            .map(|usd| usd.clamp(RESEARCH_USD_CEILING_MIN, RESEARCH_USD_CEILING_MAX)),
+    }
+}
+
 /// Load the model allowlist from `ALLOWED_MODELS` env var (comma-separated).
 /// Returns `None` if the env var is not set (all models allowed).
 fn load_allowed_models() -> Option<Vec<String>> {
@@ -589,6 +619,7 @@ mod tests {
             deep_research: false,
             research_phase: None,
             research_plan: None,
+            research_budget: None,
             retrieval_scope: None,
             connector_scope: None,
             max_cost_usd: None,

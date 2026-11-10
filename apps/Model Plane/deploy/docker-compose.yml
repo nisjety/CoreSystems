@@ -2249,6 +2249,9 @@ services:
       # EP-11 S8: import a skill from a SKILL.md or a zip (needs SKILL_BUNDLES_ENABLED and SKILL_DRAFT_PUBLISH). Keep off until
       # D2-379/D2-383 are fixed. Only the literal true.
       SKILL_IMPORT_ENABLED: ${SKILL_IMPORT_ENABLED:-false}
+      # Plan 3.4 E4.2 step 3: saved browser recipes on /api/v1/procedures. Off by default (every route answers 404
+      # procedures_disabled); only the literal `true` turns them on. Needs the procedures migration 0039 (applied at boot).
+      PROCEDURES_API: ${PROCEDURES_API:-false}
       # EP-11 S9: only the literal `true` turns it on.
       SKILL_SPACE_SCOPE: ${SKILL_SPACE_SCOPE:-false}
       # Capability Core reauthorizes every due scheduled fire directly with

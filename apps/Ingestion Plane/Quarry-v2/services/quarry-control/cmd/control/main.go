@@ -257,7 +257,6 @@ func main() {
 		// WS7.F: /v1/blocklists answers 410 Gone. The CRUD mount is
 		// resources.MountBlocklists(r, db); one-line rollback.
 		resources.MountBlocklistsGone(r)
-		resources.MountPresets(r)
 
 		// Cycle 23/24 additions — REST resource breadth part 2 +
 		// schedule lifecycle aliases. /v1/sources is a real,

@@ -50,7 +50,11 @@ type AgentSkillVersion struct {
 	// The verified principal that cut it; empty for the system and unattributed.
 	ActorId string `protobuf:"bytes,12,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`
 	// When the version was cut, RFC 3339 UTC.
-	CreatedAt     string `protobuf:"bytes,13,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	CreatedAt string `protobuf:"bytes,13,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	// Quarry v2 E4.3. The URL patterns at this version; empty for a version cut
+	// while the skill had none (its body carries no url_patterns key then, so the
+	// digest of such a version is the one it had before the field existed).
+	UrlPatterns   []string `protobuf:"bytes,14,rep,name=url_patterns,json=urlPatterns,proto3" json:"url_patterns,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -174,6 +178,13 @@ func (x *AgentSkillVersion) GetCreatedAt() string {
 		return x.CreatedAt
 	}
 	return ""
+}
+
+func (x *AgentSkillVersion) GetUrlPatterns() []string {
+	if x != nil {
+		return x.UrlPatterns
+	}
+	return nil
 }
 
 // EP-11 S2. List one skill's versions, newest first.
@@ -458,7 +469,7 @@ var File_model_plane_v1_skill_versions_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_skill_versions_proto_rawDesc = "" +
 	"\n" +
-	"#model_plane/v1/skill_versions.proto\x12\x0emodel_plane.v1\"\xba\x03\n" +
+	"#model_plane/v1/skill_versions.proto\x12\x0emodel_plane.v1\"\xdd\x03\n" +
 	"\x11AgentSkillVersion\x12\x19\n" +
 	"\bskill_id\x18\x01 \x01(\tR\askillId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\x05R\aversion\x12\x16\n" +
@@ -475,7 +486,8 @@ const file_model_plane_v1_skill_versions_proto_rawDesc = "" +
 	"actor_kind\x18\v \x01(\tR\tactorKind\x12\x19\n" +
 	"\bactor_id\x18\f \x01(\tR\aactorId\x12\x1d\n" +
 	"\n" +
-	"created_at\x18\r \x01(\tR\tcreatedAt\"\xd7\x01\n" +
+	"created_at\x18\r \x01(\tR\tcreatedAt\x12!\n" +
+	"\furl_patterns\x18\x0e \x03(\tR\vurlPatterns\"\xd7\x01\n" +
 	"\x1dListAgentSkillVersionsRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x19\n" +
 	"\bskill_id\x18\x02 \x01(\tR\askillId\x12\x14\n" +

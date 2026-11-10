@@ -150,6 +150,10 @@ struct VersionBody {
     trigger_keywords: Vec<String>,
     trigger_file_patterns: Vec<String>,
     tool_restrictions: Vec<String>,
+    /// Migration 0116's conditional key: present only in the body of a version cut while the skill
+    /// had URL patterns, so every older body (and every version of a skill without patterns)
+    /// reads as an empty list.
+    url_patterns: Vec<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -181,6 +185,7 @@ impl From<VersionRow> for pb::AgentSkillVersion {
             actor_kind: row.actor_kind,
             actor_id: row.actor_id,
             created_at: row.created_at.to_rfc3339(),
+            url_patterns: body.url_patterns,
         }
     }
 }

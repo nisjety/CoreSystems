@@ -99,24 +99,12 @@ The presets module is shape-complete; cycle 27+ wires:
   the resolved bundle into the scrape pipeline.
 - Postgres-backed registry for org-custom presets.
 
-## Job presets and `requires` (quarry-control, WS7.F)
+## Removed (E4.1-7)
 
-The job presets served by `GET /v1/presets` are `fast`, `polite` (the baseline,
-equal to `DefaultRunPolicy`), `careful` and `deterministic`. `stealth` is a
-deprecated alias of `careful` kept for one release; it carries the same
-policy, the same `requires`, and a `Deprecation` header on its single route.
+The Go job presets are gone. `GET /v1/presets` and `GET /v1/presets/{name}` are no longer mounted on quarry-control, the deprecated `stealth` alias went with them, and `POST /v1/jobs` refuses a `preset` field with `400 BAD_REQUEST` (`preset was removed; send policy`) instead of resolving it. Job creation never checked the `requires` keys the presets declared. The `fast` preset sets `RobotsIgnore` (`robots.max_mode=ignore`), so the presets were deleted rather than proxied.
 
-Each preset has `requires`: the web-policy capability keys (`key=value`, the
-names in `quarry_core::web_policy`) that its policy needs above the baseline.
-A preset whose policy exceeds the baseline must declare the excess, and the
-test `TestEveryPresetThatExceedsTheBaselineDeclaresRequires` enforces it.
+Send the run policy as `policy` on job create. With neither field, a job gets the baseline `DefaultRunPolicy`.
 
-| Preset | requires |
-| --- | --- |
-| `fast` | `robots.max_mode=ignore` |
-| `polite` | (none, baseline) |
-| `careful` (and alias `stealth`) | `proxy.max_tier=pool` |
-| `deterministic` | (none, baseline) |
+Two other uses of the word "preset" are unchanged: the change-monitor cadence on `POST /v1/sources` and `POST /v1/schedules` (`hourly`, `daily` or `weekly`), and the Rust bundles in `quarry_core::presets` described above.
 
-`requires` is declared only. Job creation does not check it yet: WS7.C wires
-the edge and WS7.I mints the claim that unlocks each key.
+A named, reusable set of job options is a saved job definition, not a preset. See `docs/CONTRACTS.md`, section "Saved job definitions (E4.1-6)".

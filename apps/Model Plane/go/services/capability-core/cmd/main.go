@@ -24,7 +24,6 @@ import (
 	"github.com/triodelab/model-plane/pkg/publisher"
 	"github.com/triodelab/model-plane/pkg/servicetoken"
 	"github.com/triodelab/model-plane/services/capability-core/internal/api"
-	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
 	"github.com/triodelab/model-plane/services/capability-core/internal/authz"
 	"github.com/triodelab/model-plane/services/capability-core/internal/commands"
 	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
@@ -39,6 +38,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/runwatch"
 	capserver "github.com/triodelab/model-plane/services/capability-core/internal/server"
 	"github.com/triodelab/model-plane/services/capability-core/internal/sessionreview"
+	"github.com/triodelab/model-plane/services/capability-core/internal/skillbundle"
 	"github.com/triodelab/model-plane/services/capability-core/internal/taskexec"
 	"github.com/triodelab/model-plane/services/capability-core/internal/watch"
 	"google.golang.org/grpc"
@@ -300,6 +300,8 @@ func main() {
 	// recPub makes reconcile.Emit a no-op).
 	api.NewSkillsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	api.NewSkillBundlesHandler(pool, api.SkillBundlesAPIFromLookup(os.Getenv)).Register(protectedMux)
+	// Plan 3.4 E4.2 step 3: saved browser recipes. Behind PROCEDURES_API (off by default): every route answers 404 procedures_disabled.
+	api.NewProceduresHandler(pool, api.ProceduresAPIFromLookup(os.Getenv)).Register(protectedMux)
 	api.NewSkillImportHandler(pool, api.SkillImportFromLookup(os.Getenv)).WithPublisher(recPub).Register(protectedMux)
 	api.NewPluginsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	// Behind ORG_AGENT_POLICY_API (off by default): the handler answers 404 while it is off.

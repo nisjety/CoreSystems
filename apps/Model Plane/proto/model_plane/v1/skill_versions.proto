@@ -43,6 +43,10 @@ message AgentSkillVersion {
   string actor_id = 12;
   // When the version was cut, RFC 3339 UTC.
   string created_at = 13;
+  // Quarry v2 E4.3. The URL patterns at this version; empty for a version cut
+  // while the skill had none (its body carries no url_patterns key then, so the
+  // digest of such a version is the one it had before the field existed).
+  repeated string url_patterns = 14;
 }
 
 // EP-11 S2. List one skill's versions, newest first.

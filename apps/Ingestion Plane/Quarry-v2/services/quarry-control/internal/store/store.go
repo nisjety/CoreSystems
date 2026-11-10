@@ -196,6 +196,12 @@ type SourcesStore interface {
 	// UpdateTagByOrg sets the tag of a live source the org owns ("" clears it) and
 	// bumps updated_at. A cross-tenant or soft-deleted id answers ErrNotFound.
 	UpdateTagByOrg(orgID string, id quarrycontracts.ID, tag string) error
+	// UpdateConfigByOrg replaces the whole config document of a live source the org
+	// owns and bumps updated_at. A caller that changes one key reads the source,
+	// copies its config and writes the copy back. A cross-tenant or soft-deleted id
+	// answers ErrNotFound. Config is free-form JSONB, so no migration backs it
+	// (E4.1-6b: the saved job definition sits at config.definition).
+	UpdateConfigByOrg(orgID string, id quarrycontracts.ID, config map[string]any) error
 	// Create inserts a new source. The caller mints the org-prefixed id and
 	// stamps the org id; Create does not derive either.
 	Create(s Source) error
@@ -1173,6 +1179,26 @@ func (m *memSources) UpdateTagByOrg(orgID string, id quarrycontracts.ID, tag str
 		return ErrNotFound
 	}
 	s.Tag = norm
+	s.UpdatedAt = time.Now().UnixMilli()
+	m.items[id] = s
+	return nil
+}
+
+// UpdateConfigByOrg replaces the config of a live source the org owns and bumps
+// updated_at (E4.1-6b). A nil config is stored as an empty map, as the pg store
+// stores it. A cross-tenant or soft-deleted id answers ErrNotFound, as
+// UpdateTagByOrg does.
+func (m *memSources) UpdateConfigByOrg(orgID string, id quarrycontracts.ID, config map[string]any) error {
+	if config == nil {
+		config = map[string]any{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.items[id]
+	if !ok || m.deleted[id] || s.OrgID != orgID || orgID == "" {
+		return ErrNotFound
+	}
+	s.Config = config
 	s.UpdatedAt = time.Now().UnixMilli()
 	m.items[id] = s
 	return nil

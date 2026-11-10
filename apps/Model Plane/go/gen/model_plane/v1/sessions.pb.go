@@ -3894,8 +3894,15 @@ type UpsertAgentSkillRequest struct {
 	SourceThreadId string `protobuf:"bytes,14,opt,name=source_thread_id,json=sourceThreadId,proto3" json:"source_thread_id,omitempty"`
 	// The reviewer's reason for proposing it.
 	ProposalReason string `protobuf:"bytes,15,opt,name=proposal_reason,json=proposalReason,proto3" json:"proposal_reason,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Quarry v2 E4.3. URL patterns the skill is for (host/path globs such as
+	// "docs.example.com/api/*"), matched against a browser page by a later,
+	// switched change. At most 20, each 1-200 characters, lowercase, with no
+	// scheme, whitespace, '?' or '#'; a pattern that breaks these is refused as
+	// invalid_argument. Empty (the default) means the skill has none. The list
+	// is part of the skill's version body only when it is not empty.
+	UrlPatterns   []string `protobuf:"bytes,16,rep,name=url_patterns,json=urlPatterns,proto3" json:"url_patterns,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *UpsertAgentSkillRequest) Reset() {
@@ -4031,6 +4038,13 @@ func (x *UpsertAgentSkillRequest) GetProposalReason() string {
 		return x.ProposalReason
 	}
 	return ""
+}
+
+func (x *UpsertAgentSkillRequest) GetUrlPatterns() []string {
+	if x != nil {
+		return x.UrlPatterns
+	}
+	return nil
 }
 
 type UpsertAgentSkillResponse struct {
@@ -4260,7 +4274,11 @@ type AgentSkill struct {
 	Kind string `protobuf:"bytes,21,opt,name=kind,proto3" json:"kind,omitempty"`
 	// EP-11 S6. The preset's settings as a JSON object text ("{}" for a skill
 	// or a template). Closed schema, linted by the authored-behaviour lint.
-	SettingsJson  string `protobuf:"bytes,22,opt,name=settings_json,json=settingsJson,proto3" json:"settings_json,omitempty"`
+	SettingsJson string `protobuf:"bytes,22,opt,name=settings_json,json=settingsJson,proto3" json:"settings_json,omitempty"`
+	// Quarry v2 E4.3. The URL patterns the skill is for (see
+	// UpsertAgentSkillRequest.url_patterns); empty when it has none. Nothing is
+	// matched against them while the matching switch is off.
+	UrlPatterns   []string `protobuf:"bytes,23,rep,name=url_patterns,json=urlPatterns,proto3" json:"url_patterns,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -4447,6 +4465,13 @@ func (x *AgentSkill) GetSettingsJson() string {
 		return x.SettingsJson
 	}
 	return ""
+}
+
+func (x *AgentSkill) GetUrlPatterns() []string {
+	if x != nil {
+		return x.UrlPatterns
+	}
+	return nil
 }
 
 type ListAgentSkillsResponse struct {
@@ -10524,7 +10549,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x06reason\x18\x04 \x01(\tR\x06reason\"R\n" +
 	"\x1cSetAgentSkillEnabledResponse\x12\x18\n" +
 	"\aupdated\x18\x01 \x01(\bR\aupdated\x12\x18\n" +
-	"\aenabled\x18\x02 \x01(\bR\aenabled\"\x92\x04\n" +
+	"\aenabled\x18\x02 \x01(\bR\aenabled\"\xb5\x04\n" +
 	"\x17UpsertAgentSkillRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12 \n" +
@@ -10541,7 +10566,8 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\freview_state\x18\f \x01(\tR\vreviewState\x12\"\n" +
 	"\rsource_run_id\x18\r \x01(\tR\vsourceRunId\x12(\n" +
 	"\x10source_thread_id\x18\x0e \x01(\tR\x0esourceThreadId\x12'\n" +
-	"\x0fproposal_reason\x18\x0f \x01(\tR\x0eproposalReason\"\xae\x01\n" +
+	"\x0fproposal_reason\x18\x0f \x01(\tR\x0eproposalReason\x12!\n" +
+	"\furl_patterns\x18\x10 \x03(\tR\vurlPatterns\"\xae\x01\n" +
 	"\x18UpsertAgentSkillResponse\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\acreated\x18\x02 \x01(\bR\acreated\x12+\n" +
@@ -10554,7 +10580,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\fenabled_only\x18\x02 \x01(\bR\venabledOnly\x12\x1e\n" +
 	"\vfor_user_id\x18\x03 \x01(\tR\tforUserId\x12\x14\n" +
 	"\x05kinds\x18\x04 \x03(\tR\x05kinds\x12\x1b\n" +
-	"\tthread_id\x18\x05 \x01(\tR\bthreadId\"\xc5\x05\n" +
+	"\tthread_id\x18\x05 \x01(\tR\bthreadId\"\xe8\x05\n" +
 	"\n" +
 	"AgentSkill\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
@@ -10581,7 +10607,8 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\aversion\x18\x13 \x01(\x05R\aversion\x12\x16\n" +
 	"\x06digest\x18\x14 \x01(\tR\x06digest\x12\x12\n" +
 	"\x04kind\x18\x15 \x01(\tR\x04kind\x12#\n" +
-	"\rsettings_json\x18\x16 \x01(\tR\fsettingsJson\"h\n" +
+	"\rsettings_json\x18\x16 \x01(\tR\fsettingsJson\x12!\n" +
+	"\furl_patterns\x18\x17 \x03(\tR\vurlPatterns\"h\n" +
 	"\x17ListAgentSkillsResponse\x122\n" +
 	"\x06skills\x18\x01 \x03(\v2\x1a.model_plane.v1.AgentSkillR\x06skills\x12\x19\n" +
 	"\bspace_id\x18\x02 \x01(\tR\aspaceId\"\xc6\x03\n" +

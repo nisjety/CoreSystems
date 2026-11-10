@@ -1128,6 +1128,13 @@ message UpsertAgentSkillRequest {
   string source_thread_id = 14;
   // The reviewer's reason for proposing it.
   string proposal_reason = 15;
+  // Quarry v2 E4.3. URL patterns the skill is for (host/path globs such as
+  // "docs.example.com/api/*"), matched against a browser page by a later,
+  // switched change. At most 20, each 1-200 characters, lowercase, with no
+  // scheme, whitespace, '?' or '#'; a pattern that breaks these is refused as
+  // invalid_argument. Empty (the default) means the skill has none. The list
+  // is part of the skill's version body only when it is not empty.
+  repeated string url_patterns = 16;
 }
 
 message UpsertAgentSkillResponse {
@@ -1223,6 +1230,10 @@ message AgentSkill {
   // EP-11 S6. The preset's settings as a JSON object text ("{}" for a skill
   // or a template). Closed schema, linted by the authored-behaviour lint.
   string settings_json = 22;
+  // Quarry v2 E4.3. The URL patterns the skill is for (see
+  // UpsertAgentSkillRequest.url_patterns); empty when it has none. Nothing is
+  // matched against them while the matching switch is off.
+  repeated string url_patterns = 23;
 }
 
 message ListAgentSkillsResponse {

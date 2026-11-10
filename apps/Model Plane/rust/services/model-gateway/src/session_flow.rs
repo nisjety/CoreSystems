@@ -2481,7 +2481,7 @@ pub(crate) fn with_retrieval_decline(
     Some(metadata)
 }
 
-fn json_to_prost_value(value: &serde_json::Value) -> prost_types::Value {
+pub(crate) fn json_to_prost_value(value: &serde_json::Value) -> prost_types::Value {
     use prost_types::value::Kind;
     let kind = match value {
         serde_json::Value::Null => Kind::NullValue(0),

@@ -1265,6 +1265,35 @@ func (s *sourcesStore) UpdateTagByOrg(orgID string, id quarrycontracts.ID, tag s
 	return nil
 }
 
+// UpdateConfigByOrg replaces the config document of a live source the org owns and
+// bumps updated_at (E4.1-6b). Config is JSONB, so no migration backs it: the map is
+// marshalled as UpsertByOrgAndURL marshals it. A cross-tenant or soft-deleted id
+// answers ErrNotFound, as UpdateTagByOrg does.
+func (s *sourcesStore) UpdateConfigByOrg(orgID string, id quarrycontracts.ID, config map[string]any) error {
+	if orgID == "" {
+		return store.ErrNotFound
+	}
+	if config == nil {
+		config = map[string]any{}
+	}
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	ct, err := s.pool.Exec(context.Background(),
+		`UPDATE quarry_sources
+		    SET config = $3, updated_at = NOW()
+		  WHERE source_id = $1 AND org_id = $2 AND deleted_at IS NULL`,
+		string(id), orgID, configJSON)
+	if err != nil {
+		return mapPgErr(err)
+	}
+	if ct.RowsAffected() == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 // ---- events ---------------------------------------------------------------
 
 type eventLog struct{ pool *pgxpool.Pool }

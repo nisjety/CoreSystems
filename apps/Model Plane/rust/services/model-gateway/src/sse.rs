@@ -1976,6 +1976,189 @@ fn retrieval_space_decision(req: &InvokeRequest) -> Option<&str> {
     )
 }
 
+/// The error code of a deep-research turn whose thread already runs a research run (E4.6 062b). Session Core refuses the
+/// begin with the same code, and `research_runs` reads it from that refusal.
+const RESEARCH_RUN_ACTIVE: &str = "research_run_active";
+
+/// What beginning a deep-research turn's run record came to (E4.6 062b).
+enum ResearchRunBegin {
+    /// The record is begun under this id: the id its progress and finish address.
+    Begun(String),
+    /// The thread already runs a research run under this id, so the turn ends before any search.
+    Active(String),
+    /// The record could not be begun; the failure was logged by its class, and the turn goes on without one.
+    Unrecorded,
+}
+
+/// Begins the run record of a deep-research turn, before any search (E4.6 062b). Its deadline is Session Core's
+/// default, which outlasts the pipeline's wall clock.
+async fn begin_research_run(
+    state: &AppState,
+    bearer: &VerifiedModelBearer,
+    thread_id: &str,
+    run_id: &str,
+    request_id: &str,
+    zdr: bool,
+    budget: &crate::deep_research::ResearchBudget,
+) -> ResearchRunBegin {
+    let request = mp_contracts::model_plane::v1::BeginRequest {
+        thread_id: thread_id.to_owned(),
+        run_id: run_id.to_owned(),
+        request_id: request_id.to_owned(),
+        zdr,
+        budget: Some(proto_research_budget(budget)),
+        deadline_seconds: 0,
+    };
+    let client = crate::research_runs::ResearchRunsClient::new(state.research_run_client.clone());
+    match client.begin(bearer, request).await {
+        Ok(run) => ResearchRunBegin::Begun(run.id),
+        Err(status) => match crate::research_runs::research_run_active(&status) {
+            Some(active) => ResearchRunBegin::Active(active),
+            None => {
+                tracing::warn!(
+                    code = ?status.code(),
+                    run_id = %run_id,
+                    "research run could not be begun; the turn continues without a record"
+                );
+                ResearchRunBegin::Unrecorded
+            }
+        },
+    }
+}
+
+/// A research budget as the run record keeps it: only the dimensions the caller set, since a dimension the budget does
+/// not bound is left unset (E4.6 062b).
+#[allow(clippy::cast_possible_truncation)] // reason: a USD ceiling is clamped to 0.01 to 25 before this, far inside i64 micro-dollars
+fn proto_research_budget(
+    budget: &crate::deep_research::ResearchBudget,
+) -> mp_contracts::model_plane::v1::ResearchBudget {
+    mp_contracts::model_plane::v1::ResearchBudget {
+        max_pages: budget.max_pages.and_then(|pages| i32::try_from(pages).ok()),
+        max_sub_queries: budget
+            .max_sub_queries
+            .and_then(|queries| i32::try_from(queries).ok()),
+        usd_ceiling_micro: budget
+            .usd_ceiling
+            .map(|usd| (usd * 1_000_000.0).round() as i64),
+    }
+}
+
+/// Reports a research run's counters to its record as the pipeline moves on (E4.6 062b). The pipeline calls `report`
+/// inline, so each report goes out on its own task and is not waited for. The store's counters only move up, so a
+/// report that arrives late cannot lower one. A refused report is logged by its class and the run goes on.
+struct ResearchRunProgress {
+    client: crate::research_runs::ResearchRunsClient,
+    bearer: VerifiedModelBearer,
+    run_id: String,
+}
+
+impl crate::deep_research::ResearchProgress for ResearchRunProgress {
+    fn report(&self, pages_read: u32, sources_found: u32, spent_usd_micro: i64) {
+        let request = mp_contracts::model_plane::v1::ProgressRequest {
+            id: self.run_id.clone(),
+            pages_read: i32::try_from(pages_read).unwrap_or(i32::MAX),
+            sources_found: i32::try_from(sources_found).unwrap_or(i32::MAX),
+            spent_usd_micro,
+            partial: None,
+        };
+        let client = self.client.clone();
+        let bearer = self.bearer.clone();
+        tokio::spawn(async move {
+            if let Err(status) = client.progress(&bearer, request).await {
+                tracing::warn!(code = ?status.code(), "research run progress was not recorded");
+            }
+        });
+    }
+}
+
+/// Ends a run's record (E4.6 062b). A refused or failed end is logged by its class and never fails the turn: the record
+/// then runs to its deadline, as a run whose stream dropped does.
+async fn finish_research_run(
+    state: &AppState,
+    bearer: &VerifiedModelBearer,
+    request: mp_contracts::model_plane::v1::FinishRequest,
+) {
+    let run_id = request.id.clone();
+    let client = crate::research_runs::ResearchRunsClient::new(state.research_run_client.clone());
+    if let Err(status) = client.finish(bearer, request).await {
+        tracing::warn!(
+            code = ?status.code(),
+            run_id = %run_id,
+            "research run could not be finished"
+        );
+    }
+}
+
+/// The end a research pipeline's outcome makes (E4.6 062b). The status is the one the pipeline's stop maps to:
+/// `completed`, `cancelled`, or `stopped` for a deadline, a cost stop or no evidence. A run that is not zero-retention
+/// keeps its partial result, and its report's id when it wrote a report; a zero-retention run keeps neither, since
+/// Session Core refuses them.
+fn research_finish(
+    run_id: &str,
+    research: &crate::deep_research::DeepResearchOutcome,
+    request_id: &str,
+    zdr: bool,
+) -> mp_contracts::model_plane::v1::FinishRequest {
+    use crate::deep_research::ResearchStop;
+    let status = match research.stop {
+        ResearchStop::Completed => "completed",
+        ResearchStop::Cancelled => "cancelled",
+        ResearchStop::Deadline
+        | ResearchStop::BudgetUsd
+        | ResearchStop::CostUnpriced
+        | ResearchStop::NoEvidence => "stopped",
+    };
+    let report_artifact_id = match &research.report {
+        Some(_) if !zdr => crate::deep_research::report_artifact_id(request_id),
+        _ => String::new(),
+    };
+    mp_contracts::model_plane::v1::FinishRequest {
+        id: run_id.to_owned(),
+        status: status.to_owned(),
+        stop_reason: research.stop.as_str().to_owned(),
+        halt_code: research.halt_code.clone().unwrap_or_default(),
+        partial: (!zdr).then(|| research_partial(research)),
+        report_artifact_id,
+        pages_read: i32::try_from(research.coverage.read).unwrap_or(i32::MAX),
+        sources_found: i32::try_from(research.coverage.found).unwrap_or(i32::MAX),
+        spent_usd_micro: research.spent_usd_micro,
+    }
+}
+
+/// The partial result a run that keeps content holds (E4.6 062b): the sub-queries it planned, the sources it considered
+/// as host and status only (the pipeline keeps at most fifty), and its coverage counts. Never a URL, a query or text.
+fn research_partial(research: &crate::deep_research::DeepResearchOutcome) -> prost_types::Struct {
+    let coverage = &research.coverage;
+    let sources: Vec<Value> = research
+        .source_summary
+        .iter()
+        .map(|source| json!({ "host": source.url_host, "status": source.status }))
+        .collect();
+    let partial = json!({
+        "sub_queries_planned": coverage.planned,
+        "sources": sources,
+        "coverage": {
+            "with_results": coverage.with_results,
+            "search_failures": coverage.search_failures,
+            "found": coverage.found,
+            "filtered": coverage.filtered,
+            "read": coverage.read,
+            "unread": coverage.unread,
+            "page_target": coverage.page_target,
+            "deadline_hit": coverage.deadline_hit,
+            "corpus_exhausted": coverage.corpus_exhausted,
+            "relevance_fallback": coverage.relevance_fallback,
+        },
+    });
+    let fields = partial
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(key, value)| (key.clone(), crate::session_flow::json_to_prost_value(value)))
+        .collect();
+    prost_types::Struct { fields }
+}
+
 pub async fn invoke_stream_sse(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -3913,6 +4096,14 @@ pub async fn invoke_stream_sse(
     // searches, and the loop afterwards must be able to close a named gap the
     // report could not fill.
     let deep_research_requested = req.deep_research;
+    // The research run record and its budget (E4.6 062b), read at the request as the other turn switches are. With the
+    // switch off there is no record, and the budget is the default: the run is the one it was before budgets.
+    let research_runs_on = crate::research_runs::enabled();
+    let research_budget = if research_runs_on {
+        crate::normalize::research_budget(req.research_budget.as_ref())
+    } else {
+        crate::deep_research::ResearchBudget::default()
+    };
     // Which turn of a two-turn deep research this is (EP-2 S5). With `DEEP_RESEARCH_PLAN_TURN` off
     // both fields are ignored and the turn is the one-shot it always was.
     let research_phase = crate::deep_research::research_phase(
@@ -4524,6 +4715,53 @@ pub async fn invoke_stream_sse(
                     space_scoped: research_space_scoped,
                 }),
             };
+            // The research run record (E4.6 062b), begun before any search. A thread that already runs a research run
+            // ends this turn: its chat run fails with `research_run_active`, and the error names the running run. A
+            // record that cannot be begun never fails the turn, and neither does one whose calls fail.
+            let research_run = if research_runs_on {
+                match begin_research_run(
+                    &session_state,
+                    &session_bearer,
+                    &thread_scope,
+                    &session_run_for_terminal.run_id,
+                    &req_id,
+                    effective_zdr,
+                    &research_budget,
+                )
+                .await
+                {
+                    ResearchRunBegin::Begun(id) => Some(id),
+                    ResearchRunBegin::Unrecorded => None,
+                    ResearchRunBegin::Active(active) => {
+                        emit_prepared_failure(
+                            &tx,
+                            &session_state,
+                            &session_run_for_terminal,
+                            &session_bearer,
+                            &req_id,
+                            RESEARCH_RUN_ACTIVE,
+                            &format!(
+                                "This thread already has a research run in progress ({active}). Try again when it finishes."
+                            ),
+                            true,
+                            &timing,
+                            (&stream_buffers, &buffer_key, &mut seq, &features),
+                        )
+                        .await;
+                        finish_stream_registrations(&cancels, &queued_inputs, &req_id);
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
+            let research_progress = research_run.as_ref().map(|id| ResearchRunProgress {
+                client: crate::research_runs::ResearchRunsClient::new(
+                    session_state.research_run_client.clone(),
+                ),
+                bearer: session_bearer.clone(),
+                run_id: id.clone(),
+            });
             let research = crate::deep_research::run_deep_research(
                 &session_state,
                 &req_id,
@@ -4542,14 +4780,22 @@ pub async fn invoke_stream_sse(
                 &research_sources,
                 cancel_flag.as_ref(),
                 Some(&sink),
-                // The run as it was before budgets: the process caps and no USD ceiling, and no progress sink
-                // until the research-run wiring lands (E4.6 062b).
-                &crate::deep_research::ResearchBudget::default(),
-                None,
+                &research_budget,
+                research_progress
+                    .as_ref()
+                    .map(|progress| progress as &dyn crate::deep_research::ResearchProgress),
             )
             .await;
             seq = sink.sync_cursor(seq).await;
             let Ok(research) = research else {
+                if let Some(id) = &research_run {
+                    let failed = mp_contracts::model_plane::v1::FinishRequest {
+                        id: id.clone(),
+                        status: "failed".to_owned(),
+                        ..Default::default()
+                    };
+                    finish_research_run(&session_state, &session_bearer, failed).await;
+                }
                 emit_prepared_failure(
                     &tx,
                     &session_state,
@@ -4592,6 +4838,10 @@ pub async fn invoke_stream_sse(
                 )
                 .await;
                 end_resume_buffer(&stream_buffers, &buffer_key, seq).await;
+                if let Some(id) = &research_run {
+                    let ended = research_finish(id, &research, &req_id, effective_zdr);
+                    finish_research_run(&session_state, &session_bearer, ended).await;
+                }
                 if let Err(error) = crate::session_flow::cancel_direct_inference_run_authenticated(
                     &session_state,
                     &session_run_for_terminal,
@@ -4605,6 +4855,10 @@ pub async fn invoke_stream_sse(
                 return;
             }
             deep_research_ran = true;
+            if let Some(id) = &research_run {
+                let ended = research_finish(id, &research, &req_id, effective_zdr);
+                finish_research_run(&session_state, &session_bearer, ended).await;
+            }
             turn_evidence.tool_successes += research.tool_successes;
             turn_evidence.tool_failures += research.tool_failures;
             turn_evidence.web_citations += research.web_citations;

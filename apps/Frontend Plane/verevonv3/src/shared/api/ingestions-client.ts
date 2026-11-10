@@ -485,6 +485,8 @@ export interface JobResultItem {
 }
 
 export interface JobResultsPage {
+  /** What the rows are: `page_index` is an index of the pages fetched, not their text. */
+  kind: string
   items: JobResultItem[]
   /** The cursor for the next page; null on the last page. */
   nextSeq: number | null
@@ -504,6 +506,50 @@ export function getIngestionJobResults(
   if (options.latest) query.set('latest', 'true')
   const suffix = query.size > 0 ? `?${query.toString()}` : ''
   return requestJson<JobResultsPage>(`/api/ingestions/jobs/${encodeURIComponent(id)}/results${suffix}`, { signal })
+}
+
+/** The row fields a results export may name, as Quarry writes them. */
+export type JobResultExportField =
+  | 'seq'
+  | 'url'
+  | 'status'
+  | 'content_type'
+  | 'title'
+  | 'fetched_at'
+  | 'word_count'
+  | 'driver'
+  | 'markdown_artifact_id'
+  | 'source_artifact_id'
+  | 'bytes'
+
+/** One page of a job's results as a CSV or JSON Lines file, ready to save. */
+export interface JobResultsExport {
+  filename: string
+  contentType: string
+  content: string
+  /** The cursor for the next export page; null on the last page. */
+  nextSeq: number | null
+  kind: string
+  scanCapped: boolean
+}
+
+/**
+ * One page of a job's results as CSV or JSON Lines (at most 100 rows). `fields` picks and orders the
+ * columns (default: all). Quarry answers 501 while `QUARRY_EDGE__JOB_RESULTS` is off and 403 under ZDR.
+ */
+export function exportIngestionJobResults(
+  id: string,
+  options: { format: 'csv' | 'jsonl'; fields?: JobResultExportField[]; afterSeq?: number; latest?: boolean },
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams({ format: options.format })
+  if (options.fields && options.fields.length > 0) query.set('fields', options.fields.join(','))
+  if (options.afterSeq !== undefined) query.set('afterSeq', String(options.afterSeq))
+  if (options.latest) query.set('latest', 'true')
+  return requestJson<JobResultsExport>(
+    `/api/ingestions/jobs/${encodeURIComponent(id)}/results/export?${query.toString()}`,
+    { signal },
+  )
 }
 
 /** A text artifact, such as a fetched page's markdown, capped at 1 MiB by the gateway. */

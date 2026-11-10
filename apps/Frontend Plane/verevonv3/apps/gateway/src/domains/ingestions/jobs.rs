@@ -167,6 +167,196 @@ pub(super) async fn get_job_results(
     okay(to_results_view(&crate::envelope::unwrap_data(&body)))
 }
 
+/// The row fields an export may name, as Quarry writes them (closed list; the edge checks it again).
+const EXPORT_FIELDS: [&str; 11] = [
+    "seq",
+    "url",
+    "status",
+    "content_type",
+    "title",
+    "fetched_at",
+    "word_count",
+    "driver",
+    "markdown_artifact_id",
+    "source_artifact_id",
+    "bytes",
+];
+/// The most rows one export reads (Quarry caps an export at 100 rows).
+const MAX_EXPORT_ROWS: u32 = 100;
+/// The largest export body the gateway wraps into JSON; a longer one is refused with a 413.
+const MAX_EXPORT_BYTES: usize = 10 * 1024 * 1024;
+
+/// A checked `fields` list: names from [`EXPORT_FIELDS`], each at most once. `None` when the
+/// list is not valid.
+fn export_fields(raw: &str) -> Option<Vec<&'static str>> {
+    let mut fields: Vec<&'static str> = Vec::new();
+    for name in raw.split(',').map(str::trim) {
+        let known = EXPORT_FIELDS.iter().copied().find(|field| *field == name)?;
+        if fields.contains(&known) {
+            return None;
+        }
+        fields.push(known);
+    }
+    Some(fields)
+}
+
+/// The Quarry path of a results export. `limit` is clamped to 1..=100 (default 100);
+/// `afterSeq` and `latest=true` are forwarded only when they parse. `format` and `fields`
+/// are already checked.
+fn export_path(
+    job_id: &str,
+    format: &str,
+    fields: Option<&[&str]>,
+    params: &HashMap<String, String>,
+) -> String {
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|v| v.clamp(1, MAX_EXPORT_ROWS))
+        .unwrap_or(MAX_EXPORT_ROWS);
+    let mut query = vec![format!("format={format}"), format!("limit={limit}")];
+    if let Some(fields) = fields {
+        query.push(format!("fields={}", fields.join(",")));
+    }
+    if let Some(after) = params.get("afterSeq").and_then(|v| v.parse::<u64>().ok()) {
+        query.push(format!("after_seq={after}"));
+    }
+    if params.get("latest").map(|v| v.trim()) == Some("true") {
+        query.push("latest=true".to_owned());
+    }
+    format!("/v1/jobs/{job_id}/results?{}", query.join("&"))
+}
+
+/// `GET /api/ingestions/jobs/{id}/results/export` — one page of a job's results as CSV or
+/// JSON Lines, wrapped as `{ filename, contentType, content, nextSeq, kind, scanCapped }` so
+/// the SPA reads it like any other call and saves the text itself. Query: `format`
+/// (`csv` | `jsonl`), `fields` (comma-separated row fields, each at most once; default all),
+/// `afterSeq`, `latest=true` and `limit` (1..100, default 100). The rows are an index of the
+/// fetched pages (URLs, status, artifact ids), not page text. A ZDR org gets the same refusal
+/// as an artifact read before any upstream call. Quarry answers 501 while
+/// `QUARRY_EDGE__JOB_RESULTS` is off and 403 under ZDR; both pass through unchanged.
+pub(super) async fn export_job_results(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(job_id) = valid_job_id(&id) else {
+        return validation("A job id is required.");
+    };
+    if crate::zdr::org_zdr_enabled(&state, &user).await {
+        return BrowserArtifactAbsence::Withheld.into_response();
+    }
+    let (format, filename, content_type) = match params.get("format").map(|v| v.trim()) {
+        Some("csv") => ("csv", "job-results.csv", "text/csv; charset=utf-8"),
+        Some("jsonl") => (
+            "jsonl",
+            "job-results.jsonl",
+            "application/x-ndjson; charset=utf-8",
+        ),
+        _ => return validation("format must be csv or jsonl."),
+    };
+    let fields = match params.get("fields") {
+        None => None,
+        Some(raw) => match export_fields(raw) {
+            Some(fields) => Some(fields),
+            None => {
+                return bad_request(
+                    "invalid_fields",
+                    "fields must name result fields, comma separated, each at most once.",
+                )
+            }
+        },
+    };
+
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let url = format!(
+        "{}{}",
+        state.quarry_edge_url,
+        export_path(&job_id, format, fields.as_deref(), &params)
+    );
+    let mut req =
+        crate::request_id::apply(state.client.get(&url)).header("x-user-id", &user.user_id);
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
+    }
+    let upstream = match req.send().await {
+        Ok(upstream) => upstream,
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(crate::envelope::upstream_unavailable()),
+            )
+                .into_response()
+        }
+    };
+    let status = upstream.status();
+    if !status.is_success() {
+        let body = match upstream.json::<Value>().await {
+            Ok(body) => body,
+            Err(_) => crate::envelope::upstream_unavailable(),
+        };
+        return forward(status, body);
+    }
+    let next_seq = upstream
+        .headers()
+        .get("x-quarry-next-seq")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let kind = upstream
+        .headers()
+        .get("x-quarry-result-kind")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "page_index".to_owned());
+    let scan_capped = upstream
+        .headers()
+        .get("x-quarry-scan-capped")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim() == "true");
+    if upstream
+        .content_length()
+        .is_some_and(|length| length > MAX_EXPORT_BYTES as u64)
+    {
+        return export_too_large();
+    }
+    let bytes = match upstream.bytes().await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(crate::envelope::upstream_unavailable()),
+            )
+                .into_response()
+        }
+    };
+    if bytes.len() > MAX_EXPORT_BYTES {
+        return export_too_large();
+    }
+    super::shared::no_store(okay(json!({
+        "filename": filename,
+        "contentType": content_type,
+        "content": String::from_utf8_lossy(&bytes),
+        "nextSeq": next_seq,
+        "kind": kind,
+        "scanCapped": scan_capped,
+    })))
+}
+
+fn export_too_large() -> Response {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        Json(error(
+            "export_too_large",
+            "The export is too large: use a smaller limit or fewer fields.",
+        )),
+    )
+        .into_response()
+}
+
 /// `GET /api/ingestions/artifacts/{id}` — the text of one artifact of the caller's org,
 /// such as a page's markdown (`markdownArtifactId` in a results row). Only `text/*` and
 /// `application/json` are served, cut to 1 MiB with `truncated` set. A ZDR org gets the
@@ -520,6 +710,7 @@ pub(super) fn to_results_view(view: &Value) -> Value {
         })
         .collect();
     json!({
+        "kind": view.get("kind").and_then(Value::as_str).unwrap_or("page_index"),
         "items": items,
         "nextSeq": view.get("next_seq").cloned().unwrap_or(Value::Null),
         "scanCapped": view.get("scan_capped").and_then(Value::as_bool).unwrap_or(false),

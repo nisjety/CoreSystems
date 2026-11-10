@@ -53,6 +53,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route("/api/ingestions/jobs/{id}", get(jobs::get_job))
         .route("/api/ingestions/jobs/{id}/errors", get(jobs::get_job_errors))
         .route("/api/ingestions/jobs/{id}/results", get(jobs::get_job_results))
+        .route(
+            "/api/ingestions/jobs/{id}/results/export",
+            get(jobs::export_job_results),
+        )
         .route("/api/ingestions/artifacts/{id}", get(jobs::get_artifact_text))
         .route("/api/ingestions/jobs/{id}/control", post(jobs::job_control))
         .route("/api/ingestions/usage", get(jobs::get_usage))

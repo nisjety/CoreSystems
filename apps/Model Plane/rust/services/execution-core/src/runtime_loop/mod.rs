@@ -2255,11 +2255,23 @@ async fn execute_web_crawl_tool(
     org_id: &str,
     attribution: crate::web_tools::Attribution,
 ) -> tool_bridge::ToolExecution {
-    use crate::web_tools::{BATCH_TOOL, CRAWL_SITE_TOOL, MAP_TOOL, MAX_BATCH_URLS};
+    use crate::web_tools::{
+        DraftScope, BATCH_TOOL, CRAWL_PLAN_TOOL, CRAWL_SITE_TOOL, MAP_TOOL, MAX_BATCH_URLS,
+    };
     #[derive(serde::Deserialize)]
     struct CrawlInput {
         #[serde(default)]
         url: String,
+        /// `knowledge.crawl_plan`: what the person wants from the site.
+        #[serde(default)]
+        goal: String,
+        /// `knowledge.crawl_plan`: proposed scope patterns.
+        #[serde(default)]
+        include_paths: Vec<String>,
+        #[serde(default)]
+        exclude_paths: Vec<String>,
+        #[serde(default)]
+        allow_subdomains: bool,
         #[serde(default)]
         urls: Vec<String>,
         #[serde(default)]
@@ -2300,6 +2312,29 @@ async fn execute_web_crawl_tool(
                     org_id,
                 )
                 .await
+        }
+        CRAWL_PLAN_TOOL if input.url.trim().is_empty() => {
+            Err("knowledge.crawl_plan needs a url".to_owned())
+        }
+        CRAWL_PLAN_TOOL if input.goal.trim().is_empty() => {
+            Err("knowledge.crawl_plan needs a goal".to_owned())
+        }
+        // A read-only planner: it maps the site and drafts a scope; the person approves any crawl.
+        CRAWL_PLAN_TOOL => {
+            match DraftScope::validated(
+                input.max_pages,
+                input.max_depth,
+                &input.include_paths,
+                &input.exclude_paths,
+                input.allow_subdomains,
+            ) {
+                Ok(scope) => {
+                    client
+                        .plan_crawl(input.url.trim(), &input.goal, &scope, org_id)
+                        .await
+                }
+                Err(error) => Err(error),
+            }
         }
         CRAWL_SITE_TOOL if input.url.trim().is_empty() => {
             Err("knowledge.crawl_site needs a url".to_owned())

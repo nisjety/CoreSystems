@@ -176,6 +176,7 @@ mod tests {
         "browser.console",
         "extract_structured",
         "knowledge.map",
+        "knowledge.crawl_plan",
         "knowledge.crawl_site",
         "knowledge.batch",
         "mcp__srv__any_tool",

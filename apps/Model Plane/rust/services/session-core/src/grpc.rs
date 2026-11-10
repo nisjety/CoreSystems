@@ -3001,6 +3001,53 @@ async fn append_scheduled_result_in_tx(
 /// untrusted and the reason is shown to the owner.
 const MAX_PROPOSAL_REASON_CHARS: usize = 300;
 
+/// Most URL patterns one skill may carry (Quarry v2 E4.3).
+const MAX_SKILL_URL_PATTERNS: usize = 20;
+/// Longest URL pattern, in characters.
+const MAX_SKILL_URL_PATTERN_CHARS: usize = 200;
+
+/// Checks a skill's `url_patterns` before they are written. A pattern is a host/path glob such
+/// as `docs.example.com/api/*`: 1-200 characters, already lowercase, with no scheme, no
+/// whitespace or control character and no `?` or `#` (a query or fragment is not part of what a
+/// skill is matched on). Nothing is rewritten: a pattern that breaks a rule is refused whole as
+/// `invalid_argument`, so the stored text is exactly what the author sent and the version digest
+/// follows it.
+#[allow(clippy::result_large_err)]
+fn validate_skill_url_patterns(patterns: &[String]) -> Result<(), Status> {
+    if patterns.len() > MAX_SKILL_URL_PATTERNS {
+        return Err(Status::invalid_argument(format!(
+            "url_patterns: at most {MAX_SKILL_URL_PATTERNS} patterns"
+        )));
+    }
+    for pattern in patterns {
+        let chars = pattern.chars().count();
+        if chars == 0 || chars > MAX_SKILL_URL_PATTERN_CHARS {
+            return Err(Status::invalid_argument(format!(
+                "url_patterns: each pattern must be 1-{MAX_SKILL_URL_PATTERN_CHARS} characters"
+            )));
+        }
+        if pattern.contains("://") || pattern.starts_with("//") {
+            return Err(Status::invalid_argument(
+                "url_patterns: a pattern has no scheme (write host/path, not https://host/path)",
+            ));
+        }
+        if pattern
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '?' || c == '#')
+        {
+            return Err(Status::invalid_argument(
+                "url_patterns: a pattern has no whitespace, control character, '?' or '#'",
+            ));
+        }
+        if *pattern != pattern.to_lowercase() {
+            return Err(Status::invalid_argument(
+                "url_patterns: patterns must be lowercase",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Run and thread ids are provenance, not content: cap them so a hostile caller
 /// cannot park arbitrary text in the row.
 fn bounded_provenance(value: &str) -> String {
@@ -9575,6 +9622,7 @@ impl SessionCore for SessionService {
                     return Err(Status::invalid_argument(format!("invalid origin: {other}")));
                 }
             };
+            validate_skill_url_patterns(&req.url_patterns)?;
             // A learned skill is a disabled proposal owned by one user, whatever
             // the caller asked for; a human write is accepted as it always was.
             let (scope, owner, review_state, enabled) = if origin == "background_review" {
@@ -9690,14 +9738,15 @@ impl SessionCore for SessionService {
                         (id, org_id, name, description, content, trigger_keywords,
                          trigger_file_patterns, tool_restrictions, enabled, origin,
                          scope, owner_user_id, review_state, source_run_id,
-                         source_thread_id, proposal_reason, created_at, updated_at)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now(), now())
+                         source_thread_id, proposal_reason, url_patterns, created_at, updated_at)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, now(), now())
                      ON CONFLICT (org_id, kind, scope, scope_id, owner_user_id, name) DO UPDATE SET
                          description = EXCLUDED.description,
                          content = EXCLUDED.content,
                          trigger_keywords = EXCLUDED.trigger_keywords,
                          trigger_file_patterns = EXCLUDED.trigger_file_patterns,
                          tool_restrictions = EXCLUDED.tool_restrictions,
+                         url_patterns = EXCLUDED.url_patterns,
                          source_run_id = EXCLUDED.source_run_id,
                          source_thread_id = EXCLUDED.source_thread_id,
                          proposal_reason = EXCLUDED.proposal_reason,
@@ -9712,14 +9761,15 @@ impl SessionCore for SessionService {
                         (id, org_id, name, description, content, trigger_keywords,
                          trigger_file_patterns, tool_restrictions, enabled, origin,
                          scope, owner_user_id, review_state, source_run_id,
-                         source_thread_id, proposal_reason, created_at, updated_at)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now(), now())
+                         source_thread_id, proposal_reason, url_patterns, created_at, updated_at)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, now(), now())
                      ON CONFLICT (org_id, kind, scope, scope_id, owner_user_id, name) DO UPDATE SET
                          description = EXCLUDED.description,
                          content = EXCLUDED.content,
                          trigger_keywords = EXCLUDED.trigger_keywords,
                          trigger_file_patterns = EXCLUDED.trigger_file_patterns,
                          tool_restrictions = EXCLUDED.tool_restrictions,
+                         url_patterns = EXCLUDED.url_patterns,
                          enabled = EXCLUDED.enabled AND agent_skills.review_state = 'accepted',
                          updated_at = now()
                      RETURNING id, (xmax = 0) AS created",
@@ -9741,6 +9791,7 @@ impl SessionCore for SessionService {
             .bind(&source_run_id)
             .bind(&source_thread_id)
             .bind(&proposal_reason)
+            .bind(serde_json::json!(req.url_patterns))
             .fetch_optional(&mut *tx)
             .await
             .map_err(|e| {
@@ -10079,6 +10130,7 @@ impl SessionCore for SessionService {
             digest: String,
             kind: String,
             settings: sqlx::types::Json<serde_json::Value>,
+            url_patterns: sqlx::types::Json<Vec<String>>,
         }
 
         let started = Instant::now();
@@ -10133,7 +10185,7 @@ impl SessionCore for SessionService {
                         source_run_id, source_thread_id, proposal_reason, updated_at,
                         (SELECT COALESCE(MAX(r.revision), 0) FROM skill_revisions r
                          WHERE r.skill_id = agent_skills.id) AS revision,
-                        version, digest, kind, settings
+                        version, digest, kind, settings, url_patterns
                  FROM agent_skills
                  WHERE org_id = $1 AND (NOT $2 OR enabled)
                    AND ((scope <> 'space'
@@ -10181,6 +10233,8 @@ impl SessionCore for SessionService {
                     // EP-11 S6: only rows of a requested kind reach here.
                     kind: row.kind,
                     settings_json: row.settings.0.to_string(),
+                    // Quarry v2 E4.3: nothing matches on them until the matching switch is on.
+                    url_patterns: row.url_patterns.0,
                 })
                 .collect();
             Ok(Response::new(pb::ListAgentSkillsResponse {
@@ -17728,6 +17782,7 @@ mod tests {
             source_run_id: "run-1".into(),
             source_thread_id: "thread-1".into(),
             proposal_reason: "why".into(),
+            url_patterns: vec![],
         }
     }
 

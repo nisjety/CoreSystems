@@ -8,6 +8,7 @@ import { VerevonSegmented, VerevonSegmentedButton } from '@/shared/ui/verevon/Ve
 import { VerevonSelect } from '@/shared/ui/verevon/VerevonSelect'
 import {
   createIngestionRun,
+  exportIngestionJobResults,
   getIngestionArtifactText,
   getIngestionJob,
   getIngestionJobErrors,
@@ -44,6 +45,7 @@ import {
   EmptyState,
   StatusBadge,
   absoluteTime,
+  downloadText,
   kindLabel,
   relativeTime,
   type Tr,
@@ -609,6 +611,8 @@ function RunResults(props: { runId: string; onIngestStarted?: () => void }) {
   const [ingesting, setIngesting] = createSignal(false)
   const [ingestError, setIngestError] = createSignal<string | null>(null)
   const [ingestReceipt, setIngestReceipt] = createSignal<string | null>(null)
+  const [exporting, setExporting] = createSignal(false)
+  const [exportError, setExportError] = createSignal<string | null>(null)
   const plan = createMemo(() => planIngest((page()?.items ?? []).map((item) => ({ seq: item.seq, url: item.url })), picked()))
 
   createEffect(
@@ -668,6 +672,20 @@ function RunResults(props: { runId: string; onIngestStarted?: () => void }) {
     }
   }
 
+  /** Saves the page on screen (same cursor and latest toggle) as a CSV or JSON Lines file. */
+  async function exportPage(format: 'csv' | 'jsonl') {
+    setExporting(true)
+    setExportError(null)
+    try {
+      const file = await exportIngestionJobResults(props.runId, { format, afterSeq: cursor(), latest: latest() })
+      downloadText(file.filename, file.content, file.contentType)
+    } catch (cause) {
+      setExportError(jobResultsMessage(cause, tr, { no: 'Kunne ikke eksportere sidene.', en: 'Could not export the pages.' }))
+    } finally {
+      setExporting(false)
+    }
+  }
+
   function countText() {
     if (picked().size === 0) return tr('Velg sider for å hente dem på nytt og lagre dem.', 'Pick pages to re-fetch and ingest them.')
     const skipped = plan().duplicates
@@ -710,6 +728,11 @@ function RunResults(props: { runId: string; onIngestStarted?: () => void }) {
   return (
     <>
       <h3 class="ingestions-section-title">{tr('Sider som ble hentet', 'Pages fetched')}</h3>
+      <Show when={(page()?.kind ?? 'page_index') === 'page_index'}>
+        <p class="ingestions-muted">
+          {tr('Oversikt over sidene som ble hentet; teksten leses per side.', 'Index of the pages fetched; the page text is read per page.')}
+        </p>
+      </Show>
       <label class="ingestions-toggle">
         <input type="checkbox" checked={latest()} onChange={(event) => toggleLatest(event.currentTarget.checked)} />
         <span>
@@ -789,7 +812,14 @@ function RunResults(props: { runId: string; onIngestStarted?: () => void }) {
               <Button size="xs" variant="ghost" disabled={view().nextSeq === null || loading()} onClick={nextPage}>
                 {tr('Neste', 'Next')}
               </Button>
+              <Button size="xs" variant="ghost" disabled={exporting() || loading() || view().items.length === 0} onClick={() => void exportPage('csv')}>
+                CSV
+              </Button>
+              <Button size="xs" variant="ghost" disabled={exporting() || loading() || view().items.length === 0} onClick={() => void exportPage('jsonl')}>
+                JSON Lines
+              </Button>
             </div>
+            <Show when={exportError()}>{(message) => <div class="ingestions-alert" role="alert">{message()}</div>}</Show>
           </>
         )}
       </Show>

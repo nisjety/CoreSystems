@@ -144,6 +144,7 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
         // `deep_research`, which is refused before either phase runs.
         ("research_phase", with("research_phase", json!("plan")), None),
         ("research_plan", with("research_plan", json!({"sub_queries": ["a"]})), None),
+        ("research_budget", with("research_budget", json!({"max_pages": 4})), None),
         // e_zdr_token_deep_research_plan_turn_refused: the plan turn itself, refused for
         // `deep_research` before any plan inference.
         (
