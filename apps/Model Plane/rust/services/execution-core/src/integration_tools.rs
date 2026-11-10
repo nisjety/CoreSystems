@@ -36,8 +36,8 @@
 #![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
 
 use std::fmt::Write as _;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 use mp_contracts::provider_reads::READ_OPERATIONS;
 use serde_json::Value;
@@ -53,8 +53,13 @@ const DEFAULT_AUTH_CORE_URL: &str = "http://host.docker.internal:3011";
 
 /// Cap on the result JSON echoed back to the model — provider responses can be
 /// large; the head is enough for the model to reason about, and the full
-/// payload is not something it should paste verbatim.
+/// payload is not something it should paste verbatim. A write, and every read
+/// that is not a content read, keeps this cap (see [`result_cap`]).
 const MAX_RESULT_CHARS: usize = 2000;
+
+/// Cap on the text a content read (a file, a page, a README or a mail body) echoes back to the
+/// model. The text is what the model is reading for, so it gets the connected-app read cap.
+const READ_CONTENT_RESULT_CHARS: usize = READ_RESULT_CHAR_CAP;
 
 /// One entry in the static, agent-facing operations catalog. `is_write` mirrors
 /// integration-corev2's approval requirement (writes are HITL-gated through the
@@ -70,7 +75,9 @@ struct CatalogOp {
 /// integration-corev2's Execute switch (see docs/actions-surface-operations.md
 /// for the exhaustive list). Kept small on purpose: too many near-duplicate
 /// tool names degrade model tool-selection. Operation strings here MUST match
-/// the gateway's case arms exactly — they are sent verbatim.
+/// the gateway's case arms exactly — they are sent verbatim. This table is the fallback and the
+/// golden-checked source. The served catalog (see [`ServedCatalog`]) only adds to it, never
+/// removes from it.
 const CATALOG: &[(&str, &[CatalogOp])] = &[
     (
         "meta",
@@ -137,6 +144,10 @@ const CATALOG: &[(&str, &[CatalogOp])] = &[
         "github",
         &[
             CatalogOp { operation: "issues.list", is_write: false, summary: "List repository issues. params.owner, params.repo." },
+            // Read-only: the executor's `contents.get` and `readme.get` arms (service.go). The rendered
+            // result decodes a file's base64 to text (see `render_action_result`).
+            CatalogOp { operation: "contents.get", is_write: false, summary: "Read-only: read one file of a GitHub repository (its text, decoded), or list one folder. params.owner, params.repo, params.path, ref (optional branch, tag or commit)." },
+            CatalogOp { operation: "readme.get", is_write: false, summary: "Read-only: read a GitHub repository's README (its text, decoded). params.owner, params.repo, ref (optional branch, tag or commit)." },
             CatalogOp { operation: "issues.create", is_write: true, summary: "Open a GitHub issue. params.owner, params.repo, body.{title,body}." },
         ],
     ),
@@ -148,6 +159,8 @@ const CATALOG: &[(&str, &[CatalogOp])] = &[
         &[
             CatalogOp { operation: "databases", is_write: false, summary: "List the Notion databases shared with the connection." },
             CatalogOp { operation: "pages", is_write: false, summary: "List pages; with params.databaseId, query that database's rows." },
+            // Read-only: one page of block children (the page's content), passed through as Notion returns it.
+            CatalogOp { operation: "page.content", is_write: false, summary: "Read-only: read the blocks (the content) of one Notion page, a page of them at a time. params.pageId, pageSize (max 100), startCursor (from next_cursor)." },
             CatalogOp { operation: "user", is_write: false, summary: "Read the connected Notion bot user (workspace identity)." },
         ],
     ),
@@ -159,6 +172,235 @@ const CATALOG: &[(&str, &[CatalogOp])] = &[
         ],
     ),
 ];
+
+/// One operation as the model is shown it. It comes from the static table, from the served
+/// catalog, or from both, and is owned so every row takes the one render path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RenderOp {
+    operation: String,
+    is_write: bool,
+    summary: String,
+}
+
+impl From<&CatalogOp> for RenderOp {
+    fn from(op: &CatalogOp) -> Self {
+        Self {
+            operation: op.operation.to_owned(),
+            is_write: op.is_write,
+            summary: op.summary.to_owned(),
+        }
+    }
+}
+
+/// The environment switch for the served operations catalog. Only the literal `true` turns it on.
+/// Off, the static table alone decides what the model is offered and how a call is gated, and no
+/// served catalog is fetched.
+const SERVED_CATALOG_ENV: &str = "EXECUTION_CORE_SERVED_CATALOG";
+
+/// The one served catalog version this client reads. Any other version is refused.
+const SERVED_CATALOG_VERSION: u32 = 1;
+/// Most operations one served catalog may contribute. Operations past the cap are not admitted,
+/// so they stay unknown, and an unknown operation is gated.
+const SERVED_MAX_OPERATIONS: usize = 500;
+/// Longest provider key kept from a served catalog, in characters.
+const SERVED_MAX_PROVIDER_CHARS: usize = 64;
+/// Longest operation name kept from a served catalog, in characters.
+const SERVED_MAX_OPERATION_CHARS: usize = 128;
+/// Longest summary kept from a served catalog, in characters.
+const SERVED_MAX_SUMMARY_CHARS: usize = 512;
+/// Longest etag kept from a served catalog, in characters. A longer one is dropped.
+const SERVED_MAX_ETAG_CHARS: usize = 128;
+/// The least time between two asks for the served catalog, across the whole process.
+const SERVED_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// integration-corev2's served operations catalog (`GET /api/v1/actions/catalog`): operation
+/// names, kinds and summaries, and nothing else. It is addition-only. It can add an operation the
+/// static table lacks, and it can mark a static read as a write, but it never makes a static write
+/// a read. Fields this client does not read are ignored.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+pub struct ServedCatalog {
+    version: u32,
+    etag: String,
+    providers: Vec<ServedProvider>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+struct ServedProvider {
+    provider: String,
+    operations: Vec<ServedOperation>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+struct ServedOperation {
+    operation: String,
+    kind: ServedKind,
+    summary: String,
+}
+
+/// How integration-corev2 classifies a served operation. Only `read` is a read. Any other value,
+/// or none, is a write, so a kind this client does not recognise gates instead of running.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ServedKind {
+    Read,
+    #[default]
+    #[serde(other)]
+    Write,
+}
+
+impl ServedKind {
+    fn is_write(self) -> bool {
+        matches!(self, Self::Write)
+    }
+}
+
+impl ServedCatalog {
+    /// Admit only what this client reads: version [`SERVED_CATALOG_VERSION`], at most
+    /// [`SERVED_MAX_OPERATIONS`] operations in all, and every string cut to its cap and kept on
+    /// one line. A row with no operation name is dropped, and so is a provider left with no rows.
+    /// An etag that is not printable ASCII is dropped, which means the next ask sends no
+    /// `If-None-Match`.
+    fn bounded(self) -> Result<Self, String> {
+        if self.version != SERVED_CATALOG_VERSION {
+            return Err(format!(
+                "integration-corev2 /actions/catalog version {} is not one this client reads",
+                self.version
+            ));
+        }
+        let etag = if self.etag.len() <= SERVED_MAX_ETAG_CHARS
+            && self.etag.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            self.etag
+        } else {
+            String::new()
+        };
+        let mut admitted = 0usize;
+        let mut providers = Vec::new();
+        for provider in self.providers {
+            let name = bounded_line(&provider.provider, SERVED_MAX_PROVIDER_CHARS);
+            let mut operations = Vec::new();
+            for row in provider.operations {
+                if admitted == SERVED_MAX_OPERATIONS {
+                    break;
+                }
+                let operation = bounded_line(&row.operation, SERVED_MAX_OPERATION_CHARS);
+                if operation.is_empty() {
+                    continue;
+                }
+                operations.push(ServedOperation {
+                    operation,
+                    kind: row.kind,
+                    summary: bounded_line(&row.summary, SERVED_MAX_SUMMARY_CHARS),
+                });
+                admitted += 1;
+            }
+            if !name.is_empty() && !operations.is_empty() {
+                providers.push(ServedProvider {
+                    provider: name,
+                    operations,
+                });
+            }
+        }
+        Ok(Self {
+            version: self.version,
+            etag,
+            providers,
+        })
+    }
+}
+
+/// One served string, made safe for a single rendered line: control characters become spaces, the
+/// ends are trimmed, and the text is cut to `max` characters.
+fn bounded_line(raw: &str, max: usize) -> String {
+    let flat: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    cap_chars(flat.trim(), max).0
+}
+
+/// The served catalog this process last admitted. [`catalog_for`] and [`operation_is_write`] read
+/// it only while the switch is on, and [`IntegrationActionsClient::refresh_served_catalog`]
+/// replaces it. A poisoned lock reads as no served catalog.
+static SERVED: OnceLock<RwLock<Option<ServedCatalog>>> = OnceLock::new();
+/// When the served catalog was last asked for, across every client in this process.
+static SERVED_LAST_ASKED: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn served_store() -> &'static RwLock<Option<ServedCatalog>> {
+    SERVED.get_or_init(|| RwLock::new(None))
+}
+
+/// Whether the served catalog is switched on. Only the literal `true` enables it.
+fn served_catalog_enabled() -> bool {
+    parse_served_catalog_enabled(std::env::var(SERVED_CATALOG_ENV).ok().as_deref())
+}
+
+fn parse_served_catalog_enabled(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// Run `read` against the admitted served catalog while the switch is on, and against no served
+/// catalog while it is off. A poisoned lock also reads as none, which gates more, never less.
+fn served_view<T>(read: impl FnOnce(Option<&ServedCatalog>) -> T) -> T {
+    if !served_catalog_enabled() {
+        return read(None);
+    }
+    match served_store().read() {
+        Ok(guard) => read((*guard).as_ref()),
+        Err(_) => read(None),
+    }
+}
+
+/// The etag of the admitted served catalog, when there is one to send as `If-None-Match`.
+fn served_etag() -> Option<String> {
+    served_store()
+        .read()
+        .ok()
+        .and_then(|guard| (*guard).as_ref().map(|catalog| catalog.etag.clone()))
+        .filter(|etag| !etag.is_empty())
+}
+
+/// A copy of the admitted served catalog, for a 304 to answer with.
+fn served_snapshot() -> Option<ServedCatalog> {
+    served_store()
+        .read()
+        .ok()
+        .and_then(|guard| (*guard).clone())
+}
+
+/// Replace the admitted served catalog. A poisoned lock keeps the old one.
+fn store_served(catalog: ServedCatalog) {
+    if let Ok(mut guard) = served_store().write() {
+        *guard = Some(catalog);
+    }
+}
+
+/// Whether this call should ask integration-corev2 for the served catalog. The slot is claimed
+/// before the ask, so concurrent calls make one ask between them, and a failed ask waits out the
+/// interval too.
+fn claim_served_refresh(now: Instant) -> bool {
+    let Ok(mut last_asked) = SERVED_LAST_ASKED.lock() else {
+        return false;
+    };
+    let due = match *last_asked {
+        Some(at) => now.saturating_duration_since(at) >= SERVED_REFRESH_INTERVAL,
+        None => true,
+    };
+    if due {
+        *last_asked = Some(now);
+    }
+    due
+}
+
+/// Whether a call's operation names `operation` under `provider`, bare or provider-prefixed. The
+/// match is case-insensitive, as the classification has always been.
+fn names_operation(op: &str, provider: &str, operation: &str) -> bool {
+    op.eq_ignore_ascii_case(operation)
+        || op.eq_ignore_ascii_case(&format!("{provider}.{operation}"))
+}
 
 /// HTTP client for integration-corev2's actions gateway. Cheap to clone.
 #[derive(Clone)]
@@ -264,7 +506,9 @@ impl IntegrationActionsClient {
 
     /// GET /api/v1/connections?organizationId=<org> — the org's live provider
     /// connections. Rendered together with the static catalog so the model can
-    /// see what is connected and what it can call on each.
+    /// see what is connected and what it can call on each. With
+    /// `EXECUTION_CORE_SERVED_CATALOG` on, this is also where the served catalog
+    /// is refreshed, at most once per [`SERVED_REFRESH_INTERVAL`].
     pub async fn list_provider_actions(
         &self,
         org_id: &str,
@@ -296,7 +540,74 @@ impl IntegrationActionsClient {
                 truncate(&value.to_string())
             ));
         }
+        if served_catalog_enabled() && claim_served_refresh(Instant::now()) {
+            self.refresh_served_catalog(org_id, session_bearer).await;
+        }
         Ok(render_provider_actions(&parse_connections(&value)))
+    }
+
+    /// GET /api/v1/actions/catalog — integration-corev2's versioned provider operation catalog:
+    /// operation names, kinds and summaries, with no org data and no connection ids. It is read
+    /// with an org-scoped `integration:read` token. The etag of the copy already admitted goes out
+    /// as `If-None-Match`, so an unchanged catalog answers 304 and the admitted copy is returned.
+    ///
+    /// # Errors
+    ///
+    /// A missing org, a failed or refused request, a body that is not a catalog, or a catalog
+    /// version this client does not read.
+    pub async fn fetch_catalog(
+        &self,
+        org_id: &str,
+        session_bearer: Option<&str>,
+    ) -> Result<ServedCatalog, String> {
+        if org_id.trim().is_empty() {
+            return Err("fetch_catalog requires a run org_id (tenant scope)".to_owned());
+        }
+        let token = self
+            .resolve_ingestion_token(org_id, "integration:read", session_bearer)
+            .await?;
+        let cached_etag = served_etag();
+        let mut request = self
+            .http
+            .get(format!("{}/api/v1/actions/catalog", self.base_url))
+            .bearer_auth(token)
+            .header("accept", "application/json");
+        if let Some(etag) = cached_etag.as_deref() {
+            request = request.header("if-none-match", etag);
+        }
+        let resp = request
+            .send()
+            .await
+            .map_err(|e| format!("integration-corev2 /actions/catalog request failed: {e}"))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::NOT_MODIFIED {
+            return served_snapshot().ok_or_else(|| {
+                "integration-corev2 /actions/catalog answered 304 with no admitted catalog"
+                    .to_owned()
+            });
+        }
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("integration-corev2 /actions/catalog decode failed: {e}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "integration-corev2 /actions/catalog returned {status}: {}",
+                truncate(&value.to_string())
+            ));
+        }
+        serde_json::from_value::<ServedCatalog>(value)
+            .map_err(|e| format!("integration-corev2 /actions/catalog is not a catalog: {e}"))?
+            .bounded()
+    }
+
+    /// Ask for the served catalog and admit it. A failed ask keeps the copy already admitted, or
+    /// none, so the static table stands.
+    async fn refresh_served_catalog(&self, org_id: &str, session_bearer: Option<&str>) {
+        match self.fetch_catalog(org_id, session_bearer).await {
+            Ok(catalog) => store_served(catalog),
+            Err(error) => tracing::warn!(error = %error, "served provider catalog not refreshed"),
+        }
     }
 
     /// GET /api/v1/connections/{id} — the connection's own `providerKey`,
@@ -990,24 +1301,35 @@ fn shape_read(
     }
 }
 
-/// File content is text or nothing: a binary file is `unsupported_content`, not a blob the model
-/// is handed. The text is capped and says so when it was cut.
+/// File content is text or nothing: a binary file is `unsupported_content`, not a blob the model is
+/// handed. The executor sends the bytes as `content_base64` with `mime_type`. They are decoded only
+/// when the file is text, and bytes that are not UTF-8 are not text. The text is capped and says so
+/// when it was cut, and so does an executor that truncated the file.
 fn shape_file_content(request: &serde_json::Map<String, Value>, result: &Value) -> ProviderRead {
     let mime = result
-        .get("mimeType")
+        .get("mime_type")
         .and_then(Value::as_str)
+        .or_else(|| result.get("mimeType").and_then(Value::as_str))
         .unwrap_or_default();
     let exported_as_text = request.get("exportAs").and_then(Value::as_str) == Some("text");
-    let Some(content) = result
-        .get("content")
-        .and_then(Value::as_str)
-        .filter(|_| exported_as_text || mime.starts_with("text/"))
-    else {
+    if !(exported_as_text || mime.starts_with("text/")) {
+        return ProviderRead::bare(ReadStatus::UnsupportedContent);
+    }
+    // `content` is the older plain-text shape, read only when the executor sent no base64.
+    let content = match result.get("content_base64").and_then(Value::as_str) {
+        Some(encoded) => decode_base64_text(encoded),
+        None => result
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    };
+    let Some(content) = content else {
         return ProviderRead::bare(ReadStatus::UnsupportedContent);
     };
-    let (text, cut) = cap_chars(content, BODY_CHAR_CAP);
+    let (text, cut) = cap_chars(&content, BODY_CHAR_CAP);
+    let truncated = result.get("truncated").and_then(Value::as_bool) == Some(true);
     ProviderRead {
-        status: if cut {
+        status: if cut || truncated {
             ReadStatus::TooLarge
         } else {
             ReadStatus::Ok
@@ -1016,6 +1338,59 @@ fn shape_file_content(request: &serde_json::Map<String, Value>, result: &Value) 
         next_page_token: None,
         more_available: false,
     }
+}
+
+/// Decodes standard-alphabet base64 to text. Padding is optional and ASCII whitespace is ignored,
+/// so the padded body the executor sends, and a wrapped or unpadded copy, all decode. Any other
+/// byte, a stray `=`, or a length no base64 text has gives `None`. So do bytes that are not UTF-8:
+/// a lossy decode would hand the model a guess at a file that is not text.
+fn decode_base64_text(encoded: &str) -> Option<String> {
+    String::from_utf8(decode_base64_bytes(encoded)?).ok()
+}
+
+/// The bytes of a standard-alphabet base64 string, under the rules [`decode_base64_text`] states
+/// except that bytes which are not UTF-8 are returned as they are. A byte that is not base64, a
+/// stray `=`, or a length no base64 has gives `None`.
+fn decode_base64_bytes(encoded: &str) -> Option<Vec<u8>> {
+    let mut out: Vec<u8> = Vec::with_capacity(encoded.len() / 4 * 3);
+    let mut bits: u32 = 0;
+    let mut held: u32 = 0;
+    let mut symbols = 0usize;
+    let mut padding = 0usize;
+    for byte in encoded.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        if byte == b'=' {
+            padding += 1;
+            continue;
+        }
+        if padding > 0 {
+            return None;
+        }
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(value);
+        held += 6;
+        symbols += 1;
+        if held >= 8 {
+            held -= 8;
+            out.push(u8::try_from((bits >> held) & 0xFF).ok()?);
+        }
+    }
+    // One data symbol left over cannot make a byte, and padding must complete a four-symbol unit.
+    let ragged = symbols % 4 == 1;
+    let bad_padding = padding > 2 || (padding > 0 && !(symbols + padding).is_multiple_of(4));
+    if ragged || bad_padding {
+        return None;
+    }
+    Some(out)
 }
 
 fn shape_item(row: &Value, fields: &[&str]) -> Value {
@@ -1164,11 +1539,47 @@ fn parse_connections(value: &Value) -> Vec<ConnectionSummary> {
         .collect()
 }
 
-fn catalog_for(provider_key: &str) -> Option<&'static [CatalogOp]> {
-    CATALOG
-        .iter()
-        .find(|(p, _)| *p == provider_key)
-        .map(|(_, ops)| *ops)
+/// The operations to offer for one provider: the static table's, then any served operation the
+/// table lacks. An operation both name keeps the static summary, and its write flag is the OR of
+/// the two. `None` when neither the table nor the served catalog names the provider, which renders
+/// as "no agent-callable operations are catalogued".
+fn catalog_for(provider_key: &str) -> Option<Vec<RenderOp>> {
+    served_view(|served| {
+        let static_ops = CATALOG
+            .iter()
+            .find(|(p, _)| *p == provider_key)
+            .map(|(_, ops)| *ops);
+        let mut known = static_ops.is_some();
+        let mut rows: Vec<RenderOp> = static_ops
+            .unwrap_or_default()
+            .iter()
+            .map(RenderOp::from)
+            .collect();
+        if let Some(catalog) = served {
+            for provider in catalog
+                .providers
+                .iter()
+                .filter(|provider| provider.provider == provider_key)
+            {
+                for row in &provider.operations {
+                    known = true;
+                    let is_write = row.kind.is_write();
+                    let position = rows
+                        .iter()
+                        .position(|op| op.operation.eq_ignore_ascii_case(&row.operation));
+                    match position {
+                        Some(index) => rows[index].is_write |= is_write,
+                        None => rows.push(RenderOp {
+                            operation: row.operation.clone(),
+                            is_write,
+                            summary: row.summary.clone(),
+                        }),
+                    }
+                }
+            }
+        }
+        known.then_some(rows)
+    })
 }
 
 /// Classify a provider-action operation as write (`true`) or read (`false`)
@@ -1177,6 +1588,9 @@ fn catalog_for(provider_key: &str) -> Option<&'static [CatalogOp]> {
 /// operation (`pages.post`) and the provider-prefixed alias (`meta.pages.post`),
 /// case-insensitively — the exhaustive gateway is stricter about case, so a
 /// looser match here only ever ADDS caution.
+///
+/// With `EXECUTION_CORE_SERVED_CATALOG` on, the served catalog is consulted too,
+/// and an operation either catalog names is a write when either says so.
 ///
 /// Returns `None` when the operation is not catalogued. Callers MUST treat an
 /// unknown operation as a write for gating purposes: integration-corev2 leaves
@@ -1188,15 +1602,26 @@ pub fn operation_is_write(operation: &str) -> Option<bool> {
     if op.is_empty() {
         return None;
     }
-    for (provider, ops) in CATALOG {
-        for c in *ops {
-            let aliased = format!("{provider}.{}", c.operation);
-            if op.eq_ignore_ascii_case(c.operation) || op.eq_ignore_ascii_case(&aliased) {
-                return Some(c.is_write);
+    served_view(|served| {
+        let mut verdict: Option<bool> = None;
+        for (provider, ops) in CATALOG {
+            for c in *ops {
+                if names_operation(op, provider, c.operation) {
+                    verdict = Some(verdict.unwrap_or(false) || c.is_write);
+                }
             }
         }
-    }
-    None
+        if let Some(catalog) = served {
+            for provider in &catalog.providers {
+                for row in &provider.operations {
+                    if names_operation(op, &provider.provider, &row.operation) {
+                        verdict = Some(verdict.unwrap_or(false) || row.kind.is_write());
+                    }
+                }
+            }
+        }
+        verdict
+    })
 }
 
 /// What a provider write would do, in words for the approval's reason (WS23-S8). Moved to
@@ -1257,14 +1682,91 @@ provider yet)"
     s
 }
 
+/// The read operations whose result is a content body, by bare name. Each is capped at
+/// [`READ_CONTENT_RESULT_CHARS`] instead of [`MAX_RESULT_CHARS`]. The field is where a base64 body
+/// sits, when one does: Drive sends a file as `content_base64`, and GitHub sends a file's `content`
+/// as base64. A Notion block list and an Outlook message carry their text inline in JSON, so they
+/// have no base64 field.
+const CONTENT_READS: &[(&str, Option<&str>)] = &[
+    ("drive.file.content", Some("content_base64")),
+    ("contents.get", Some("content")),
+    ("readme.get", Some("content")),
+    ("page.content", None),
+    ("mail.messages.get", None),
+];
+
+/// The content read `operation` names, bare or behind a catalogued provider prefix
+/// (`google.drive.file.content`), when the catalogue classes it as a read. An unknown operation is
+/// not a read here, so it never gets the larger cap, and a write never does either.
+fn content_read(operation: &str) -> Option<(&'static str, Option<&'static str>)> {
+    if operation_is_write(operation) != Some(false) {
+        return None;
+    }
+    CONTENT_READS.iter().copied().find(|(name, _)| {
+        CATALOG
+            .iter()
+            .any(|(provider, _)| names_operation(operation.trim(), provider, name))
+    })
+}
+
+/// The most text one result carries back to the model: [`READ_CONTENT_RESULT_CHARS`] for a content
+/// read, and [`MAX_RESULT_CHARS`] for everything else.
+fn result_cap(operation: &str) -> usize {
+    if content_read(operation).is_some() {
+        READ_CONTENT_RESULT_CHARS
+    } else {
+        MAX_RESULT_CHARS
+    }
+}
+
+/// Replace the base64 body of a content read's result with its text, before the result is rendered,
+/// so the cap is spent on text and not on base64. Bytes that are UTF-8 become the text, and any other
+/// bytes become `"[binary, N bytes]"`. The body is kept under `content`. A result that is not an
+/// object, a field that is absent or is not base64, and an `encoding` other than base64 are left as
+/// they are.
+fn decode_base64_body(result: &mut Value, field: &str) {
+    let Some(map) = result.as_object_mut() else {
+        return;
+    };
+    if map
+        .get("encoding")
+        .and_then(Value::as_str)
+        .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("base64"))
+    {
+        return;
+    }
+    let Some(bytes) = map
+        .get(field)
+        .and_then(Value::as_str)
+        .and_then(decode_base64_bytes)
+    else {
+        return;
+    };
+    let body = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(error) => {
+            let size = error.as_bytes().len();
+            format!("[binary, {size} bytes]")
+        }
+    };
+    map.remove(field);
+    map.insert("content".to_owned(), Value::from(body));
+}
+
 fn render_action_result(operation: &str, value: &Value) -> String {
-    let result = value
+    let mut result = value
         .pointer("/data/action/result")
         .or_else(|| value.pointer("/data/result"))
         .cloned()
         .unwrap_or_else(|| value.clone());
+    if let Some((_, Some(field))) = content_read(operation) {
+        decode_base64_body(&mut result, field);
+    }
     let pretty = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
-    format!("Executed {operation}. Result:\n{}", truncate(&pretty))
+    format!(
+        "Executed {operation}. Result:\n{}",
+        truncate_to(&pretty, result_cap(operation))
+    )
 }
 
 /// Rust port of integration-corev2's own `actionProviderMessageIDAtDepth`
@@ -1316,11 +1818,17 @@ fn provider_message_id_at_depth(value: &Value, depth: u8) -> Option<String> {
 }
 
 fn truncate(s: &str) -> String {
-    if s.len() <= MAX_RESULT_CHARS {
+    truncate_to(s, MAX_RESULT_CHARS)
+}
+
+/// `s`, cut to at most `cap` bytes on a char boundary, with the cut said in a `[truncated N more
+/// chars]` marker. A `cap` of [`MAX_RESULT_CHARS`] is what [`truncate`] applies.
+fn truncate_to(s: &str, cap: usize) -> String {
+    if s.len() <= cap {
         return s.to_owned();
     }
     // Truncate on a char boundary so we never split a UTF-8 sequence.
-    let mut end = MAX_RESULT_CHARS;
+    let mut end = cap;
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }

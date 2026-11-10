@@ -159,6 +159,7 @@ async fn step_refuses_raw_script_and_consumes_nothing() {
             initiated_by: None,
             ai_run_id: None,
             agent_label: None,
+            expect: None,
         }),
     )
     .await;
@@ -571,6 +572,7 @@ async fn call_step_on(
             initiated_by,
             ai_run_id: None,
             agent_label: None,
+            expect: None,
         }),
     )
     .await;
@@ -2257,6 +2259,7 @@ async fn a_step_on_a_released_run_carries_the_hint() {
             initiated_by: None,
             ai_run_id: None,
             agent_label: None,
+            expect: None,
         }),
     )
     .await;

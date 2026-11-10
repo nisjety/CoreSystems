@@ -32,6 +32,7 @@ pub mod redaction;
 pub mod resources;
 pub mod scrape;
 pub mod scrape_actions;
+pub mod step_expect;
 pub mod tracked_snapshot;
 pub mod web_policy;
 pub mod zdr;

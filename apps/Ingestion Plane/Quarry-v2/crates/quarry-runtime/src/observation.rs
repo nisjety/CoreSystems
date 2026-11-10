@@ -27,6 +27,7 @@ use quarry_core::event::{ActionStartedPayload, EventType};
 use quarry_core::ids::kinds::ArtifactKind;
 use quarry_core::lease::BrowserViewport;
 use quarry_core::redaction::{self, FieldKind, Tally, RULE_VERSION};
+use quarry_core::step_expect::{ExpectVerdict, ExpectationReport, StepExpectation};
 use quarry_core::zdr::{self, WriteKind, ZdrMode};
 use serde_json::{json, Value};
 
@@ -168,6 +169,11 @@ pub struct ObservationContext {
     /// from the approved grant and the verified token. Unset, the fill is refused (fail
     /// closed, `otp_binding_missing`). Run-local, in memory only.
     pub otp_binding: Option<OtpBinding>,
+    /// E4.2 step 1: the postcondition the next `execute` checks against the page it observes.
+    /// The edge sets it for one step, and only while `QUARRY_EDGE__STEP_EXPECT` is on.
+    /// `execute` takes it first thing, so a step that fails early never leaks it to the
+    /// next step. In memory only, run-local.
+    pub pending_expect: Option<StepExpectation>,
 }
 
 /// E3.1-d: the mail connection, origin and acting user a one-time-code fill is for. Opaque
@@ -359,6 +365,36 @@ impl ObservationRunner {
         }
     }
 
+    /// E4.2: folds a step expectation's verdict into the outcome the action already has.
+    /// `Met` turns an unknown outcome into verified (`expect_satisfied`) and leaves any
+    /// other outcome alone. `NotMet` fails the step (`expect_not_met`) over any base.
+    /// `Unevaluable` keeps the base and, for an unknown base, notes the closed reason.
+    /// The detail carries condition indexes and closed tokens only, never page text.
+    pub(crate) fn apply_expectation(base: ActionOutcome, verdict: &ExpectVerdict) -> ActionOutcome {
+        use quarry_core::contracts::ActionOutcomeStatus;
+        match verdict {
+            ExpectVerdict::Met => match base.status {
+                ActionOutcomeStatus::Unknown => ActionOutcome::verified("expect_satisfied"),
+                _ => base,
+            },
+            ExpectVerdict::NotMet { unmet } => {
+                let listed = unmet
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                ActionOutcome::failed("expect_not_met", format!("unmet conditions: {listed}"))
+            }
+            ExpectVerdict::Unevaluable { reason } => match base.status {
+                ActionOutcomeStatus::Unknown => ActionOutcome {
+                    detail: Some(format!("expect_unevaluable: {reason}")),
+                    ..base
+                },
+                _ => base,
+            },
+        }
+    }
+
     pub fn agent_action_to_browser_action(action: &AgentAction) -> QuarryResult<Action> {
         Ok(match action {
             AgentAction::Navigate { url } => Action::Navigate { url: url.clone() },
@@ -445,6 +481,8 @@ impl ObservationRunner {
         session: &quarry_browser::BrowserSession,
         ctx: &mut ObservationContext,
     ) -> QuarryResult<BrowserObservation> {
+        // E4.2: taken before anything can return early, so an expectation belongs to this step only.
+        let expect = ctx.pending_expect.take();
         let observation_started_at = Instant::now();
         let run_id = &request.run_id;
         // W3-E3.1-e / CW-3: a page a one-time code was delivered into is read with nothing
@@ -1285,7 +1323,33 @@ impl ObservationRunner {
                 None
             })
         };
-        let action_outcome = Self::outcome_for_action(&request.action, &ctx.current_url);
+        let mut action_outcome = Self::outcome_for_action(&request.action, &ctx.current_url);
+        // E4.2: check the step's postcondition against what this observation read, in memory
+        // only. A withheld page (a delivered credential) offers no snapshot or text.
+        let expectation_report = expect.map(|expect| {
+            let page_text = (!otp_denied && crate::step_expect::needs_page_text(&expect))
+                .then(|| {
+                    html_bytes.as_ref().map(|bytes| {
+                        crate::step_expect::cap_page_text(strip_tags(&String::from_utf8_lossy(
+                            bytes,
+                        )))
+                    })
+                })
+                .flatten();
+            let verdict = crate::step_expect::evaluate(
+                &expect,
+                &crate::step_expect::ExpectInput {
+                    url: &ctx.current_url,
+                    snapshot: if otp_denied { None } else { snapshot.as_ref() },
+                    page_text: page_text.as_deref(),
+                },
+            );
+            action_outcome = Self::apply_expectation(
+                std::mem::take(&mut action_outcome),
+                &verdict,
+            );
+            ExpectationReport { expect, verdict }
+        });
         let text_snippet = dom_summary
             .as_ref()
             .and_then(|summary| summary.text_snippet.as_deref());
@@ -1374,6 +1438,7 @@ impl ObservationRunner {
             target_resolution: target_resolution.clone(),
             evidence_delta_artifact_id: evidence_delta_artifact_id.clone(),
             redaction_rule_version: Some(RULE_VERSION.to_owned()),
+            expectation: expectation_report,
             observed_at: Utc::now(),
         });
         let observation_url = redactor.live_url(&ctx.current_url);
@@ -2424,7 +2489,7 @@ fn resolve_semantic_ref(
     }
 }
 
-fn semantic_matches(target: &SnapshotTarget, locator: &SemanticLocator) -> bool {
+pub(crate) fn semantic_matches(target: &SnapshotTarget, locator: &SemanticLocator) -> bool {
     match locator {
         SemanticLocator::Role { role, name, exact } => {
             value_matches(target.role.as_deref(), role, *exact)

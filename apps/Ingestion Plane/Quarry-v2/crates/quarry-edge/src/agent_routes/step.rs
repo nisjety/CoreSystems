@@ -156,6 +156,31 @@ fn otp_reads() -> &'static quarry_runtime::observation_redaction::CredentialDeli
     quarry_runtime::observation_redaction::credential_delivered_reads()
 }
 
+/// E4.2 step 1: admits a step's `expect`, or refuses it. While `QUARRY_EDGE__STEP_EXPECT` is off
+/// (the default) a step that carries one is a 400 `unsupported_option`; otherwise its bounds are
+/// checked (`StepExpectation::validate`). Called before the step key is reserved, so a refusal
+/// takes none. Neither refusal carries the proposed text. Shared with the delegate step.
+pub(super) fn admit_step_expect(
+    expect: Option<quarry_core::step_expect::StepExpectation>,
+) -> QuarryResult<Option<quarry_core::step_expect::StepExpectation>> {
+    let Some(expect) = expect else {
+        return Ok(None);
+    };
+    if !quarry_runtime::step_expect::step_expect_enabled() {
+        return Err(QuarryError::new(
+            ErrorCode::BadRequest,
+            "step expectations are not enabled on this deployment",
+        )
+        .with_details(serde_json::json!({
+            "reason": "unsupported_option",
+            "option": "expect",
+            "env": "QUARRY_EDGE__STEP_EXPECT",
+        })));
+    }
+    expect.validate()?;
+    Ok(Some(expect))
+}
+
 /// `POST /v1/agent/runs/{run_id}/step` — execute one action, return the
 /// resulting observation. `ObservationRunner` emits `ActionStarted`/`ObservationReady`
 /// itself, keyed by the step key this lane reserved.
@@ -275,6 +300,10 @@ pub async fn step(
         entry.budget.as_ref(),
     );
 
+    // E4.2 step 1: the postcondition is taken off the body after its last whole-body read and
+    // before `body.action` moves into the request. Admitted before the step key is reserved.
+    let expect = body.expect;
+    let expect = admit_step_expect(expect).map_err(|error| driver_err(&request_id, error))?;
     let req = AgentActionRequest {
         run_id: entry.run_id.clone(),
         lease_id: entry.lease.lease_id.clone(),
@@ -287,6 +316,8 @@ pub async fn step(
     // WS8.H: the step key is reserved now, after admission, so a refusal takes none.
     let receipt_step = handle.live.reserve_step();
     lane.ctx.step = receipt_step;
+    // E4.2 step 1: read once by the `execute` that follows, which takes it first thing.
+    lane.ctx.pending_expect = expect;
     let receipt_run_id = entry.run_id.to_string();
     let receipt_action = req.action.clone();
     // WS12.S3: the kind of the control a typing action goes to, read from the snapshot the

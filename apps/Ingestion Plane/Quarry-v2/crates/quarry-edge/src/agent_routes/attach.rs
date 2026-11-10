@@ -1009,6 +1009,10 @@ pub(super) async fn delegate_step(
     let tab_id = attach.tab_id.clone();
     let attach_id = attach.attach_id.clone();
     let pinned = entry.session.pinned_to(&tab_id);
+    // E4.2 step 1: as on the person's lane. Taken after the last whole-body read and admitted
+    // before the step key is reserved below, so a refused expectation takes none.
+    let expect = body.expect;
+    let expect = super::step::admit_step_expect(expect).map_err(|error| driver_err(request_id, error))?;
     let req = AgentActionRequest {
         run_id: entry.run_id.clone(),
         lease_id: entry.lease.lease_id.clone(),
@@ -1032,6 +1036,8 @@ pub(super) async fn delegate_step(
     // the person's lane, so the events and receipts of the two lanes never collide.
     let receipt_step = handle.live.reserve_step();
     lane.ctx.step = receipt_step;
+    // E4.2 step 1: read once by the `execute` that follows, which takes it first thing.
+    lane.ctx.pending_expect = expect;
     let receipt_run_id = entry.run_id.to_string();
     let receipt_action = req.action.clone();
     let typed_kind = quarry_runtime::observation::receipt_field_kind(&lane.ctx, &req.action);
@@ -1497,6 +1503,7 @@ mod delegate_lane_tests {
             instruction: None,
             extraction_profile: None,
             grant_id: Some(grant.to_owned()),
+            expect: None,
         }
     }
 

@@ -1519,8 +1519,30 @@ impl PageRunner {
         inline_request: &InlineRequest,
         redact_requested: bool,
     ) -> QuarryResult<(NormalizedOutput, InlineParts)> {
+        // Q4-E4.3-056b2: a publicly shared Google Doc/Sheet/Slides URL or a GitHub blob page
+        // is fetched through its plain-content URL. The rewrite runs first, so every host gate
+        // below (preflight with the deny list and egress allowlist, robots, DNS/SSRF check,
+        // scheduler) judges the host that is actually contacted, never the original one. The
+        // requested URL stays the identity of the run: events, failure record, cache and
+        // `url.requested`. Default off (QUARRY_RUNTIME__URL_REWRITE).
+        let fetch_url: Option<Url> = if crate::public_url_rewrite::enabled() {
+            crate::public_url_rewrite::rewrite(requested_url)
+                .filter(|r| r.fetched != *requested_url)
+                .map(|r| {
+                    tracing::info!(
+                        rule = r.rule,
+                        url = log_url(self.zdr, requested_url.as_str()),
+                        "public URL rewritten for fetch"
+                    );
+                    r.fetched
+                })
+        } else {
+            None
+        };
+        let target: &Url = fetch_url.as_ref().unwrap_or(requested_url);
+
         // Preflight
-        let verdict = self.security.preflight(requested_url).await;
+        let verdict = self.security.preflight(target).await;
         if verdict.decision == quarry_security::Decision::Block {
             self.emit_page_event(
                 run_id.clone(),
@@ -1541,9 +1563,9 @@ impl PageRunner {
         // WS14.S4: robots.txt, after the preflight and before DNS resolution and the
         // scheduler slot, so a denial never reaches `record_bad` (which reads an
         // unknown error as a server error and halves the host's concurrency).
-        if let Some(delay) = self.robots_check(run_id, requested_url, "request").await? {
+        if let Some(delay) = self.robots_check(run_id, target, "request").await? {
             if let Some(s) = self.scheduler.as_ref() {
-                s.set_min_interval(requested_url.host_str().unwrap_or("unknown"), delay)
+                s.set_min_interval(target.host_str().unwrap_or("unknown"), delay)
                     .await;
             }
         }
@@ -1555,7 +1577,7 @@ impl PageRunner {
         // Q3-E3.8.8w: a driver that reads a stored capture (no_egress) opens no connection to
         // the host, so there is nothing to pin and no lookup to make.
         let resolved_target = if !self.security.allow_private_hosts() && self.driver.reaches_network() {
-            Some(crate::dns_guard::resolve_public_url(requested_url).await?)
+            Some(crate::dns_guard::resolve_public_url(target).await?)
         } else {
             None
         };
@@ -1565,7 +1587,7 @@ impl PageRunner {
         // and drops eagerly (`drop(_slot)` before any other work) so
         // we don't hold scarce per-host concurrency during DOM cleanup
         // / markdown conversion / artifact storage.
-        let host_for_scheduler = requested_url.host_str().unwrap_or("unknown").to_string();
+        let host_for_scheduler = target.host_str().unwrap_or("unknown").to_string();
         // WS14.S4, D2-161: a Crawl-delay wait is spent before the process-wide permit is taken,
         // so a request that waits for its start time holds no global permit and other hosts keep
         // theirs. The per-host slot is still taken after the global permit.
@@ -1601,7 +1623,7 @@ impl PageRunner {
         };
         let fetch_result = self
             .driver
-            .fetch_conditional(requested_url, &fetch_hints)
+            .fetch_conditional(target, &fetch_hints)
             .await;
 
         // Inform the scheduler before we propagate the error or move
@@ -1656,7 +1678,7 @@ impl PageRunner {
         // saw. When the engine asks for it, the final URL is preflighted too (host rules,
         // blocklists, URL reputation). A block ends the run here: nothing is parsed, stored,
         // cached or ingested. A final URL equal to the requested one is not asked twice.
-        if self.security.recheck_final_url() && resp.final_url != *requested_url {
+        if self.security.recheck_final_url() && resp.final_url != *target {
             let verdict = self.security.preflight(&resp.final_url).await;
             if verdict.decision == quarry_security::Decision::Block {
                 self.emit_page_event(
@@ -1679,9 +1701,7 @@ impl PageRunner {
 
         // WS14.S4: a redirect to another origin is checked against that origin's
         // robots.txt before anything is parsed, stored, cached or ingested.
-        if resp.final_url != *requested_url
-            && origin_key(&resp.final_url) != origin_key(requested_url)
-        {
+        if resp.final_url != *target && origin_key(&resp.final_url) != origin_key(target) {
             self.robots_check(run_id, &resp.final_url, "final_url").await?;
         }
 
@@ -2310,6 +2330,7 @@ impl PageRunner {
                 requested: requested_url.to_string(),
                 final_url: resp.final_url.to_string(),
                 canonical: None,
+                fetched_url: fetch_url.as_ref().map(|u| u.to_string()),
             },
             status: resp.status,
             fetched_at,

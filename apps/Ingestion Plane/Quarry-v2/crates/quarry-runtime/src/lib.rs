@@ -36,6 +36,7 @@ pub mod nats_event_bus;
 pub mod page_extract;
 pub mod page_image;
 pub mod page_renderer;
+pub mod public_url_rewrite;
 
 pub mod agent_memory;
 pub mod autoprompt;
@@ -107,6 +108,7 @@ pub mod serp;
 pub mod service_tokens;
 pub mod smart_router;
 pub mod source_registrar;
+pub mod step_expect;
 pub mod step_receipts;
 pub mod structured_extract;
 pub mod target_repair;

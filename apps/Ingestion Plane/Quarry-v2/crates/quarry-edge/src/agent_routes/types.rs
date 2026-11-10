@@ -366,6 +366,11 @@ pub struct StepBody {
     /// WS8.F: the attach grant, on a delegate step only (the attachment's agent sends it).
     #[serde(default, alias = "grantId")]
     pub grant_id: Option<String>,
+    /// E4.2 step 1: a postcondition the page must meet once this step ran. Refused with 400
+    /// unless `QUARRY_EDGE__STEP_EXPECT` is on (default off). Quarry checks it against the
+    /// observation it reads; the verdict is on the observation's `proof_bundle.expectation`.
+    #[serde(default)]
+    pub expect: Option<quarry_core::step_expect::StepExpectation>,
 }
 
 impl StepBody {

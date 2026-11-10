@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::kinds;
 use crate::privacy::PrivacyPolicy;
+use crate::step_expect::ExpectationReport;
 use crate::zdr::ZdrMode;
 
 // ---------------------------------------------------------------------------
@@ -495,6 +496,11 @@ pub struct ProofBundle {
     /// belongs to was masked under, so a stored proof says which rules ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redaction_rule_version: Option<String>,
+    /// The step's `expect` postcondition and Quarry's verdict on it, when the
+    /// step carried one. Omitted otherwise, so a bundle without an expectation
+    /// keeps its wire shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expectation: Option<ExpectationReport>,
     pub observed_at: DateTime<Utc>,
 }
 

@@ -2639,6 +2639,7 @@ mod tests {
                 requested: "https://example.com/".into(),
                 final_url: "https://example.com/".into(),
                 canonical: None,
+                fetched_url: None,
             },
             status: 200,
             fetched_at: chrono::Utc::now(),

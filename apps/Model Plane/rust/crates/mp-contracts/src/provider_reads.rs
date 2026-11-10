@@ -338,23 +338,34 @@ pub fn shape_read(operation: &str, request: &Map<String, Value>, result: &Value)
 }
 
 /// File content is text or nothing: a binary file is `unsupported_content`, not a blob the model is
-/// handed. The text is capped and says so when it was cut.
+/// handed. The executor sends the bytes as `content_base64` with `mime_type`. They are decoded only
+/// when the file is text, and bytes that are not UTF-8 are not text. The text is capped and says so
+/// when it was cut, and so does an executor that truncated the file.
 fn shape_file_content(request: &Map<String, Value>, result: &Value) -> ProviderRead {
     let mime = result
-        .get("mimeType")
+        .get("mime_type")
         .and_then(Value::as_str)
+        .or_else(|| result.get("mimeType").and_then(Value::as_str))
         .unwrap_or_default();
     let exported_as_text = request.get("exportAs").and_then(Value::as_str) == Some("text");
-    let Some(content) = result
-        .get("content")
-        .and_then(Value::as_str)
-        .filter(|_| exported_as_text || mime.starts_with("text/"))
-    else {
+    if !(exported_as_text || mime.starts_with("text/")) {
+        return ProviderRead::bare(ReadStatus::UnsupportedContent);
+    }
+    // `content` is the older plain-text shape, read only when the executor sent no base64.
+    let content = match result.get("content_base64").and_then(Value::as_str) {
+        Some(encoded) => decode_base64_text(encoded),
+        None => result
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    };
+    let Some(content) = content else {
         return ProviderRead::bare(ReadStatus::UnsupportedContent);
     };
-    let (text, cut) = cap_chars(content, BODY_CHAR_CAP);
+    let (text, cut) = cap_chars(&content, BODY_CHAR_CAP);
+    let truncated = result.get("truncated").and_then(Value::as_bool) == Some(true);
     ProviderRead {
-        status: if cut {
+        status: if cut || truncated {
             ReadStatus::TooLarge
         } else {
             ReadStatus::Ok
@@ -363,6 +374,52 @@ fn shape_file_content(request: &Map<String, Value>, result: &Value) -> ProviderR
         next_page_token: None,
         more_available: false,
     }
+}
+
+/// Decodes standard-alphabet base64 to text. Padding is optional and ASCII whitespace is ignored,
+/// so the padded body the executor sends, and a wrapped or unpadded copy, all decode. Any other
+/// byte, a stray `=`, or a length no base64 text has gives `None`. So do bytes that are not UTF-8:
+/// a lossy decode would hand the model a guess at a file that is not text.
+fn decode_base64_text(encoded: &str) -> Option<String> {
+    let mut out: Vec<u8> = Vec::with_capacity(encoded.len() / 4 * 3);
+    let mut bits: u32 = 0;
+    let mut held: u32 = 0;
+    let mut symbols = 0usize;
+    let mut padding = 0usize;
+    for byte in encoded.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        if byte == b'=' {
+            padding += 1;
+            continue;
+        }
+        if padding > 0 {
+            return None;
+        }
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(value);
+        held += 6;
+        symbols += 1;
+        if held >= 8 {
+            held -= 8;
+            out.push(u8::try_from((bits >> held) & 0xFF).ok()?);
+        }
+    }
+    // One data symbol left over cannot make a byte, and padding must complete a four-symbol unit.
+    let ragged = symbols % 4 == 1;
+    let bad_padding = padding > 2 || (padding > 0 && !(symbols + padding).is_multiple_of(4));
+    if ragged || bad_padding {
+        return None;
+    }
+    String::from_utf8(out).ok()
 }
 
 fn shape_item(row: &Value, fields: &[&str]) -> Value {

@@ -89,6 +89,7 @@ import type {
 } from '@/shared/api/chat-client'
 import { isSafeLinkHref } from '../lib/safe-href'
 import { isWidgetFence } from '../lib/inline-widget'
+import { crawlPlanCardEnabled } from '../lib/crawl-plan'
 import { feedbackReasonLabels } from '../lib/feedback-reasons'
 import type { SettledFold } from '../lib/settled-fold'
 import type { SettledFoldChoices } from '../lib/settled-fold-choices'
@@ -111,12 +112,14 @@ import {
   Match,
   Show,
   Switch,
+  createContext,
   createEffect,
   createMemo,
   createSignal,
   createUniqueId,
   onCleanup,
   untrack,
+  useContext,
 } from 'solid-js'
 import { render, type JSX } from '@solidjs/web'
 import {
@@ -130,6 +133,7 @@ import {
 } from './chat-code-highlight'
 import { ChartFenceBlock } from './ChatChart'
 import { InlineWidget, InlineWidgetAnswer, InlineWidgetSurface, inlineWidgetsEnabled, useInlineWidgetsLive } from './InlineWidget'
+import { CrawlPlanFence } from './CrawlPlanFence'
 import { McpAppsForAnswer, mcpAppsEnabled } from './McpAppFrame'
 import { ChatTableTools, TableChart, createTableChartState } from './ChatTableTools'
 import { SettledTurnContent } from './SettledTurnFold'
@@ -932,15 +936,19 @@ export function AssistantMessage(props: {
           {/* The one surface where a ```widget fence may run (EP-4 S1): `InlineWidgetSurface`.
               A Space thread shown here is room content (D2), so it keeps the code block. */}
           <InlineWidgetSurface value={inlineWidgetsEnabled() && !props.spaceScoped ? 'live' : 'inert'}>
-            <InlineWidgetAnswer onSelectFollowUp={props.onSelectFollowUp}>
-              <SettledTurnContent
-                fold={props.settledFold}
-                turnId={props.message.id}
-                choices={props.settledFoldChoices}
-                entries={nodeEntries()}
-                renderEntries={renderNodeEntries}
-              />
-            </InlineWidgetAnswer>
+            {/* A temporary (zero-retention) chat never gets the crawl-plan approval card: its click
+                would start a crawl that writes into the knowledge base. */}
+            <CrawlPlanCardAllowed value={!props.temporaryChat}>
+              <InlineWidgetAnswer onSelectFollowUp={props.onSelectFollowUp}>
+                <SettledTurnContent
+                  fold={props.settledFold}
+                  turnId={props.message.id}
+                  choices={props.settledFoldChoices}
+                  entries={nodeEntries()}
+                  renderEntries={renderNodeEntries}
+                />
+              </InlineWidgetAnswer>
+            </CrawlPlanCardAllowed>
             {/* EP-4 S9: the apps of this answer's settled MCP calls, under the same chat-only surface. */}
             <Show when={mcpAppsEnabled() && (props.message.toolCalls?.length ?? 0) > 0}>
               <McpAppsForAnswer
@@ -1647,9 +1655,18 @@ export function DynamicHeading(props: { block: Extract<MarkdownBlock, { kind: 'h
  * A closed ```widget fence is a live sandboxed widget only where the surface
  * says so (`InlineWidgetSurface`, a chat assistant answer) and the switch is on;
  * everywhere else, and while streaming, it is a code block like any other.
+ *
+ * A closed ```crawl-plan fence is the approval card (`CrawlPlanFence`) where a widget may run
+ * (`useInlineWidgetsLive`, so `VITE_CHAT_INLINE_WIDGETS` must be on as well) and only with
+ * `VITE_CRAWL_PLAN_CARD` on. Everywhere else, while streaming, in a temporary (zero-retention)
+ * chat (`CrawlPlanCardAllowed`), or when the plan does not parse, it is a code block.
  */
+/** False inside a temporary (zero-retention) chat; true everywhere else (the widget surface gate still applies). */
+const CrawlPlanCardAllowed = createContext<boolean>(true)
+
 export function MarkdownCodeBlock(props: { block: Extract<MarkdownBlock, { kind: 'code' }> }) {
   const widgetsLive = useInlineWidgetsLive()
+  const crawlPlanAllowed = useContext(CrawlPlanCardAllowed)
   return (
     <Show
       when={props.block.closed && props.block.lang.trim().toLowerCase() === 'chart'}
@@ -1659,7 +1676,20 @@ export function MarkdownCodeBlock(props: { block: Extract<MarkdownBlock, { kind:
           fallback={
             <Show
               when={widgetsLive && isWidgetFence(props.block)}
-              fallback={<TranscriptCodeBlock block={props.block} />}
+              fallback={
+                <Show
+                  when={
+                    widgetsLive &&
+                    crawlPlanAllowed &&
+                    crawlPlanCardEnabled() &&
+                    props.block.closed &&
+                    props.block.lang.trim().toLowerCase() === 'crawl-plan'
+                  }
+                  fallback={<TranscriptCodeBlock block={props.block} />}
+                >
+                  <CrawlPlanFence text={props.block.text} fallback={<TranscriptCodeBlock block={props.block} />} />
+                </Show>
+              }
             >
               <InlineWidget source={props.block.text} fallback={<TranscriptCodeBlock block={props.block} />} />
             </Show>

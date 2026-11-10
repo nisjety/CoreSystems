@@ -6654,6 +6654,64 @@ components:
           type: object
           nullable: true
           additionalProperties: true
+        expect:
+          $ref: '#/components/schemas/StepExpectation'
+    StepExpectation:
+      type: object
+      description: >-
+        E4.2 step 1: a postcondition the page must meet once this step ran. Quarry checks it
+        against the observation it reads, never the Model's word. It holds when every condition
+        in `all` holds. Unknown fields are refused. Dark: a step that carries one is refused with
+        400 `unsupported_option` unless QUARRY_EDGE__STEP_EXPECT is on (default off). A ZDR run may
+        send it; the verdict is returned on the observation (proof_bundle.expectation) and nothing
+        is stored. A bounds violation is a 400 BAD_REQUEST whose details.field names the path of
+        the refused field, never its value.
+      required:
+      - all
+      properties:
+        all:
+          type: array
+          description: 1 to 8 conditions.
+          minItems: 1
+          maxItems: 8
+          items:
+            $ref: '#/components/schemas/ExpectCondition'
+      additionalProperties: false
+    ExpectCondition:
+      type: object
+      description: >-
+        One checkable condition, tagged by kind. url_matches: `pattern` (1 to 512 bytes; `*` is the
+        only metacharacter). element_present and element_absent: `locator`. text_present and
+        text_absent: `text` (1 to 256 bytes) in the page text or, with `within`, in the one element
+        that `within` names. A locator string is 1 to 256 bytes; a locator of kind nth is refused.
+      required:
+      - kind
+      properties:
+        kind:
+          type: string
+          enum: [url_matches, element_present, element_absent, text_present, text_absent]
+        pattern:
+          type: string
+          minLength: 1
+          maxLength: 512
+        locator:
+          $ref: '#/components/schemas/ExpectLocator'
+        text:
+          type: string
+          minLength: 1
+          maxLength: 256
+        within:
+          $ref: '#/components/schemas/ExpectLocator'
+      additionalProperties: false
+    ExpectLocator:
+      type: object
+      description: A semantic locator for an expectation. Kind nth is refused (order-dependent).
+      oneOf:
+      - $ref: '#/components/schemas/RoleLocator'
+      - $ref: '#/components/schemas/TextLocator'
+      - $ref: '#/components/schemas/LabelLocator'
+      - $ref: '#/components/schemas/PlaceholderLocator'
+      - $ref: '#/components/schemas/TestIdLocator'
     Envelope_BrowserObservation:
       type: object
       required:
@@ -6803,7 +6861,7 @@ components:
         proof_bundle:
           type: object
           nullable: true
-          description: Evidence manifest for this observation. redaction_rule_version names the secret-redaction rule set the observation was masked under.
+          description: Evidence manifest for this observation. redaction_rule_version names the secret-redaction rule set the observation was masked under. expectation, when the step carried an expect, is that expect and Quarry's verdict on it.
           additionalProperties: true
         target_resolution:
           type: object

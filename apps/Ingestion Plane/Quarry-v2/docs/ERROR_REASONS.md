@@ -394,3 +394,14 @@ Browser errors: 400 `BAD_REQUEST` with `details.reason` `page_emulation_failed`,
 | 501 | `UNSUPPORTED` | `profile_clear_data_disabled` (`env`) | `QUARRY_EDGE__PROFILE_CLEAR_DATA` is off | ask the operator |
 
 A 200 with `dry_run: true` (the default) changes nothing. A ZDR organization is not refused: the route only erases what is stored.
+
+## `POST /v1/agent/runs/{run_id}/step`: the `expect` postcondition (E4.2 step 1)
+
+A step may carry `expect`, a list of up to 8 conditions that must all hold once the step ran. It is dark: while `QUARRY_EDGE__STEP_EXPECT` is off (the default) a step that carries one is refused, and a step without it is unchanged. The refusals below come before the step key is reserved, so a refused step takes none. Neither carries the proposed text.
+
+| status | code | `details` | meaning | what to do |
+|---|---|---|---|---|
+| 400 | `BAD_REQUEST` | `reason` `unsupported_option`, `option` `expect`, `env` `QUARRY_EDGE__STEP_EXPECT` | the step carries `expect` and the switch is off on this deployment | omit `expect`, or ask the operator to turn the switch on |
+| 400 | `BAD_REQUEST` | `field`, the path of the refused field (for example `all[0].pattern`) | the expectation is out of bounds: 1 to 8 conditions; a `pattern` 1 to 512 bytes; a `text` 1 to 256 bytes; a locator string 1 to 256 bytes; a locator of kind `nth`, which is order-dependent | fix the named field |
+
+A verdict is not an error. A step whose `expect` is checked answers 200 with the observation, and the verdict is on `proof_bundle.expectation` (`met`, `not_met` with the zero-based `unmet` indexes, or `unevaluable` with a closed `reason`). `action_outcome` follows it: `expect_satisfied` (verified, for a step whose own outcome was unknown), `expect_not_met` (failed), and for an unknown outcome that could not be checked the detail `expect_unevaluable: <reason>`. A ZDR run may send `expect`; the verdict is returned and nothing is stored for it.
