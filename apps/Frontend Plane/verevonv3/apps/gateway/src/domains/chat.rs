@@ -10,6 +10,7 @@ mod search;
 mod snapshots;
 mod streams;
 pub(crate) mod support;
+mod transcripts;
 
 use axum::{
     extract::DefaultBodyLimit,
@@ -194,6 +195,14 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             post(documents::upload_chat_document),
         )
         .route("/api/v1/chat/documents/extract", post(documents::extract_chat_document))
+        // Transcribe one audio upload into a private Data Plane `media_transcript` document (W5, F-t3-090). The body
+        // limit is the speech route's own. 404 `media_transcripts_disabled` while CHAT_MEDIA_TRANSCRIPTS_ENABLED is off.
+        .route(
+            "/api/v1/chat/transcripts",
+            post(transcripts::create_chat_transcript).layer(DefaultBodyLimit::max(
+                crate::domains::ai::AI_AUDIO_BODY_LIMIT_BYTES,
+            )),
+        )
         // The chat library (F-t3-080): saved artifacts and uploaded text, one filtered Data Plane view. 404 while
         // the artifact-promote switch is off.
         .route("/api/v1/chat/library", get(library::list_chat_library))

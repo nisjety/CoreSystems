@@ -9,6 +9,10 @@ import { For, Match, Show, Switch, createEffect, createSignal } from 'solid-js'
 import type { ChatTurnAttachment } from './chat-types'
 import { sandboxHtmlDocument } from '@/shared/lib/sandbox-html'
 import { useI18n } from '@/shared/i18n'
+import { mediaTranscriptsEnabled, transcribeToDocument } from '@/shared/api/chat-client'
+import { ApiError, hasErrorCode } from '@/shared/api/http'
+import { isZdrCode } from '@/shared/api/zdr-refusals'
+import { transcriptAudioType } from '@/shared/actions/chat-transcript'
 
 /**
  * Viewer for files the user attached to the current conversation. Object URLs
@@ -19,6 +23,11 @@ import { useI18n } from '@/shared/i18n'
 export function ChatAttachmentCanvas(props: {
   attachments: ChatTurnAttachment[]
   selectedId?: string | null
+  /**
+   * The conversation a transcript of an audio attachment is saved from (W5-090-b). Absent in a temporary or
+   * zero-retention chat, where no transcript is offered: a transcript is a durable document.
+   */
+  transcriptThreadId?: string
 }) {
   const i18n = useI18n()
   const [selectedId, setSelectedId] = createSignal<string | null>(props.selectedId ?? null)
@@ -33,6 +42,37 @@ export function ChatAttachmentCanvas(props: {
     return props.attachments.find((attachment) => attachment.id === requested)
       ?? props.attachments.at(-1)
       ?? null
+  }
+
+  // Each attachment's transcript state, kept by id so switching tabs keeps what its last request left.
+  const [transcripts, setTranscripts] = createSignal<Record<string, TranscriptOutcome | undefined>>({})
+  const setOutcome = (id: string, outcome: TranscriptOutcome) => {
+    setTranscripts((current) => ({ ...current, [id]: outcome }))
+  }
+  const transcribeOffered = (attachment: ChatTurnAttachment): boolean => Boolean(props.transcriptThreadId)
+    && mediaTranscriptsEnabled()
+    && transcriptAudioType(attachment.type) !== null
+    && (attachment.previewUrl ?? '').startsWith('data:')
+  const transcribe = async (attachment: ChatTurnAttachment) => {
+    const threadId = props.transcriptThreadId
+    const phase = transcripts()[attachment.id]?.phase
+    if (!threadId || phase === 'working' || phase === 'saved') return
+    const file = attachment.previewUrl ? audioBlobFromDataUrl(attachment.previewUrl, attachment.type) : null
+    if (!file) {
+      setOutcome(attachment.id, { phase: 'failed', failure: 'unavailable' })
+      return
+    }
+    setOutcome(attachment.id, { phase: 'working' })
+    try {
+      const saved = await transcribeToDocument({
+        file,
+        title: i18n.tr(`Transkripsjon av ${attachment.name}`, `Transcript of ${attachment.name}`),
+        threadId,
+      })
+      setOutcome(attachment.id, { phase: 'saved', documentId: saved.documentId })
+    } catch (error) {
+      setOutcome(attachment.id, { phase: 'failed', failure: transcriptFailureOf(error) })
+    }
   }
 
   return (
@@ -94,6 +134,9 @@ export function ChatAttachmentCanvas(props: {
               attachment={attachment()}
               panelId={`${attachmentTabId(attachment().id)}-panel`}
               tabId={attachmentTabId(attachment().id)}
+              transcribeOffered={transcribeOffered(attachment())}
+              transcript={transcripts()[attachment().id]}
+              onTranscribe={() => void transcribe(attachment())}
             />
           )}
         </Show>
@@ -102,7 +145,16 @@ export function ChatAttachmentCanvas(props: {
   )
 }
 
-function AttachmentViewer(props: { attachment: ChatTurnAttachment; panelId: string; tabId: string }) {
+function AttachmentViewer(props: {
+  attachment: ChatTurnAttachment
+  panelId: string
+  tabId: string
+  /** Whether "Transcribe to document" is offered for this attachment (W5-090-b). */
+  transcribeOffered: boolean
+  /** What the last transcript request for this attachment left on screen. */
+  transcript: TranscriptOutcome | undefined
+  onTranscribe: () => void
+}) {
   const i18n = useI18n()
   const previewUrl = () => props.attachment.previewUrl
   const isImage = () => props.attachment.type.startsWith('image/')
@@ -157,8 +209,25 @@ function AttachmentViewer(props: { attachment: ChatTurnAttachment; panelId: stri
               </>
             )}
           </Show>
+          <Show when={props.transcribeOffered && props.transcript?.phase !== 'saved'}>
+            <button
+              type="button"
+              class="verevon-chat-artifact-action"
+              disabled={props.transcript?.phase === 'working'}
+              aria-busy={props.transcript?.phase === 'working' ? 'true' : undefined}
+              onClick={() => props.onTranscribe()}
+            >
+              <FileText size={14} />
+              {props.transcript?.phase === 'working'
+                ? i18n.tr('Transkriberer…', 'Transcribing…')
+                : i18n.tr('Transkriber til dokument', 'Transcribe to document')}
+            </button>
+          </Show>
         </div>
       </header>
+      <Show when={props.transcript}>
+        {(outcome) => <TranscriptNote outcome={outcome()} />}
+      </Show>
       <Switch>
         <Match when={!previewUrl()}>
           <div class="verevon-chat-attachment-workspace__unavailable">
@@ -307,4 +376,89 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** Why a transcript was not saved (W5-090-b). The reader sees the words for the reason, never the server's own text. */
+type TranscriptFailure = 'too_large' | 'unsupported' | 'unreadable' | 'empty' | 'zdr' | 'unavailable'
+
+/** Where a transcript request for one attachment stands on screen (W5-090-b). */
+type TranscriptOutcome =
+  | { phase: 'working' }
+  | { phase: 'saved'; documentId: string }
+  | { phase: 'failed'; failure: TranscriptFailure }
+
+const TRANSCRIPT_FAILURE_COPY: Record<TranscriptFailure, { no: string; en: string }> = {
+  too_large: { no: 'Opptaket er for stort. Grensen er 1,4 MB.', en: 'The recording is too large. The limit is 1.4 MB.' },
+  unsupported: { no: 'Dette lydformatet kan ikke transkriberes.', en: 'This audio format cannot be transcribed.' },
+  unreadable: { no: 'Opptaket kunne ikke transkriberes.', en: 'The recording could not be transcribed.' },
+  empty: { no: 'Ingen tale ble gjenkjent i opptaket.', en: 'No speech was recognised in this recording.' },
+  zdr: {
+    no: 'Zero Data Retention gjelder, så opptaket kan ikke lagres som dokument.',
+    en: 'Zero Data Retention applies, so this recording cannot be saved as a document.',
+  },
+  unavailable: { no: 'Transkripsjonen kunne ikke lagres. Prøv igjen.', en: 'The transcript could not be saved. Try again.' },
+}
+
+function transcriptFailureText(failure: TranscriptFailure, tr: (noText: string, enText: string) => string): string {
+  const copy = TRANSCRIPT_FAILURE_COPY[failure]
+  return tr(copy.no, copy.en)
+}
+
+/** The reason a transcript request failed, read from the typed codes the client and the gateway send. */
+function transcriptFailureOf(error: unknown): TranscriptFailure {
+  if (hasErrorCode(error, 'transcript_recording_too_large')) return 'too_large'
+  if (hasErrorCode(error, 'transcript_type_unsupported', 'unsupported_audio_type')) return 'unsupported'
+  if (hasErrorCode(error, 'transcription_failed')) return 'unreadable'
+  if (hasErrorCode(error, 'transcript_empty')) return 'empty'
+  if (error instanceof ApiError && isZdrCode(error.code)) return 'zdr'
+  return 'unavailable'
+}
+
+/** The note under an audio attachment's header: the saved transcript's link, or why it was not saved (W5-090-b). */
+function TranscriptNote(props: { outcome: TranscriptOutcome }) {
+  const i18n = useI18n()
+  const savedId = () => (props.outcome.phase === 'saved' ? props.outcome.documentId : null)
+  const failure = () => (props.outcome.phase === 'failed' ? props.outcome.failure : null)
+  return (
+    <>
+      <Show when={savedId()}>
+        {(documentId) => (
+          <p class="verevon-chat-feedback-reasons__note" role="status">
+            {i18n.tr(
+              'Transkripsjonen er lagret som dokument. Den blir værende hvis samtalen slettes. Lydopptaket lagres ikke.',
+              'The transcript is saved as a document. It stays if the chat is deleted. The recording is not kept.',
+            )}
+            {' '}
+            <a href={`/knowledge?source=${encodeURIComponent(documentId())}`}>
+              {i18n.tr('Åpne dokumentet', 'Open the document')}
+            </a>
+          </p>
+        )}
+      </Show>
+      <Show when={failure()}>
+        {(kind) => (
+          <p class="verevon-chat-feedback-reasons__note" role="alert">
+            {transcriptFailureText(kind(), (noText, enText) => i18n.tr(noText, enText))}
+          </p>
+        )}
+      </Show>
+    </>
+  )
+}
+
+/**
+ * The bytes of a base64 data URL the chat controller materialized, as a Blob of the attachment's own audio type (already
+ * checked by the caller). Null for any other URL.
+ */
+function audioBlobFromDataUrl(url: string, type: string): Blob | null {
+  const comma = url.indexOf(',')
+  if (!url.startsWith('data:') || comma < 0) return null
+  if (!/;base64/i.test(url.slice(5, comma))) return null
+  try {
+    const binary = atob(url.slice(comma + 1))
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0))
+    return new Blob([bytes], { type })
+  } catch {
+    return null
+  }
 }

@@ -143,6 +143,18 @@ pub const SETTINGS: &[SettingDef] = &[
         status: Status::Enforced,
         reserved_values: &[],
     },
+    // F-t3-083: the org's agents-paused switch. `true` pauses every agent run the org starts or resumes (a Do turn, a
+    // resume and a continuation); a plain Ask turn is never paused. Enforced through ORG_AGENT_POLICY_MODE, and
+    // fail-closed to `true` (D8): a stored value this build cannot read pauses the org rather than leaving it running.
+    SettingDef {
+        key: "agents.paused",
+        kind: Kind::Bool,
+        strictness_order: &["true", "false"],
+        default: "false",
+        fail_closed_value: "true",
+        status: Status::Enforced,
+        reserved_values: &[],
+    },
     SettingDef {
         key: "ext.mcp_servers",
         kind: Kind::AllowList,

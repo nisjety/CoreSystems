@@ -358,6 +358,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'chat.set_agent_mode': exempt('agent_cannot_self_govern', 'context_write'),
   'chat.set_transcript_density': exempt('ui_state_only', 'external_write'),
   'chat.inspect_run_request': exempt('no_owner_executor', 'read'),
+  'review.run': exempt('no_owner_executor', 'read'),
   'thread.export': exempt('no_owner_executor', 'read'),
   'thread.import': exempt('no_owner_executor', 'context_write'),
   'thread.share_snapshot': exempt('no_owner_executor', 'context_write'),
@@ -431,6 +432,11 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'router_policy.update': exempt('no_owner_executor', 'external_write'),
   'models.create_customer_gateway': exempt('human_identity_or_security', 'external_write'),
   'models.delete_customer_gateway': exempt('irreversible_destructive', 'destructive'),
+  // W4-CC-8: the stored connector keys and the custom REST connector. A key is a person's secret and its revocation a
+  // person's choice, so the agent is never offered any of the three.
+  'connectors.create_credential_binding': exempt('human_identity_or_security', 'external_write'),
+  'connectors.revoke_credential_binding': exempt('irreversible_destructive', 'destructive'),
+  'connectors.create_custom_rest': exempt('human_identity_or_security', 'external_write'),
   'audit.verify_chain': exempt('no_owner_executor', 'external_write'),
   'audit.list_events': exempt('no_owner_executor', 'read'),
   'audit.export_log': exempt('no_owner_executor', 'external_write'),
@@ -444,6 +450,12 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'schedule.delete': exempt('irreversible_destructive', 'destructive'),
   'schedule.fires.list': exempt('no_owner_executor', 'read'),
   'schedule.run_now': exempt('agent_cannot_self_govern', 'external_write'),
+  // W4-T8: the event trigger contracts the automations hub calls. A trigger starts runs from webhook events, so a model
+  // that could create, change or dry run one would set its own wake-ups; the listing reads only the person's own triggers.
+  'automations.list_event_triggers': exempt('no_owner_executor', 'read'),
+  'automations.create_event_trigger': exempt('agent_cannot_self_govern', 'external_write'),
+  'automations.update_event_trigger': exempt('agent_cannot_self_govern', 'external_write'),
+  'automations.dry_run_event_trigger': exempt('agent_cannot_self_govern', 'read'),
   'agents.installations.list': exempt('no_owner_executor', 'read'),
   'agents.draft.save': exempt('agent_cannot_self_govern', 'external_write'),
   'agents.publish': exempt('agent_cannot_self_govern', 'external_write'),

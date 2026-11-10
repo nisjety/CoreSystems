@@ -12,6 +12,7 @@ use mp_contracts::model_plane::v1::{
     artifact_revision_service_client::ArtifactRevisionServiceClient,
     browser_broker_client::BrowserBrokerClient, capability_core_client::CapabilityCoreClient,
     event_log_client::EventLogClient,
+    event_trigger_service_client::EventTriggerServiceClient,
     execution_core_client::ExecutionCoreClient, finetune_jobs_client::FinetuneJobsClient,
     inference_core_client::InferenceCoreClient,
     learning_governance_service_client::LearningGovernanceServiceClient,
@@ -140,6 +141,8 @@ pub struct AppState {
     pub thread_fork_client: ThreadForkServiceClient<Channel>,
     /// Session Core's ThreadGoalService on the session_client endpoint (EP-7 S1).
     pub thread_goal_client: ThreadGoalServiceClient<Channel>,
+    /// Session Core's EventTriggerService on the session_client endpoint (W4-T7, EP-7 F-t3-047).
+    pub event_trigger_client: EventTriggerServiceClient<Channel>,
     /// Session Core's ThreadExportService on the session_client endpoint (EP-12 S10).
     pub thread_export_client: ThreadExportServiceClient<Channel>,
     /// Session Core's ThreadShareService on the session_client endpoint (EP-12 S14).
@@ -512,6 +515,7 @@ impl AppState {
             message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),
             thread_fork_client: ThreadForkServiceClient::new(session_channel.clone()),
             thread_goal_client: ThreadGoalServiceClient::new(session_channel.clone()),
+            event_trigger_client: EventTriggerServiceClient::new(session_channel.clone()),
             thread_export_client: ThreadExportServiceClient::new(session_channel.clone()),
             thread_share_client: ThreadShareServiceClient::new(session_channel.clone()),
             thread_reference_client: ThreadReferenceServiceClient::new(session_channel.clone()),
@@ -730,6 +734,11 @@ impl AppState {
             "http://localhost:9091",
         )?);
         let thread_goal_client = ThreadGoalServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let event_trigger_client = EventTriggerServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -1004,6 +1013,7 @@ impl AppState {
             state.message_tree_client = message_tree_client;
             state.thread_fork_client = thread_fork_client;
             state.thread_goal_client = thread_goal_client;
+            state.event_trigger_client = event_trigger_client;
             state.thread_export_client = thread_export_client;
             state.thread_share_client = thread_share_client;
             state.thread_reference_client = thread_reference_client;
@@ -1081,6 +1091,7 @@ impl AppState {
             state.message_tree_client = message_tree_client;
             state.thread_fork_client = thread_fork_client;
             state.thread_goal_client = thread_goal_client;
+            state.event_trigger_client = event_trigger_client;
             state.thread_export_client = thread_export_client;
             state.thread_share_client = thread_share_client;
             state.thread_reference_client = thread_reference_client;

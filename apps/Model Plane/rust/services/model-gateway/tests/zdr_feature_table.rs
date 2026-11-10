@@ -334,6 +334,8 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
             refused("agentic"),
         ),
         ("approved_plan_id", with("approved_plan_id", json!("  ")), None),
+        // Coordinator mode is never sent for a ZDR turn, so asking for it is not refused.
+        ("coordinator", with("coordinator", json!(true)), None),
         (
             "tools",
             with(

@@ -426,6 +426,18 @@ pub const FEATURES: &[Feature] = &[
         key: "mcp_secret_ref",
         label: "MCP servers that use a stored credential",
     },
+    // W4-CC-7: a custom REST tool calls the organisation's own API with a stored credential, so a ZDR or waived run is
+    // refused before any read or write.
+    Feature {
+        key: "custom_rest",
+        label: "custom REST connectors",
+    },
+    // W5-081-c (F-t3-081): teach mode drafts a skill from one run's takeover steps and files it as a proposal, which is
+    // retained content. A ZDR or waived caller is refused before any read, Quarry call or model call.
+    Feature {
+        key: "teach_mode",
+        label: "saving a run's steps as a skill",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

@@ -539,6 +539,35 @@ impl IntegrationActionsClient {
         Ok(value)
     }
 
+    /// One read of a custom REST connection's endpoint (W4-CC-7): `custom_rest.call` with the GET or
+    /// HEAD method the call names, on the `integration:read` token, rendered for the model and capped
+    /// like every tool result. The host and the credential are the connection's own, from its binding
+    /// in integration-corev2, so the call names neither; integration-corev2 refuses any other method
+    /// on this token.
+    pub async fn read_custom_rest(
+        &self,
+        org_id: &str,
+        call: &mp_contracts::custom_rest::CallArgs,
+        session_bearer: Option<&str>,
+    ) -> Result<String, String> {
+        let value = self
+            .read_action_json(
+                org_id,
+                &call.connection_id,
+                mp_contracts::custom_rest::OPERATION,
+                call.params(),
+                session_bearer,
+            )
+            .await?;
+        let result = value.pointer("/data/action/result").unwrap_or(&Value::Null);
+        Ok(truncate(&mp_contracts::custom_rest::render_read(
+            &call.connection_id,
+            &call.method,
+            &call.path,
+            result,
+        )))
+    }
+
     /// POST one read request with an `integration:read` token and return the gateway's status
     /// and body. Shared by [`Self::read_action_json`] and [`Self::read_action`], so both reads
     /// name the same credential and endpoint.
@@ -823,6 +852,19 @@ pub fn read_provider_action_offered(
     connector_scope: &[String],
 ) -> bool {
     switched_on && !zdr && !space_scoped && !connector_scope.is_empty()
+}
+
+/// Whether a run is offered the custom REST tools (W4-CC-7): the switch, a run that is neither
+/// zero-retention nor Space-scoped, and a connection the person selected. The switch is read on
+/// every offer, so a restart is not needed to turn it off.
+#[must_use]
+pub fn custom_rest_offered(zdr: bool, space_scoped: bool, connector_scope: &[String]) -> bool {
+    mp_contracts::custom_rest::offered(
+        mp_contracts::custom_rest::enabled(),
+        zdr,
+        space_scoped,
+        connector_scope,
+    )
 }
 
 /// A connection id is spliced into the gateway path, so only the characters an id is made of may

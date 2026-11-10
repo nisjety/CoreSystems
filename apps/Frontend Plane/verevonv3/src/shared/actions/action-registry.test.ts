@@ -1810,7 +1810,8 @@ describe('action registry', () => {
     // +3 after W5-077-c registered chat.thread.archive, chat.thread.star and chat.thread.mark_unread, the palette's thread flags.
     // +5 after W4-PL-4 registered plugins.list_catalog, plugins.install, plugins.uninstall, plugins.approve_catalog and plugins.kill_digest.
     // +3 after W5-074-c registered org.list_permission_rules, org.create_permission_rule and org.delete_permission_rule, the organization's permission rules.
-    expect(ids).toHaveLength(339)
+    // +3 after W4-CC-8 registered connectors.create_credential_binding, connectors.revoke_credential_binding and connectors.create_custom_rest, the stored connector keys and the custom REST connector.
+    expect(ids).toHaveLength(342)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

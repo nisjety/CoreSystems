@@ -70,7 +70,10 @@ pub fn evaluate_call(
     // human-approval requirement selected by the owner plane. `Deny` remains
     // the stricter caller posture; otherwise the runtime must pause before an
     // adapter can make any Control/owner-plane request.
-    if requires_durable_owner_approval(tool_name) || requires_consent_to_disclose(tool_name) {
+    if requires_durable_owner_approval(tool_name)
+        || requires_consent_to_disclose(tool_name)
+        || custom_rest_write_pauses(tool_name)
+    {
         return if mode == PermissionMode::Deny {
             PermissionDecision::Deny
         } else {
@@ -332,6 +335,9 @@ pub fn is_risky_tool(tool_name: &str) -> bool {
         // Its read-side sibling list_social_accounts matches no keyword and
         // stays ungated by design.
         "publish_social_post",
+        // custom_rest.write (W4-CC-7) sends a write to the organisation's own API. It contains "write" and
+        // so is risky by name already, and it is listed here so the gate is intent-visible.
+        "custom_rest.write",
     ];
     if tool_name.starts_with("mcp__") {
         return true;
@@ -514,6 +520,12 @@ fn record_divergence(point: &'static str, tool_name: &str) {
     metrics::counter!("tool_class_divergence_total", "point" => point, "tool" => tool).increment(1);
 }
 
+/// Whether a call is a custom REST write (W4-CC-7). It reaches a system outside the platform, so it pauses for a
+/// person on every posture but `deny`, whatever class the registry declares for it.
+fn custom_rest_write_pauses(tool_name: &str) -> bool {
+    mp_contracts::custom_rest::is_write_tool(tool_name)
+}
+
 /// [`evaluate_call`] under the gate.
 #[must_use]
 pub fn evaluate_call_with(
@@ -523,6 +535,13 @@ pub fn evaluate_call_with(
     tool_name: &str,
     tool_input: &str,
 ) -> PermissionDecision {
+    if custom_rest_write_pauses(tool_name) {
+        return if mode == PermissionMode::Deny {
+            PermissionDecision::Deny
+        } else {
+            PermissionDecision::AwaitApproval
+        };
+    }
     by_gate(
         gate,
         view,
@@ -1363,6 +1382,8 @@ code_interpreter           risky=no/no restricted=no rung=read_only/read_only ow
 company_lookup             risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 computer.act               risky=yes/yes restricted=no rung=danger_full_access/danger_full_access owner=no consent=no ask=AwaitApproval/AwaitApproval auto=Allow/Allow
 computer.observe           risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+custom_rest.read           risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
+custom_rest.write          risky=yes/yes restricted=no rung=danger_full_access/danger_full_access owner=no consent=no ask=AwaitApproval/AwaitApproval auto=AwaitApproval/AwaitApproval
 execute_provider_action    risky=no/yes restricted=no rung=read_only/danger_full_access owner=no consent=no ask=Allow/AwaitApproval auto=Allow/Allow
 get_shipping_quotes        risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow
 knowledge_search           risky=no/no restricted=no rung=read_only/read_only owner=no consent=no ask=Allow/Allow auto=Allow/Allow

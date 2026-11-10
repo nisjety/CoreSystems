@@ -2345,11 +2345,13 @@ pub async fn invoke_stream_sse(
     {
         Ok(cap) => cap,
         Err(code) => {
+            // The words and retry hint follow the code: a paused org is refused until an admin resumes agent runs, while an
+            // unreadable policy may clear on a retry (F-t3-083).
             return error_stream(
                 &request_id,
                 code,
-                crate::org_agent_policy::POLICY_UNAVAILABLE_MESSAGE,
-                true,
+                crate::org_agent_policy::refusal_answer(code).1,
+                code == crate::org_agent_policy::POLICY_UNAVAILABLE_CODE,
             );
         }
     };
@@ -3411,6 +3413,8 @@ pub async fn invoke_stream_sse(
             goal_turn,
             // The agent's tool allowlist of this Do turn (EP-6 S9); `None` for an Ask turn.
             run_tool_allowlist,
+            // The turn's coordinator flag (`InvokeRequest.coordinator`); the dispatch decides whether it is sent.
+            req.coordinator,
         );
     }
 
@@ -12594,6 +12598,37 @@ fn ask_user_max_questions(
     }
 }
 
+/// Whether the deployment runs coordinator mode (`EXECUTION_COORDINATOR_MODE_ENABLED`), read once per process so a
+/// run cannot see it change. Only the literal `true` enables it, and the default is off.
+fn coordinator_mode_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        coordinator_switch(
+            std::env::var("EXECUTION_COORDINATOR_MODE_ENABLED")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+/// The strict reading of `EXECUTION_COORDINATOR_MODE_ENABLED`: only the literal `true` enables it.
+fn coordinator_switch(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// Whether a Do turn's coordinator flag is sent to execution-core as `RunAgentRequest.coordinator`. It is sent only
+/// while the switch is on, and never for a zero-retention or waived turn or a continuation: a continuation resumes the
+/// tools its pause retained, so it carries no offer of its own to narrow. Execution-core applies the same rule.
+fn coordinator_forwarded(
+    on: bool,
+    requested: bool,
+    zdr: bool,
+    waived: bool,
+    continuation: bool,
+) -> bool {
+    on && requested && !zdr && !waived && !continuation
+}
+
 /// The question a run is waiting on, if its `ask_user` call put one to the owner (build plan WS14 S4): the
 /// newest `REQUESTED` question of the run in session-core's run-scoped list. Best-effort: a failed lookup
 /// sends no card, and the prose the turn ends with still carries the question.
@@ -13025,6 +13060,8 @@ fn spawn_run_dispatch(
     wide_research: Option<mp_contracts::model_plane::v1::WideResearchRequest>,
     // The agent's tool allowlist of a Do turn (EP-6 S9); `None` for every other dispatch.
     agent_tool_allowlist: Option<mp_contracts::model_plane::v1::AgentToolAllowlist>,
+    // Coordinator mode (`coordinator_forwarded`): sent as `RunAgentRequest.coordinator`, `false` for every other dispatch.
+    coordinator: bool,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     // The graded authority execution-core enforces PER CALL.
@@ -13153,6 +13190,8 @@ fn spawn_run_dispatch(
     );
     // The question tool's cap for this run (build plan WS14 S4), set by the caller as the org policy is.
     run_agent_req.max_questions = max_questions;
+    // Coordinator mode, decided by the caller (`coordinator_forwarded`): sent only while its switch is on.
+    run_agent_req.coordinator = coordinator;
     // A wide-research run (EP-2 S8) delegates no wider than its org-clamped item cap: the narrower
     // of that cap and the server's own subagent budget, never wider than either.
     if let Some(wide) = wide_research {
@@ -13426,6 +13465,8 @@ fn build_run_agent_request(
         // The agent's tool allowlist is set by the caller (`spawn_run_dispatch`), which holds the turn's pin (EP-6 S9);
         // none here.
         agent_tool_allowlist: None,
+        // Coordinator mode is set by the caller (`spawn_run_dispatch`), which decides it from the turn; none here.
+        coordinator: false,
     }
 }
 
@@ -13974,6 +14015,9 @@ fn agentic_run_stream(
     // for an Ask turn, for a turn whose version states none (or with MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST off), and
     // for a continuation, whose tools are the snapshot its pause retained.
     agent_tool_allowlist: Option<mp_contracts::model_plane::v1::AgentToolAllowlist>,
+    // Whether the turn asked for coordinator mode (`InvokeRequest.coordinator`). `false` for a continuation. The
+    // dispatch sends it only as `coordinator_forwarded` allows.
+    coordinator_requested: bool,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -14128,6 +14172,18 @@ fn agentic_run_stream(
             !space_id.is_empty(),
             resume.is_some(),
         );
+        // Coordinator mode (`coordinator_forwarded`): the flag is sent only while its switch is on, and never for a
+        // zero-retention or waived turn or a continuation.
+        let coordinator = coordinator_forwarded(
+            coordinator_mode_enabled(),
+            coordinator_requested,
+            zdr,
+            matches!(
+                retention_class,
+                Some(crate::sse_events::RetentionClass::ZdrWaived { .. })
+            ),
+            resume.is_some(),
+        );
         // Construct the authenticated request before reporting the run as
         // started. A deterministic local credential/metadata failure is a
         // confirmed pre-dispatch rejection, not an ambiguous remote outage.
@@ -14178,6 +14234,7 @@ fn agentic_run_stream(
             max_questions,
             wide_research,
             agent_tool_allowlist,
+            coordinator,
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
@@ -20516,6 +20573,18 @@ fn continue_error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
     )
 }
 
+/// The HTTP answer of a continuation the org's agent policy refuses (F-t3-083, WS25-S9): the closed code, its status and
+/// the words a person reads, from [`crate::org_agent_policy::refusal_answer`]. Its codes are kept out of
+/// [`CONTINUE_HTTP_REFUSALS`] on purpose: the BFF's relay list and the SPA's list are pinned to that one, so the two
+/// codes join it only in the same change as those lists.
+fn continue_policy_error(code: &'static str) -> (StatusCode, Json<Value>) {
+    let (status, message) = crate::org_agent_policy::refusal_answer(code);
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message } })),
+    )
+}
+
 // ---- The gateway's pre-consume of a continuation: the pure building blocks (build plan
 // WS03 S7c-A4) and their wiring in `continue_run` and `agentic_run_stream` (S7c-B1).
 // With the resume switch on, `continue_run` consumes the approval itself, spend only,
@@ -21340,6 +21409,7 @@ pub(crate) async fn continue_run(
     inference_bearer: VerifiedInferenceBearer,
     execution_bearer: Option<Extension<VerifiedExecutionBearer>>,
     data_plane_bearer: Option<Extension<VerifiedBearer>>,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
     axum::Json(req): axum::Json<ContinueRunRequest>,
 ) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
@@ -21373,6 +21443,21 @@ pub(crate) async fn continue_run(
     )
     .await
     .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?;
+    // The org's agent-run pause (F-t3-083, WS25-S9): a paused org starts no continuation, and a policy that cannot be read
+    // starts none either, as a Do turn is refused. Read after the owner check and before the run or the approval is read,
+    // so no approval is spent by a refused continuation.
+    crate::org_agent_policy::ensure_not_paused(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        &claims.org_id,
+        capability_bearer
+            .as_deref()
+            .map_or("", VerifiedCapabilityBearer::as_str),
+    )
+    .await
+    .map_err(continue_policy_error)?;
 
     let detail = state
         .run_client
@@ -21551,6 +21636,8 @@ pub(crate) async fn continue_run(
             None,
             // Nor an agent allowlist: its tools are the snapshot the pause retained, already narrowed (EP-6 S9).
             None,
+            // Nor coordinator mode: its tools are the snapshot the pause retained, so there is no offer to narrow.
+            false,
         )
     };
     if !resume_enabled {
@@ -23449,6 +23536,7 @@ mod continue_run_tests {
             String::new(),
             None,
             None,
+            false,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -24960,6 +25048,7 @@ mod continue_run_tests {
             String::new(),
             None,
             None,
+            false,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();

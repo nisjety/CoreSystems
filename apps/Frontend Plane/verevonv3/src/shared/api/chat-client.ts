@@ -1,4 +1,4 @@
-import { ApiError, apiErrorFromResponse, requestJson, signalSessionExpiry } from './http'
+import { ApiError, apiErrorFromResponse, clientError, requestJson, signalSessionExpiry } from './http'
 import { gatewayBaseUrl } from './config'
 import {
   normalizePlan,
@@ -33,6 +33,20 @@ import {
   reconcileLocalThreads,
 } from '@/features/chat/lib/chat-retention'
 import { runParkedFrameOf, type RunParkedFrame } from '@/features/chat/lib/run-park'
+import { chatLibraryKindOf } from '@/features/chat/lib/chat-library-origins'
+import { blobToDataUrl, parseDataUrl } from '@/shared/lib/blob-data'
+import {
+  TRANSCRIPT_MAX_RECORDING_BYTES,
+  TRANSCRIPT_MAX_TITLE_CHARS,
+  parseChatTranscriptCreate,
+  transcriptAudioType,
+} from '@/shared/actions/chat-transcript'
+import {
+  REVIEW_TARGETS,
+  parseReviewRunInput,
+  type ReviewRunInput,
+  type ReviewTarget,
+} from '@/shared/actions/chat-review'
 import type { ThreadGoalStatus } from './thread-goal-client'
 
 // ── Wide research (EP-2 S8) ─────────────────────────────────────────────────
@@ -3625,7 +3639,7 @@ export type ChatLibraryItem = {
   contentBytes: number
   createdAt: string
   updatedAt: string
-  /** The thread a generated copy was saved from, from its source trace. Absent for an upload. */
+  /** The thread a generated copy was saved from, or a transcript was made in. Absent for other uploads. */
   threadId?: string
 }
 
@@ -3639,12 +3653,14 @@ function chatLibraryItem(value: unknown): ChatLibraryItem | null {
   const record = objectValue(value)
   if (!record || typeof record.document_id !== 'string' || !record.document_id) return null
   const metadata = objectValue(record.metadata)
-  const threadValue = objectValue(metadata?.source_ref)?.thread_id
+  // A generated copy names its thread in `source_ref`; a transcript names it at the top of `metadata` (W5-090-b).
+  const threadValue = objectValue(metadata?.source_ref)?.thread_id ?? metadata?.thread_id
   const threadId = typeof threadValue === 'string' && threadValue ? threadValue : undefined
   return {
     documentId: record.document_id,
     title: typeof record.title === 'string' ? record.title : '',
-    kind: metadata?.origin === 'chat-artifact' ? 'generated' : 'uploaded',
+    // An origin the library does not list reads as uploaded, as it always has.
+    kind: chatLibraryKindOf(metadata?.origin) ?? 'uploaded',
     ownerId: typeof record.owner_id === 'string' ? record.owner_id : '',
     visibility: typeof record.visibility === 'string' ? record.visibility : '',
     contentBytes: typeof record.content_bytes === 'number' ? record.content_bytes : 0,
@@ -3681,6 +3697,187 @@ export async function readChatLibraryText(documentId: string): Promise<string> {
   const raw = await requestJson<unknown>(`/api/v1/knowledge/documents/${encodeURIComponent(documentId)}`)
   const content = objectValue(raw)?.content
   return typeof content === 'string' ? content : ''
+}
+
+/**
+ * Whether "Transcribe to document" is offered on an audio attachment at all (W5-090-b): only when
+ * `VITE_CHAT_MEDIA_TRANSCRIPTS` is exactly `true`. Read at call time so a test can stub it.
+ */
+export function mediaTranscriptsEnabled(): boolean {
+  return import.meta.env.VITE_CHAT_MEDIA_TRANSCRIPTS === 'true'
+}
+
+/** A saved transcript: the id of its document. The transcript's text is never carried back (W5-090-b). */
+export type ChatTranscript = { documentId: string }
+
+/**
+ * Turn one audio recording into a private transcript document (W5-090-b, F-t3-090).
+ *
+ * The recording is read as base64 and sent once to `POST /api/v1/chat/transcripts`. The gateway transcribes it through
+ * the speech route and saves the text as a `media_transcript` document, owned by the caller and private, with
+ * `metadata.origin` set to `chat-transcript`. The audio is never stored, here or on the server. The title is cut to the
+ * gateway's 120 characters.
+ *
+ * A recording over 1.4 MB is refused before it is read, with an `ApiError` whose code is `transcript_recording_too_large`,
+ * and a type the gateway does not take is refused with `transcript_type_unsupported`. Both are thrown without sending
+ * anything. A zero-retention caller is refused by the gateway with a `zdr_` code; a temporary chat is never offered this.
+ */
+export async function transcribeToDocument(input: {
+  file: Blob
+  title: string
+  threadId?: string
+}): Promise<ChatTranscript> {
+  const audioType = transcriptAudioType(input.file.type)
+  if (!audioType) throw clientError(415, 'transcript_type_unsupported')
+  if (input.file.size > TRANSCRIPT_MAX_RECORDING_BYTES) throw clientError(413, 'transcript_recording_too_large')
+  const parsed = parseDataUrl(await blobToDataUrl(input.file))
+  const body = parseChatTranscriptCreate({
+    audio_base64: parsed?.base64 ?? '',
+    mime: audioType,
+    title: Array.from(input.title.trim()).slice(0, TRANSCRIPT_MAX_TITLE_CHARS).join(''),
+    ...(input.threadId ? { thread_id: input.threadId } : {}),
+  })
+  const raw = await requestJson<unknown>('/api/v1/chat/transcripts', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+  const documentId = objectValue(raw)?.document_id
+  if (typeof documentId !== 'string' || !documentId) throw clientError(503, 'transcript_not_saved')
+  return { documentId }
+}
+
+/** The severities a review finding may carry, most severe first (F-t3-086). */
+const REVIEW_SEVERITIES = ['P0', 'P1', 'P2', 'P3'] as const
+const REVIEW_STATUSES = ['completed', 'unreadable'] as const
+const REVIEW_VERDICTS = ['clean', 'findings', 'unverified', 'unreadable'] as const
+/** The deterministic checks the gateway runs on a model's reply, and the outcomes a check can report. */
+const REVIEW_CHECKS = ['reply_contract', 'line_locations', 'quoted_text'] as const
+const REVIEW_OUTCOMES = ['passed', 'failed', 'not_run'] as const
+
+/** One finding the gateway kept (F-t3-086): its line span lies in the text, and its quote is in those lines. */
+export type ReviewFinding = {
+  severity: (typeof REVIEW_SEVERITIES)[number]
+  title: string
+  body: string
+  suggestion: string
+  lineStart: number
+  lineEnd: number
+  quote: string
+}
+
+/** One deterministic check the gateway ran on a model's reply. It is not a model finding (F-t3-086). */
+export type ReviewSourceCheck = {
+  check: (typeof REVIEW_CHECKS)[number]
+  outcome: (typeof REVIEW_OUTCOMES)[number]
+  /** The model's findings this check removed. */
+  dropped: number
+}
+
+/**
+ * A review card (F-t3-086), as Model Gateway's `card_json` writes it. The model's findings and the gateway's checks are
+ * separate arrays, so a reader can tell what the model said from what the gateway verified. `usage.costUsd` is null on
+ * a zero-retention review, which is not priced.
+ */
+export type ReviewCard = {
+  runId: string
+  target: ReviewTarget
+  label: string
+  status: (typeof REVIEW_STATUSES)[number]
+  verdict: (typeof REVIEW_VERDICTS)[number]
+  findings: ReviewFinding[]
+  sourceChecks: ReviewSourceCheck[]
+  /** More findings were checked and kept than the card holds. The most severe are the ones it keeps. */
+  limitReached: boolean
+  reviewed: { contentHash: string; lines: number; bytes: number }
+  modelUsed: string
+  usage: { inputTokens: number; outputTokens: number; costUsd: number | null; latencyMs: number }
+}
+
+/** The wire value when it is one of `values`, or `undefined` for anything else. */
+function oneOf<T extends string>(values: readonly T[], value: unknown): T | undefined {
+  return typeof value === 'string' && (values as readonly string[]).includes(value) ? (value as T) : undefined
+}
+
+function reviewFinding(value: unknown): ReviewFinding | null {
+  const record = objectValue(value)
+  const severity = oneOf(REVIEW_SEVERITIES, record?.severity)
+  const title = str(record?.title)
+  const body = str(record?.body)
+  const lineStart = num(record?.lineStart)
+  const lineEnd = num(record?.lineEnd)
+  const quote = str(record?.quote)
+  if (!severity || title === undefined || body === undefined) return null
+  if (lineStart === undefined || lineEnd === undefined || quote === undefined) return null
+  return { severity, title, body, suggestion: str(record?.suggestion) ?? '', lineStart, lineEnd, quote }
+}
+
+function reviewSourceCheck(value: unknown): ReviewSourceCheck | null {
+  const record = objectValue(value)
+  const check = oneOf(REVIEW_CHECKS, record?.check)
+  const outcome = oneOf(REVIEW_OUTCOMES, record?.outcome)
+  if (!check || !outcome) return null
+  return { check, outcome, dropped: frameCount(record?.dropped) }
+}
+
+/** A card read defensively: a card with no run id, target, status or verdict is not a card, and the caller refuses it. */
+function normalizeReviewCard(value: unknown): ReviewCard | null {
+  const record = objectValue(value)
+  const runId = str(record?.runId)
+  const target = oneOf(REVIEW_TARGETS, record?.target)
+  const status = oneOf(REVIEW_STATUSES, record?.status)
+  const verdict = oneOf(REVIEW_VERDICTS, record?.verdict)
+  if (!runId || !target || !status || !verdict) return null
+  const rawFindings = record?.findings
+  const rawChecks = record?.sourceChecks
+  const reviewed = objectValue(record?.reviewed)
+  const usage = objectValue(record?.usage)
+  return {
+    runId,
+    target,
+    label: str(record?.label) ?? '',
+    status,
+    verdict,
+    findings: (Array.isArray(rawFindings) ? rawFindings : []).flatMap((item: unknown) => reviewFinding(item) ?? []),
+    sourceChecks: (Array.isArray(rawChecks) ? rawChecks : []).flatMap((item: unknown) => reviewSourceCheck(item) ?? []),
+    limitReached: record?.limitReached === true,
+    reviewed: {
+      contentHash: str(reviewed?.contentHash) ?? '',
+      lines: frameCount(reviewed?.lines),
+      bytes: frameCount(reviewed?.bytes),
+    },
+    modelUsed: str(record?.modelUsed) ?? '',
+    usage: {
+      inputTokens: frameCount(usage?.inputTokens),
+      outputTokens: frameCount(usage?.outputTokens),
+      costUsd: num(usage?.costUsd) ?? null,
+      latencyMs: frameCount(usage?.latencyMs),
+    },
+  }
+}
+
+/**
+ * Runs one read-only review of a text (F-t3-086) and returns its card. The request is checked against the action
+ * contract before anything is sent, and the card goes back to the caller only: nothing is stored. Resolves to `null`
+ * while the gateway's review switch is off (404 `review_run_disabled`). Other refusals reject with the server's typed
+ * `ApiError`: a text the gateway will not take (a `review_` code on 400 or 413), a zero-retention refusal, and
+ * `delegated_auth_unavailable` while the model's credentials are unavailable. A request the contract refuses rejects
+ * with a `ReviewRunContractError`, and nothing is sent.
+ */
+export async function runReview(input: ReviewRunInput): Promise<ReviewCard | null> {
+  const request = parseReviewRunInput(input)
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>('/api/v1/ai/review', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404 && error.code === 'review_run_disabled') return null
+    throw error
+  }
+  const card = normalizeReviewCard(objectValue(objectValue(raw)?.data)?.run)
+  if (!card) throw new ApiError('The review did not return a card.', 502, 'review_no_card')
+  return card
 }
 
 export async function getThreadContext(

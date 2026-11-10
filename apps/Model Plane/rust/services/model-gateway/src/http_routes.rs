@@ -371,10 +371,16 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         .route("/v1/threads/:thread_id/fork", post(fork_thread))
         // The thread's goal (Wave 3 EP-7 S1); 404 `thread_goals_disabled` while its switch is off.
         .merge(crate::thread_goal_routes::router())
+        // The event trigger routes (Wave 4 EP-7 W4-T7); 404 `event_triggers_disabled` while MODEL_GATEWAY_EVENT_TRIGGERS is off.
+        .merge(crate::event_trigger_routes::router())
         // One read-only review of a text, as a run (F-t3-086); 404 `review_run_disabled` while its switch is off.
         .merge(crate::review_run_routes::router())
         // A read-only question about one thread's transcript (F-t3-069); 404 `side_chat_disabled` while its switch is off.
         .merge(crate::side_chat_routes::router())
+        // The model council (F-t3-092): one question to two to four models, then a synthesis; 404 `model_council_disabled` while its switch is off.
+        .merge(crate::council_routes::router())
+        // Teach mode (F-t3-081): a disabled skill proposal drafted from one run's takeover steps; 404 `teach_mode_disabled` while its switch is off.
+        .merge(crate::teach_routes::router())
         // The owner's export of one thread (Wave 3 EP-12 S10); 404 `thread_export_disabled` while its switch is off.
         .merge(crate::thread_export_routes::router())
         // The owner's share snapshots (Wave 3 EP-12 S14); 404 `thread_shares_disabled` while its switch is off.
@@ -3979,11 +3985,32 @@ async fn resume_run(
     Extension(claims): Extension<Claims>,
     execution_bearer: VerifiedExecutionBearer,
     session_bearer: VerifiedModelBearer,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
     Path(run_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     // Owner decision 17: resuming a stored run is a continuation. See approve_plan.
     crate::zdr_posture::continuation_gate(&claims)?;
     require_durable_run_owner(&state, &claims, &run_id, &session_bearer).await?;
+    // The org's agent-run pause (F-t3-083, WS25-S9): a paused org resumes no run, and a policy that cannot be read resumes
+    // none either, as a Do turn is refused. Read after the owner check and before the execution is asked to resume.
+    crate::org_agent_policy::ensure_not_paused(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        &claims.org_id,
+        capability_bearer
+            .as_deref()
+            .map_or("", VerifiedCapabilityBearer::as_str),
+    )
+    .await
+    .map_err(|code| {
+        let (status, message) = crate::org_agent_policy::refusal_answer(code);
+        (
+            status,
+            Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
+        )
+    })?;
     // Direct, immediate unblock only for a user-paused run. Approval-gated
     // work has no bare-resume path and remains in the descriptor quarantine.
     let resume = state
@@ -7940,7 +7967,7 @@ async fn admitted_owner_actions_proxy(
 // ============================================================================
 
 /// Proxy GET/POST to capability-core's /api/v1/{path}.
-async fn proxy_to_capability_core(
+pub(crate) async fn proxy_to_capability_core(
     state: &AppState,
     claims: &Claims,
     bearer: &VerifiedCapabilityBearer,
@@ -11725,6 +11752,12 @@ pub struct InvokeRequest {
     /// that grant itself (`sse::approve_then_execute_grant`). It carries no rung.
     #[serde(default, alias = "approvedPlanId")]
     pub approved_plan_id: Option<String>,
+    /// Coordinator mode (`EXECUTION_COORDINATOR_MODE_ENABLED`): asks for the Do run to be a non-editing orchestrator,
+    /// offered only the read tools and the subagent delegation tools, with its effects delegated to subagents. Read only
+    /// while that switch is the literal `true`, forwarded only then, and never on a zero-retention or waived turn or a
+    /// continuation (`sse::coordinator_forwarded`). It grants nothing: execution-core still gates every call.
+    #[serde(default)]
+    pub coordinator: bool,
     /// chat-parity §2 function-calling: tool definitions the model may call.
     /// Empty → no tools. With the `tools` feature opted in, the stream path runs
     /// the tool loop (`tool_call`/`tool_result` events) before the final answer.
@@ -19331,6 +19364,7 @@ mod run_owner_publish_tests {
             Extension(foreign_org),
             VerifiedExecutionBearer::for_test("test-execution-bearer"),
             VerifiedSessionBearer::for_test("test-session-bearer"),
+            None,
             Path("run-owned".to_owned()),
         )
         .await;

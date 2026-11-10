@@ -235,6 +235,10 @@ services:
       MODEL_ENTITLEMENT_ADMIN_ENABLED: ${MODEL_ENTITLEMENT_ADMIN_ENABLED:-false}
       # EP-3 S8: save a document artifact version to knowledge from the Output panel. Only the literal `true`.
       CHAT_ARTIFACT_PROMOTE_ENABLED: ${CHAT_ARTIFACT_PROMOTE_ENABLED:-false}
+      # W5 (F-t3-090): transcribe an audio upload into a private transcript document, POST /api/v1/chat/transcripts.
+      # Only the literal `true` enables it; off, the route answers 404 media_transcripts_disabled. Zero Data Retention
+      # callers are refused whatever this says.
+      CHAT_MEDIA_TRANSCRIPTS_ENABLED: ${CHAT_MEDIA_TRANSCRIPTS_ENABLED:-false}
       # W4-P3 (F-t3-035): the owner's read of a background process's output, GET /api/v1/chat/runs/{run_id}/processes/{pid}/output.
       # Only the literal `true` enables it; off, the route answers 404 process_output_disabled.
       CHAT_PROCESS_OUTPUT_READ_ENABLED: ${CHAT_PROCESS_OUTPUT_READ_ENABLED:-false}
@@ -244,6 +248,10 @@ services:
       # chat_snapshots_disabled. Pairs with MODEL_GATEWAY_THREAD_SHARES and SESSION_SNAPSHOT_GRANTS_ENABLED on the
       # Model Plane and VITE_CHAT_SNAPSHOTS on the frontend service. All default off.
       CHAT_SNAPSHOTS_ENABLED: ${CHAT_SNAPSHOTS_ENABLED:-false}
+      # W4-CC-8 (F-t3-057): the organisation's credential bindings (/api/v1/credential-bindings) and the custom REST
+      # connector (/api/v1/connectors/custom-rest). Only the literal `true` enables them; off, they answer 404
+      # credential_bindings_disabled. Pairs with the Ingestion Plane's CREDENTIAL_BINDINGS_ENABLED. Owners and admins only.
+      CREDENTIAL_BINDINGS_UI_ENABLED: ${CREDENTIAL_BINDINGS_UI_ENABLED:-false}
       # EP-6 S7/S8: the agent builder routes (draft, publish, versions) and the draft preview of a chat turn.
       # Only the literal `true` enables them; off, the builder routes answer 404. Pairs with VITE_AGENT_BUILDER
       # on the frontend service, which mounts the page. Both default off.

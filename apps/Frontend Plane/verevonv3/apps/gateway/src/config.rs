@@ -166,6 +166,17 @@ pub(crate) struct AppState {
     /// answers 404 `chat_snapshots_disabled`. A rollout control, never an authorization input: Session Core proves the
     /// owner, Control holds the grants, and Model Gateway has its own switch.
     pub(crate) chat_snapshots_enabled: bool,
+    /// `EVENT_TRIGGERS_UI_ENABLED` (W4-T7): the event trigger routes (`/api/v1/event-triggers` and its dry run). Read
+    /// once from the environment in `build_state`, exactly `true` turns them on. Off, the paths are absent and answer
+    /// the fallback 404. A rollout control, never an authorization input: Model Gateway's own switch and Session Core
+    /// decide what a caller may read or change.
+    pub(crate) event_triggers_enabled: bool,
+    /// `CREDENTIAL_BINDINGS_UI_ENABLED` (W4-CC-8): the org credential-binding routes (`/api/v1/credential-bindings`,
+    /// POST, GET and DELETE `/{id}`) and the custom REST connector route (`/api/v1/connectors/custom-rest`). Read once
+    /// from the environment in `build_state`, exactly `true` turns them on. Off, each of them answers 404
+    /// `credential_bindings_disabled` and nothing is sent to Integration Core. A rollout control, never an authorization
+    /// input: Integration Core admits only an owner or admin and holds the sealed secret.
+    pub(crate) credential_bindings_enabled: bool,
     /// "Forward an email to create a task" inbound pipeline (chat-wave2
     /// mail-task spec, owner ruling 2026-09-28: Postmark inbound,
     /// self-forward only). Empty token = the whole `/internal/mail-task/ingest`
@@ -249,6 +260,13 @@ pub(crate) struct SpaceFeatureFlags {
     /// and `source_ref` are ignored and every copy is a `chat-attachment`. A rollout control, never
     /// an authorization input: documents-api decides under the user's own scoped token.
     pub(crate) chat_artifact_promote: bool,
+    /// `CHAT_MEDIA_TRANSCRIPTS_ENABLED` (W5, F-t3-090): `POST /api/v1/chat/transcripts`, which transcribes one audio
+    /// upload through Model Gateway's speech route and saves the text as a private `media_transcript` document. Only
+    /// the literal `true` turns it on, never by default in development. Off, the route answers 404
+    /// `media_transcripts_disabled`. A rollout control, never an authorization input: the speech route, documents-api
+    /// and the caller's own token decide what is read and written, and a Zero Data Retention caller is refused with
+    /// the typed 412 whatever this says.
+    pub(crate) chat_media_transcripts: bool,
     /// `SPACE_DENIALS_TYPED` (WS03-S5): map Control's typed Space denials to the browser envelope.
     /// Off restores pass-through. A rollout control, never an authorization input.
     pub(crate) denials_typed: bool,
@@ -525,6 +543,9 @@ impl SpaceFeatureFlags {
             chat_artifact_promote: chat_artifact_promote_from(
                 env::var("CHAT_ARTIFACT_PROMOTE_ENABLED").ok().as_deref(),
             ),
+            chat_media_transcripts: chat_media_transcripts_from(
+                env::var("CHAT_MEDIA_TRANSCRIPTS_ENABLED").ok().as_deref(),
+            ),
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             dm_api: space_flag("SPACE_DM_API"),
             message_revise_api: space_flag("SPACE_MESSAGE_REVISE_API"),
@@ -792,6 +813,8 @@ pub(crate) async fn build_state() -> Result<AppState> {
         agent_definition_versions: agent_definition_versions_enabled(),
         chat_process_output_enabled: chat_process_output_enabled(),
         chat_snapshots_enabled: chat_snapshots_enabled(),
+        event_triggers_enabled: event_triggers_ui_enabled(),
+        credential_bindings_enabled: credential_bindings_ui_enabled(),
         mail_task_ingest_service_token: optional_env("MAIL_TASK_INGEST_SERVICE_TOKEN"),
         mail_task_nats_url: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_URL"),
         mail_task_nats_user: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_USER"),
@@ -1021,9 +1044,38 @@ fn chat_snapshots_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
+/// `EVENT_TRIGGERS_UI_ENABLED`, read once by `build_state` (W4-T7). Off unless it is exactly `true`. The trigger routes
+/// read it from `AppState` at router build, never from the environment.
+fn event_triggers_ui_enabled() -> bool {
+    event_triggers_ui_from(env::var("EVENT_TRIGGERS_UI_ENABLED").ok().as_deref())
+}
+
+/// Exactly the word `true`, for the same reason as `continue_park_form_from`: a stray `1` or `TRUE` would open the
+/// routes that list and change a person's event triggers before anyone chose to.
+fn event_triggers_ui_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// `CREDENTIAL_BINDINGS_UI_ENABLED`, read once by `build_state` (W4-CC-8). Off unless it is exactly `true`. The binding
+/// and custom connector routes read it from `AppState` at request time, never from the environment.
+fn credential_bindings_ui_enabled() -> bool {
+    credential_bindings_ui_from(env::var("CREDENTIAL_BINDINGS_UI_ENABLED").ok().as_deref())
+}
+
+/// Exactly the word `true`: a stray `1` would open the routes that store a credential before anyone chose to.
+fn credential_bindings_ui_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
 /// Exactly the word `true` (EP-3 S8): a promote switch that a stray `1` turned on would start
 /// copying thread work product into the knowledge base before anyone chose to.
 fn chat_artifact_promote_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// Exactly the word `true` (W5, F-t3-090): a switch that a stray `1` turned on would start saving a recording's text as
+/// durable documents before anyone chose to.
+fn chat_media_transcripts_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 

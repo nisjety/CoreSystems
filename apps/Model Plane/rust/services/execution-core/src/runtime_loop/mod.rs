@@ -16,6 +16,8 @@ pub(crate) mod run_effort;
 pub(crate) mod scheduled_agent;
 pub(crate) mod skill_budget;
 pub mod subagent_results;
+// W5-070. The deferred tool index of the Do loop (`tool_search` over untrusted and MCP tools).
+pub(crate) mod tool_index;
 // WS24-S8. The file lives at the crate root; lib.rs should declare it there (shared edit).
 #[path = "../owner_reads.rs"]
 pub mod owner_reads;
@@ -183,6 +185,11 @@ const EXECUTE_PROVIDER_ACTION_TOOL: &str = "execute_provider_action";
 /// One read on a connected account the user selected for the turn (WS23-S3). Read-only: no body,
 /// a closed operation list, and an `integration:read` token.
 pub(crate) const READ_PROVIDER_ACTION_TOOL: &str = "read_provider_action";
+/// The custom REST read and write tools (W4-CC-7). Their contract is `mp_contracts::custom_rest`. Each
+/// reaches the organisation's own API with the connection's stored credential, so neither runs without a
+/// connection the person selected for the turn.
+const CUSTOM_REST_READ_TOOL: &str = mp_contracts::custom_rest::READ_TOOL_NAME;
+const CUSTOM_REST_WRITE_TOOL: &str = mp_contracts::custom_rest::WRITE_TOOL_NAME;
 
 /// Namespace prefix for tools proxied to a registered MCP server
 /// (`mcp__<server_id>__<tool>`). Routed back through the gateway's
@@ -522,7 +529,7 @@ fn permission_pause_cause(gate: permission::RunGate<'_>, tool_name: &str) -> Cau
         || gate.requires_consent_to_disclose(tool_name.trim())
     {
         CauseCode::ConsentToDisclose
-    } else if tool_name == EXECUTE_PROVIDER_ACTION_TOOL {
+    } else if tool_name == EXECUTE_PROVIDER_ACTION_TOOL || tool_name == CUSTOM_REST_WRITE_TOOL {
         CauseCode::ProviderWrite
     } else {
         CauseCode::RiskyEffectUnderAsk
@@ -949,6 +956,42 @@ async fn execute_step_inner(
         return StepOutcome::failed(
             &mp_contracts::zdr_refusal::Refusal::feature_not_supported("connector_read").message(),
         );
+    }
+    // A custom REST tool reaches the organisation's own API with its stored credential, so none runs under zero
+    // data retention or on a waived route, in a Space room, or while the switch is off (W4-CC-7). Refused before
+    // the capability gate is asked.
+    if mp_contracts::custom_rest::is_tool(tool_name) {
+        if zdr || waived {
+            return StepOutcome::failed(
+                &mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                    mp_contracts::custom_rest::ZDR_FEATURE,
+                )
+                .message(),
+            );
+        }
+        if sandbox.is_some() {
+            return StepOutcome::failed(&format!("{tool_name} is not available in a Space room"));
+        }
+        if !mp_contracts::custom_rest::enabled() {
+            return StepOutcome::failed(&format!(
+                "{tool_name} is not available on this deployment: the custom REST tools are switched off"
+            ));
+        }
+        // The arguments are checked before anyone is asked to approve the call, so a malformed write never
+        // raises an approval it could not use.
+        if let Err(message) = mp_contracts::custom_rest::parse_call(
+            tool_input,
+            tool_name == mp_contracts::custom_rest::READ_TOOL_NAME,
+        ) {
+            return StepOutcome::failed(&message);
+        }
+        // A write needs a connection the person selected for the turn to name. A turn that selected none has
+        // none, so the write is refused here, where the selected connection is checked below.
+        if tool_name == mp_contracts::custom_rest::WRITE_TOOL_NAME && connector_scope.is_empty() {
+            return StepOutcome::failed(
+                "connection_not_in_scope: no connected account was selected for this turn",
+            );
+        }
     }
     // A connected-app read is refused in a Space room too (DEC-06). A Space-scoped step is the
     // one that carries the sandbox context, and only a Space run has one.
@@ -1631,6 +1674,20 @@ async fn execute_step_inner(
         execute_list_provider_actions(org_id, session_bearer).await
     } else if tool_name == READ_PROVIDER_ACTION_TOOL {
         execute_read_provider_action(tool_input, org_id, session_bearer, connector_scope).await
+    } else if tool_name == CUSTOM_REST_READ_TOOL {
+        execute_custom_rest_read(tool_input, org_id, session_bearer, connector_scope).await
+    } else if tool_name == CUSTOM_REST_WRITE_TOOL {
+        execute_custom_rest_write(
+            tool_input,
+            org_id,
+            user_id,
+            run_id,
+            step_id,
+            permission_mode,
+            session_channel.clone(),
+            session_bearer,
+        )
+        .await
     } else if tool_name == EXECUTE_PROVIDER_ACTION_TOOL {
         execute_provider_action(
             tool_input,
@@ -1776,7 +1833,8 @@ async fn execute_step_inner(
         release.filter(|_| released),
     ));
     outcome.compaction_triggered = compaction_triggered;
-    outcome.screening_taint = (tool_name == READ_PROVIDER_ACTION_TOOL
+    outcome.screening_taint = ((tool_name == READ_PROVIDER_ACTION_TOOL
+        || tool_name == CUSTOM_REST_READ_TOOL)
         && screened.provenance.is_audit_worthy())
         || screened.taint;
     outcome
@@ -3151,7 +3209,9 @@ fn connection_selected(connector_scope: &[String], connection_id: &str) -> bool 
 /// were before the turn scope existed, and each still waits for a grant. Once a selection exists,
 /// a write that names no connection is outside it.
 fn write_outside_turn_scope(tool_name: &str, tool_input: &str, connector_scope: &[String]) -> bool {
-    if tool_name != EXECUTE_PROVIDER_ACTION_TOOL || connector_scope.is_empty() {
+    let provider_write =
+        tool_name == EXECUTE_PROVIDER_ACTION_TOOL || tool_name == CUSTOM_REST_WRITE_TOOL;
+    if !provider_write || connector_scope.is_empty() {
         return false;
     }
     let connection = serde_json::from_str::<serde_json::Value>(tool_input)
@@ -3291,6 +3351,17 @@ async fn execute_provider_action(
         Ok(i) => i,
         Err(e) => return tool_error(format!("invalid execute_provider_action input: {e}")),
     };
+    // The custom REST operation has its own two tools, which name the method and never the host (W4-CC-7).
+    if input
+        .operation
+        .trim()
+        .eq_ignore_ascii_case(mp_contracts::custom_rest::OPERATION)
+    {
+        return tool_error(format!(
+            "{} is served by {CUSTOM_REST_READ_TOOL} and {CUSTOM_REST_WRITE_TOOL}, not execute_provider_action",
+            mp_contracts::custom_rest::OPERATION
+        ));
+    }
 
     // Only WRITE operations require an approval reference. Unknown operations are
     // treated as writes (fail safe — see `integration_tools::operation_is_write`).
@@ -3351,6 +3422,111 @@ async fn execute_provider_action(
         },
     )
     .await
+}
+
+/// `custom_rest.read` (W4-CC-7): one GET or HEAD on an endpoint of a custom REST connection the user selected for
+/// the turn. The method and path are checked here. The host and the credential belong to integration-corev2's
+/// binding for the connection, so the call names neither. The answer is framed and screened as connector content
+/// at the render seam, as every connected-account read is.
+async fn execute_custom_rest_read(
+    tool_input: &str,
+    org_id: &str,
+    session_bearer: Option<&str>,
+    connector_scope: &[String],
+) -> tool_bridge::ToolExecution {
+    let call = match mp_contracts::custom_rest::parse_call(tool_input, true) {
+        Ok(call) => call,
+        Err(message) => return tool_error(message),
+    };
+    // A connection the run's person did not select is refused before any client, token or call.
+    if !connection_selected(connector_scope, &call.connection_id) {
+        return tool_error(
+            "connection_not_in_scope: this connected account was not selected for this turn"
+                .to_owned(),
+        );
+    }
+    let Some(client) = crate::integration_tools::IntegrationActionsClient::from_env() else {
+        return tool_error(
+            "custom_rest.read unavailable: integration client could not be built".to_owned(),
+        );
+    };
+    match client.read_custom_rest(org_id, &call, session_bearer).await {
+        Ok(output) => tool_bridge::ToolExecution {
+            output,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
+}
+
+/// `custom_rest.write` (W4-CC-7): one call with a method other than GET or HEAD on a custom REST connection the
+/// user selected for the turn. It runs only once a person has approved this exact call. The approval is resolved
+/// as the provider writes are, and its id goes to integration-corev2 with the signed write attestation that
+/// `execute_action` adds. The response is not read back: no postcondition knows this operation, and a guessed
+/// read-back could confirm a write that never happened.
+#[allow(clippy::too_many_arguments)]
+async fn execute_custom_rest_write(
+    tool_input: &str,
+    org_id: &str,
+    user_id: &str,
+    run_id: &str,
+    step_id: &str,
+    permission_mode: &str,
+    session_channel: Option<Channel>,
+    session_bearer: Option<&str>,
+) -> tool_bridge::ToolExecution {
+    let call = match mp_contracts::custom_rest::parse_call(tool_input, false) {
+        Ok(call) => call,
+        Err(message) => return tool_error(message),
+    };
+    // The write is attested to the person who approves it, so a run with no acting user sends nothing.
+    if user_id.trim().is_empty() {
+        return tool_error(
+            "custom_rest write blocked: this run has no acting user to approve it".to_owned(),
+        );
+    }
+    let approval_ref = match resolve_write_approval(
+        session_channel.as_ref(),
+        org_id,
+        user_id,
+        run_id,
+        step_id,
+        permission_mode,
+        mp_contracts::custom_rest::OPERATION,
+        CUSTOM_REST_WRITE_TOOL,
+        tool_input,
+        session_bearer,
+    )
+    .await
+    {
+        Ok(id) => id,
+        // Fail closed: never send a write to integration-corev2 without a real, verifiable approval behind it.
+        Err(e) => return tool_error(e),
+    };
+    let Some(client) = post_mutation::integration_client() else {
+        return tool_error(
+            "custom_rest.write unavailable: integration client could not be built".to_owned(),
+        );
+    };
+    match client
+        .execute_action(
+            org_id,
+            &call.connection_id,
+            mp_contracts::custom_rest::OPERATION,
+            call.params(),
+            call.body_value(),
+            user_id,
+            Some(approval_ref.as_str()),
+            session_bearer,
+        )
+        .await
+    {
+        Ok(outcome) => tool_bridge::ToolExecution {
+            output: outcome.rendered,
+            error: None,
+        },
+        Err(e) => tool_error(e),
+    }
 }
 
 /// Resolve the REAL durable approval id to forward as `approvalId` for a
@@ -3483,7 +3659,12 @@ async fn resolve_write_approval(
 /// as it always did. The words are scrubbed here and nowhere else copies them.
 fn write_approval_reason(operation: &str, tool_input: &str) -> String {
     let reason = format!("provider write '{operation}' requires approval");
-    match crate::integration_tools::provider_effect_summary(tool_input) {
+    let summary = if operation == mp_contracts::custom_rest::OPERATION {
+        mp_contracts::custom_rest::effect_summary(tool_input)
+    } else {
+        crate::integration_tools::provider_effect_summary(tool_input)
+    };
+    match summary {
         Some(summary) => {
             crate::scrub::scrub_string(&format!("{reason}: the agent would {summary}"))
         }

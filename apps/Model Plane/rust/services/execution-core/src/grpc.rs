@@ -587,6 +587,8 @@ impl ExecutionService {
                 runtime_loop::agent::base_tool_defs(!req.space_id.is_empty()),
             ),
             derivable: false,
+            // A scheduled run is offered its contract's tools and nothing else, so it is not indexed.
+            deferred: runtime_loop::tool_index::DeferredIndex::default(),
         };
         let run_req = runtime_loop::scheduled_agent::run_request(req, &run.goal, &contract);
         self.state.begin_unattended(&req.run_id);

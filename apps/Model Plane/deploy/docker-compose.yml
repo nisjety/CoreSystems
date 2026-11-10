@@ -457,6 +457,10 @@ services:
       # WS14-S4: offer ask_user to a Do run (max_questions on the run request). Off by default; ZDR, waived, scheduled
       # and Space-scoped runs never get it. Needs capability-core migration 0029 before TOOL_CLASS_GATE=enforce.
       AGENT_ASK_USER_ENABLED: ${AGENT_ASK_USER_ENABLED:-false}
+      # Coordinator mode: a Do run may ask to be a non-editing orchestrator, offered read and delegation tools only. Off by
+      # default; only the literal true. The gateway forwards the flag only while this is on, and never for a ZDR or waived
+      # turn or a continuation. Execution-core reads the same switch and applies it to a fresh run.
+      EXECUTION_COORDINATOR_MODE_ENABLED: ${EXECUTION_COORDINATOR_MODE_ENABLED:-false}
       # WS25-S9: the org agent policy binds Do runs (mode cap, lockdown, rung cap). off, shadow (logs only) or enforce;
       # an unknown value reads as enforce. Off by default: resumed runs and the browser and code-interpreter entry points
       # do not read the policy yet, and every Do caller must carry a capability bearer before enforce.
@@ -496,6 +500,8 @@ services:
       MODEL_GATEWAY_THREAD_EXPORT: ${MODEL_GATEWAY_THREAD_EXPORT:-false}
       # F-t3-069: side chat, a read-only question about one thread's transcript (POST /v1/threads/:id/side-chat). Answered, never stored. Only the literal true.
       MODEL_GATEWAY_SIDE_CHAT_ENABLED: ${MODEL_GATEWAY_SIDE_CHAT_ENABLED:-false}
+      # F-t3-081: teach mode, POST /v1/teach/skill-draft drafts one disabled skill proposal from a run's takeover steps (Quarry's procedure draft, read as the caller). Needs QUARRY_TEACH_MODE_ENABLED on the Ingestion Plane edge. Only the literal true.
+      MODEL_GATEWAY_TEACH_MODE_ENABLED: ${MODEL_GATEWAY_TEACH_MODE_ENABLED:-false}
       # F-t3-093 (b): a data-source catalogue in the chat tool guidance, listing only the sources this turn's tools reach, with use-when and cost hints. Only the literal true.
       MODEL_GATEWAY_DATA_SOURCE_CATALOGUE: ${MODEL_GATEWAY_DATA_SOURCE_CATALOGUE:-false}
       # EP-12 S14: the owner's share snapshot routes (/v1/threads/:id/snapshots, /v1/snapshots/:id). Needs SESSION_THREAD_SHARES_ENABLED. Only the literal true.
@@ -514,6 +520,9 @@ services:
       # (POST /internal/v1/goals/:goal_id/judge-turn) answers 404. Needs MODEL_GATEWAY_THREAD_GOALS_ENABLED and
       # MODEL_GATEWAY_GOAL_JUDGE_ENABLED. Only the literal true.
       MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED: ${MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED:-false}
+      # EP-7 W4-T7: the event trigger routes (/v1/event-triggers and the dry run). Needs EVENT_TRIGGERS_ENABLED on
+      # session-core, and the dry run needs EVENT_TRIGGER_WAKE_GATE_ENABLED on capability-core. Only the literal true.
+      MODEL_GATEWAY_EVENT_TRIGGERS: ${MODEL_GATEWAY_EVENT_TRIGGERS:-false}
       # EP-6 S9: a mention turn's agent tool allowlist and autonomy cap narrow the offered tools. Only the literal true.
       MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST: ${MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST:-false}
       # EP-6 P3: a thread listing takes the agent filter (one named agent's threads). Off, the parameter is ignored.
@@ -529,6 +538,8 @@ services:
       # frames, usage envelope and message metadata, and the Details popover's Routed line. Closed tokens only, and nothing
       # is stated without INFERENCE_ROUTE_NOTE on inference-core. Only the literal true.
       MODEL_GATEWAY_ROUTING_DECISION_ENABLED: ${MODEL_GATEWAY_ROUTING_DECISION_ENABLED:-false}
+      # F-t3-092: the model council (POST /v1/ai/council). Two to four models answer one question in parallel with no tools, then a synthesis compares them. Cost is estimated first (estimate_only). Nothing stored. Off, the route answers 404. Only the literal true.
+      MODEL_GATEWAY_MODEL_COUNCIL_ENABLED: ${MODEL_GATEWAY_MODEL_COUNCIL_ENABLED:-false}
       # WS27-S6: the per-run cost and token ceiling (request cap, else the org ceiling): WARN streams run_ceiling_80 and
       # run_ceiling_reached on the usage_progress frames, ENFORCE also ends the tool phase at the cap. Both off by default,
       # only the literal `true`. Keep both off until the budget.rs precedence P0 (a request cap can loosen the org cap) is fixed.
@@ -984,6 +995,10 @@ services:
       CONNECTOR_ASK_READS_ENABLED: ${CONNECTOR_ASK_READS_ENABLED:-false}
       # EP-10 S8: the suggest_connector tool and its connector_suggestion card in Ask. Only the literal true.
       CONNECTOR_SUGGESTIONS_ENABLED: ${CONNECTOR_SUGGESTIONS_ENABLED:-false}
+      # W4-CC-7: the custom REST connector tools. Ask offers custom_rest.read; Do offers custom_rest.read and
+      # custom_rest.write, and every write pauses for approval. Both loops read this switch, and only the literal true
+      # turns it on. Off, neither loop offers either tool. The capabilities also start unavailable.
+      EXECUTION_CUSTOM_REST_TOOLS: ${EXECUTION_CUSTOM_REST_TOOLS:-false}
       INTEGRATION_COREV2_URL: ${INTEGRATION_COREV2_URL:-http://integration-api:3026}
       # information-core (Application Plane weather/traffic/news aggregator,
       # wraps Yr/met.no) — backs the plain-chat `get_weather` builtin. Without
@@ -1843,6 +1858,14 @@ services:
       # read-back; an outage or a missing verifier is reported as "could not
       # verify", never as a failure.
       EXECUTION_POST_MUTATION_VERIFY_ENABLED: ${EXECUTION_POST_MUTATION_VERIFY_ENABLED:-false}
+      # W4-CC-7: the custom REST connector tools, offered by this loop and by model-gateway's Ask loop alike. Only the
+      # literal true turns them on. A write pauses for the person's approval, and a ZDR or waived run is refused.
+      EXECUTION_CUSTOM_REST_TOOLS: ${EXECUTION_CUSTOM_REST_TOOLS:-false}
+      # W5-070: the Do loop's deferred tool index. Off by default; only the literal true turns it on. On, a run whose
+      # catalogue has more than EXECUTION_DEFERRED_TOOL_INDEX_THRESHOLD definitions offers its MCP and client-declared
+      # tools only after tool_search reveals them. Off, every run is offered its whole catalogue, as before.
+      EXECUTION_DEFERRED_TOOL_INDEX_ENABLED: ${EXECUTION_DEFERRED_TOOL_INDEX_ENABLED:-false}
+      EXECUTION_DEFERRED_TOOL_INDEX_THRESHOLD: ${EXECUTION_DEFERRED_TOOL_INDEX_THRESHOLD:-40}
       # EP-11 S3 for Do runs. A RunAgent run records the skill versions it
       # injected, and reattach_skill reads the pinned version when the skill has
       # changed mid-run. Never for a zero-retention or waived run. Only the literal
@@ -1863,6 +1886,8 @@ services:
       # Wave 3 EP-2 S9: the token budget all children of one fan-out call may spend (metered tokens; subscription rounds count 0). Only the literal true enforces it; off, a spent budget is logged and every item still starts.
       WIDE_RESEARCH_CHILD_BUDGET_ENFORCED: ${WIDE_RESEARCH_CHILD_BUDGET_ENFORCED:-false}
       WIDE_RESEARCH_CHILD_TOKEN_BUDGET: ${WIDE_RESEARCH_CHILD_TOKEN_BUDGET:-400000}
+      # F-t3-071: a fan-out item's answer may end with a fenced JSON block checked against the call's result_schema (typed per-item results). Only the literal true enables it; off, result_schema is ignored and the tool keeps its schema.
+      SUBAGENT_TYPED_RESULTS_ENABLED: ${SUBAGENT_TYPED_RESULTS_ENABLED:-false}
       DATABASE_URL: postgresql://postgres:${MODEL_POSTGRES_PASSWORD:?MODEL_POSTGRES_PASSWORD is required}@postgres:5432/session_core
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: ${MODEL_MINIO_ROOT_USER:?MODEL_MINIO_ROOT_USER is required}
@@ -2026,6 +2051,10 @@ services:
       EXECUTION_DO_COMPUTER_ENABLED: ${EXECUTION_DO_COMPUTER_ENABLED:-false}
       # WS14-S4: the Do loop's ask_user tool. Off by default; the gateway's max_questions bounds it as well.
       AGENT_ASK_USER_ENABLED: ${AGENT_ASK_USER_ENABLED:-false}
+      # Coordinator mode: a fresh Do run the gateway marks as a coordinator is offered the read tools and the subagent
+      # delegation tools only, and its delegates keep the full catalogue. Off by default; only the literal true. A ZDR,
+      # waived or continued run is never a coordinator, and a run the switch is off for keeps its usual tools.
+      EXECUTION_COORDINATOR_MODE_ENABLED: ${EXECUTION_COORDINATOR_MODE_ENABLED:-false}
       # WS14-S5: an answer continues the same run. Off by default; also needs AGENT_CONTINUE_AFTER_APPROVAL_ENABLED and
       # EXECUTION_LOOP_RESUME_ENABLED, and the executor's input pause is not built yet, so it must stay off.
       AGENT_ASK_USER_RESUME_ENABLED: ${AGENT_ASK_USER_RESUME_ENABLED:-false}

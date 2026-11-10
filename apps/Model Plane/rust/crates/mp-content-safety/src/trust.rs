@@ -53,6 +53,9 @@ const TOOL_TRUST: &[(&str, TrustClass)] = &[
     ("browser.console", TrustClass::BrowserScraped),
     ("read_provider_action", TrustClass::ConnectorContent),
     ("execute_provider_action", TrustClass::ConnectorContent),
+    // W4-CC-7: a custom REST call returns a response from the organisation's own API, which is outside data.
+    ("custom_rest.read", TrustClass::ConnectorContent),
+    ("custom_rest.write", TrustClass::ConnectorContent),
     ("recall_conversations", TrustClass::PriorConversation),
     // EP-3 S7: the thread reference tools read an earlier conversation the person attached.
     ("thread_outline", TrustClass::PriorConversation),

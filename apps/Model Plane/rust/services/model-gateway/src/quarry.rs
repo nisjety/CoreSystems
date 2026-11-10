@@ -962,6 +962,55 @@ impl Client {
         Ok(raw)
     }
 
+    /// `GET /v1/agent/runs/{run_id}/procedure-draft` on the edge (Teach mode, F-t3-081), as the
+    /// person who drove the run. `bearer` is that person's own `aud=quarry` credential, which the
+    /// caller verified; it is never this gateway's service principal, because the edge checks the
+    /// run's owner and the owner is a person. Returns the answer's `data` object: `run_id`,
+    /// `steps`, `params` and `truncated`.
+    ///
+    /// A typed refusal keeps its status. Its code is the edge's `details.reason` when it names one
+    /// (`zdr_not_supported`, `teach_mode_disabled`), and the envelope's code otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`QuarryError`] if the edge is unavailable, answers a refusal, or answers a body
+    /// that is not the envelope it names.
+    pub async fn procedure_draft(&self, run_id: &str, bearer: &str) -> Result<Value, QuarryError> {
+        if !self.available() {
+            return Err(QuarryError::Unavailable);
+        }
+        let endpoint = format!("{}/v1/agent/runs/{run_id}/procedure-draft", self.base_url);
+        let resp = self.http.get(&endpoint).bearer_auth(bearer).send().await?;
+        let status = resp.status().as_u16();
+        let raw = resp.text().await?;
+        if status >= 400 {
+            let parsed: Option<Value> = serde_json::from_str(&raw).ok();
+            let error = parsed.as_ref().and_then(|value| value.get("error"));
+            let reason = error
+                .and_then(|error| error.get("details"))
+                .and_then(|details| details.get("reason"))
+                .and_then(Value::as_str);
+            let code = error
+                .and_then(|error| error.get("code"))
+                .and_then(Value::as_str);
+            let message = error
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str);
+            return Err(QuarryError::Typed {
+                code: reason
+                    .or(code)
+                    .map_or_else(|| format!("HTTP_{status}"), str::to_owned),
+                message: message.map_or_else(|| truncate(&raw, 200), str::to_owned),
+                status,
+            });
+        }
+        let env: Value = serde_json::from_str(&raw)?;
+        env.get("data")
+            .filter(|data| data.is_object())
+            .cloned()
+            .ok_or(QuarryError::EmptyEnvelope)
+    }
+
     /// Call `/v1/search` with no per-call options and return the projected
     /// results. Equivalent to [`Client::search_with_options`] with a default
     /// [`SearchOptions`], and kept as its own entry point so existing callers

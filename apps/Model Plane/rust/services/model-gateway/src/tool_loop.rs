@@ -531,6 +531,10 @@ fn public_tool_output(outcome: &ToolOutcome, source_checked: bool, norwegian: bo
     if outcome.error.is_none() && outcome.name == mp_contracts::provider_reads::READ_TOOL_NAME {
         return connector_reads::public_summary(&outcome.output);
     }
+    // A custom REST read shows its call and HTTP status to the person, never the body (W4-CC-7).
+    if outcome.error.is_none() && outcome.name == mp_contracts::custom_rest::READ_TOOL_NAME {
+        return mp_contracts::custom_rest::public_summary(&outcome.output);
+    }
     if outcome.error.is_none() && source_checked {
         return if norwegian { "Utkastet er klart for gjennomgang i Resultat." }
             else { "The draft is ready for review in Result." }.to_owned();
@@ -923,8 +927,10 @@ fn recall_memory_output(items: Vec<serde_json::Value>, skip_reason: &str) -> Str
 pub(crate) fn inline_tool_allowed(name: &str) -> bool {
     // A provider write leaves through execution-core's approval path. The Ask loop reads a connected
     // account and never writes one (WS23-S5).
-    !matches!(name, "save_memory" | "browser_agent" | "execute_provider_action")
-        && !name.starts_with("mcp__")
+    !matches!(
+        name,
+        "save_memory" | "browser_agent" | "execute_provider_action" | "custom_rest.write"
+    ) && !name.starts_with("mcp__")
         && name != "mcp_call"
         && name != "mcp_catalog"
 }
@@ -4958,6 +4964,24 @@ async fn dispatch_tool_with_cost(
         }
         // The connected-account read (WS23-S5): offered only on a turn the person selected accounts for, and
         // refused here again whenever the turn does not admit it.
+        // The custom REST read (W4-CC-7): offered on the same turns, and only while the switch is on and capability-core
+        // admits it. A custom REST write is never made from the Ask loop: it is a Do-run call that waits for approval.
+        mp_contracts::custom_rest::READ_TOOL_NAME => {
+            connector_reads::custom_rest_read_outcome(
+                state,
+                connector,
+                zdr,
+                !space_id.is_empty(),
+                ingestion_bearer,
+                capability_bearer,
+                call,
+            )
+            .await
+        }
+        mp_contracts::custom_rest::WRITE_TOOL_NAME => err_outcome(
+            call,
+            "custom_rest.write is not available on this turn: a write is made in a Do run, after the person approves it",
+        ),
         mp_contracts::provider_reads::READ_TOOL_NAME => {
             connector_reads::read_outcome(
                 state,
@@ -6365,6 +6389,7 @@ const ORG_CLASS_TOOLS: &[&str] = &[
 const CONNECTOR_CLASS_TOOLS: &[&str] = &[
     mp_contracts::provider_reads::READ_TOOL_NAME,
     mp_contracts::connector_suggest::TOOL_NAME,
+    mp_contracts::custom_rest::READ_TOOL_NAME,
 ];
 
 /// Whether `name` is a public-web tool, which an org's `web.mode=off` withholds (Wave 3 EP-9 W2). It is the set the
@@ -6406,6 +6431,19 @@ fn tools_for_connector_scope(mut tools: Vec<ToolDefinition>, offered: bool) -> V
     tools.retain(|tool| tool.name != mp_contracts::provider_reads::READ_TOOL_NAME);
     if offered {
         tools.push(connector_reads::tool_definition());
+    }
+    tools
+}
+
+/// The custom REST read's place in a turn's tool set (W4-CC-7). A client's copy of the name is dropped, and the
+/// server's own definition is added last, so the cached prefix holds. It is added only on a turn the Ask loop admits.
+fn tools_for_custom_rest(mut tools: Vec<ToolDefinition>, offered: bool) -> Vec<ToolDefinition> {
+    tools.retain(|tool| {
+        tool.name != mp_contracts::custom_rest::READ_TOOL_NAME
+            && tool.name != mp_contracts::custom_rest::WRITE_TOOL_NAME
+    });
+    if offered {
+        tools.push(connector_reads::custom_rest_tool_definition());
     }
     tools
 }
@@ -8980,6 +9018,17 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         .await
         .admits_ask_loop();
     let tools = tools_for_connector_scope(tools, connector_offered);
+    // The custom REST read (W4-CC-7) is offered on the turns the connected-account read is offered on, and only while its
+    // switch is on and capability-core admits it. The switch is read first, so a turn with it off makes no call.
+    let custom_rest_turn = connector_reads::offered(
+        mp_contracts::custom_rest::enabled(),
+        zdr,
+        !space_id.is_empty(),
+        connector_turn,
+    );
+    let custom_rest_offered = custom_rest_turn
+        && connector_reads::custom_rest_read_admitted(state, capability_bearer).await;
+    let tools = tools_for_custom_rest(tools, custom_rest_offered);
     // The connected-app suggestion (EP-10 S8) is offered on a turn that selected no account, read from
     // the same sink selection. With its switch off the list is left as it was.
     let suggestion_offered = connector_suggestion::offered(

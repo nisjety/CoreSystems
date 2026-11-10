@@ -1749,6 +1749,11 @@ pub fn trusted_capability_id(tool_name: &str) -> Option<String> {
         "publish_social_post" => "cap.tool.social.publish",
         "list_provider_actions" | "read_provider_action" => "cap.tool.provider.read",
         "execute_provider_action" => "cap.tool.provider.execute",
+        // The custom REST tools (W4-CC-7): one capability each, seeded unavailable by capability-core's migration
+        // 0041 until an attestation names them. Each name binds to its own seeded row here, and never to a name
+        // the model proposed.
+        "custom_rest.read" => "cap.custom_rest.read",
+        "custom_rest.write" => "cap.custom_rest.write",
         // The Space's read-only workspace tools (WS24-S3) share one capability: reading a file and
         // listing the tree are one authority over one object, as the process family is.
         "workspace_read" | "workspace_grep" | "workspace_glob" | "workspace_list" => {

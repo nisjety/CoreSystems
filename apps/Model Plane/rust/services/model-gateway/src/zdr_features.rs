@@ -170,6 +170,12 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     // plan and no grant, so it is refused through the `agentic` feature it rides on.
     ("execute_granted", refused_feature("agentic")),
     ("approved_plan_id", refused_feature("agentic")),
+    // Coordinator mode is never sent for a ZDR turn: the gateway sends the flag as false, so the turn is answered with
+    // the tools an ordinary run is offered, and nothing is refused for asking.
+    (
+        "coordinator",
+        Treatment::Inert("a ZDR turn is never coordinated: the gateway sends the flag as false on it"),
+    ),
     // A client's own tool definitions. Those the composer derives from its
     // actions are declared here too, so an action is refused the same way.
     ("tools", refused_feature("client_tools")),
@@ -313,6 +319,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         plan_mode: _,
         execute_granted: _,
         approved_plan_id: _,
+        coordinator: _,
         tools: _,
         org_name: _,
         user_name: _,
@@ -377,6 +384,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "plan_mode",
         "execute_granted",
         "approved_plan_id",
+        "coordinator",
         "tools",
         "org_name",
         "user_name",

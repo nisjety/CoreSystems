@@ -194,6 +194,18 @@
       ]
     },
     {
+      "name": "EXECUTION_COORDINATOR_MODE_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Coordinator mode for Do runs: a fresh run that asks for it is offered only the read tools and the subagent delegation tools, so its effects are delegated to subagents, which keep their normal catalogue. Only the literal true turns it on. The gateway forwards the flag only while it is on, and zero-retention, waived and continued runs are never coordinated.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_COORDINATOR_MODE_ENABLED", "default": "false" },
+        { "service": "model-gateway", "env": "EXECUTION_COORDINATOR_MODE_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "EXECUTION_CORE_SKILL_PINS",
       "kind": "switch",
       "owner": "model-plane",
@@ -202,6 +214,29 @@
       "purpose": "EP-11 S3 for Do runs: a RunAgent run records the skill versions it injected on its run record, and reattach_skill reads the version the run pinned when the skill has changed since. Never applies to a zero-retention or waived run. Only the literal true turns it on; off, injection and recovery read the current skill row as before. Read once at start, so a change needs a restart.",
       "declarations": [
         { "service": "execution-core", "env": "EXECUTION_CORE_SKILL_PINS", "default": "false" }
+      ]
+    },
+    {
+      "name": "EXECUTION_CUSTOM_REST_TOOLS",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "W4-CC-7: the custom REST connector tools. execution-core's Do loop offers custom_rest.read and custom_rest.write, and model-gateway's Ask loop offers custom_rest.read, each only on a turn with a connection the person selected. Every write pauses for approval. Only the literal true turns it on, and it is read on every offer. Off, neither loop offers either tool. Both capabilities also start unavailable and need an attestation. A zero-retention or waived run is refused.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_CUSTOM_REST_TOOLS", "default": "false" },
+        { "service": "model-gateway", "env": "EXECUTION_CUSTOM_REST_TOOLS", "default": "false" }
+      ]
+    },
+    {
+      "name": "EXECUTION_DEFERRED_TOOL_INDEX_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "W5-070: the Do loop's deferred tool index. Off, a run gets its whole catalogue. On, a catalogue over EXECUTION_DEFERRED_TOOL_INDEX_THRESHOLD offers its MCP and client tools once tool_search reveals them. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_DEFERRED_TOOL_INDEX_ENABLED", "default": "false" }
       ]
     },
     {
@@ -477,6 +512,19 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_EVENT_TRIGGERS",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "EP-7 W4-T7: the event trigger routes on model-gateway (/v1/event-triggers and the dry run). Off, every route answers 404. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_EVENT_TRIGGERS", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_GOAL_JUDGE_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -523,6 +571,18 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_MODEL_COUNCIL_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-t3-092 model council: two to four models answer one question with no tools, then a synthesis of agreement and disagreement. Cost is estimated first. Nothing stored. Off, the route is a 404. Only the literal true.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_MODEL_COUNCIL_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_NAMED_AGENT_THREADS",
       "kind": "switch",
       "owner": "model-plane",
@@ -566,6 +626,19 @@
       "codeDefault": "false",
       "declarations": [
         { "service": "model-gateway", "env": "MODEL_GATEWAY_SIDE_CHAT_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_TEACH_MODE_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-t3-081 teach mode: one run's steps are drafted into a disabled skill proposal for the owner (POST /v1/teach/skill-draft). Off, the route is a 404. Only the literal true, in any case, turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_TEACH_MODE_ENABLED", "default": "false" }
       ]
     },
     {
@@ -736,6 +809,17 @@
       "purpose": "EP-12 S15 foreign readers: ImportThread also reads a ChatGPT or Claude conversations.json. Only the literal true, and only while SESSION_THREAD_IMPORT_ENABLED is on.",
       "declarations": [
         { "service": "session-core", "env": "SESSION_THREAD_IMPORT_FOREIGN_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "SUBAGENT_TYPED_RESULTS_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Typed per-item results for wide research: checks each item's answer against the call's result_schema. Only the literal true enables it.",
+      "declarations": [
+        { "service": "execution-core", "env": "SUBAGENT_TYPED_RESULTS_ENABLED", "default": "false" }
       ]
     },
     {

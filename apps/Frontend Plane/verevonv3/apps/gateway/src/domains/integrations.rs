@@ -1,6 +1,7 @@
 mod browse;
 mod connect_sessions;
 pub(crate) mod connections;
+mod credential_bindings;
 pub(crate) mod model_subscriptions;
 mod model_connections;
 mod profile;
@@ -51,6 +52,28 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/model-connections/customer-gateway",
             delete(model_connections::delete_customer_gateway),
+        )
+        // Credential bindings and the custom REST connector (W4-CC-8): an organisation admin stores one key for one
+        // host and creates a connector that calls it. Integration Core seals the key; the browser never reads it back.
+        // Off, every one of these paths answers 404.
+        .route(
+            "/api/v1/credential-bindings",
+            get(credential_bindings::list_credential_bindings),
+        )
+        // A stored key is at most 4096 bytes, and JSON escaping can double it, so 16 KiB bounds both POST bodies.
+        .route(
+            "/api/v1/credential-bindings",
+            post(credential_bindings::create_credential_binding)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route(
+            "/api/v1/credential-bindings/{id}",
+            delete(credential_bindings::revoke_credential_binding),
+        )
+        .route(
+            "/api/v1/connectors/custom-rest",
+            post(credential_bindings::create_custom_rest_connector)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
         )
         .route("/api/v1/integrations/algolia/connections",get(algolia::connections))
         .route("/api/v1/integrations/algolia/connect-session",post(algolia::connect).layer(axum::extract::DefaultBodyLimit::max(2048)))

@@ -27,6 +27,7 @@ import { OrgSpacePolicySection } from '@/features/settings/components/OrgSpacePo
 import { MemorySection } from '@/features/settings/components/MemorySection'
 import { LearningSection } from '@/features/settings/components/LearningSection'
 import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
+import { CustomConnectorSection } from '@/features/settings/components/CustomConnectorSection'
 import { CustomerGatewaySection } from '@/features/settings/components/CustomerGatewaySection'
 import { ConnectedAppsPolicy } from '@/features/settings/components/ConnectedAppsPolicy'
 import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
@@ -1912,6 +1913,7 @@ function IntegrationsSection() {
       </Show>
       <ChatGptSubscriptionPanel orgId={orgId()} onConnectionChange={() => void refresh()} />
       <CustomerGatewaySection orgId={orgId()} />
+      <CustomConnectorSection orgId={orgId()} />
       <section class="verevon-settings-social-layer" aria-labelledby="verevon-settings-social-title">
         <div class="verevon-settings-social-layer__header">
           <div>

@@ -627,8 +627,15 @@ type RunAgentRequest struct {
 	// tools are the snapshot its pause retained, which was already narrowed. Field 26 is reserved for this message
 	// by the Wave 3 integration round A.
 	AgentToolAllowlist *AgentToolAllowlist `protobuf:"bytes,26,opt,name=agent_tool_allowlist,json=agentToolAllowlist,proto3" json:"agent_tool_allowlist,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Coordinator mode: this Do run is a non-editing orchestrator. Execution-core offers it only the read tools and the
+	// subagent delegation tools, and refuses any other call, so its effects are delegated to subagents, which keep their
+	// normal catalogue under their normal gates. Absent or false = an ordinary run, exactly as before the field existed.
+	// The gateway sets it only while EXECUTION_COORDINATOR_MODE_ENABLED is the literal `true`, and never on a
+	// zero-retention or waived turn or a continuation. Execution-core applies it only while the same switch is on.
+	// Field 27 is the next free number on this message.
+	Coordinator   bool `protobuf:"varint,27,opt,name=coordinator,proto3" json:"coordinator,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RunAgentRequest) Reset() {
@@ -841,6 +848,13 @@ func (x *RunAgentRequest) GetAgentToolAllowlist() *AgentToolAllowlist {
 		return x.AgentToolAllowlist
 	}
 	return nil
+}
+
+func (x *RunAgentRequest) GetCoordinator() bool {
+	if x != nil {
+		return x.Coordinator
+	}
+	return false
 }
 
 // WideResearchRequest is what a person asked a wide-research run to cover (Wave 3 EP-2 S8/S9). It only
@@ -2787,7 +2801,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"tool_calls\x18\t \x01(\rR\ttoolCalls\x12!\n" +
 	"\finput_tokens\x18\n" +
 	" \x01(\rR\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\v \x01(\rR\foutputTokens\"\xb2\t\n" +
+	"\routput_tokens\x18\v \x01(\rR\foutputTokens\"\xd4\t\n" +
 	"\x0fRunAgentRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x12\n" +
@@ -2818,7 +2832,8 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\n" +
 	"org_policy\x18\x18 \x01(\v2 .model_plane.v1.OrgPolicyContextR\torgPolicy\x12H\n" +
 	"\rwide_research\x18\x19 \x01(\v2#.model_plane.v1.WideResearchRequestR\fwideResearch\x12T\n" +
-	"\x14agent_tool_allowlist\x18\x1a \x01(\v2\".model_plane.v1.AgentToolAllowlistR\x12agentToolAllowlist\"\x93\x01\n" +
+	"\x14agent_tool_allowlist\x18\x1a \x01(\v2\".model_plane.v1.AgentToolAllowlistR\x12agentToolAllowlist\x12 \n" +
+	"\vcoordinator\x18\x1b \x01(\bR\vcoordinator\"\x93\x01\n" +
 	"\x13WideResearchRequest\x12\x19\n" +
 	"\bitem_cap\x18\x01 \x01(\rR\aitemCap\x12\x14\n" +
 	"\x05items\x18\x02 \x03(\tR\x05items\x12\x19\n" +

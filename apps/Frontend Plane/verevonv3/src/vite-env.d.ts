@@ -112,6 +112,14 @@ interface ImportMetaEnv {
 	readonly VITE_CHAT_SNAPSHOTS?: string;
 	/** "true" mounts the Knowledge view that reviews the wiki proposals agents file: accept saves the proposal, reject writes nothing (W5-094-b). Default off. */
 	readonly VITE_WIKI_PROPOSALS_REVIEW?: string;
+	/** "true" offers "Transcribe to document" on an audio attachment: the recording's text is saved as a private transcript document (W5-090-b). Default off. */
+	readonly VITE_CHAT_MEDIA_TRANSCRIPTS?: string;
+	/** "true" mounts the event triggers section under the automations schedule list: a webhook event can start a run of one of the person's own approved schedules, with a dry run. Hidden for zero-retention organisations. Default off. */
+	readonly VITE_EVENT_TRIGGERS?: string;
+	/** "true" mounts the custom connector section in workspace settings: a stored key for a REST API or a static-token MCP server, sealed by the integration service (W4-CC-8). Hidden for zero-retention organisations. Default off. */
+	readonly VITE_CUSTOM_CONNECTORS?: string;
+	/** "true" offers Review on a text artifact in a chat: one read-only review of the revision on screen, shown as a card below it. Never offered in a temporary chat. Default off (F-t3-086, W5-086-b). */
+	readonly VITE_REVIEW_RUN?: string;
 }
 
 interface ImportMeta {

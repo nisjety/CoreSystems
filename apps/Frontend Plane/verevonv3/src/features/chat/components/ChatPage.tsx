@@ -1256,7 +1256,11 @@ export default function ChatPage() {
           fallback={<ArtifactsPanel items={[]} />}
         >
           <Show when={conversationAttachments().length > 0}>
-            <ChatAttachmentCanvas attachments={conversationAttachments()} selectedId={selectedAttachmentId()} />
+            <ChatAttachmentCanvas
+              attachments={conversationAttachments()}
+              selectedId={selectedAttachmentId()}
+              transcriptThreadId={artifactTemporary() ? undefined : (state.threadId || undefined)}
+            />
           </Show>
           <Show when={artifactItems().length > 0}>
             {/* The deck view's "Bytt mal" reads its templates from this provider (EP-5 S7). It sits inside the panel, not above

@@ -312,6 +312,14 @@ message RunAgentRequest {
   // tools are the snapshot its pause retained, which was already narrowed. Field 26 is reserved for this message
   // by the Wave 3 integration round A.
   AgentToolAllowlist agent_tool_allowlist = 26;
+
+  // Coordinator mode: this Do run is a non-editing orchestrator. Execution-core offers it only the read tools and the
+  // subagent delegation tools, and refuses any other call, so its effects are delegated to subagents, which keep their
+  // normal catalogue under their normal gates. Absent or false = an ordinary run, exactly as before the field existed.
+  // The gateway sets it only while EXECUTION_COORDINATOR_MODE_ENABLED is the literal `true`, and never on a
+  // zero-retention or waived turn or a continuation. Execution-core applies it only while the same switch is on.
+  // Field 27 is the next free number on this message.
+  bool coordinator = 27;
 }
 
 // WideResearchRequest is what a person asked a wide-research run to cover (Wave 3 EP-2 S8/S9). It only

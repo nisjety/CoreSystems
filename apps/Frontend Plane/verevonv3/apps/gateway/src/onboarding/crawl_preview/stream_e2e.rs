@@ -193,6 +193,8 @@ fn test_state(quarry_edge_url: String) -> AppState {
         agent_definition_versions: false,
         chat_process_output_enabled: false,
         chat_snapshots_enabled: false,
+        event_triggers_enabled: false,
+        credential_bindings_enabled: false,
         mail_task_pipeline: None,
         space_features: Default::default(),
     }

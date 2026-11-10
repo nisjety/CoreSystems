@@ -1,19 +1,20 @@
 use axum::{
     extract::{DefaultBodyLimit, Extension, State},
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    http::{header, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::post,
     Json, Router,
 };
 use reqwest::Method;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::{
     config::AppState,
     domains::chat::shared,
     envelope::error,
     middleware::{require_session, AuthenticatedUser},
+    zdr::request_zdr,
 };
 
 /// The only text-to-speech provider this gateway forwards. Azure Speech runs
@@ -48,6 +49,11 @@ pub(crate) struct AssistantNavigationRequest {
 /// 1.4 MB cap on a take is its own limit, not one this transport imposes.
 pub(crate) const AI_AUDIO_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
+/// Request body ceiling for the review route (F-t3-086). A text of the most Model Gateway takes (60,000 bytes) fits
+/// with its label, brief and JSON framing. A text that is mostly quotes or backslashes grows when it is escaped, and the
+/// transport refuses such a body with 413 before the handler runs.
+const REVIEW_BODY_LIMIT_BYTES: usize = 96 * 1024;
+
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     routes().route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
@@ -72,6 +78,10 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/ai/dictate",
             post(proxy_dictate).layer(audio_body_limit()),
+        )
+        .route(
+            "/api/v1/ai/review",
+            post(proxy_review_run).layer(DefaultBodyLimit::max(REVIEW_BODY_LIMIT_BYTES)),
         )
 }
 
@@ -274,6 +284,136 @@ pub(crate) async fn proxy_speech(
         &user,
     )
     .await
+}
+
+/// The review the browser asks for (F-t3-086): the text and the fields that frame it, and nothing else. An unknown field
+/// is refused, so a caller cannot name a posture, a model or a switch. The target and the limits are Model Gateway's to
+/// check, and its typed refusals pass through.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewRunRequest {
+    target: String,
+    #[serde(default)]
+    label: String,
+    material: String,
+    #[serde(default)]
+    brief: String,
+    #[serde(default)]
+    locale: String,
+}
+
+/// `POST /api/v1/ai/review`: one read-only review of a text, as a run (F-t3-086). Proxies to Model Gateway's
+/// `/v1/ai/review`, which checks the input, makes one model call with no tools and stores nothing. The card is the
+/// answer, and it is marked `no-store`. The zero-retention posture is the request's header flag or the organisation's
+/// standing posture, and only ever raised. While the model's switch (`MODEL_GATEWAY_REVIEW_RUN_ENABLED`) is off, the
+/// route answers 404 `review_run_disabled`, which passes through.
+async fn proxy_review_run(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(request): Json<ReviewRunRequest>,
+) -> Response {
+    let (status, Json(body)) = review_run_answer(&state, &user, &headers, request).await;
+    (status, [(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
+}
+
+async fn review_run_answer(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    request: ReviewRunRequest,
+) -> (StatusCode, Json<Value>) {
+    let token = match shared::model_token(state, user, headers).await {
+        Some(token) if !token.trim().is_empty() => token,
+        _ => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "delegated_auth_unavailable",
+                    "Model authentication is temporarily unavailable",
+                )),
+            )
+        }
+    };
+    let inference_token = match shared::required_inference_token(state, user, headers).await {
+        Ok(token) if !token.trim().is_empty() => token,
+        Ok(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "delegated_auth_unavailable",
+                    "Inference authentication is temporarily unavailable",
+                )),
+            )
+        }
+        Err(detail) => return shared::delegated_auth_unavailable(detail),
+    };
+    // A one-way raise, as on every model route: the header's flag or the organisation's posture makes the review
+    // zero-retention. The body names only the fields the review reads.
+    let mut body = json!({
+        "target": request.target,
+        "label": request.label,
+        "material": request.material,
+        "brief": request.brief,
+        "locale": request.locale,
+        "zdr": request_zdr(headers, None),
+    });
+    shared::apply_org_zdr_posture(state, user, &mut body).await;
+    let url = format!("{}/v1/ai/review", state.model_gateway_url);
+    let (status, Json(response)) = shared::proxy_model_json_with_inference(
+        state,
+        Method::POST,
+        &url,
+        Some(body),
+        Some(&token),
+        Some(&inference_token),
+        user,
+    )
+    .await;
+    if status.is_success() {
+        return match response.pointer("/data/run") {
+            Some(run) if run.is_object() => {
+                (StatusCode::OK, Json(json!({ "data": { "run": run } })))
+            }
+            _ => (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "invalid_model_response",
+                    "The review returned an invalid response",
+                )),
+            ),
+        };
+    }
+    let code = response
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    match status {
+        // Upstream authentication describes a delegated credential, not the caller's browser session.
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "delegated_auth_unavailable",
+                "Model authentication is temporarily unavailable",
+            )),
+        ),
+        // The review's own typed refusals (its switch and its input limits) pass through as sent, and so does a typed
+        // zero-retention refusal, which tells the caller why the review cannot run.
+        StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::PAYLOAD_TOO_LARGE
+            if code.starts_with("review_") =>
+        {
+            (status, Json(response))
+        }
+        StatusCode::PRECONDITION_FAILED if code.starts_with("zdr_") => (status, Json(response)),
+        _ => (
+            status,
+            Json(error(
+                "review_unavailable",
+                "The review is temporarily unavailable.",
+            )),
+        ),
+    }
 }
 
 /// Keep what the client may not choose out of a dictation: the clean-up

@@ -2,7 +2,8 @@
 //!
 //! capability-core is the system of record for an org's agent policy (WS25-S7). This module reads
 //! the org's document through `GET /api/v1/org-agent-policy`, holds it briefly, and turns it into the
-//! caps the gateway enforces: the mode cap (with the lockdown bundle folded in) and the rung cap. The
+//! caps the gateway enforces: the mode cap (with the lockdown bundle folded in), the rung cap and the
+//! org's agent-run pause (`agents.paused`, F-t3-083), which refuses a Do run's start. The
 //! fetch follows the shape DEC-13 sets for every entitlement the gateway reads: a 30 s TTL, and when a
 //! refresh fails the last answer may still be served for 900 s if it was restrictive or 120 s if it
 //! was not. Past that bound the org's policy is unknown, and a Do run is refused with the typed code
@@ -18,6 +19,7 @@
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use axum::http::StatusCode;
 use dashmap::DashMap;
 use mp_contracts::agent_mode::{self, AgentMode, Resolved};
 use mp_contracts::autonomy;
@@ -39,6 +41,13 @@ pub const POLICY_UNAVAILABLE_CODE: &str = "org_policy_unavailable";
 /// The words a person reads with [`POLICY_UNAVAILABLE_CODE`]. The code is the contract; the words are copy.
 pub const POLICY_UNAVAILABLE_MESSAGE: &str =
     "The organisation's agent policy cannot be read right now, so this agent run cannot start. Try again shortly.";
+
+/// The typed code of a Do run, resume or continuation refused because its org has paused agent runs (`agents.paused`,
+/// F-t3-083). A plain Ask turn is never refused with it.
+pub const AGENTS_PAUSED_CODE: &str = "org_agents_paused";
+
+/// The words a person reads with [`AGENTS_PAUSED_CODE`]. The code is the contract; the words are copy.
+pub const AGENTS_PAUSED_MESSAGE: &str = "Your organisation has paused agent runs.";
 
 /// How long a read org policy is served without asking capability-core again (DEC-13, D8).
 pub const POLICY_TTL: Duration = Duration::from_secs(30);
@@ -129,6 +138,10 @@ pub struct OrgPolicy {
     /// The network origins the org's MCP apps may reach (`mcp_apps.network_origins`, Wave 4 W4-D M1a): the ids of an
     /// `approved_only` value, canonical https origins, sorted and unique. Empty for any other token.
     pub mcp_app_origins: Vec<String>,
+    /// Whether the org has paused agent runs (`agents.paused`, F-t3-083): a Do run it would start, resume or continue is
+    /// refused. A plain Ask turn is never paused. A value this build cannot read is paused, so a malformed value can only
+    /// narrow the org.
+    pub agents_paused: bool,
 }
 
 impl OrgPolicy {
@@ -165,6 +178,7 @@ impl OrgPolicy {
             },
             ext_skills: token("ext.skills"),
             mcp_app_origins: origins_of(settings, MCP_APPS_NETWORK_ORIGINS),
+            agents_paused: token("agents.paused") == "true",
         }
     }
 }
@@ -420,7 +434,8 @@ async fn ensure_at(
 /// # Errors
 ///
 /// [`POLICY_UNAVAILABLE_CODE`] when the policy is enforced, the turn is a Do run, and the policy cannot be read
-/// inside its bound. A plain turn is not refused: it keeps the floor it already had.
+/// inside its bound. [`AGENTS_PAUSED_CODE`] when the policy is enforced, the turn is a Do run, and the org has paused
+/// agent runs. A plain turn is not refused: it keeps the floor it already had.
 pub async fn admit_turn(
     mode: PolicyMode,
     cache: &OrgPolicyCache,
@@ -448,6 +463,12 @@ pub async fn admit_turn(
                             "org agent policy (shadow): web access would be withheld for this turn"
                         );
                     }
+                    if agentic && policy.agents_paused {
+                        tracing::info!(
+                            %org_id,
+                            "org agent policy (shadow): agent runs would be paused for this turn"
+                        );
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(%org_id, %error, "org agent policy (shadow) could not be read")
@@ -456,6 +477,8 @@ pub async fn admit_turn(
             Ok(None)
         }
         PolicyMode::Enforce => match ensure(cache, client, base_url, org_id, bearer).await {
+            // A paused org runs no Do turn. A plain Ask turn is never paused (F-t3-083).
+            Ok(policy) if agentic && policy.agents_paused => Err(AGENTS_PAUSED_CODE),
             Ok(policy) => Ok(Some(policy.mode_cap)),
             Err(error) => {
                 tracing::warn!(%org_id, %error, agentic, "org agent policy cannot be read");
@@ -466,6 +489,60 @@ pub async fn admit_turn(
                 }
             }
         },
+    }
+}
+
+/// Decides whether the org's agent-run pause refuses a stored run's resume or continuation, both Do runs that start work
+/// on a run that already exists. Off reads nothing and changes nothing. Shadow reads and logs what would be refused and
+/// refuses nothing. Enforce refuses a paused org with [`AGENTS_PAUSED_CODE`], and a policy that cannot be read inside
+/// its bound with [`POLICY_UNAVAILABLE_CODE`], as [`admit_turn`] refuses a Do turn.
+///
+/// # Errors
+///
+/// [`AGENTS_PAUSED_CODE`] when the org has paused agent runs, or [`POLICY_UNAVAILABLE_CODE`] when the policy is enforced
+/// and cannot be read.
+pub async fn ensure_not_paused(
+    mode: PolicyMode,
+    cache: &OrgPolicyCache,
+    client: &reqwest::Client,
+    base_url: &str,
+    org_id: &str,
+    bearer: &str,
+) -> Result<(), &'static str> {
+    match mode {
+        PolicyMode::Off => Ok(()),
+        PolicyMode::Shadow => {
+            match ensure(cache, client, base_url, org_id, bearer).await {
+                Ok(policy) if policy.agents_paused => tracing::info!(
+                    %org_id,
+                    "org agent policy (shadow): agent runs would be paused for this resume or continuation"
+                ),
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%org_id, %error, "org agent policy (shadow) could not be read");
+                }
+            }
+            Ok(())
+        }
+        PolicyMode::Enforce => match ensure(cache, client, base_url, org_id, bearer).await {
+            Ok(policy) if policy.agents_paused => Err(AGENTS_PAUSED_CODE),
+            Ok(_) => Ok(()),
+            Err(error) => {
+                tracing::warn!(%org_id, %error, "org agent policy cannot be read; the run is not resumed or continued");
+                Err(POLICY_UNAVAILABLE_CODE)
+            }
+        },
+    }
+}
+
+/// The HTTP status, and the words a person reads, of a refusal the org policy makes: a paused org is `403`, and a policy
+/// that cannot be read is `503`, as a Do turn's refusal answers. The code is the contract; the words are copy.
+#[must_use]
+pub fn refusal_answer(code: &str) -> (StatusCode, &'static str) {
+    if code == AGENTS_PAUSED_CODE {
+        (StatusCode::FORBIDDEN, AGENTS_PAUSED_MESSAGE)
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, POLICY_UNAVAILABLE_MESSAGE)
     }
 }
 

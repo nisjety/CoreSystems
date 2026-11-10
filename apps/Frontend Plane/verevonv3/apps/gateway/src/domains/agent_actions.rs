@@ -25,6 +25,7 @@ use axum::{
     Json, Router,
 };
 use reqwest::Method;
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::{
@@ -124,6 +125,13 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
     // SKILL_MEMBER_AUTHORING is on; off, the path answers as it did before (a GET there is a 405).
     let router = if skill_member_authoring_enabled() {
         router.route("/api/v1/skills/authoring", get(skill_authoring))
+    } else {
+        router
+    };
+    // Wave 4 EP-7 W4-T7: the event trigger routes, merged only while EVENT_TRIGGERS_UI_ENABLED is the literal `true`
+    // (AppState::event_triggers_enabled, read once in build_state). Off, the paths are absent and answer the fallback 404.
+    let router = if state.event_triggers_enabled {
+        router.merge(event_trigger_router())
     } else {
         router
     };
@@ -1079,6 +1087,219 @@ async fn run_cron_now(
         token.as_deref(),
         Some(&capability),
         &user,
+    )
+    .await
+    .into_response()
+}
+
+// Wave 4 EP-7 W4-T7: the event trigger surface (F-t3-047). Model Gateway owns the record and the dry run. This gateway
+// relays the caller's own bearers and forwards only the fields named below, never an org or a user from the body. The
+// routes are merged only while `AppState::event_triggers_enabled` (EVENT_TRIGGERS_UI_ENABLED, read once in build_state)
+// is the literal `true`; off, the paths are absent and answer the fallback 404.
+
+/// The fields of a trigger create the gateway forwards. An org, a user or any other key in the body is dropped.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct EventTriggerCreateBody {
+    #[serde(alias = "spaceRef")]
+    space_ref: String,
+    #[serde(alias = "connectionId")]
+    connection_id: String,
+    #[serde(alias = "eventType")]
+    event_type: String,
+    name: String,
+    #[serde(alias = "clockEnabled")]
+    clock_enabled: bool,
+    #[serde(alias = "scheduleId")]
+    schedule_id: String,
+    #[serde(alias = "wakeFilterJson")]
+    wake_filter_json: String,
+}
+
+/// The fields of a trigger change the gateway forwards: the revision the caller read, the paths it names and their values.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct EventTriggerUpdateBody {
+    #[serde(alias = "expectedRevision")]
+    expected_revision: u64,
+    #[serde(alias = "updatePaths")]
+    update_paths: Vec<String>,
+    name: String,
+    #[serde(alias = "clockEnabled")]
+    clock_enabled: bool,
+    status: String,
+    #[serde(alias = "scheduleId")]
+    schedule_id: String,
+    #[serde(alias = "wakeFilterJson")]
+    wake_filter_json: String,
+}
+
+/// The body of a dry run: the one stored webhook event to dry run against.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct EventTriggerDryRunBody {
+    #[serde(alias = "webhookEventId")]
+    webhook_event_id: String,
+}
+
+/// The event trigger routes (Wave 4 EP-7 W4-T7), merged only while `AppState::event_triggers_enabled` is on.
+fn event_trigger_router() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/v1/event-triggers",
+            get(list_event_triggers).post(create_event_trigger),
+        )
+        .route(
+            "/api/v1/event-triggers/{trigger_id}",
+            get(get_event_trigger).patch(update_event_trigger),
+        )
+        .route(
+            "/api/v1/event-triggers/{trigger_id}/dry-run",
+            post(dry_run_event_trigger),
+        )
+}
+
+/// `GET /api/v1/event-triggers?space_ref=`: the caller's own triggers, optionally of one Space.
+async fn list_event_triggers(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let kept: HashMap<String, String> = params
+        .into_iter()
+        .filter(|(key, _)| key == "space_ref")
+        .collect();
+    let url = format!(
+        "{}/v1/event-triggers{}",
+        state.model_gateway_url,
+        build_query(&kept)
+    );
+    relay_event_trigger_session(&state, &user, &headers, Method::GET, &url, None).await
+}
+
+/// `POST /api/v1/event-triggers`: record a trigger for the caller. Model Gateway answers 201 with it.
+async fn create_event_trigger(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<EventTriggerCreateBody>,
+) -> impl IntoResponse {
+    let url = format!("{}/v1/event-triggers", state.model_gateway_url);
+    let upstream = json!({
+        "space_ref": body.space_ref,
+        "connection_id": body.connection_id,
+        "event_type": body.event_type,
+        "name": body.name,
+        "clock_enabled": body.clock_enabled,
+        "schedule_id": body.schedule_id,
+        "wake_filter_json": body.wake_filter_json,
+    });
+    relay_event_trigger_session(&state, &user, &headers, Method::POST, &url, Some(upstream)).await
+}
+
+/// `GET /api/v1/event-triggers/{trigger_id}`: one trigger the caller owns.
+async fn get_event_trigger(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(trigger_id): Path<String>,
+) -> impl IntoResponse {
+    let url = event_trigger_url(&state.model_gateway_url, &trigger_id, "");
+    relay_event_trigger_session(&state, &user, &headers, Method::GET, &url, None).await
+}
+
+/// `PATCH /api/v1/event-triggers/{trigger_id}`: changes only the paths the body names, under the revision it read.
+async fn update_event_trigger(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(trigger_id): Path<String>,
+    Json(body): Json<EventTriggerUpdateBody>,
+) -> impl IntoResponse {
+    let url = event_trigger_url(&state.model_gateway_url, &trigger_id, "");
+    let upstream = json!({
+        "expected_revision": body.expected_revision,
+        "update_paths": body.update_paths,
+        "name": body.name,
+        "clock_enabled": body.clock_enabled,
+        "status": body.status,
+        "schedule_id": body.schedule_id,
+        "wake_filter_json": body.wake_filter_json,
+    });
+    relay_event_trigger_session(&state, &user, &headers, Method::PATCH, &url, Some(upstream)).await
+}
+
+/// `POST /api/v1/event-triggers/{trigger_id}/dry-run`: would a fire of this trigger wake on one stored webhook event.
+/// Relayed to capability-core under the caller's capability bearer; nothing is recorded or fired.
+async fn dry_run_event_trigger(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(trigger_id): Path<String>,
+    Json(body): Json<EventTriggerDryRunBody>,
+) -> impl IntoResponse {
+    let url = event_trigger_url(&state.model_gateway_url, &trigger_id, "/dry-run");
+    let upstream = json!({ "webhook_event_id": body.webhook_event_id });
+    relay_event_trigger_capability(&state, &user, &headers, &url, upstream).await
+}
+
+/// `{base}/v1/event-triggers/{trigger_id}{tail}`, with the id encoded as one path segment.
+fn event_trigger_url(base: &str, trigger_id: &str, tail: &str) -> String {
+    format!(
+        "{base}/v1/event-triggers/{}{tail}",
+        urlencoding::encode(trigger_id)
+    )
+}
+
+/// One call to Model Gateway's trigger routes under the caller's model and session bearers. The answer is relayed as it came.
+async fn relay_event_trigger_session(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+) -> axum::response::Response {
+    let token = shared::model_token(state, user, headers).await;
+    let session = match shared::required_session_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let (status, Json(payload)) = shared::proxy_model_json_with_session(
+        state,
+        method,
+        url,
+        body,
+        token.as_deref(),
+        Some(&session),
+        user,
+    )
+    .await;
+    (status, Json(payload)).into_response()
+}
+
+/// One call to the dry run under the caller's model and capability bearers. The answer is relayed as it came.
+async fn relay_event_trigger_capability(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    url: &str,
+    body: Value,
+) -> axum::response::Response {
+    let token = shared::model_token(state, user, headers).await;
+    let capability = match shared::required_capability_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    shared::proxy_model_json_with_capability(
+        state,
+        Method::POST,
+        url,
+        Some(body),
+        token.as_deref(),
+        Some(&capability),
+        user,
     )
     .await
     .into_response()

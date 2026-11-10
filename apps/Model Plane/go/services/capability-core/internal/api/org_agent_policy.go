@@ -71,6 +71,9 @@ var orgAgentPolicySettings = []orgAgentSetting{
 	{key: "mode_cap", kind: "enum", order: []string{"lockdown", "read_only", "ask_first", "auto"}, def: "auto", failClose: "lockdown"},
 	{key: "rung_cap", kind: "enum", order: []string{"read_only", "workspace_write", "danger_full_access"}, def: "danger_full_access", failClose: "read_only"},
 	{key: "lockdown", kind: "bool", order: []string{"true", "false"}, def: "false", failClose: "true"},
+	// F-t3-083: the org's agents-paused switch. `true` pauses every agent run the org starts or resumes; a plain Ask
+	// turn is never paused. Enforced by the gateway through ORG_AGENT_POLICY_MODE; fail-closed `true` (D8).
+	{key: "agents.paused", kind: "bool", order: []string{"true", "false"}, def: "false", failClose: "true"},
 	{key: "ext.mcp_servers", kind: "allow_list", order: []string{"none", "approved_only", "any"}, def: "any", failClose: "none"},
 	{key: "ext.skills", kind: "allow_list", order: []string{"none", "approved_only", "any"}, def: "any", failClose: "none", reserved: true},
 	{key: "ext.plugins", kind: "allow_list", order: []string{"none", "approved_only", "any"}, def: "any", failClose: "none", reserved: true},

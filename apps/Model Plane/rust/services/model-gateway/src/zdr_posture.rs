@@ -840,6 +840,8 @@ pub(crate) mod tests {
             ("http_routes.rs", "ai_video_generate"),
             ("review_run_routes.rs", "review_run_with"),
             ("side_chat_routes.rs", "side_chat_with"),
+            ("council_routes.rs", "council_with"),
+            ("teach_routes.rs", "post_teach_skill_draft"),
             ("assistant_navigation.rs", "start_navigation"),
             ("dataplane.rs", "reject_zdr_durable_mutation"),
             ("dataplane.rs", "retrieve"),
@@ -1098,6 +1100,21 @@ pub(crate) mod tests {
                 "side_chat_routes.rs",
                 "side_chat_with",
                 "the request's route, plain (zdr_or_refuse); read-only, nothing stored",
+            ),
+            (
+                "council_routes.rs",
+                "council_infer",
+                "the request's route, plain (zdr_or_refuse in council_with); every member and the synthesis carry that zdr flag, and a refused call is reported, never retried",
+            ),
+            (
+                "council_routes.rs",
+                "chat_catalogue",
+                "catalogue read: no user content",
+            ),
+            (
+                "teach_routes.rs",
+                "teach_skill_draft_with",
+                "the request's route, plain: post_teach_skill_draft refuses a ZDR or waived caller (teach_mode) before this call, so the call only runs persistent and carries zdr false",
             ),
             (
                 "http_routes.rs",

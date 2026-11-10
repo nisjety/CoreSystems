@@ -17,6 +17,7 @@ import {
   chatLibraryReadTextInput,
   chatLibraryShareInput,
 } from '@/shared/actions/chat-library'
+import { reviewRunInput } from '@/shared/actions/chat-review'
 import { checkMailEditLimits } from '@/shared/approvals/approval-edit-limits'
 
 const sourceInput = z.object({
@@ -2250,6 +2251,12 @@ const chatLibraryReadTextOutput = z.object({
   content: z.string(),
 })
 
+// The review's answer (F-t3-086): one card under `data.run`. The card's fields are read where the client reads them
+// (chat-client.ts), so the registry only checks that the card is there.
+const reviewRunOutput = z.object({
+  data: z.object({ run: z.record(z.string(), z.unknown()) }),
+})
+
 const chatUploadDocumentInput = z.object({
   title: z.string().trim().min(1),
   content: z.string().trim().min(1),
@@ -2677,6 +2684,32 @@ const modelsDeleteCustomerGatewayInput = z
   })
   .strict()
 
+// W4-CC-8: an organisation's stored connector keys and its custom REST connector. The key is sent once and never read
+// back; Integration Core seals it. Strict, so a field the form never sends (an organisation, a host override) is refused.
+const connectorsCreateCredentialBindingInput = z
+  .object({
+    kind: z.enum(['mcp_bearer', 'rest_api_key', 'rest_bearer']),
+    host: z.string().trim().min(1).max(253),
+    header_name: z.enum(['Authorization', 'X-Api-Key', 'Api-Key', 'X-Auth-Token']),
+    allowed_methods: z.array(z.enum(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'])).min(1).max(7),
+    allowed_path_prefixes: z.array(z.string().min(1).max(256)).min(1).max(32),
+    secret: z.string().min(1).max(4096),
+  })
+  .strict()
+
+const connectorsRevokeCredentialBindingInput = z
+  .object({
+    binding_id: z.string().trim().min(1).max(128),
+  })
+  .strict()
+
+const connectorsCreateCustomRestInput = z
+  .object({
+    name: z.string().trim().min(1).max(120),
+    credential_binding_id: z.string().trim().min(1).max(128),
+  })
+  .strict()
+
 const envelopeStatusOutput = z.object({
   status: z.string(),
 })
@@ -2714,6 +2747,90 @@ const scheduleRunNowInput = z
     requestId: z.string().regex(/^[A-Za-z0-9-]{16,64}$/),
   })
   .strict()
+
+// Event triggers (Wave 4 EP-7, F-t3-047, W4-T8): a webhook event on one connection may wake a run of the person's own
+// schedule. The automations hub calls these through event-trigger-client.ts. Strict, camelCase and person-only: a model
+// never creates, changes or dry runs a trigger (MODEL_ACCESS 'none'). Session Core checks the member, the connection,
+// the Space, the schedule's approval and the closed wake filter, so these shapes only bound what the hub sends.
+const eventTriggerWakeFilterInput = z
+  .string()
+  .max(4096)
+  .refine((value) => {
+    if (value.trim() === '') return true
+    try {
+      const parsed: unknown = JSON.parse(value)
+      return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+    } catch {
+      return false
+    }
+  }, 'wakeFilterJson is empty or a JSON object')
+
+const eventTriggerListInput = z
+  .object({
+    spaceRef: z.string().trim().min(1).max(128).optional(),
+  })
+  .strict()
+
+const eventTriggerCreateInput = z
+  .object({
+    spaceRef: z.string().trim().min(1).max(128),
+    connectionId: z.string().trim().min(1).max(128),
+    eventType: z.literal('webhook_received'),
+    name: z.string().trim().min(1).max(120),
+    clockEnabled: z.boolean().optional(),
+    scheduleId: z.string().trim().min(1).max(128).optional(),
+    wakeFilterJson: eventTriggerWakeFilterInput.optional(),
+  })
+  .strict()
+
+const eventTriggerUpdateInput = z
+  .object({
+    triggerId: z.string().trim().min(1).max(128),
+    expectedRevision: z.number().int().min(1),
+    updatePaths: z.array(z.enum(['name', 'clock_enabled', 'status', 'schedule_id', 'wake_filter_json'])).min(1).max(5),
+    name: z.string().trim().min(1).max(120).optional(),
+    clockEnabled: z.boolean().optional(),
+    status: z.enum(['active', 'paused', 'disabled']).optional(),
+    scheduleId: z.string().trim().max(128).optional(),
+    wakeFilterJson: eventTriggerWakeFilterInput.optional(),
+  })
+  .strict()
+
+const eventTriggerDryRunInput = z
+  .object({
+    triggerId: z.string().trim().min(1).max(128),
+    webhookEventId: z.string().trim().min(1).max(128),
+  })
+  .strict()
+
+const eventTriggerRecordOutput = z.object({
+  id: z.string(),
+  spaceRef: z.string(),
+  connectionId: z.string(),
+  eventType: z.string(),
+  name: z.string(),
+  clockEnabled: z.boolean(),
+  status: z.string(),
+  revision: z.number(),
+  scheduleId: z.string().nullable(),
+  wakeFilterJson: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+})
+
+const eventTriggerListOutput = z.object({
+  triggers: z.array(eventTriggerRecordOutput),
+})
+
+const eventTriggerEnvelopeOutput = z.object({
+  trigger: eventTriggerRecordOutput,
+})
+
+const eventTriggerDryRunOutput = z.object({
+  wouldWake: z.boolean(),
+  reason: z.string(),
+  matched: z.array(z.string()),
+})
 
 // The agents landing's read of the org's definitions and the rooms each is installed in (EP-6-S5).
 // Strict and empty: the organisation comes from the session, never from the caller.
@@ -5352,6 +5469,17 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'review.run',
+    label: 'Review a text as a run',
+    description: "Run one read-only review of a text the person chose: an artifact revision, one turn's diff or an attached file. The model's located P0-P3 findings come back with the gateway's own source checks, kept apart, and each finding is checked against the text before it is kept. Read only: nothing is changed or stored, and the answer is the review card alone. Refused for an unknown target or a text over its limit, and answers 404 review_run_disabled while the review switch is off. Never model-executable: a model does not choose what is reviewed.",
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: reviewRunInput,
+    outputSchema: reviewRunOutput,
+  },
+  {
     id: 'chat.submit_feedback',
     label: 'Submit chat feedback',
     description: 'Submit a positive or negative rating on a chat response.',
@@ -6056,6 +6184,39 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'connectors.create_credential_binding',
+    label: 'Store connector key',
+    description: 'Store one bearer token or API key for one host, for a custom REST connector or an MCP server. Owners and admins only. The key is sent once; Integration Core seals it and never returns it. Refused for an organization with zero data retention.',
+    ownerPlane: 'ingestion',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: connectorsCreateCredentialBindingInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'connectors.revoke_credential_binding',
+    label: 'Revoke connector key',
+    description: 'Revoke one of the organization\'s stored connector keys. Owners and admins only. Its stored secret is emptied, and a connector that calls with it stops working. Revoking is never refused.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: connectorsRevokeCredentialBindingInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'connectors.create_custom_rest',
+    label: 'Create custom REST connector',
+    description: 'Create a custom REST connector that calls one host through a stored connector key. Owners and admins only. Its host, methods and path prefixes are the key\'s, not the request\'s.',
+    ownerPlane: 'ingestion',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: connectorsCreateCustomRestInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'audit.verify_chain',
     label: 'Verify audit log integrity',
     description: 'Recompute the organization\'s audit hash chain and report verified, verified_with_legacy, broken (with the first broken position), partial or key_unavailable. Read-only; owner or admin, human sessions only. The run is itself recorded in the audit log.',
@@ -6197,6 +6358,50 @@ export const actionRegistry = [
     reversible: false,
     inputSchema: scheduleRunNowInput,
     outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'automations.list_event_triggers',
+    label: 'List event triggers',
+    description: 'List the event triggers the signed-in person set up, newest first, or only those in one Space: the connection, the Space, the status and the bound schedule. Read only. Refused under zero data retention.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: eventTriggerListInput,
+    outputSchema: eventTriggerListOutput,
+  },
+  {
+    id: 'automations.create_event_trigger',
+    label: 'Create event trigger',
+    description: 'Set up a trigger that starts a run when a webhook event on one connection matches its wake filter. It is bound to one of the person\'s own schedules in the same Space, which must hold an approval, or to none. The binding grants nothing: every run is authorised again under that schedule\'s approval. The person creates it, never a model. Refused under zero data retention.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: eventTriggerCreateInput,
+    outputSchema: eventTriggerEnvelopeOutput,
+  },
+  {
+    id: 'automations.update_event_trigger',
+    label: 'Change event trigger',
+    description: 'Pause, resume or disable one of the person\'s event triggers, or change its name, schedule or wake filter, under the revision it was read at. Disabling is final: a disabled trigger takes no change. The person changes it, never a model. Refused under zero data retention.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: eventTriggerUpdateInput,
+    outputSchema: eventTriggerEnvelopeOutput,
+  },
+  {
+    id: 'automations.dry_run_event_trigger',
+    label: 'Dry run event trigger',
+    description: 'Ask whether one trigger would wake on one stored webhook event, and which of its filter rules the event meets. Read only: nothing is recorded or started, and no payload or field value is returned. Ten dry runs a minute per trigger. Refused under zero data retention.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: eventTriggerDryRunInput,
+    outputSchema: eventTriggerDryRunOutput,
   },
   {
     id: 'agents.installations.list',

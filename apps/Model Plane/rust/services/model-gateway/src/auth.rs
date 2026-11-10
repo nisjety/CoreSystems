@@ -294,6 +294,23 @@ impl VerifiedIngestionBearer {
     }
 }
 
+/// Independently verified `aud=quarry` user bearer of the caller, forwarded by the BFF as
+/// `x-quarry-authorization` (Teach mode, F-t3-081). Model Gateway uses it only to read one run's
+/// procedure draft as the person who drove the run. It is never the gateway's own service
+/// principal, which is not that run's actor, and it is never accepted from a body or a query.
+#[derive(Clone)]
+pub struct VerifiedQuarryBearer(Arc<str>);
+
+impl VerifiedQuarryBearer {
+    fn new(token: &str) -> Self {
+        Self(Arc::from(token))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Marker proving that the public Model Gateway bearer passed verification.
 /// The ingress credential is deliberately not retained: every downstream
 /// boundary uses its own independently verified audience token.
@@ -782,6 +799,28 @@ where
     }
 }
 
+impl fmt::Debug for VerifiedQuarryBearer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("VerifiedQuarryBearer([REDACTED])")
+    }
+}
+
+#[axum::async_trait]
+impl<S> FromRequestParts<S> for VerifiedQuarryBearer
+where
+    S: Send + Sync,
+{
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<Self>()
+            .cloned()
+            .ok_or(StatusCode::UNAUTHORIZED)
+    }
+}
+
 impl Claims {
     fn principal_kind(&self) -> Result<PrincipalKind, StatusCode> {
         match self.principal_type.as_deref().unwrap_or("user") {
@@ -1129,6 +1168,24 @@ async fn verify_delegated_ingestion_bearer(
     .map(|token| token.map(|token| VerifiedIngestionBearer::new(&token)))
 }
 
+/// The caller's `aud=quarry` bearer (Teach mode, F-t3-081), verified like every user bearer: the
+/// same subject, user and tenant as the ingress token, and the same retention posture. Its audience
+/// is `QUARRY_AUTH_AUDIENCE`, which defaults to `quarry` as the edge's own audience does.
+async fn verify_delegated_quarry_bearer(
+    headers: &HeaderMap,
+    model_claims: &Claims,
+) -> Result<Option<VerifiedQuarryBearer>, AuthRejection> {
+    verify_delegated_user_bearer(
+        headers,
+        "x-quarry-authorization",
+        "QUARRY_AUTH_AUDIENCE",
+        "quarry",
+        model_claims,
+    )
+    .await
+    .map(|token| token.map(|token| VerifiedQuarryBearer::new(&token)))
+}
+
 async fn verify_delegated_capability_bearer(
     headers: &HeaderMap,
     model_claims: &Claims,
@@ -1310,6 +1367,7 @@ const API_KEY_FORBIDDEN_DELEGATIONS: &[&str] = &[
     "x-execution-authorization",
     "x-ingestion-authorization",
     "x-sandbox-authorization",
+    "x-quarry-authorization",
 ];
 
 /// INNH-10: verify the `aud=browser-broker` bearer of an `api_key` principal. It is accepted only
@@ -1590,6 +1648,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
         let browser_bearer = verify_delegated_browser_bearer(req.headers(), &claims).await?;
         let ingestion_bearer = verify_delegated_ingestion_bearer(req.headers(), &claims).await?;
         let sandbox_bearer = verify_delegated_sandbox_bearer(req.headers(), &claims).await?;
+        let quarry_bearer = verify_delegated_quarry_bearer(req.headers(), &claims).await?;
         req.extensions_mut().insert(claims);
         req.extensions_mut()
             .insert(VerifiedModelBearer::new(&token));
@@ -1630,6 +1689,9 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
         }
         if let Some(sandbox_bearer) = sandbox_bearer {
             req.extensions_mut().insert(sandbox_bearer);
+        }
+        if let Some(quarry_bearer) = quarry_bearer {
+            req.extensions_mut().insert(quarry_bearer);
         }
         return Ok(next.run(req).await);
     }
@@ -1722,6 +1784,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
         browser_bearer,
         ingestion_bearer,
         sandbox_bearer,
+        quarry_bearer,
     ) = match principal_kind {
         PrincipalKind::User => (
             verify_delegated_data_plane_bearer(req.headers(), &token_data.claims).await?,
@@ -1733,6 +1796,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
             verify_delegated_browser_bearer(req.headers(), &token_data.claims).await?,
             verify_delegated_ingestion_bearer(req.headers(), &token_data.claims).await?,
             verify_delegated_sandbox_bearer(req.headers(), &token_data.claims).await?,
+            verify_delegated_quarry_bearer(req.headers(), &token_data.claims).await?,
         ),
         PrincipalKind::Service => {
             if req.headers().contains_key("x-data-plane-authorization")
@@ -1742,6 +1806,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
                 || req.headers().contains_key("x-browser-authorization")
                 || req.headers().contains_key("x-ingestion-authorization")
                 || req.headers().contains_key("x-sandbox-authorization")
+                || req.headers().contains_key("x-quarry-authorization")
                 || (req.headers().contains_key("x-session-authorization")
                     && req.headers().contains_key("x-inference-authorization"))
             {
@@ -1761,6 +1826,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
                 None,
                 session_bearer,
                 inference_bearer,
+                None,
                 None,
                 None,
                 None,
@@ -1801,7 +1867,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
                     verify_delegated_api_key_inference_bearer(req.headers(), &token_data.claims)
                         .await?;
             }
-            (None, None, None, None, None, None, None, None, None)
+            (None, None, None, None, None, None, None, None, None, None)
         }
     };
     if let Some(bearer) = api_key_browser_bearer {
@@ -1843,6 +1909,9 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
     }
     if let Some(sandbox_bearer) = sandbox_bearer {
         req.extensions_mut().insert(sandbox_bearer);
+    }
+    if let Some(quarry_bearer) = quarry_bearer {
+        req.extensions_mut().insert(quarry_bearer);
     }
     Ok(next.run(req).await)
 }

@@ -98,7 +98,7 @@ pub fn retrieval_scope(raw: Option<&str>) -> RetrievalScope {
 
 /// Load the model allowlist from `ALLOWED_MODELS` env var (comma-separated).
 /// Returns `None` if the env var is not set (all models allowed).
-fn load_allowed_models() -> Option<Vec<String>> {
+pub(crate) fn load_allowed_models() -> Option<Vec<String>> {
     std::env::var("ALLOWED_MODELS").ok().map(|v| {
         v.split(',')
             .map(|s| s.trim().to_owned())
@@ -114,7 +114,7 @@ fn load_allowed_models() -> Option<Vec<String>> {
 /// empty, the model is unspecified (inference-core resolves it to a provider
 /// default downstream, so there is nothing to check yet) or the model is on the
 /// list. The body names the model id and the reason, never the list itself.
-fn deployment_allowlist_refusal(
+pub(crate) fn deployment_allowlist_refusal(
     allowed: Option<&[String]>,
     model: &str,
 ) -> Option<(StatusCode, Json<serde_json::Value>)> {
@@ -719,6 +719,7 @@ mod tests {
             plan_mode: false,
             execute_granted: false,
             approved_plan_id: None,
+            coordinator: false,
             tools: Vec::new(),
             org_name: None,
             user_name: None,

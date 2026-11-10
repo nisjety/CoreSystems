@@ -28,6 +28,14 @@
       "status": "enforced"
     },
     {
+      "key": "agents.paused",
+      "kind": "bool",
+      "strictness_order": ["true", "false"],
+      "default": "false",
+      "fail_closed_value": "true",
+      "status": "enforced"
+    },
+    {
       "key": "ext.mcp_servers",
       "kind": "allow_list",
       "strictness_order": ["none", "approved_only", "any"],

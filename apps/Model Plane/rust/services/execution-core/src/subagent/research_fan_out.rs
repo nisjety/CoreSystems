@@ -26,8 +26,14 @@
 //! * The machine-readable `verification:` line is the SECOND line of the
 //!   digest, not the last, for the same reason: the one thing a tail-truncation
 //!   must never be able to remove.
+//! * With `SUBAGENT_TYPED_RESULTS_ENABLED=true` and a `result_schema`, an item
+//!   whose answer ends with a fenced JSON block that matches the schema carries
+//!   that value on one `Structured:` line. An answer whose block is missing or
+//!   does not match is `invalid_output`, names the paths that failed, and is
+//!   never counted as confirmed.
 
 use serde::Deserialize;
+use serde_json::Value;
 
 /// Tool name the model calls to fan out N research items in one round. Under
 /// [`super::TOOL_PREFIX`], so `is_subagent_tool` and
@@ -194,6 +200,10 @@ pub struct FanOutRequest {
     /// only — appended to each item's own prompt by [`compose_item_prompt`],
     /// never parsed.
     pub result_schema_hint: Option<String>,
+    /// The JSON Schema each item's answer must match, when the caller gave one and the
+    /// typed-results switch is on ([`typed_results_enabled`]). Object-typed, and at most
+    /// [`MAX_RESULT_SCHEMA_BYTES`] serialized.
+    pub result_schema: Option<Value>,
 }
 
 /// Parse a `subagent.research_fan_out` tool input.
@@ -228,6 +238,8 @@ pub fn parse_fan_out(tool_input: &str, ceiling: u32) -> Result<FanOutRequest, St
         max_rounds_per_item: Option<u32>,
         #[serde(default)]
         result_schema_hint: Option<String>,
+        #[serde(default)]
+        result_schema: Option<Value>,
     }
 
     let raw: RawRequest = serde_json::from_str(tool_input).map_err(|error| {
@@ -280,6 +292,14 @@ pub fn parse_fan_out(tool_input: &str, ceiling: u32) -> Result<FanOutRequest, St
         });
     }
 
+    // Read only with the switch on: a switched-off deployment ignores `result_schema`
+    // entirely, so a malformed one is not refused either.
+    let result_schema = if typed_results_enabled() {
+        parse_result_schema(raw.result_schema)?
+    } else {
+        None
+    };
+
     Ok(FanOutRequest {
         items,
         max_rounds_per_item: raw.max_rounds_per_item,
@@ -287,7 +307,29 @@ pub fn parse_fan_out(tool_input: &str, ceiling: u32) -> Result<FanOutRequest, St
             .result_schema_hint
             .map(|hint| hint.trim().chars().take(MAX_HINT_CHARS).collect::<String>())
             .filter(|hint| !hint.is_empty()),
+        result_schema,
     })
+}
+
+/// A `result_schema` as the caller sent it: absent or `null` is none. Anything else must be a JSON
+/// object whose `type` is `object`, and at most [`MAX_RESULT_SCHEMA_BYTES`] serialized.
+fn parse_result_schema(raw: Option<Value>) -> Result<Option<Value>, String> {
+    let Some(schema) = raw else {
+        return Ok(None);
+    };
+    if schema.get("type").and_then(Value::as_str) != Some("object") {
+        return Err(format!(
+            "{RESEARCH_TOOL_NAME} result_schema must be a JSON Schema object with \"type\": \"object\""
+        ));
+    }
+    let size = schema.to_string().len();
+    if size > MAX_RESULT_SCHEMA_BYTES {
+        return Err(format!(
+            "{RESEARCH_TOOL_NAME} result_schema is {size} bytes serialized, more than the \
+             {MAX_RESULT_SCHEMA_BYTES}-byte limit"
+        ));
+    }
+    Ok(Some(schema))
 }
 
 /// What every item's nested loop is told beyond its own question. The digest's
@@ -303,13 +345,22 @@ instead of guessing.";
 /// the shared research/citation instructions, and the caller's optional answer
 /// format hint. The lineage edge and the durable child run still record the
 /// BARE question (`FanOutItem::goal`) — the boilerplate is instructions to the
-/// child, not part of what was asked.
+/// child, not part of what was asked. A `result_schema` adds the ask for a typed result,
+/// which the item's answer is then checked against.
 #[must_use]
-pub fn compose_item_prompt(item: &FanOutItem, result_schema_hint: Option<&str>) -> String {
+pub fn compose_item_prompt(
+    item: &FanOutItem,
+    result_schema_hint: Option<&str>,
+    result_schema: Option<&Value>,
+) -> String {
     let mut prompt = format!("{}\n\n{ITEM_PROMPT_SUFFIX}", item.goal);
     if let Some(hint) = result_schema_hint {
         prompt.push_str("\nRequested answer format: ");
         prompt.push_str(hint);
+    }
+    if let Some(schema) = result_schema {
+        prompt.push_str("\nEnd your answer with one fenced ```json block matching this schema: ");
+        prompt.push_str(&schema.to_string());
     }
     prompt
 }
@@ -322,6 +373,10 @@ pub enum ItemStatus {
     Ok,
     Failed,
     Refused,
+    /// Finished, but its answer did not end with a typed result that matches the caller's
+    /// `result_schema` (see [`FanOutItemResult::checked_against`]). The answer is still shown, with
+    /// the reason, and the item is not counted as confirmed.
+    InvalidOutput,
 }
 
 /// One item's result, ready to be folded into [`merge`].
@@ -335,6 +390,9 @@ pub struct FanOutItemResult {
     /// why this is the only signal available at this layer today.
     pub sources: Vec<String>,
     pub error: Option<String>,
+    /// The typed result this item's answer carried, when the caller gave a `result_schema` and the
+    /// answer matched it. Set only by [`FanOutItemResult::checked_against`].
+    pub structured: Option<Value>,
 }
 
 impl FanOutItemResult {
@@ -348,6 +406,7 @@ impl FanOutItemResult {
             answer: Some(answer),
             sources,
             error: None,
+            structured: None,
         }
     }
 
@@ -360,6 +419,7 @@ impl FanOutItemResult {
             answer: None,
             sources: Vec::new(),
             error: Some(error),
+            structured: None,
         }
     }
 
@@ -372,6 +432,7 @@ impl FanOutItemResult {
             answer: None,
             sources: Vec::new(),
             error: Some(reason),
+            structured: None,
         }
     }
 
@@ -390,6 +451,35 @@ impl FanOutItemResult {
                 .error
                 .as_deref()
                 .is_some_and(|reason| reason.starts_with(BUDGET_REACHED))
+    }
+
+    /// Checks this item's answer against the caller's `result_schema`, when there is one. Only an
+    /// `ok` answer is checked: an item that failed or was refused has nothing to check. An answer
+    /// whose last fenced `json` block matches keeps its status and carries the parsed value in its
+    /// `structured` field. One without a valid, matching block becomes [`ItemStatus::InvalidOutput`]
+    /// with the reason.
+    #[must_use]
+    pub fn checked_against(self, schema: Option<&Value>) -> Self {
+        let Some(schema) = schema else {
+            return self;
+        };
+        if self.status != ItemStatus::Ok {
+            return self;
+        }
+        let Some(answer) = self.answer.as_deref() else {
+            return self;
+        };
+        match structured_output(answer, schema) {
+            Ok(value) => Self {
+                structured: Some(value),
+                ..self
+            },
+            Err(reason) => Self {
+                status: ItemStatus::InvalidOutput,
+                error: Some(reason),
+                ..self
+            },
+        }
     }
 }
 
@@ -427,6 +517,54 @@ pub fn extract_sources(answer: &str) -> Vec<String> {
         }
     }
     sources
+}
+
+/// The most issue paths one invalid answer's reason names; the rest are counted.
+const MAX_REASON_PATHS: usize = 3;
+
+/// The body of an answer's last fenced `json` block, trimmed, or `None` when the answer has no
+/// closed one. The last block is the one the item was asked to end with, so an example earlier in
+/// the answer is not taken for it.
+fn last_json_block(answer: &str) -> Option<&str> {
+    const OPEN: &str = "```json";
+    let start = answer.rfind(OPEN)? + OPEN.len();
+    let body = &answer[start..];
+    Some(body[..body.find("```")?].trim())
+}
+
+/// The typed result an answer carries: its last fenced `json` block, parsed and checked against
+/// `schema`. The error is the reason the digest shows. It names issue paths and codes only, never a
+/// value or a key the model invented.
+fn structured_output(answer: &str, schema: &Value) -> Result<Value, String> {
+    let Some(block) = last_json_block(answer) else {
+        return Err(
+            "the answer does not end with a fenced json block for its result_schema".to_owned(),
+        );
+    };
+    let value: Value = serde_json::from_str(block)
+        .map_err(|_| "the fenced json block is not valid JSON".to_owned())?;
+    let found = mp_contracts::json_schema_subset::validate(&value, schema);
+    if found.is_empty() {
+        return Ok(value);
+    }
+    let paths: Vec<String> = found
+        .iter()
+        .take(MAX_REASON_PATHS)
+        .map(|issue| {
+            let shown = issue.issue();
+            format!("{} ({})", shown.path, shown.code)
+        })
+        .collect();
+    let more = found.len().saturating_sub(MAX_REASON_PATHS);
+    let and_more = if more > 0 {
+        format!(" and {more} more")
+    } else {
+        String::new()
+    };
+    Err(format!(
+        "the fenced json block does not match result_schema at {}{and_more}",
+        paths.join(", ")
+    ))
 }
 
 /// How many characters of this tool's result the agent loop keeps in the
@@ -482,16 +620,38 @@ fn one_line(text: &str) -> String {
 /// Render one item's section. `answer_cap == 0` renders the section WITHOUT its
 /// answer, which is how [`merge_within`] measures what every section costs
 /// before it decides how much of each answer fits. `sources_cap` is how many of
-/// the item's sources are listed; the rest are counted, not dropped unseen.
-fn render_item(out: &mut String, result: &FanOutItemResult, answer_cap: usize, sources_cap: usize) {
+/// the item's sources are listed; the rest are counted, not dropped unseen. `structured_kept`
+/// says whether a typed line is written, or only the note that it was left out.
+fn render_item(
+    out: &mut String,
+    result: &FanOutItemResult,
+    answer_cap: usize,
+    sources_cap: usize,
+    structured_kept: bool,
+) {
     use std::fmt::Write as _;
     let (goal, goal_omitted) = clip(&one_line(&result.goal), MAX_HEADER_GOAL_CHARS);
     let ellipsis = if goal_omitted > 0 { "…" } else { "" };
     let _ = writeln!(out);
     let _ = writeln!(out, "## [{}] {goal}{ellipsis}", one_line(&result.id));
     match result.status {
-        ItemStatus::Ok => {
-            let _ = writeln!(out, "Status: ok");
+        ItemStatus::Ok | ItemStatus::InvalidOutput => {
+            if result.status == ItemStatus::Ok {
+                let _ = writeln!(out, "Status: ok");
+            } else {
+                let _ = writeln!(out, "Status: invalid_output");
+                if let Some(error) = &result.error {
+                    let (reason, _) = clip(error, MAX_REASON_CHARS);
+                    let _ = writeln!(out, "Reason: {reason}");
+                }
+            }
+            if let Some(structured) = &result.structured {
+                if structured_kept {
+                    let _ = writeln!(out, "Structured: {structured}");
+                } else {
+                    let _ = writeln!(out, "Structured: omitted to fit this digest");
+                }
+            }
             if answer_cap > 0 {
                 if let Some(answer) = &result.answer {
                     let (kept, omitted) = clip(answer.trim(), answer_cap);
@@ -592,24 +752,28 @@ pub fn merge_within(results: &[FanOutItemResult], budget: usize) -> String {
 
     let answered = results.iter().filter(|r| r.answer.is_some()).count();
     // What every section costs before any answer is added, at a given number of
-    // listed sources.
-    let fixed_at = |sources_cap: usize| -> usize {
+    // listed sources, with or without the typed lines.
+    let fixed_at = |sources_cap: usize, structured_kept: bool| -> usize {
         results
             .iter()
             .map(|result| {
                 let mut section = String::new();
-                render_item(&mut section, result, 0, sources_cap);
+                render_item(&mut section, result, 0, sources_cap, structured_kept);
                 section.chars().count()
             })
             .sum::<usize>()
             + head.chars().count()
     };
     let answers_floor = answered * (MIN_ANSWER_CHARS + TRUNCATION_NOTE_RESERVE);
+    // A typed line is the result the caller asked for, so it is kept ahead of the source
+    // lists: it is dropped only when the digest cannot hold every answer's floor with it.
+    // With no typed results the flag changes nothing.
+    let structured_kept = fixed_at(0, true) + answers_floor <= budget;
     let mut sources_cap = MAX_SOURCES_PER_ITEM;
-    while sources_cap > 0 && fixed_at(sources_cap) + answers_floor > budget {
+    while sources_cap > 0 && fixed_at(sources_cap, structured_kept) + answers_floor > budget {
         sources_cap /= 2;
     }
-    let fixed = fixed_at(sources_cap);
+    let fixed = fixed_at(sources_cap, structured_kept);
     let answer_cap = if answered == 0 {
         0
     } else {
@@ -620,7 +784,7 @@ pub fn merge_within(results: &[FanOutItemResult], budget: usize) -> String {
 
     let mut out = head;
     for result in results {
-        render_item(&mut out, result, answer_cap, sources_cap);
+        render_item(&mut out, result, answer_cap, sources_cap, structured_kept);
     }
     out
 }
@@ -783,6 +947,47 @@ pub fn parse_child_token_budget(raw: Option<&str>) -> u64 {
     raw.and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|&budget| budget > 0)
         .unwrap_or(DEFAULT_CHILD_TOKEN_BUDGET)
+}
+
+/// Env var: the switch that makes a wide-research item's answer a typed result (F-t3-071). Opt-in:
+/// only the literal `true` enables it. Off, `result_schema` is ignored, the fan-out tool is offered
+/// the parameters it always had, and a call runs exactly as it did before.
+pub const TYPED_RESULTS_ENV: &str = "SUBAGENT_TYPED_RESULTS_ENABLED";
+
+/// The largest `result_schema` a fan-out call may carry, serialized.
+pub const MAX_RESULT_SCHEMA_BYTES: usize = 8 * 1024;
+
+/// Whether typed per-item results are on, from an already-read env value: only the literal `true`.
+#[must_use]
+pub fn parse_typed_results_enabled(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| value.trim() == "true")
+}
+
+/// Whether typed per-item results are on for this deployment right now.
+#[must_use]
+pub fn typed_results_enabled() -> bool {
+    parse_typed_results_enabled(std::env::var(TYPED_RESULTS_ENV).ok().as_deref())
+}
+
+/// The fan-out tool's parameter schema with `result_schema` added to its properties. The tool is
+/// offered this schema only while [`typed_results_enabled`] is on. Input that is not an object with
+/// `properties` comes back unchanged.
+#[must_use]
+pub fn parameters_with_result_schema(parameters_json: &str) -> String {
+    let Ok(mut schema) = serde_json::from_str::<Value>(parameters_json) else {
+        return parameters_json.to_owned();
+    };
+    let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
+        return parameters_json.to_owned();
+    };
+    properties.insert(
+        "result_schema".to_owned(),
+        serde_json::json!({
+            "type": "object",
+            "description": "Optional JSON Schema, of type object, that each item's answer must match. Each item then ends its answer with one fenced json block matching it; an item whose block does not match is reported as invalid_output, with the paths that failed."
+        }),
+    );
+    schema.to_string()
 }
 
 #[cfg(test)]
@@ -1075,6 +1280,7 @@ mod tests {
         let prompt = compose_item_prompt(
             &request.items[0],
             request.result_schema_hint.as_deref(),
+            None,
         );
         assert!(prompt.starts_with("price of X\n\n"), "{prompt}");
         assert!(prompt.contains("Sources:"), "the citation ask must be there: {prompt}");
@@ -1085,7 +1291,7 @@ mod tests {
         assert_eq!(request.items[0].goal, "price of X");
 
         // No hint → no dangling "Requested answer format:" line.
-        let bare = compose_item_prompt(&request.items[0], None);
+        let bare = compose_item_prompt(&request.items[0], None, None);
         assert!(!bare.contains("Requested answer format"), "{bare}");
 
         // A blank hint is dropped at parse time, not forwarded as an empty ask.
