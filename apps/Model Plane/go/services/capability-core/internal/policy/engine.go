@@ -51,6 +51,9 @@ const (
 	PolicySourceToolPolicyNever = "tool_policy_never"
 	PolicySourceToolPolicyAsk   = "tool_policy_ask"
 	PolicySourceToolPolicyAllow = "tool_policy_allow"
+	// PolicySourceOrgPermissionRule: an org permission rule (W5-074) tightened the decision. Its reason names the rule
+	// as org_rule:<rule id> and nothing else.
+	PolicySourceOrgPermissionRule = "org_permission_rule"
 )
 
 // Review states of an MCP tool row (capability_tools.review_state). A built-in

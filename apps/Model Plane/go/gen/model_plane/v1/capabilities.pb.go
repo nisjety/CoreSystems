@@ -588,7 +588,9 @@ type EvaluatePolicyResponse struct {
 	// tool is not approved or is not in the registry), "capability_gate" (the
 	// capability is out of rollout, unavailable, out of scope or ungranted) or,
 	// only when TOOL_POLICY_ENFORCED is on, a stored per-tool policy:
-	// "tool_policy_never", "tool_policy_ask" or "tool_policy_allow".
+	// "tool_policy_never", "tool_policy_ask" or "tool_policy_allow". Or, only when
+	// CAPABILITY_PERMISSION_RULES_ENABLED is on, "org_permission_rule": an org
+	// permission rule tightened the decision, and the reason names that rule.
 	PolicySource string `protobuf:"bytes,9,opt,name=policy_source,json=policySource,proto3" json:"policy_source,omitempty"`
 	// Pinned definition digest of the evaluated MCP tool, lower-case hex. Empty
 	// for a built-in tool and for a capability-level evaluation.

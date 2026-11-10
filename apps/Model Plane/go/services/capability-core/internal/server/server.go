@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -52,6 +53,13 @@ type Server struct {
 	// honours manifest_sha256 and reads the bundle a pinned version named; off, the field is
 	// ignored and the live bundle is read, as before.
 	skillBundleRetention bool
+
+	// permissionRules reads the org permission rules (W5-074). The gate consults it only while
+	// permissionRulesEnabled is true.
+	permissionRules permissionRuleMatcher
+
+	// permissionRulesEnabled is CAPABILITY_PERMISSION_RULES_ENABLED, parsed by the caller.
+	permissionRulesEnabled bool
 }
 
 // modelCapabilitySource is the narrow slice of the models registry the
@@ -85,6 +93,13 @@ type toolDefinitionSearcher interface {
 type capabilityStore interface {
 	GetForOrg(context.Context, string, string) (*registry.CapabilityRow, error)
 	RankedList(context.Context, string, string, []string, int) ([]registry.ScoredCapability, error)
+}
+
+// permissionRuleMatcher is the org permission rule read the gate applies: the decision the rules of the verified org
+// make for one call, and the id of the rule that made it. An error is a failed read. *api.PermissionRuleStore satisfies
+// it.
+type permissionRuleMatcher interface {
+	Match(ctx context.Context, orgID, tool, kind, value string) (string, string, error)
 }
 
 // toDetail converts a domain Capability into a wire CapabilityDetail.
@@ -208,6 +223,15 @@ func (s *Server) WithSkillBundleRetention(enabled bool) *Server {
 // arrives already parsed by skillbundle.DeckTemplatesFromLookup; off, every summary reports false.
 func (s *Server) WithDeckTemplates(enabled bool) *Server {
 	s.deckTemplatesEnabled = enabled
+	return s
+}
+
+// WithPermissionRules attaches the org permission rules and the switch that lets the gate read them. The switch arrives
+// already parsed (api.PermissionRulesEnabledFromLookup), so only the literal "true" enables it; off, no rule is read and
+// EvaluatePolicy decides as it did before.
+func (s *Server) WithPermissionRules(rules permissionRuleMatcher, enabled bool) *Server {
+	s.permissionRules = rules
+	s.permissionRulesEnabled = enabled && rules != nil
 	return s
 }
 
@@ -528,6 +552,8 @@ func (s *Server) GetCapability(ctx context.Context, req *mpv1.GetCapabilityReque
 // nowhere is decided against the capability's own class and floor, its ceiling.
 // With TOOL_POLICY_ENFORCED on, the stored tool policies of the org and of the
 // named person apply as well (policy.EvaluateTool).
+// With CAPABILITY_PERMISSION_RULES_ENABLED on, the org's permission rules tighten
+// the decision last (applyPermissionRules).
 // The tool, the user, the class and floor, the policy source and the pinned
 // digest are all signed into the decision evidence.
 func (s *Server) EvaluatePolicy(ctx context.Context, req *mpv1.EvaluatePolicyRequest) (*mpv1.EvaluatePolicyResponse, error) {
@@ -591,7 +617,59 @@ func (s *Server) EvaluatePolicy(ctx context.Context, req *mpv1.EvaluatePolicyReq
 	if err != nil {
 		return nil, mapErr(err)
 	}
+	if s.permissionRulesEnabled {
+		result = s.applyPermissionRules(ctx, orgID, req, capability, binding, result)
+	}
 	return s.policyResponse(req, orgID, capability, result, binding), nil
+}
+
+// orgPermissionRuleReasonPrefix starts the reason of a decision an org permission rule made. The reason names the rule
+// and nothing else: no argument, target or address of the call reaches the signed decision.
+const orgPermissionRuleReasonPrefix = "org_rule:"
+
+// orgPermissionRulesUnavailableReason is the reason of the ask that a failed read of the rule table makes. It names no
+// rule, because none was read.
+const orgPermissionRulesUnavailableReason = "org_rules_unavailable"
+
+// applyPermissionRules tightens a decision with the org's permission rules (W5-074). It never loosens. A deny stands.
+// A rule that denies makes a deny; a rule that asks makes an ask, whether the decision was an allow or an ask already.
+// A failed read of the table makes an ask for an effect class and leaves a read class as it was. The target is the one
+// execution-core derived for the call; a ZDR or waived run sends the kind alone, so only the rules that need no value
+// apply to it.
+func (s *Server) applyPermissionRules(
+	ctx context.Context,
+	orgID string,
+	req *mpv1.EvaluatePolicyRequest,
+	capability *models.Capability,
+	binding *policy.ToolBinding,
+	result *policy.Result,
+) *policy.Result {
+	if result.Decision == policy.DecisionDeny {
+		return result
+	}
+	decision, ruleID, err := s.permissionRules.Match(ctx, orgID, req.GetToolName(), req.GetTargetKind(), req.GetTargetValue())
+	if err != nil {
+		slog.Error("org permission rules unavailable", "error", err)
+		class, _, _ := evaluatedClass(capability, binding)
+		if result.Decision == policy.DecisionAllow && class != models.SideEffectRead {
+			return &policy.Result{
+				Decision:          policy.DecisionAsk,
+				Reason:            orgPermissionRulesUnavailableReason,
+				PolicySource:      policy.PolicySourceOrgPermissionRule,
+				ToolPolicyChecked: result.ToolPolicyChecked,
+			}
+		}
+		return result
+	}
+	if decision == "" {
+		return result
+	}
+	return &policy.Result{
+		Decision:          decision,
+		Reason:            orgPermissionRuleReasonPrefix + ruleID,
+		PolicySource:      policy.PolicySourceOrgPermissionRule,
+		ToolPolicyChecked: result.ToolPolicyChecked,
+	}
 }
 
 // capabilityForPolicy resolves the capability snapshot a decision is made

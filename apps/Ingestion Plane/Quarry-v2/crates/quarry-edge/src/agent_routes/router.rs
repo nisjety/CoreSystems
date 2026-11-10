@@ -31,6 +31,12 @@ pub fn agent_router() -> Router<AppState> {
             "/v1/agent/runs/:run_id/procedure",
             post(compile_run_procedure),
         )
+        // F-t3-081 Teach mode: the redacted draft of a run's human steps. Dark behind
+        // QUARRY_TEACH_MODE_ENABLED (404 teach_mode_disabled when off); a ZDR run is 409.
+        .route(
+            "/v1/agent/runs/:run_id/procedure-draft",
+            get(run_procedure_draft),
+        )
         .route("/v1/agent/procedures/replay-check", post(replay_check))
         .route(
             "/v1/agent/procedures/quality-check",

@@ -1,0 +1,208 @@
+/* The share dialog for conversation snapshots beside the export on the latest answer (W4-SH-6). It is portalled above the chat, so a message's box never clips it. */
+.verevon-chat-snapshot {
+  position: relative;
+  display: inline-flex;
+}
+
+.verevon-chat-snapshot__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--verevon-e-muted, #667085);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-chat-snapshot__trigger:hover,
+.verevon-chat-snapshot__trigger:focus-visible {
+  background: var(--verevon-surface-soft, #f3f4f6);
+  color: inherit;
+}
+
+.verevon-chat-snapshot-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgb(15 23 42 / 35%);
+}
+
+.verevon-chat-snapshot-dialog {
+  box-sizing: border-box;
+  display: grid;
+  gap: 14px;
+  width: min(560px, 100%);
+  max-height: min(80vh, 720px);
+  overflow: auto;
+  padding: 20px;
+  border-radius: 12px;
+  background: var(--surface, #fff);
+  box-shadow: 0 16px 48px rgb(0 0 0 / 20%);
+}
+
+.verevon-chat-snapshot-dialog:focus {
+  outline: none;
+}
+
+.verevon-chat-snapshot-dialog__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.verevon-chat-snapshot-dialog__header h2 {
+  margin: 0 0 4px;
+  font-size: 17px;
+  line-height: 1.3;
+}
+
+.verevon-chat-snapshot-dialog__header p {
+  margin: 0;
+  color: var(--verevon-e-muted, #667085);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.verevon-chat-snapshot-dialog__close {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  min-width: 40px;
+  min-height: 40px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.verevon-chat-snapshot-dialog__close:hover,
+.verevon-chat-snapshot-dialog__close:focus-visible {
+  background: var(--verevon-surface-soft, #f3f4f6);
+}
+
+.verevon-chat-snapshot-dialog__card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  background: var(--verevon-surface-soft, #f3f4f6);
+}
+
+.verevon-chat-snapshot-dialog__card h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.verevon-chat-snapshot-dialog__list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-chat-snapshot-dialog__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.verevon-chat-snapshot-dialog__pick {
+  display: inline-flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.verevon-chat-snapshot-dialog__who {
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+
+.verevon-chat-snapshot-dialog__confirm {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.verevon-chat-snapshot-dialog__action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  justify-self: start;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--surface, #fff);
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.verevon-chat-snapshot-dialog__icon {
+  display: inline-grid;
+  place-items: center;
+  min-width: 32px;
+  min-height: 32px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.verevon-chat-snapshot-dialog__icon:hover,
+.verevon-chat-snapshot-dialog__icon:focus-visible {
+  background: var(--surface, #fff);
+}
+
+.verevon-chat-snapshot-dialog__action:disabled,
+.verevon-chat-snapshot-dialog__icon:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.verevon-chat-snapshot-dialog__add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.verevon-chat-snapshot-dialog__field {
+  display: grid;
+  flex: 1 1 200px;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.verevon-chat-snapshot-dialog__field select {
+  min-height: 32px;
+  max-width: 100%;
+}
+
+.verevon-chat-snapshot-dialog__muted {
+  margin: 0;
+  color: var(--verevon-e-muted, #667085);
+  font-size: 12px;
+}
+
+.verevon-chat-snapshot-dialog__refusal {
+  margin: 0;
+  color: var(--verevon-danger, #b42318);
+  font-size: 12px;
+}

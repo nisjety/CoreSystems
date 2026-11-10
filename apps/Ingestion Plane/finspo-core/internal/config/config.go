@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type Config struct {
@@ -44,6 +46,15 @@ type Config struct {
 	CaptureContent           bool
 	ContentMaxBytes          int64
 	ContentZDRClassification string
+
+	// Sensitivity-label narrowing — read each forwarded file's Microsoft Purview
+	// labels, and forward a file that carries a restricted label, or whose labels
+	// cannot be read, as private (content.NarrowForLabels). Needs CaptureContent to
+	// have any effect. Defaults OFF.
+	SensitivityLabelsEnabled bool
+	// Comma-separated Purview label GUIDs (FINSPO_RESTRICTED_LABEL_IDS). Required
+	// when SensitivityLabelsEnabled is on.
+	RestrictedLabelIDs []string
 
 	// Phase 5 — governance execution knobs.
 	// AllowExecution is a hard kill-switch for destructive Graph operations.
@@ -94,6 +105,21 @@ func Load() (Config, error) {
 		}
 	}
 
+	// Sensitivity-label narrowing is opt-in. Exactly "true" enables it: envBool
+	// uses ParseBool, which would also switch this on for "1" or "T".
+	sensitivityLabelsEnabled := strings.TrimSpace(os.Getenv("FINSPO_SENSITIVITY_LABELS_ENABLED")) == "true"
+	restrictedLabelIDs := envCSV("FINSPO_RESTRICTED_LABEL_IDS")
+	if sensitivityLabelsEnabled {
+		if len(restrictedLabelIDs) == 0 {
+			return Config{}, fmt.Errorf("FINSPO_RESTRICTED_LABEL_IDS is required when FINSPO_SENSITIVITY_LABELS_ENABLED=true")
+		}
+		for _, id := range restrictedLabelIDs {
+			if _, err := uuid.Parse(id); err != nil {
+				return Config{}, fmt.Errorf("FINSPO_RESTRICTED_LABEL_IDS must be a comma-separated list of label GUIDs")
+			}
+		}
+	}
+
 	return Config{
 		Port:                     port,
 		APIKey:                   apiKey,
@@ -116,6 +142,8 @@ func Load() (Config, error) {
 		CaptureContent:           envBool("FINSPO_CAPTURE_CONTENT", false),
 		ContentMaxBytes:          envInt64("FINSPO_CONTENT_MAX_BYTES", 0),
 		ContentZDRClassification: envOr("FINSPO_CONTENT_ZDR_CLASSIFICATION", "internal"),
+		SensitivityLabelsEnabled: sensitivityLabelsEnabled,
+		RestrictedLabelIDs:       restrictedLabelIDs,
 		AllowExecution:           envBool("FINSPO_ALLOW_EXECUTION", false),
 		ArchiveFolderID:          strings.TrimSpace(os.Getenv("FINSPO_ARCHIVE_FOLDER_ID")),
 	}, nil
@@ -155,6 +183,18 @@ func envBool(key string, fallback bool) bool {
 		return fallback
 	}
 	return b
+}
+
+// envCSV splits a comma-separated env value, trimming each entry and dropping
+// blanks. An unset or empty value yields nil.
+func envCSV(key string) []string {
+	var out []string
+	for _, item := range strings.Split(os.Getenv(key), ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func envOr(key, fallback string) string {

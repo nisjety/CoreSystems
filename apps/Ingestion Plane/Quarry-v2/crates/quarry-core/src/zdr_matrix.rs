@@ -618,6 +618,18 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "agent_procedure_draft",
+        routes: &["/v1/agent/runs/{run_id}/procedure-draft"],
+        treatment: Treatment::Refused {
+            code: "CONFLICT",
+            feature: "procedure_draft",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "procedure_draft.rs run_procedure_draft (F-t3-081, dark behind QUARRY_TEACH_MODE_ENABLED: 404 teach_mode_disabled while it is off) answers a ZDR run 409 zdr_not_supported before any receipt is read, so a ZDR run gives no draft. A draft holds only the run's completed human steps, with typed and selected values replaced by placeholders and a navigation kept to its host, and it writes nothing. No test drives a ZDR run through this route yet: the refusal is a guard in the handler, and tests/zdr_feature_matrix.rs lists the row for that reason",
+        log: Log::Unverified,
+    },
+    Row {
         id: "agent_hit_test",
         routes: &["/v1/agent/runs/{run_id}/hit-test"],
         treatment: Treatment::Inert {

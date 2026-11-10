@@ -238,6 +238,12 @@ services:
       # W4-P3 (F-t3-035): the owner's read of a background process's output, GET /api/v1/chat/runs/{run_id}/processes/{pid}/output.
       # Only the literal `true` enables it; off, the route answers 404 process_output_disabled.
       CHAT_PROCESS_OUTPUT_READ_ENABLED: ${CHAT_PROCESS_OUTPUT_READ_ENABLED:-false}
+      # W4-SH-6 (F-t3-046): governed snapshot links, POST/GET /api/v1/chat/threads/{thread_id}/snapshots, DELETE
+      # /api/v1/chat/snapshots/{id}, the member grants under /api/v1/chat/snapshots/{id}/grants and the member's read
+      # GET /api/v1/chat/shared-snapshots/{id}. Only the literal `true` enables them; off, they answer 404
+      # chat_snapshots_disabled. Pairs with MODEL_GATEWAY_THREAD_SHARES and SESSION_SNAPSHOT_GRANTS_ENABLED on the
+      # Model Plane and VITE_CHAT_SNAPSHOTS on the frontend service. All default off.
+      CHAT_SNAPSHOTS_ENABLED: ${CHAT_SNAPSHOTS_ENABLED:-false}
       # EP-6 S7/S8: the agent builder routes (draft, publish, versions) and the draft preview of a chat turn.
       # Only the literal `true` enables them; off, the builder routes answer 404. Pairs with VITE_AGENT_BUILDER
       # on the frontend service, which mounts the page. Both default off.
@@ -487,6 +493,9 @@ services:
       # EP-6 S8: mounts the agent builder page at /agents/:agentId/edit. Only the literal `true`; pairs with
       # AGENT_DEFINITION_VERSIONS on the gateway, without which the page cannot load a draft.
       VITE_AGENT_BUILDER: ${VITE_AGENT_BUILDER:-false}
+      # W4-SH-6: the share dialog for conversation snapshots and the /chat/shared/:snapshotId viewer page. Only the
+      # literal `true`; pairs with the gateway's CHAT_SNAPSHOTS_ENABLED, without which every snapshot call answers 404.
+      VITE_CHAT_SNAPSHOTS: ${VITE_CHAT_SNAPSHOTS:-false}
       # WS08-S4: images ride as parts. Flip together with the gateway's CHAT_VISION_AS_PARTS_ENABLED.
       VITE_CHAT_VISION_AS_PARTS_ENABLED: ${VITE_CHAT_VISION_AS_PARTS_ENABLED:-false}
     healthcheck:

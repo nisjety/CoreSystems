@@ -3231,6 +3231,22 @@ async fn latest_skill_revision(
         .await
 }
 
+/// The fire key prefix capability-core's event-trigger starter gives a fire it starts through the
+/// scheduled-run path (`trigger:<trigger id>:<webhook event id>`). A cron fire's key is its RFC 3339 slot,
+/// which can never begin with it.
+const TRIGGER_FIRE_KEY_PREFIX: &str = "trigger:";
+
+/// The origin a scheduled run is stamped with. It is derived from the immutable fire key the run is bound
+/// to, never from a request field: a key that starts `trigger:` is a run an event trigger started, and
+/// every other key is a schedule's own slot.
+fn scheduled_run_origin(fire_key: &str) -> RunOrigin {
+    if fire_key.starts_with(TRIGGER_FIRE_KEY_PREFIX) {
+        RunOrigin::Trigger
+    } else {
+        RunOrigin::Schedule
+    }
+}
+
 /// Bind the non-secret schedule identity to the deterministic run row. This
 /// is separate from `StartRunRequest` so generic user runs cannot populate the
 /// schedule namespace. A retry may observe the exact same binding, but a
@@ -3272,7 +3288,7 @@ async fn persist_scheduled_run_bindings(
         "template_digest": req.template_digest,
         "policy_digest": req.policy_digest,
         "idempotency_key": req.idempotency_key,
-        "origin": RunOrigin::Schedule.as_str(),
+        "origin": scheduled_run_origin(&req.fire_key).as_str(),
     });
     if !req.contract_digest.is_empty() {
         let body: serde_json::Value = serde_json::from_str(&req.contract_json)
@@ -3298,8 +3314,8 @@ async fn persist_scheduled_run_bindings(
     // A run bound before the origin stamp existed carries none. It may take the
     // stamp, but a run already stamped with any other origin is never rebound.
     let stamped = metadata.get(ORIGIN_METADATA_KEY).is_some();
-    let origin_bindable =
-        !stamped || RunOrigin::from_metadata(&metadata) == Some(RunOrigin::Schedule);
+    let origin_bindable = !stamped
+        || RunOrigin::from_metadata(&metadata) == Some(scheduled_run_origin(&req.fire_key));
     if !metadata.is_object() || metadata.as_object().is_none() || metadata == serde_json::json!({})
     {
         sqlx::query(
@@ -3321,7 +3337,7 @@ async fn persist_scheduled_run_bindings(
              WHERE id = $1 AND org_id = $3",
         )
         .bind(&req.run_id)
-        .bind(RunOrigin::Schedule.as_str())
+        .bind(scheduled_run_origin(&req.fire_key).as_str())
         .bind(&org_id)
         .bind(ORIGIN_METADATA_KEY)
         .execute(&mut *tx)
@@ -12588,7 +12604,12 @@ pub async fn serve(
         ))
         // EP-12 S14: the owner's share snapshots; answers `unavailable` until its switch is on.
         .add_service(ThreadShareServiceServer::with_interceptor(
-            crate::thread_shares::ThreadShareGrpc { pool: thread_share_pool },
+            crate::thread_shares::ThreadShareGrpc {
+                pool: thread_share_pool,
+                // W4-SH-4: sharing verifies the owner's delegated credential and calls Control.
+                auth: Some(auth.clone()),
+                control: crate::control_grants::ControlGrantsClient::from_env(),
+            },
             auth.clone(),
         ))
         // EP-3 S7: read-only thread reference reads; only the gateway's switched-off tools call it.

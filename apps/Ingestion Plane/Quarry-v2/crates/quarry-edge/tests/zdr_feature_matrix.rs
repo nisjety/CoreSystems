@@ -250,7 +250,13 @@ fn every_enforced_honouring_row_cites_a_test_or_says_why_it_cannot() {
         .collect();
     assert_eq!(
         without_a_test,
-        vec!["search_similar", "agent_resume", "agent_attach", "internal_run_page"],
+        vec![
+            "search_similar",
+            "agent_resume",
+            "agent_attach",
+            "agent_procedure_draft",
+            "internal_run_page"
+        ],
         "a new honoured or refused row without a test: add the test, or add it here on purpose"
     );
 }

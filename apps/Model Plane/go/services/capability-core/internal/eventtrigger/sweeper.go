@@ -27,6 +27,7 @@ type Sweeper struct {
 	interval  time.Duration
 	batchSize int
 	now       func() time.Time
+	wake      wakeGate
 }
 
 // NewSweeper builds the sweeper over the fire table. Both the database and the authorizer are required: a sweeper
@@ -47,6 +48,18 @@ func newSweeper(l ledger, authority cron.FireAuthorizer, limits Limits) *Sweeper
 		batchSize: defaultBatchSize,
 		now:       time.Now,
 	}
+}
+
+// EnableWakeGate turns the wake gate on. Before Control is asked, a fire whose trigger carries a wake filter reads its
+// webhook payload from source and must match the filter. Without this call (the switch is off) stored filters are ignored,
+// and every fire is decided as before. Call it before Start. A nil source fails closed: a filtered fire then stays pending
+// and is refused once its attempts are spent.
+func (s *Sweeper) EnableWakeGate(source WebhookEventSource) {
+	if store, ok := s.ledger.(pgStore); ok {
+		store.wakeFilter = true
+		s.ledger = store
+	}
+	s.wake = payloadWakeGate{source: source}
 }
 
 // Start sweeps until ctx is cancelled. A failed sweep is logged, not fatal.
@@ -95,9 +108,9 @@ func (s *Sweeper) RunOnce(ctx context.Context) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		settlement, authErr := decide(ctx, s.authority, fire, counts, s.limits)
+		settlement, authErr := decide(ctx, s.authority, s.wake, fire, counts, s.limits)
 		if authErr != nil {
-			slog.Warn("event trigger fire authority failed", "trigger_id", fire.TriggerID,
+			slog.Warn("event trigger fire could not be decided", "trigger_id", fire.TriggerID,
 				"status", settlement.Status, "attempts", settlement.Attempts, "error", authErr)
 		}
 		if err := b.settle(ctx, fire, settlement, now); err != nil {

@@ -5,7 +5,10 @@ import {
   threadArchiveAction,
   threadExportInput,
   threadImportInput,
+  threadGrantSnapshotInput,
   threadMarkUnreadAction,
+  threadRevokeSnapshotInput,
+  threadShareSnapshotInput,
   threadStarAction,
 } from '@/shared/actions/chat-history'
 import {
@@ -1944,6 +1947,64 @@ const orgHookRevokeOutput = z
   })
   .passthrough()
 
+// The organization's permission rules (W5-074-c, F-t3-074): a deny or ask rule on one tool, for one target. A rule only
+// tightens a call, so there is no allow. Inputs name no organization: the session supplies it. The target kinds are the
+// closed set capability-core stores: a web domain, a mail recipient's domain (never the address), a command prefix, or
+// any target of the tool. Inputs are camelCase like the rest of the registry; the REST bodies and the outputs are
+// capability-core's wire form.
+const orgPermissionRuleTargetKinds = ['domain', 'recipient', 'command_prefix', 'any'] as const
+
+const orgCreatePermissionRuleInput = z
+  .object({
+    toolPattern: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^(\*|[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}\*?)$/),
+    targetKind: z.enum(orgPermissionRuleTargetKinds),
+    targetPattern: z.string().min(1).max(200),
+    decision: z.enum(['deny', 'ask']),
+  })
+  .strict()
+  .refine((input) => input.targetKind !== 'any' || input.targetPattern === '*', {
+    message: 'an any-target rule takes the pattern *',
+    path: ['targetPattern'],
+  })
+
+const orgDeletePermissionRuleInput = z.object({ ruleId: z.string().min(1).max(200) }).strict()
+
+const orgPermissionRuleRecord = z
+  .object({
+    id: z.string(),
+    tool_pattern: z.string(),
+    target_kind: z.enum(orgPermissionRuleTargetKinds),
+    target_pattern: z.string(),
+    decision: z.enum(['deny', 'ask']),
+    created_by: z.string(),
+    created_at: z.string(),
+  })
+  .passthrough()
+
+const orgPermissionRuleListOutput = z
+  .object({
+    org_id: z.string(),
+    revision: z.number().int().min(0),
+    rules: z.array(orgPermissionRuleRecord),
+  })
+  .passthrough()
+
+const orgPermissionRuleWriteOutput = orgPermissionRuleRecord
+  .extend({ revision: z.number().int().min(0) })
+  .passthrough()
+
+const orgPermissionRuleDeleteOutput = z
+  .object({
+    id: z.string(),
+    deleted: z.literal(true),
+    revision: z.number().int().min(0),
+  })
+  .passthrough()
+
 const membershipInviteMemberInput = z.object({
   orgId: z.string().min(1),
   email: z.string().trim().email().max(320),
@@ -2161,6 +2222,22 @@ const threadImportOutput = z.object({
   threadId: z.string().min(1),
   importedMessages: z.number().int().nonnegative(),
   dropped: z.number().int().nonnegative(),
+})
+
+// A snapshot as the owner sees it (W4-SH-6): the id a grant names, the thread it copies and when it was taken or revoked.
+// The copy itself is read through the shared-snapshot route, never returned by these writes.
+const threadSnapshotOutput = z.object({
+  id: z.string().min(1),
+  threadId: z.string().min(1),
+  title: z.string(),
+  createdAt: z.string(),
+  revokedAt: z.string().nullable(),
+})
+
+// One member grant on a snapshot (W4-SH-6): the member and when Control recorded the grant.
+const threadSnapshotGrantOutput = z.object({
+  granteeUserId: z.string().min(1),
+  grantedAt: z.string().nullable(),
 })
 
 // The library's answers (F-t3-080): one page of document metadata, never text, and one document's text when it is read.
@@ -4273,6 +4350,39 @@ export const actionRegistry = [
     outputSchema: orgHookRevokeOutput,
   },
   {
+    id: 'org.list_permission_rules',
+    label: 'List organization permission rules',
+    description: 'Read the deny and ask rules that tighten the tool calls of the organization agents, and the policy revision they are at. Any member of the organization may read them. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: z.object({}).strict(),
+    outputSchema: orgPermissionRuleListOutput,
+  },
+  {
+    id: 'org.create_permission_rule',
+    label: 'Add organization permission rule',
+    description: 'Add a rule that denies, or asks first about, one tool call of the organization agents for one target: a web domain, a mail recipient domain (never an address), a command prefix, or any target of the tool. A rule only tightens a call and never allows one. Takes effect only where the deployment has switched permission rules on. An org admin only. Refused typed under zero data retention. Never model-executable: a model does not set the rules it runs under.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgCreatePermissionRuleInput,
+    outputSchema: orgPermissionRuleWriteOutput,
+  },
+  {
+    id: 'org.delete_permission_rule',
+    label: 'Remove organization permission rule',
+    description: 'Remove an organization permission rule, so it no longer tightens the calls it covered. The removal is audited. An org admin only. Refused typed under zero data retention. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgDeletePermissionRuleInput,
+    outputSchema: orgPermissionRuleDeleteOutput,
+  },
+  {
     id: 'monitoring.check_now',
     label: 'Check page now',
     description: 'Fetch a monitored URL, fingerprint it, and compare against the org\'s latest baseline.',
@@ -5108,6 +5218,39 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: threadExportInput,
     outputSchema: threadExportOutput,
+  },
+  {
+    id: 'thread.share_snapshot',
+    label: 'Take a conversation snapshot',
+    description: 'Take an immutable, redacted copy of one of the caller\'s own chat conversations so it can be shared with named members of the organisation. There is no public link: the snapshot is read only by its owner and by members the owner then grants a view of. Nothing is shared by taking it. Owner only. Refused under zero data retention, for a waived caller, for a Space conversation and for a thread with a run kept outside retention; at most 20 live snapshots per thread; the route answers 404 while snapshots are off. Never model-executable: a model does not copy a person\'s conversation for others.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: threadShareSnapshotInput,
+    outputSchema: threadSnapshotOutput,
+  },
+  {
+    id: 'thread.revoke_snapshot',
+    label: 'Revoke a conversation snapshot',
+    description: 'Revoke one of the caller\'s own conversation snapshots: its copy is deleted and so is every member grant on it, so nobody can read it again. Owner only. Allowed under zero data retention, since revoking makes no copy. Irreversible: a revoked snapshot is gone, and a new one has to be taken. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: threadRevokeSnapshotInput,
+    outputSchema: threadSnapshotOutput,
+  },
+  {
+    id: 'thread.grant_snapshot',
+    label: 'Share a snapshot with a member',
+    description: 'Give one member of the caller\'s own organisation a view of a live conversation snapshot, or take that view away (change add or remove). The grant is Control\'s: the member reads the redacted copy as static text, only while they are a member and the snapshot is live, and the role is always view. Owner only. Refused under zero data retention for add, for a member outside the organisation, and for a revoked snapshot; the route answers 404 while snapshots are off. Reversible: remove undoes add. Never model-executable: a model never grants access to a person\'s conversation.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: threadGrantSnapshotInput,
+    outputSchema: threadSnapshotGrantOutput,
   },
   {
     id: 'thread.import',

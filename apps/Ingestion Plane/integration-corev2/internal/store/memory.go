@@ -34,6 +34,9 @@ type MemoryRepository struct {
 	// acknowledgement ledger (insertion order); see zdr.go.
 	zdrRecords map[string]ConnectionZDR
 	zdrAcks    []ConnectionZDRAcknowledgement
+
+	// Sealed credential bindings (by binding id); see credential_bindings.go.
+	credentialBindings map[string]CredentialBinding
 }
 
 type memorySCIMToken struct {
@@ -66,6 +69,8 @@ func NewMemoryRepository() *MemoryRepository {
 
 		zdrRecords: map[string]ConnectionZDR{},
 		zdrAcks:    []ConnectionZDRAcknowledgement{},
+
+		credentialBindings: map[string]CredentialBinding{},
 	}
 }
 

@@ -1,0 +1,24 @@
+/* The page behind the replay view of a shared conversation snapshot (W4-SH-6). */
+.verevon-shared-snapshot {
+  box-sizing: border-box;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  width: min(680px, 100%);
+  margin: 0 auto;
+  padding: 24px 16px;
+}
+
+.verevon-shared-snapshot__header h1 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  line-height: 1.3;
+}
+
+.verevon-shared-snapshot__header p,
+.verevon-shared-snapshot__status {
+  margin: 0;
+  color: var(--verevon-e-muted, #667085);
+  font-size: 13px;
+  line-height: 1.5;
+}

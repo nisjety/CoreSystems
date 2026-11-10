@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,10 +48,14 @@ func principalIDFrom(ctx context.Context) string {
 type WikiHandler struct {
 	repo                 *repo.WikiRepo
 	createMaintenanceLog func(context.Context, model.CreateMaintenanceLogInput) (*model.MaintenanceLog, error)
+
+	// createPageProposals mirrors WIKI_CREATE_PAGE_PROPOSALS_ENABLED. MountRoutes
+	// reads it, and with it off the create-page routes are not mounted.
+	createPageProposals bool
 }
 
-func NewWikiHandler(r *repo.WikiRepo) *WikiHandler {
-	return &WikiHandler{repo: r, createMaintenanceLog: r.CreateMaintenanceLog}
+func NewWikiHandler(r *repo.WikiRepo, createPageProposals bool) *WikiHandler {
+	return &WikiHandler{repo: r, createMaintenanceLog: r.CreateMaintenanceLog, createPageProposals: createPageProposals}
 }
 
 type wikiRouteHandlers struct {
@@ -60,6 +65,12 @@ type wikiRouteHandlers struct {
 	listVersions, diffVersions, getBacklinks, submitProposal                http.Handler
 	reviewProposal, createSourceLog, listSourceLogs                         http.Handler
 	createMaintenanceLog, listMaintenanceLogs, maintenanceSweep             http.Handler
+
+	// createPageProposals gates the two create-page routes. They are mounted
+	// only when it is set, so with the switch off they answer 404.
+	createPageProposals bool
+
+	submitCreatePageProposal, listProposals http.Handler
 }
 
 // MountRoutes installs the complete sensitive wiki HTTP surface behind one
@@ -80,6 +91,10 @@ func MountRoutes(r chi.Router, authMiddleware func(http.Handler) http.Handler, h
 		createMaintenanceLog: http.HandlerFunc(h.CreateMaintenanceLog),
 		listMaintenanceLogs:  http.HandlerFunc(h.ListMaintenanceLogs),
 		maintenanceSweep:     http.HandlerFunc(h.MaintenanceSweep),
+
+		createPageProposals:      h.createPageProposals,
+		submitCreatePageProposal: http.HandlerFunc(h.SubmitCreatePageProposal),
+		listProposals:            http.HandlerFunc(h.ListProposals),
 	})
 }
 
@@ -110,6 +125,12 @@ func mountProtectedRoutes(r chi.Router, authMiddleware func(http.Handler) http.H
 		maintenance.Method(http.MethodPost, "/pages/{pageID}/maintenance-logs", h.createMaintenanceLog)
 		read.Method(http.MethodGet, "/pages/{pageID}/maintenance-logs", h.listMaintenanceLogs)
 		maintenance.Method(http.MethodPost, "/maintenance/sweep", h.maintenanceSweep)
+		// Dark behind WIKI_CREATE_PAGE_PROPOSALS_ENABLED. With the switch off,
+		// neither path is mounted, so both answer 404.
+		if h.createPageProposals {
+			write.Method(http.MethodPost, "/proposals/create-page", h.submitCreatePageProposal)
+			read.Method(http.MethodGet, "/proposals", h.listProposals)
+		}
 	})
 }
 
@@ -246,11 +267,80 @@ func (h *WikiHandler) ReviewProposal(w http.ResponseWriter, r *http.Request) {
 	input.ReviewedBy = principalIDFrom(r.Context())
 
 	proposal, version, err := h.repo.ReviewProposal(r.Context(), input)
+	if errors.Is(err, repo.ErrProposalNotPending) {
+		writeError(w, http.StatusConflict, "proposal is no longer pending")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to review proposal")
 		return
 	}
+	if proposal.ProposalStatus == "conflict" {
+		// A create-page accept found a live page at its path. Nothing was
+		// written; the proposal records the conflict.
+		writeJSON(w, http.StatusConflict, map[string]any{"proposal": proposal, "new_version": nil})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"proposal": proposal, "new_version": version})
+}
+
+// SubmitCreatePageProposal files an agent's proposal for a page that does not
+// exist yet. Source refs are required, because a human approves the page on
+// the strength of them. A live page already at the path answers 409.
+func (h *WikiHandler) SubmitCreatePageProposal(w http.ResponseWriter, r *http.Request) {
+	orgID := orgIDFrom(r.Context())
+
+	var input model.SubmitCreatePageProposalInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	input.OrgID = orgID
+	input.ProposedByAgent = principalIDFrom(r.Context())
+
+	if input.ProposedPath == "" || input.ProposedTitle == "" {
+		writeError(w, http.StatusBadRequest, "proposed_path and proposed_title required")
+		return
+	}
+	if len(input.SourceRefs) == 0 {
+		writeError(w, http.StatusBadRequest, "source_refs required for a create-page proposal")
+		return
+	}
+
+	proposal, err := h.repo.SubmitCreatePageProposal(r.Context(), input)
+	if errors.Is(err, repo.ErrPathExists) {
+		writeError(w, http.StatusConflict, "a live page already exists at this path")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to submit create-page proposal")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"proposal": proposal})
+}
+
+// ListProposals returns one org's proposals. status defaults to pending; limit
+// and offset page the result.
+func (h *WikiHandler) ListProposals(w http.ResponseWriter, r *http.Request) {
+	orgID := orgIDFrom(r.Context())
+	status := r.URL.Query().Get("status")
+	if status == "" {
+		status = "pending"
+	}
+	allowedStatuses := map[string]struct{}{"pending": {}, "accepted": {}, "rejected": {}, "conflict": {}}
+	if _, ok := allowedStatuses[status]; !ok {
+		writeError(w, http.StatusBadRequest, "status must be pending, accepted, rejected or conflict")
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+
+	proposals, total, err := h.repo.ListProposals(r.Context(), orgID, status, limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list proposals")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"proposals": proposals, "total": total})
 }
 
 func (h *WikiHandler) CreateSourceLog(w http.ResponseWriter, r *http.Request) {

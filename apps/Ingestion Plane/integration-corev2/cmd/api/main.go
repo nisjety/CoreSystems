@@ -150,6 +150,13 @@ func main() {
 		}
 	}
 
+	// Credential bindings (dark): the admin routes seal a bound secret with this vault. Without the
+	// switch no sealer is passed and the routes are absent (404).
+	var credentialSealer api.CredentialSealer
+	if cfg.CredentialBindingsEnabled {
+		credentialSealer = vault
+	}
+
 	// Microsoft's token/profile endpoints are fixed deployment config
 	// (cfg.MicrosoftTokenURL, cfg.MicrosoftGraphBaseURL), but are guarded here
 	// purely for consistency with every other provider client
@@ -329,6 +336,7 @@ func main() {
 		HotPath:            hotpath.NewHTTPWebhookNormalizer(cfg.WebhookHotPathURL, hotPathClient),
 		CodexSubscriptions: codexSubscriptions,
 		CustomerGateway:    customerGateway,
+		CredentialSealer:   credentialSealer,
 		// Same finspo-core client the finspo worker uses; lets the generic
 		// sync route answer 409 no_sources_registered instead of queuing a
 		// Microsoft job that has no library to sync. ErrNotConfigured (no

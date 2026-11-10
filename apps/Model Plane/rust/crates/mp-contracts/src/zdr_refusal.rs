@@ -420,6 +420,12 @@ pub const FEATURES: &[Feature] = &[
         key: "process_output_spill",
         label: "saving background process output to files",
     },
+    // W4-CC-5: a static-bearer MCP server redeems its stored credential for each call. A ZDR or waived turn never
+    // redeems one, so a request that would use such a server is refused before any call.
+    Feature {
+        key: "mcp_secret_ref",
+        label: "MCP servers that use a stored credential",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

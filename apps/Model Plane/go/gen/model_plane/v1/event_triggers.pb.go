@@ -49,9 +49,17 @@ type EventTrigger struct {
 	// When the trigger was created.
 	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
 	// When the trigger last changed.
-	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	UpdatedAt *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	// The id of the member's cron schedule this trigger is bound to, or empty for a record-only trigger.
+	// A fire runs under that schedule's consent contract. The binding grants no authority by itself:
+	// Control authorises every fire (W4-F T3).
+	ScheduleId string `protobuf:"bytes,13,opt,name=schedule_id,json=scheduleId,proto3" json:"schedule_id,omitempty"`
+	// The wake filter the trigger's fires must match, as canonical JSON in the closed version 1 schema, or empty for a
+	// trigger with none. Session Core checks the schema and stores it. capability-core reads it before a fire is decided,
+	// and only when EVENT_TRIGGER_WAKE_GATE_ENABLED is on (W4-F T5). The filter grants no authority by itself.
+	WakeFilterJson string `protobuf:"bytes,14,opt,name=wake_filter_json,json=wakeFilterJson,proto3" json:"wake_filter_json,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *EventTrigger) Reset() {
@@ -168,6 +176,20 @@ func (x *EventTrigger) GetUpdatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *EventTrigger) GetScheduleId() string {
+	if x != nil {
+		return x.ScheduleId
+	}
+	return ""
+}
+
+func (x *EventTrigger) GetWakeFilterJson() string {
+	if x != nil {
+		return x.WakeFilterJson
+	}
+	return ""
+}
+
 // Create a trigger for the caller, who becomes its member. The new trigger starts "active".
 type CreateEventTriggerRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -182,9 +204,16 @@ type CreateEventTriggerRequest struct {
 	// A short label, 1 to 120 characters after trimming.
 	Name string `protobuf:"bytes,5,opt,name=name,proto3" json:"name,omitempty"`
 	// Whether the clock arm is enabled. False when unset.
-	ClockEnabled  bool `protobuf:"varint,6,opt,name=clock_enabled,json=clockEnabled,proto3" json:"clock_enabled,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ClockEnabled bool `protobuf:"varint,6,opt,name=clock_enabled,json=clockEnabled,proto3" json:"clock_enabled,omitempty"`
+	// The cron schedule to bind, or empty for a record-only trigger. The schedule must be the caller's own
+	// live schedule in the same org and Space and carry an approval contract, or the create is refused with
+	// trigger_schedule_mismatch (W4-F T3).
+	ScheduleId string `protobuf:"bytes,7,opt,name=schedule_id,json=scheduleId,proto3" json:"schedule_id,omitempty"`
+	// The wake filter, as JSON in the closed version 1 schema, or empty for none. A filter the schema does not allow is
+	// refused as invalid_event_trigger (W4-F T5).
+	WakeFilterJson string `protobuf:"bytes,8,opt,name=wake_filter_json,json=wakeFilterJson,proto3" json:"wake_filter_json,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *CreateEventTriggerRequest) Reset() {
@@ -257,6 +286,20 @@ func (x *CreateEventTriggerRequest) GetClockEnabled() bool {
 		return x.ClockEnabled
 	}
 	return false
+}
+
+func (x *CreateEventTriggerRequest) GetScheduleId() string {
+	if x != nil {
+		return x.ScheduleId
+	}
+	return ""
+}
+
+func (x *CreateEventTriggerRequest) GetWakeFilterJson() string {
+	if x != nil {
+		return x.WakeFilterJson
+	}
+	return ""
 }
 
 // Read one trigger the caller owns.
@@ -425,16 +468,22 @@ type UpdateEventTriggerRequest struct {
 	TriggerId string `protobuf:"bytes,2,opt,name=trigger_id,json=triggerId,proto3" json:"trigger_id,omitempty"`
 	// The revision the caller saw. A stale one is refused with aborted event_trigger_revision_conflict.
 	ExpectedRevision uint64 `protobuf:"varint,3,opt,name=expected_revision,json=expectedRevision,proto3" json:"expected_revision,omitempty"`
-	// The fields to change: any of "name", "clock_enabled" and "status". Required.
+	// The fields to change: any of "name", "clock_enabled", "status", "schedule_id" and "wake_filter_json". Required.
 	UpdatePaths []string `protobuf:"bytes,4,rep,name=update_paths,json=updatePaths,proto3" json:"update_paths,omitempty"`
 	// The new label. Read when "name" is named.
 	Name string `protobuf:"bytes,5,opt,name=name,proto3" json:"name,omitempty"`
 	// The new clock flag. Read when "clock_enabled" is named.
 	ClockEnabled bool `protobuf:"varint,6,opt,name=clock_enabled,json=clockEnabled,proto3" json:"clock_enabled,omitempty"`
 	// The new status, "active", "paused" or "disabled". Read when "status" is named.
-	Status        string `protobuf:"bytes,7,opt,name=status,proto3" json:"status,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Status string `protobuf:"bytes,7,opt,name=status,proto3" json:"status,omitempty"`
+	// The new schedule binding, read when "schedule_id" is named. Empty unbinds the trigger. A non-empty id
+	// is checked as on create (W4-F T3).
+	ScheduleId string `protobuf:"bytes,8,opt,name=schedule_id,json=scheduleId,proto3" json:"schedule_id,omitempty"`
+	// The new wake filter, read when "wake_filter_json" is named. Empty removes the filter. A non-empty filter is checked
+	// as on create (W4-F T5).
+	WakeFilterJson string `protobuf:"bytes,9,opt,name=wake_filter_json,json=wakeFilterJson,proto3" json:"wake_filter_json,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *UpdateEventTriggerRequest) Reset() {
@@ -516,6 +565,20 @@ func (x *UpdateEventTriggerRequest) GetStatus() string {
 	return ""
 }
 
+func (x *UpdateEventTriggerRequest) GetScheduleId() string {
+	if x != nil {
+		return x.ScheduleId
+	}
+	return ""
+}
+
+func (x *UpdateEventTriggerRequest) GetWakeFilterJson() string {
+	if x != nil {
+		return x.WakeFilterJson
+	}
+	return ""
+}
+
 // One trigger and whether it was found for the caller.
 type EventTriggerResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -575,7 +638,7 @@ var File_model_plane_v1_event_triggers_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_event_triggers_proto_rawDesc = "" +
 	"\n" +
-	"#model_plane/v1/event_triggers.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x9f\x03\n" +
+	"#model_plane/v1/event_triggers.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xea\x03\n" +
 	"\fEventTrigger\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x1b\n" +
@@ -592,7 +655,10 @@ const file_model_plane_v1_event_triggers_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
-	"updated_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"\xcc\x01\n" +
+	"updated_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12\x1f\n" +
+	"\vschedule_id\x18\r \x01(\tR\n" +
+	"scheduleId\x12(\n" +
+	"\x10wake_filter_json\x18\x0e \x01(\tR\x0ewakeFilterJson\"\x97\x02\n" +
 	"\x19CreateEventTriggerRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
 	"\tspace_ref\x18\x02 \x01(\tR\bspaceRef\x12#\n" +
@@ -600,7 +666,10 @@ const file_model_plane_v1_event_triggers_proto_rawDesc = "" +
 	"\n" +
 	"event_type\x18\x04 \x01(\tR\teventType\x12\x12\n" +
 	"\x04name\x18\x05 \x01(\tR\x04name\x12#\n" +
-	"\rclock_enabled\x18\x06 \x01(\bR\fclockEnabled\"N\n" +
+	"\rclock_enabled\x18\x06 \x01(\bR\fclockEnabled\x12\x1f\n" +
+	"\vschedule_id\x18\a \x01(\tR\n" +
+	"scheduleId\x12(\n" +
+	"\x10wake_filter_json\x18\b \x01(\tR\x0ewakeFilterJson\"N\n" +
 	"\x16GetEventTriggerRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1d\n" +
 	"\n" +
@@ -609,7 +678,7 @@ const file_model_plane_v1_event_triggers_proto_rawDesc = "" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1b\n" +
 	"\tspace_ref\x18\x02 \x01(\tR\bspaceRef\"U\n" +
 	"\x19ListEventTriggersResponse\x128\n" +
-	"\btriggers\x18\x01 \x03(\v2\x1c.model_plane.v1.EventTriggerR\btriggers\"\xf2\x01\n" +
+	"\btriggers\x18\x01 \x03(\v2\x1c.model_plane.v1.EventTriggerR\btriggers\"\xbd\x02\n" +
 	"\x19UpdateEventTriggerRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1d\n" +
 	"\n" +
@@ -618,7 +687,10 @@ const file_model_plane_v1_event_triggers_proto_rawDesc = "" +
 	"\fupdate_paths\x18\x04 \x03(\tR\vupdatePaths\x12\x12\n" +
 	"\x04name\x18\x05 \x01(\tR\x04name\x12#\n" +
 	"\rclock_enabled\x18\x06 \x01(\bR\fclockEnabled\x12\x16\n" +
-	"\x06status\x18\a \x01(\tR\x06status\"d\n" +
+	"\x06status\x18\a \x01(\tR\x06status\x12\x1f\n" +
+	"\vschedule_id\x18\b \x01(\tR\n" +
+	"scheduleId\x12(\n" +
+	"\x10wake_filter_json\x18\t \x01(\tR\x0ewakeFilterJson\"d\n" +
 	"\x14EventTriggerResponse\x126\n" +
 	"\atrigger\x18\x01 \x01(\v2\x1c.model_plane.v1.EventTriggerR\atrigger\x12\x14\n" +
 	"\x05found\x18\x02 \x01(\bR\x05found2\xae\x03\n" +

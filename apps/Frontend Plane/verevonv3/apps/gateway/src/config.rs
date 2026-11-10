@@ -159,6 +159,13 @@ pub(crate) struct AppState {
     /// A rollout control, never an authorization input: Control's sandbox-manager read decision and
     /// Model Gateway's run-owner check decide what a caller reads.
     pub(crate) chat_process_output_enabled: bool,
+    /// `CHAT_SNAPSHOTS_ENABLED` (W4-SH-6): the owner's governed snapshot links, `POST/GET
+    /// /api/v1/chat/threads/{thread_id}/snapshots`, `DELETE /api/v1/chat/snapshots/{id}`, the grant routes
+    /// under `/api/v1/chat/snapshots/{id}/grants` and the member's read `GET /api/v1/chat/shared-snapshots/{id}`.
+    /// Read once from the environment in `build_state`, exactly `true` turns it on. Off, every one of those routes
+    /// answers 404 `chat_snapshots_disabled`. A rollout control, never an authorization input: Session Core proves the
+    /// owner, Control holds the grants, and Model Gateway has its own switch.
+    pub(crate) chat_snapshots_enabled: bool,
     /// "Forward an email to create a task" inbound pipeline (chat-wave2
     /// mail-task spec, owner ruling 2026-09-28: Postmark inbound,
     /// self-forward only). Empty token = the whole `/internal/mail-task/ingest`
@@ -784,6 +791,7 @@ pub(crate) async fn build_state() -> Result<AppState> {
         model_entitlement_admin_enabled: model_entitlement_admin_enabled(),
         agent_definition_versions: agent_definition_versions_enabled(),
         chat_process_output_enabled: chat_process_output_enabled(),
+        chat_snapshots_enabled: chat_snapshots_enabled(),
         mail_task_ingest_service_token: optional_env("MAIL_TASK_INGEST_SERVICE_TOKEN"),
         mail_task_nats_url: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_URL"),
         mail_task_nats_user: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_USER"),
@@ -998,6 +1006,18 @@ fn chat_process_output_enabled() -> bool {
 /// Exactly the word `true`, for the same reason as `continue_park_form_from`: a stray `1` or `TRUE`
 /// would open a route that relays a process's output before anyone chose to.
 fn chat_process_output_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// `CHAT_SNAPSHOTS_ENABLED`, read once by `build_state` (W4-SH-6). Off unless it is exactly `true`. The snapshot
+/// routes read it from `AppState`, never from the environment.
+fn chat_snapshots_enabled() -> bool {
+    chat_snapshots_from(env::var("CHAT_SNAPSHOTS_ENABLED").ok().as_deref())
+}
+
+/// Exactly the word `true`, for the same reason as `continue_park_form_from`: a stray `1` or `TRUE` would open the
+/// routes that copy a conversation and share it before anyone chose to.
+fn chat_snapshots_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 

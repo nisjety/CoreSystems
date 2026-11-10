@@ -3,7 +3,8 @@ import { z } from 'zod'
 // The client action contract for chat history (WS17). Each action names one
 // change to a conversation the server owns, so the browser parses the request
 // here before it sends anything. The archive pair and `thread.search` are wired;
-// `thread.export` is declared for the export surface (EP-12 S11); the other actions
+// `thread.export` is declared for the export surface (EP-12 S11); `thread.share_snapshot`,
+// `thread.revoke_snapshot` and `thread.grant_snapshot` are the governed snapshot links (W4-SH-6); the other actions
 // are declared so the later history slices extend this union instead of inventing
 // parallel names. `thread.search`, `thread.export` and `thread.side_chat` only read.
 // `thread.spin_off` creates nothing on the server: the browser opens a draft, and nothing
@@ -34,6 +35,22 @@ const threadImportFields = {
     }),
   title: z.string().trim().max(96).optional(),
 }
+
+// Governed snapshot links (W4-SH-6, F-t3-046). A snapshot is an immutable, redacted copy of one of the caller's own
+// conversations; it is shared with named members of the organisation and never by a public link. The owner and the
+// organisation are the session's, so none is named here and a body that names one is refused rather than dropped.
+const snapshotId = z.string().trim().min(1).max(200)
+const granteeUserId = z.string().trim().min(1).max(200)
+
+// Take a snapshot of one conversation.
+const threadShareSnapshotFields = { threadId }
+
+// Revoke one snapshot: its copy is deleted and so are its member grants.
+const threadRevokeSnapshotFields = { snapshotId }
+
+// Share a live snapshot with one member of the organisation, or stop sharing it with that member. `change` has no
+// default: the person picks add or remove.
+const threadGrantSnapshotFields = { snapshotId, granteeUserId, change: z.enum(['add', 'remove']) }
 
 // The three members the command palette runs (W5-077-c) are named, so the palette's inputs reuse them
 // instead of restating the fields. The union below is unchanged.
@@ -66,6 +83,9 @@ export const chatHistoryActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('thread.search'), query: z.string().trim().min(1).max(200), threadId: threadId.optional() }),
   z.object({ type: z.literal('thread.export'), ...threadExportFields }),
   z.object({ type: z.literal('thread.import'), ...threadImportFields }),
+  z.object({ type: z.literal('thread.share_snapshot'), ...threadShareSnapshotFields }),
+  z.object({ type: z.literal('thread.revoke_snapshot'), ...threadRevokeSnapshotFields }),
+  z.object({ type: z.literal('thread.grant_snapshot'), ...threadGrantSnapshotFields }),
   z.object({ type: z.literal('message.switch_version'), threadId, messageId, index: z.number().int().min(0).max(100) }),
   // A rewind moves the active leaf and deletes nothing, but it still changes
   // which answer the next turn sees, so the caller must confirm it explicitly.
@@ -84,6 +104,11 @@ export const threadExportInput = z.object(threadExportFields).strict()
 // The registry's input for the import: the file's text and the optional title, and nothing else. The new thread is the
 // session's, so a body that names an owner or an organisation is refused rather than dropped.
 export const threadImportInput = z.object(threadImportFields).strict()
+
+// The registry's inputs for the snapshot actions: the fields above and nothing else.
+export const threadShareSnapshotInput = z.object(threadShareSnapshotFields).strict()
+export const threadRevokeSnapshotInput = z.object(threadRevokeSnapshotFields).strict()
+export const threadGrantSnapshotInput = z.object(threadGrantSnapshotFields).strict()
 
 export type ChatHistoryAction = z.infer<typeof chatHistoryActionSchema>
 

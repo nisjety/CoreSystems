@@ -890,6 +890,8 @@ pub(crate) mod tests {
             ("http_routes.rs", "create_org_hook_proxy"),
             ("http_routes.rs", "update_org_hook_proxy"),
             ("http_routes.rs", "delete_org_hook_proxy"),
+            ("http_routes.rs", "create_org_permission_rule_proxy"),
+            ("http_routes.rs", "delete_org_permission_rule_proxy"),
             ("http_routes.rs", "approve_plan"),
             ("http_routes.rs", "reject_plan"),
             ("http_routes.rs", "update_todo_status"),

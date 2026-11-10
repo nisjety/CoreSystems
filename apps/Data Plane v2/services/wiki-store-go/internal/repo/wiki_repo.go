@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -322,29 +323,9 @@ func (r *WikiRepo) CreatePage(ctx context.Context, input model.CreatePageInput) 
 
 	// Phase 1 RLS: this function already opened its own transaction, so the
 	// scope replaces that Begin rather than nesting a second transaction
-	// inside it. Ordering matters for RLS as well as for the FK: the
-	// wiki_pages row is inserted first, so the wiki_page_versions WITH CHECK
-	// — which derives the org from its parent page — can see it.
+	// inside it. The writes themselves are insertPageTx.
 	err := orgscope.WithOrgScope(ctx, r.pool, input.OrgID, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO wiki_pages (page_id, org_id, workspace_id, title, path, current_version_id, page_status)
-			VALUES ($1, $2, $3, $4, $5, $6, 'published')
-		`, pageID, input.OrgID, input.WorkspaceID, input.Title, input.Path, versionID); err != nil {
-			return fmt.Errorf("insert page: %w", err)
-		}
-
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO wiki_page_versions (version_id, page_id, content, version_status, created_at, published_at)
-			VALUES ($1, $2, $3, 'published', $4, $4)
-		`, versionID, pageID, input.InitialContent, now); err != nil {
-			return fmt.Errorf("insert version: %w", err)
-		}
-
-		return enqueueWikiPublished(ctx, tx, events.WikiVersionPublishedEvent{
-			PageID: pageID, VersionID: versionID, OrgID: input.OrgID,
-			WorkspaceID: input.WorkspaceID, Title: input.Title, Path: input.Path,
-			Content: input.InitialContent, UserID: verifiedPrincipalID(ctx), ZDR: false,
-		})
+		return insertPageTx(ctx, tx, input, pageID, versionID, now)
 	})
 	if err != nil {
 		return nil, nil, err
@@ -354,6 +335,34 @@ func (r *WikiRepo) CreatePage(ctx context.Context, input model.CreatePageInput) 
 	version, _ := r.GetVersionForPage(ctx, input.OrgID, pageID, versionID)
 
 	return page, version, nil
+}
+
+// insertPageTx writes a published page, its first version and the publish
+// event inside tx. CreatePage and the create-page proposal review share it, so
+// a page is written the same way on both paths. Ordering matters for RLS as
+// well as for the FK: the wiki_pages row is inserted first, so the
+// wiki_page_versions WITH CHECK — which derives the org from its parent page —
+// can see it.
+func insertPageTx(ctx context.Context, tx pgx.Tx, input model.CreatePageInput, pageID, versionID string, now time.Time) error {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO wiki_pages (page_id, org_id, workspace_id, title, path, current_version_id, page_status)
+		VALUES ($1, $2, $3, $4, $5, $6, 'published')
+	`, pageID, input.OrgID, input.WorkspaceID, input.Title, input.Path, versionID); err != nil {
+		return fmt.Errorf("insert page: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO wiki_page_versions (version_id, page_id, content, version_status, created_at, published_at)
+		VALUES ($1, $2, $3, 'published', $4, $4)
+	`, versionID, pageID, input.InitialContent, now); err != nil {
+		return fmt.Errorf("insert version: %w", err)
+	}
+
+	return enqueueWikiPublished(ctx, tx, events.WikiVersionPublishedEvent{
+		PageID: pageID, VersionID: versionID, OrgID: input.OrgID,
+		WorkspaceID: input.WorkspaceID, Title: input.Title, Path: input.Path,
+		Content: input.InitialContent, UserID: verifiedPrincipalID(ctx), ZDR: false,
+	})
 }
 
 func (r *WikiRepo) CreateVersion(ctx context.Context, input model.UpdateVersionInput) (*model.WikiPageVersion, error) {
@@ -435,18 +444,20 @@ func (r *WikiRepo) GetProposal(ctx context.Context, orgID, proposalID string) (*
 	// Phase 1 RLS: single-org proposal read.
 	err := orgscope.WithOrgScope(ctx, r.pool, orgID, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
-			SELECT proposal.proposal_id, proposal.page_id, proposal.org_id, proposal.proposed_content,
+			SELECT proposal.proposal_id, COALESCE(proposal.page_id, ''), proposal.org_id, proposal.proposed_content,
 			       proposal.edit_reason, proposal.proposed_by_agent, proposal.source_refs,
-			       proposal.proposal_status, proposal.reviewed_by, proposal.metadata, proposal.created_at
+			       proposal.proposal_status, proposal.reviewed_by, proposal.metadata, proposal.created_at,
+			       proposal.proposal_kind, proposal.proposed_path, proposal.proposed_title
 			FROM wiki_proposals AS proposal
-			JOIN wiki_pages AS page ON page.page_id = proposal.page_id
+			LEFT JOIN wiki_pages AS page ON page.page_id = proposal.page_id AND page.org_id = proposal.org_id
 			WHERE proposal.proposal_id = $1 AND proposal.org_id = $2
-			  AND page.org_id = proposal.org_id AND page.deleted_at IS NULL
-			  AND LOWER(COALESCE(page.page_status, '')) <> 'deleted'
+			  AND (proposal.proposal_kind = 'create_page'
+			       OR (page.page_id IS NOT NULL AND page.deleted_at IS NULL
+			           AND LOWER(COALESCE(page.page_status, '')) <> 'deleted'))
 		`, proposalID, orgID).Scan(
 			&p.ProposalID, &p.PageID, &p.OrgID, &p.ProposedContent, &p.EditReason,
 			&p.ProposedByAgent, &p.SourceRefs, &p.ProposalStatus, &p.ReviewedBy,
-			&p.Metadata, &p.CreatedAt,
+			&p.Metadata, &p.CreatedAt, &p.ProposalKind, &p.ProposedPath, &p.ProposedTitle,
 		)
 	})
 	if err != nil {
@@ -459,6 +470,9 @@ func (r *WikiRepo) ReviewProposal(ctx context.Context, input model.ReviewProposa
 	proposal, err := r.GetProposal(ctx, input.OrgID, input.ProposalID)
 	if err != nil {
 		return nil, nil, err
+	}
+	if proposal.ProposalKind == model.ProposalKindCreatePage {
+		return r.reviewCreatePageProposal(ctx, input, proposal)
 	}
 
 	status := "rejected"
@@ -501,6 +515,202 @@ func (r *WikiRepo) ReviewProposal(ctx context.Context, input model.ReviewProposa
 	}
 
 	return proposal, nil, nil
+}
+
+// ErrPathExists reports that a live page already holds the path a create-page
+// proposal asks for. Nothing is filed.
+var ErrPathExists = errors.New("a live page already exists at this path")
+
+// ErrProposalNotPending reports a review of a proposal that is already decided.
+// The earlier decision stands and nothing is written.
+var ErrProposalNotPending = errors.New("proposal is no longer pending")
+
+// SubmitCreatePageProposal files an agent's proposal for a page that does not
+// exist yet. The row carries the path and title and no page_id. The insert is
+// refused with ErrPathExists when a live page already holds the path. The
+// review checks the path again under lock, because a page can appear after
+// filing.
+func (r *WikiRepo) SubmitCreatePageProposal(ctx context.Context, input model.SubmitCreatePageProposalInput) (*model.WikiProposal, error) {
+	id := uuid.New().String()
+	refs, _ := json.Marshal(input.SourceRefs)
+
+	// Phase 1 RLS: the row is written inside this org's scope, and the NOT
+	// EXISTS guard reads wiki_pages through the same scope.
+	err := orgscope.WithOrgScope(ctx, r.pool, input.OrgID, func(tx pgx.Tx) error {
+		result, err := tx.Exec(ctx, `
+			INSERT INTO wiki_proposals (proposal_id, org_id, proposed_content, edit_reason, proposed_by_agent, source_refs, proposal_status, proposal_kind, proposed_path, proposed_title)
+			SELECT $1, $2, $3, $4, $5, $6, 'pending', 'create_page', $7, $8
+			WHERE NOT EXISTS (
+				SELECT 1 FROM wiki_pages
+				WHERE org_id = $2 AND path = $7 AND deleted_at IS NULL
+				  AND LOWER(COALESCE(page_status, '')) <> 'deleted'
+			)
+		`, id, input.OrgID, input.ProposedContent, input.EditReason, input.ProposedByAgent, refs, input.ProposedPath, input.ProposedTitle)
+		if err != nil {
+			return fmt.Errorf("insert create-page proposal: %w", err)
+		}
+		if result.RowsAffected() != 1 {
+			return ErrPathExists
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return r.GetProposal(ctx, input.OrgID, id)
+}
+
+// reviewCreatePageProposal decides one create-page proposal in one transaction.
+// The proposal row is locked first, so a second review waits, then finds the
+// proposal decided and gets ErrProposalNotPending: a double click cannot write
+// two pages. An accept takes a lock on the path, then either writes the page
+// and its first version (insertPageTx) or, when a live page already holds the
+// path, records conflict and writes nothing. The status change commits with
+// whatever the decision wrote.
+func (r *WikiRepo) reviewCreatePageProposal(ctx context.Context, input model.ReviewProposalInput, proposal *model.WikiProposal) (*model.WikiProposal, *model.WikiPageVersion, error) {
+	if proposal.ProposedPath == nil || proposal.ProposedTitle == nil {
+		return proposal, nil, fmt.Errorf("create-page proposal %s has no path or title", proposal.ProposalID)
+	}
+
+	pageID := uuid.New().String()
+	versionID := uuid.New().String()
+	now := time.Now()
+	status := "rejected"
+
+	err := orgscope.WithOrgScope(ctx, r.pool, input.OrgID, func(tx pgx.Tx) error {
+		var current string
+		if err := tx.QueryRow(ctx, `
+			SELECT proposal_status FROM wiki_proposals
+			WHERE proposal_id = $1 AND org_id = $2 AND proposal_kind = 'create_page'
+			FOR UPDATE
+		`, input.ProposalID, input.OrgID).Scan(&current); err != nil {
+			return fmt.Errorf("lock create-page proposal: %w", err)
+		}
+		if current != "pending" {
+			return ErrProposalNotPending
+		}
+
+		if input.Decision == "accept" {
+			// Two proposals for one path may be reviewed at once. The advisory
+			// lock lets only one of them check the path and write the page. The
+			// key joins org and path with '|'; a NUL byte cannot live in text.
+			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`,
+				input.OrgID+"|"+*proposal.ProposedPath); err != nil {
+				return fmt.Errorf("lock page path: %w", err)
+			}
+
+			var taken bool
+			if err := tx.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM wiki_pages
+					WHERE org_id = $1 AND path = $2 AND deleted_at IS NULL
+					  AND LOWER(COALESCE(page_status, '')) <> 'deleted'
+				)
+			`, input.OrgID, *proposal.ProposedPath).Scan(&taken); err != nil {
+				return fmt.Errorf("check page path: %w", err)
+			}
+			if taken {
+				status = "conflict"
+			} else {
+				if err := insertPageTx(ctx, tx, model.CreatePageInput{
+					OrgID:          input.OrgID,
+					Title:          *proposal.ProposedTitle,
+					Path:           *proposal.ProposedPath,
+					InitialContent: proposal.ProposedContent,
+				}, pageID, versionID, now); err != nil {
+					return err
+				}
+				status = "accepted"
+			}
+		}
+
+		if _, err := tx.Exec(ctx,
+			"UPDATE wiki_proposals SET proposal_status = $1, reviewed_by = $2 WHERE proposal_id = $3 AND org_id = $4",
+			status, input.ReviewedBy, input.ProposalID, input.OrgID); err != nil {
+			return fmt.Errorf("update proposal status: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return proposal, nil, err
+	}
+
+	proposal.ProposalStatus = status
+	rb := input.ReviewedBy
+	proposal.ReviewedBy = &rb
+	if status != "accepted" {
+		return proposal, nil, nil
+	}
+	version, _ := r.GetVersionForPage(ctx, input.OrgID, pageID, versionID)
+	return proposal, version, nil
+}
+
+// ListProposals returns one org's proposals with the given status, newest
+// first, with the total for paging. Edit proposals are listed only while their
+// page is live, as GetProposal requires. Create-page proposals have no page to
+// check and are always listed.
+func (r *WikiRepo) ListProposals(ctx context.Context, orgID, status string, limit, offset int) ([]model.WikiProposal, int, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	var total int
+	proposals := []model.WikiProposal{}
+
+	// Phase 1 RLS: one org's proposal queue. The count and the page share one
+	// scoped transaction.
+	err := orgscope.WithOrgScope(ctx, r.pool, orgID, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `
+			SELECT COUNT(*) FROM wiki_proposals AS proposal
+			LEFT JOIN wiki_pages AS page ON page.page_id = proposal.page_id AND page.org_id = proposal.org_id
+			WHERE proposal.org_id = $1 AND proposal.proposal_status = $2
+			  AND (proposal.proposal_kind = 'create_page'
+			       OR (page.page_id IS NOT NULL AND page.deleted_at IS NULL
+			           AND LOWER(COALESCE(page.page_status, '')) <> 'deleted'))
+		`, orgID, status).Scan(&total); err != nil {
+			return fmt.Errorf("count proposals: %w", err)
+		}
+
+		rows, err := tx.Query(ctx, `
+			SELECT proposal.proposal_id, COALESCE(proposal.page_id, ''), proposal.org_id, proposal.proposed_content,
+			       proposal.edit_reason, proposal.proposed_by_agent, proposal.source_refs,
+			       proposal.proposal_status, proposal.reviewed_by, proposal.metadata, proposal.created_at,
+			       proposal.proposal_kind, proposal.proposed_path, proposal.proposed_title
+			FROM wiki_proposals AS proposal
+			LEFT JOIN wiki_pages AS page ON page.page_id = proposal.page_id AND page.org_id = proposal.org_id
+			WHERE proposal.org_id = $1 AND proposal.proposal_status = $2
+			  AND (proposal.proposal_kind = 'create_page'
+			       OR (page.page_id IS NOT NULL AND page.deleted_at IS NULL
+			           AND LOWER(COALESCE(page.page_status, '')) <> 'deleted'))
+			ORDER BY proposal.created_at DESC, proposal.proposal_id DESC
+			LIMIT $3 OFFSET $4
+		`, orgID, status, limit, offset)
+		if err != nil {
+			return fmt.Errorf("list proposals: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var p model.WikiProposal
+			if err := rows.Scan(
+				&p.ProposalID, &p.PageID, &p.OrgID, &p.ProposedContent, &p.EditReason,
+				&p.ProposedByAgent, &p.SourceRefs, &p.ProposalStatus, &p.ReviewedBy,
+				&p.Metadata, &p.CreatedAt, &p.ProposalKind, &p.ProposedPath, &p.ProposedTitle,
+			); err != nil {
+				return fmt.Errorf("scan proposal: %w", err)
+			}
+			proposals = append(proposals, p)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	return proposals, total, nil
 }
 
 func (r *WikiRepo) CreateSourceLog(ctx context.Context, input model.CreateSourceLogInput) (*model.SourceLog, error) {

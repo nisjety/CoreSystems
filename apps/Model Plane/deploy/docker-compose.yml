@@ -222,6 +222,8 @@ services:
       MP_COMPAT_MODE: v1_only
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: model-gateway
+      # F-t3-075 (W5-075-a): JSON logs and exported span attributes keep only the names on TRACE_FIELDS. Only the literal true.
+      MP_TELEMETRY_FIELD_ALLOWLIST: ${MP_TELEMETRY_FIELD_ALLOWLIST:-false}
       # Shared-Space transcript reads return only allowlisted metadata keys
       # (WS07-S9a). `1` restores the old pass-through (kill switch only).
       SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH: ${SPACE_ROOM_METADATA_LEGACY_PASSTHROUGH:-false}
@@ -374,6 +376,9 @@ services:
       # W4-IMG-3: generate_image as a typed tool in the chat tool loop (one image per call, four per reply). Never offered on a
       # ZDR or waived turn; the org's cap.inference.image tool policy can withhold it. Only the literal true.
       MODEL_GATEWAY_IMAGE_TOOL: ${MODEL_GATEWAY_IMAGE_TOOL:-false}
+      # W5-087: create_artifact accepts kind web_bundle, a multi-file static page the gateway checks and inlines into one html
+      # artifact (no module syntax, no URL that leaves the page). Off by default; only the literal true turns it on.
+      MODEL_GATEWAY_WEB_BUNDLE_ARTIFACTS: ${MODEL_GATEWAY_WEB_BUNDLE_ARTIFACTS:-false}
       # EP-5 S6: a turn's brand deck template, mounted read-only for the build. Needs SKILL_BUNDLE_MOUNT_ENABLED. Only the
       # literal true.
       SKILL_DECK_TEMPLATES_ENABLED: ${SKILL_DECK_TEMPLATES_ENABLED:-false}
@@ -395,6 +400,12 @@ services:
       # MCP server probe (POST /v1/mcp/servers/probe): a server's auth requirement and tools, saved nothing. Only the
       # literal true turns it on; off, the route is a 404.
       MODEL_GATEWAY_MCP_PROBE: ${MODEL_GATEWAY_MCP_PROBE:-false}
+      # W4-CC-5: a static-bearer MCP server (auth_kind static_bearer) redeems its integration-corev2 credential binding
+      # for each call. Only the literal true turns it on; off, such a registration is refused. IC_CREDENTIAL_REF_KEY is
+      # this service's principal key for integration-corev2's credential-reference routes, and it must equal that
+      # service's CREDENTIAL_REF_SEAL_KEYS entry for model-gateway.
+      MCP_SECRET_REF_AUTH_ENABLED: ${MCP_SECRET_REF_AUTH_ENABLED:-false}
+      IC_CREDENTIAL_REF_KEY: ${IC_CREDENTIAL_REF_KEY:-}
       # WS04-S5: a mirror in Redis/Dragonfly that holds ids only (run_id, skill ids, 24 h), so a turn streamed on one
       # replica can be rated on another. On by default since the WS04-S9 proof; only the literal `true` turns it on.
       # Dragonfly eviction degrades to the single-replica behaviour.
@@ -1110,6 +1121,8 @@ services:
       NATS_SHARED_PASSWORD: ${SESSION_CORE_GDPR_NATS_PASSWORD:?SESSION_CORE_GDPR_NATS_PASSWORD is required}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: session-core
+      # F-t3-075 (W5-075-a): JSON logs and exported span attributes keep only the names on TRACE_FIELDS. Only the literal true.
+      MP_TELEMETRY_FIELD_ALLOWLIST: ${MP_TELEMETRY_FIELD_ALLOWLIST:-false}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
@@ -1271,6 +1284,16 @@ services:
       SESSION_THREAD_EXPORT_ENABLED: ${SESSION_THREAD_EXPORT_ENABLED:-false}
       # EP-12 S14: the ThreadShareService snapshot store. Only the literal true; stays off until the share-model ADR (OD-5) is accepted.
       SESSION_THREAD_SHARES_ENABLED: ${SESSION_THREAD_SHARES_ENABLED:-false}
+      # W4-SH-4: share a live snapshot with organisation members through Control `view` grants, and remove the grants
+      # when a snapshot is revoked. W4-SH-5: the same switch lets a granted member read it (GET /v1/shared-snapshots/:id).
+      # Only the literal true; needs SESSION_THREAD_SHARES_ENABLED, MODEL_GATEWAY_THREAD_SHARES
+      # and the two values below. Control must have CONTROL_OWNER_ASSERTED_GRANTS on and the session-core credential
+      # (USER_CORE_SESSION_TOKEN in Control Plane's USER_CORE_SERVICE_CREDENTIALS) set to SESSION_USER_CORE_SERVICE_TOKEN.
+      SESSION_SNAPSHOT_GRANTS_ENABLED: ${SESSION_SNAPSHOT_GRANTS_ENABLED:-false}
+      # user-core's root URL and session-core's credential for it. Blank leaves the grant client out: the grant RPCs answer
+      # unavailable snapshot_grants_unconfigured and nothing else changes. Set both or neither.
+      USER_CORE_URL: ${CONTROL_PLANE_USER_CORE_URL:-}
+      SESSION_USER_CORE_SERVICE_TOKEN: ${SESSION_USER_CORE_SERVICE_TOKEN:-}
       # EP-12 S15: the owner's ImportThread (ThreadExportService). Only the literal true.
       SESSION_THREAD_IMPORT_ENABLED: ${SESSION_THREAD_IMPORT_ENABLED:-false}
       # EP-12 S15 (foreign): ImportThread also reads a ChatGPT or Claude conversations.json. Only the
@@ -1393,6 +1416,8 @@ services:
       INFERENCE_API_KEY_PRINCIPAL: ${INFERENCE_API_KEY_PRINCIPAL:-false}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: inference-core
+      # F-t3-075 (W5-075-a): JSON logs and exported span attributes keep only the names on TRACE_FIELDS. Only the literal true.
+      MP_TELEMETRY_FIELD_ALLOWLIST: ${MP_TELEMETRY_FIELD_ALLOWLIST:-false}
       INFERENCE_PROVIDER_ORDER: ${INFERENCE_PROVIDER_ORDER:-azure,anthropic,openai,cohere}
       # Reasoning-effort ladder (WS11): the level reaches the provider body only when its switch is the literal
       # `true`; both are off by default and the request body is then byte-identical to before. The aliases map an
@@ -1845,6 +1870,8 @@ services:
       MINIO_BUCKET: ${OBJECT_STORAGE_BUCKET:-model-plane-artifacts}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: execution-core
+      # F-t3-075 (W5-075-a): JSON logs and exported span attributes keep only the names on TRACE_FIELDS. Only the literal true.
+      MP_TELEMETRY_FIELD_ALLOWLIST: ${MP_TELEMETRY_FIELD_ALLOWLIST:-false}
       SESSION_CORE_ADDR: http://model-plane-session-core-1:9091
       # Cross-plane dependencies resolve on the private inter-plane bus; no
       # host-published development ports are part of the service contract.
@@ -2263,6 +2290,9 @@ services:
       # WS25-S9: hide and deny MCP servers and tools outside the org's allow-list (org_extension_not_allowed). Only the
       # literal `true` enables it.
       ORG_EXTENSION_ALLOWLIST: ${ORG_EXTENSION_ALLOWLIST:-false}
+      # F-t3-074 (W5-074): the org permission rules (org_permission_rules) tighten EvaluatePolicy only on the literal true.
+      # Off, no rule is read. execution-core names a call's target under the same switch.
+      CAPABILITY_PERMISSION_RULES_ENABLED: ${CAPABILITY_PERMISSION_RULES_ENABLED:-false}
       # WS20-S4: stored-consent schedule contracts. Only the literal `true` enables it; user-core takes the same name.
       SCHEDULE_CONTRACT_ENABLED: ${SCHEDULE_CONTRACT_ENABLED:-false}
       # WS20-S8: approval guards (auto-pause on expiry and failures, renewal refusal). Only the literal `true` enables them.
@@ -2272,6 +2302,17 @@ services:
       # EP-7 W4-F T2: the event trigger fire path (webhook_received consumer and fire sweeper). Only the literal true.
       # The consumer also needs EVENT_TRIGGER_NATS_URL; the sweeper alone decides nothing until a fire is recorded.
       EVENT_TRIGGER_FIRE_ENABLED: ${EVENT_TRIGGER_FIRE_ENABLED:-false}
+      # EP-7 W4-F T4: the trigger starter, one scheduled run per authorised fire of a trigger that names a schedule. Only the
+      # literal true, and only with EVENT_TRIGGER_FIRE_ENABLED on. Control re-authorises every run; the run budget applies.
+      EVENT_TRIGGER_RUN_ENABLED: ${EVENT_TRIGGER_RUN_ENABLED:-false}
+      # EP-7 W4-F T5: the wake gate. A fire of a trigger with a wake filter reads its webhook payload from integration-corev2
+      # (the two values below) and is refused unless the filter matches. Only the literal true, and only with
+      # EVENT_TRIGGER_FIRE_ENABLED on. Off, stored filters are ignored.
+      EVENT_TRIGGER_WAKE_GATE_ENABLED: ${EVENT_TRIGGER_WAKE_GATE_ENABLED:-false}
+      # integration-corev2's base URL and its internal API key for the wake gate's payload read. Blank leaves the gate unable
+      # to read, so a filtered fire stays pending and is then refused. Set both or neither.
+      EVENT_TRIGGER_IC_URL: ${EVENT_TRIGGER_IC_URL:-}
+      EVENT_TRIGGER_IC_API_KEY: ${EVENT_TRIGGER_IC_API_KEY:-}
       # WS16-S4: RUN_ATTENTION becomes a typed notification. Off by default; turn NOTIFICATION_NATIVE_TYPES_ENABLED on first.
       CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED: ${CAPABILITY_CORE_ATTENTION_NOTIFY_ENABLED:-false}
       ATTENTION_NOTIFY_COALESCE_SECONDS: ${ATTENTION_NOTIFY_COALESCE_SECONDS:-60}

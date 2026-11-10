@@ -31,9 +31,11 @@ type batch interface {
 }
 
 // pgStore is the Postgres fire table. It reads the session-core trigger table in the same database, as the cron
-// sweeper reads the cron tables.
+// sweeper reads the cron tables. wakeFilter is set only when the wake gate is on (Sweeper.EnableWakeGate), so a sweeper
+// without the gate never reads the wake filter column.
 type pgStore struct {
-	pool *pgxpool.Pool
+	pool       *pgxpool.Pool
+	wakeFilter bool
 }
 
 // record writes one pending fire for each active trigger bound to the event's connection, in one transaction. A
@@ -89,25 +91,36 @@ func (s pgStore) begin(ctx context.Context) (batch, error) {
 	if err != nil {
 		return nil, fmt.Errorf("begin trigger fire sweep: %w", err)
 	}
-	return pgBatch{tx: tx}, nil
+	return pgBatch{tx: tx, wakeFilter: s.wakeFilter}, nil
 }
 
 type pgBatch struct {
-	tx pgx.Tx
+	tx         pgx.Tx
+	wakeFilter bool
 }
 
-// due claims up to limit pending fires. A row another replica holds is skipped, so replicas never decide one fire
-// twice.
-func (b pgBatch) due(ctx context.Context, limit int) ([]Fire, error) {
-	rows, err := b.tx.Query(ctx, `
+// The claim's SQL either side of the wake filter column. The column is named only when the wake gate is on, so a sweeper
+// without the gate reads nothing it does not need.
+const dueFiresSelect = `
 		SELECT f.id, f.trigger_id, f.org_id, f.webhook_event_id, f.attempts,
-		       t.connection_id, t.space_ref, t.member_user_id, t.status
+		       t.connection_id, t.space_ref, t.member_user_id, t.status, `
+
+const dueFiresFrom = `
 		FROM event_trigger_fires f
 		JOIN event_triggers t ON t.id = f.trigger_id
 		WHERE f.status = 'pending'
 		ORDER BY f.created_at, f.id
 		LIMIT $1
-		FOR UPDATE OF f SKIP LOCKED`, limit)
+		FOR UPDATE OF f SKIP LOCKED`
+
+// due claims up to limit pending fires. A row another replica holds is skipped, so replicas never decide one fire
+// twice. The stored wake filter is read only when the wake gate is on; with it off every fire's filter is nil.
+func (b pgBatch) due(ctx context.Context, limit int) ([]Fire, error) {
+	wakeFilter := "NULL::jsonb"
+	if b.wakeFilter {
+		wakeFilter = "t.wake_filter"
+	}
+	rows, err := b.tx.Query(ctx, dueFiresSelect+wakeFilter+dueFiresFrom, limit)
 	if err != nil {
 		return nil, fmt.Errorf("claim pending trigger fires: %w", err)
 	}
@@ -116,7 +129,7 @@ func (b pgBatch) due(ctx context.Context, limit int) ([]Fire, error) {
 	for rows.Next() {
 		var fire Fire
 		if err := rows.Scan(&fire.ID, &fire.TriggerID, &fire.OrgID, &fire.WebhookEventID, &fire.Attempts,
-			&fire.ConnectionID, &fire.SpaceRef, &fire.MemberUserID, &fire.TriggerStatus); err != nil {
+			&fire.ConnectionID, &fire.SpaceRef, &fire.MemberUserID, &fire.TriggerStatus, &fire.WakeFilter); err != nil {
 			return nil, fmt.Errorf("scan pending trigger fire: %w", err)
 		}
 		fires = append(fires, fire)

@@ -98,9 +98,10 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "F-t3-074 org permission rules: execution-core names a call's target (a web host, a mail recipient's domain, a command's first token) to capability-core. Only the literal true turns it on, and off the request carries no target.",
+      "purpose": "F-t3-074 org permission rules: execution-core names a call's target and capability-core applies the org's deny and ask rules to it. Only the literal true turns it on; off, no target is sent and no rule is read.",
       "codeDefault": "false",
       "declarations": [
+        { "service": "capability-core", "env": "CAPABILITY_PERMISSION_RULES_ENABLED", "default": "false" },
         { "service": "execution-core", "env": "CAPABILITY_PERMISSION_RULES_ENABLED", "default": "false" }
       ]
     },
@@ -168,6 +169,28 @@
       "purpose": "EP-7 W4-F T2: the event trigger fire path in capability-core (the webhook_received consumer and the fire sweeper). Records and authorises fires only; no run starts until the wake gate lands.",
       "declarations": [
         { "service": "capability-core", "env": "EVENT_TRIGGER_FIRE_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "EVENT_TRIGGER_RUN_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-7 W4-F T4: the trigger starter in capability-core. Each authorised fire of a trigger that names a cron schedule becomes one scheduled run through the cron fire path (origin trigger), re-authorised by Control and bounded by the run budget and the hourly trigger and org limits. Needs EVENT_TRIGGER_FIRE_ENABLED. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "capability-core", "env": "EVENT_TRIGGER_RUN_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "EVENT_TRIGGER_WAKE_GATE_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-7 W4-F T5: the wake gate in capability-core. A fire of a trigger with a wake filter reads its webhook payload from integration-corev2 and needs a match. Off, stored filters are ignored. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "capability-core", "env": "EVENT_TRIGGER_WAKE_GATE_ENABLED", "default": "false" }
       ]
     },
     {
@@ -372,6 +395,17 @@
       "codePath": "apps/Model Plane/go/services/capability-core/cmd/main.go"
     },
     {
+      "name": "MCP_SECRET_REF_AUTH_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "W4-CC-5: a static-bearer MCP server redeems its integration-corev2 credential binding for each call. Only the literal true turns it on; off, such a registration is refused. A ZDR or waived turn never redeems one.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MCP_SECRET_REF_AUTH_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "MEMORY_GROUNDING_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -535,6 +569,17 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_WEB_BUNDLE_ARTIFACTS",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "W5-087 web_bundle artifacts: create_artifact accepts kind web_bundle, a multi-file static page that the gateway checks and inlines into one html artifact (no import or export, no type=module, no URL that leaves the page). Off, the kind is unknown. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_WEB_BUNDLE_ARTIFACTS", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT",
       "kind": "switch",
       "owner": "model-plane",
@@ -566,6 +611,21 @@
       "default": "false",
       "purpose": "Allows embedding calls outside the EU residency boundary. Deny by default: without it a non-EU embedding fails startup and is refused.",
       "codePath": "apps/Model Plane/rust/services/inference-core/src/config.rs"
+    },
+    {
+      "name": "MP_TELEMETRY_FIELD_ALLOWLIST",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-t3-075 telemetry allow-list: JSON logs and exported span attributes keep only the names on TRACE_FIELDS and count the rest as scrubbed_fields. Off, telemetry is unchanged. Only the literal true turns it on.",
+      "codePath": "apps/Model Plane/rust/crates/mp-telemetry/src/field_allowlist.rs",
+      "declarations": [
+        { "service": "execution-core", "env": "MP_TELEMETRY_FIELD_ALLOWLIST", "default": "false" },
+        { "service": "inference-core", "env": "MP_TELEMETRY_FIELD_ALLOWLIST", "default": "false" },
+        { "service": "model-gateway", "env": "MP_TELEMETRY_FIELD_ALLOWLIST", "default": "false" },
+        { "service": "session-core", "env": "MP_TELEMETRY_FIELD_ALLOWLIST", "default": "false" }
+      ]
     },
     {
       "name": "ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED",
@@ -654,6 +714,17 @@
       "purpose": "F-t3-050: GetRunProofBundle carries the run's browser walkthrough as screenshot references, never bytes. Off, or for a ZDR or waived run or an unreadable receipt, the section is omitted. Only the literal true enables it.",
       "declarations": [
         { "service": "session-core", "env": "SESSION_PROOF_WALKTHROUGH_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "SESSION_SNAPSHOT_GRANTS_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "W4-SH-4: ShareSnapshot, UnshareSnapshot and ListSnapshotGrants on session-core's ThreadShareService write, remove and list Control view grants on a live share snapshot for organisation members, and revoking a snapshot removes its grants. W4-SH-5: GetSharedSnapshot lets a granted member read the snapshot, after Control confirms that member's view grant. Off, these RPCs answer UNAVAILABLE snapshot_grants_disabled and Control is never called. Sharing refuses a ZDR or waived caller. Only the literal true enables it. Needs SESSION_THREAD_SHARES_ENABLED and MODEL_GATEWAY_THREAD_SHARES, plus USER_CORE_URL and SESSION_USER_CORE_SERVICE_TOKEN on session-core and CONTROL_OWNER_ASSERTED_GRANTS on Control.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_SNAPSHOT_GRANTS_ENABLED", "default": "false" }
       ]
     },
     {

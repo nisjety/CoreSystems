@@ -111,7 +111,22 @@ type Config struct {
 	// broker routes. It falls back to CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY, the same
 	// Model-Plane-to-Integration-Core credential, when CUSTOMER_GATEWAY_MODEL_PLANE_API_KEY
 	// is unset.
-	CustomerGatewayModelPlaneAPIKey    string
+	CustomerGatewayModelPlaneAPIKey string
+	// CredentialRefSealKeys is CREDENTIAL_REF_SEAL_KEYS: principal=key pairs, comma separated, for
+	// the credential-reference routes (model-gateway seals, execution-core redeems). Each route
+	// takes its own principal's key, never the internal API key. Read only with
+	// CREDENTIAL_BINDINGS_ENABLED.
+	CredentialRefSealKeys string
+	// CredentialBindingsEnabled mounts the credential-binding admin routes
+	// (/api/v1/credential-bindings): an org admin binds a secret to one host, sealed in this
+	// service and never returned. Off unless CREDENTIAL_BINDINGS_ENABLED is exactly "true";
+	// while off the routes answer 404.
+	CredentialBindingsEnabled bool
+	// CustomRESTConnectorsEnabled turns on custom_rest.call (W4-CC-6): a server-side REST proxy for
+	// connections of provider custom_rest, called with a sealed credential binding's secret. Off
+	// unless CUSTOM_REST_CONNECTORS_ENABLED is exactly "true"; while off the provider is unknown to
+	// the actions surface, as before. Needs CREDENTIAL_BINDINGS_ENABLED.
+	CustomRESTConnectorsEnabled        bool
 	ZDRAcknowledgementEnabled          bool
 	CodexSubscriptionEnabled           bool
 	CodexAppServerCommand              string
@@ -419,6 +434,9 @@ func Load() (Config, error) {
 		// Exactly "true" only: envBool uses ParseBool, which would also switch this on for "1" or "T".
 		CustomerGatewayConnectionsEnabled:  strings.TrimSpace(os.Getenv("CUSTOMER_GATEWAY_CONNECTIONS_ENABLED")) == "true",
 		CustomerGatewayModelPlaneAPIKey:    strings.TrimSpace(envOr("CUSTOMER_GATEWAY_MODEL_PLANE_API_KEY", os.Getenv("CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY"))),
+		CredentialBindingsEnabled:          strings.TrimSpace(os.Getenv("CREDENTIAL_BINDINGS_ENABLED")) == "true",
+		CustomRESTConnectorsEnabled:        strings.TrimSpace(os.Getenv("CUSTOM_REST_CONNECTORS_ENABLED")) == "true",
+		CredentialRefSealKeys:              strings.TrimSpace(os.Getenv("CREDENTIAL_REF_SEAL_KEYS")),
 		ZDRAcknowledgementEnabled:          envBool("ZDR_ACKNOWLEDGEMENT_ENABLED", false),
 		CodexSubscriptionEnabled:           envBool("CODEX_SUBSCRIPTION_ENABLED", false),
 		CodexAppServerCommand:              strings.TrimSpace(envOr("CODEX_APP_SERVER_COMMAND", "codex")),
@@ -572,6 +590,17 @@ func (c Config) ValidateRuntime() error {
 			return fmt.Errorf("the credential encryption key is required when CUSTOMER_GATEWAY_CONNECTIONS_ENABLED=true")
 		}
 	}
+	if c.CredentialBindingsEnabled && len(c.EncryptionKey) == 0 {
+		return fmt.Errorf("the credential encryption key is required when CREDENTIAL_BINDINGS_ENABLED=true")
+	}
+	if c.CustomRESTConnectorsEnabled && !c.CredentialBindingsEnabled {
+		return fmt.Errorf("CREDENTIAL_BINDINGS_ENABLED=true is required when CUSTOM_REST_CONNECTORS_ENABLED=true")
+	}
+	if c.CredentialBindingsEnabled {
+		if problems := c.credentialRefSealKeyProblems(); len(problems) > 0 {
+			return fmt.Errorf("%s", problems[0])
+		}
+	}
 	if c.CodexSubscriptionEnabled {
 		if strings.TrimSpace(c.CodexAppServerCommand) == "" {
 			return fmt.Errorf("CODEX_APP_SERVER_COMMAND is required when CODEX_SUBSCRIPTION_ENABLED=true")
@@ -715,6 +744,74 @@ func (c Config) ControlPlaneInternalAPIKey() string {
 		return strings.TrimSpace(c.AuthCoreInternalAPIKey)
 	}
 	return strings.TrimSpace(c.InternalAPIKey)
+}
+
+// The credential-reference principals (W4-CC-4, CREDENTIAL_REF_SEAL_KEYS). The seal route admits
+// model-gateway and the redeem route admits execution-core, each with its own key. The shared
+// internal key opens neither.
+const (
+	CredentialRefPrincipalModelGateway  = "model-gateway"
+	CredentialRefPrincipalExecutionCore = "execution-core"
+)
+
+// CredentialRefPrincipalKeys returns the principal keys that CREDENTIAL_REF_SEAL_KEYS names. Entries
+// that do not parse, and repeats, are left out; credentialRefSealKeyProblems reports them.
+func (c Config) CredentialRefPrincipalKeys() map[string]string {
+	keys := map[string]string{}
+	for _, entry := range strings.Split(c.CredentialRefSealKeys, ",") {
+		name, key, found := strings.Cut(strings.TrimSpace(entry), "=")
+		name, key = strings.TrimSpace(name), strings.TrimSpace(key)
+		if !found || name == "" || key == "" {
+			continue
+		}
+		if _, repeated := keys[name]; repeated {
+			continue
+		}
+		keys[name] = key
+	}
+	return keys
+}
+
+// credentialRefSealKeyProblems lists what is wrong with CREDENTIAL_REF_SEAL_KEYS, checked when the
+// credential-binding switch is on. Each entry is principal=key for one of the two principals. Each
+// key is a non-placeholder secret of at least 32 bytes, distinct from the other principal's key and
+// from both internal API keys. A principal with no entry is not an error: its route answers 401.
+// Problems name the variable and the principal, never a key value.
+func (c Config) credentialRefSealKeyProblems() []string {
+	var problems []string
+	internalKeys := []string{strings.TrimSpace(c.InternalAPIKey), c.ControlPlaneInternalAPIKey()}
+	seen := map[string]bool{}
+	owners := map[string]string{}
+	for _, entry := range strings.Split(c.CredentialRefSealKeys, ",") {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+		name, key, found := strings.Cut(trimmed, "=")
+		name, key = strings.TrimSpace(name), strings.TrimSpace(key)
+		if !found || (name != CredentialRefPrincipalModelGateway && name != CredentialRefPrincipalExecutionCore) {
+			problems = append(problems, "CREDENTIAL_REF_SEAL_KEYS entries must be principal=key, with principal model-gateway or execution-core")
+			continue
+		}
+		if seen[name] {
+			problems = append(problems, "CREDENTIAL_REF_SEAL_KEYS names "+name+" more than once")
+			continue
+		}
+		seen[name] = true
+		if !validDedicatedServiceToken(key) {
+			problems = append(problems, "CREDENTIAL_REF_SEAL_KEYS key for "+name+" must be a non-placeholder secret of at least 32 bytes")
+		}
+		for _, internal := range internalKeys {
+			if internal != "" && key == internal {
+				problems = append(problems, "CREDENTIAL_REF_SEAL_KEYS key for "+name+" must not reuse the internal API key")
+			}
+		}
+		if other, reused := owners[key]; reused {
+			problems = append(problems, "CREDENTIAL_REF_SEAL_KEYS key for "+name+" must not reuse the key for "+other)
+		}
+		owners[key] = name
+	}
+	return problems
 }
 
 func (c Config) ValidateProvider(providerKey string) error {

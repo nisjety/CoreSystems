@@ -248,6 +248,9 @@ type AuditTransaction interface {
 	// digest-change path revokes acknowledgements, so it belongs in the same transaction as
 	// the audit intent that records the change.
 	ConnectionZDRStore
+	// CredentialBindingStore is the sealed credential bindings table. A create or revoke commits
+	// with the audit row that records it.
+	CredentialBindingStore
 }
 
 type Repository interface {
@@ -333,6 +336,9 @@ type Repository interface {
 	// the connection row: no read-modify-write of a Connection can write it back stale, and no
 	// generic connection route can set it.
 	ConnectionZDRStore
+	// CredentialBindingStore keeps the organisation's sealed credential bindings in their own
+	// table, apart from provider connections.
+	CredentialBindingStore
 	Close()
 }
 

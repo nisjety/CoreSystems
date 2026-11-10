@@ -18,6 +18,7 @@ mod audit_publisher;
 mod auth;
 mod compaction;
 mod continuation_crypto;
+mod control_grants;
 mod decision_keys;
 mod dream_extractor;
 mod dreaming;

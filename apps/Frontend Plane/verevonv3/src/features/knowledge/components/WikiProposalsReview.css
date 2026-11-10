@@ -1,0 +1,267 @@
+/* The wiki proposals a person reviews in Knowledge (W5-094-b). Every colour is a theme token, so dark mode follows the page. */
+.wiki-proposals-review {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.wiki-proposals-review__header h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.3;
+}
+
+.wiki-proposals-review__lead {
+  margin: 4px 0 0;
+  color: var(--verevon-text-muted, #66615b);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.wiki-proposals-review__filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wiki-proposals-review__filter {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--verevon-border, #e7e7e5);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--verevon-text-muted, #66615b);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.wiki-proposals-review__filter[aria-pressed='true'] {
+  background: var(--verevon-surface-soft, #f4f4f3);
+  color: var(--verevon-text, #1a1a1a);
+  font-weight: 600;
+}
+
+.wiki-proposals-review__filter:focus-visible,
+.wiki-proposals-review__ref:focus-visible {
+  outline: 2px solid var(--verevon-accent, #e0703f);
+  outline-offset: 2px;
+}
+
+.wiki-proposals-review__notice {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--verevon-surface-soft, #f4f4f3);
+  color: var(--verevon-text, #1a1a1a);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.wiki-proposals-review__notice--error {
+  color: var(--danger, #b42318);
+}
+
+.wiki-proposals-review__empty {
+  margin: 0;
+  color: var(--verevon-text-muted, #66615b);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.wiki-proposals-review__list {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wiki-proposals-review__card {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--verevon-border, #e7e7e5);
+  border-radius: 12px;
+  background: var(--surface, #ffffff);
+}
+
+.wiki-proposals-review__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.wiki-proposals-review__title {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.wiki-proposals-review__path {
+  margin: 0;
+  color: var(--verevon-text-muted, #66615b);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.wiki-proposals-review__reason {
+  margin: 0;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.wiki-proposals-review__label {
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--verevon-text-muted, #66615b);
+  font-size: 12px;
+}
+
+.wiki-proposals-review__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.wiki-proposals-review__meta > div {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.wiki-proposals-review__meta dt {
+  color: var(--verevon-text-muted, #66615b);
+}
+
+.wiki-proposals-review__meta dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.wiki-proposals-review__refs ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wiki-proposals-review__ref {
+  display: inline-block;
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--verevon-surface-soft, #f4f4f3);
+  color: var(--verevon-text, #1a1a1a);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+a.wiki-proposals-review__ref {
+  color: var(--verevon-accent-ink, #b8501f);
+  text-decoration: underline;
+}
+
+.wiki-proposals-review__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.wiki-proposals-review__panel {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wiki-proposals-review__diff {
+  display: grid;
+  max-height: 420px;
+  overflow: auto;
+  border: 1px solid var(--verevon-border, #e7e7e5);
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.wiki-proposals-review__hunk + .wiki-proposals-review__hunk {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--verevon-border, #e7e7e5);
+}
+
+.wiki-proposals-review__line {
+  position: relative;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 6px;
+  padding: 0 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.wiki-proposals-review__line--added {
+  background: rgb(34 197 94 / 14%);
+}
+
+.wiki-proposals-review__line--removed {
+  background: rgb(239 68 68 / 14%);
+}
+
+.wiki-proposals-review__mark {
+  user-select: none;
+  color: var(--verevon-text-muted, #66615b);
+}
+
+.wiki-proposals-review__text {
+  min-width: 0;
+}
+
+.wiki-proposals-review__preview {
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--verevon-surface-soft, #f4f4f3);
+  color: var(--verevon-text, #1a1a1a);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Screen readers hear which lines were added or removed; sighted readers see the marks. */
+.wiki-proposals-review__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  border: 0;
+  white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+  .wiki-proposals-review__card {
+    padding: 14px;
+  }
+
+  .wiki-proposals-review__actions {
+    justify-content: stretch;
+  }
+
+  .wiki-proposals-review__actions > * {
+    flex: 1 1 auto;
+  }
+}

@@ -29,6 +29,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
 	"github.com/triodelab/model-plane/services/capability-core/internal/crypto"
 	"github.com/triodelab/model-plane/services/capability-core/internal/decisionkey"
+	"github.com/triodelab/model-plane/services/capability-core/internal/eventtrigger"
 	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
 	"github.com/triodelab/model-plane/services/capability-core/internal/notifyclient"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
@@ -305,6 +306,9 @@ func main() {
 	// Behind ORG_AGENT_POLICY_API (off by default): the handler answers 404 while it is off.
 	api.NewOrgAgentPolicyHandler(pool, api.OrgAgentPolicyAPIFromLookup(os.Getenv)).Register(protectedMux)
 	api.NewOrgHooksHandler(pool).Register(protectedMux)
+	// W5-074-c: the org permission rules admin routes, behind the switch the EvaluatePolicy gate reads
+	// (CAPABILITY_PERMISSION_RULES_ENABLED, literal true). Off, every route answers 404 and the table is not written.
+	api.NewPermissionRulesHandler(pool, api.PermissionRulesEnabledFromLookup(os.Getenv)).Register(protectedMux)
 	// WS05-S5: writes need a person and capability:write; reads are the org's
 	// and the caller's own. Enforcement is the engine's, behind TOOL_POLICY_ENFORCED.
 	toolPolicies.Register(protectedMux)
@@ -412,6 +416,18 @@ func main() {
 		startEventTriggerFire(ctx, pool, cronAuthorizer, cronAuthErr)
 	}
 
+	// EP-7 W4-F T6: the trigger dry run answers whether one stored webhook event would wake a trigger, without firing.
+	// Strict literal true; off, the route is not mounted and the path answers 404. It reads the payload through the same
+	// integration-corev2 source the wake gate uses, and it records nothing and asks Control nothing.
+	if os.Getenv("EVENT_TRIGGER_WAKE_GATE_ENABLED") == "true" {
+		dryRunSource := eventtrigger.NewIntegrationWebhookSource(os.Getenv("EVENT_TRIGGER_IC_URL"), os.Getenv("EVENT_TRIGGER_IC_API_KEY"))
+		if !dryRunSource.Configured() {
+			slog.Warn("event trigger dry run has no integration-corev2 URL or key; dry runs report the payload unavailable")
+		}
+		api.NewEventTriggerDryRunHandler(pool, dryRunSource).Register(protectedMux)
+		slog.Info("event trigger dry run mounted")
+	}
+
 	// Watch sweeper (S4.3): claims due space_watches, polls each one's source
 	// adapter, and commits what it saw. Single-flight across replicas via the
 	// same FOR UPDATE SKIP LOCKED claim the cron sweeper uses — except the claim
@@ -512,12 +528,17 @@ func main() {
 	}
 
 	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(verifier.UnaryServerInterceptor(authz.AuthorizeGRPCWith(authz.BundleReadRuleFromLookup(os.Getenv)))))
+	// W5-074: the org permission rules tighten EvaluatePolicy only on the literal "true" of
+	// CAPABILITY_PERMISSION_RULES_ENABLED. Off, no rule is read.
+	permissionRulesOn := api.PermissionRulesEnabledFromLookup(os.Getenv)
+	slog.Info("org permission rules", "enabled", permissionRulesOn)
 	// Attach the durable store so ListCapabilities returns score-ranked results
 	// (nil-safe: WithStore(nil) keeps the in-memory registry ordering).
 	capSrv := capserver.NewServer(reg, modelsCache, pol).WithStore(capStore).
 		WithSkillBundles(skillbundle.NewStore(pool), api.SkillBundlesAPIFromLookup(os.Getenv)).
 		WithDeckTemplates(skillbundle.DeckTemplatesFromLookup(os.Getenv)).
-		WithSkillBundleRetention(skillbundle.RetentionFromLookup(os.Getenv))
+		WithSkillBundleRetention(skillbundle.RetentionFromLookup(os.Getenv)).
+		WithPermissionRules(api.NewPermissionRuleStore(pool), permissionRulesOn)
 	if lettaToolSearcher != nil {
 		capSrv.WithLettaToolSearcher(lettaToolSearcher)
 	}

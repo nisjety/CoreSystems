@@ -1,12 +1,12 @@
-// Package eventtrigger is the fire path of an event trigger (EP-7, F-t3-047, Wave 4 slice W4-F T2).
+// Package eventtrigger is the fire path of an event trigger (EP-7, F-t3-047, Wave 4 slices W4-F T2 and T5).
 //
 // A durable consumer of integration-corev2's webhook_received event records one pending fire for each live
 // trigger bound to that event's connection, keyed on the webhook event id, so a redelivered event adds nothing.
 // A sweeper then decides each pending fire: the trigger must still be active, the trigger and its org must be
-// under their hourly budgets, and Control must authorise the fire afresh through the same FireAuthorizer the cron
-// sweeper uses. An authorised fire is recorded as authorized and nothing else happens here; the wake gate and the
-// budgeted run read those rows in a later slice. The webhook body stays in integration-corev2. This package never
-// fetches or stores it.
+// under their hourly budgets, a trigger with a wake filter must pass the wake gate (wakegate.go), and Control must
+// authorise the fire afresh through the same FireAuthorizer the cron sweeper uses. An authorised fire is recorded as
+// authorized, and the starter turns it into a budgeted run. The wake gate alone reads a webhook body, and only for a
+// trigger that carries a filter: it holds the body in memory for one decision and never stores or logs it.
 package eventtrigger
 
 import (

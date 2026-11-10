@@ -2529,9 +2529,11 @@ name = "mp-telemetry"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "mp-contracts",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "serde_json",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",

@@ -1,5 +1,5 @@
-//! `/api/v1/org/agent-policy` and `/api/v1/org/hooks`: the organization's agent policy and its durable hook
-//! rules (WS25-S10).
+//! `/api/v1/org/agent-policy`, `/api/v1/org/hooks` and `/api/v1/org/permission-rules`: the organization's agent
+//! policy, its durable hook rules (WS25-S10) and its permission rules (W5-074-c).
 //!
 //! A thin authenticated proxy from the SPA to model-gateway's `/v1/org/*` routes, which forward to
 //! capability-core, the system of record for both (DEC-14). Any member of the active organization reads the
@@ -15,9 +15,9 @@
 
 use axum::{
     extract::{Extension, Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, put},
+    routing::{delete, get, put},
     Json, Router,
 };
 use reqwest::Method;
@@ -50,6 +50,14 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/org/hooks/{hook_id}",
             put(update_hook).delete(delete_hook),
         )
+        .route(
+            "/api/v1/org/permission-rules",
+            get(list_permission_rules).post(create_permission_rule),
+        )
+        .route(
+            "/api/v1/org/permission-rules/{rule_id}",
+            delete(delete_permission_rule),
+        )
         // Per-org/user rate limiting, ordered as in `mcp.rs`: `require_session` runs first and inserts
         // `AuthenticatedUser`, so the limiter keys by the validated organization and user.
         .route_layer(axum::middleware::from_fn(rate_limit_middleware))
@@ -65,7 +73,7 @@ async fn write_refusal(state: &AppState, user: &AuthenticatedUser) -> Option<Res
                 StatusCode::FORBIDDEN,
                 Json(error(
                     "forbidden",
-                    "Only organization admins can change the agent policy or its hook rules.",
+                    "Only organization admins can change the agent policy, its hook rules or its permission rules.",
                 )),
             )
                 .into_response(),
@@ -83,7 +91,7 @@ fn zdr_refusal() -> Value {
     json!({
         "error": {
             "code": "zdr_durable_mutation_forbidden",
-            "message": "Zero Data Retention is on for this organization, so its agent policy and hook rules cannot be changed.",
+            "message": "Zero Data Retention is on for this organization, so its agent policy, hook rules and permission rules cannot be changed.",
             "retryable": false,
             "action": "none",
         }
@@ -231,6 +239,71 @@ async fn delete_hook(
     }
     let route = format!("/v1/org/hooks/{}", urlencoding::encode(&hook_id));
     forward(&state, &user, &headers, Method::DELETE, &route, None).await
+}
+
+/// `GET /api/v1/org/permission-rules` — the organization's permission rules and the policy revision they are at, for any
+/// member.
+async fn list_permission_rules(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> Response {
+    let response = forward(
+        &state,
+        &user,
+        &headers,
+        Method::GET,
+        "/v1/org/permission-rules",
+        None,
+    )
+    .await;
+    no_store(response)
+}
+
+/// `POST /api/v1/org/permission-rules` — an org admin adds a deny or ask rule.
+async fn create_permission_rule(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    if let Some(refusal) = write_refusal(&state, &user).await {
+        return no_store(refusal);
+    }
+    let response = forward(
+        &state,
+        &user,
+        &headers,
+        Method::POST,
+        "/v1/org/permission-rules",
+        Some(body),
+    )
+    .await;
+    no_store(response)
+}
+
+/// `DELETE /api/v1/org/permission-rules/{rule_id}` — an org admin removes a rule.
+async fn delete_permission_rule(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(rule_id): Path<String>,
+) -> Response {
+    if let Some(refusal) = write_refusal(&state, &user).await {
+        return no_store(refusal);
+    }
+    let route = format!("/v1/org/permission-rules/{}", urlencoding::encode(&rule_id));
+    let response = forward(&state, &user, &headers, Method::DELETE, &route, None).await;
+    no_store(response)
+}
+
+/// Marks a response `Cache-Control: no-store`: a rule set is the organization's policy, so no browser or shared cache
+/// keeps it.
+fn no_store(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 #[cfg(test)]

@@ -74,6 +74,12 @@ type ServerConfig struct {
 	// OrgZDR reads the organisation's ZDR posture from org-core for the acknowledgement API. Nil
 	// refuses every acknowledgement (fail closed), and the routes exist only with the switch on.
 	OrgZDR ZDROrgPosture
+	// CredentialSealer seals a credential binding's secret (the credential vault). Nil, and the
+	// credential-binding routes absent (404), unless CREDENTIAL_BINDINGS_ENABLED is exactly "true".
+	CredentialSealer CredentialSealer
+	// CredentialHostVetter vets a binding's host against private, loopback and metadata addresses.
+	// Nil means the process-wide egress guard; tests substitute a stub resolver.
+	CredentialHostVetter CredentialHostVetter
 	// WebhookOrg resolves the owning tenant for account-wide provider
 	// webhooks (Meta/Slack callbacks carry no Verevon org id). Nil-safe.
 	WebhookOrg *webhookorg.Resolver
@@ -1360,6 +1366,8 @@ func NewServer(cfg ServerConfig) *fiber.App {
 	registerCodexSubscriptionRoutes(app, cfg, codexSubscriptionModelPlaneAuth, internalOrBearerAuth, rateLimited)
 	registerCustomerGatewayRoutes(app, cfg, customerGatewayModelPlaneAuth, bearerOnlyAuth, rateLimited)
 	registerZDRAcknowledgementRoutes(app, cfg, bearerOnlyAuth, rateLimited)
+	registerCredentialBindingRoutes(app, cfg, bearerOnlyAuth, rateLimited)
+	registerCredentialRefRoutes(app, cfg, rateLimited)
 
 	app.Get("/internal/gdpr/export", internalAuth, func(c *fiber.Ctx) error {
 		organizationID := strings.TrimSpace(c.Query("organizationId"))
@@ -2955,6 +2963,23 @@ func runGDPRDelete(ctx context.Context, cfg ServerConfig, body gdprRequestBody) 
 			}); err != nil {
 				return err
 			}
+			// The organisation's sealed credential bindings go with it: a deleted organisation
+			// keeps no standing secret. Nothing is written when it had none.
+			bindingsPurged, bindingsErr := tx.PurgeOrganizationCredentialBindings(ctx, organizationID)
+			if bindingsErr != nil {
+				return bindingsErr
+			}
+			if bindingsPurged > 0 {
+				if err := persist(store.AuditEvent{
+					ID:             auditMutationID(ctx, "gdpr-credential-bindings-purged", organizationID),
+					OrganizationID: organizationID,
+					EventType:      "gdpr.integration.credential_bindings_purged",
+					Metadata:       map[string]any{"bindings": bindingsPurged},
+					CreatedAt:      now,
+				}); err != nil {
+					return err
+				}
+			}
 		}
 		return persist(store.AuditEvent{
 			ID:             auditMutationID(ctx, "gdpr-delete-completed", organizationID, userID),
@@ -3021,8 +3046,12 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 	if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
 		return actions.ExecuteResult{}, err
 	}
+	// custom_rest.call is dark (W4-CC-6): with the switch off the provider is unknown, as before.
+	if connection.ProviderKey == actions.CustomRESTProviderKey && !cfg.Config.CustomRESTConnectorsEnabled {
+		return actions.ExecuteResult{}, errActionOperationUnsupported
+	}
 	idempotencyKey := strings.TrimSpace(body.IdempotencyKey)
-	writeAction := actionRequiresApproval(connection.ProviderKey, body.Operation)
+	writeAction := actionRequiresApproval(connection.ProviderKey, body.Operation) || customRESTCallIsWrite(connection.ProviderKey, body)
 	if !writeAction {
 		// A read has no write attestation to carry a cryptographically
 		// verified acting user, so owner ruling (5) is enforced from the
@@ -3121,12 +3150,23 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 			}
 		}
 	}
-	token, err := cfg.OAuth.AccessTokenForConnection(ctx, connection.ID)
-	if err != nil {
-		if writeAction {
-			return actions.ExecuteResult{}, errActionPreProviderRetryable
+	var token oauth.AccessTokenResult
+	var restBinding *actions.CustomRESTBinding
+	if connection.ProviderKey == actions.CustomRESTProviderKey {
+		// A custom_rest connection has no OAuth token: its credential is the one binding the
+		// connection names, opened for this call only (custom_rest.go).
+		restBinding, err = openCustomRESTBinding(ctx, cfg, connection, idempotencyKey)
+		if err != nil {
+			return actions.ExecuteResult{}, err
 		}
-		return actions.ExecuteResult{}, err
+	} else {
+		token, err = cfg.OAuth.AccessTokenForConnection(ctx, connection.ID)
+		if err != nil {
+			if writeAction {
+				return actions.ExecuteResult{}, errActionPreProviderRetryable
+			}
+			return actions.ExecuteResult{}, err
+		}
 	}
 	if writeAction {
 		if err := withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
@@ -3156,6 +3196,7 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 		Operation:   body.Operation,
 		Params:      body.Params,
 		Body:        body.Body,
+		RESTBinding: restBinding,
 	})
 	if err != nil {
 		if writeAction {
@@ -3272,6 +3313,10 @@ func actionReceiptMatchesAuthorization(receipt store.ActionReceipt, connection s
 
 func requireActionCapability(c *fiber.Ctx, connection store.Connection, body actionBody) error {
 	required, sensitive := requiredCapabilityForOperation(connection.ProviderKey, body.Operation)
+	if connection.ProviderKey == actions.CustomRESTProviderKey {
+		// custom_rest.call is one operation whose capability depends on the method (custom_rest.go).
+		required, sensitive = customRESTCapability(body)
+	}
 	if required == "" {
 		return errActionOperationUnsupported
 	}
@@ -3702,6 +3747,10 @@ func actionError(c *fiber.Ctx, err error) error {
 		return apiError(c, fiber.StatusForbidden, "write_attestation_invalid", "Provider-write attestation is invalid.")
 	case errors.Is(err, errActionAttestationUnconfigured):
 		return apiError(c, fiber.StatusServiceUnavailable, "write_attestation_unconfigured", "Provider-write attestation verification is unavailable.")
+	case errors.Is(err, errCustomRESTBindingUnavailable):
+		return apiError(c, fiber.StatusConflict, "credential_binding_unavailable", "The connection's credential binding is not available.")
+	case errors.Is(err, errCustomRESTAuditFailed):
+		return apiError(c, fiber.StatusServiceUnavailable, "credential_audit_failed", "The credential could not be released safely.")
 	case isProviderAuthRejection(err):
 		return reconnectRequiredError(c, err)
 	default:

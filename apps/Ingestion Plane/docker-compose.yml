@@ -31,6 +31,8 @@ services:
       # Local rollout switch for owner-authorized browser-agent attachment.
       QUARRY_EDGE__ATTACH: "${QUARRY_EDGE_ATTACH:-off}"
       QUARRY_EDGE__HUMAN_BROWSE: "${QUARRY_EDGE_HUMAN_BROWSE:-off}"
+      # F-t3-081 Teach mode: the procedure draft of a run's human steps. Only the literal true turns it on.
+      QUARRY_TEACH_MODE_ENABLED: "${QUARRY_TEACH_MODE_ENABLED:-false}"
       # /v1/scrape request contract (docs/CONTRACTS.md 9.1): unknown keys are
       # ignored with a warning (lenient) until strict is chosen, either now or from
       # a date; the inline cap is per field; 0 disables the new option keys.

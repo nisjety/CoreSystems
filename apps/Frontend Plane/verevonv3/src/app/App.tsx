@@ -31,6 +31,13 @@ const AGENT_BUILDER_ENABLED = import.meta.env.VITE_AGENT_BUILDER === 'true'
 const AgentBuilderPage = AGENT_BUILDER_ENABLED
   ? lazy(() => import('@/features/agents/components/AgentBuilderPage'))
   : undefined
+// The page a member opens from a shared conversation snapshot (W4-SH-6) talks to BFF routes that exist only with
+// CHAT_SNAPSHOTS_ENABLED on, so its route is off unless VITE_CHAT_SNAPSHOTS=true. With the flag unset the build
+// emits no chunk.
+const CHAT_SNAPSHOTS_ENABLED = import.meta.env.VITE_CHAT_SNAPSHOTS === 'true'
+const SharedSnapshotPage = CHAT_SNAPSHOTS_ENABLED
+  ? lazy(() => import('@/features/chat/replay/SharedSnapshotPage'))
+  : undefined
 const AutomationsHubPage = lazy(() => import('@/features/automations/components/AutomationsHubPage'))
 const ChiefCoreRoutingPage = lazy(() => import('@/features/agents/components/ChiefCoreRoutingPage'))
 const CustomizeHubPage = lazy(() => import('@/features/customize/CustomizeHub'))
@@ -209,6 +216,7 @@ export const Router = createRouter({
         { path: '/', component: DashboardPage },
         { path: '/dashboard', component: DashboardPage },
         { path: '/chat', component: ChatPage },
+        ...(SharedSnapshotPage ? [{ path: '/chat/shared/:snapshotId', component: SharedSnapshotPage }] : []),
         { path: '/chat/findings', component: () => <ChatUtilityPage section="findings" /> },
         { path: '/chat/reports', component: () => <ChatUtilityPage section="reports" /> },
         { path: '/chat/routines', component: () => <ChatUtilityPage section="routines" /> },

@@ -7,12 +7,13 @@ mod library;
 mod processes;
 pub(crate) mod shared;
 mod search;
+mod snapshots;
 mod streams;
 pub(crate) mod support;
 
 use axum::{
     extract::DefaultBodyLimit,
-    routing::{get, post, put},
+    routing::{delete, get, post, put},
     Router,
 };
 
@@ -119,6 +120,27 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             post(history::import_thread).layer(DefaultBodyLimit::max(
                 history::THREAD_IMPORT_BODY_LIMIT_BYTES,
             )),
+        )
+        // Governed snapshot links (W4-SH-6, F-t3-046): the owner takes, lists and revokes snapshots of a thread and
+        // shares one with named members of the organisation; a granted member reads it. Model Gateway's routes,
+        // relayed under the caller's own bearers. 404 `chat_snapshots_disabled` while CHAT_SNAPSHOTS_ENABLED is off.
+        .route(
+            "/api/v1/chat/threads/{thread_id}/snapshots",
+            post(snapshots::create_snapshot).get(snapshots::list_snapshots),
+        )
+        .route(
+            "/api/v1/chat/snapshots/{snapshot_id}",
+            delete(snapshots::revoke_snapshot),
+        )
+        .route(
+            "/api/v1/chat/snapshots/{snapshot_id}/grants",
+            post(snapshots::grant_snapshot)
+                .delete(snapshots::ungrant_snapshot)
+                .get(snapshots::list_snapshot_grants),
+        )
+        .route(
+            "/api/v1/chat/shared-snapshots/{snapshot_id}",
+            get(snapshots::get_shared_snapshot),
         )
         // The owner's read of one background process's output in a run (W4-P3): Model Gateway's page,
         // read under the room's own sandbox read decision. 404 `process_output_disabled` while its switch is off.

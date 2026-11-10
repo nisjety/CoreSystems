@@ -701,6 +701,23 @@
       "treatment": "inert"
     },
     {
+      "basis": "procedure_draft.rs run_procedure_draft (F-t3-081, dark behind QUARRY_TEACH_MODE_ENABLED: 404 teach_mode_disabled while it is off) answers a ZDR run 409 zdr_not_supported before any receipt is read, so a ZDR run gives no draft. A draft holds only the run's completed human steps, with typed and selected values replaced by placeholders and a navigation kept to its host, and it writes nothing. No test drives a ZDR run through this route yet: the refusal is a guard in the handler, and tests/zdr_feature_matrix.rs lists the row for that reason",
+      "detail": {
+        "code": "CONFLICT",
+        "feature": "procedure_draft"
+      },
+      "enforced_by": [],
+      "id": "agent_procedure_draft",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/agent/runs/{run_id}/procedure-draft"
+      ],
+      "status": "enforced",
+      "treatment": "refused"
+    },
+    {
       "basis": "agent_routes::hit_test::hit_test_point (E3.3-h, dark behind QUARRY_EDGE__HIT_TEST: 403 hit_test_disabled when off, and 501 unsupported when on until the driver trait gains its point method) reads DOM.getNodeForLocation and the partial accessibility tree, maps the hit to the person's lane's last observed @e ref, and answers the run's zdr flag with it. The AX name it returns is page text the same caller's observation already carries under ZDR; no backend node id or frame id is on the wire. Nothing is stored, so ZDR has nothing to suppress and the route is not refused",
       "detail": {
         "reason": "a read-only point lookup on the caller's own live run; it writes no receipt, timeline row, artifact or cache entry, and logs no page text"

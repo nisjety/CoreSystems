@@ -1497,6 +1497,10 @@ services:
       WIKISTORE_GDPR_SHARED_NATS_URL: nats://control-shared-nats:4222
       WIKISTORE_GDPR_SHARED_NATS_USER: wiki-store-gdpr
       WIKISTORE_GDPR_SHARED_NATS_PASSWORD: ${WIKI_STORE_GDPR_NATS_PASSWORD:?WIKI_STORE_GDPR_NATS_PASSWORD is required}
+      # WIKI_CREATE_PAGE_PROPOSALS_ENABLED is dark by default. Only the strict
+      # literal "true" turns on agent create-page proposals and the pending
+      # listing; off, both routes answer 404.
+      WIKI_CREATE_PAGE_PROPOSALS_ENABLED: ${WIKI_CREATE_PAGE_PROPOSALS_ENABLED:-false}
     volumes:
       - ${WIKI_EVENT_SIGNING_PRIVATE_KEY_PATH:-.secrets/event-keys/wiki-events.pem}:/run/event-keys/wiki-events.pem:ro
     networks:

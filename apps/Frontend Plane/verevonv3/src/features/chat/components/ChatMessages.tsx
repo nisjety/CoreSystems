@@ -3,6 +3,7 @@ import { ResearchPlanCard, researchPlanTurnEnabled } from './ResearchPlanCard'
 import type { ConnectIntent } from '@/shared/integrations/connect-intent'
 import { ForkAction, threadForkEnabled } from './ForkAction'
 import { ExportConversationAction, threadExportEnabled } from './ExportConversationAction'
+import { ShareSnapshotDialog, shareSnapshotEnabled } from './ShareSnapshotDialog'
 import { ImportConversationAction, threadImportEnabled } from './ImportConversationAction'
 import { formatResetTime, humanizeToolName, refreshResetTimeWording, workStepLabel } from './chat-normalizers'
 import { RunNotifyButton } from './RunNotifyButton'
@@ -1041,6 +1042,14 @@ export function AssistantMessage(props: {
             {/* The export is about the whole conversation, so it is offered once: on the latest answer, beside fork. */}
             <Show when={threadExportEnabled() && props.isLatest && Boolean(props.threadId) && !props.message.streaming}>
               <ExportConversationAction
+                threadId={props.threadId ?? ''}
+                temporaryChat={props.temporaryChat}
+                spaceScoped={props.spaceScoped}
+              />
+            </Show>
+            {/* A snapshot shares a redacted copy with named members, so it sits beside the export on the same answer (W4-SH-6). */}
+            <Show when={shareSnapshotEnabled() && props.isLatest && Boolean(props.threadId) && !props.message.streaming}>
+              <ShareSnapshotDialog
                 threadId={props.threadId ?? ''}
                 temporaryChat={props.temporaryChat}
                 spaceScoped={props.spaceScoped}

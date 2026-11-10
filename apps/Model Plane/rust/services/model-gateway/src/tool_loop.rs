@@ -274,18 +274,27 @@ fn document_artifact_write(
     kind == Some(ArtifactKind::Document)
 }
 
-/// Validates a model-authored artifact, returning the normalized parts.
+/// Validates a model-authored artifact, returning the normalized parts: the id, the kind it is stored under, the
+/// title, and the content to store. A `web_bundle` (W5-087, behind its switch) is a manifest: it is checked and
+/// inlined here into the `html` document it is stored as, so the manifest itself is never kept.
 fn validate_authored_artifact(
     id: &str,
     kind: &str,
     title: &str,
     content: &str,
-) -> Result<(String, crate::artifacts::ArtifactKind, String), String> {
+) -> Result<(String, crate::artifacts::ArtifactKind, String, String), String> {
     let id = id.trim();
     if id.is_empty() {
         return Err("create_artifact requires a non-empty 'id'".to_owned());
     }
-    let Some(kind) = crate::artifacts::ArtifactKind::parse(kind) else {
+    // `ArtifactKind::parse` does not know a bundle; only the switch admits its kind, and it is stored as html.
+    let bundle = crate::web_bundle::is_bundle_kind(kind);
+    let parsed = if bundle {
+        Some(crate::artifacts::ArtifactKind::Html)
+    } else {
+        crate::artifacts::ArtifactKind::parse(kind)
+    };
+    let Some(kind) = parsed else {
         return Err(format!(
             "unknown artifact kind '{kind}' — use 'document', 'code', or 'html'"
         ));
@@ -305,11 +314,16 @@ fn validate_authored_artifact(
             crate::artifacts::MAX_TEXT_ARTIFACT_CHARS
         ));
     }
+    let content = if bundle {
+        crate::web_bundle::inline_bundle(content)?
+    } else {
+        content.to_owned()
+    };
     let title = title.trim();
     // A missing title would render as an unlabelled panel entry; fall back to
     // the id, which the model chose to be descriptive.
     let title = if title.is_empty() { id } else { title };
-    Ok((id.to_owned(), kind, title.to_owned()))
+    Ok((id.to_owned(), kind, title.to_owned(), content))
 }
 
 fn authored_artifact_payload(
@@ -3878,7 +3892,8 @@ async fn dispatch_tool_with_cost(
             let title = arg_str(&call.arguments_json, "title");
             let content = arg_str(&call.arguments_json, "content");
             match validate_authored_artifact(&id, &kind, &title, &content) {
-                Ok((id, kind, title)) => {
+                // The content is the validator's: a web_bundle manifest arrives here already inlined (W5-087).
+                Ok((id, kind, title, content)) => {
                     // A "new" artifact whose title the user already sees in
                     // this thread is a revision, whatever id the model picked
                     // (RUN-LOG findings 2/5/14: three same-titled documents in
@@ -6446,6 +6461,8 @@ fn builtin_tool_defs_for(batch: bool) -> Vec<ToolDefinition> {
     advertise_batched_search(&mut defs, batch);
     // Last, and only while its switch is on, so the list is unchanged when it is off (EP-5 S2).
     crate::deck_tool::offer(&mut defs, crate::deck_tool::enabled());
+    // The `web_bundle` kind of `create_artifact` (W5-087), named on the definition only while its switch is on.
+    crate::web_bundle::offer(&mut defs, crate::web_bundle::enabled());
     defs
 }
 
@@ -14977,7 +14994,7 @@ mod tests {
         let huge = "x".repeat(crate::artifacts::MAX_TEXT_ARTIFACT_CHARS + 1);
         assert!(validate_authored_artifact("id", "document", "T", &huge).is_err());
         // A missing title falls back to the id rather than rendering blank.
-        let (id, kind, title) =
+        let (id, kind, title, _) =
             validate_authored_artifact("min-rapport", "markdown", "  ", "body").expect("valid");
         assert_eq!(id, "min-rapport");
         assert_eq!(kind, crate::artifacts::ArtifactKind::Document);

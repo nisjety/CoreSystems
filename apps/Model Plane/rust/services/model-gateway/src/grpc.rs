@@ -2132,34 +2132,102 @@ impl ModelGateway for GatewayService {
         request: Request<ProxyMcpToolRequest>,
     ) -> Result<Response<ProxyMcpToolResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Tool)?;
+        // W4-CC-5: a static-bearer server is refused on a ZDR or waived turn with its own feature, so the check runs
+        // before the MCP-wide gate below, which would name `mcp_execution` instead.
+        let names_stored_binding = self
+            .state
+            .mcp
+            .credential_binding(&request.get_ref().org_id, &request.get_ref().server_id)
+            .is_some();
+        if names_stored_binding {
+            let posture = identity
+                .posture(&crate::zdr_posture::Route::plain(false))
+                .map_err(|refusal| refusal.grpc_status(tonic::Code::FailedPrecondition))?;
+            if let Some(refusal) = crate::mcp_credential_ref::turn_refusal(&posture) {
+                return Err(refusal.grpc_status(tonic::Code::FailedPrecondition));
+            }
+        }
         require_explicit_zdr_contract(&identity, "mcp_execution")?;
         if !identity.is_service() {
             return Err(Status::permission_denied(
                 "MCP execution is restricted to the governed execution service",
             ));
         }
-        let req = request.into_inner();
+        let mut req = request.into_inner();
+        // W4-CC-5: a static-bearer server runs with the credential its integration-corev2 binding redeems for this
+        // call. A waived turn is refused for such a server before any call. Every other server keeps the OAuth path.
+        let static_bearer = match (
+            self.state
+                .mcp
+                .credential_binding(&req.org_id, &req.server_id),
+            self.state.mcp.get_server(&req.org_id, &req.server_id),
+        ) {
+            (Some(binding_id), Some(server)) => {
+                let posture = identity
+                    .posture(&crate::zdr_posture::Route::plain(false))
+                    .map_err(|refusal| refusal.grpc_status(tonic::Code::FailedPrecondition))?;
+                if let Some(refusal) = crate::mcp_credential_ref::turn_refusal(&posture) {
+                    return Err(refusal.grpc_status(tonic::Code::FailedPrecondition));
+                }
+                match crate::mcp_credential_ref::bearer_for(
+                    &server.url,
+                    &binding_id,
+                    &req.org_id,
+                    &crate::mcp_credential_ref::call_id_for(&req.request_id),
+                    false,
+                )
+                .await
+                {
+                    Ok(bearer) => Some(bearer),
+                    Err(error) => {
+                        return Ok(Response::new(ProxyMcpToolResponse {
+                            request_id: req.request_id,
+                            output_json: String::new(),
+                            error_message: error.message(),
+                            elicitation: None,
+                        }));
+                    }
+                }
+            }
+            _ => None,
+        };
         // No live per-user bearer exists on this service-to-service path, so
         // an OAuth-connected server's token can't be forwarded the way every
         // other gateway->capability-core call does it — resolve one via the
         // Model-Plane-local service secret instead. Soft-fails to None (never
         // an error) so servers with no stored OAuth tokens are unaffected.
-        let oauth_token = crate::mcp_oauth::resolve_stored_oauth_token(
-            &self.state.http_client,
-            &self.state.capability_core_base_url,
-            &self.state.mcp_oauth_service_token,
-            &req.org_id,
-            &req.server_id,
-        )
-        .await;
-        runtime_registries::handle_proxy_mcp_tool(
+        let oauth_token = if static_bearer.is_some() {
+            // A held elicitation keeps its session, and with it the token, until the user answers. A call on a
+            // stored credential is never held, so the token lives for that call alone.
+            req.allow_elicitation = false;
+            None
+        } else {
+            crate::mcp_oauth::resolve_stored_oauth_token(
+                &self.state.http_client,
+                &self.state.capability_core_base_url,
+                &self.state.mcp_oauth_service_token,
+                &req.org_id,
+                &req.server_id,
+            )
+            .await
+        };
+        let token = static_bearer
+            .as_ref()
+            .map(crate::mcp_credential_ref::SecretBearer::expose)
+            .or(oauth_token.as_deref());
+        let mut response = runtime_registries::handle_proxy_mcp_tool(
             &self.state.mcp,
             &self.state.ownership,
             req,
-            oauth_token.as_deref(),
+            token,
         )
-        .await
-        .map(Response::new)
+        .await?;
+        if let Some(bearer) = static_bearer.as_ref() {
+            // A server that echoes its own credential must not hand it to the model.
+            crate::mcp_credential_ref::redact(&mut response.output_json, bearer.expose());
+            crate::mcp_credential_ref::redact(&mut response.error_message, bearer.expose());
+        }
+        Ok(Response::new(response))
     }
 
     /// Agent-facing tool defs for the org's enabled MCP servers, namespaced
@@ -2183,6 +2251,11 @@ impl ModelGateway for GatewayService {
                 .zdr_for(&crate::zdr_posture::Route::plain(false))
                 .ok(),
         );
+        // W4-CC-5: a static-bearer server is listed only on a turn that may redeem its binding. A ZDR or waived turn
+        // lists none, and so does an identity whose posture cannot be read.
+        let redeem_static_bearers = identity
+            .posture(&crate::zdr_posture::Route::plain(false))
+            .is_ok_and(|posture| crate::mcp_credential_ref::turn_refusal(&posture).is_none());
         let capability_bearer = forwarded_capability_bearer(&identity, &request);
         let req = request.into_inner();
         let (tools, meta) = runtime_registries::mcp_tool_listing(
@@ -2197,6 +2270,7 @@ impl ModelGateway for GatewayService {
             runtime_registries::McpListingOptions {
                 unstaged: req.unstaged,
                 observe,
+                redeem_static_bearers,
             },
         )
         .await;

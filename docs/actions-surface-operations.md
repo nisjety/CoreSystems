@@ -318,7 +318,50 @@ of these land, the operation is inert.
 | `spotlight.post` / `snapchat.spotlight.post` | POST `{profile}/public_profiles/{profileId}/spotlights` | `profileId`* | JSON, forwarded verbatim; **required** (`media_id`, `description`, `locale`); returns status `SUBMITTED` → review → `LIVE`/`REJECTED` | `social.post.write` | yes | **yes** | 1016 |
 | `saved_story.create` / `snapchat.saved_story.create` | POST `{profile}/public_profiles/{profileId}/saved_stories` | `profileId`* | JSON, forwarded verbatim; **required** (`saved_stories` list with `snap_sources[]`, `title`) | `social.post.write` | yes | **yes** | 1025 |
 
-Row totals: microsoft 5, slack 5, google 5, github 15, notion 3, shopify 3, stripe 4, okta 5, linkedin 19, meta family 37, snapchat 15 — **116 operations**.
+### custom_rest (1 op) — organisation REST connector through a credential binding — W4-CC-6
+
+Added 2026-11-10 (W4-CC-6, F-t3-057). **This extends the frozen contract and is flagged for owner
+review (K3-14 class): do not treat it as ratified until the owner signs it off.** Code:
+`internal/actions/custom_rest.go` (executor, a `custom_rest` case in the `Execute` switch in
+`service.go`) and `internal/api/custom_rest.go` (capability by method, binding opening, redemption
+audit). **Ships dark**: `CUSTOM_REST_CONNECTORS_ENABLED`, default off, only the exact value `true`
+turns it on (and it needs `CREDENTIAL_BINDINGS_ENABLED=true`). While off, provider `custom_rest` is
+unknown exactly as before (`operation_not_supported`, and `actions are not implemented for provider
+custom_rest` from the executor).
+
+A `custom_rest` connection has no OAuth token. Its `providerContext.credential_binding_id` names
+**one** credential binding (W4-CC-3, kind `rest_api_key` or `rest_bearer`, active, same organisation).
+The binding fixes the host, the one header the secret goes in, the allowed methods and the allowed
+path prefixes; the request chooses none of those. Connections of this provider carry no ZDR
+assessment record, so they read as `cannot_verify` (no ZDR claim).
+
+| Operation (aliases) | Method + Endpoint | Params | Body semantics | Capability | Sensitive | Approval |
+|---|---|---|---|---|---|---|
+| `custom_rest.call` (no aliases; lowercased before matching) | `{method}` `https://{binding.host}{path}?{query}` | `method`* (one of GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS, and in the binding's `allowed_methods`), `path`* (absolute; at or below one of the binding's `allowed_path_prefixes` at a segment boundary; plain URL path characters only: no `?`, `#`, `%`, `\`, `//`, `.` or `..` segments; max 2048), `query` (object of scalars or arrays of scalars; max 32 entries) | optional JSON object, sent as the request body for POST, PUT, PATCH, DELETE only (max 256 KiB); a body with GET, HEAD or OPTIONS is refused | **GET, HEAD:** `custom_rest.read`. **Every other method:** `custom_rest.write` | yes (both) | **GET, HEAD: no. Every other method: yes** (signed write attestation from a service bearer with `integration:write`, plus a valid `idempotencyKey`, receipts as for any provider write). A missing or unknown `method` counts as a write |
+
+Execution rules:
+
+1. Host fixed by the binding; scheme always `https`, port 443. The request cannot choose either.
+2. Egress goes through the service's `internal/egress` client, so every dial is resolved and vetted
+   (private, loopback, link-local and metadata addresses are refused). Redirects are never followed:
+   a 3xx is an error.
+3. 10 second deadline. The response is read up to 256 KiB; a larger response is refused, never
+   truncated.
+4. The secret is placed only in the binding's header (`Authorization: Bearer <secret>` for
+   `rest_bearer`, the raw secret in the named header for `rest_api_key`). It is never put in the
+   URL, query or body, and never logged, audited or placed in an error.
+5. The exact injected secret bytes (raw, JSON-escaped and URL-escaped forms) are replaced with
+   `[redacted]` in the response before it is decoded.
+6. Result: `{ "status": <2xx code>, "content_type": "…", "body": <decoded JSON, or text, or null> }`.
+   A non-2xx status is an error carrying the status only (`custom_rest endpoint returned status N`);
+   the error body is not returned.
+7. Opening the binding writes a `connection.credential.redeemed` audit row (ids, host and call id,
+   never the secret) before the call is made; if it cannot be written the call is refused
+   (`503 credential_audit_failed`). A binding that is missing, revoked, of another kind or cannot be
+   opened is `409 credential_binding_unavailable`. Writes also record `connection.action.requested` /
+   `connection.action.executed`; reads record `connection.action.executed`.
+
+Row totals: microsoft 5, slack 5, google 5, github 15, notion 3, shopify 3, stripe 4, okta 5, linkedin 19, meta family 37, snapchat 15 — **116 operations** (plus `mail.otp.read` and, when `CUSTOM_REST_CONNECTORS_ENABLED` is on, `custom_rest.call`).
 
 ---
 

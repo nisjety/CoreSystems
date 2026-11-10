@@ -40,6 +40,11 @@ type WikiPageVersion struct {
 	PublishedAt     *time.Time      `json:"published_at,omitempty"`
 }
 
+// ProposalKindCreatePage marks a proposal for a page that does not exist yet.
+// Its row carries proposed_path and proposed_title and no page_id. Edit
+// proposals keep the column default, "edit".
+const ProposalKindCreatePage = "create_page"
+
 type WikiProposal struct {
 	ProposalID      string          `json:"proposal_id"`
 	PageID          string          `json:"page_id"`
@@ -52,6 +57,12 @@ type WikiProposal struct {
 	ReviewedBy      *string         `json:"reviewed_by,omitempty"`
 	Metadata        json.RawMessage `json:"metadata,omitempty"`
 	CreatedAt       time.Time       `json:"created_at"`
+
+	// ProposalKind is "edit" or "create_page". A create_page proposal has no
+	// page_id; it names the page it would create by ProposedPath and ProposedTitle.
+	ProposalKind  string  `json:"proposal_kind"`
+	ProposedPath  *string `json:"proposed_path,omitempty"`
+	ProposedTitle *string `json:"proposed_title,omitempty"`
 }
 
 type CreatePageInput struct {
@@ -73,6 +84,18 @@ type UpdateVersionInput struct {
 type SubmitProposalInput struct {
 	PageID          string   `json:"page_id"`
 	OrgID           string   `json:"org_id"`
+	ProposedContent string   `json:"proposed_content"`
+	EditReason      string   `json:"edit_reason"`
+	ProposedByAgent string   `json:"proposed_by_agent"`
+	SourceRefs      []string `json:"source_refs,omitempty"`
+}
+
+// SubmitCreatePageProposalInput is an agent's proposal for a page that does not
+// exist yet. SourceRefs must name at least one source.
+type SubmitCreatePageProposalInput struct {
+	OrgID           string   `json:"org_id"`
+	ProposedPath    string   `json:"proposed_path"`
+	ProposedTitle   string   `json:"proposed_title"`
 	ProposedContent string   `json:"proposed_content"`
 	EditReason      string   `json:"edit_reason"`
 	ProposedByAgent string   `json:"proposed_by_agent"`

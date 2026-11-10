@@ -143,7 +143,7 @@ func main() {
 		}
 	}()
 
-	wikiHandler := handler.NewWikiHandler(wikiRepo)
+	wikiHandler := handler.NewWikiHandler(wikiRepo, cfg.CreatePageProposalsEnabled)
 
 	r := chi.NewRouter()
 	r.Use(chimw.RequestID)

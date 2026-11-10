@@ -10,11 +10,14 @@
 // service owns for the org:
 //
 //   - wiki_pages                          — the wiki tree root for the org.
-//   - wiki_page_versions, wiki_proposals  — no org_id column of their own;
-//     carry an ON DELETE CASCADE FK to wiki_pages(page_id), so deleting the
-//     org's rows from wiki_pages purges these transitively. Not a separate
-//     statement — verified against the current schema
-//     (infra/postgres/init.sql), not assumed.
+//   - wiki_page_versions                  — no org_id column of its own; carries an
+//     ON DELETE CASCADE FK to wiki_pages(page_id), so deleting the org's rows
+//     from wiki_pages purges it transitively. Not a separate statement —
+//     verified against the current schema (infra/postgres/init.sql), not
+//     assumed.
+//   - wiki_proposals                      — carries its own org_id. A create-page
+//     proposal has no page_id, so the cascade does not reach it; purged
+//     explicitly by org_id, ahead of wiki_pages.
 //   - wiki_source_logs, wiki_maintenance_logs — carry their own NOT NULL
 //     org_id column (backfilled by the 2026-07-10 reconciliation migration)
 //     in addition to a page_id FK to wiki_pages. Purged explicitly by
@@ -53,6 +56,7 @@ import (
 // error.
 type PurgeResult struct {
 	WikiPagesDeleted           int64 `json:"wiki_pages_deleted"`
+	WikiProposalsDeleted       int64 `json:"wiki_proposals_deleted"`
 	WikiSourceLogsDeleted      int64 `json:"wiki_source_logs_deleted"`
 	WikiMaintenanceLogsDeleted int64 `json:"wiki_maintenance_logs_deleted"`
 	OperatingMapsDeleted       int64 `json:"operating_maps_deleted"`
@@ -61,12 +65,12 @@ type PurgeResult struct {
 
 // Total sums every deleted-row count directly targeted above. It does NOT
 // include rows removed transitively by cascade (wiki_page_versions,
-// wiki_proposals, operating_map_versions, operating_map_proposals,
+// operating_map_versions, operating_map_proposals,
 // operating_map_blueprint_suggestions) — Postgres doesn't report cascaded
 // row counts through RowsAffected() on the parent statement, so those are
 // not counted here. Convenience for logging and tests.
 func (r PurgeResult) Total() int64 {
-	return r.WikiPagesDeleted + r.WikiSourceLogsDeleted + r.WikiMaintenanceLogsDeleted +
+	return r.WikiPagesDeleted + r.WikiProposalsDeleted + r.WikiSourceLogsDeleted + r.WikiMaintenanceLogsDeleted +
 		r.OperatingMapsDeleted + r.WikiEventOutboxDeleted
 }
 
@@ -146,10 +150,16 @@ func (r *WikiRepo) HardPurgeByOrg(ctx context.Context, orgID string) (PurgeResul
 		return PurgeResult{}, fmt.Errorf("purge wiki_source_logs: %w", derr)
 	}
 
+	// wiki_proposals carries its own org_id, but a create-page proposal has no
+	// page_id, so the cascade from wiki_pages below would not reach it. Delete
+	// it explicitly, by org_id, ahead of wiki_pages.
+	if result.WikiProposalsDeleted, derr = del(`DELETE FROM wiki_proposals WHERE org_id = $1`); derr != nil {
+		return PurgeResult{}, fmt.Errorf("purge wiki_proposals: %w", derr)
+	}
+
 	// wiki_pages is the root of the wiki tree for this org. wiki_page_versions
-	// and wiki_proposals have no org_id column of their own — only a page_id
-	// FK to wiki_pages(page_id) ON DELETE CASCADE — so this single statement
-	// purges them transitively; there is no separate statement for either.
+	// has no org_id column of its own — only a page_id FK to wiki_pages(page_id)
+	// ON DELETE CASCADE — so this single statement purges it transitively.
 	if result.WikiPagesDeleted, derr = del(`DELETE FROM wiki_pages WHERE org_id = $1`); derr != nil {
 		return PurgeResult{}, fmt.Errorf("purge wiki_pages: %w", derr)
 	}

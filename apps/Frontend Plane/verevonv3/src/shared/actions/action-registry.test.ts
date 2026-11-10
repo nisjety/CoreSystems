@@ -1809,7 +1809,8 @@ describe('action registry', () => {
     // +1 after W4-CC-2 registered mcp.probe_server, the MCP add flow's probe of a server before it is saved.
     // +3 after W5-077-c registered chat.thread.archive, chat.thread.star and chat.thread.mark_unread, the palette's thread flags.
     // +5 after W4-PL-4 registered plugins.list_catalog, plugins.install, plugins.uninstall, plugins.approve_catalog and plugins.kill_digest.
-    expect(ids).toHaveLength(336)
+    // +3 after W5-074-c registered org.list_permission_rules, org.create_permission_rule and org.delete_permission_rule, the organization's permission rules.
+    expect(ids).toHaveLength(339)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

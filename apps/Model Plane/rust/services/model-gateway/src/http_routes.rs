@@ -682,6 +682,16 @@ fn proxy_routes() -> Router<AppState> {
             "/v1/org/hooks/:hook_id",
             put(update_org_hook_proxy).delete(delete_org_hook_proxy),
         )
+        // The org permission rules (W5-074-c): capability-core owns them and decides who may write them from the signed
+        // principal. Off, capability-core answers 404 and this proxy passes that on.
+        .route(
+            "/v1/org/permission-rules",
+            get(list_org_permission_rules_proxy).post(create_org_permission_rule_proxy),
+        )
+        .route(
+            "/v1/org/permission-rules/:rule_id",
+            delete(delete_org_permission_rule_proxy),
+        )
         // Tasks
         .route("/v1/tasks", get(list_tasks_proxy).post(create_task_proxy))
         .route("/v1/tasks/:id", get(get_task_proxy).patch(patch_task_proxy))
@@ -972,14 +982,54 @@ async fn read_viewer_app(
             "capability registry is unavailable",
         ));
     }
-    let oauth_token = crate::mcp_oauth::resolve_stored_oauth_token(
-        &state.http_client,
-        &state.capability_core_base_url,
-        &state.mcp_oauth_service_token,
-        &claims.org_id,
-        server_id,
-    )
-    .await;
+    // A static-bearer server reads with the credential its binding redeems for this read (W4-CC-5). A waived turn is
+    // refused before the read. A ZDR turn was refused by `app_read_checks` before this point.
+    let static_bearer = match (
+        state.mcp.credential_binding(&claims.org_id, server_id),
+        state.mcp.get_server(&claims.org_id, server_id),
+    ) {
+        (Some(binding_id), Some(server)) => {
+            let posture =
+                crate::zdr_posture::decide_for(claims, &crate::zdr_posture::Route::plain(false))
+                    .map_err(|refusal| crate::zdr_posture::http(&refusal))?;
+            if let Some(refusal) = crate::mcp_credential_ref::turn_refusal(&posture) {
+                return Err(crate::zdr_posture::http(&refusal));
+            }
+            let bearer = crate::mcp_credential_ref::bearer_for(
+                &server.url,
+                &binding_id,
+                &claims.org_id,
+                &new_ulid(),
+                false,
+            )
+            .await
+            .map_err(|error| {
+                run_trace_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "credential_unavailable",
+                    &error.message(),
+                )
+            })?;
+            Some(bearer)
+        }
+        _ => None,
+    };
+    let oauth_token = if static_bearer.is_some() {
+        None
+    } else {
+        crate::mcp_oauth::resolve_stored_oauth_token(
+            &state.http_client,
+            &state.capability_core_base_url,
+            &state.mcp_oauth_service_token,
+            &claims.org_id,
+            server_id,
+        )
+        .await
+    };
+    let token = static_bearer
+        .as_ref()
+        .map(crate::mcp_credential_ref::SecretBearer::expose)
+        .or(oauth_token.as_deref());
     crate::mcp_apps::read_app_resource(
         &state.mcp,
         &state.ownership,
@@ -988,7 +1038,7 @@ async fn read_viewer_app(
         &claims.user_id,
         server_id,
         tool,
-        oauth_token.as_deref(),
+        token,
     )
     .await
     .map_err(|error| run_trace_error(error.status(), error.code(), error.message()))
@@ -5248,6 +5298,13 @@ struct McpRegisterBody {
     /// all org members). A non-admin can never create an "org" server.
     #[serde(default = "default_mcp_scope")]
     scope: String,
+    /// `static_bearer` registers a server whose token is a stored integration-corev2 credential binding
+    /// (W4-CC-5). Empty is the plain registration, as before.
+    #[serde(default)]
+    auth_kind: String,
+    /// The credential binding (`cb_...`) a `static_bearer` server redeems for each call. Never a token.
+    #[serde(default)]
+    credential_binding_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5319,6 +5376,7 @@ async fn mcp_register(
             Json(json!({ "error": "server_id is assigned by the gateway on create" })),
         ));
     }
+    let credential_binding = static_bearer_binding(&body.auth_kind, &body.credential_binding_id)?;
     register_plain_mcp_server(
         &state,
         &claims,
@@ -5331,8 +5389,43 @@ async fn mcp_register(
         body.tool_allowlist,
         body.enabled,
         body.scope,
+        credential_binding,
     )
     .await
+}
+
+/// The credential binding a registration names (W4-CC-5). An empty `auth_kind` is the plain registration, which names
+/// no binding, and so is `none`. `static_bearer` names one, and only while `MCP_SECRET_REF_AUTH_ENABLED` is the literal
+/// `true`. The binding is an id, never a token: a raw token is still refused by validation.
+fn static_bearer_binding(
+    auth_kind: &str,
+    credential_binding_id: &str,
+) -> Result<Option<String>, HttpJsonError> {
+    let refused = |message: &str| -> HttpJsonError {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
+    };
+    let auth_kind = auth_kind.trim();
+    let binding_id = credential_binding_id.trim();
+    match auth_kind {
+        "" | "none" if binding_id.is_empty() => Ok(None),
+        "" | "none" => Err(refused(
+            "credential_binding_id needs auth_kind static_bearer",
+        )),
+        crate::mcp_credential_ref::AUTH_KIND_STATIC_BEARER => {
+            if !crate::mcp_credential_ref::enabled() {
+                return Err(refused(
+                    "static_bearer MCP servers are not enabled on this deployment",
+                ));
+            }
+            if !crate::mcp_credential_ref::binding_id_valid(binding_id) {
+                return Err(refused(
+                    "credential_binding_id must name a credential binding",
+                ));
+            }
+            Ok(Some(binding_id.to_owned()))
+        }
+        _ => Err(refused("auth_kind must be static_bearer when it is given")),
+    }
 }
 
 /// Resolve the effective tool allowlist for a new MCP server: if the caller
@@ -5384,6 +5477,7 @@ async fn register_plain_mcp_server(
     tool_allowlist: Vec<String>,
     enabled: bool,
     scope: String,
+    credential_binding_id: Option<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let org_id = claims.org_id.clone();
     let scope = crate::ownership::Scope::from_wire(&scope);
@@ -5397,7 +5491,18 @@ async fn register_plain_mcp_server(
         crate::ownership::Scope::Org => crate::ownership::Ownership::org(),
         crate::ownership::Scope::User => crate::ownership::Ownership::user(claims.user_id.clone()),
     };
-    let tool_allowlist = if transport == "http" {
+    if credential_binding_id.is_some() {
+        // A static-bearer server redeems its token from integration-corev2 over https only, on the default port.
+        if let Err(error) = crate::mcp_credential_ref::validate_server_url(&url) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": error.message() })),
+            ));
+        }
+    }
+    // A static-bearer server's token is not in hand at registration, so its tools are never discovered here: the
+    // allowlist the caller names is the one kept.
+    let tool_allowlist = if transport == "http" && credential_binding_id.is_none() {
         resolve_tool_allowlist(&url, &token, tool_allowlist).await
     } else {
         tool_allowlist
@@ -5431,6 +5536,15 @@ async fn register_plain_mcp_server(
             ownership.clone(),
         );
     }
+    // The credential binding a static-bearer server redeems per call (W4-CC-5). In memory only: the token stays
+    // in integration-corev2, and the record in capability-core names the binding.
+    if let (Some(binding_id), Some(server)) =
+        (credential_binding_id.as_deref(), resp.server.as_ref())
+    {
+        state
+            .mcp
+            .set_credential_binding(&org_id, &server.server_id, binding_id);
+    }
 
     // capability-core is the registry system of record. A create is not
     // successful until the authenticated catalog write succeeds; on failure we
@@ -5452,13 +5566,21 @@ async fn register_plain_mcp_server(
             Json(json!({"error": "capability registry is unavailable"})),
         ));
     }
-    let auth_kind = if registered.token.is_empty() {
-        "none"
+    // A static-bearer server is catalogued as a bearer whose secret reference names its binding (W4-CC-5).
+    let auth_kind = if credential_binding_id.is_some() || !registered.token.is_empty() {
+        crate::mcp_credential_ref::CATALOG_AUTH_KIND
     } else {
-        "bearer"
+        "none"
     };
+    let secret_ref = credential_binding_id
+        .as_deref()
+        .map(crate::mcp_credential_ref::secret_ref_for);
     let payload = crate::runtime_registries::mcp_capability_payload(
-        &org_id, registered, &ownership, auth_kind,
+        &org_id,
+        registered,
+        &ownership,
+        auth_kind,
+        secret_ref.as_deref(),
     );
     let url = format!("{}/api/v1/mcp", state.capability_core_base_url);
     let catalog_result = state
@@ -5919,6 +6041,8 @@ async fn mcp_connect(
                 // servers are registered live, as they always have been.
                 true,
                 body.scope,
+                // The connect flow names no credential binding (W4-CC-5).
+                None,
             )
             .await
         }
@@ -6026,6 +6150,7 @@ async fn mcp_oauth_callback(
         &registered,
         &ownership,
         "oauth",
+        None,
     );
     let catalog_url = format!("{}/api/v1/mcp", state.capability_core_base_url);
     let catalog_response = state
@@ -8205,6 +8330,40 @@ async fn delete_org_hook_proxy(
     require_non_zdr_durable_mutation(&c)?;
     require_registry_identifier(&hook_id, "hook_id")?;
     let path = format!("org-hooks/{hook_id}");
+    proxy_to_capability_core(&s, &c, &bearer, &path, "DELETE", None).await
+}
+
+/// `GET /v1/org/permission-rules` — the org's permission rules and the policy revision they are at. Any member reads them.
+async fn list_org_permission_rules_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "org-permission-rules", "GET", None).await
+}
+
+/// `POST /v1/org/permission-rules` — an org admin adds a deny or ask rule. The body is forwarded as sent, so a field that
+/// capability-core does not know is refused rather than dropped.
+async fn create_org_permission_rule_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    proxy_to_capability_core(&s, &c, &bearer, "org-permission-rules", "POST", Some(&body)).await
+}
+
+/// `DELETE /v1/org/permission-rules/:rule_id` — an org admin removes a rule.
+async fn delete_org_permission_rule_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(rule_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    require_registry_identifier(&rule_id, "rule_id")?;
+    let path = format!("org-permission-rules/{rule_id}");
     proxy_to_capability_core(&s, &c, &bearer, &path, "DELETE", None).await
 }
 
@@ -18153,6 +18312,8 @@ mod capability_contract_tests {
                 enabled: true,
                 server_id: String::new(),
                 scope: "user".to_owned(),
+                auth_kind: String::new(),
+                credential_binding_id: String::new(),
             }),
         )
         .await

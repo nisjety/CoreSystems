@@ -106,6 +106,12 @@ interface ImportMetaEnv {
 	readonly VITE_ENV_PILL?: string;
 	/** "true" applies the organisation accent, solved for contrast in OKLCH, as `--org-accent` and `--org-accent-on` (F-t3-098). Default off. */
 	readonly VITE_ORG_ACCENT?: string;
+	/** "true" mounts the organisation permission rules section in Customize: deny or ask rules on a tool, for a web domain, a mail recipient's domain or a command prefix (W5-074-c). Default off. */
+	readonly VITE_PERMISSION_RULES?: string;
+	/** "true" mounts the share dialog for conversation snapshots beside the export, and the `/chat/shared/:snapshotId` viewer page a granted member opens (W4-SH-6). Pairs with the gateway's `CHAT_SNAPSHOTS_ENABLED`. Default off. */
+	readonly VITE_CHAT_SNAPSHOTS?: string;
+	/** "true" mounts the Knowledge view that reviews the wiki proposals agents file: accept saves the proposal, reject writes nothing (W5-094-b). Default off. */
+	readonly VITE_WIKI_PROPOSALS_REVIEW?: string;
 }
 
 interface ImportMeta {
