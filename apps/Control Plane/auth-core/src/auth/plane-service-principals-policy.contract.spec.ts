@@ -1571,12 +1571,14 @@ describeIfPolicy('principal bundle P1: data:rerank for quarry-edge', () => {
     ];
     expect(row?.scopesByAudience?.['data-plane']).toEqual(ceiling);
     // The union of the lanes: P2 adds browser:read on browser-broker beside it,
-    // WS16.S2 the two model scopes and ADR-2a the one-time-code read.
+    // WS16.S2 the two model scopes, ADR-2a the one-time-code read and Q3-REG
+    // imports:read on ingestion.
     expect(row?.scopes).toEqual([
       'browser:read',
       'data:read',
       'data:rerank',
       'documents:write',
+      'imports:read',
       'inference:invoke',
       'integration:otp:read',
       'models:invoke',
@@ -1691,6 +1693,7 @@ describeIfPolicy('principal bundle P2: browser:read for quarry-edge', () => {
       'data:read',
       'data:rerank',
       'documents:write',
+      'imports:read',
       'inference:invoke',
       'integration:otp:read',
       'models:invoke',
@@ -2185,6 +2188,7 @@ const modelScope = 'models:invoke';
 const inferenceScope = 'inference:invoke';
 const otpScope = 'integration:otp:read';
 const parseScope = 'parse:write';
+const importsReadScope = 'imports:read';
 
 describeIfPolicy('principal bundle R-13 PR 1: quarry-edge model lanes', () => {
   it('gives quarry-edge exactly the two model audiences, tenant, with the scopes of the plan and no new credential', () => {
@@ -2346,7 +2350,12 @@ describeIfPolicy(
   () => {
     it('gives quarry-edge integration:otp:read on ingestion alone, as a ZDR lane, and no other principal holds it', () => {
       const row = policy?.['quarry-edge'];
-      expect(row?.scopesByAudience?.ingestion).toEqual([otpScope]);
+      // The ingestion lane is the code read and, since Q3-REG, the imports-core
+      // extract read (below); the code-read scope itself stays on this lane alone.
+      expect(row?.scopesByAudience?.ingestion).toEqual([
+        importsReadScope,
+        otpScope,
+      ]);
       expect(row?.retentionByAudience?.ingestion).toBe('zdr');
       expect(holdersOfScope(otpScope)).toEqual(['quarry-edge']);
       expect(lanesHoldingScope(otpScope)).toEqual(['quarry-edge|ingestion']);
@@ -2407,6 +2416,62 @@ describeIfPolicy(
           });
         },
       );
+    });
+  },
+);
+
+// Q3-REG: the manifest row office-extract (imports-core POST /api/v1/import/extract,
+// ephemeral text extraction). imports:read is read-only: imports-core admits it for
+// that one POST and no other write, and the ingestion lane is ZDR, so nothing the
+// token reaches is stored.
+describeIfPolicy(
+  'principal bundle Q3-REG: imports:read for quarry-edge on ingestion',
+  () => {
+    it('is held by quarry-edge alone, on ingestion alone, as a ZDR lane, and never with imports:write', () => {
+      const row = policy?.['quarry-edge'];
+      expect(row?.scopesByAudience?.ingestion).toContain(importsReadScope);
+      expect(row?.retentionByAudience?.ingestion).toBe('zdr');
+      expect(holdersOfScope(importsReadScope)).toEqual(['quarry-edge']);
+      expect(lanesHoldingScope(importsReadScope)).toEqual([
+        'quarry-edge|ingestion',
+      ]);
+      expectScopeConfinedTo(importsReadScope, ['quarry-edge|ingestion']);
+      expect(holdersOfScope('imports:write')).not.toContain('quarry-edge');
+    });
+
+    it('mints imports:read for quarry-edge on ingestion as a ZDR token, and refuses it on every other audience', () => {
+      const registry = registryWithTestCredentials();
+      expect(
+        authorizePlaneServicePrincipal(
+          registry,
+          mintRequest('quarry-edge', 'ingestion', importsReadScope),
+        ),
+      ).toMatchObject({
+        serviceId: 'quarry-edge',
+        orgBinding: 'directory',
+        scopes: [importsReadScope],
+        retention: 'zdr',
+        zdr: true,
+      });
+      for (const audience of [
+        'data-plane',
+        'model-gateway',
+        'inference-core',
+        'browser-broker',
+      ]) {
+        expect(() =>
+          authorizePlaneServicePrincipal(
+            registry,
+            mintRequest('quarry-edge', audience, importsReadScope),
+          ),
+        ).toThrow(/not authorized/i);
+      }
+      expect(() =>
+        authorizePlaneServicePrincipal(
+          registry,
+          mintRequest('quarry-edge', 'ingestion', 'imports:write'),
+        ),
+      ).toThrow(/not authorized/i);
     });
   },
 );

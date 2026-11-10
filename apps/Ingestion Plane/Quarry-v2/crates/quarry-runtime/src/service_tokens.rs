@@ -812,8 +812,10 @@ mod manifest_tests {
     /// before the manifest existed, so the refactor cannot change a request
     /// unnoticed, and editing a row means editing this table too. The two
     /// model-extract rows are the WS16.S2 grant (the two bearers of an org-bound
-    /// model call); the last is the E3.1-h one-time-code read (R-13 PR 1).
-    const EXPECTED_REQUESTS: [(&str, ServiceTokenAudience, &[&str], &str); 10] = [
+    /// model call); then the E3.1-h one-time-code read (R-13 PR 1); the last two
+    /// are the imports-core Office extraction (E3.6-6a) and the Data Plane
+    /// artifact read of a no_egress scrape (E3.8.8).
+    const EXPECTED_REQUESTS: [(&str, ServiceTokenAudience, &[&str], &str); 12] = [
         (
             "vector-retrieve",
             ServiceTokenAudience::DataPlane,
@@ -873,6 +875,18 @@ mod manifest_tests {
             ServiceTokenAudience::Ingestion,
             &["integration:otp:read"],
             "read one approved one-time code",
+        ),
+        (
+            "office-extract",
+            ServiceTokenAudience::Ingestion,
+            &["imports:read"],
+            "ephemeral text extraction of a fetched Office file",
+        ),
+        (
+            "artifacts-read",
+            ServiceTokenAudience::DataPlane,
+            &["data:read"],
+            "no_egress scrape reads the org's stored page capture",
         ),
     ];
 

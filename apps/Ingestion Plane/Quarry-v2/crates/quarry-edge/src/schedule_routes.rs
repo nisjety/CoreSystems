@@ -32,6 +32,7 @@ use quarry_core::envelope::Envelope;
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::resources::OverlapPolicy;
 
+use crate::resource_routes::{optional_monitor_tag, tag_patch_body, TagPatchRequest};
 use crate::state::AppState;
 
 // =============================================================================
@@ -78,6 +79,10 @@ pub struct CreateScheduleRequest {
     pub preset: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_ref: Option<String>,
+    /// The operator label of a monitor (E3.5-6): trimmed, lowercased and checked against the
+    /// monitor-tag grammar before the create is forwarded. Absent or blank is untagged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
     /// Per-kind payload: `url` for scrape and crawl, `urls` for batch, and
     /// optional `max_pages`, `max_depth`, `ingest`.
     #[serde(default)]
@@ -131,6 +136,9 @@ struct ControlScheduleCreate {
     /// token's floor.
     #[serde(skip_serializing_if = "Option::is_none")]
     zdr: Option<bool>,
+    /// The operator label of the monitor (E3.5-6), normalised at the edge. Omitted when untagged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tag: Option<String>,
 }
 
 /// `POST /v1/schedules/:id/backfill` body. The Temporal `backfill`
@@ -375,6 +383,7 @@ pub async fn create_schedule(
         "schedules",
         "create",
     )?;
+    let tag = optional_monitor_tag(req.tag.as_deref()).map_err(|e| err_response(&request_id, e))?;
 
     // W2 change-monitoring path: `preset` signals a recurring change monitor. The
     // org comes from the verified JWT (never the body), the cron from the preset on
@@ -428,6 +437,7 @@ pub async fn create_schedule(
             pause_on_failure: false,
             activate: true,
             zdr: Some(zdr),
+            tag,
         };
         let summary = forward_json::<ControlScheduleCreate, serde_json::Value>(
             &state,
@@ -494,6 +504,7 @@ pub async fn create_schedule(
         pause_on_failure: req.pause_on_failure,
         activate: req.activate.unwrap_or(false) && !claims.is_service(),
         zdr: None,
+        tag,
     };
     let summary = forward_json::<ControlScheduleCreate, serde_json::Value>(
         &state,
@@ -654,6 +665,40 @@ pub async fn delete_schedule(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `PATCH /v1/schedules/{id}` (E3.5-6): set the monitor's tag, or clear it with `""`. The id must
+/// parse as a schedule id, so the path segment cannot reach another control route; the org is the
+/// verified JWT org. The answer is control's updated schedule view, passed through unchanged. This
+/// route does not call the ZDR refusal: it only relabels a row that already exists, as pause and
+/// delete do, and starts no run and creates no resource.
+pub async fn patch_schedule(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Path(id): Path<String>,
+    Json(req): Json<TagPatchRequest>,
+) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = crate::request_id::current();
+    let id = id
+        .parse::<quarry_core::ids::kinds::ScheduleKind>()
+        .map_err(|_| {
+            err_response(
+                &request_id,
+                QuarryError::new(ErrorCode::BadRequest, "invalid schedule id"),
+            )
+        })?;
+    let body = tag_patch_body(&req).map_err(|e| err_response(&request_id, e))?;
+    let path = format!("/v1/schedules/{id}");
+    let summary = forward_json::<TagPatchRequest, serde_json::Value>(
+        &state,
+        reqwest::Method::PATCH,
+        &path,
+        &claims.org_id,
+        Some(&body),
+    )
+    .await
+    .map_err(|e| err_response(&request_id, e))?;
+    Ok(Json(Envelope::ok(request_id, summary)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -676,6 +721,7 @@ mod tests {
             pause_on_failure: false,
             preset: None,
             target_ref: None,
+            tag: None,
             config: serde_json::json!({}),
             activate: None,
             zdr: None,
@@ -718,6 +764,7 @@ mod tests {
             activate: true,
             preset: Some("daily".into()),
             zdr: Some(true),
+            tag: None,
         };
         let s = serde_json::to_string(&body).unwrap();
         assert!(s.contains("\"org_id\":\"org_verevon\""));

@@ -1805,6 +1805,8 @@ async fn proxy_bearer_json_with_headers_and_timeout(
 /// Proxy an SSE stream from model-gateway to the browser without buffering.
 /// Injects a Bearer token and optional `Last-Event-ID` / ZDR headers before forwarding.
 /// Returns a proper JSON error envelope if the upstream returns a non-2xx status.
+/// `extra_headers` are fixed (name, value) pairs the gateway sets upstream: `None` for every
+/// caller but a route that sends one (W3-E3.4-5b: the view-only `x-quarry-live-scope`).
 #[allow(clippy::too_many_arguments)] // cohesive SSE-proxy request context
 pub(crate) async fn proxy_sse_stream(
     state: &AppState,
@@ -1815,8 +1817,9 @@ pub(crate) async fn proxy_sse_stream(
     last_event_id: Option<&str>,
     actor: Option<(&str, &str)>,
     zdr: bool,
+    extra_headers: Option<&'static [(&'static str, &'static str)]>,
 ) -> Response {
-    proxy_sse_stream_with_data_plane(
+    proxy_sse_stream_with_browser(
         state,
         method,
         url,
@@ -1830,10 +1833,12 @@ pub(crate) async fn proxy_sse_stream(
         None,
         None,
         None,
+        None,
         last_event_id,
         actor,
         zdr,
         &[],
+        extra_headers,
     )
     .await
 }
@@ -1922,6 +1927,7 @@ pub(crate) async fn proxy_sse_stream_with_data_plane(
         actor,
         zdr,
         relayed_errors,
+        None,
     )
     .await
 }
@@ -1959,6 +1965,9 @@ pub(crate) async fn proxy_sse_stream_with_browser(
     // fixed message). Empty for every caller but a continuation: the error body
     // is then not even read. See `upstream_error_response`.
     relayed_errors: &'static [(&'static str, u16, &'static str)],
+    // Fixed (name, value) headers this caller sets upstream, `None` for every caller but the
+    // view-only live stream (W3-E3.4-5b). `&'static` on purpose: a request never chooses them.
+    extra_headers: Option<&'static [(&'static str, &'static str)]>,
 ) -> Response {
     let mut req = state.streaming_client.request(method, url);
 
@@ -2019,6 +2028,11 @@ pub(crate) async fn proxy_sse_stream_with_browser(
         .filter(|token| !token.is_empty() && !token.chars().any(char::is_whitespace))
     {
         req = req.header("x-browser-authorization", format!("Bearer {token}"));
+    }
+    if let Some(extra) = extra_headers {
+        for (name, value) in extra {
+            req = req.header(*name, *value);
+        }
     }
 
     req = crate::request_id::apply(req);

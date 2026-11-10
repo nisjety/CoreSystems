@@ -18,7 +18,7 @@ use super::dispatchers::{
     dispatch_browser_create_tab, dispatch_browser_delete_profile,
     dispatch_browser_probe_profile_restore, dispatch_browser_rename_profile,
     dispatch_browser_run_action, dispatch_browser_run_control, dispatch_browser_run_start,
-    dispatch_browser_run_steer,
+    dispatch_browser_run_steer, dispatch_browser_download_send_to_knowledge,
     dispatch_browser_list_origin_consents, dispatch_browser_revoke_origin_consent,
     dispatch_browser_select_tab, dispatch_browser_set_control_mode,
     dispatch_browser_suggest_action, dispatch_chat_approve_plan, dispatch_chat_cancel_invocation,
@@ -552,6 +552,16 @@ pub(super) async fn execute_action(
         }
         "browser.blocked.try_other_source" => {
             dispatch_browser_blocked_try_other_source(&state, &user, &headers, &body.input).await
+        }
+        "browser_download.send_to_knowledge" => {
+            dispatch_browser_download_send_to_knowledge(
+                &state,
+                &user,
+                &headers,
+                &body.input,
+                &body.idempotency_key,
+            )
+            .await
         }
         "router_policy.update" => dispatch_router_policy_update(&state, &user, &body.input).await,
         "browser_session.create" => {

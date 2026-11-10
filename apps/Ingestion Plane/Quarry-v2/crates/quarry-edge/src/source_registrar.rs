@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use quarry_core::error::QuarryResult;
-use quarry_runtime::source_registrar::SourceRegistrar;
+use quarry_runtime::source_registrar::{SourceRegistrar, SourceRegistration};
 
 use crate::resource_routes::upsert_source_internal;
 use crate::state::AppState;
@@ -21,13 +21,14 @@ pub struct EdgeSourceRegistrar {
 
 #[async_trait]
 impl SourceRegistrar for EdgeSourceRegistrar {
-    async fn register_source(
-        &self,
-        org_id: &str,
-        name: &str,
-        url: &str,
-        kind: &str,
-    ) -> QuarryResult<()> {
+    async fn register_source(&self, registration: SourceRegistration<'_>) -> QuarryResult<()> {
+        let SourceRegistration {
+            org_id,
+            name,
+            url,
+            kind,
+            tag,
+        } = registration;
         // The crawl that triggered this registration passed the web policy of its caller. The
         // registrar has no token, so it re-checks under the baseline (the operator deny list) as a
         // human principal: an allow list binds autonomous callers only, and a row for a URL the
@@ -39,6 +40,6 @@ impl SourceRegistrar for EdgeSourceRegistrar {
             None,
         )?;
         crate::web_policy_edge::gate_url(&decision, url)?;
-        upsert_source_internal(&self.state, org_id, name, url, kind).await
+        upsert_source_internal(&self.state, org_id, name, url, kind, tag).await
     }
 }

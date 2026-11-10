@@ -45,7 +45,7 @@ const DOWNLOADS_FLAG: &str = "QUARRY_EDGE__DOWNLOADS";
 
 /// Whether `QUARRY_EDGE__DOWNLOADS` is on in this process. Read per call, like
 /// `QUARRY_EDGE__FILL_OTP`, so the flag needs no AppState plumbing.
-fn downloads_enabled() -> bool {
+pub(super) fn downloads_enabled() -> bool {
     std::env::var(DOWNLOADS_FLAG)
         .map(|v| {
             matches!(

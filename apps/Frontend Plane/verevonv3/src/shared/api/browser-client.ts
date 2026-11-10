@@ -1185,3 +1185,65 @@ export async function attachBrowserRegion(
   }
   return attachment
 }
+
+/**
+ * One admitted download of a browser session, as the gateway lists it (Q3-E3.4-7b). It carries no URL and no
+ * file name. `handoffState` is Quarry's hand-off state: `handed_off` once the owner holds the file's text.
+ */
+export type BrowserDownloadListEntry = {
+  artifactId: string
+  mimeType: string
+  sizeBytes: number
+  sha256: string
+  admittedType: 'pdf' | 'txt' | 'md' | 'csv'
+  handoffState: 'not_handed_off' | 'handed_off'
+}
+
+const DOWNLOAD_ADMITTED_TYPES: readonly string[] = ['pdf', 'txt', 'md', 'csv']
+const DOWNLOAD_HANDOFF_STATES: readonly string[] = ['not_handed_off', 'handed_off']
+
+/** One list entry rebuilt field by field: an entry without the expected shape is dropped. */
+function browserDownloadEntryFromWire(value: unknown): BrowserDownloadListEntry | null {
+  const wire = recordOf(value)
+  const sizeBytes = finiteNumberOf(wire, 'sizeBytes')
+  if (!wire || sizeBytes === null || sizeBytes < 0) return null
+  const { artifactId, mimeType, sha256, admittedType, handoffState } = wire
+  if (typeof artifactId !== 'string' || !artifactId) return null
+  if (typeof mimeType !== 'string' || typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) return null
+  if (typeof admittedType !== 'string' || !DOWNLOAD_ADMITTED_TYPES.includes(admittedType)) return null
+  if (typeof handoffState !== 'string' || !DOWNLOAD_HANDOFF_STATES.includes(handoffState)) return null
+  return {
+    artifactId,
+    mimeType,
+    sizeBytes,
+    sha256,
+    admittedType: admittedType as BrowserDownloadListEntry['admittedType'],
+    handoffState: handoffState as BrowserDownloadListEntry['handoffState'],
+  }
+}
+
+/**
+ * The admitted downloads of a browser session: `GET /api/v1/browser/sessions/{id}/downloads` (Q3-E3.4-7b).
+ * The gateway answers an empty list for a zero-retention session and when nothing was downloaded. A 404
+ * `browser_downloads_unavailable` (the BFF switch is off) and a 403 also resolve to an empty list, so the
+ * drawer stays hidden. Any other failure rejects.
+ */
+export async function listBrowserDownloads(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<BrowserDownloadListEntry[]> {
+  let value: unknown
+  try {
+    value = await requestJson<unknown>(`/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/downloads`, {
+      method: 'GET',
+      signal,
+    })
+  } catch (error) {
+    if (error instanceof ApiError && (error.code === 'browser_downloads_unavailable' || error.status === 403)) return []
+    throw error
+  }
+  if (!Array.isArray(value)) return []
+  return value
+    .map(browserDownloadEntryFromWire)
+    .filter((entry): entry is BrowserDownloadListEntry => entry !== null)
+}

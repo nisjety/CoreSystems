@@ -437,13 +437,11 @@ async fn enforced_refusals_hold_for_durable_jobs() {
 }
 
 /// A service principal's durable crawl or batch, sent with `zdr: true` in the body, is
-/// refused by the route scope gate, not by the ZDR refusal. `/v1/crawl` and `/v1/batch`
-/// have no arm in `auth::require_service_route_scope`, so every service principal gets
-/// a bare 403 there, and the body is never read, before
-/// `routes::refuse_durable_job_under_zdr` could run. Nothing reaches Control Plane. This
-/// does not evidence row `durable_jobs`, whose basis is the ZDR refusal for users. It
-/// changes only if a service is ever granted a durable-job scope, and then the ZDR
-/// refusal is what has to hold.
+/// refused with a 403 and nothing reaches Control Plane. Since E3.7.10 a principal that holds
+/// `crawl:write` passes the route scope gate (`auth::require_service_route_scope`) and is
+/// refused by `routes::refuse_durable_job_under_zdr`; one without the scope is refused by the
+/// gate with a bare 403 before the body is read. Both are a 403. This does not evidence row
+/// `durable_jobs`, whose basis is the ZDR refusal for users.
 #[tokio::test]
 async fn a_service_principal_is_refused_durable_jobs_by_the_scope_gate() {
     let control = control_plane_double().await;

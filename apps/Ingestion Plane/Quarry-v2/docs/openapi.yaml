@@ -1196,6 +1196,95 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_Error'
+  /v1/agent/runs/{run_id}/downloads:
+    get:
+      operationId: listAgentRunDownloads
+      summary: List the admitted downloads of a run
+      description: Lists the files a `download_ref` step stored for the caller's own run, each already checked against the download type allow-list (PDF, plain text, Markdown, CSV). An entry names the
+        artifact, its type, size and SHA-256 digest; it carries no URL and no file name. A ZDR run lists nothing. Off (403 `downloads_disabled`) until `QUARRY_EDGE__DOWNLOADS` is on.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      responses:
+        '200':
+          description: The run's admitted downloads, oldest first (at most 64)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_AgentRunDownloads'
+        '403':
+          description: Downloads are not enabled (`downloads_disabled`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '404':
+          description: Run not found or not owned by the caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+  /v1/agent/runs/{run_id}/downloads/{artifact_id}/knowledge:
+    post:
+      operationId: handOffAgentRunDownload
+      summary: Hand one admitted download of a run to Data Plane as a document
+      description: Reads the stored bytes under the caller's org, derives the text (PDF parser, or UTF-8 for text, Markdown and CSV) and sends it through the one Data Plane ingest contract. The org and user
+        come from the verified token. Off until `QUARRY_EDGE__DOWNLOADS` and `QUARRY_EDGE__DOWNLOAD_HANDOFF` are on; a ZDR token or run is refused (403, `download_handoff_zdr_refused`) before anything is
+        read. A repeat for the same artifact and digest returns the first document id with `created` false. Typed refusals (`download_handoff_*` in `details.reason`) pass through from the hand-off.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      - name: artifact_id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: An artifact id from the run's download list
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentDownloadKnowledgeRequest'
+      responses:
+        '200':
+          description: The document the download became
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_AgentDownloadKnowledge'
+        '400':
+          description: Invalid `idempotency_key`, or the download's text or source is not acceptable to Data Plane
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '403':
+          description: Downloads or the hand-off are not enabled, or the caller or run is ZDR
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '404':
+          description: Run or download not found, or not owned by the caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '415':
+          description: The download type cannot be handed off, or the file has no text
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '501':
+          description: Data Plane ingest is not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/agent/runs/{run_id}/egress-receipts:
     get:
       operationId: listAgentEgressReceipts
@@ -1724,6 +1813,12 @@ paths:
         in: query
         schema:
           type: string
+      - name: tag
+        in: query
+        description: Keeps only the sources with this monitor tag (E3.5-6). The value is trimmed and lowercased first; a value that fails the tag grammar is a 400 with reason `invalid_tag`. A blank value is no filter.
+        schema:
+          type: string
+          maxLength: 32
       responses:
         '200':
           description: Source page
@@ -1819,6 +1914,55 @@ paths:
                     $ref: '#/components/schemas/ResponseMeta'
                   error:
                     $ref: '#/components/schemas/ErrorDetail'
+        '404':
+          description: Unknown source for this org
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    patch:
+      operationId: update_source_tag
+      summary: Set or clear a source's monitor tag
+      description: Sets the tag of a source the caller's org owns. An empty string clears it. A body that names no tag is a 400 with reason `tag_required`; a tag that fails the grammar is a 400 with reason `invalid_tag`. The answer is the updated source in control's wire shape.
+      tags:
+      - resources
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: source_id
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TagPatchRequest'
+      responses:
+        '200':
+          description: Updated source (control-plane wire shape)
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - meta
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: true
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+                  error:
+                    $ref: '#/components/schemas/ErrorDetail'
+        '400':
+          description: Malformed source id, missing tag or invalid tag
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
         '404':
           description: Unknown source for this org
           content:
@@ -3414,6 +3558,12 @@ paths:
         in: query
         schema:
           type: string
+      - name: tag
+        in: query
+        description: Keeps only the schedules with this monitor tag (E3.5-6). The value is trimmed and lowercased first; a value that fails the tag grammar is a 400 with reason `invalid_tag`. A blank value is no filter.
+        schema:
+          type: string
+          maxLength: 32
       responses:
         '200':
           description: Schedule page
@@ -3506,6 +3656,55 @@ paths:
                     $ref: '#/components/schemas/ResponseMeta'
                   error:
                     $ref: '#/components/schemas/ErrorDetail'
+        '404':
+          description: Unknown schedule
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+    patch:
+      operationId: update_schedule_tag
+      summary: Set or clear a schedule's monitor tag
+      description: Sets the tag of a schedule the caller's org owns. An empty string clears it. A body that names no tag is a 400 with reason `tag_required`; a tag that fails the grammar is a 400 with reason `invalid_tag`. The answer is control's updated schedule view.
+      tags:
+      - schedules
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: schedule_id
+        in: path
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TagPatchRequest'
+      responses:
+        '200':
+          description: Updated schedule (control-plane view)
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - meta
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: true
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+                  error:
+                    $ref: '#/components/schemas/ErrorDetail'
+        '400':
+          description: Malformed schedule id, missing tag or invalid tag
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
         '404':
           description: Unknown schedule
           content:
@@ -4791,6 +4990,10 @@ components:
           format: date-time
         config:
           description: Free-form per-source configuration
+        tag:
+          type: string
+          maxLength: 32
+          description: The operator label that groups this source (E3.5-6). Absent when untagged.
     Snapshot:
       type: object
       required:
@@ -5226,6 +5429,19 @@ components:
         config:
           type: object
           additionalProperties: true
+        tag:
+          type: string
+          maxLength: 32
+          description: The operator label that groups this source (E3.5-6). Trimmed and lowercased; 1 to 32 characters of letters a to z, digits, dot, underscore or hyphen, starting with a letter or digit. Blank is untagged. A repeat registration keeps the tag the row already has.
+    TagPatchRequest:
+      type: object
+      required:
+      - tag
+      properties:
+        tag:
+          type: string
+          maxLength: 32
+          description: The monitor tag to set, normalised as a create tag is. An empty string clears the tag.
     TeamCreditUsage:
       type: object
       required:
@@ -5713,6 +5929,10 @@ components:
           nullable: true
         config:
           description: Per-kind payload the schedule was created with
+        tag:
+          type: string
+          maxLength: 32
+          description: The operator label that groups this monitor (E3.5-6). Absent when untagged.
     CreateScheduleRequest:
       type: object
       properties:
@@ -5764,6 +5984,10 @@ components:
           type: string
           nullable: true
           description: URL to watch for change-monitor schedules
+        tag:
+          type: string
+          maxLength: 32
+          description: The operator label that groups this monitor (E3.5-6). Trimmed and lowercased; 1 to 32 characters of letters a to z, digits, dot, underscore or hyphen, starting with a letter or digit. Blank is untagged.
         config:
           type: object
           additionalProperties: true
@@ -7673,6 +7897,92 @@ components:
         visual_observation_artifact_id:
           type: string
           nullable: true
+    Envelope_AgentRunDownloads:
+      type: object
+      required:
+      - request_id
+      - success
+      - data
+      properties:
+        request_id:
+          type: string
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentRunDownload'
+    AgentRunDownload:
+      type: object
+      description: One admitted download of a run. No URL and no file name.
+      required:
+      - artifact_id
+      - mime_type
+      - byte_size
+      - sha256
+      - admitted_type
+      - handoff_state
+      properties:
+        artifact_id:
+          type: string
+          description: The tenant-owned artifact that holds the bytes
+        mime_type:
+          type: string
+          enum:
+          - application/pdf
+          - text/plain
+          - text/markdown
+          - text/csv
+        byte_size:
+          type: integer
+          minimum: 0
+        sha256:
+          type: string
+          description: SHA-256 of the stored bytes, lower-case hex
+        admitted_type:
+          type: string
+          enum:
+          - pdf
+          - txt
+          - md
+          - csv
+        handoff_state:
+          type: string
+          description: Whether this edge has handed the file to Data Plane since it started
+          enum:
+          - not_handed_off
+          - handed_off
+    AgentDownloadKnowledgeRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        idempotency_key:
+          type: string
+          maxLength: 128
+          description: A retry label. The dedupe is by artifact id and digest, so a retry gets the first answer with or without it.
+    Envelope_AgentDownloadKnowledge:
+      type: object
+      required:
+      - request_id
+      - success
+      - data
+      properties:
+        request_id:
+          type: string
+        success:
+          type: boolean
+        data:
+          type: object
+          required:
+          - document_id
+          - created
+          properties:
+            document_id:
+              type: string
+              description: The Data Plane document the file became
+            created:
+              type: boolean
+              description: False when an earlier call for the same artifact and digest had already created it
     Envelope_StepReceipts:
       type: object
       required:

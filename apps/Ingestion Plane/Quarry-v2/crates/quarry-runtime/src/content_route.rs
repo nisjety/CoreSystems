@@ -743,6 +743,29 @@ pub fn office_via_imports_enabled() -> bool {
     flag_on(std::env::var(OFFICE_VIA_IMPORTS_FLAG).ok().as_deref())
 }
 
+/// The environment variable that sets the input cap of the imports-core client
+/// (see [`office_max_input_bytes_from_env`]).
+pub const OFFICE_MAX_INPUT_BYTES_ENV: &str = "QUARRY_EDGE__OFFICE_MAX_INPUT_BYTES";
+
+/// The input cap from [`OFFICE_MAX_INPUT_BYTES_ENV`]: unset or blank is
+/// [`DEFAULT_OFFICE_MAX_INPUT_BYTES`], and a value above [`MAX_OFFICE_INPUT_BYTES`]
+/// is capped there. Zero, a negative or a non-number is an error that names the
+/// variable and never its value, so the edge stops at boot rather than guess.
+pub fn office_max_input_bytes_from_env() -> Result<usize, String> {
+    let Some(raw) = std::env::var(OFFICE_MAX_INPUT_BYTES_ENV)
+        .ok()
+        .filter(|raw| !raw.trim().is_empty())
+    else {
+        return Ok(DEFAULT_OFFICE_MAX_INPUT_BYTES);
+    };
+    match raw.trim().parse::<usize>() {
+        Ok(bytes) if bytes > 0 => Ok(bytes.min(MAX_OFFICE_INPUT_BYTES)),
+        _ => Err(format!(
+            "{OFFICE_MAX_INPUT_BYTES_ENV} must be a positive whole number of bytes"
+        )),
+    }
+}
+
 /// `1`, `true`, `yes` or `on` (any case); anything else, or unset, is off.
 fn flag_on(value: Option<&str>) -> bool {
     value.is_some_and(|value| {
@@ -794,8 +817,8 @@ pub trait ImportsBearer: Send + Sync {
 }
 
 /// [`ImportsBearer`] over the service-token provider and one manifest row. The
-/// wiring builds the request with `ServiceTokenRequest::from_manifest` and the
-/// row's literal name once that row exists (see this unit's status file).
+/// production row is `office-extract` ([`ManifestImportsBearer::for_office_extract`]);
+/// `new` takes any request so a test can inject its own.
 pub struct ManifestImportsBearer {
     tokens: SharedServiceTokenProvider,
     request: ServiceTokenRequest,
@@ -804,6 +827,19 @@ pub struct ManifestImportsBearer {
 impl ManifestImportsBearer {
     pub fn new(tokens: SharedServiceTokenProvider, request: ServiceTokenRequest) -> Self {
         Self { tokens, request }
+    }
+
+    /// The production bearer: the `office-extract` row of the token-request
+    /// manifest (audience `ingestion`, scope `imports:read`, ZDR lane). The
+    /// request is read from the manifest and never built by hand. The row name
+    /// is a literal in this file, the file the row's `used_by` lists, and the
+    /// constructor is not named `from_manifest` because the manifest's source
+    /// scan refuses a `from_manifest(` that takes no literal.
+    pub fn for_office_extract(tokens: SharedServiceTokenProvider) -> QuarryResult<Self> {
+        Ok(Self::new(
+            tokens,
+            ServiceTokenRequest::from_manifest("office-extract")?,
+        ))
     }
 }
 

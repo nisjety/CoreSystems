@@ -47,14 +47,6 @@
   min-width: 0;
 }
 
-.browser-downloads__name {
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .browser-downloads__meta,
 .browser-downloads__status {
   color: var(--muted-foreground, #5f5f5f);

@@ -243,6 +243,15 @@ pub struct AnswerResult {
     /// full page read. Additive + defaulted so existing clients are unaffected.
     #[serde(default)]
     pub sources_snippet_fallback: usize,
+    /// Result URLs the answer step fetched itself (see [`PreparedAnswer::pages_fetched`]). Not on
+    /// the wire: it is for the caller's metering, so a page the caller already fetched is never
+    /// counted twice.
+    #[serde(default, skip_serializing)]
+    pub pages_fetched: usize,
+    /// Result URLs the answer step read from a [`PrefetchedPages`] entry, with no fetch of its own.
+    /// Not on the wire, for the same reason as `pages_fetched`.
+    #[serde(default, skip_serializing)]
+    pub pages_reused: usize,
 }
 
 /// One fetched source as both extraction channels see it.
@@ -797,6 +806,8 @@ impl AnswerPipeline {
                 sources_used: 0,
                 sources_skipped: prepared.sources_skipped,
                 sources_snippet_fallback: prepared.sources_snippet_fallback,
+                pages_fetched: prepared.pages_fetched,
+                pages_reused: prepared.pages_reused,
             });
         }
         let zdr = ZdrMode::from(req.zdr.unwrap_or(false));
@@ -823,6 +834,8 @@ impl AnswerPipeline {
             sources_used: prepared.sources_used,
             sources_skipped: prepared.sources_skipped,
             sources_snippet_fallback: prepared.sources_snippet_fallback,
+            pages_fetched: prepared.pages_fetched,
+            pages_reused: prepared.pages_reused,
         })
     }
 }

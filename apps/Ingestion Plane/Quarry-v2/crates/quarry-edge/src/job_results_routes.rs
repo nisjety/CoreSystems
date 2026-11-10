@@ -12,8 +12,8 @@
 //!
 //! Dark by default: `QUARRY_EDGE__JOB_RESULTS` must be on, otherwise every route answers 501
 //! before control is called. The rows carry page URLs, so a caller under Zero Data Retention
-//! gets a 403 (the same floor as the errors routes), and a service principal is refused by
-//! `auth::require_service_route_scope`, which does not name these paths. The caller's org
+//! gets a 403 (the same floor as the errors routes), and a service principal needs the
+//! `jobs:read` scope (`auth::require_service_route_scope`, E3.7.10). The caller's org
 //! comes from the verified token; control answers a foreign or unknown id with 404, and a
 //! kind mismatch (a batch id on the crawl path) is a 404 too.
 

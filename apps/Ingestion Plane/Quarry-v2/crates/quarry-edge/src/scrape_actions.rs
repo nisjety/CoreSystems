@@ -624,10 +624,7 @@ mod tests {
     impl quarry_runtime::source_registrar::SourceRegistrar for NoRegistrar {
         async fn register_source(
             &self,
-            _org_id: &str,
-            _name: &str,
-            _url: &str,
-            _kind: &str,
+            _registration: quarry_runtime::source_registrar::SourceRegistration<'_>,
         ) -> quarry_core::QuarryResult<()> {
             Ok(())
         }

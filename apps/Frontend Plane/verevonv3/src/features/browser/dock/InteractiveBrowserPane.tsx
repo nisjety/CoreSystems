@@ -1,4 +1,4 @@
-import { createEffect, createMemo, createSignal, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, onCleanup, Show, untrack } from 'solid-js'
 import { Portal, type JSX } from '@solidjs/web'
 import { BrowserChrome } from '@/features/dashboard/home/BrowserChrome'
 import type { BrowserSessionViewModel } from '@/features/dashboard/home/browser-session'
@@ -13,6 +13,7 @@ import {
   attachBrowserRegion,
   browserErrorMessage,
   keepAliveBrowserSession,
+  listBrowserDownloads,
 } from '@/shared/api/browser-client'
 import {
   buildRegionAttachRequest,
@@ -26,9 +27,17 @@ import {
   type RegionImagePayload,
   type RegionRect,
 } from '@/features/browser/page-context/region-attach'
+import { DownloadsDrawer } from '@/features/browser/downloads/DownloadsDrawer'
+import {
+  isBrowserDownloadsDrawerEnabled,
+  readDownloadListing,
+  type BrowserSessionDownload,
+} from '@/features/browser/downloads/downloads-model'
 import { ApiError } from '@/shared/api/http'
+import type { ActionActor } from '@/shared/actions/types'
 import { useI18n } from '@/shared/i18n'
 import { X, Globe, ScanSearch } from '@/shared/icons'
+import { getSession } from '@/shared/session/session-store'
 import { BrowserDockControls } from './BrowserDockControls'
 import type { BrowserDockPosition } from './browser-dock-state'
 import { AskAboutPageButton } from './OpenBrowserButton'
@@ -54,9 +63,35 @@ const LIVE_FRAME_SELECTOR = '.knowledge-browser-screenshot--interactive img'
 // mapped to the page, because a region drawn on it would be the wrong part of the page.
 const FRAME_ASPECT_TOLERANCE = 0.01
 const REGION_ATTACH_FALLBACK = { no: 'Området kunne ikke legges ved.', en: 'The area could not be attached.' }
+// The downloads list is read this many ms after a trigger settles: the cadence KnowledgeComposer uses to re-read
+// the tab list after a click (scheduleTabRefresh). The newest answer wins.
+const DOWNLOAD_READ_DELAYS_MS = [350, 1500, 4000] as const
+// The downloads a session's list was read for. The drawer shows them only for that session.
+type DownloadListing = { sessionId: string; items: readonly BrowserSessionDownload[] }
+
+/** Whether two listings name the same files in the same state, in the same order. */
+function sameDownloads(a: readonly BrowserSessionDownload[], b: readonly BrowserSessionDownload[]): boolean {
+  return a.length === b.length && a.every((item, index) => {
+    const other = b[index]
+    return other !== undefined
+      && other.artifactId === item.artifactId
+      && other.kind === item.kind
+      && other.sizeBytes === item.sizeBytes
+      && other.handedOff === item.handedOff
+  })
+}
 
 function activeTab(model: BrowserSessionViewModel | null) {
   return model?.tabs.find((tab) => tab.active) ?? null
+}
+
+// The signed-in person acting as themselves in the active organisation, for the downloads drawer's send (the same
+// shape as the steer actor in ChatLiveRunPanel). Undefined until the session has both, so the send is refused as
+// signed out.
+function downloadActorFromSession(): ActionActor | undefined {
+  const session = getSession()
+  if (!session.user || !session.activeOrg) return undefined
+  return { type: 'human', userId: session.user.id, orgId: session.activeOrg.id }
 }
 
 // The picture on screen is the live page when it is a streamed frame (an inline image) or the live polling frame.
@@ -412,6 +447,74 @@ export function InteractiveBrowserPane(props: InteractiveBrowserPaneProps): JSX.
     setRegionDrag(null)
   }
 
+  // The downloads drawer (E3.4-7). The list is read only with the build flag on and on a session that is not zero
+  // retention: when a session opens, when the controller's busy flag falls (an action or a tab change has settled)
+  // and when the agent loop moves on (a step, so a download_ref step has landed). Each trigger reads the list at
+  // DOWNLOAD_READ_DELAYS_MS and the newest answer wins. A failed read leaves the drawer hidden.
+  const [downloads, setDownloads] = createSignal<DownloadListing | null>(null)
+  let downloadTimers: ReturnType<typeof setTimeout>[] = []
+  let downloadGeneration = 0
+
+  // The session the list is read for, or null when the drawer is off for this session.
+  const downloadsSessionId = (): string | null => {
+    if (!isBrowserDownloadsDrawerEnabled() || props.zdr()) return null
+    const model = view()
+    if (!model || model.zdr || !model.sessionId) return null
+    return model.sessionId
+  }
+  const cancelDownloadReads = (): void => {
+    downloadGeneration += 1
+    for (const timer of downloadTimers) clearTimeout(timer)
+    downloadTimers = []
+  }
+  const scheduleDownloadReads = (): void => {
+    cancelDownloadReads()
+    const sessionId = untrack(downloadsSessionId)
+    if (!sessionId) {
+      if (untrack(downloads) !== null) setDownloads(null)
+      return
+    }
+    const generation = downloadGeneration
+    let applied = -1
+    const settle = (index: number, items: readonly BrowserSessionDownload[]): void => {
+      if (generation !== downloadGeneration || index < applied) return
+      applied = index
+      // A read that changed nothing keeps the rows where they are, so a poll does not re-render focus away.
+      const current = untrack(downloads)
+      if (current && current.sessionId === sessionId && sameDownloads(current.items, items)) return
+      setDownloads({ sessionId, items })
+    }
+    DOWNLOAD_READ_DELAYS_MS.forEach((delay, index) => {
+      downloadTimers.push(setTimeout(() => {
+        void listBrowserDownloads(sessionId).then(
+          (entries) => settle(index, readDownloadListing(entries)),
+          () => settle(index, []),
+        )
+      }, delay))
+    })
+  }
+  // The list is shown for the session it was read for, and only while it holds a download.
+  const shownDownloads = () => {
+    const current = downloads()
+    if (!current || current.items.length === 0) return null
+    return current.sessionId === downloadsSessionId() ? current : null
+  }
+  // A session opens, or zero retention changes: the list starts over.
+  createEffect(() => downloadsSessionId(), () => {
+    scheduleDownloadReads()
+  })
+  // A step settles: the busy flag falls, or the agent loop moves on.
+  createEffect(() => controller.busy(), (busy) => {
+    if (!busy) scheduleDownloadReads()
+  })
+  createEffect(() => {
+    const loop = controller.loop()
+    return `${loop.step}:${loop.status}`
+  }, () => {
+    scheduleDownloadReads()
+  })
+  onCleanup(cancelDownloadReads)
+
   return (
     <aside
       class="verevon-chat-run-panel verevon-browser-dock-pane"
@@ -554,6 +657,15 @@ export function InteractiveBrowserPane(props: InteractiveBrowserPaneProps): JSX.
                 onAskVerevon={props.onAskVerevon}
                 searchEnabled={searchEnabled()}
               />
+              <Show when={shownDownloads()}>
+                {(shown) => (
+                  <DownloadsDrawer
+                    sessionId={shown().sessionId}
+                    downloads={shown().items}
+                    actor={downloadActorFromSession}
+                  />
+                )}
+              </Show>
             </>
           )}
         </Show>

@@ -22,6 +22,9 @@ type scheduleWire struct {
 	TargetRef  string `json:"target_ref"`
 	Enabled    bool   `json:"enabled"`
 	CreatedAt  int64  `json:"created_at"`
+	// Tag is the monitor's operator label (E3.5-6). Omitted when untagged, so an
+	// untagged row serialises exactly as before. The reconciler does not read it.
+	Tag string `json:"tag,omitempty"`
 	// Orchestrator contract — what Temporal schedule to materialize.
 	Workflow string `json:"workflow"`
 	Args     []any  `json:"args"`
@@ -94,6 +97,7 @@ func toScheduleWire(s store.Schedule) scheduleWire {
 		TargetRef:      s.TargetRef,
 		Enabled:        s.Enabled,
 		CreatedAt:      s.CreatedAt,
+		Tag:            s.Tag,
 		Workflow:       wf,
 		Args:           args,
 		Paused:         !s.Enabled,
@@ -121,6 +125,7 @@ type scheduleView struct {
 	PauseOnFailure bool   `json:"pause_on_failure"`
 	JitterS        int64  `json:"jitter_s"`
 	Status         string `json:"status"`
+	Tag            string `json:"tag,omitempty"`
 	// NeedsActivation is true for a non-monitor schedule that was created
 	// disabled and never toggled (updated_at still equals created_at). Two
 	// operations in the same second are indistinguishable here; the column
@@ -165,6 +170,7 @@ func toScheduleView(s store.Schedule) scheduleView {
 		PauseOnFailure: s.PauseOnFailure,
 		JitterS:        s.JitterS,
 		Status:         status,
+		Tag:            s.Tag,
 		NeedsActivation: !s.Enabled && s.TargetKind != store.TargetKindChangeMonitor &&
 			s.UpdatedAt == s.CreatedAt,
 		Config:              cfg,

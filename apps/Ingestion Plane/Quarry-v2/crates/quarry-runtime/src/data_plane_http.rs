@@ -340,11 +340,18 @@ impl DataPlaneArtifactReader {
         }
     }
 
-    /// The manifest row the call's service token is minted for. Until the row exists, a reader with
-    /// a token provider refuses every lookup before any request (see [`DataPlaneHttp::post_json_for`]).
+    /// The manifest row the call's service token is minted for. A reader with a token provider and
+    /// no row refuses every lookup before any request (see [`DataPlaneHttp::post_json_for`]).
     pub fn with_token_request(mut self, request: ServiceTokenRequest) -> Self {
         self.token_request = Some(request);
         self
+    }
+
+    /// The production row: `artifacts-read` (audience `data-plane`, scope `data:read`), read from
+    /// the token-request manifest and never built by hand. A no_egress run is never a ZDR run, so
+    /// this token is never requested for one.
+    pub fn with_manifest_token_request(self) -> QuarryResult<Self> {
+        Ok(self.with_token_request(ServiceTokenRequest::from_manifest("artifacts-read")?))
     }
 
     fn refusal(&self, status: StatusCode) -> QuarryError {

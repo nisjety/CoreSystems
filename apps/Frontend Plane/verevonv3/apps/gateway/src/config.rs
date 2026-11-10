@@ -32,16 +32,23 @@ pub(crate) struct AppState {
     /// `BROWSER_HUMAN_BROWSE` (WS8.D): whether a session asks for a person's open-web
     /// `human_browse` grant. Off unless set to a truthy value, in every environment.
     pub(crate) browser_human_browse: bool,
-    /// `BROWSER_LIVE_VIEW_ONLY` (W3-E3.4-5): whether the owner's view-only live route
-    /// (`/api/v1/browser/sessions/{id}/view/frames/ws`) is served. Off unless set to a truthy
-    /// value; while off that route answers 404. Quarry honours the scope only with
-    /// `QUARRY_EDGE__LIVE_VIEW_ONLY` on, so the gateway also drops input frames itself.
+    /// `BROWSER_LIVE_VIEW_ONLY` (W3-E3.4-5, W3-E3.4-5b): whether the owner's view-only live
+    /// routes (`/api/v1/browser/sessions/{id}/view/frames/ws` and `.../view/frames/stream`) are
+    /// served. Off unless set to a truthy value; while off they answer 404. Quarry honours the
+    /// scope only with `QUARRY_EDGE__LIVE_VIEW_ONLY` on, so the gateway also drops input frames
+    /// itself on the socket; the SSE stream carries no client frames at all.
     pub(crate) browser_live_view_only: bool,
     /// `BROWSER_CONSENT_API` (Q3-E3.2-e3-gw): whether the viewer's per-origin browser consent
     /// decisions can be listed and revoked (`/api/v1/browser/consent`). Read once here, never in a
     /// handler. Exactly `true` enables it; while off the routes are absent. user-core also needs
     /// its own browser-consent switch on, or it answers `browser_consent_disabled`.
     pub(crate) browser_consent_api: bool,
+    /// `BROWSER_DOWNLOADS` (Q3-E3.4-7b): whether a browser session's governed downloads can be listed
+    /// (`GET /api/v1/browser/sessions/{id}/downloads`) and sent to the knowledge base
+    /// (`browser_download.send_to_knowledge`). Read once here, never in a handler. Exactly `true`
+    /// enables it; while off both answer 404 and nothing goes upstream. Quarry also needs
+    /// `QUARRY_EDGE__DOWNLOADS` and `QUARRY_EDGE__DOWNLOAD_HANDOFF` on.
+    pub(crate) browser_downloads: bool,
     pub(crate) auth_core_url: String,
     pub(crate) verevon_public_origin: String,
     pub(crate) session_core_url: String,
@@ -656,6 +663,7 @@ pub(crate) async fn build_state() -> Result<AppState> {
         browser_consent_api: browser_consent_api_enabled(
             env::var("BROWSER_CONSENT_API").ok().as_deref(),
         ),
+        browser_downloads: browser_downloads_enabled(env::var("BROWSER_DOWNLOADS").ok().as_deref()),
         auth_core_url: env_url("AUTH_CORE_URL", "http://auth-core:3011"),
         verevon_public_origin: canonical_public_origin(
             &env::var("VEREVON_PUBLIC_ORIGIN")
@@ -1035,6 +1043,12 @@ pub(crate) fn human_browse_enabled(raw: Option<&str>) -> bool {
 /// Parses `BROWSER_CONSENT_API` (Q3-E3.2-e3-gw). Only the literal `true` enables the consent
 /// routes; unset, blank or any other value is off, in every environment.
 pub(crate) fn browser_consent_api_enabled(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// Parses `BROWSER_DOWNLOADS` (Q3-E3.4-7b). Only the literal `true` enables the downloads list and
+/// the knowledge hand-off; unset, blank or any other value is off, in every environment.
+pub(crate) fn browser_downloads_enabled(raw: Option<&str>) -> bool {
     raw == Some("true")
 }
 

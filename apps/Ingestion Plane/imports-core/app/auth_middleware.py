@@ -180,6 +180,17 @@ def _legacy_context(request: Request, settings: Any) -> AuthContext | None:
     )
 
 
+# The one non-GET route a service token holding only imports:read may call:
+# POST /api/v1/import/extract is ephemeral (no storage, no embedding, no model
+# call, no third-party egress), so reading scope is enough. Exact method and
+# exact path; there is no prefix or pattern match.
+_EPHEMERAL_EXTRACT_PATH = "/api/v1/import/extract"
+
+
+def _is_ephemeral_extract_call(request: Request) -> bool:
+    return request.method == "POST" and request.url.path == _EPHEMERAL_EXTRACT_PATH
+
+
 async def _bearer_context(request: Request, settings: Any) -> AuthContext:
     authorization = request.headers.get("authorization", "")
     scheme, separator, token = authorization.partition(" ")
@@ -206,6 +217,12 @@ async def _bearer_context(request: Request, settings: Any) -> AuthContext:
 
     if principal.principal_type == "service":
         required = "imports:read" if request.method in {"GET", "HEAD", "OPTIONS"} else "imports:write"
+        if _is_ephemeral_extract_call(request):
+            # Ephemeral text extraction: nothing is stored, embedded or sent on, so
+            # a read-only service token (quarry-edge, manifest row office-extract)
+            # may make exactly this one call. Every other non-GET call still needs
+            # imports:write.
+            required = "imports:read"
         if not principal.has_scope(required) and not principal.has_scope("imports:write"):
             raise HTTPException(status_code=403, detail=f"Missing required scope: {required}")
     return replace(principal, bearer_token=token.strip())

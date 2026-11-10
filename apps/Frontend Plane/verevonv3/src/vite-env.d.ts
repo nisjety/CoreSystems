@@ -62,6 +62,8 @@ interface ImportMetaEnv {
 	readonly VITE_BROWSER_REGION_ATTACH?: string;
 	/** "1" or "true" mounts the steer composer in the live browser run dock (E3.3-g). Default off. */
 	readonly VITE_CHAT_BROWSER_STEER?: string;
+	/** "1" or "true" shows the downloads drawer of a browser session and reads its download list (E3.4-7). Default off. */
+	readonly VITE_BROWSER_DOWNLOADS_DRAWER?: string;
 }
 
 interface ImportMeta {

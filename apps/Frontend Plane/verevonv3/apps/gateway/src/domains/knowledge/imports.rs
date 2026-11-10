@@ -146,6 +146,7 @@ pub(super) async fn import_job_events(
             .and_then(|value| value.to_str().ok()),
         Some((&user.user_id, &org_id)),
         false,
+        None,
     )
     .await
 }

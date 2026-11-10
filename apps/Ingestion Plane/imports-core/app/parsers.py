@@ -13,6 +13,7 @@ from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, NamedTuple
+from urllib.parse import unquote
 
 import httpx
 from bs4 import BeautifulSoup
@@ -1065,6 +1066,487 @@ def _parse_pptx(content: bytes, *, deadline: float | None = None, max_chars: int
         _READ_DEADLINE.reset(token)
 
 
+# --- OpenDocument and EPUB ----------------------------------------------------
+#
+# .odt, .ods and .odp are zip containers whose text sits in one XML part
+# (`content.xml`); .epub is a zip of XHTML items that an OPF package lists in
+# reading order. They get the limits the OOXML formats above have: the zip
+# budget before any part is read, a streamed content part (a long document is
+# never held as one tree), and a refusal of any DTD or entity declaration before
+# the parser sees it. No new dependency: the stdlib parser plus the existing
+# BeautifulSoup helper for XHTML.
+
+_ODF_OFFICE_NS = "urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+_ODF_TEXT_NS = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+_ODF_TABLE_NS = "urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+_ODF_DRAW_NS = "urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+_ODF_PRESENTATION_NS = "urn:oasis:names:tc:opendocument:xmlns:presentation:1.0"
+_EPUB_CONTAINER_NS = "urn:oasis:names:tc:opendocument:xmlns:container"
+_OPF_NS = "http://www.idpf.org/2007/opf"
+
+_ODT_MIMETYPE = "application/vnd.oasis.opendocument.text"
+_ODS_MIMETYPE = "application/vnd.oasis.opendocument.spreadsheet"
+_ODP_MIMETYPE = "application/vnd.oasis.opendocument.presentation"
+_EPUB_TEXT_TYPES = frozenset({"application/xhtml+xml", "text/html"})
+
+_ODF_READ_CHUNK = 64 * 1024
+_ODF_DTD_MARKERS = (b"<!DOCTYPE", b"<!ENTITY")
+_ODF_DTD_CARRY = 8  # bytes kept from one chunk, so a marker split across two is still seen
+_ODF_MAX_MIMETYPE_BYTES = 256
+_ODF_MAX_PARAGRAPH_CHARS = 1_000_000
+_ODF_MAX_SPACE_RUN = 1024  # a text:s count is spacing; a huge one is a bomb
+_ODF_MAX_CHAT_CHARS = 200_000  # a chat turn takes 60 000; past this the text is refused, as for a deck
+
+_ODF_BODY = f"{{{_ODF_OFFICE_NS}}}body"
+_ODF_TEXT_BODIES = frozenset({f"{{{_ODF_OFFICE_NS}}}text", f"{{{_ODF_OFFICE_NS}}}presentation"})
+_ODF_PARAGRAPHS = frozenset({f"{{{_ODF_TEXT_NS}}}p", f"{{{_ODF_TEXT_NS}}}h"})
+# Comments and deleted text are not part of the document as a reader sees it.
+_ODF_SKIPPED = frozenset({f"{{{_ODF_OFFICE_NS}}}annotation", f"{{{_ODF_TEXT_NS}}}tracked-changes"})
+_ODF_SPACE = f"{{{_ODF_TEXT_NS}}}s"
+_ODF_SPACE_COUNT = f"{{{_ODF_TEXT_NS}}}c"
+_ODF_TAB = f"{{{_ODF_TEXT_NS}}}tab"
+_ODF_LINE_BREAK = f"{{{_ODF_TEXT_NS}}}line-break"
+_ODF_TABLE = f"{{{_ODF_TABLE_NS}}}table"
+_ODF_ROW = f"{{{_ODF_TABLE_NS}}}table-row"
+_ODF_CELL = f"{{{_ODF_TABLE_NS}}}table-cell"
+_ODF_CELL_TAGS = frozenset({_ODF_CELL, f"{{{_ODF_TABLE_NS}}}covered-table-cell"})
+_ODF_ROW_REPEAT = f"{{{_ODF_TABLE_NS}}}number-rows-repeated"
+_ODF_COLUMN_REPEAT = f"{{{_ODF_TABLE_NS}}}number-columns-repeated"
+_ODF_SHEET_NAME = f"{{{_ODF_TABLE_NS}}}name"
+_ODF_SHEET_DISPLAY = f"{{{_ODF_TABLE_NS}}}display"
+_ODF_PAGE = f"{{{_ODF_DRAW_NS}}}page"
+_ODF_PAGE_VISIBILITY = f"{{{_ODF_PRESENTATION_NS}}}visibility"
+_ODF_NOTES = f"{{{_ODF_PRESENTATION_NS}}}notes"
+# A cell with no paragraph text keeps its stored value: the first of these it carries.
+_ODF_VALUE_ATTRS = tuple(
+    f"{{{_ODF_OFFICE_NS}}}{name}" for name in ("value", "date-value", "time-value", "boolean-value", "string-value")
+)
+
+
+def _odf_events(zf: zipfile.ZipFile, path: str, deadline: float | None):
+    """(event, element) pairs of an OpenDocument content part, parsed in chunks.
+
+    A DOCTYPE or ENTITY declaration is refused before the parser sees it: no
+    OpenDocument part declares one, and entity expansion is how a small part
+    grows large. Children of the root other than the body are freed as they
+    close (styles and settings are never read here); the readers below free the
+    rest once they have finished with it."""
+    if not _has_part(zf, path):
+        raise _MalformedOfficeDocument(f"{path} is missing")
+    parser = ET.XMLPullParser(events=("start", "end"))
+    carry = b""
+    events = 0
+    depth = 0
+    try:
+        with zf.open(path) as stream:
+            while chunk := stream.read(_ODF_READ_CHUNK):
+                window = carry + chunk
+                if any(marker in window for marker in _ODF_DTD_MARKERS):
+                    raise _MalformedOfficeDocument(f"{path} declares a DTD")
+                carry = window[-_ODF_DTD_CARRY:]
+                parser.feed(chunk)
+                for event, elem in parser.read_events():
+                    events += 1
+                    if deadline is not None and not events & 0xFFF and time.monotonic() > deadline:
+                        raise OfficeArchiveTooLargeError("The document took too long to read")
+                    if event == "start":
+                        depth += 1
+                    else:
+                        depth -= 1
+                        if depth == 1 and elem.tag != _ODF_BODY:
+                            elem.clear()
+                    yield event, elem
+        parser.close()
+    except ET.ParseError as exc:
+        raise _MalformedOfficeDocument(f"Malformed XML part: {path}") from exc
+
+
+def _odf_check_mimetype(zf: zipfile.ZipFile, expected: str) -> None:
+    """An OpenDocument archive opens with an uncompressed `mimetype` member that names its type."""
+    infos = zf.infolist()
+    if not infos or infos[0].filename != "mimetype" or infos[0].file_size > _ODF_MAX_MIMETYPE_BYTES:
+        raise _MalformedOfficeDocument("Not an OpenDocument archive")
+    if zf.read(infos[0]).decode("ascii", errors="replace").strip() != expected:
+        raise _MalformedOfficeDocument("Not an OpenDocument archive of this type")
+
+
+def _odf_count(raw: str | None, cap: int) -> int:
+    """A repeat count from an attribute, kept between 1 and `cap`; an unreadable one counts once."""
+    try:
+        return min(max(int(raw or "1"), 1), cap)
+    except ValueError:
+        return 1
+
+
+def _odf_budget(total: int, max_chars: int | None) -> None:
+    """Refuse text past the chat ceiling (a chat turn only), and any text past the expansion cap."""
+    if max_chars is not None and total > _ODF_MAX_CHAT_CHARS:
+        raise OfficeArchiveTooLargeError("The document holds too much text")
+    if total > _ZIP_MAX_TOTAL_BYTES:
+        raise OfficeArchiveTooLargeError("The archive expands to too much content")
+
+
+class _OdfText:
+    """The text of one paragraph, refused once it passes the paragraph cap."""
+
+    __slots__ = ("parts", "size")
+
+    def __init__(self) -> None:
+        self.parts: list[str] = []
+        self.size = 0
+
+    def add(self, piece: str) -> None:
+        self.size += len(piece)
+        if self.size > _ODF_MAX_PARAGRAPH_CHARS:
+            raise OfficeArchiveTooLargeError("A paragraph of the document holds too much text")
+        self.parts.append(piece)
+
+
+def _odf_collect(element: ET.Element, out: _OdfText) -> None:
+    if element.text:
+        out.add(element.text)
+    for child in element:
+        if child.tag == _ODF_SPACE:
+            out.add(" " * _odf_count(child.get(_ODF_SPACE_COUNT), _ODF_MAX_SPACE_RUN))
+        elif child.tag == _ODF_TAB:
+            out.add("\t")
+        elif child.tag == _ODF_LINE_BREAK:
+            out.add("\n")
+        elif child.tag not in _ODF_SKIPPED:
+            _odf_collect(child, out)
+        if child.tail:
+            out.add(child.tail)
+
+
+def _odf_inline_text(element: ET.Element) -> str:
+    """The text of a paragraph with its spacing and tabs kept, comments and deleted text left out."""
+    out = _OdfText()
+    _odf_collect(element, out)
+    return "".join(out.parts)
+
+
+def _odf_paragraph_texts(element: ET.Element):
+    """The text of each outermost paragraph under `element`, in document order."""
+    for child in element:
+        if child.tag in _ODF_PARAGRAPHS:
+            yield _odf_inline_text(child)
+        elif child.tag not in _ODF_SKIPPED:
+            yield from _odf_paragraph_texts(child)
+
+
+def _odf_text_units(zf: zipfile.ZipFile, deadline: float | None):
+    """("page", hidden) as each slide opens, then ("text", paragraph, in_notes) per paragraph, in document order.
+
+    Each paragraph is read as it closes, and the body it sits in is freed then,
+    so a long document is never held as one tree."""
+    body: ET.Element | None = None
+    skipping = 0  # open elements whose text is not document text
+    paragraphs = 0  # open paragraphs and headings, nested or not
+    notes = 0  # open speaker notes
+    pending = 0  # elements opened since memory was last released
+    for event, elem in _odf_events(zf, "content.xml", deadline):
+        tag = elem.tag
+        if event == "start":
+            if body is None and tag in _ODF_TEXT_BODIES:
+                body = elem
+            if tag in _ODF_SKIPPED:
+                skipping += 1
+            elif tag in _ODF_PARAGRAPHS:
+                paragraphs += 1
+            elif tag == _ODF_PAGE:
+                yield "page", elem.get(_ODF_PAGE_VISIBILITY) == "hidden"
+            elif tag == _ODF_NOTES:
+                notes += 1
+            pending += 1
+            if pending > _STREAM_MAX_OPEN_ELEMENTS:
+                raise OfficeArchiveTooLargeError("A part of the document holds too much content")
+            continue
+        if tag in _ODF_SKIPPED:
+            skipping -= 1
+        elif tag in _ODF_PARAGRAPHS:
+            paragraphs -= 1
+            if paragraphs == 0:
+                if not skipping:
+                    text = _odf_inline_text(elem)
+                    if text.strip():
+                        yield "text", text, notes > 0
+                elem.clear()
+                if body is not None:
+                    body.clear()
+                pending = 0
+        elif tag == _ODF_NOTES:
+            notes -= 1
+        elif tag == _ODF_PAGE and body is not None:
+            body.clear()
+            pending = 0
+
+
+def _ods_cell_text(cell: ET.Element) -> str:
+    """A cell's paragraphs on one line; a cell with no paragraph text falls back to its stored value."""
+    text = " ".join(" ".join(_odf_paragraph_texts(cell)).split())
+    if text:
+        return text
+    for attr in _ODF_VALUE_ATTRS:
+        value = cell.get(attr)
+        if value:
+            return " ".join(value.split())
+    return ""
+
+
+def _ods_row_text(row: ET.Element) -> str:
+    """A row as tab-separated cells. A run of blank columns is written only when a later column has text,
+    so a row that repeats out to the edge of the sheet costs nothing; a row past its size cap is refused."""
+    cells: list[str] = []
+    size = 0
+    blank = 0
+    for cell in row:
+        if cell.tag not in _ODF_CELL_TAGS:
+            continue
+        repeat = _odf_count(cell.get(_ODF_COLUMN_REPEAT), _XLSX_MAX_COLUMN)
+        text = _ods_cell_text(cell) if cell.tag == _ODF_CELL else ""
+        if not text:
+            blank = min(blank + repeat, _XLSX_MAX_COLUMN)
+            continue
+        pad = min(blank, _XLSX_MAX_COLUMN - len(cells))
+        columns = max(min(repeat, _XLSX_MAX_COLUMN - len(cells) - pad), 0)
+        size += pad + (len(text) + 1) * columns
+        if size > _XLSX_MAX_ROW_CHARS:
+            raise OfficeArchiveTooLargeError("A row of the document holds too much text")
+        cells.extend([""] * pad)
+        cells.extend([text] * columns)
+        blank = 0
+        if len(cells) >= _XLSX_MAX_COLUMN:
+            break
+    return "\t".join(cells)
+
+
+def _ods_rows(events, sheet: ET.Element):
+    """(row number, text) for each row of one sheet, read from the shared event stream up to the sheet's end.
+
+    A run of blank rows comes out as one item at the run's last row, so the
+    reader counts the gap without the run being written out row by row."""
+    row_number = 1
+    pending = 0  # elements opened since the last row closed
+    for event, elem in events:
+        if event == "start":
+            pending += 1
+            if pending > _STREAM_MAX_OPEN_ELEMENTS:
+                raise OfficeArchiveTooLargeError("A row of the document holds too much content")
+            continue
+        if elem is sheet:
+            sheet.clear()
+            return
+        if elem.tag != _ODF_ROW:
+            continue
+        repeat = _odf_count(elem.get(_ODF_ROW_REPEAT), max(_XLSX_MAX_ROW - row_number + 1, 1))
+        text = _ods_row_text(elem)
+        elem.clear()
+        sheet.clear()
+        pending = 0
+        if text:
+            for offset in range(repeat):
+                yield row_number + offset, text
+        else:
+            yield row_number + repeat - 1, ""
+        row_number += repeat
+
+
+def _ods_sheets(zf: zipfile.ZipFile, deadline: float | None):
+    """(name, hidden, rows) per sheet in workbook order. Each `rows` is read to its end before the next sheet is asked for."""
+    events = _odf_events(zf, "content.xml", deadline)
+    for event, elem in events:
+        if event == "start" and elem.tag == _ODF_TABLE:
+            name = elem.get(_ODF_SHEET_NAME, "")[:_SHEET_NAME_MAX_CHARS]
+            yield name, elem.get(_ODF_SHEET_DISPLAY) == "false", _ods_rows(events, elem)
+
+
+def _parse_odt(content: bytes, *, max_chars: int | None = None) -> str:
+    """The body text of a word-processing document: one line per paragraph and heading, in document order.
+    Table cells and list items come out as the paragraphs they hold."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            _zip_budget(zf)
+            _odf_check_mimetype(zf, _ODT_MIMETYPE)
+            # Only a chat turn is latency-bound; a durable import may take as long as it takes.
+            deadline = time.monotonic() + _PARSE_DEADLINE_SECONDS if max_chars is not None else None
+            lines: list[str] = []
+            total = 0
+            for unit in _odf_text_units(zf, deadline):
+                if unit[0] == "text":
+                    lines.append(unit[1])
+                    total += len(unit[1]) + 1
+                    _odf_budget(total, max_chars)
+            return "\n".join(lines).strip()
+    except zipfile.BadZipFile as exc:
+        raise _MalformedOfficeDocument("Not a valid .odt archive") from exc
+
+
+def _parse_ods(content: bytes, *, max_chars: int | None = None, info: dict[str, Any] | None = None) -> str:
+    """Sheet names as headings and each row as tab-separated cells, like _parse_xlsx.
+
+    Row n is line n of its sheet, so a blank row keeps its place. With `max_chars`
+    the grid is cut on a row boundary with a marker and `info["truncated"]` is set;
+    a durable import keeps every row, bounded only by the expansion cap."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            _zip_budget(zf)
+            _odf_check_mimetype(zf, _ODS_MIMETYPE)
+            # Only a chat turn is latency-bound; a durable import may take as long as it takes.
+            deadline = time.monotonic() + _PARSE_DEADLINE_SECONDS if max_chars is not None else None
+            sections: list[str] = []
+            rendered = 0
+            budget_left = max_chars
+            exhausted = False
+            truncated = False
+            omitted_sheet_markers = 0
+            omitted_sheets = 0
+            for name, hidden, rows in _ods_sheets(zf, deadline):
+                header = f"[{name}]" + (" (skjult)" if hidden else "")
+                lines: list[str] = []
+                if not exhausted:
+                    lines.append(header)
+                    if budget_left is not None:
+                        budget_left -= len(header) + 1
+                omitted_rows = 0
+                last_row = 0
+                skipped_rows = 0
+                for row_number, text in rows:
+                    skipped_rows += max(row_number - last_row - 1, 0)  # rows the file never wrote
+                    last_row = max(last_row, row_number)
+                    if not text:
+                        skipped_rows += 1
+                        continue
+                    if exhausted:
+                        omitted_rows += 1
+                        continue
+                    if skipped_rows > _XLSX_GAP_LINES:
+                        chunk = [f"[hopper til rad {row_number}]", text]
+                    else:
+                        chunk = [""] * skipped_rows + [text]
+                    skipped_rows = 0
+                    cost = sum(len(line) + 1 for line in chunk)
+                    if budget_left is not None and cost > budget_left:
+                        exhausted = True
+                        omitted_rows += 1
+                        continue
+                    lines.extend(chunk)
+                    rendered += cost
+                    _odf_budget(rendered, None)
+                    if budget_left is not None:
+                        budget_left -= cost
+                if omitted_rows:
+                    truncated = True
+                    marker = f"[… avkortet: {omitted_rows} rader utelatt i «{name}»]"
+                    if lines:
+                        lines.append(marker)
+                    elif omitted_sheet_markers < _XLSX_MAX_OMITTED_SHEET_MARKERS:
+                        omitted_sheet_markers += 1
+                        lines.append(marker)
+                    else:
+                        omitted_sheets += 1
+                if lines:
+                    sections.append("\n".join(lines))
+            if omitted_sheets:
+                sections.append(f"[… avkortet: {omitted_sheets} flere ark utelatt]")
+            if truncated and info is not None:
+                info["truncated"] = True
+            return "\n\n".join(sections).strip()
+    except zipfile.BadZipFile as exc:
+        raise _MalformedOfficeDocument("Not a valid .ods archive") from exc
+
+
+def _parse_odp(content: bytes, *, max_chars: int | None = None) -> str:
+    """Slide text in presentation order, one section per slide, with speaker notes in a `[Notater]` block
+    and hidden slides labelled, as _parse_pptx does. Text outside a slide is not slide text."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            _zip_budget(zf)
+            _odf_check_mimetype(zf, _ODP_MIMETYPE)
+            # Only a chat turn is latency-bound; a durable import may take as long as it takes.
+            deadline = time.monotonic() + _PARSE_DEADLINE_SECONDS if max_chars is not None else None
+            slides: list[tuple[bool, list[str], list[str]]] = []
+            total = 0
+            for unit in _odf_text_units(zf, deadline):
+                if unit[0] == "page":
+                    slides.append((unit[1], [], []))
+                    continue
+                if not slides:
+                    continue
+                _, text, in_notes = unit
+                slides[-1][2 if in_notes else 1].append(text)
+                total += len(text) + 1
+                _odf_budget(total, max_chars)
+            sections: list[str] = []
+            for index, (hidden, body, notes) in enumerate(slides, start=1):
+                lines = [f"[Slide {index}]" + (" (skjult)" if hidden else "")]
+                if body:
+                    lines.append("\n".join(body))
+                if notes:
+                    lines.extend(["[Notater]", "\n".join(notes)])
+                sections.append("\n".join(lines))
+            return "\n\n".join(sections).strip()
+    except zipfile.BadZipFile as exc:
+        raise _MalformedOfficeDocument("Not a valid .odp archive") from exc
+
+
+def _epub_chapter_texts(zf: zipfile.ZipFile):
+    """The text of each XHTML item the package lists, in spine (reading) order.
+
+    A chapter is read whole into the existing HTML helper, which builds a tree,
+    so a chapter past the tree limit is refused, as a large slide is."""
+    container = _read_zip_xml(zf, "META-INF/container.xml")
+    rootfile = container.find(f".//{{{_EPUB_CONTAINER_NS}}}rootfile") if container is not None else None
+    opf_path = (rootfile.get("full-path", "") if rootfile is not None else "").lstrip("/")
+    if not opf_path:
+        raise _MalformedOfficeDocument("META-INF/container.xml names no package document")
+    package = _read_zip_xml(zf, opf_path)
+    if package is None:
+        raise _MalformedOfficeDocument("The package document is missing")
+    manifest = {
+        item.get("id", ""): (item.get("href", ""), item.get("media-type", ""))
+        for item in package.findall(f"{{{_OPF_NS}}}manifest/{{{_OPF_NS}}}item")
+    }
+    for itemref in package.findall(f"{{{_OPF_NS}}}spine/{{{_OPF_NS}}}itemref"):
+        href, media_type = manifest.get(itemref.get("idref", ""), ("", ""))
+        if media_type not in _EPUB_TEXT_TYPES or not href:
+            continue
+        path = _resolve_part_path(opf_path, unquote(href.split("#", 1)[0]))
+        if not _has_part(zf, path):
+            continue
+        info = zf.getinfo(path)
+        if info.file_size > _ZIP_MAX_TREE_PART_BYTES:
+            raise OfficeArchiveTooLargeError("A part of the archive is too large to read safely")
+        _check_read_deadline()
+        data = zf.read(info)
+        if b"<!ENTITY" in data:
+            raise _MalformedOfficeDocument(f"{path} declares an entity")
+        text = _parse_html(data)
+        if text:
+            yield text
+
+
+def _parse_epub(content: bytes, *, max_chars: int | None = None) -> str:
+    """The text of each XHTML item in reading order, one section per item."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            _zip_budget(zf)
+            # Only a chat turn is latency-bound; a durable import may take as long as it takes.
+            deadline = time.monotonic() + _PARSE_DEADLINE_SECONDS if max_chars is not None else None
+            token = _READ_DEADLINE.set(deadline)
+            try:
+                sections: list[str] = []
+                total = 0
+                for text in _epub_chapter_texts(zf):
+                    sections.append(text)
+                    total += len(text) + 2
+                    _odf_budget(total, max_chars)
+                return "\n\n".join(sections).strip()
+            finally:
+                _READ_DEADLINE.reset(token)
+    except zipfile.BadZipFile as exc:
+        raise _MalformedOfficeDocument("Not a valid .epub archive") from exc
+
+
 def _parse_tika(
     filename: str,
     content: bytes,
@@ -1115,6 +1597,15 @@ def _parse_local(
         # Like a workbook, only a chat turn is latency-bound.
         deadline = time.monotonic() + _PARSE_DEADLINE_SECONDS if max_chars is not None else None
         return _parse_pptx(content, deadline=deadline, max_chars=_PPTX_MAX_CHAT_CHARS if max_chars is not None else None)
+    if extension == "odt":
+        return _parse_odt(content, max_chars=max_chars)
+    if extension == "ods":
+        # Like a workbook: `max_chars` is a chat-turn limit, and the grid is cut with a marker.
+        return _parse_ods(content, max_chars=max_chars, info=metadata)
+    if extension == "odp":
+        return _parse_odp(content, max_chars=max_chars)
+    if extension == "epub":
+        return _parse_epub(content, max_chars=max_chars)
     raise UnsupportedFileTypeError(f"Unsupported file type: {extension}")
 
 

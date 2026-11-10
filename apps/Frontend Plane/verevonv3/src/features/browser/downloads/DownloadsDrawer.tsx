@@ -18,7 +18,7 @@ import './downloads-drawer.css'
 export type DownloadsDrawerProps = {
   /** The browser session the downloads belong to. */
   sessionId: string
-  /** What the session reported, read with `readSessionDownloads`. An empty list hides the drawer. */
+  /** What the session reported, read with `readDownloadListing`. An empty list hides the drawer. */
   downloads: readonly BrowserSessionDownload[]
   /** Zero Data Retention on: the hand-off is off and a line says so. */
   zdr?: boolean
@@ -34,8 +34,8 @@ type RowState = { readonly state: 'sending' } | SendOutcome
 
 /**
  * Downloads drawer of a browser session (E3.4-7). Lists the files the session's browser downloaded, with
- * type and size, and sends one at a time to the knowledge base through `browser_download.send_to_knowledge`.
- * Hidden unless the flag is on and the session reports at least one download.
+ * type, size and state, and sends one at a time to the knowledge base through `browser_download.send_to_knowledge`.
+ * It shows no file name and no URL. Hidden unless the flag is on and the session reports at least one download.
  */
 export function DownloadsDrawer(props: DownloadsDrawerProps): JSX.Element {
   const i18n = useI18n()
@@ -86,13 +86,22 @@ export function DownloadsDrawer(props: DownloadsDrawerProps): JSX.Element {
         return tr('Logg inn på nytt for å sende filen', 'Sign in again to send the file')
       case 'not_found':
         return tr('Filen finnes ikke lenger i økten', 'The file is no longer in the session')
+      case 'no_text':
+        return tr('Filen har ingen tekst som kan legges i kunnskapsbasen', 'The file has no text to add to the knowledge base')
+      case 'too_large':
+        return tr('Teksten i filen er for stor for kunnskapsbasen', 'The text in the file is too large for the knowledge base')
+      case 'disabled':
+        return tr('Å sende filer til kunnskapsbasen er ikke slått på', 'Sending files to the knowledge base is not turned on')
       default:
         return tr('Filen ble ikke sendt. Prøv igjen.', 'The file was not sent. Try again.')
     }
   }
 
-  const statusText = (state: RowState | undefined): string => {
-    if (!state) return ''
+  // The state of a file: what this session's send answered, else the owner's hand-off state from the list.
+  const statusText = (download: BrowserSessionDownload, state: RowState | undefined): string => {
+    if (!state) {
+      return download.handedOff === true ? tr('Sendt til kunnskapsbasen', 'Sent to the knowledge base') : ''
+    }
     if ('state' in state) return tr('Sender …', 'Sending …')
     if (state.outcome === 'refused') return refusalText(state.refusal)
     switch (state.indexStatus) {
@@ -109,6 +118,7 @@ export function DownloadsDrawer(props: DownloadsDrawerProps): JSX.Element {
 
   const buttonDisabled = (download: BrowserSessionDownload): boolean => {
     if (sendRefusalBefore(download, zdr()) !== undefined) return true
+    if (download.handedOff === true) return true
     const state = rows()[download.artifactId]
     if (!state) return false
     if ('state' in state) return true
@@ -141,9 +151,6 @@ export function DownloadsDrawer(props: DownloadsDrawerProps): JSX.Element {
               return (
                 <li class="browser-downloads__item" data-kind={download.kind}>
                   <FileText class="size-4" aria-hidden="true" />
-                  <span class="browser-downloads__name" title={download.filename}>
-                    {download.filename}
-                  </span>
                   <span class="browser-downloads__meta">
                     {kindLabel(download.kind)}
                     <Show when={download.sizeBytes !== undefined}>
@@ -152,7 +159,7 @@ export function DownloadsDrawer(props: DownloadsDrawerProps): JSX.Element {
                     </Show>
                   </span>
                   <span class="browser-downloads__status">
-                    {unsupported() ? refusalText('unsupported_type') : statusText(rows()[download.artifactId])}
+                    {unsupported() ? refusalText('unsupported_type') : statusText(download, rows()[download.artifactId])}
                   </span>
                   <button
                     type="button"

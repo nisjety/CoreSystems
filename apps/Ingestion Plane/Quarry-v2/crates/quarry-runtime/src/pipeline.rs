@@ -33,7 +33,7 @@ use crate::local_index::{LocalDocument, TantivyLocalIndex};
 use crate::policy::RunPolicy;
 use crate::robots_cache::origin_key;
 use crate::robots_gate::{RobotsEnforceMode, RobotsEnforcement};
-use crate::source_registrar::SourceRegistrar;
+use crate::source_registrar::{SourceRegistrar, SourceRegistration};
 
 /// What a run returns besides its [`NormalizedOutput`]: the parts that cannot
 /// be stored artifacts. Under Zero Data Retention no artifact is written, so
@@ -2526,12 +2526,13 @@ impl PageRunner {
                                         if let Some(host) = parsed.host_str() {
                                             let root = format!("{}://{}", parsed.scheme(), host);
                                             if let Err(e) = registrar
-                                                .register_source(
-                                                    &registrar_org,
-                                                    host,
-                                                    &root,
-                                                    "crawl",
-                                                )
+                                                .register_source(SourceRegistration {
+                                                    org_id: &registrar_org,
+                                                    name: host,
+                                                    url: &root,
+                                                    kind: "crawl",
+                                                    tag: None,
+                                                })
                                                 .await
                                             {
                                                 tracing::warn!(

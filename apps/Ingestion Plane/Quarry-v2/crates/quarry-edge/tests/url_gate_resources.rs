@@ -19,7 +19,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use quarry_edge::policy_baseline::{PolicyBaseline, BASELINE_ENV};
 use quarry_edge::source_registrar::EdgeSourceRegistrar;
 use quarry_edge::state::AppState;
-use quarry_runtime::source_registrar::SourceRegistrar;
+use quarry_runtime::source_registrar::{SourceRegistrar, SourceRegistration};
 use quarry_runtime::{fetch::StaticDriver, EventSink};
 
 mod support;
@@ -236,13 +236,25 @@ async fn crawl_completion_registrar_never_writes_a_source_for_a_denied_host() {
     let registrar = EdgeSourceRegistrar { state };
 
     let denied = registrar
-        .register_source("org_a", "Denied", &format!("https://{DENIED}/"), "crawl")
+        .register_source(SourceRegistration {
+            org_id: "org_a",
+            name: "Denied",
+            url: &format!("https://{DENIED}/"),
+            kind: "crawl",
+            tag: None,
+        })
         .await;
     assert!(denied.is_err(), "the registrar refuses a denied URL");
     assert_eq!(count(&control).await, 0);
 
     registrar
-        .register_source("org_a", "Allowed", &format!("https://{ALLOWED}/"), "crawl")
+        .register_source(SourceRegistration {
+            org_id: "org_a",
+            name: "Allowed",
+            url: &format!("https://{ALLOWED}/"),
+            kind: "crawl",
+            tag: None,
+        })
         .await
         .expect("an allowed URL registers");
     assert_eq!(count(&control).await, 1);

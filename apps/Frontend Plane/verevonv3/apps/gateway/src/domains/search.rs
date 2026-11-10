@@ -717,6 +717,7 @@ async fn search_answer_stream(
         None,
         None,
         false,
+        None,
     )
     .await
 }

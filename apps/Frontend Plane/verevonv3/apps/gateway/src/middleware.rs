@@ -74,6 +74,9 @@ const STRIPPED_HEADERS: &[&str] = &[
     // Client-controlled tenant scoping must never be trusted: the org id is
     // derived server-side from the validated session (`authorized_org_id`).
     "x-verevon-org-id",
+    // The live scope is the gateway's to set: only a view-only route sends it upstream
+    // (W3-E3.4-5b), so a client-sent value is dropped here on every route.
+    "x-quarry-live-scope",
 ];
 
 /// User identity extracted from a validated Better Auth session.

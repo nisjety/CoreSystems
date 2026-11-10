@@ -226,6 +226,11 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Denne visningen er bare for å se på. Bruk den vanlige nettleservisningen for å styre siden.',
     en: 'This view is for watching only. Use the regular browser view to control the page.',
   },
+  // W3-E3.4-5b: the view-only live stream of a zero-data-retention session (gateway browser.rs).
+  browser_live_view_zdr_unsupported: {
+    no: 'Visningen som bare kan ses på, er ikke tilgjengelig for en økt som ikke lagrer data.',
+    en: 'The watch-only view is not available for a session that does not retain data.',
+  },
   browser_procedure_not_compilable: { no: 'Prosedyren kan ikke kompileres ennå. Fullfør flere handlinger og prøv igjen.', en: 'The procedure cannot be compiled yet. Complete more actions and try again.' },
   browser_receipts_unavailable_zdr: { no: 'Handlingsloggen er ikke tilgjengelig for økter uten lagring.', en: 'The action log is not available for sessions without retention.' },
   invalid_browser_evidence_query: { no: 'Filteret for nettleserloggen er ugyldig.', en: 'The browser log filter is not valid.' },

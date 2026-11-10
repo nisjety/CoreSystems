@@ -310,7 +310,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/v1/sources/:id",
-            delete(crate::resource_routes::delete_source),
+            delete(crate::resource_routes::delete_source)
+                .patch(crate::resource_routes::patch_source),
         )
         .route("/v1/snapshots", get(crate::resource_routes::list_snapshots))
         .route("/v1/:kind/jobs", get(crate::resource_routes::list_jobs))
@@ -384,7 +385,8 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/v1/schedules/:id",
-            delete(crate::schedule_routes::delete_schedule),
+            delete(crate::schedule_routes::delete_schedule)
+                .patch(crate::schedule_routes::patch_schedule),
         )
         .route(
             "/v1/schedules/:id/pause",

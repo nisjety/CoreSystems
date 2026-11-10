@@ -11,8 +11,10 @@ import { ApiError } from '@/shared/api/api-error'
 // which asks the owner (Ingestion Plane, through the gateway) to parse the file and write its text to
 // the knowledge base under the caller's org. The file itself never leaves the owner.
 //
-// The drawer is hidden unless the build flag is on AND the session reports at least one download. A
-// session that reports nothing (every session today: no projection carries `downloads` yet) shows nothing.
+// The drawer is hidden unless the build flag is on AND the session reports at least one download. The
+// downloads come from the owner's list (`GET /api/v1/browser/sessions/{id}/downloads`, read with
+// `readDownloadListing`) or from a session's `downloads` field (`readSessionDownloads`). A session that
+// reports nothing shows nothing.
 
 /** Whether the downloads drawer is on for this build. `VITE_BROWSER_DOWNLOADS_DRAWER` counts only as "1" or "true". */
 export function isBrowserDownloadsDrawerEnabled(): boolean {
@@ -26,13 +28,18 @@ export type DownloadKind = 'pdf' | 'text' | 'markdown' | 'csv' | 'other'
 export interface BrowserSessionDownload {
   /** The opaque artifact handle the session reported. The owner checks it belongs to this session and org. */
   readonly artifactId: string
-  /** Display name only; never sent to the owner. */
+  /** Display name only; never sent to the owner. The drawer does not show it: it shows type, size and state. */
   readonly filename: string
   /** The MIME type the session reported, lower-cased without parameters; `''` when unknown. */
   readonly mimeType: string
   /** Size in bytes, or `undefined` when the session did not say. */
   readonly sizeBytes: number | undefined
   readonly kind: DownloadKind
+  /**
+   * `true` once the owner holds the file's text in the knowledge base (Quarry's `handed_off`). Absent when the
+   * report did not say.
+   */
+  readonly handedOff?: boolean
 }
 
 // One reported download, as the gateway may spell it (camelCase or Quarry's snake_case). Unknown keys are
@@ -48,6 +55,8 @@ const reportedDownload = z.object({
   content_type: z.string().optional(),
   sizeBytes: z.number().int().nonnegative().optional(),
   size_bytes: z.number().int().nonnegative().optional(),
+  handoffState: z.string().optional(),
+  handoff_state: z.string().optional(),
 })
 
 /** The most entries the drawer lists; a longer report is cut, newest first as reported. */
@@ -85,17 +94,24 @@ function normalizeMime(raw: string | undefined): string {
 }
 
 /**
- * The downloads a session reported, read from its `downloads` field. Tolerant: anything that is not a
- * list gives `[]`, and an entry that does not parse or has no artifact id is skipped. Duplicate artifact
- * ids keep the first entry.
+ * The downloads a session reported, read from its `downloads` field (see {@link readDownloadListing}).
+ * Tolerant: anything that is not a list gives `[]`.
  */
 export function readSessionDownloads(session: unknown): BrowserSessionDownload[] {
   if (session === null || typeof session !== 'object') return []
-  const raw = (session as { downloads?: unknown }).downloads
-  if (!Array.isArray(raw)) return []
+  return readDownloadListing((session as { downloads?: unknown }).downloads)
+}
+
+/**
+ * The downloads of a list: the owner's `GET /api/v1/browser/sessions/{id}/downloads` answer (its `data`
+ * array) or a session's `downloads` field. Tolerant: anything that is not a list gives `[]`, and an entry
+ * that does not parse or has no artifact id is skipped. Duplicate artifact ids keep the first entry.
+ */
+export function readDownloadListing(listing: unknown): BrowserSessionDownload[] {
+  if (!Array.isArray(listing)) return []
   const seen = new Set<string>()
   const out: BrowserSessionDownload[] = []
-  for (const item of raw) {
+  for (const item of listing) {
     if (out.length >= DOWNLOADS_DRAWER_MAX) break
     const parsed = reportedDownload.safeParse(item)
     if (!parsed.success) continue
@@ -105,12 +121,14 @@ export function readSessionDownloads(session: unknown): BrowserSessionDownload[]
     seen.add(artifactId)
     const filename = (entry.filename ?? entry.file_name ?? '').trim() || artifactId
     const mimeType = normalizeMime(entry.mimeType ?? entry.mime_type ?? entry.contentType ?? entry.content_type)
+    const handoff = entry.handoffState ?? entry.handoff_state
     out.push({
       artifactId,
       filename,
       mimeType,
       sizeBytes: entry.sizeBytes ?? entry.size_bytes,
       kind: downloadKind(mimeType, filename),
+      ...(handoff === undefined ? {} : { handedOff: handoff === 'handed_off' }),
     })
   }
   return out
@@ -128,7 +146,15 @@ export function formatDownloadSize(bytes: number | undefined, locale: 'no' | 'en
 }
 
 /** Why a download cannot be sent to knowledge right now; `undefined` when it can. */
-export type SendRefusal = 'zdr' | 'unsupported_type' | 'signed_out' | 'not_found' | 'failed'
+export type SendRefusal =
+  | 'zdr'
+  | 'unsupported_type'
+  | 'signed_out'
+  | 'not_found'
+  | 'no_text'
+  | 'too_large'
+  | 'disabled'
+  | 'failed'
 
 /** Whether the drawer offers the action for this file, before anything is sent. */
 export function sendRefusalBefore(
@@ -158,9 +184,25 @@ export function sendToKnowledgeKey(sessionId: string, artifactId: string): strin
   return `browser-download:${sessionId}:${artifactId}`
 }
 
+// The owner's typed refusals (Q3-E3.4-7b) by code; a code it does not name falls back to the status.
 function refusalOf(failure: unknown): SendRefusal {
   if (!(failure instanceof ApiError)) return 'failed'
   if (failure.feature !== null) return 'zdr'
+  switch (failure.code) {
+    case 'browser_download_unsupported_type':
+      return 'unsupported_type'
+    case 'browser_download_no_text':
+      return 'no_text'
+    case 'browser_download_too_large':
+      return 'too_large'
+    case 'browser_download_handoff_disabled':
+      return 'disabled'
+    case 'browser_download_not_found':
+      return 'not_found'
+    default:
+      break
+  }
+  if (failure.status === 401) return 'signed_out'
   if (failure.status === 404) return 'not_found'
   if (failure.status === 415 || failure.status === 422) return 'unsupported_type'
   return 'failed'

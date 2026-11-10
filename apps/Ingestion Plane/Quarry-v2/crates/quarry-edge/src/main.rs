@@ -1436,6 +1436,10 @@ async fn run() -> anyhow::Result<()> {
         Ok(client)
     };
 
+    // E3.6-6a: the imports-core Office extract client. Installed only behind
+    // QUARRY_EDGE__OFFICE_VIA_IMPORTS (see `wire_office_extract_client`).
+    wire_office_extract_client(cross_plane_tokens.as_ref())?;
+
     // Cycle 19 / cluster #20: optional LLM-backed intent classifier.
     // When `llm_classify_intent` is on AND a Model Plane URL is set, we
     // build a `CachedClassifier(HybridClassifier(MpIntentClassifier))`
@@ -2275,6 +2279,83 @@ fn build_otp_source(
             None
         }
     }
+}
+
+/// E3.6-6a: install the imports-core Office extract client that
+/// `content_route::extract_office_via_imports` calls. It is built and installed only when
+/// `QUARRY_EDGE__OFFICE_VIA_IMPORTS` is on AND `QUARRY_EDGE__IMPORTS_CORE_URL` is non-empty AND
+/// the cross-plane token provider exists. In any other state nothing is installed: an Office body
+/// keeps the typed 415 `imports_client_unavailable` and nothing is sent. The bearer is the
+/// `office-extract` manifest row (audience `ingestion`, scope `imports:read`), built by
+/// `ManifestImportsBearer::for_office_extract`, whose row call site is in `content_route.rs`, the
+/// file the row's `used_by` lists. `QUARRY_EDGE__OFFICE_MAX_INPUT_BYTES` caps a body before any call;
+/// it is read at boot whether or not the route is on, so a typo stops the edge. Nothing here logs
+/// the URL, a token or a body. No ZDR refusal is added here: imports-core stores nothing, and the
+/// client refuses any answer that says it did.
+fn wire_office_extract_client(
+    tokens: Option<&quarry_runtime::service_tokens::SharedServiceTokenProvider>,
+) -> anyhow::Result<()> {
+    use quarry_runtime::content_route::{
+        install_office_extract_client, office_max_input_bytes_from_env, office_via_imports_enabled,
+        ImportsExtractClient, ManifestImportsBearer, IMPORTS_CORE_URL_ENV,
+    };
+
+    let max_input_bytes =
+        office_max_input_bytes_from_env().map_err(|e| anyhow::anyhow!("office extract: {e}"))?;
+    if !office_via_imports_enabled() {
+        tracing::info!(enabled = false, "office extract via imports-core: off");
+        return Ok(());
+    }
+    let url = std::env::var(IMPORTS_CORE_URL_ENV)
+        .ok()
+        .map(|raw| raw.trim().to_owned())
+        .filter(|raw| !raw.is_empty());
+    let Some(url) = url else {
+        tracing::warn!(
+            reason = "imports_core_url_unset",
+            "office extract via imports-core is on but QUARRY_EDGE__IMPORTS_CORE_URL is empty; Office bodies stay refused"
+        );
+        return Ok(());
+    };
+    let Some(tokens) = tokens else {
+        tracing::warn!(
+            reason = "cross_plane_tokens_unset",
+            "office extract via imports-core is on but no cross-plane token provider exists; Office bodies stay refused"
+        );
+        return Ok(());
+    };
+    let bearer = match ManifestImportsBearer::for_office_extract(tokens.clone()) {
+        Ok(bearer) => bearer,
+        Err(error) => {
+            tracing::warn!(
+                reason = "office_extract_row_unavailable",
+                error_code = ?error.code,
+                "office extract via imports-core is on but the office-extract token row is unavailable; Office bodies stay refused"
+            );
+            return Ok(());
+        }
+    };
+    let client = match ImportsExtractClient::new(url, Arc::new(bearer)) {
+        Ok(client) => client
+            .with_enabled(true)
+            .with_max_input_bytes(max_input_bytes),
+        Err(_) => {
+            tracing::warn!(
+                reason = "imports_core_url_invalid",
+                "QUARRY_EDGE__IMPORTS_CORE_URL is not a plain http(s) origin; Office bodies stay refused"
+            );
+            return Ok(());
+        }
+    };
+    if install_office_extract_client(client) {
+        tracing::info!(enabled = true, "office extract via imports-core: installed");
+    } else {
+        tracing::warn!(
+            reason = "already_installed",
+            "office extract via imports-core: a client is already installed"
+        );
+    }
+    Ok(())
 }
 
 pub fn routes_for_test(state: state::AppState) -> Router {

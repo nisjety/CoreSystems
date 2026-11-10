@@ -71,6 +71,7 @@ pub(super) async fn proxy_sse_for_user(
             .and_then(|value| value.to_str().ok()),
         Some((&user.user_id, &org_id)),
         false,
+        None,
     )
     .await
 }

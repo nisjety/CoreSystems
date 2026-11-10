@@ -22,17 +22,23 @@
 use async_trait::async_trait;
 use quarry_core::error::QuarryResult;
 
+/// One "tracked website" registration: the org it belongs to, its display name, the target
+/// URL, the source kind and the optional monitor tag (E3.5-6). `tag` is `None` for an
+/// untagged row. A repeat registration keeps the tag the row already has.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceRegistration<'a> {
+    pub org_id: &'a str,
+    pub name: &'a str,
+    pub url: &'a str,
+    pub kind: &'a str,
+    pub tag: Option<&'a str>,
+}
+
 /// Registers (or refreshes) one durable "tracked website" row. `url` should
 /// be the crawl target's root (`scheme://host`), not each individual page —
 /// callers derive that from the page's final URL so a multi-page crawl of
 /// one site produces exactly one row instead of one per page.
 #[async_trait]
 pub trait SourceRegistrar: Send + Sync {
-    async fn register_source(
-        &self,
-        org_id: &str,
-        name: &str,
-        url: &str,
-        kind: &str,
-    ) -> QuarryResult<()>;
+    async fn register_source(&self, registration: SourceRegistration<'_>) -> QuarryResult<()>;
 }

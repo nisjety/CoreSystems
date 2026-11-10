@@ -1230,6 +1230,7 @@ mod tests {
             browser_human_browse: false,
             browser_live_view_only: false,
             browser_consent_api: false,
+            browser_downloads: false,
             auth_core_url: "http://127.0.0.1:1".into(),
             verevon_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),

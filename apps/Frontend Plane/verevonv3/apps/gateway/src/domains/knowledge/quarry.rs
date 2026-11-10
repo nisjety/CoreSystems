@@ -2658,6 +2658,7 @@ pub(super) async fn crawl_run_events(
         headers.get("last-event-id").and_then(|v| v.to_str().ok()),
         None,
         false,
+        None,
     )
     .await
 }
@@ -2692,6 +2693,7 @@ pub(super) async fn crawl_job_events(
         headers.get("last-event-id").and_then(|v| v.to_str().ok()),
         None,
         false,
+        None,
     )
     .await
 }

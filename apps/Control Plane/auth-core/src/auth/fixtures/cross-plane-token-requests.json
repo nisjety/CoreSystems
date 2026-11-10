@@ -120,6 +120,28 @@
       "used_by": ["crates/quarry-runtime/src/otp_ic_client.rs"],
       "feature_flags": [],
       "notes": "The executor-only one-time-code read (E3.1-h, ADR-2a): integration-corev2 POST /api/v1/connections/{id}/actions with operation mail.otp.read, minted for the run's verified org. R-13 PR 1 granted quarry-edge the ingestion audience with integration:otp:read alone, as a ZDR lane; no other row holds the scope and no other scope rides with it. integration-core refuses the shared internal key and any token without this scope for the operation, and quarry-edge is not a token lease consumer. The read is reachable only behind QUARRY_EDGE__FILL_OTP (default off, read by otp_source::fill_otp_enabled, not an edge config field) and one approved fill_otp grant per read (the edge's single-use set plus the client's own spent set). The code never reaches a log, an error or a receipt."
+    },
+    {
+      "name": "office-extract",
+      "audience": "ingestion",
+      "mint_path": "/api/ingestion/internal-token",
+      "scopes": ["imports:read"],
+      "reason": "ephemeral text extraction of a fetched Office file",
+      "granted": true,
+      "used_by": ["crates/quarry-runtime/src/content_route.rs"],
+      "feature_flags": [],
+      "notes": "The bearer of imports-core POST /api/v1/import/extract (E3.6-6a/6b), minted for the run's verified organization. The registry lane is ZDR: the extraction is ephemeral and nothing is stored, embedded or sent on, so the token carries imports:read alone and imports-core admits imports:read for exactly that one POST (every other non-GET route there still needs imports:write). It is reachable only behind QUARRY_EDGE__OFFICE_VIA_IMPORTS (default off, read by pipeline::office_via_imports_mode and content_route::office_via_imports_enabled, not an edge config field) and QUARRY_EDGE__DOC_ROUTING. Built by ManifestImportsBearer::from_manifest; no other row holds imports:read."
+    },
+    {
+      "name": "artifacts-read",
+      "audience": "data-plane",
+      "mint_path": "/api/data-plane/internal-token",
+      "scopes": ["data:read"],
+      "reason": "no_egress scrape reads the org's stored page capture",
+      "granted": true,
+      "used_by": ["crates/quarry-runtime/src/data_plane_http.rs"],
+      "feature_flags": [],
+      "notes": "The no_egress scrape read of one stored page capture: POST /v1/artifacts/lookup on the Data Plane (E3.8.8), minted for the run's verified organization. Read-only, the same audience and scope as vector-retrieve but a request of its own so the artifact read is named at its call site; it never carries org:data:read_all. Reachable only behind QUARRY_EDGE__NO_EGRESS (default off, read by fetch::no_egress_enabled, not an edge config field), and never requested for a ZDR run: the no_egress driver refuses a ZDR caller before any lookup. Built by DataPlaneArtifactReader::with_manifest_token_request."
     }
   ]
 }

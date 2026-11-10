@@ -95,6 +95,11 @@ pub struct ListFilter {
     /// Every other list ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+
+    /// Monitor lists only (E3.5-6): keep the sources or schedules that carry this tag. The
+    /// sources and schedules lists forward it to control; every other list ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 impl ListFilter {

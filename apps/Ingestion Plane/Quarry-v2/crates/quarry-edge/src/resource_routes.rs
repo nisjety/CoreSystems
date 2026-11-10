@@ -66,6 +66,10 @@ pub struct ListQuery {
     /// `GET /v1/artifacts` only (INNH-12); other lists ignore it.
     #[serde(default)]
     pub kind: Option<String>,
+    /// `GET /v1/sources` and `GET /v1/schedules` only (E3.5-6): keep the rows with this tag.
+    /// The other lists never read it, so a `tag` on them is ignored.
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 /// The artifact kinds `GET /v1/artifacts?kind=` accepts, as `docs/openapi.yaml` lists them.
@@ -104,6 +108,8 @@ impl ListQuery {
             sort,
             run_id: self.run_id,
             kind: self.kind,
+            // Set by the monitor list handlers only (E3.5-6), never from `self.tag` here.
+            tag: None,
         })
     }
 }
@@ -313,6 +319,9 @@ where
     if let Some(c) = &filter.cursor {
         req = req.query(&[("cursor", c)]);
     }
+    if let Some(t) = &filter.tag {
+        req = req.query(&[("tag", t)]);
+    }
     req = req.query(&[(
         "sort",
         if filter.sort.is_descending() {
@@ -352,6 +361,9 @@ where
         push_q("limit", &filter.effective_limit().to_string());
         if let Some(c) = &filter.cursor {
             push_q("cursor", c);
+        }
+        if let Some(t) = &filter.tag {
+            push_q("tag", t);
         }
         push_q(
             "sort",
@@ -422,7 +434,9 @@ pub async fn list_sources(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<Source>>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
-    let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
+    let tag = optional_monitor_tag(q.tag.as_deref()).map_err(|e| err_response(&request_id, e))?;
+    let mut filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
+    filter.tag = tag;
     let page = forward_list::<Source>(&state, &request_id, &claims.org_id, "/v1/sources", &filter)
         .await
         .map_err(|e| err_response(&request_id, e))?;
@@ -438,6 +452,58 @@ pub async fn list_sources(
 // param — NEVER from the client body — so a caller can't register or delete a
 // source under another tenant (control's handler reads the query param only).
 // =============================================================================
+
+/// The longest monitor tag, in bytes (E3.5-6). Control's `store.NormalizeTag` refuses more.
+const MAX_MONITOR_TAG_LEN: usize = 32;
+
+/// Normalises a monitor tag the way control does (E3.5-6): trimmed and lowercased, then 1 to 32
+/// bytes of `a-z`, `0-9`, `.`, `_` or `-` that start with a letter or a digit. Blank comes back
+/// empty, which is the untagged value. The check is ASCII only, so a non-ASCII tag is refused
+/// here rather than folded to ASCII by a Unicode lowercasing.
+pub(crate) fn normalize_monitor_tag(raw: &str) -> Result<String, QuarryError> {
+    let tag = raw.trim().to_ascii_lowercase();
+    let well_formed = tag.bytes().enumerate().all(|(at, b)| {
+        b.is_ascii_lowercase() || b.is_ascii_digit() || (at > 0 && matches!(b, b'.' | b'_' | b'-'))
+    });
+    if tag.len() <= MAX_MONITOR_TAG_LEN && well_formed {
+        return Ok(tag);
+    }
+    Err(QuarryError::new(
+        ErrorCode::BadRequest,
+        "tag must be 1 to 32 characters: a-z, 0-9, '.', '_' or '-', starting with a letter or digit",
+    )
+    .with_details(serde_json::json!({ "field": "tag", "reason": "invalid_tag" })))
+}
+
+/// The optional `tag` of a create or a monitor list filter (E3.5-6): absent or blank is untagged
+/// (`None`); anything else is normalised and checked. A bad tag is a 400 that names the field, so
+/// a typo never becomes an untagged row or an empty page that looks like "no sources".
+pub(crate) fn optional_monitor_tag(raw: Option<&str>) -> Result<Option<String>, QuarryError> {
+    let tag = normalize_monitor_tag(raw.unwrap_or_default())?;
+    Ok((!tag.is_empty()).then_some(tag))
+}
+
+/// `PATCH /v1/sources/{id}` and `PATCH /v1/schedules/{id}` body (E3.5-6): the monitor tag to set.
+/// `""` clears it. A body that names no tag is refused, so a PATCH never clears a tag by omission.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct TagPatchRequest {
+    #[serde(default)]
+    pub tag: Option<String>,
+}
+
+/// The PATCH body the edge forwards to control (E3.5-6): the tag normalised, `""` to clear it.
+pub(crate) fn tag_patch_body(req: &TagPatchRequest) -> Result<TagPatchRequest, QuarryError> {
+    let raw = req.tag.as_deref().ok_or_else(|| {
+        QuarryError::new(
+            ErrorCode::BadRequest,
+            r#"tag is required; send "" to clear it"#,
+        )
+        .with_details(serde_json::json!({ "field": "tag", "reason": "tag_required" }))
+    })?;
+    Ok(TagPatchRequest {
+        tag: Some(normalize_monitor_tag(raw)?),
+    })
+}
 
 /// `POST /v1/sources` request body. Mirrors quarry-control's `sourceCreateBody`
 /// (`services/quarry-control/internal/resources/cycle23.go`). `org_id` is
@@ -462,6 +528,11 @@ pub struct CreateSourceRequest {
     /// Free-form per-source config (max_pages, include_patterns, …).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<serde_json::Value>,
+    /// The operator label that groups this source (E3.5-6). It is trimmed, lowercased and
+    /// checked against the monitor-tag grammar before it is forwarded; absent or blank is
+    /// untagged. A repeat registration keeps the tag the row already has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
     /// The ZDR posture of a `monitor: true` create (WS4.H). In a client body it is
     /// only a declaration that raises the posture ([`Claims::effective_zdr`] never
     /// lets it lower the token's floor); the edge replaces it with the effective
@@ -618,6 +689,7 @@ pub async fn create_source(
             ),
         ));
     }
+    let tag = optional_monitor_tag(req.tag.as_deref()).map_err(|e| err_response(&request_id, e))?;
     // A source is a URL the platform fetches later, so a denied URL is refused at create
     // time, under the same org web policy as the scrape family. The fetch itself is gated
     // again where it happens (the scrape, crawl and batch routes a tracked source feeds).
@@ -640,6 +712,7 @@ pub async fn create_source(
             .filter(|s| !s.is_empty())
             .map(str::to_owned),
         config: req.config.clone(),
+        tag,
         zdr: monitor_zdr,
     };
     let body_bytes = serde_json::to_vec(&body).map_err(|e| {
@@ -671,7 +744,9 @@ pub async fn create_source(
 ///
 /// `monitor` is always `false` here: crawl-completion registration should
 /// not silently spin up a recurring change-monitor schedule the user never
-/// asked for. Best-effort by contract — callers (the registrar impl) log
+/// asked for. `tag` is the optional monitor tag a caller supplies (E3.5-6); it is
+/// normalised like a `POST /v1/sources` tag, and a bad one fails the registration.
+/// Best-effort by contract — callers (the registrar impl) log
 /// and swallow errors so a materialization hiccup never fails the ingest
 /// that already succeeded.
 pub(crate) async fn upsert_source_internal(
@@ -680,6 +755,7 @@ pub(crate) async fn upsert_source_internal(
     name: &str,
     url: &str,
     kind: &str,
+    tag: Option<&str>,
 ) -> Result<(), QuarryError> {
     let body = CreateSourceRequest {
         name: name.to_string(),
@@ -688,6 +764,7 @@ pub(crate) async fn upsert_source_internal(
         monitor: false,
         preset: None,
         config: None,
+        tag: optional_monitor_tag(tag)?,
         zdr: None,
     };
     let body_bytes = serde_json::to_vec(&body)
@@ -714,6 +791,45 @@ pub async fn delete_source(
         .await
         .map_err(|e| err_response(&request_id, e))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PATCH /v1/sources/{id}` (E3.5-6): set the source's monitor tag, or clear it with `""`. The id
+/// must parse as a source id, so the path segment cannot reach another control route; the org is
+/// the verified JWT org. Control answers the updated source in its own wire shape, which is passed
+/// through unchanged, as `POST /v1/sources` passes its answer through.
+pub async fn patch_source(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Path(id): Path<String>,
+    Json(req): Json<TagPatchRequest>,
+) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = crate::request_id::current();
+    let id = id
+        .parse::<quarry_core::ids::kinds::SourceKind>()
+        .map_err(|_| {
+            err_response(
+                &request_id,
+                QuarryError::new(ErrorCode::BadRequest, "invalid source id"),
+            )
+        })?;
+    let body = tag_patch_body(&req).map_err(|e| err_response(&request_id, e))?;
+    let body_bytes = serde_json::to_vec(&body).map_err(|e| {
+        err_response(
+            &request_id,
+            QuarryError::new(ErrorCode::Internal, format!("encode body: {e}")),
+        )
+    })?;
+    let path = format!("/v1/sources/{id}");
+    let updated = forward_mutation(
+        &state,
+        reqwest::Method::PATCH,
+        &path,
+        &claims.org_id,
+        &body_bytes,
+    )
+    .await
+    .map_err(|e| err_response(&request_id, e))?;
+    Ok(Json(Envelope::ok(request_id, updated)))
 }
 
 pub async fn list_snapshots(
@@ -871,7 +987,9 @@ pub async fn list_schedules(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<serde_json::Value>>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
-    let filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
+    let tag = optional_monitor_tag(q.tag.as_deref()).map_err(|e| err_response(&request_id, e))?;
+    let mut filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
+    filter.tag = tag;
     // control's /v1/schedules serves the orchestrator-facing `scheduleWire`
     // projection (id / target_kind / target_ref / enabled / created_at-as-unix),
     // NOT the generic `ScheduleSummary` resource shape. Pass items through as raw
@@ -1442,6 +1560,7 @@ mod tests {
             cursor: Some("opaque".into()),
             run_id: None,
             kind: None,
+            tag: None,
         };
         let f = q.into_filter().unwrap();
         assert_eq!(f.status.as_deref(), Some("running"));

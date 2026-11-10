@@ -197,6 +197,7 @@ async fn stream_chat(
         Some((&user.user_id, org_id.as_str())),
         effective_zdr,
         &[],
+        None,
     )
     .await
 }

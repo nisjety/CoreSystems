@@ -416,8 +416,41 @@ export function deleteIngestionSource(id: string, signal?: AbortSignal) {
   )
 }
 
-export function getIngestionJob(id: string, signal?: AbortSignal) {
-  return requestJson<JobDetail>(`/api/ingestions/jobs/${encodeURIComponent(id)}`, { signal })
+/**
+ * The optional long-poll of {@link getIngestionJob}. `wait` is whole seconds from 1 to 30. `resume` is
+ * the `resume_token` of an earlier 408: 1 to 512 characters of letters, digits, `_`, `-` and `.`.
+ */
+export interface JobWaitOptions {
+  wait?: number
+  resume?: string
+}
+
+/**
+ * `GET /api/ingestions/jobs/{id}`. With `options.wait` the gateway holds the read until the job ends or
+ * the wait runs out. A wait that runs out answers 408 `TIMEOUT` with `details.reason` set to
+ * `processing_continues` and `details.resume_token`; send that token back as `options.resume` to keep
+ * waiting. Values outside those limits are refused before any request is sent.
+ */
+export async function getIngestionJob(
+  id: string,
+  signal?: AbortSignal,
+  options: JobWaitOptions = {},
+) {
+  const query = new URLSearchParams()
+  if (options.wait !== undefined) {
+    if (!Number.isInteger(options.wait) || options.wait < 1 || options.wait > 30) {
+      throw new RangeError('wait must be a whole number of seconds from 1 to 30.')
+    }
+    query.set('wait', String(options.wait))
+  }
+  if (options.resume !== undefined) {
+    if (!/^[A-Za-z0-9_.-]{1,512}$/.test(options.resume)) {
+      throw new RangeError('resume must be a resume token of 1 to 512 characters.')
+    }
+    query.set('resume', options.resume)
+  }
+  const suffix = query.size > 0 ? `?${query.toString()}` : ''
+  return requestJson<JobDetail>(`/api/ingestions/jobs/${encodeURIComponent(id)}${suffix}`, { signal })
 }
 
 export function getIngestionJobErrors(

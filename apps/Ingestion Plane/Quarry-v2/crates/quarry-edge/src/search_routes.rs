@@ -34,6 +34,7 @@ use quarry_runtime::vector_index::{VectorHit, VectorOutcome, VectorQuery};
 
 use quarry_core::zdr::ZdrMode;
 use quarry_runtime::answer::FetchFailure;
+use quarry_transform::structured::StructuredData;
 use quarry_runtime::job_pricing::{
     estimate_job_price, BulkJobKind, JobPrice, JobPriceInput, JobRates,
 };
@@ -900,6 +901,10 @@ async fn search_run(
     // wrote, so it is a miss: the caller asked for an answer and gets a fresh attempt.
     let from_cache = from_cache.filter(|c| usable_hit(c, req.include_answer));
 
+    // E3.7.7b: the scrape block's run, when the include_answer step needed the hydrated pages
+    // before the block's own turn below. The block then runs once and the report reads this run.
+    let mut early_scrape: Option<ScrapeRun> = None;
+
     let (results, answer, citations, provider_name, rerank, cache_hit, answer_outcome) = match from_cache {
         Some(c) => {
             let outcome = if req.include_answer {
@@ -929,6 +934,12 @@ async fn search_run(
                 // include_answer — best-effort synthesis; never fail search on it. INNH-8a: the
                 // outcome is named in the response, and ZDR is checked first: under ZDR no page
                 // text goes to a model (the model hop has no ZDR posture, ADR-4).
+                //
+                // E3.7.7b: with a scrape block on the request, the answer reads the pages the block
+                // hydrates instead of fetching them again. `capped_pages` is set when one of those
+                // pages was cut at the per-result cap: such an answer depends on the caller's cap,
+                // which the cache key does not carry, so it is not cached.
+                let mut capped_pages = false;
                 let (answer, citations, answer_outcome) = if !req.include_answer {
                     (None, None, AnswerOutcome::not_asked())
                 } else if zdr {
@@ -937,6 +948,25 @@ async fn search_run(
                     match answer_status::gate(&state) {
                         Err(reason) => (None, None, AnswerOutcome::unavailable(reason)),
                         Ok(p) => {
+                            // The block hydrates the results as the response will list them
+                            // (host-diversified), so the later report and this run are one run.
+                            // No scrape block (or the block disabled) is an empty map: the answer
+                            // fetches every page itself, exactly as before.
+                            let prefetched = match scrape_caps {
+                                Some(caps) => {
+                                    let (listed, _demoted) = diversify_results(results.clone());
+                                    let run =
+                                        run_scrape_block(&state, &decision, zdr, &listed, caps)
+                                            .await;
+                                    let pages = run.prefetched_pages();
+                                    capped_pages = pages
+                                        .values()
+                                        .any(|page| page.outcome.is_ok() && !page.complete);
+                                    early_scrape = Some(run);
+                                    pages
+                                }
+                                None => quarry_runtime::answer::PrefetchedPages::new(),
+                            };
                             let areq = AnswerRequest {
                                 query: req.query.clone(),
                                 top_k: Some(ANSWER_TOP_K),
@@ -948,8 +978,15 @@ async fn search_run(
                             // D2-055: the answer's page fetches pass the same web-policy gate
                             // as `/v1/answer`; a denied result URL is never fetched.
                             let gate = crate::answer_routes::gate_for(decision.clone());
-                            match p.answer_gated(areq, Some(&gate)).await {
+                            match p.answer_with_pages(areq, Some(&gate), &prefetched).await {
                                 Ok(ar) => {
+                                    // Counts only: which pages the answer read from the scrape
+                                    // block and which it fetched itself.
+                                    tracing::info!(
+                                        pages_reused = ar.pages_reused,
+                                        pages_fetched = ar.pages_fetched,
+                                        "search.answer.pages"
+                                    );
                                     let outcome = AnswerOutcome::from_result(&ar);
                                     (Some(ar.answer), Some(ar.citations), outcome)
                                 }
@@ -973,6 +1010,7 @@ async fn search_run(
                 // turning the pipeline on is seen by the very next query and not after the TTL.
                 if cacheable_search(zdr, &rerank)
                     && cacheable(zdr, req.include_answer, answer.as_deref())
+                    && !capped_pages
                 {
                     if let Some(c) = &scache {
                         let ttl = crate::cache::search_ttl_secs(
@@ -1117,14 +1155,14 @@ async fn search_run(
         (None, _) => None,
         (Some(_), None) => Some(SearchScrapeReport::disabled()),
         (Some(_), Some(caps)) => {
-            let gate = crate::answer_routes::gate_for(decision.clone());
-            let engine =
-                crate::web_policy_edge::security_engine(&state.security, &state.policy, &decision);
-            let fetcher = SimpleHttpMarkdownFetcher::new().with_max_bytes(SCRAPE_MAX_BYTES);
-            let zdr_mode = if zdr { ZdrMode::On } else { ZdrMode::Off };
-            let items =
-                hydrate_results(&fetcher, engine.as_ref(), &gate, &results, caps, zdr_mode).await;
-            let report = SearchScrapeReport::from_items(items);
+            // E3.7.7b: the include_answer step may already have run the block over these same
+            // results (host-diversified, in the same order); then its run is the report, and no
+            // page is fetched a second time.
+            let run = match early_scrape.take() {
+                Some(run) => run,
+                None => run_scrape_block(&state, &decision, zdr, &results, caps).await,
+            };
+            let report = run.into_report();
             // Counts and closed codes only: no URL, no page text.
             tracing::info!(
                 requested = report.requested,
@@ -1214,6 +1252,10 @@ async fn search_run(
                     "sources_skipped": synth.sources_skipped,
                     "model": synth.model,
                     "latency_ms": synth.latency_ms,
+                    // E3.7.7b: pages_reused were fetched by the scrape block and are metered
+                    // there (search.scrape); this event does not count them again.
+                    "pages_fetched": synth.pages_fetched,
+                    "pages_reused": synth.pages_reused,
                     "via": "search.include_answer",
                 }),
             ))
@@ -1323,6 +1365,10 @@ struct SynthUsage {
     sources_skipped: usize,
     model: String,
     latency_ms: u64,
+    /// Pages the answer step fetched itself. Pages it read from the scrape block are in
+    /// `pages_reused`: their fetch is metered once, by the scrape metering, not here.
+    pages_fetched: usize,
+    pages_reused: usize,
 }
 
 impl AnswerOutcome {
@@ -1351,6 +1397,8 @@ impl AnswerOutcome {
                 sources_skipped: result.sources_skipped,
                 model: result.model.clone(),
                 latency_ms: result.latency_ms,
+                pages_fetched: result.pages_fetched,
+                pages_reused: result.pages_reused,
             }),
         }
     }
@@ -2320,6 +2368,7 @@ pub(crate) fn truncate_chars(text: &str, max_chars: usize) -> (String, usize, bo
 /// Hydrate the first `caps.limit` results concurrently under one deadline. The output keeps
 /// the order of `results`; every entry has an outcome, so a caller can always tell a refused
 /// or failed page from one that was never asked for.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn hydrate_results(
     fetcher: &dyn MarkdownFetcher,
     security: &dyn quarry_security::SecurityEngine,
@@ -2328,13 +2377,31 @@ pub(crate) async fn hydrate_results(
     caps: ScrapeCaps,
     zdr: ZdrMode,
 ) -> Vec<HydratedResult> {
+    hydrate_extractions(fetcher, security, gate, results, caps, zdr)
+        .await
+        .into_iter()
+        .map(|(item, _structured)| item)
+        .collect()
+}
+
+/// [`hydrate_results`], keeping the structured harvest of each page beside its report entry.
+/// The harvest is for the include_answer step that reuses these pages (E3.7.7b): the answer reads
+/// the same facts a fetch of its own would have given it. It never reaches the response.
+pub(crate) async fn hydrate_extractions(
+    fetcher: &dyn MarkdownFetcher,
+    security: &dyn quarry_security::SecurityEngine,
+    gate: &quarry_runtime::answer::UrlGate,
+    results: &[SearchResult],
+    caps: ScrapeCaps,
+    zdr: ZdrMode,
+) -> Vec<(HydratedResult, Option<StructuredData>)> {
     let deadline = tokio::time::Instant::now() + caps.timeout;
     let jobs = results
         .iter()
         .take(caps.limit)
         .enumerate()
         .map(|(i, result)| async move {
-            let outcome = hydrate_one(
+            let (outcome, structured) = hydrate_one(
                 fetcher,
                 security,
                 gate,
@@ -2344,11 +2411,14 @@ pub(crate) async fn hydrate_results(
                 deadline,
             )
             .await;
-            HydratedResult {
-                url: result.url.clone(),
-                position: i + 1,
-                outcome,
-            }
+            (
+                HydratedResult {
+                    url: result.url.clone(),
+                    position: i + 1,
+                    outcome,
+                },
+                structured,
+            )
         });
     futures::future::join_all(jobs).await
 }
@@ -2361,36 +2431,131 @@ async fn hydrate_one(
     max_chars: usize,
     zdr: ZdrMode,
     deadline: tokio::time::Instant,
-) -> HydrationOutcome {
+) -> (HydrationOutcome, Option<StructuredData>) {
     // The web policy first: a denied URL is never parsed further, preflighted or fetched.
     if !gate(url) {
-        return HydrationOutcome::failed(HydrationFailure::PolicyDenied);
+        return (HydrationOutcome::failed(HydrationFailure::PolicyDenied), None);
     }
     let parsed = match url::Url::parse(url) {
         Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => parsed,
-        _ => return HydrationOutcome::failed(HydrationFailure::InvalidUrl),
+        _ => return (HydrationOutcome::failed(HydrationFailure::InvalidUrl), None),
     };
     let run = async {
         if security.preflight(&parsed).await.decision != quarry_security::Decision::Allow {
             return Err(HydrationOutcome::failed(HydrationFailure::Blocked));
         }
-        fetcher.fetch_source(url, zdr).await.map_err(|failure| {
+        fetcher.fetch_extraction(url, zdr).await.map_err(|failure| {
             let (code, http_status) = HydrationFailure::from_fetch(&failure);
             HydrationOutcome::Failed { code, http_status }
         })
     };
     match tokio::time::timeout_at(deadline, run).await {
-        Err(_elapsed) => HydrationOutcome::failed(HydrationFailure::DeadlineExceeded),
-        Ok(Err(outcome)) => outcome,
-        Ok(Ok(markdown)) => {
-            let (markdown, chars, truncated) = truncate_chars(&markdown, max_chars);
-            HydrationOutcome::Ok {
-                markdown,
-                chars,
-                truncated,
-            }
+        Err(_elapsed) => (HydrationOutcome::failed(HydrationFailure::DeadlineExceeded), None),
+        Ok(Err(outcome)) => (outcome, None),
+        Ok(Ok(extraction)) => {
+            let (markdown, chars, truncated) = truncate_chars(&extraction.markdown, max_chars);
+            (
+                HydrationOutcome::Ok {
+                    markdown,
+                    chars,
+                    truncated,
+                },
+                extraction.structured,
+            )
         }
     }
+}
+
+/// The hydrated pages of one search request, as the scrape block returned them, with the time the
+/// block started. In memory for the request only: never cached and never stored.
+pub(crate) struct ScrapeRun {
+    items: Vec<(HydratedResult, Option<StructuredData>)>,
+    fetched_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl ScrapeRun {
+    /// The report entries, in result order.
+    fn into_report(self) -> SearchScrapeReport {
+        SearchScrapeReport::from_items(self.items.into_iter().map(|(item, _)| item).collect())
+    }
+
+    /// The pages the include_answer step may read instead of fetching again (E3.7.7b), keyed by
+    /// result URL.
+    ///
+    /// - A hydrated page is reused. It is `complete` only when it was not cut at the per-result
+    ///   cap, so a capped page feeds the answer but never enters the local corpus.
+    /// - A URL the web policy or the security preflight refused is reused as a refusal
+    ///   ([`FetchFailure::PolicyDenied`]), so the answer never fetches what the preflight blocked.
+    /// - A fetch that failed is reused as that failure, so the same failing page is not fetched twice.
+    /// - A page whose hydration ran out of time is left out: the answer fetches it as it always did.
+    fn prefetched_pages(&self) -> quarry_runtime::answer::PrefetchedPages {
+        use quarry_runtime::answer::{PrefetchedPage, SourceExtraction};
+        let mut pages = quarry_runtime::answer::PrefetchedPages::new();
+        for (item, structured) in &self.items {
+            let (outcome, complete) = match &item.outcome {
+                HydrationOutcome::Ok {
+                    markdown,
+                    truncated,
+                    ..
+                } => (
+                    Ok(SourceExtraction {
+                        markdown: markdown.clone(),
+                        structured: structured.clone(),
+                    }),
+                    !*truncated,
+                ),
+                HydrationOutcome::Failed { code, http_status } => {
+                    let failure = match code {
+                        HydrationFailure::PolicyDenied
+                        | HydrationFailure::Blocked
+                        | HydrationFailure::InvalidUrl => FetchFailure::PolicyDenied,
+                        HydrationFailure::DeadlineExceeded => continue,
+                        HydrationFailure::HttpStatus => match http_status {
+                            Some(status) => FetchFailure::HttpStatus(*status),
+                            None => continue,
+                        },
+                        HydrationFailure::TooLarge => FetchFailure::TooLarge,
+                        HydrationFailure::Decode => FetchFailure::Decode,
+                        HydrationFailure::Extract => FetchFailure::Extract,
+                        HydrationFailure::Timeout => FetchFailure::Timeout,
+                        HydrationFailure::Transport => FetchFailure::Transport,
+                        HydrationFailure::Empty => FetchFailure::Empty,
+                        HydrationFailure::TooShort => FetchFailure::TooShort,
+                    };
+                    (Err(failure), false)
+                }
+            };
+            pages.insert(
+                item.url.clone(),
+                PrefetchedPage {
+                    outcome,
+                    complete,
+                    fetched_at: self.fetched_at,
+                },
+            );
+        }
+        pages
+    }
+}
+
+/// Run the scrape block over `results`: the first `caps.limit` results, each through the web
+/// policy and the security preflight before its fetch. Called once per request; the include_answer
+/// step and the response's `scrape` report both read this one run.
+async fn run_scrape_block(
+    state: &AppState,
+    decision: &crate::policy_baseline::Decision,
+    zdr: bool,
+    results: &[SearchResult],
+    caps: ScrapeCaps,
+) -> ScrapeRun {
+    let gate = crate::answer_routes::gate_for(decision.clone());
+    let engine = crate::web_policy_edge::security_engine(&state.security, &state.policy, decision);
+    let fetcher = SimpleHttpMarkdownFetcher::new().with_max_bytes(SCRAPE_MAX_BYTES);
+    let zdr_mode = if zdr { ZdrMode::On } else { ZdrMode::Off };
+    let fetched_at = chrono::Utc::now();
+    let items =
+        hydrate_extractions(&fetcher, engine.as_ref(), &gate, results, caps, zdr_mode).await;
+    ScrapeRun { items, fetched_at }
 }
 
 /// QB-T17: the suggestion route's Model Plane switch.

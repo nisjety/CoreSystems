@@ -26,6 +26,7 @@ package resources
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"strconv"
@@ -79,6 +80,10 @@ type sourceCreateBody struct {
 	Name string `json:"name"`
 	URL  string `json:"url"`
 	Kind string `json:"kind"` // crawl | scrape | search
+	// Tag is the operator label that groups this source (E3.5-6, migration 027). ""
+	// is untagged. A repeat registration keeps the tag the row already has: the
+	// upsert writes it on insert only, so PATCH /v1/sources/{id} changes it.
+	Tag string `json:"tag,omitempty"`
 	// Monitor, when true, also registers a recurring change_monitor schedule
 	// (preset-driven) so the orchestrator reconcile materializes a Temporal
 	// schedule for this source. Sources without it are durable records only.
@@ -99,14 +104,17 @@ var validSourceKinds = map[string]bool{"crawl": true, "scrape": true, "search": 
 // is the verified `?org_id` the edge stamps from the JWT, never a body field,
 // so there is no cross-tenant IDOR vector.
 //
-//   - GET    /v1/sources      — list the org's live sources (Page<Source>).
+//   - GET    /v1/sources      — list the org's live sources (Page<Source>);
+//     ?tag= lists only the sources with that tag (E3.5-6).
 //   - POST   /v1/sources      — create a source (mints src_<ulid>); optionally
 //     registers a change_monitor schedule so the orchestrator drives recurring
-//     refresh through Temporal.
+//     refresh through Temporal. Accepts an optional tag (E3.5-6).
+//   - PATCH  /v1/sources/{id} — set the tag; "" clears it (E3.5-6).
 //   - DELETE /v1/sources/{id} — soft-delete (sets deleted_at), org-scoped.
 func MountSources(r chi.Router, db store.DB) {
 	r.Get("/v1/sources", listSourcesHandler(db))
 	r.Post("/v1/sources", createSourceHandler(db))
+	r.Patch("/v1/sources/{id}", patchSourceHandler(db))
 	r.Delete("/v1/sources/{id}", deleteSourceHandler(db))
 }
 
@@ -114,6 +122,68 @@ func MountSources(r chi.Router, db store.DB) {
 // rejected by callers — an unscoped sources query must never succeed.
 func orgFromQuery(r *http.Request) string {
 	return strings.TrimSpace(r.URL.Query().Get("org_id"))
+}
+
+// maxTagPatchBody bounds a PATCH body that carries a tag. A tag is at most 32
+// characters, so a body over 4 KiB is refused as unreadable rather than decoded.
+const maxTagPatchBody = 4 << 10
+
+// tagPatchBody is the body of PATCH /v1/schedules/{id} and PATCH /v1/sources/{id}.
+// Tag is a pointer so an absent key (refused: a PATCH that names no tag must not
+// clear one) stays apart from "" (clears the tag).
+type tagPatchBody struct {
+	Tag *string `json:"tag"`
+}
+
+// tagFilter reads the ?tag= list filter. An absent or blank value is no filter
+// (filtered is false). Any other value is normalised the way a write is, so
+// "Pricing" finds "pricing". A value that does not normalise returns the store's
+// ValidationError, which the caller answers as a 400: a typo must not list as an
+// empty tag.
+func tagFilter(r *http.Request) (tag string, filtered bool, err error) {
+	raw := r.URL.Query().Get("tag")
+	if strings.TrimSpace(raw) == "" {
+		return "", false, nil
+	}
+	tag, err = store.NormalizeTag(raw)
+	if err != nil {
+		return "", false, err
+	}
+	return tag, true, nil
+}
+
+// readTagPatch decodes a tag PATCH body and returns the stored form of its tag.
+// It writes the 400 and reports false when the body is unreadable, names no tag,
+// or its tag does not normalise.
+func readTagPatch(w http.ResponseWriter, r *http.Request) (string, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxTagPatchBody)
+	var body tagPatchBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "decode body: "+err.Error(), nil)
+		return "", false
+	}
+	if body.Tag == nil {
+		httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, `tag is required; send "" to clear it`,
+			map[string]any{"field": "tag", "reason": "tag_required"})
+		return "", false
+	}
+	tag, err := store.NormalizeTag(*body.Tag)
+	if err != nil {
+		writeTagBadRequest(w, r, err)
+		return "", false
+	}
+	return tag, true
+}
+
+// writeTagBadRequest answers a tag the grammar refuses: a 400 that names the field
+// and the stable reason (invalid_tag). The message never echoes the input.
+func writeTagBadRequest(w http.ResponseWriter, r *http.Request, err error) {
+	reason := "invalid_tag"
+	var ve *store.ValidationError
+	if errors.As(err, &ve) && ve.Reason != "" {
+		reason = ve.Reason
+	}
+	httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), map[string]any{"field": "tag", "reason": reason})
 }
 
 func listSourcesHandler(db store.DB) http.HandlerFunc {
@@ -127,7 +197,18 @@ func listSourcesHandler(db store.DB) http.HandlerFunc {
 		if limit <= 0 {
 			limit = 50
 		}
-		items, next := db.Sources().ListByOrg(org, limit, r.URL.Query().Get("cursor"))
+		tag, filtered, err := tagFilter(r)
+		if err != nil {
+			writeTagBadRequest(w, r, err)
+			return
+		}
+		var items []store.Source
+		var next string
+		if filtered {
+			items, next = db.Sources().ListByOrgTag(org, tag, limit, r.URL.Query().Get("cursor"))
+		} else {
+			items, next = db.Sources().ListByOrg(org, limit, r.URL.Query().Get("cursor"))
+		}
 		if items == nil {
 			items = []store.Source{}
 		}
@@ -162,6 +243,13 @@ func createSourceHandler(db store.DB) http.HandlerFunc {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "kind must be one of crawl|scrape|search", nil)
 			return
 		}
+		// The store refuses a bad tag too, but its conflict answer would hide the reason:
+		// refuse it here as a 400 that names the field (E3.5-6).
+		tag, err := store.NormalizeTag(body.Tag)
+		if err != nil {
+			writeTagBadRequest(w, r, err)
+			return
+		}
 		now := time.Now().UnixMilli()
 		src := store.Source{
 			ID:        quarrycontracts.NewID(quarrycontracts.KindSource),
@@ -171,6 +259,7 @@ func createSourceHandler(db store.DB) http.HandlerFunc {
 			Kind:      body.Kind,
 			Status:    "active",
 			Config:    body.Config,
+			Tag:       tag,
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
@@ -227,6 +316,41 @@ func createSourceHandler(db store.DB) http.HandlerFunc {
 			status = http.StatusOK
 		}
 		httpx.WriteJSON(w, r, status, result)
+	}
+}
+
+// patchSourceHandler answers PATCH /v1/sources/{id} for the caller's org (E3.5-6). The
+// body's tag replaces the source's tag ("" clears it) and bumps updated_at; the answer is
+// the updated source. A cross-tenant or soft-deleted id is a 404, as a missing one is.
+func patchSourceHandler(db store.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		org, ok := orgOr400(w, r)
+		if !ok {
+			return
+		}
+		id := quarrycontracts.ID(chi.URLParam(r, "id"))
+		if err := id.MustKind(quarrycontracts.KindSource); err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
+			return
+		}
+		tag, ok := readTagPatch(w, r)
+		if !ok {
+			return
+		}
+		if err := db.Sources().UpdateTagByOrg(org, id, tag); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+				return
+			}
+			httpx.WriteErr(w, r, quarrycontracts.CodeInternal, err.Error(), nil)
+			return
+		}
+		src, ok := db.Sources().GetByOrg(org, id)
+		if !ok {
+			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+			return
+		}
+		httpx.WriteJSON(w, r, http.StatusOK, src)
 	}
 }
 

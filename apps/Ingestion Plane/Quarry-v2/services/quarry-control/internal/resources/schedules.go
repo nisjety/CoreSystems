@@ -25,12 +25,14 @@ const EnvSchedulesRequireOrg = "QUARRY_CONTROL_SCHEDULES_REQUIRE_ORG"
 // org_id from the edge-verified query and answers 404 for a row that belongs to
 // another org, exactly as it answers for a missing row. The pause, unpause,
 // trigger and backfill aliases are mounted by MountScheduleAliases (cycle23.go).
+// The monitor tag (E3.5-6) rides create, PATCH /{id} and the ?tag= list filter.
 func MountSchedules(r chi.Router, db store.DB) {
 	s := db.Schedules()
 	r.Route("/v1/schedules", func(r chi.Router) {
 		r.Get("/", listSchedulesHandler(s))
 		r.Post("/", createScheduleHandler(s))
 		r.Get("/{id}", getScheduleHandler(s))
+		r.Patch("/{id}", patchScheduleHandler(s))
 		r.Delete("/{id}", deleteScheduleHandler(s))
 	})
 	r.Post("/v1/schedules/{id}/enable", scheduleSetEnabled(s, true))
@@ -55,7 +57,18 @@ func listSchedulesHandler(s store.SchedulesStore) http.HandlerFunc {
 			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "org_id required", nil)
 			return
 		}
-		items, next := s.ListByOrg(org, limit, cursor)
+		tag, filtered, err := tagFilter(r)
+		if err != nil {
+			writeTagBadRequest(w, r, err)
+			return
+		}
+		var items []store.Schedule
+		var next string
+		if filtered {
+			items, next = s.ListByOrgTag(org, tag, limit, cursor)
+		} else {
+			items, next = s.ListByOrg(org, limit, cursor)
+		}
 		out := make([]scheduleView, 0, len(items))
 		for _, it := range items {
 			out = append(out, toScheduleView(it))
@@ -94,6 +107,38 @@ func getScheduleHandler(s store.SchedulesStore) http.HandlerFunc {
 			return
 		}
 		id := quarrycontracts.ID(chi.URLParam(r, "id"))
+		v, ok := s.GetByOrg(id, org)
+		if !ok {
+			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+			return
+		}
+		httpx.WriteJSON(w, r, http.StatusOK, toScheduleView(v))
+	}
+}
+
+// patchScheduleHandler answers PATCH /v1/schedules/{id} for the caller's org (E3.5-6). The
+// body's tag replaces the schedule's tag ("" clears it); the answer is the updated view. The
+// row's updated_at is not moved (it stays the create or enable/disable stamp). A row of
+// another org is a 404, as a missing one is.
+func patchScheduleHandler(s store.SchedulesStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		org, ok := orgOr400(w, r)
+		if !ok {
+			return
+		}
+		id := quarrycontracts.ID(chi.URLParam(r, "id"))
+		tag, ok := readTagPatch(w, r)
+		if !ok {
+			return
+		}
+		if err := s.UpdateTagByOrg(id, org, tag); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+				return
+			}
+			httpx.WriteErr(w, r, quarrycontracts.CodeInternal, err.Error(), nil)
+			return
+		}
 		v, ok := s.GetByOrg(id, org)
 		if !ok {
 			httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
@@ -149,6 +194,14 @@ func createScheduleHandler(s store.SchedulesStore) http.HandlerFunc {
 		}
 		v.OrgID = org
 		v.Enabled = v.Activate
+		// The optional monitor tag (E3.5-6) is normalised before the definition is
+		// validated, so a bad tag is a 400 naming the field, not a store conflict.
+		tag, err := store.NormalizeTag(v.Tag)
+		if err != nil {
+			writeTagBadRequest(w, r, err)
+			return
+		}
+		v.Tag = tag
 		if err := v.Validate(); err != nil {
 			writeScheduleValidation(w, r, err)
 			return

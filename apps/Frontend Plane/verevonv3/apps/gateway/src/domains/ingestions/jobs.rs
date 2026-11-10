@@ -16,6 +16,7 @@ use axum::{
 use reqwest::Method;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::{
     config::AppState,
@@ -25,8 +26,8 @@ use crate::{
 };
 
 use super::shared::{
-    array_at, cookie_header, first_str, forward, obj_or_empty, okay, quarry_call, quarry_token,
-    str_at, str_or_null, validation,
+    array_at, bad_request, cookie_header, first_str, forward, obj_or_empty, okay, quarry_call,
+    quarry_call_with_timeout, quarry_token, str_at, str_or_null, validation,
 };
 
 /// The job kinds Quarry exposes pause/resume/cancel for. Scrape, search, extract
@@ -35,28 +36,60 @@ const CONTROLLABLE_KINDS: [&str; 2] = ["crawl", "batch"];
 const CONTROL_ACTIONS: [&str; 3] = ["pause", "resume", "cancel"];
 /// The most text `GET /api/ingestions/artifacts/{id}` returns; a longer artifact is cut.
 const MAX_TEXT_ARTIFACT_BYTES: usize = 1024 * 1024;
+/// The longest `wait` a job read forwards, in whole seconds. The edge caps its own wait lower.
+const MAX_JOB_WAIT_S: u64 = 30;
+/// The seconds a job read may run past its `wait`, so the edge's answer (a status or its 408)
+/// arrives before the gateway gives up on the upstream.
+const JOB_WAIT_MARGIN_S: u64 = 5;
+/// The longest `resume` token a job read forwards. The edge's token for a large crawl runs to
+/// about 260 characters, so the cap sits above that.
+const MAX_RESUME_TOKEN_LEN: usize = 512;
 
-/// `GET /api/ingestions/jobs/{id}` — the status of one durable job.
+/// `GET /api/ingestions/jobs/{id}` — the status of one durable job. `?wait=N` (whole seconds,
+/// 1 to 30) holds the read until the job ends or N seconds pass. A wait that runs out is the
+/// edge's 408 `processing_continues` envelope, passed on unchanged; its
+/// `error.details.resume_token` goes back as `?resume=` to keep waiting. Quarry honours both
+/// keys only while `QUARRY_EDGE__JOB_CONTROL` is on.
 pub(super) async fn get_job(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let Some(job_id) = valid_job_id(&id) else {
         return validation("A job id is required.");
     };
+    let (path, wait) = match job_status_path(&job_id, &params) {
+        Ok(read) => read,
+        Err(refusal) => return refusal,
+    };
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
-    let (status, body) = quarry_call(
-        &state,
-        Method::GET,
-        &format!("/v1/jobs/{job_id}"),
-        None,
-        token.as_deref(),
-        user.user_id.as_str(),
-    )
-    .await;
+    let (status, body) = match wait {
+        Some(seconds) => {
+            quarry_call_with_timeout(
+                &state,
+                Method::GET,
+                &path,
+                token.as_deref(),
+                user.user_id.as_str(),
+                Duration::from_secs(seconds + JOB_WAIT_MARGIN_S),
+            )
+            .await
+        }
+        None => {
+            quarry_call(
+                &state,
+                Method::GET,
+                &path,
+                None,
+                token.as_deref(),
+                user.user_id.as_str(),
+            )
+            .await
+        }
+    };
     if !status.is_success() {
         return forward(status, body);
     }
@@ -390,6 +423,61 @@ pub(crate) async fn control_job(
         StatusCode::OK
     };
     (code, Json(crate::envelope::ok(accepted))).into_response()
+}
+
+/// The Quarry path of a job status read, and its `wait` in seconds (`None` for a plain read).
+/// Only `wait` and `resume` are forwarded, each once it passes its limit; every other key is
+/// dropped. A `wait` outside 1 to 30, or a malformed `resume`, is a 400. A `resume` without a
+/// `wait` is forwarded as sent, and Quarry answers it.
+fn job_status_path(
+    job_id: &str,
+    params: &HashMap<String, String>,
+) -> Result<(String, Option<u64>), Response> {
+    let wait = match params.get("wait") {
+        Some(raw) => Some(job_wait_seconds(raw)?),
+        None => None,
+    };
+    let mut query: Vec<String> = Vec::new();
+    if let Some(seconds) = wait {
+        query.push(format!("wait={seconds}"));
+    }
+    if let Some(token) = params.get("resume") {
+        if !is_resume_token(token) {
+            return Err(bad_request(
+                "invalid_resume",
+                "resume must be the resume_token of an earlier 408.",
+            ));
+        }
+        query.push(format!("resume={}", urlencoding::encode(token)));
+    }
+    let path = if query.is_empty() {
+        format!("/v1/jobs/{job_id}")
+    } else {
+        format!("/v1/jobs/{job_id}?{}", query.join("&"))
+    };
+    Ok((path, wait))
+}
+
+/// A `wait` in whole seconds, from 1 to 30. Anything else, including a non-number, is a 400.
+fn job_wait_seconds(raw: &str) -> Result<u64, Response> {
+    raw.parse::<u64>()
+        .ok()
+        .filter(|seconds| (1..=MAX_JOB_WAIT_S).contains(seconds))
+        .ok_or_else(|| {
+            bad_request(
+                "invalid_wait",
+                "wait must be a whole number of seconds from 1 to 30.",
+            )
+        })
+}
+
+/// A `resume` token the gateway forwards: 1 to 512 characters of ASCII letters, digits, `_`,
+/// `-` and `.`. The token is opaque to the gateway, so nothing else about it is read.
+fn is_resume_token(raw: &str) -> bool {
+    (1..=MAX_RESUME_TOKEN_LEN).contains(&raw.len())
+        && raw
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
 }
 
 /// The Quarry path of a results read. `limit` is clamped to 1..=500 (default 100);

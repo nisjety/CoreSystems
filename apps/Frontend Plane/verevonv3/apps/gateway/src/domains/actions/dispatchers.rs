@@ -6128,6 +6128,78 @@ pub(super) async fn dispatch_browser_blocked_try_other_source(
     owner_json_response_to_envelope(ACTION, user, status, payload)
 }
 
+/// The input keys `browser_download.send_to_knowledge` accepts. `runId` is the same Quarry run
+/// as `sessionId` (a browser session is the run that holds it); `actor` is only checked, never used.
+const BROWSER_DOWNLOAD_KEYS: [&str; 4] = ["sessionId", "runId", "artifactId", "actor"];
+
+/// `browser_download.send_to_knowledge` (Q3-E3.4-7b): the person sends one file their browser
+/// session downloaded to the knowledge base. The session is owner-checked against Quarry's own
+/// projection (the id the client names is never trusted alone), the file is handed to Data Plane
+/// by Quarry under the org of the verified token, and the file itself never passes through here.
+///
+/// Human-only, like the other `browser_*` arms that move content: a body that states any actor
+/// but the person is refused. Refused under zero data retention with a 403 that names the feature,
+/// before anything goes upstream. 404 while `BROWSER_DOWNLOADS` is off. The upstream body is never
+/// relayed: Quarry's typed refusals are re-keyed by `domains::browser_downloads`.
+pub(super) async fn dispatch_browser_download_send_to_knowledge(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+    idempotency_key: &str,
+) -> Response {
+    const ACTION: &str = "browser_download.send_to_knowledge";
+    if !state.browser_downloads {
+        return crate::domains::browser_downloads::unavailable_response();
+    }
+    if let Some(actor) = input.get("actor") {
+        if actor.as_str() != Some("human") {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(error(
+                    "browser_download_human_only",
+                    "Only the person can send a browser download to the knowledge base.",
+                )),
+            )
+                .into_response();
+        }
+    }
+    let Some(fields) = input.as_object() else {
+        return ticket_bad_request("browser_download.send_to_knowledge requires an object input");
+    };
+    if fields
+        .keys()
+        .any(|key| !BROWSER_DOWNLOAD_KEYS.contains(&key.as_str()))
+    {
+        return ticket_bad_request(
+            "browser_download.send_to_knowledge accepts only sessionId, runId and artifactId",
+        );
+    }
+    let session_id = ticket_string(input, "sessionId");
+    let run_id = ticket_string(input, "runId");
+    let artifact_id = ticket_string(input, "artifactId");
+    if (!session_id.is_empty() && !run_id.is_empty() && session_id != run_id)
+        || (session_id.is_empty() && run_id.is_empty())
+        || artifact_id.is_empty()
+    {
+        return ticket_bad_request(
+            "browser_download.send_to_knowledge requires 'artifactId' and one of 'sessionId' or 'runId'",
+        );
+    }
+    let session_id = if session_id.is_empty() { run_id } else { session_id };
+    let response = crate::domains::browser_downloads::send_to_knowledge(
+        state,
+        user,
+        headers,
+        session_id,
+        artifact_id,
+        idempotency_key,
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope(ACTION, user, status, payload)
+}
+
 fn parse_browser_profile_scope(value: &str) -> Option<BrowserProfileScope> {
     serde_json::from_value(Value::String(value.to_owned())).ok()
 }

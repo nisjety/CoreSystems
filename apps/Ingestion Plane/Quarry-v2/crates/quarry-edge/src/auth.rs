@@ -47,7 +47,12 @@
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use axum::{extract::Request, http::StatusCode, middleware::Next, response::Response};
+use axum::{
+    extract::Request,
+    http::{Method, StatusCode},
+    middleware::Next,
+    response::Response,
+};
 use jsonwebtoken::{decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -799,6 +804,50 @@ pub fn require_scope(
     }
 }
 
+/// Scope a service principal needs for a durable job route (E3.7.10), or `None` when the
+/// method and path name no such route (the caller then fails closed).
+///
+/// - `POST /v1/crawl`, `POST /v1/batch`: `crawl:write` (create a job).
+/// - `GET /v1/{crawl,batch,jobs}/:id` and its `/errors`, `/results` and `/events`, and
+///   `GET /v1/{crawl,batch}/ongoing` (which, as a path, is one more `:id`): `jobs:read`.
+/// - `DELETE /v1/{crawl,batch}/:id` and `POST /v1/{crawl,batch}/:id/pause|resume`:
+///   `jobs:control`.
+///
+/// Anything else, an empty segment, a deeper path, another method or another family is
+/// `None`. Only the scope is decided here. The caller's org is the verified token's: the
+/// handlers read every job through it, and control answers a foreign id with 404. A
+/// durable job is still refused under ZDR (`routes::refuse_durable_job_under_zdr`) and
+/// never carries the robots override for a service principal (`crawl_request::robots_override`).
+fn job_route_scope(method: &Method, path: &str) -> Option<&'static str> {
+    let rest = path.strip_prefix("/v1/")?;
+    let mut parts = rest.split('/');
+    let family = parts.next()?;
+    let first = parts.next();
+    let second = parts.next();
+    if parts.next().is_some() {
+        return None;
+    }
+    if !matches!(family, "crawl" | "batch" | "jobs")
+        || first.is_some_and(str::is_empty)
+        || second.is_some_and(str::is_empty)
+    {
+        return None;
+    }
+    let creatable = family != "jobs";
+    match (first, second) {
+        (None, None) if creatable && method == Method::POST => Some("crawl:write"),
+        (Some(_), None) if method == Method::GET => Some("jobs:read"),
+        (Some(_), None) if creatable && method == Method::DELETE => Some("jobs:control"),
+        (Some(_), Some("errors" | "results" | "events")) if method == Method::GET => {
+            Some("jobs:read")
+        }
+        (Some(_), Some("pause" | "resume")) if creatable && method == Method::POST => {
+            Some("jobs:control")
+        }
+        _ => None,
+    }
+}
+
 /// Enforces least privilege for service principals while preserving existing
 /// interactive-user behavior. Unknown service routes fail closed; each Model
 /// Plane integration route declares the only scope(s) it accepts.
@@ -844,7 +893,10 @@ pub async fn require_service_route_scope(req: Request, next: Next) -> Result<Res
                 || claims.has_scope("browser:execute")
         }
         _ if path.starts_with("/v1/agent/") => claims.has_scope("browser:execute"),
-        _ => false,
+        // E3.7.10: the durable job routes. The scope depends on the method as well as the
+        // path, so it is settled in one function; a path or method it does not name stays
+        // closed. Org scoping and the ZDR refusal are the handlers' (see `job_route_scope`).
+        _ => job_route_scope(req.method(), path).is_some_and(|scope| claims.has_scope(scope)),
     };
     if permitted {
         Ok(next.run(req).await)

@@ -629,6 +629,29 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "agent_downloads_list",
+        routes: &["/v1/agent/runs/{run_id}/downloads"],
+        treatment: Treatment::Inert {
+            reason: "reads downloads a ZDR run never admitted; a ZDR caller or run gets an empty list without any receipt or artifact read",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "agent_routes::downloads::list_run_downloads (Q3-E3.4-7a, dark behind QUARRY_EDGE__DOWNLOADS: 403 downloads_disabled when off) lists the run's admitted downloads from the caller's own receipts and the tenant-scoped artifact store. It writes nothing; the answer names the artifact id, type, size and digest, never a URL or a file name. A ZDR run stores no download (the step is refused under ZDR), so there is nothing to list",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "agent_download_handoff",
+        routes: &["/v1/agent/runs/{run_id}/downloads/{artifact_id}/knowledge"],
+        treatment: Treatment::Refused {
+            code: "FORBIDDEN",
+            feature: "download_handoff",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "agent_routes::downloads::send_download_to_knowledge (Q3-E3.4-7a, dark behind QUARRY_EDGE__DOWNLOADS and QUARRY_EDGE__DOWNLOAD_HANDOFF) persists a download's text to Data Plane, a durable write, so a ZDR token floor or a ZDR run is refused with download_handoff_zdr_refused (403) before any receipt or byte is read; the ingest request builder and the transport repeat the guard. The org and user come from the verified claim only",
+        log: Log::Unverified,
+    },
+    Row {
         id: "fleets",
         routes: &[
             "/v1/fleets",

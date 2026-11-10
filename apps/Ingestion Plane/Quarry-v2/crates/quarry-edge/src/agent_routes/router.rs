@@ -27,6 +27,13 @@ pub fn agent_router() -> Router<AppState> {
             get(egress_receipts),
         )
         .route("/v1/agent/runs/:run_id/receipts", get(list_receipts))
+        // Q3-E3.4-7a: a run's admitted downloads, and the hand-off of one to Data Plane. Dark
+        // behind QUARRY_EDGE__DOWNLOADS (both) and QUARRY_EDGE__DOWNLOAD_HANDOFF (the POST).
+        .route("/v1/agent/runs/:run_id/downloads", get(list_run_downloads))
+        .route(
+            "/v1/agent/runs/:run_id/downloads/:artifact_id/knowledge",
+            post(send_download_to_knowledge),
+        )
         .route(
             "/v1/agent/runs/:run_id/procedure",
             post(compile_run_procedure),

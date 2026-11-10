@@ -4,9 +4,10 @@
 //! Every read is org-scoped by the verified token (never by a query parameter):
 //! control answers a foreign id with 404, and this file passes that through.
 //! Kind checks reject a crawl id on the batch path and the reverse, so a status
-//! document always matches its path. A service principal cannot reach these
-//! routes at all: `auth::require_service_route_scope` answers 403 for every path
-//! it does not name, and these paths are not named.
+//! document always matches its path. A service principal reaches these routes only
+//! with the scope `auth::require_service_route_scope` names for them (E3.7.10):
+//! `jobs:read` for the reads, `jobs:control` for cancel, pause and resume; any other
+//! principal-and-path pair is a 403 there.
 
 use std::time::{Duration, Instant};
 
@@ -400,17 +401,23 @@ impl ControlVerb {
 }
 
 /// Who may control a job. One function, so a later rule (the creator only, or a
-/// role) changes one place. Org-wide today. A service principal is refused here as
-/// well as by the route scope in `auth::require_service_route_scope`.
+/// role) changes one place. Org-wide today. A service principal is allowed only with the
+/// `jobs:control` scope (E3.7.10), the same scope `auth::require_service_route_scope`
+/// asks for on these routes; without it the refusal is here as well as there. The job is
+/// read through the token's org (`load_summary`), so the scope never reaches another
+/// organization's job.
 pub fn authorize_control(claims: &Claims) -> Result<(), QuarryError> {
-    if claims.is_service() {
+    if claims.is_service() && !claims.has_scope(SCOPE_JOBS_CONTROL) {
         return Err(QuarryError::new(
             ErrorCode::Forbidden,
-            "service principals cannot control jobs",
+            "service principals cannot control jobs without the jobs:control scope",
         ));
     }
     Ok(())
 }
+
+/// The scope a service principal needs to cancel, pause or resume a job.
+const SCOPE_JOBS_CONTROL: &str = "jobs:control";
 
 /// The answer to a control request: the phase after it and what was asked.
 /// `control.pending` stays true until the orchestrator applies the request.

@@ -561,6 +561,11 @@ fn classed_routes(limiter: &crate::rate_limit::RateLimiter) -> Router<AppState> 
             "/api/v1/browser/sessions/{session_id}/artifacts/{artifact_id}",
             get(get_artifact),
         )
+        // Q3-E3.4-7b: the session's governed downloads; 404 unless BROWSER_DOWNLOADS is on.
+        .route(
+            "/api/v1/browser/sessions/{session_id}/downloads",
+            get(crate::domains::browser_downloads::list_session_downloads),
+        )
         .route(
             "/api/v1/browser/sessions/{session_id}/frame",
             get(get_live_frame),
@@ -583,6 +588,12 @@ fn classed_routes(limiter: &crate::rate_limit::RateLimiter) -> Router<AppState> 
         .route(
             "/api/v1/browser/sessions/{session_id}/view/frames/ws",
             get(proxy_live_frames_view_only_ws),
+        )
+        // W3-E3.4-5b: the SSE twin of the watch-only socket above (owner frames, no client
+        // frames); 404 unless BROWSER_LIVE_VIEW_ONLY is on, 403 for a ZDR run.
+        .route(
+            "/api/v1/browser/sessions/{session_id}/view/frames/stream",
+            get(stream_live_frames_view_only),
         )
         .route(
             "/api/v1/browser/sessions/{session_id}/devtools",
@@ -2904,6 +2915,7 @@ async fn stream_live_frames(
             .get("zdr")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        None,
     )
     .await
 }
@@ -2963,6 +2975,7 @@ async fn stream_agent_events(
             .get("zdr")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        None,
     )
     .await
 }
@@ -3093,8 +3106,94 @@ async fn proxy_live_frames_view_only_ws(
     proxy_live_frames_ws_scoped(state, user, headers, session_id, uri, ws, true).await
 }
 
+/// W3-E3.4-5b: `GET /api/v1/browser/sessions/{session_id}/view/frames/stream`, the owner's
+/// view-only live frames over SSE: the twin of `proxy_live_frames_view_only_ws`. The scope comes
+/// from this route, never from the client: the gateway sends `x-quarry-live-scope: view_only`
+/// upstream (`VIEW_ONLY_LIVE_SCOPE_HEADERS`), and quarry-edge honours it on its frame stream while
+/// `QUARRY_EDGE__LIVE_VIEW_ONLY` is on. With that flag off the edge ignores the scope and the
+/// stream may carry an interactive live-view reference, so turn both flags on together. The share
+/// is owner-only: the owner projection check runs first, as on every live route. A ZDR run, or a
+/// projection that does not say it is not one, is refused with 403 before anything goes upstream.
+/// 404 while `BROWSER_LIVE_VIEW_ONLY` is off. The stream carries no client frames: no input.
+async fn stream_live_frames_view_only(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    uri: Uri,
+) -> Response {
+    if !state.browser_live_view_only {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error(
+                "browser_session_not_found",
+                "The requested browser session view is not available.",
+            )),
+        )
+            .into_response();
+    }
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let projection = match owner_browser_session_projection(
+        &state,
+        &user,
+        token.as_deref(),
+        &session_id,
+    )
+    .await
+    {
+        Ok(projection) => projection,
+        Err(response) => return response,
+    };
+    // Fails closed: only a projection that says `zdr: false` may be shared view-only.
+    if projection.get("zdr").and_then(Value::as_bool) != Some(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "browser_live_view_zdr_unsupported",
+                "A view-only live share is not available for a zero-data-retention run.",
+            )),
+        )
+            .into_response();
+    }
+    let url = format!(
+        "{}/v1/agent/runs/{}/frames/stream{}",
+        state.quarry_edge_url,
+        urlencoding::encode(&session_id),
+        query_suffix(&uri)
+    );
+
+    proxy_sse_stream(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        headers.get("last-event-id").and_then(|v| v.to_str().ok()),
+        None,
+        false,
+        Some(VIEW_ONLY_LIVE_SCOPE_HEADERS),
+    )
+    .await
+}
+
 /// The header Quarry reads for the connection's live scope (quarry-edge `LIVE_SCOPE_HEADER`).
 const QUARRY_LIVE_SCOPE_HEADER: &str = "x-quarry-live-scope";
+
+/// The upstream headers a view-only route sends: the watch-only scope, as the gateway's own
+/// constants. Passed to `proxy_sse_stream` as its extra headers (W3-E3.4-5b).
+const VIEW_ONLY_LIVE_SCOPE_HEADERS: &[(&str, &str)] = &[(QUARRY_LIVE_SCOPE_HEADER, "view_only")];
 
 /// W3-E3.4-5: whether a client frame may go upstream on a view-only socket. Only the JSON
 /// keep-alive (`{"type":"ping"}`) and the transport's own ping/pong/close pass; an action,
@@ -9491,6 +9590,7 @@ pub(crate) mod tests {
             browser_human_browse: false,
             browser_live_view_only: false,
             browser_consent_api: false,
+            browser_downloads: false,
             auth_core_url: "http://127.0.0.1:1".into(),
             verevon_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),

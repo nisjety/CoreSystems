@@ -38,7 +38,7 @@ use crate::{
     envelope::{error, ok},
     middleware::AuthenticatedUser,
     public_url::normalize_public_http_url,
-    upstream::proxy_bearer_json,
+    upstream::{proxy_bearer_json, proxy_bearer_json_with_timeout},
 };
 
 /// Largest curated batch we hand quarry's `/v1/batch` in one request — quarry
@@ -91,6 +91,23 @@ pub(super) async fn quarry_call(
 ) -> (StatusCode, Value) {
     let url = format!("{}{}", state.quarry_edge_url, path);
     let (status, Json(value)) = proxy_bearer_json(state, method, &url, body, token, user_id).await;
+    (status, value)
+}
+
+/// As [`quarry_call`], with a per-request ceiling in place of the client's standard one. A job
+/// read with a `wait` may hold the edge for longer than that standard ceiling, so its caller
+/// sets the ceiling to the wait plus a margin.
+pub(super) async fn quarry_call_with_timeout(
+    state: &AppState,
+    method: Method,
+    path: &str,
+    token: Option<&str>,
+    user_id: &str,
+    timeout: Duration,
+) -> (StatusCode, Value) {
+    let url = format!("{}{}", state.quarry_edge_url, path);
+    let (status, Json(value)) =
+        proxy_bearer_json_with_timeout(state, method, &url, None, token, user_id, timeout).await;
     (status, value)
 }
 

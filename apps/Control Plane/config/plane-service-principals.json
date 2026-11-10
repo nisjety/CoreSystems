@@ -442,6 +442,7 @@
       "data:read",
       "data:rerank",
       "documents:write",
+      "imports:read",
       "inference:invoke",
       "integration:otp:read",
       "models:invoke",
@@ -462,6 +463,7 @@
         "models:invoke"
       ],
       "ingestion": [
+        "imports:read",
         "integration:otp:read"
       ],
       "model-gateway": [

@@ -34,12 +34,36 @@ pub struct Source {
     pub kind: String,
     /// `"active" | "paused" | "deleted"`.
     pub status: String,
+    #[serde(deserialize_with = "deserialize_millis_or_rfc3339")]
     pub created_at: DateTime<Utc>,
+    #[serde(deserialize_with = "deserialize_millis_or_rfc3339")]
     pub updated_at: DateTime<Utc>,
     /// Free-form per-source configuration (max_pages, include_patterns,
     /// presets, etc). JSONB on the Go control side.
     #[serde(default)]
     pub config: serde_json::Value,
+    /// The operator label that groups this source (E3.5-6). Absent when untagged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
+}
+
+/// Control writes `created_at` and `updated_at` as Unix milliseconds (`store.Source`), while
+/// the public shape is RFC 3339. Read either, so a list page decodes the rows control sends.
+fn deserialize_millis_or_rfc3339<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum MillisOrRfc3339 {
+        Millis(i64),
+        Rfc3339(DateTime<Utc>),
+    }
+    match MillisOrRfc3339::deserialize(deserializer)? {
+        MillisOrRfc3339::Millis(ms) => DateTime::<Utc>::from_timestamp_millis(ms)
+            .ok_or_else(|| serde::de::Error::custom("timestamp out of range")),
+        MillisOrRfc3339::Rfc3339(at) => Ok(at),
+    }
 }
 
 // =============================================================================
@@ -696,6 +720,9 @@ pub struct ScheduleSummary {
     /// body the schedule was created from.
     #[serde(default)]
     pub config: serde_json::Value,
+    /// The operator label that groups this monitor (E3.5-6). Absent when untagged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<String>,
 }
 
 #[cfg(test)]
@@ -849,6 +876,7 @@ mod tests {
             last_run_at: None,
             next_run_at: None,
             config: serde_json::json!({"url": "https://example.com"}),
+            tag: None,
         };
         let s = serde_json::to_string(&sched).unwrap();
         // Field name pins — silent renames break SDK generators.
