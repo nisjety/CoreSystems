@@ -11782,6 +11782,8 @@ mod human_browse_session_tests {
             .unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"]["details"]["reason"], "profile_busy");
+    }
+
     #[test]
     fn advertised_capabilities_name_only_what_quarry_honours() {
         let open = browser_session_capabilities(&json!({
