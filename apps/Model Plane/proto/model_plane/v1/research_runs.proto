@@ -1,0 +1,195 @@
+syntax = "proto3";
+
+package model_plane.v1;
+
+option go_package = "github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1";
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// Research runs (Quarry v2 E4.6, slice Q4-062b): the durable, addressable research phase of a chat turn.
+//
+// A research run is one row in session-core's research_runs table. A client addresses it by id to read its
+// status, its partial results and its stop reason. A thread has at most one running research run: a second
+// Begin on that thread is refused with aborted research_run_active, and the x-mp-active-run-id trailer names
+// the run already running there, as the thread run guard refuses a second chat run.
+//
+// The org of a call is the caller's verified org, and the owner of a run is the verified caller: the person
+// who began it, or the service principal that began it, so a service reads only the rows it created. No
+// request names an org or an owner. A run that belongs to another owner, or to no run, reads as not found.
+//
+// Zero Data Retention: a run is ZDR when the request says so, or when the caller holds a ZDR or waived
+// credential. A ZDR run keeps ids, status, codes, budget and counters only. Progress and Finish refuse a
+// partial result on it, and Finish refuses a report artifact id, with zdr_durable_mutation_forbidden. A ZDR
+// token is refused on every write.
+//
+// The switch is RESEARCH_RUNS_ENABLED (literal true only). While it is off every RPC answers unavailable with
+// research_runs_disabled.
+
+// The budget a research run was given. A dimension that is not set is not bounded by this record.
+message ResearchBudget {
+  // The most pages the run may read. Unset when the budget does not bound pages.
+  optional int32 max_pages = 1;
+  // The most sub-queries the run may issue. Unset when the budget does not bound sub-queries.
+  optional int32 max_sub_queries = 2;
+  // The USD ceiling of the run in micro-dollars (one millionth of a dollar). Unset when there is no ceiling.
+  optional int64 usd_ceiling_micro = 3;
+}
+
+// One research run as it is stored.
+message ResearchRun {
+  // The run's id, `rsr_` followed by a ULID, assigned by session-core.
+  string id = 1;
+  // The org the run belongs to.
+  string org_id = 2;
+  // The owner of the run: the person who began it, or the service principal that began it.
+  string user_id = 3;
+  // The chat thread the research phase belongs to.
+  string thread_id = 4;
+  // The chat session run the research phase belongs to.
+  string run_id = 5;
+  // The caller's request id for the run, when it sent one. Empty when it did not.
+  string request_id = 6;
+  // One closed token: "running", "completed", "stopped", "failed", "cancelled" or "expired". Running is the
+  // only state that moves; a terminal status is final.
+  string status = 7;
+  // Why the run ended, a short token of 1 to 64 characters. Empty while the run is running.
+  string stop_reason = 8;
+  // The halt code the research loop ended with, a short token of 1 to 64 characters. Empty while running.
+  string halt_code = 9;
+  // Whether the run is zero-retention: it keeps no partial result and no report artifact id.
+  bool zdr = 10;
+  // The budget the run was given.
+  ResearchBudget budget = 11;
+  // The USD spent so far, in micro-dollars. Only moves up.
+  int64 spent_usd_micro = 12;
+  // The pages read so far. Only moves up.
+  int32 pages_read = 13;
+  // The sources found so far. Only moves up.
+  int32 sources_found = 14;
+  // The partial results so far. Unset when the run keeps none, which is always the case for a ZDR run.
+  google.protobuf.Struct partial = 15;
+  // The id of the report artifact the run wrote. Empty when it wrote none, which is always the case for a ZDR run.
+  string report_artifact_id = 16;
+  // When the run was begun.
+  google.protobuf.Timestamp created_at = 17;
+  // When the run last changed.
+  google.protobuf.Timestamp updated_at = 18;
+  // When the run's deadline falls. A running run past its deadline is expired and no longer holds its thread.
+  google.protobuf.Timestamp deadline_at = 19;
+}
+
+// Begin a research run on a thread for the caller, who becomes its owner.
+message BeginRequest {
+  // The chat thread the research phase belongs to, 1 to 128 characters after trimming.
+  string thread_id = 1;
+  // The chat session run the research phase belongs to, 1 to 128 characters after trimming.
+  string run_id = 2;
+  // The caller's request id for the run, 1 to 128 characters after trimming, or empty.
+  string request_id = 3;
+  // Whether the run is zero-retention. The caller's own ZDR or waived credential also makes the run ZDR, and
+  // this field can only add to that: a request cannot make a ZDR caller's run keep content.
+  bool zdr = 4;
+  // The budget the run is given. Each dimension is optional.
+  ResearchBudget budget = 5;
+  // Seconds from now until the run's deadline. Zero takes the default of 900 seconds; any other value must be
+  // from 60 to 3600.
+  uint32 deadline_seconds = 6;
+}
+
+// The run that was begun.
+message BeginResponse {
+  // The run that was begun.
+  ResearchRun run = 1;
+}
+
+// A progress report for a research run the caller owns. The counters only move up, so a report that arrives
+// late cannot lower them.
+message ProgressRequest {
+  // The run's id.
+  string id = 1;
+  // The pages read so far.
+  int32 pages_read = 2;
+  // The sources found so far.
+  int32 sources_found = 3;
+  // The USD spent so far, in micro-dollars.
+  int64 spent_usd_micro = 4;
+  // The partial results so far. Replaces the stored ones when set, and is refused for a ZDR run.
+  google.protobuf.Struct partial = 5;
+}
+
+// Whether a progress report changed the run.
+message ProgressResponse {
+  // True when the run was running and the report applied. False when the run had already ended, and nothing
+  // changed.
+  bool applied = 1;
+}
+
+// How a research run the caller owns ends.
+message FinishRequest {
+  // The run's id.
+  string id = 1;
+  // The terminal status: "completed", "stopped", "failed", "cancelled" or "expired". "running" is refused.
+  string status = 2;
+  // Why the run stopped, 1 to 64 characters, or empty.
+  string stop_reason = 3;
+  // The halt code the research loop ended with, 1 to 64 characters, or empty.
+  string halt_code = 4;
+  // The final partial results. Replaces the stored ones when set, and is refused for a ZDR run.
+  google.protobuf.Struct partial = 5;
+  // The report artifact the run wrote, 1 to 128 characters, or empty. Refused for a ZDR run.
+  string report_artifact_id = 6;
+  // The pages read in total. Only moves the stored count up.
+  int32 pages_read = 7;
+  // The sources found in total. Only moves the stored count up.
+  int32 sources_found = 8;
+  // The USD spent in total, in micro-dollars. Only moves the stored total up.
+  int64 spent_usd_micro = 9;
+}
+
+// Whether the end changed the run.
+message FinishResponse {
+  // True when the run was running and it ended now. False when it had already ended, and nothing changed.
+  bool applied = 1;
+}
+
+// Read one research run the caller owns.
+message GetRequest {
+  // The run's id.
+  string id = 1;
+}
+
+// The research run that was read.
+message GetResponse {
+  // The run. A run that belongs to another owner, or to no run, is not found.
+  ResearchRun run = 1;
+}
+
+// Read the running research run of a thread, if the caller owns one inside its deadline.
+message GetActiveRequest {
+  // The chat thread.
+  string thread_id = 1;
+}
+
+// The running research run of the thread, when the caller owns one.
+message GetActiveResponse {
+  // The run. Empty when found is false.
+  ResearchRun run = 1;
+  // Whether the caller owns a running run of the thread that is inside its deadline.
+  bool found = 2;
+}
+
+// The research run store (Quarry v2 E4.6, slice Q4-062b). Every RPC answers unavailable while its switch
+// RESEARCH_RUNS_ENABLED is off.
+service ResearchRunService {
+  // Begin a research run on a thread. Aborted research_run_active when the thread already has a running run.
+  rpc Begin(BeginRequest) returns (BeginResponse);
+  // Report progress on a research run the caller owns.
+  rpc Progress(ProgressRequest) returns (ProgressResponse);
+  // End a research run the caller owns with a terminal status.
+  rpc Finish(FinishRequest) returns (FinishResponse);
+  // Read one research run the caller owns.
+  rpc Get(GetRequest) returns (GetResponse);
+  // Read the running research run of a thread the caller owns.
+  rpc GetActive(GetActiveRequest) returns (GetActiveResponse);
+}

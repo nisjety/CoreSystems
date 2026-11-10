@@ -91,6 +91,7 @@ pub mod readiness;
 pub mod recall_conversations;
 pub mod relevance;
 pub mod relevance_calibration;
+pub mod research_runs;
 pub mod result_validation;
 pub mod source_validation;
 pub mod source_facts;

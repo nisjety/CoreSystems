@@ -877,11 +877,14 @@ pub struct RunBudget {
     base_active_ms: u64,
     /// The surface that started this segment (`usage_attrs::surface_for`).
     pub surface: crate::usage_attrs::Surface,
+    /// The advisory parent run of the start or resume that opened this segment (E4.6 062a). It is
+    /// not in the checkpoint ledger, never serialised; `usage_attrs::emit_run_segment` reads it.
+    pub parent_run: Option<String>,
 }
 
 /// What one run segment spent, for its usage events (WS6.C-e). `steps` and `active_ms` are
 /// the segment's own: the spend of the checkpoint it resumed is subtracted.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SegmentUsage {
     pub class: RunClass,
     pub segment: u32,
@@ -890,6 +893,9 @@ pub struct SegmentUsage {
     pub active_ms: u64,
     /// A bound latched during the segment (the budget's exhaustion latch).
     pub exhausted: bool,
+    /// The advisory parent run of the run this segment belongs to (E4.6 062a). Written to the
+    /// segment's usage metadata off ZDR only.
+    pub parent_run: Option<String>,
 }
 
 impl RunBudget {
@@ -946,6 +952,7 @@ impl RunBudget {
             base_steps: resumed.map_or(0, |checkpoint| checkpoint.steps),
             base_active_ms: resumed.map_or(0, |checkpoint| checkpoint.active_ms),
             surface: crate::usage_attrs::Surface::Api,
+            parent_run: None,
         }
     }
 
@@ -1092,6 +1099,15 @@ impl RunBudget {
         self
     }
 
+    /// E4.6 062a: the advisory parent run of the start or resume that opened this segment. The
+    /// start route passes its own request's value, so a resume takes the resume request's value,
+    /// never the checkpoint's. It is not stored in the checkpoint.
+    #[must_use]
+    pub fn with_parent_run(mut self, parent_run: Option<String>) -> Self {
+        self.parent_run = parent_run;
+        self
+    }
+
     /// WS6.C-e: what this segment alone spent, read once by the path that ends it.
     pub fn segment_usage(&self, now: Instant) -> SegmentUsage {
         SegmentUsage {
@@ -1101,6 +1117,7 @@ impl RunBudget {
             steps: self.ledger.steps.saturating_sub(self.base_steps),
             active_ms: self.ledger.active_ms(now).saturating_sub(self.base_active_ms),
             exhausted: self.ledger.exhausted().is_some(),
+            parent_run: self.parent_run.clone(),
         }
     }
 

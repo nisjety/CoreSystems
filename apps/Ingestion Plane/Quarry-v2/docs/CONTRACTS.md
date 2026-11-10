@@ -1215,10 +1215,10 @@ recorded is not returned. `next_seq` is set when the page was full; pass it as
 `after_seq`. Under the token's ZDR floor the whole route answers 403, because it returns
 URLs.
 
-**Job results (INNH-12, the dataset of a run).** `GET /v1/crawl/{id}/results`,
+**Job results (INNH-12, an index of the pages a run fetched).** `GET /v1/crawl/{id}/results`,
 `/v1/batch/{id}/results` and `/v1/jobs/{id}/results` list the pages a job fetched, one row
-for each fetch, in the order they were fetched. The edge answers `{data: {items, next_seq?},
-meta: {request_id, page: {next?, limit}}}`. A row is `{seq, url, status, content_type?,
+for each fetch, in the order they were fetched. The edge answers `{data: {kind, items,
+next_seq?}, meta: {request_id, page: {next?, limit}}}`. A row is `{seq, url, status, content_type?,
 title?, fetched_at, word_count?, driver?, markdown_artifact_id?, source_artifact_id?,
 bytes?}`: `url` is the URL the job fetched (as requested), `bytes` the size of the stored
 Markdown, `driver` one of `static`, `tls`, `browser`. The rows come from the job's
@@ -1235,6 +1235,15 @@ escalation to a browser) has two rows; `latest=true` keeps the latest fetch of e
 20 000 fetches of a job at most and sets `scan_capped: true` when there were more. A row
 written before the fields existed has `url`, `status`, `title` and `fetched_at` only; the
 ids are also absent when nothing was stored, which is every ZDR run.
+
+**Decision B2(a): results are a page index first.** `data.kind` names what the rows are, a
+closed set: `page_index` or `dataset`. Every read answers `page_index` today: a row says
+which page was fetched and which artifacts hold its content, and carries no extracted
+fields. `dataset` (rows of extracted records) is reserved and nothing produces it; it needs
+WS5.I (the extract step a crawl or batch can embed) and WS16.J (the dataset store) first.
+The CSV and JSON Lines export carries the same value in `X-Quarry-Result-Kind`, taken from
+the same field. A client must not read a row set as page content or as a dataset unless
+`kind` says so. Zero Data Retention is unchanged: the 403 floor stays in the route gate.
 
 **Export (E4.1-4).** `format=csv` or `format=jsonl` on the same three routes returns the same rows as text instead of the envelope: CSV (RFC 4180: a header line of the field names, CRLF line ends, quoting for a comma, quote or line break) or JSON Lines (one object per row). `fields` projects the columns: a comma-separated list of row fields from the list above, each named at most once, written in the order given; the default is all eleven in the order listed. A CSV cell that a spreadsheet would read as a formula (a leading `=`, `+`, `-`, `@`, tab or carriage return) gets a leading apostrophe, so a page title or URL stays text. A JSON Lines field the row does not have is `null`. An export reads 1 to 100 rows (`limit` above 100 is a 400 naming `limit`) and its body is at most 10 MiB (over that, a 400 with `details.reason: export_too_large`; the file is never cut short). `fields` without an export `format` is a 400 naming `fields`; an unknown `format` is a 400 naming `format`. Headers: `Content-Type` (`text/csv; charset=utf-8` or `application/x-ndjson; charset=utf-8`), `Content-Disposition: attachment`, `Cache-Control: private, no-store`, `X-Quarry-Result-Kind: page_index` (an index of the fetched pages, not the page content), `X-Quarry-Next-Seq` when another page exists, and `X-Quarry-Scan-Capped: true` when a `latest` scan stopped at its ceiling. The gates are the JSON read's: the flag (501), the ZDR floor (403) and the service-principal refusal, all checked before the export options are read.
 

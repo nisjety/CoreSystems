@@ -51,11 +51,17 @@ use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use mp_contracts::model_plane::v1::{ChatMessage, InferPurpose, InferRequest, ToolCall};
+use mp_contracts::model_plane::v1::{
+    ChatMessage, InferPurpose, InferRequest, InferResponse, ToolCall,
+};
 use serde_json::Value;
 
 use crate::{
-    artifacts::ArtifactKind, relevance, role_routing, sse_events::ChatEvent, state::AppState,
+    artifacts::ArtifactKind,
+    pricing::{CostBasis, TokenLegs},
+    relevance, role_routing,
+    sse_events::ChatEvent,
+    state::AppState,
 };
 
 // ---------------------------------------------------------------------------
@@ -1006,6 +1012,339 @@ async fn gather_internal_sources(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Run budget, spend and stop reason (E4.6 062b)
+//
+// A caller may ask for a smaller run, and for a USD ceiling. Both can only LOWER what the process allows:
+// `RunCaps` takes the process caps and lowers them, and the ceiling is enforced here, in Model Plane, from the
+// catalogue's prices rather than on the caller's word. Every stop is typed, so a run record says why a run
+// ended and not only that it did.
+// ---------------------------------------------------------------------------
+
+/// Micro-dollars in one US dollar. Spend is kept as an integer so that a sum of calls never drifts.
+const MICRO_USD_PER_USD: f64 = 1_000_000.0;
+
+/// Most sources one outcome lists in its summary. The citations carry the rest.
+const MAX_SOURCE_SUMMARY: usize = 50;
+
+/// A caller's request for a smaller run (E4.6 062b). Each field can only lower the process cap it names, and
+/// `None` leaves that cap as the process has it. `ResearchBudget::default()` is the run as it was before
+/// budgets existed: the process caps and no ceiling.
+#[derive(Clone, Debug, Default)]
+pub struct ResearchBudget {
+    /// Pages to read successfully, lowered below the process's `max_pages`.
+    pub max_pages: Option<usize>,
+    /// Sub-queries to plan, lowered below the process's `max_sub_queries`.
+    pub max_sub_queries: Option<usize>,
+    /// Wall clock for the whole run in seconds, lowered below the process's `wall_clock_secs`.
+    pub wall_clock_secs: Option<u64>,
+    /// Most US dollars the run's inference may cost, priced from the cost catalogue. Under a ceiling, a call
+    /// with no catalogue price stops the run (see [`ResearchStop::CostUnpriced`]).
+    pub usd_ceiling: Option<f64>,
+}
+
+/// The caps one run works under: the process caps, each lowered by its [`ResearchBudget`] field where the
+/// budget asks for less (E4.6 062b). They are read once per run, so a run never changes its caps midway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunCaps {
+    /// Sub-queries the run plans and searches.
+    pub max_sub_queries: usize,
+    /// Pages the run sets out to read successfully.
+    pub max_pages: usize,
+    /// Wall clock for the whole run, in seconds.
+    pub wall_clock_secs: u64,
+}
+
+impl RunCaps {
+    /// The process caps, lowered by `budget`. A requested value is clamped to the process cap and to its floor,
+    /// so a budget can lower a cap but never raise one, and never reduce one to nothing.
+    #[must_use]
+    pub fn for_budget(budget: &ResearchBudget) -> Self {
+        Self {
+            max_sub_queries: lowered_cap(
+                budget.max_sub_queries,
+                max_sub_queries(),
+                MIN_SUB_QUERIES,
+            ),
+            max_pages: lowered_cap(budget.max_pages, max_pages(), MIN_PAGES),
+            wall_clock_secs: lowered_cap(
+                budget.wall_clock_secs,
+                wall_clock_secs(),
+                MIN_WALL_CLOCK_SECS,
+            ),
+        }
+    }
+}
+
+/// `requested` clamped into `[floor, process]`, or `process` when nothing was requested.
+fn lowered_cap<T: Ord + Copy>(requested: Option<T>, process: T, floor: T) -> T {
+    requested.map_or(process, |value| value.min(process).max(floor))
+}
+
+/// Why a run ended (E4.6 062b). A closed set: the run record's status and stop reason are read from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResearchStop {
+    /// The run did its work and held evidence, whether or not the synthesis succeeded.
+    Completed,
+    /// The user pressed Stop.
+    Cancelled,
+    /// The wall clock ran out.
+    Deadline,
+    /// The USD ceiling was reached at a boundary, so no further work was started. Evidence already held is kept.
+    BudgetUsd,
+    /// A call under a USD ceiling had no catalogue price, so its spend cannot be bounded. Fails closed.
+    CostUnpriced,
+    /// Nothing was read, so there is no evidence to write from.
+    NoEvidence,
+}
+
+impl ResearchStop {
+    /// The stable token the run record and its clients read. Wire format: changing one changes how a client
+    /// reads why a run stopped.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Deadline => "deadline",
+            Self::BudgetUsd => "budget_usd",
+            Self::CostUnpriced => "cost_unpriced",
+            Self::NoEvidence => "no_evidence",
+        }
+    }
+}
+
+/// Receives a run's counters as it goes (E4.6 062b): after the plan, after each read batch and after the
+/// synthesis. It is handed numbers only, never text, a URL or a query. It is called inline, so it must not block.
+pub trait ResearchProgress: Send + Sync {
+    /// `pages_read` counts the web pages whose text the run holds, `sources_found` every source it has
+    /// considered, and `spent_usd_micro` what its inference has cost so far.
+    fn report(&self, pages_read: u32, sources_found: u32, spent_usd_micro: i64);
+}
+
+/// Adds up what a run's inference costs, in micro-dollars, and decides whether the run may start its next
+/// step (E4.6 062b).
+///
+/// A call is priced through the cost catalogue ([`crate::pricing::PricingCache::priced`]). Under a ceiling, a
+/// call with no price latches [`ResearchStop::CostUnpriced`]: the run cannot show that it is within budget, so
+/// it stops at the next boundary and keeps its evidence. Without a ceiling an unpriced call adds nothing and
+/// changes nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpendMeter {
+    /// The ceiling in micro-dollars, or `None` when the run has no USD ceiling.
+    ceiling_micro: Option<i64>,
+    /// What the run has spent, in micro-dollars.
+    spent_usd_micro: i64,
+    /// A call under a ceiling had no price.
+    unpriced: bool,
+    /// The stop the run took at its first refused boundary: the reason the run reports.
+    refused: Option<ResearchStop>,
+}
+
+impl SpendMeter {
+    /// A meter for a run whose ceiling is `ceiling_micro`, or none.
+    #[must_use]
+    pub fn new(ceiling_micro: Option<i64>) -> Self {
+        Self {
+            ceiling_micro,
+            spent_usd_micro: 0,
+            unpriced: false,
+            refused: None,
+        }
+    }
+
+    /// Adds one call's price. `None`, or a price that is not a finite number, is an unpriced call.
+    pub fn record(&mut self, usd: Option<f64>) {
+        match usd {
+            Some(usd) if usd.is_finite() => {
+                let micro = usd_to_micro(usd.max(0.0));
+                self.spent_usd_micro = self.spent_usd_micro.saturating_add(micro);
+            }
+            _ => {
+                if self.ceiling_micro.is_some() {
+                    self.unpriced = true;
+                }
+            }
+        }
+    }
+
+    /// Called before a step that would spend or gather more. `Some` means the step must not start: the ceiling
+    /// is reached, or a call under it was unpriced. The first such stop is kept as the run's reason.
+    pub fn check(&mut self) -> Option<ResearchStop> {
+        let stop = self.gate()?;
+        if self.refused.is_none() {
+            self.refused = Some(stop);
+        }
+        Some(stop)
+    }
+
+    /// The stop the run took at a refused boundary, if it took one.
+    #[must_use]
+    pub fn stopped(&self) -> Option<ResearchStop> {
+        self.refused
+    }
+
+    /// What the run has spent so far, in micro-dollars.
+    #[must_use]
+    pub fn spent_usd_micro(&self) -> i64 {
+        self.spent_usd_micro
+    }
+
+    fn gate(&self) -> Option<ResearchStop> {
+        if let Some(ceiling) = self.ceiling_micro {
+            if self.spent_usd_micro >= ceiling {
+                return Some(ResearchStop::BudgetUsd);
+            }
+        }
+        self.unpriced.then_some(ResearchStop::CostUnpriced)
+    }
+}
+
+/// A non-negative US amount in micro-dollars, rounded to the nearest one. Saturates far above any real run.
+// reason: the rounded value is clamped into 0..=9e15 before the cast, so the cast is exact
+#[allow(clippy::cast_possible_truncation)]
+fn usd_to_micro(usd: f64) -> i64 {
+    (usd * MICRO_USD_PER_USD).round().clamp(0.0, 9.0e15) as i64
+}
+
+/// The micro-dollar ceiling a caller's USD figure names. A figure that is not a positive finite number names a
+/// ceiling of zero, so the run refuses to spend rather than guess what was meant.
+fn usd_ceiling_micro(usd: f64) -> i64 {
+    if usd.is_finite() && usd > 0.0 {
+        usd_to_micro(usd)
+    } else {
+        0
+    }
+}
+
+/// One source a run considered, as its run record keeps it (E4.6 062b): the host and whether its text was
+/// read. Never a path, a query or the text.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SourceSummary {
+    /// The host of the source's URL, lowercased and without `www.`; empty when it has none.
+    pub url_host: String,
+    /// `read` when the run holds its text and may cite it; otherwise the [`UnreadStatus`] token.
+    pub status: &'static str,
+}
+
+/// The run's sources as summaries: the read ones first, in citation order, then the rest, at most
+/// [`MAX_SOURCE_SUMMARY`] of them.
+#[must_use]
+pub fn source_summary(sources: &[ResearchSource]) -> Vec<SourceSummary> {
+    let mut ordered: Vec<&ResearchSource> = sources.iter().collect();
+    ordered.sort_by_key(|source| (!source.is_read(), source.number.unwrap_or(usize::MAX)));
+    ordered
+        .into_iter()
+        .take(MAX_SOURCE_SUMMARY)
+        .map(|source| SourceSummary {
+            url_host: url_host(&source.url),
+            status: if source.is_read() {
+                "read"
+            } else {
+                source
+                    .unread_status
+                    .unwrap_or(UnreadStatus::NotAttempted)
+                    .code()
+            },
+        })
+        .collect()
+}
+
+/// The host of a source's URL, or empty. [`crate::url_domain::web_domain`] returns the raw string for a URL it
+/// cannot read as absolute, so anything that is not a bare host (a path, a query, userinfo) is dropped here.
+fn url_host(url: &str) -> String {
+    let host = crate::url_domain::web_domain(url);
+    if host.is_empty()
+        || host.contains(['/', '?', '#', '@'])
+        || host.chars().any(char::is_whitespace)
+    {
+        String::new()
+    } else {
+        host
+    }
+}
+
+/// Hands the run's counters to the caller's progress sink, when it has one (E4.6 062b). Counts and the spend
+/// only: the sink is never given text, a URL or a query.
+fn report_progress(
+    progress: Option<&dyn ResearchProgress>,
+    sources: &[ResearchSource],
+    meter: &SpendMeter,
+) {
+    let Some(progress) = progress else {
+        return;
+    };
+    let pages_read = sources
+        .iter()
+        .filter(|source| source.is_read() && source.origin.is_web())
+        .count();
+    progress.report(
+        u32::try_from(pages_read).unwrap_or(u32::MAX),
+        u32::try_from(sources.len()).unwrap_or(u32::MAX),
+        meter.spent_usd_micro(),
+    );
+}
+
+/// What one successful inference call reported about its own cost, held until the call is priced (E4.6 062b).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InferUsage {
+    /// The model that served the call, or the one it asked for when the response names none.
+    model: String,
+    /// The registry id of the provider that served the call; empty when the response names none.
+    provider: String,
+    /// The token counts as the provider reported them.
+    legs: TokenLegs,
+}
+
+impl InferUsage {
+    /// The usage of a response. A call is billed whether or not its content is usable, so the caller keeps this
+    /// for every call that succeeded.
+    fn of(response: &InferResponse, requested: &str) -> Self {
+        let model = if response.model_used.trim().is_empty() {
+            requested
+        } else {
+            response.model_used.as_str()
+        };
+        Self {
+            model: model.to_owned(),
+            provider: response.provider_used.clone(),
+            legs: TokenLegs {
+                input_tokens: i64::from(response.input_tokens),
+                output_tokens: i64::from(response.output_tokens),
+                cache_read_input_tokens: i64::from(response.cache_read_input_tokens),
+                cache_creation_input_tokens: i64::from(response.cache_creation_input_tokens),
+            },
+        }
+    }
+}
+
+/// Prices one successful inference call into the run's meter (E4.6 062b). The basis follows the provider that
+/// served the call, so a call served by a subscription adds nothing.
+async fn record_usage(state: &AppState, meter: &mut SpendMeter, usage: &InferUsage) {
+    let priced = state
+        .pricing
+        .priced(
+            CostBasis::Metered.served_by(&usage.provider),
+            &usage.model,
+            usage.legs,
+        )
+        .await;
+    meter.record(priced.usd);
+}
+
+/// Why a run that was not cancelled ended (E4.6 062b). A cost stop the meter took at a refused boundary comes
+/// first; then the deadline; then no evidence; otherwise the run completed.
+#[must_use]
+fn run_stop(meter: &SpendMeter, deadline_hit: bool, read: usize) -> ResearchStop {
+    meter.stopped().unwrap_or(if deadline_hit {
+        ResearchStop::Deadline
+    } else if read == 0 {
+        ResearchStop::NoEvidence
+    } else {
+        ResearchStop::Completed
+    })
+}
+
 /// Result of a deep-research turn. Mirrors [`crate::tool_loop::ToolRounds`] so
 /// the call site in `sse.rs` treats it the same way, plus the two things only
 /// this pipeline produces: a report and a cancellation verdict.
@@ -1029,6 +1368,14 @@ pub struct DeepResearchOutcome {
     pub report: Option<String>,
     /// Coverage facts, for logging and for the caller's own telemetry.
     pub coverage: Coverage,
+    /// Why the run ended (E4.6 062b). A run that stopped early keeps the evidence it held; this says why it stopped.
+    pub stop: ResearchStop,
+    /// The read bound's stable token ([`Coverage::halt_code`]); `None` when the read loop never ran.
+    pub halt_code: Option<String>,
+    /// What the run's inference cost, in micro-dollars, as the cost catalogue priced it.
+    pub spent_usd_micro: i64,
+    /// Every source the run considered, as host and status only, at most [`MAX_SOURCE_SUMMARY`].
+    pub source_summary: Vec<SourceSummary>,
 }
 
 /// Why the pipeline stopped early.
@@ -2037,6 +2384,9 @@ pub enum ReadHalt {
     /// The corpus budget has no room for another page, so fetching one would
     /// spend network time on text that could not be admitted anyway.
     CorpusFull,
+    /// The run's USD ceiling was reached, or a call under it had no price, so no further batch was started
+    /// (E4.6 062b). The stop reason says which: [`ResearchStop::BudgetUsd`] or [`ResearchStop::CostUnpriced`].
+    CostLimit,
 }
 
 impl ReadHalt {
@@ -2048,6 +2398,7 @@ impl ReadHalt {
             Self::CandidatesExhausted => "candidates-exhausted",
             Self::AttemptsExhausted => "attempts-exhausted",
             Self::CorpusFull => "corpus-full",
+            Self::CostLimit => "cost-limit",
         }
     }
 }
@@ -2408,6 +2759,9 @@ fn shortfall_reason(coverage: &Coverage) -> Option<&'static str> {
         ),
         ReadHalt::CorpusFull => {
             Some("the evidence-character budget had no room left for another page")
+        }
+        ReadHalt::CostLimit => {
+            Some("the research cost limit was reached before the read target was met")
         }
     }
 }
@@ -3032,6 +3386,7 @@ pub fn research_receipt(
     coverage: &Coverage,
     report_chars: usize,
     sources: &[ResearchSource],
+    caps: RunCaps,
 ) -> Value {
     serde_json::json!({
         "sub_queries": plan,
@@ -3057,17 +3412,19 @@ pub fn research_receipt(
         "read_halt": coverage.halt_code(),
         "deadline_hit": coverage.deadline_hit,
         "corpus_budget_exhausted": coverage.corpus_exhausted,
+        // The caps this run worked under: the process caps, lowered by its budget where the budget asked for
+        // less (E4.6 062b). A receipt that named the process caps would contradict `pages_wanted`.
         "caps": {
-            "max_sub_queries": max_sub_queries(),
+            "max_sub_queries": caps.max_sub_queries,
             // A target of SUCCESSFUL reads now, not an attempt cap. Keeping the
             // key name (a receipt shape the model and the tool timeline already
             // read) but stating the attempt ceiling beside it, so the pair
             // cannot be misread as "at most 8 fetches happened".
-            "max_pages": max_pages(),
-            "max_read_attempts": read_attempt_budget(max_pages()),
+            "max_pages": caps.max_pages,
+            "max_read_attempts": read_attempt_budget(caps.max_pages),
             "page_chars": page_char_cap(),
             "corpus_chars": corpus_char_cap(),
-            "wall_clock_secs": wall_clock_secs(),
+            "wall_clock_secs": caps.wall_clock_secs,
         },
     })
 }
@@ -3503,6 +3860,9 @@ pub enum SecondPassSkip {
     NoGaps,
     /// The first pass spent the page target or the fetch-attempt ceiling.
     BudgetSpent,
+    /// The run's USD ceiling was reached, or a call under it had no price, so no claim check or gap search ran
+    /// (E4.6 062b).
+    CostLimit,
 }
 
 impl SecondPassSkip {
@@ -3516,6 +3876,7 @@ impl SecondPassSkip {
             Self::NotNeeded => "not-needed",
             Self::NoGaps => "no-gaps",
             Self::BudgetSpent => "budget-spent",
+            Self::CostLimit => "cost-limit",
         }
     }
 
@@ -3528,6 +3889,7 @@ impl SecondPassSkip {
             Self::NotNeeded => "Ingen ny runde trengs: alle påstander er støttet.",
             Self::NoGaps => "Ingen hull å søke etter.",
             Self::BudgetSpent => "Ingen ny runde: side- eller hentebudsjettet er brukt opp.",
+            Self::CostLimit => "Hoppet over: kostnadsgrensen for research er nådd.",
         }
     }
 
@@ -3542,6 +3904,7 @@ impl SecondPassSkip {
             Self::NotNeeded => "the first pass met its read target and every claim was supported",
             Self::NoGaps => "the claim check named no gap worth searching",
             Self::BudgetSpent => "the first pass had spent the page or fetch-attempt budget",
+            Self::CostLimit => "the research cost limit was reached",
         }
     }
 }
@@ -3791,9 +4154,10 @@ pub fn research_receipt_with_second_pass(
     coverage: &Coverage,
     report_chars: usize,
     sources: &[ResearchSource],
+    caps: RunCaps,
     pass: Option<&SecondPass>,
 ) -> Value {
-    let mut receipt = research_receipt(plan, coverage, report_chars, sources);
+    let mut receipt = research_receipt(plan, coverage, report_chars, sources, caps);
     let Some(pass) = pass else {
         return receipt;
     };
@@ -4025,7 +4389,7 @@ fn extract_from_fetch_output(output: &str) -> Option<String> {
 /// single hard failure the inline tool loop has. Every other failure (no Quarry
 /// edge, dead network, empty results, failed inference, exhausted budget)
 /// degrades into a stated fact in the returned context message.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // cohesive pipeline entry — all are request context
+#[allow(clippy::too_many_arguments)] // cohesive pipeline entry — all are request context
 pub async fn run_deep_research(
     state: &AppState,
     request_id: &str,
@@ -4049,8 +4413,71 @@ pub async fn run_deep_research(
     source_access: &ResearchSources<'_>,
     cancel: &AtomicBool,
     sink: Option<&crate::sse_events::RichEventSink>,
+    // What the run may spend and how far it may go (E4.6 062b). `ResearchBudget::default()` is the run as it was
+    // before budgets: the process caps and no USD ceiling.
+    budget: &ResearchBudget,
+    // Receives the run's counters as it goes; `None` when nothing is listening.
+    progress: Option<&dyn ResearchProgress>,
 ) -> Result<DeepResearchOutcome, &'static str> {
-    let deadline = Instant::now() + Duration::from_secs(wall_clock_secs());
+    // Every search and page read of the run carries its request id and, off ZDR, its run id as advisory
+    // attribution (E4.6, 062a). The pipeline is awaited on this task and never spawned, so the scope reaches
+    // each `web_search` and `fetch_url` hop: the sub-queries and pages are joined, not spawned.
+    crate::quarry::attribution::scope(
+        crate::quarry::attribution::Attribution {
+            request_id: Some(request_id.to_owned()),
+            parent_run: (!zdr).then(|| run_id.to_owned()),
+        },
+        run_deep_research_inner(
+            state,
+            request_id,
+            run_id,
+            org_id,
+            user_id,
+            thread_id,
+            inference_bearer,
+            session_bearer,
+            zdr,
+            min_privacy_tier,
+            model,
+            base_messages,
+            question,
+            client_plan,
+            source_access,
+            cancel,
+            sink,
+            budget,
+            progress,
+        ),
+    )
+    .await
+}
+
+/// The pipeline of [`run_deep_research`], run inside its attribution scope. The parameters are the same.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // cohesive pipeline entry — all are request context
+async fn run_deep_research_inner(
+    state: &AppState,
+    request_id: &str,
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    inference_bearer: &str,
+    session_bearer: &str,
+    zdr: bool,
+    min_privacy_tier: i32,
+    model: &str,
+    base_messages: Vec<ChatMessage>,
+    question: &str,
+    client_plan: Option<&ClientPlan>,
+    source_access: &ResearchSources<'_>,
+    cancel: &AtomicBool,
+    sink: Option<&crate::sse_events::RichEventSink>,
+    budget: &ResearchBudget,
+    progress_sink: Option<&dyn ResearchProgress>,
+) -> Result<DeepResearchOutcome, &'static str> {
+    // The caps this run works under, read once: the process caps, lowered by the budget (E4.6 062b).
+    let caps = RunCaps::for_budget(budget);
+    let deadline = Instant::now() + Duration::from_secs(caps.wall_clock_secs);
     let source_plan = source_access.plan;
     let mut events = match sink {
         Some(sink) => ResearchEvents::Live(sink),
@@ -4058,6 +4485,9 @@ pub async fn run_deep_research(
     };
     let mut tool_successes: u32 = 0;
     let mut tool_failures: u32 = 0;
+    // The run's spend: every successful inference call is priced into it, and the USD ceiling is checked at each
+    // boundary that would spend or gather more (E4.6 062b). Without a ceiling it changes nothing.
+    let mut meter = SpendMeter::new(budget.usd_ceiling.map(usd_ceiling_micro));
 
     // One synthetic tool call frames the whole pipeline in the tool timeline.
     let pipeline_call_id = format!("{request_id}-deep-research");
@@ -4088,8 +4518,33 @@ pub async fn run_deep_research(
              search or page read was attempted.",
             0,
             1,
+            caps,
         )
         .await);
+    }
+
+    // The USD ceiling is checked before each step that would spend or gather (E4.6 062b). A run whose ceiling is
+    // already spent plans, searches and reads nothing, and says so rather than reporting an empty search.
+    if meter.check().is_some() {
+        let coverage = Coverage::default();
+        let mut outcome = finish_without_evidence(
+            events,
+            base_messages,
+            question,
+            &coverage,
+            &pipeline_call_id,
+            &[],
+            &[],
+            "The research cost limit was reached before any sub-query was planned, so nothing was \
+             searched or read.",
+            0,
+            0,
+            caps,
+        )
+        .await;
+        outcome.stop = run_stop(&meter, false, 0);
+        outcome.spent_usd_micro = meter.spent_usd_micro();
+        return Ok(outcome);
     }
 
     // ---- Phase 1: plan ---------------------------------------------------
@@ -4101,10 +4556,10 @@ pub async fn run_deep_research(
             "active",
         )
         .await;
-    let plan_limit = max_sub_queries();
+    let plan_limit = caps.max_sub_queries;
     let edited_plan = edited_sub_queries(client_plan);
     let planned = match edited_plan {
-        Some(queries) => Ok((queries.to_vec(), false)),
+        Some(queries) => Ok((queries.to_vec(), false, Vec::new())),
         None => {
             guarded(
                 cancel,
@@ -4125,9 +4580,19 @@ pub async fn run_deep_research(
         }
     };
     let (plan, plan_degraded) = match planned {
-        Ok(result) => result,
+        Ok((plan, degraded, usages)) => {
+            // Every planning call is billed, a retry included, so each one is priced into the run.
+            for usage in &usages {
+                record_usage(state, &mut meter, usage).await;
+            }
+            (plan, degraded)
+        }
         Err(StopReason::Cancelled) => {
-            return Ok(cancelled_outcome(events, base_messages));
+            return Ok(cancelled_outcome(
+                events,
+                base_messages,
+                meter.spent_usd_micro(),
+            ));
         }
         // The deadline cannot realistically expire during planning (its own
         // timeout is far shorter), but if it does, the question itself is a
@@ -4170,6 +4635,8 @@ pub async fn run_deep_research(
         )
         .await;
 
+    report_progress(progress_sink, &[], &meter);
+
     // The plan as a checklist, one row per sub-query, before any search runs.
     // Emitted here rather than after the search so the reader can see WHAT is
     // being researched while it happens — the whole point of item 13.
@@ -4192,7 +4659,8 @@ pub async fn run_deep_research(
     let mut internal_sources: Vec<ResearchSource> = Vec::new();
     let mut internal_outcomes: Vec<SubQueryOutcome> = Vec::new();
     let mut internal_receipt: Option<Value> = None;
-    if source_plan.internal() {
+    // Gathering stops at the ceiling like the web does (E4.6 062b). Knowledge retrieval costs no inference.
+    if source_plan.internal() && meter.check().is_none() {
         events
             .step(
                 STEP_INTERNAL,
@@ -4210,7 +4678,11 @@ pub async fn run_deep_research(
         let gathered = match gathered {
             Ok(gathered) => Some(gathered),
             Err(StopReason::Cancelled) => {
-                return Ok(cancelled_outcome(events, base_messages));
+                return Ok(cancelled_outcome(
+                    events,
+                    base_messages,
+                    meter.spent_usd_micro(),
+                ));
             }
             Err(StopReason::Deadline) => {
                 deadline_hit = true;
@@ -4271,7 +4743,9 @@ pub async fn run_deep_research(
     let internal_chars = number_internal_sources(&mut internal_sources, corpus_char_cap());
 
     // ---- Phase 2: search -------------------------------------------------
-    if web {
+    // A spent ceiling searches nothing (E4.6 062b): each sub-query row then reports that it was not run.
+    let searched_gated = web && meter.check().is_some();
+    if web && !searched_gated {
         events
             .step(
                 STEP_SEARCH,
@@ -4283,7 +4757,9 @@ pub async fn run_deep_research(
     }
     // A run without the web searches nothing: no Quarry call is made, and each
     // sub-query's row reports its knowledge retrieval instead.
-    let searched = if web {
+    let searched = if searched_gated {
+        Ok(Ok((Vec::new(), 0, 0, Vec::new())))
+    } else if web {
         guarded(
             cancel,
             deadline,
@@ -4314,7 +4790,11 @@ pub async fn run_deep_research(
     let (hits, search_ok, search_failures, sub_query_outcomes) = match searched {
         Ok(result) => result?,
         Err(StopReason::Cancelled) => {
-            return Ok(cancelled_outcome(events, base_messages));
+            return Ok(cancelled_outcome(
+                events,
+                base_messages,
+                meter.spent_usd_micro(),
+            ));
         }
         Err(StopReason::Deadline) => {
             deadline_hit = true;
@@ -4402,7 +4882,7 @@ pub async fn run_deep_research(
     let priority = read_order(&sources);
     // A run without the web sets out to read no page, so its coverage names no
     // page target and the loop below fetches nothing.
-    let page_target = if web { max_pages() } else { 0 };
+    let page_target = if web { caps.max_pages } else { 0 };
     let attempt_budget = read_attempt_budget(page_target);
     let corpus_cap = corpus_char_cap();
     let mut progress = ReadProgress {
@@ -4412,8 +4892,14 @@ pub async fn run_deep_research(
     // Overwritten by the first `plan_read_batch` that declines, and reported as
     // `deadline` instead whenever the clock is what stopped us — including the
     // case where the search phase already burned it and this loop never runs.
-    let mut halt = ReadHalt::CandidatesExhausted;
-    while !deadline_hit {
+    // A search the ceiling refused found no candidates, and that is a cost stop,
+    // not an exhausted web (E4.6 062b), so it is not reported as one.
+    let mut halt = if searched_gated {
+        ReadHalt::CostLimit
+    } else {
+        ReadHalt::CandidatesExhausted
+    };
+    while !deadline_hit && !searched_gated {
         let batch =
             match plan_read_batch(&priority, progress, page_target, attempt_budget, corpus_cap) {
                 Ok(batch) => batch,
@@ -4422,6 +4908,11 @@ pub async fn run_deep_research(
                     break;
                 }
             };
+        // Checked before a batch is fetched: a spent ceiling starts no further batch, and keeps what was read (E4.6 062b).
+        if meter.check().is_some() {
+            halt = ReadHalt::CostLimit;
+            break;
+        }
         progress.batches = progress.batches.saturating_add(1);
         events
             .step(
@@ -4474,9 +4965,14 @@ pub async fn run_deep_research(
                         }
                     }
                 }
+                report_progress(progress_sink, &sources, &meter);
             }
             Err(StopReason::Cancelled) => {
-                return Ok(cancelled_outcome(events, base_messages));
+                return Ok(cancelled_outcome(
+                    events,
+                    base_messages,
+                    meter.spent_usd_micro(),
+                ));
             }
             Err(StopReason::Deadline) => {
                 deadline_hit = true;
@@ -4521,7 +5017,7 @@ pub async fn run_deep_research(
         log_bound(
             request_id,
             "wall_clock_secs",
-            usize::try_from(wall_clock_secs()).unwrap_or(usize::MAX),
+            usize::try_from(caps.wall_clock_secs).unwrap_or(usize::MAX),
             priority.len(),
             progress.succeeded,
             "the wall clock expired before the planned work finished",
@@ -4582,6 +5078,7 @@ pub async fn run_deep_research(
             question,
             cancel,
             deadline,
+            progress_sink,
         };
         let budget = PassBudget {
             first: progress,
@@ -4589,10 +5086,22 @@ pub async fn run_deep_research(
             attempt_budget,
             corpus_cap,
         };
-        let Some(run) =
-            run_second_pass(&context, &mut events, &plan, &mut sources, budget, &coverage).await?
+        let Some(run) = run_second_pass(
+            &context,
+            &mut events,
+            &plan,
+            &mut sources,
+            budget,
+            &coverage,
+            &mut meter,
+        )
+        .await?
         else {
-            return Ok(cancelled_outcome(events, base_messages));
+            return Ok(cancelled_outcome(
+                events,
+                base_messages,
+                meter.spent_usd_micro(),
+            ));
         };
         tool_successes = tool_successes.saturating_add(run.tool_successes);
         tool_failures = tool_failures.saturating_add(run.tool_failures);
@@ -4622,7 +5131,12 @@ pub async fn run_deep_research(
     }
 
     if coverage.read == 0 {
-        let detail = if !web {
+        let detail = if meter.stopped().is_some() {
+            // A cost stop is the cause when it was latched, whatever the search found (E4.6 062b).
+            "The research cost limit was reached before any page could be read, so there is no evidence to \
+             write from."
+                .to_owned()
+        } else if !web {
             // Said before the web's own explanations: this run never searched the web, so blaming
             // it would send the user to a cause that is not there (EP-2-S7).
             "No source in the organisation's knowledge base or selected accounts matched the \
@@ -4661,9 +5175,12 @@ pub async fn run_deep_research(
             &detail,
             tool_successes,
             tool_failures,
+            caps,
         )
         .await;
         outcome.web_citations = web_citations;
+        outcome.stop = run_stop(&meter, deadline_hit, coverage.read);
+        outcome.spent_usd_micro = meter.spent_usd_micro();
         return Ok(outcome);
     }
 
@@ -4704,17 +5221,33 @@ pub async fn run_deep_research(
     )
     .await;
     let (report, resolved_model, synthesis_failure) = match synthesized {
-        Ok(Some((report, resolved))) => (Some(report), resolved, None),
-        Ok(None) => (None, None, Some("the synthesis inference failed")),
-        Err(StopReason::Cancelled) => {
-            return Ok(cancelled_outcome(events, base_messages));
+        Ok((answer, usage)) => {
+            // The synthesis is billed whether or not its report is usable, so it is priced either way (E4.6 062b).
+            if let Some(usage) = usage {
+                record_usage(state, &mut meter, &usage).await;
+            }
+            match answer {
+                Some((report, resolved)) => (Some(report), resolved, None),
+                None => (None, None, Some("the synthesis inference failed")),
+            }
         }
-        Err(StopReason::Deadline) => (
-            None,
-            None,
-            Some("the research time budget ran out before the report was composed"),
-        ),
+        Err(StopReason::Cancelled) => {
+            return Ok(cancelled_outcome(
+                events,
+                base_messages,
+                meter.spent_usd_micro(),
+            ));
+        }
+        Err(StopReason::Deadline) => {
+            deadline_hit = true;
+            (
+                None,
+                None,
+                Some("the research time budget ran out before the report was composed"),
+            )
+        }
     };
+    report_progress(progress_sink, &sources, &meter);
 
     let mut messages = base_messages;
     let report_chars = report.as_ref().map_or(0, |text| text.chars().count());
@@ -4794,6 +5327,7 @@ pub async fn run_deep_research(
         &coverage,
         report_chars,
         &sources,
+        caps,
         second_pass.as_ref(),
     );
     // Counts of the internal sources, only on a run that read them, so a web-only receipt keeps
@@ -4833,6 +5367,8 @@ pub async fn run_deep_research(
         "deep research complete"
     );
 
+    let stop = run_stop(&meter, deadline_hit, coverage.read);
+    let halt_code = coverage.halt_code().map(str::to_owned);
     Ok(DeepResearchOutcome {
         messages,
         events: events.into_buffer(),
@@ -4844,6 +5380,10 @@ pub async fn run_deep_research(
         cancelled: false,
         report,
         coverage,
+        stop,
+        halt_code,
+        spent_usd_micro: meter.spent_usd_micro(),
+        source_summary: source_summary(&sources),
     })
 }
 
@@ -4853,6 +5393,7 @@ pub async fn run_deep_research(
 fn cancelled_outcome(
     events: ResearchEvents<'_>,
     base_messages: Vec<ChatMessage>,
+    spent_usd_micro: i64,
 ) -> DeepResearchOutcome {
     DeepResearchOutcome {
         messages: base_messages,
@@ -4865,11 +5406,16 @@ fn cancelled_outcome(
         cancelled: true,
         report: None,
         coverage: Coverage::default(),
+        stop: ResearchStop::Cancelled,
+        halt_code: None,
+        spent_usd_micro,
+        source_summary: Vec::new(),
     }
 }
 
-/// Build the outcome for a run that gathered no readable evidence.
-#[allow(clippy::too_many_arguments)] // one call shape, used from two failure points
+/// Build the outcome for a run that gathered no readable evidence. Its stop is `NoEvidence` and its spend is
+/// zero; a caller that knows a cost stop or a spend overrides both (E4.6 062b).
+#[allow(clippy::too_many_arguments)] // one call shape, used from three failure points
 async fn finish_without_evidence(
     mut events: ResearchEvents<'_>,
     mut messages: Vec<ChatMessage>,
@@ -4881,6 +5427,7 @@ async fn finish_without_evidence(
     detail: &str,
     tool_successes: u32,
     tool_failures: u32,
+    caps: RunCaps,
 ) -> DeepResearchOutcome {
     events
         .step(
@@ -4894,7 +5441,7 @@ async fn finish_without_evidence(
         .push(ChatEvent::ToolResult {
             id: pipeline_call_id.to_owned(),
             status: "error".to_owned(),
-            output: research_receipt(plan, coverage, 0, sources).to_string(),
+            output: research_receipt(plan, coverage, 0, sources, caps).to_string(),
             error: Some(detail.to_owned()),
         })
         .await;
@@ -4915,6 +5462,10 @@ async fn finish_without_evidence(
         cancelled: false,
         report: None,
         coverage: *coverage,
+        stop: ResearchStop::NoEvidence,
+        halt_code: coverage.halt_code().map(str::to_owned),
+        spent_usd_micro: 0,
+        source_summary: source_summary(sources),
     }
 }
 
@@ -4934,6 +5485,8 @@ struct PassContext<'a> {
     cancel: &'a AtomicBool,
     /// The run's wall clock, which the pass's own window ends before.
     deadline: Instant,
+    /// The caller's progress sink, handed the counters after each gap read batch (E4.6 062b).
+    progress_sink: Option<&'a dyn ResearchProgress>,
 }
 
 /// The first pass's read budgets, which the second pass may only spend the rest of.
@@ -4976,6 +5529,7 @@ async fn run_second_pass(
     sources: &mut Vec<ResearchSource>,
     budget: PassBudget,
     first: &Coverage,
+    meter: &mut SpendMeter,
 ) -> Result<Option<SecondPassRun>, &'static str> {
     let unchanged = |pass: SecondPass| SecondPassRun {
         pass,
@@ -5007,12 +5561,25 @@ async fn run_second_pass(
         }
     };
 
+    // The ceiling is checked before the claim check is paid for (E4.6 062b). A spent ceiling skips the pass with
+    // its reason and keeps the evidence the first pass gathered.
+    if meter.check().is_some() {
+        let skip = SecondPassSkip::CostLimit;
+        log_bound(context.request_id, "second_pass", 1, 0, 0, skip.code());
+        events.step(STEP_GAPS, GAPS_TITLE, skip.detail(), "done").await;
+        return Ok(Some(unchanged(SecondPass::skipped(skip, None))));
+    }
+
     let prompt = ledger_prompt(context.question, sources);
-    let raw = match guarded(context.cancel, window, ledger_inference(context, &prompt)).await {
-        Ok(raw) => raw,
-        Err(StopReason::Cancelled) => return Ok(None),
-        Err(StopReason::Deadline) => String::new(),
-    };
+    let (raw, usage) =
+        match guarded(context.cancel, window, ledger_inference(context, &prompt)).await {
+            Ok(answer) => answer,
+            Err(StopReason::Cancelled) => return Ok(None),
+            Err(StopReason::Deadline) => (String::new(), None),
+        };
+    if let Some(usage) = usage {
+        record_usage(context.state, meter, &usage).await;
+    }
     let Some(ledger) = parse_research_ledger(&raw, &readable_numbers(sources), plan) else {
         let skip = SecondPassSkip::LedgerUnavailable;
         log_bound(context.request_id, "second_pass", 1, 0, 0, skip.code());
@@ -5045,6 +5612,8 @@ async fn run_second_pass(
         Some(SecondPassSkip::NoGaps)
     } else if target == 0 || attempts == 0 {
         Some(SecondPassSkip::BudgetSpent)
+    } else if meter.check().is_some() {
+        Some(SecondPassSkip::CostLimit)
     } else {
         None
     };
@@ -5131,6 +5700,11 @@ async fn run_second_pass(
                 break;
             }
         };
+        // Checked before a gap batch is fetched, as before the first pass's batches (E4.6 062b).
+        if meter.check().is_some() {
+            halt = Some(ReadHalt::CostLimit);
+            break;
+        }
         progress.batches = progress.batches.saturating_add(1);
         events
             .step(
@@ -5183,6 +5757,7 @@ async fn run_second_pass(
                         }
                     }
                 }
+                report_progress(context.progress_sink, sources.as_slice(), meter);
             }
             Err(StopReason::Cancelled) => return Ok(None),
             Err(StopReason::Deadline) => {
@@ -5221,13 +5796,21 @@ async fn run_second_pass(
     // not reported as unsupported. Otherwise the first ledger stands, labelled over pass 1 only,
     // which its `pass_count` of 1 says.
     let mut ledger = ledger;
-    if !second_pass_numbers.is_empty() && relabel_fits(Instant::now(), window) {
+    // The re-label is a claim check like the first, so the ceiling applies to it too (E4.6 062b).
+    if !second_pass_numbers.is_empty()
+        && relabel_fits(Instant::now(), window)
+        && meter.check().is_none()
+    {
         let prompt = ledger_prompt(context.question, sources);
-        let raw = match guarded(context.cancel, window, ledger_inference(context, &prompt)).await {
-            Ok(raw) => raw,
-            Err(StopReason::Cancelled) => return Ok(None),
-            Err(StopReason::Deadline) => String::new(),
-        };
+        let (raw, usage) =
+            match guarded(context.cancel, window, ledger_inference(context, &prompt)).await {
+                Ok(answer) => answer,
+                Err(StopReason::Cancelled) => return Ok(None),
+                Err(StopReason::Deadline) => (String::new(), None),
+            };
+        if let Some(usage) = usage {
+            record_usage(context.state, meter, &usage).await;
+        }
         let searched: Vec<String> = plan.iter().chain(gaps.iter()).cloned().collect();
         if let Some(mut relabelled) =
             parse_research_ledger(&raw, &readable_numbers(sources), &searched)
@@ -5283,8 +5866,9 @@ async fn run_second_pass(
 
 /// One bounded ledger inference on the plan tier. Returns the raw content, or an empty string for
 /// every failure mode, each logged; an empty answer means "no ledger", which skips the gap search
-/// rather than failing the run.
-async fn ledger_inference(context: &PassContext<'_>, prompt: &str) -> String {
+/// rather than failing the run. The usage of a call that succeeded is returned beside its content, so the
+/// caller can price it (E4.6 062b).
+async fn ledger_inference(context: &PassContext<'_>, prompt: &str) -> (String, Option<InferUsage>) {
     let configured =
         std::env::var("DEEP_RESEARCH_PLAN_MODEL").unwrap_or_else(|_| PLAN_MODEL.to_owned());
     let (request_model, role_fallback_model) = role_routing::side_task_model(
@@ -5292,6 +5876,7 @@ async fn ledger_inference(context: &PassContext<'_>, prompt: &str) -> String {
         &configured,
         &configured,
     );
+    let requested = request_model.clone();
     let mut client = context.state.inference_client.clone();
     let response = tokio::time::timeout(
         LEDGER_TIMEOUT,
@@ -5322,21 +5907,26 @@ async fn ledger_inference(context: &PassContext<'_>, prompt: &str) -> String {
     )
     .await;
     match response {
-        Ok(Ok(resp)) => resp.into_inner().content,
+        Ok(Ok(resp)) => {
+            let resp = resp.into_inner();
+            let usage = InferUsage::of(&resp, &requested);
+            (resp.content, Some(usage))
+        }
         Ok(Err(error)) => {
             tracing::debug!(%error, request_id = %context.request_id, "deep research ledger inference failed");
-            String::new()
+            (String::new(), None)
         }
         Err(_elapsed) => {
             tracing::debug!(request_id = %context.request_id, "deep research ledger inference timed out");
-            String::new()
+            (String::new(), None)
         }
     }
 }
 
 /// One cheap, bounded, non-streaming inference that decomposes the question.
 ///
-/// Returns `(plan, degraded)`. Best-effort in the same posture as
+/// Returns `(plan, degraded, usages)`, the usages of every planning call that succeeded, so the run can
+/// price them (E4.6 062b). Best-effort in the same posture as
 /// `sse::generate_thread_title`: every failure path logs at debug and degrades
 /// to searching the question as asked, because a research turn must produce an
 /// answer rather than an error.
@@ -5351,8 +5941,8 @@ async fn plan_sub_queries(
     question: &str,
     limit: usize,
     turn_model: &str,
-) -> (Vec<String>, bool) {
-    let (raw, degraded) = plan_raw(
+) -> (Vec<String>, bool, Vec<InferUsage>) {
+    let (raw, degraded, usages) = plan_raw(
         state,
         request_id,
         org_id,
@@ -5365,7 +5955,7 @@ async fn plan_sub_queries(
         false,
     )
     .await;
-    (parse_sub_queries(&raw, question, limit), degraded)
+    (parse_sub_queries(&raw, question, limit), degraded, usages)
 }
 
 /// The plan turn (EP-2 S5): one planning inference, which may also ask clarifying questions, and
@@ -5393,7 +5983,8 @@ pub async fn plan_only(
         )
         .await;
     let limit = max_sub_queries();
-    let (raw, degraded) = plan_raw(
+    // The plan turn is not a research run, so it has no budget to spend against and its usage is not metered.
+    let (raw, degraded, _usages) = plan_raw(
         state,
         request_id,
         org_id,
@@ -5426,9 +6017,9 @@ pub async fn plan_only(
     plan
 }
 
-/// The planning inference's raw answer and whether it degraded to nothing, with the one retry on
-/// the turn's model. `with_questions` asks for the plan turn's JSON object, which may carry
-/// clarifying questions beside the queries (EP-2 S5).
+/// The planning inference's raw answer, whether it degraded to nothing, and the usage of every planning call
+/// that succeeded, the retry included (E4.6 062b). `with_questions` asks for the plan turn's JSON object, which
+/// may carry clarifying questions beside the queries (EP-2 S5).
 #[allow(clippy::too_many_arguments)] // request context, mirrors plan_sub_queries
 async fn plan_raw(
     state: &AppState,
@@ -5441,11 +6032,11 @@ async fn plan_raw(
     limit: usize,
     turn_model: &str,
     with_questions: bool,
-) -> (String, bool) {
+) -> (String, bool, Vec<InferUsage>) {
     let configured =
         std::env::var("DEEP_RESEARCH_PLAN_MODEL").unwrap_or_else(|_| PLAN_MODEL.to_owned());
 
-    let mut raw = plan_once(
+    let (mut raw, first_usage) = plan_once(
         state,
         request_id,
         org_id,
@@ -5458,6 +6049,7 @@ async fn plan_raw(
         with_questions,
     )
     .await;
+    let mut usages: Vec<InferUsage> = first_usage.into_iter().collect();
 
     // The configured plan tier can be unroutable in a deployment while
     // the turn's own model demonstrably answers (it streamed the reply).
@@ -5471,7 +6063,7 @@ async fn plan_raw(
             %turn_model,
             "deep research plan model produced no content; retrying on the turn's model"
         );
-        raw = plan_once(
+        let (retried, retry_usage) = plan_once(
             state,
             request_id,
             org_id,
@@ -5484,6 +6076,8 @@ async fn plan_raw(
             with_questions,
         )
         .await;
+        raw = retried;
+        usages.extend(retry_usage);
     }
 
     let degraded = raw.trim().is_empty();
@@ -5495,7 +6089,7 @@ async fn plan_raw(
             "deep research planning degraded; searching the question as asked"
         );
     }
-    (raw, degraded)
+    (raw, degraded, usages)
 }
 
 /// Whether an empty plan warrants one retry on the turn's own model.
@@ -5521,11 +6115,12 @@ async fn plan_once(
     limit: usize,
     model: &str,
     with_questions: bool,
-) -> String {
+) -> (String, Option<InferUsage>) {
     // With role routing on the plan asks the role table, and the configured plan model is the fallback the
     // table tries after its own candidates; with it off the plan names that model exactly as before.
     let (request_model, role_fallback_model) =
         role_routing::side_task_model(role_routing::role_routing_enabled(), model, model);
+    let requested = request_model.clone();
     let mut client = state.inference_client.clone();
     let response = tokio::time::timeout(
         PLAN_TIMEOUT,
@@ -5562,7 +6157,9 @@ async fn plan_once(
     .await;
     match response {
         Ok(Ok(resp)) => {
-            let content = resp.into_inner().content;
+            let resp = resp.into_inner();
+            let usage = InferUsage::of(&resp, &requested);
+            let content = resp.content;
             // A successful-but-empty response used to be the ONE path
             // here that logged nothing, which is why an always-degrading
             // planner survived a debug-level live run undetected.
@@ -5573,15 +6170,15 @@ async fn plan_once(
                     "deep research plan inference succeeded but returned empty content"
                 );
             }
-            content
+            (content, Some(usage))
         }
         Ok(Err(error)) => {
             tracing::debug!(%error, %request_id, %model, "deep research plan inference failed");
-            String::new()
+            (String::new(), None)
         }
         Err(_elapsed) => {
             tracing::debug!(%request_id, %model, "deep research plan inference timed out");
-            String::new()
+            (String::new(), None)
         }
     }
 }
@@ -5742,8 +6339,8 @@ async fn read_pages(
     Ok((results, ok, failed))
 }
 
-/// One bounded inference that writes the report. Returns the report plus the
-/// concrete model that produced it, or `None` on any failure.
+/// One bounded inference that writes the report. Returns the report plus the concrete model that produced it,
+/// or `None` on any failure, and the usage of the call whenever it succeeded, usable content or not (E4.6 062b).
 async fn synthesize_report(
     state: &AppState,
     request_id: &str,
@@ -5753,7 +6350,7 @@ async fn synthesize_report(
     min_privacy_tier: i32,
     model: &str,
     prompt: &str,
-) -> Option<(String, Option<String>)> {
+) -> (Option<(String, Option<String>)>, Option<InferUsage>) {
     let mut client = state.inference_client.clone();
     let response = tokio::time::timeout(
         SYNTHESIS_TIMEOUT,
@@ -5787,22 +6384,23 @@ async fn synthesize_report(
     match response {
         Ok(Ok(resp)) => {
             let resp = resp.into_inner();
+            let usage = InferUsage::of(&resp, model);
             let content = resp.content.trim().to_owned();
             if content.is_empty() {
                 tracing::debug!(%request_id, "deep research synthesis returned empty content");
-                return None;
+                return (None, Some(usage));
             }
             let resolved =
                 Some(resp.model_used).filter(|model_used: &String| !model_used.trim().is_empty());
-            Some((content, resolved))
+            (Some((content, resolved)), Some(usage))
         }
         Ok(Err(error)) => {
             tracing::debug!(%error, %request_id, "deep research synthesis inference failed");
-            None
+            (None, None)
         }
         Err(_elapsed) => {
             tracing::debug!(%request_id, "deep research synthesis inference timed out");
-            None
+            (None, None)
         }
     }
 }
@@ -7164,6 +7762,7 @@ mod tests {
             &coverage,
             12_000,
             &sources,
+            RunCaps::for_budget(&ResearchBudget::default()),
         );
         assert_eq!(receipt["sources_found"], 9);
         assert_eq!(receipt["sources_read"], 5);
@@ -8618,15 +9217,23 @@ mod tests {
             let sources = quoted_sources();
             let coverage = coverage_of(&sources, 1, 1, 0, GateReport::default(), target_met(2));
             let plan = vec!["sub".to_owned()];
+            let caps = RunCaps::for_budget(&ResearchBudget::default());
             assert_eq!(
-                research_receipt_with_second_pass(&plan, &coverage, 10, &sources, None),
-                research_receipt(&plan, &coverage, 10, &sources)
+                research_receipt_with_second_pass(&plan, &coverage, 10, &sources, caps, None),
+                research_receipt(&plan, &coverage, 10, &sources, caps)
             );
             let pass = ran(Some(ledger_with(vec![
                 (ClaimStatus::Supported, vec![1, 2]),
                 (ClaimStatus::Unsupported, vec![]),
             ])));
-            let receipt = research_receipt_with_second_pass(&plan, &coverage, 10, &sources, Some(&pass));
+            let receipt = research_receipt_with_second_pass(
+                &plan,
+                &coverage,
+                10,
+                &sources,
+                caps,
+                Some(&pass),
+            );
             assert_eq!(receipt["passes"], 2);
             assert_eq!(receipt["gap_queries"], serde_json::json!(["gap one", "gap two"]));
             assert_eq!(receipt["second_pass_skipped"], Value::Null);
@@ -8635,7 +9242,14 @@ mod tests {
                 serde_json::json!({"conflict": 0, "single_source": 0, "supported": 1, "unsupported": 1})
             );
             let skipped = SecondPass::skipped(SecondPassSkip::NoGaps, None);
-            let receipt = research_receipt_with_second_pass(&plan, &coverage, 10, &sources, Some(&skipped));
+            let receipt = research_receipt_with_second_pass(
+                &plan,
+                &coverage,
+                10,
+                &sources,
+                caps,
+                Some(&skipped),
+            );
             assert_eq!(receipt["passes"], 1);
             assert_eq!(receipt["second_pass_skipped"], "no-gaps");
             assert_eq!(receipt["claims_by_status"], Value::Null);

@@ -374,7 +374,7 @@ fn export_response(export: &Export, view: &JobResultsView) -> Result<Response, Q
             format!("attachment; filename=\"{}\"", export.format.file_name()),
         )
         .header(header::CACHE_CONTROL, "private, no-store")
-        .header(RESULT_KIND_HEADER, "page_index");
+        .header(RESULT_KIND_HEADER, view.kind.as_str());
     if let Some(next) = view.next_seq {
         builder = builder.header(NEXT_SEQ_HEADER, next.to_string());
     }

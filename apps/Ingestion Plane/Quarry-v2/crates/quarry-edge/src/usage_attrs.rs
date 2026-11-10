@@ -12,6 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use axum::extract::Request;
+use axum::middleware::Next;
+use axum::response::Response;
 use quarry_runtime::usage_metrics as names;
 use quarry_runtime::{BrowserMetricsMode, UsageEvent, UsageMeter};
 use serde_json::{json, Map, Value};
@@ -21,6 +24,14 @@ use crate::budget::{RunClass, SegmentUsage};
 
 /// The header a service stamps with the surface a request came from.
 pub const SURFACE_HEADER: &str = "x-verevon-surface";
+
+/// The header a service principal may stamp with the id of the parent run it acts for (E4.6 062a).
+/// Advisory: it is a usage attribute only and is never authority.
+pub const PARENT_RUN_HEADER: &str = "x-verevon-parent-run";
+
+/// The environment switch for the parent-run usage attribute. Unset means off; `on`, `1` or `true`
+/// turns it on.
+pub const ENV_PARENT_RUN: &str = "QUARRY_EDGE__USAGE_PARENT_RUN";
 
 /// The environment switch for the seven browser metrics. Unset means `off`.
 pub const ENV_BROWSER_METRICS: &str = "QUARRY_EDGE__USAGE_BROWSER_METRICS";
@@ -87,6 +98,60 @@ pub fn surface_for(claims: &Claims, header: Option<&str>) -> Surface {
     header.and_then(Surface::parse).unwrap_or(Surface::Internal)
 }
 
+/// Whether `QUARRY_EDGE__USAGE_PARENT_RUN` is on in this process. Read once.
+pub fn parent_run_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var(ENV_PARENT_RUN)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "on" | "1" | "true"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// The parent run id of a request (E4.6 062a). `Some` only when the switch is on, the principal is a
+/// service and the header is a well-formed id (1 to 128 bytes of `[A-Za-z0-9._:-]`). A user token
+/// never gets one and the header is not read for it. The value is advisory: it is written to usage
+/// metadata and is never read by auth, scopes, budget, grants, ZDR, policy or rate limits.
+pub fn parent_run_for(claims: &Claims, header: Option<&str>, enabled: bool) -> Option<String> {
+    if !enabled || !claims.is_service() {
+        return None;
+    }
+    header
+        .filter(|value| crate::request_id::is_valid_inbound(value))
+        .map(str::to_owned)
+}
+
+tokio::task_local! {
+    /// The parent run id of the request being served, set by [`parent_run_layer`].
+    static PARENT_RUN: Option<String>;
+}
+
+/// The parent run id of the request in scope, if the layer set one. It does not follow
+/// `tokio::spawn`: work that leaves the request task must carry the value itself.
+pub fn current_parent_run() -> Option<String> {
+    PARENT_RUN.try_with(Clone::clone).ok().flatten()
+}
+
+/// Reads the advisory parent-run header of a service principal and scopes it to the request.
+/// It must sit inside `require_auth`, which inserts the claims. A request with no claims, a user
+/// token, an absent or malformed header, or the switch off runs with no parent run. It never
+/// refuses a request.
+pub async fn parent_run_layer(req: Request, next: Next) -> Response {
+    let parent = req.extensions().get::<Claims>().and_then(|claims| {
+        let header = req
+            .headers()
+            .get(PARENT_RUN_HEADER)
+            .and_then(|value| value.to_str().ok());
+        parent_run_for(claims, header, parent_run_enabled())
+    });
+    PARENT_RUN.scope(parent, next.run(req)).await
+}
+
 /// How an ended unit of usage finished. `Error`, `Refused`, `Cancelled` and `Timeout` are part of the
 /// closed set that the shutdown drain (WS6.J) and the refusal paths emit; until those land only `Ok`
 /// and `Expired` are constructed.
@@ -134,6 +199,9 @@ pub struct UsageAttrs {
     pub paid_provider: Option<bool>,
     /// Written only off ZDR.
     pub llm_format: Option<&'static str>,
+    /// The advisory id of the parent run a service acts for (E4.6 062a). Written only off ZDR. When
+    /// `None`, [`current_parent_run`] supplies the request's value.
+    pub parent_run: Option<String>,
 }
 
 impl UsageAttrs {
@@ -149,6 +217,7 @@ impl UsageAttrs {
             host: None,
             paid_provider: None,
             llm_format: None,
+            parent_run: None,
         }
     }
 }
@@ -182,6 +251,10 @@ pub fn metadata(attrs: &UsageAttrs, zdr: bool) -> Value {
         }
         if let Some(format) = attrs.llm_format {
             map.insert("llm_format".into(), json!(format));
+        }
+        // Advisory attribution only; ZDR_ALLOWLIST is unchanged, so under ZDR the id is dropped.
+        if let Some(parent) = attrs.parent_run.clone().or_else(current_parent_run) {
+            map.insert("parent_run".into(), json!(parent));
         }
     }
     Value::Object(map)
@@ -226,8 +299,31 @@ pub async fn emit(
 /// `agent.run` and its completed steps; a person's session emits its browser seconds only.
 /// Seconds are whole and a zero is skipped. The ids are `quarry:<run_id>:s<segment>:<metric>`,
 /// so a resumed run's segments never share an id. A latched bound overrides the outcome.
+/// The segment carries the run's own parent run (E4.6 062a), never the closing request's.
 #[allow(clippy::too_many_arguments)] // one call site; the arguments are the segment's identity
 pub async fn emit_run_segment(
+    meter: &dyn UsageMeter,
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+    zdr: bool,
+    usage: &SegmentUsage,
+    outcome: Outcome,
+) {
+    // The segment is emitted by whichever request closes the run, so that request's task-local is
+    // in scope here. `metadata` falls back to the task-local when an attribute is unset, so the
+    // task-local is set to the run's value: a closing request's header never reaches the segment.
+    PARENT_RUN
+        .scope(
+            usage.parent_run.clone(),
+            emit_segment_events(meter, run_id, org_id, user_id, zdr, usage, outcome),
+        )
+        .await
+}
+
+/// The events of one run segment, emitted under the run's parent run by [`emit_run_segment`].
+#[allow(clippy::too_many_arguments)] // see emit_run_segment
+async fn emit_segment_events(
     meter: &dyn UsageMeter,
     run_id: &str,
     org_id: &str,
@@ -247,6 +343,7 @@ pub async fn emit_run_segment(
     attrs.class = Some(usage.class.label());
     attrs.user_id = Some(user_id.to_owned());
     attrs.estimated = true;
+    attrs.parent_run = usage.parent_run.clone();
     let whole_seconds = (usage.active_ms / 1_000) as f64;
     match usage.class {
         RunClass::Agent => {

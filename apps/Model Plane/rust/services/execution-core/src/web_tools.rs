@@ -66,9 +66,57 @@ pub struct WebToolsClient {
     http: reqwest::Client,
     /// The org's domain rules, checked before a host is reached (EP-9 W3). Off reads nothing and changes nothing.
     site: SitePolicy,
+    /// Advisory request attribution sent on every Quarry call (Q4-062a). Empty by default.
+    attribution: Attribution,
+}
+
+/// The header carrying the step's correlation id. The edge adopts it when it is valid.
+pub const REQUEST_ID_HEADER: &str = "x-request-id";
+/// The advisory parent-run header. Quarry reads it only from service principals and only behind
+/// `QUARRY_EDGE__USAGE_PARENT_RUN`; it never decides billing or authority.
+pub const PARENT_RUN_HEADER: &str = "x-verevon-parent-run";
+/// Longest attribution value sent, in bytes.
+const MAX_ATTRIBUTION_BYTES: usize = 128;
+
+/// Advisory attribution for the Quarry calls of one run step: a request id and the parent run.
+/// Each value is kept only when non-empty, at most 128 bytes and every byte is in
+/// `[A-Za-z0-9._:-]`; otherwise it is dropped. Quarry stays the only biller and the only authority.
+#[derive(Clone, Default)]
+pub struct Attribution {
+    request_id: Option<String>,
+    parent_run: Option<String>,
+}
+
+impl Attribution {
+    fn clean(value: String) -> Option<String> {
+        let ok = !value.is_empty()
+            && value.len() <= MAX_ATTRIBUTION_BYTES
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'));
+        ok.then_some(value)
+    }
+
+    /// Attribution for one step. The parent run is omitted under ZDR so no run id leaves the plane.
+    pub fn for_step(run_id: &str, step_id: &str, zdr: bool) -> Self {
+        Self {
+            request_id: Self::clean(format!("{run_id}.{step_id}")),
+            parent_run: if zdr {
+                None
+            } else {
+                Self::clean(run_id.to_owned())
+            },
+        }
+    }
 }
 
 impl WebToolsClient {
+    /// Attach the step's advisory attribution; every call this client makes then carries it.
+    pub fn with_attribution(mut self, attribution: Attribution) -> Self {
+        self.attribution = attribution;
+        self
+    }
+
     /// Build from the environment. Returns `None` when `QUARRY_EDGE_URL` /
     /// `QUARRY_EDGE_ADDR` is unset, so the caller can surface a clear
     /// "not configured" error instead of echoing.
@@ -91,6 +139,7 @@ impl WebToolsClient {
             auth,
             http,
             site: SitePolicy::from_env(),
+            attribution: Attribution::default(),
         }))
     }
 
@@ -108,11 +157,18 @@ impl WebToolsClient {
                 .token(org_id, scopes)
                 .await
                 .map_err(|error| format!("quarry authentication failed: {error}"))?;
-            let resp = self
+            let mut request = self
                 .http
                 .post(format!("{}{path}", self.base_url))
                 .bearer_auth(&bearer)
-                .header("x-quarry-org", org_id)
+                .header("x-quarry-org", org_id);
+            if let Some(request_id) = &self.attribution.request_id {
+                request = request.header(REQUEST_ID_HEADER, request_id);
+            }
+            if let Some(parent_run) = &self.attribution.parent_run {
+                request = request.header(PARENT_RUN_HEADER, parent_run);
+            }
+            let resp = request
                 .json(body)
                 .send()
                 .await
@@ -315,6 +371,7 @@ impl WebToolsClient {
                 .build()
                 .expect("test HTTP client"),
             site: SitePolicy::disabled(),
+            attribution: Attribution::default(),
         }
     }
 }

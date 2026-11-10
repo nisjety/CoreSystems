@@ -168,6 +168,9 @@ pub fn router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(crate::profile_routes::IMPORT_MAX_BYTES))
         .layer(RequestBodyLimitLayer::new(crate::profile_routes::IMPORT_MAX_BYTES))
         .layer(middleware::from_fn(crate::auth::require_service_route_scope))
+        // E4.6 062a: the advisory parent-run usage attribute (dark behind QUARRY_EDGE__USAGE_PARENT_RUN).
+        // Inside require_auth, which inserts the claims; never read by auth, scopes or budget.
+        .layer(middleware::from_fn(crate::usage_attrs::parent_run_layer))
         // INNH-10: an `api_key` principal is held to its route allow-list (dark behind
         // QUARRY_EDGE__API_KEY_AGENT_RUNS; user and service tokens pass through untouched).
         .layer(middleware::from_fn(crate::api_key::require_api_key_route_fence))
@@ -181,6 +184,8 @@ pub fn router(state: AppState) -> Router {
     let parse_upload = Router::new()
         .route("/v1/parse", post(crate::parse_routes::parse))
         .layer(middleware::from_fn(crate::auth::require_service_route_scope))
+        // E4.6 062a: the advisory parent-run usage attribute (see the profile router).
+        .layer(middleware::from_fn(crate::usage_attrs::parent_run_layer))
         // INNH-10 x INNH-11: an `api_key` principal is held to its allow-list here too; /v1/parse
         // is not on it, so a key is refused (403 `api_key_route_refused`). This router's layers
         // also wrap the fallback of the merged router, so the fence must be here for an unknown
@@ -417,6 +422,9 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn(
             crate::auth::require_service_route_scope,
         ))
+        // E4.6 062a: the advisory parent-run usage attribute, beside the service scope. It covers
+        // search, extract, map, scrape, crawl and batch metering (see the profile router).
+        .layer(middleware::from_fn(crate::usage_attrs::parent_run_layer))
         // INNH-10: the API-key route fence, beside the service scope (see the profile router).
         .layer(middleware::from_fn(crate::api_key::require_api_key_route_fence))
         // After require_auth (which inserts the claims), before the handler: a

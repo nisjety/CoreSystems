@@ -1480,11 +1480,17 @@ async fn execute_step_inner(
         )
         .await
     } else if matches!(tool_name, WEB_SEARCH_TOOL | QUARRY_MCP_WEB_SEARCH_TOOL) {
-        execute_web_search(tool_input, org_id, zdr).await
+        let attribution =
+            crate::web_tools::Attribution::for_step(run_id, step_id, zdr || waived);
+        execute_web_search(tool_input, org_id, zdr, attribution).await
     } else if matches!(tool_name, WEB_FETCH_TOOL | QUARRY_MCP_WEB_READ_TOOL) {
-        execute_web_fetch(tool_input, org_id, zdr).await
+        let attribution =
+            crate::web_tools::Attribution::for_step(run_id, step_id, zdr || waived);
+        execute_web_fetch(tool_input, org_id, zdr, attribution).await
     } else if crate::web_tools::is_crawl_tool(tool_name) {
-        execute_web_crawl_tool(tool_name, tool_input, org_id).await
+        let attribution =
+            crate::web_tools::Attribution::for_step(run_id, step_id, zdr || waived);
+        execute_web_crawl_tool(tool_name, tool_input, org_id, attribution).await
     } else if tool_name == crate::runtime_loop::owner_reads::TOOL_NAME {
         crate::runtime_loop::owner_reads::execute(
             tool_input,
@@ -2247,6 +2253,7 @@ async fn execute_web_crawl_tool(
     tool_name: &str,
     tool_input: &str,
     org_id: &str,
+    attribution: crate::web_tools::Attribution,
 ) -> tool_bridge::ToolExecution {
     use crate::web_tools::{BATCH_TOOL, CRAWL_SITE_TOOL, MAP_TOOL, MAX_BATCH_URLS};
     #[derive(serde::Deserialize)]
@@ -2273,7 +2280,7 @@ async fn execute_web_crawl_tool(
         Err(error) => return tool_error(format!("invalid {tool_name} input: {error}")),
     };
     let client = match crate::web_tools::WebToolsClient::from_env() {
-        Ok(Some(client)) => client,
+        Ok(Some(client)) => client.with_attribution(attribution),
         Ok(None) => {
             return tool_error(format!(
                 "{tool_name} unavailable: QUARRY_EDGE_URL not configured"
@@ -2330,6 +2337,7 @@ async fn execute_web_search(
     tool_input: &str,
     org_id: &str,
     zdr: bool,
+    attribution: crate::web_tools::Attribution,
 ) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct SearchInput {
@@ -2342,7 +2350,7 @@ async fn execute_web_search(
         Err(e) => return tool_error(format!("invalid web_search input: {e}")),
     };
     let client = match crate::web_tools::WebToolsClient::from_env() {
-        Ok(Some(client)) => client,
+        Ok(Some(client)) => client.with_attribution(attribution),
         Ok(None) => {
             return tool_error("web_search unavailable: QUARRY_EDGE_URL not configured".to_owned());
         }
@@ -2555,6 +2563,7 @@ async fn execute_web_fetch(
     tool_input: &str,
     org_id: &str,
     zdr: bool,
+    attribution: crate::web_tools::Attribution,
 ) -> tool_bridge::ToolExecution {
     #[derive(serde::Deserialize)]
     struct FetchInput {
@@ -2565,7 +2574,7 @@ async fn execute_web_fetch(
         Err(e) => return tool_error(format!("invalid web_fetch input: {e}")),
     };
     let client = match crate::web_tools::WebToolsClient::from_env() {
-        Ok(Some(client)) => client,
+        Ok(Some(client)) => client.with_attribution(attribution),
         Ok(None) => {
             return tool_error("web_fetch unavailable: QUARRY_EDGE_URL not configured".to_owned());
         }

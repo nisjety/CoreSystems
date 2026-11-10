@@ -79,6 +79,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "model_plane/v1/thread_shares.proto",
         // W4-F T1: EventTriggerService (session-core's event trigger record store).
         "model_plane/v1/event_triggers.proto",
+        // Q4 E4.6 (062b): ResearchRunService (session-core's durable research run store).
+        "model_plane/v1/research_runs.proto",
     ];
 
     let dp_protos = &[

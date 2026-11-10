@@ -1011,7 +1011,7 @@ pub(crate) mod tests {
             ),
             (
                 "tool_loop.rs",
-                "run_tool_rounds_for_model_with_attachments",
+                "run_tool_rounds_for_model_with_attachments_inner",
                 "the turn's route (provider hint and connection)",
             ),
             (

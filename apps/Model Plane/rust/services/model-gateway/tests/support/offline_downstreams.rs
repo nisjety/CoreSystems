@@ -36,6 +36,7 @@ use mp_contracts::model_plane::v1::{
     learning_governance_service_client::LearningGovernanceServiceClient,
     managed_run_lifecycle_client::ManagedRunLifecycleClient,
     memory_service_client::MemoryServiceClient,
+    research_run_service_client::ResearchRunServiceClient,
     message_search_client::MessageSearchClient,
     message_tree_service_client::MessageTreeServiceClient,
     thread_fork_service_client::ThreadForkServiceClient,
@@ -77,6 +78,7 @@ pub fn offline_state() -> AppState {
     state.message_tree_client = MessageTreeServiceClient::new(offline_channel());
     state.thread_fork_client = ThreadForkServiceClient::new(offline_channel());
     state.thread_goal_client = ThreadGoalServiceClient::new(offline_channel());
+    state.research_run_client = ResearchRunServiceClient::new(offline_channel());
     state.thread_reference_client = ThreadReferenceServiceClient::new(offline_channel());
     state.attention_client = AttentionServiceClient::new(offline_channel());
     state.learning_client = LearningGovernanceServiceClient::new(offline_channel());

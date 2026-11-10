@@ -4542,6 +4542,10 @@ pub async fn invoke_stream_sse(
                 &research_sources,
                 cancel_flag.as_ref(),
                 Some(&sink),
+                // The run as it was before budgets: the process caps and no USD ceiling, and no progress sink
+                // until the research-run wiring lands (E4.6 062b).
+                &crate::deep_research::ResearchBudget::default(),
+                None,
             )
             .await;
             seq = sink.sync_cursor(seq).await;

@@ -70,7 +70,7 @@ fn the_ask_loop_reaches_the_read_only_through_the_gate() {
 
     let rounds = function_body(
         &text,
-        "pub async fn run_tool_rounds_for_model_with_attachments(",
+        "async fn run_tool_rounds_for_model_with_attachments_inner(",
     );
     assert!(
         rounds.contains("connector_reads::offered(")

@@ -404,11 +404,38 @@ pub struct JobResultView {
     pub bytes: Option<u64>,
 }
 
-/// `GET /v1/jobs/{id}/results` (and the crawl and batch aliases). `next_seq` is set when
-/// the page was full: pass it back as `after_seq` to read the rest. A `latest=true` read
-/// whose scan reached its ceiling says so in `scan_capped`.
+/// What the rows of a job-results read are (decision B2(a)). The rows are a page index
+/// first: where each page is and which artifacts hold its content. `Dataset` names the
+/// extracted-records shape a later wave adds; nothing produces it today. Closed set.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultKind {
+    /// An index of the pages fetched (URL, status, metadata, artifact ids), not their content.
+    #[default]
+    PageIndex,
+    /// Extracted records of a run. Reserved: no job produces it yet.
+    Dataset,
+}
+
+impl ResultKind {
+    /// The wire name, also the value of the `X-Quarry-Result-Kind` export header.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ResultKind::PageIndex => "page_index",
+            ResultKind::Dataset => "dataset",
+        }
+    }
+}
+
+/// `GET /v1/jobs/{id}/results` (and the crawl and batch aliases). `kind` says what the rows
+/// are (`page_index` today). `next_seq` is set when the page was full: pass it back as
+/// `after_seq` to read the rest. A `latest=true` read whose scan reached its ceiling says so
+/// in `scan_capped`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct JobResultsView {
+    /// What the rows are; absent from the upstream body, where the default `page_index` applies.
+    #[serde(default)]
+    pub kind: ResultKind,
     pub items: Vec<JobResultView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_seq: Option<u64>,

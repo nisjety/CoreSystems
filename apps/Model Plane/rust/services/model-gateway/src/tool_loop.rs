@@ -7489,6 +7489,51 @@ pub async fn run_forced_web_search_for_model(
     query: &str,
     sink: Option<&crate::sse_events::RichEventSink>,
 ) -> Result<ToolRounds, &'static str> {
+    // Every search and page read of the forced lookup carries its request id and, off ZDR, its run id as
+    // advisory attribution (E4.6, 062a). The reads run on this task, so the scope reaches each of them.
+    crate::quarry::attribution::scope(
+        crate::quarry::attribution::Attribution {
+            request_id: Some(request_id.to_owned()),
+            parent_run: (!zdr).then(|| run_id.to_owned()),
+        },
+        run_forced_web_search_for_model_inner(
+            state,
+            request_id,
+            run_id,
+            org_id,
+            user_id,
+            thread_id,
+            session_bearer,
+            capability_bearer,
+            zdr,
+            data_plane_mode,
+            requested_model,
+            base_messages,
+            query,
+            sink,
+        ),
+    )
+    .await
+}
+
+/// The body of [`run_forced_web_search_for_model`], run inside its attribution scope. The parameters are the same.
+#[allow(clippy::too_many_arguments)]
+async fn run_forced_web_search_for_model_inner(
+    state: &AppState,
+    request_id: &str,
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    session_bearer: &str,
+    capability_bearer: Option<&str>,
+    zdr: bool,
+    data_plane_mode: Option<String>,
+    requested_model: &str,
+    base_messages: Vec<ChatMessage>,
+    query: &str,
+    sink: Option<&crate::sse_events::RichEventSink>,
+) -> Result<ToolRounds, &'static str> {
     let search_query = resolve_forced_web_search_query(&base_messages, query);
     // Derived from the ORIGINAL message, not from `search_query`: normalization
     // strips precisely the function words the language heuristic reads, so
@@ -8849,6 +8894,84 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     // The model the tool-DECISION rounds run on, substitutions included.
     model: &str,
     // The model the USER selected, for the paid-provider entitlement only.
+    requested_model: &str,
+    provider_hint: &str,
+    subscription_connection_id: &str,
+    base_messages: Vec<ChatMessage>,
+    tools: Vec<ToolDefinition>,
+    tool_choice: String,
+    ingestion_bearer: Option<&VerifiedIngestionBearer>,
+    sandbox_bearer: Option<&VerifiedSandboxBearer>,
+    sink: Option<&crate::sse_events::RichEventSink>,
+    attachments: &crate::turn_attachments::ValidatedAttachments,
+    images: &crate::vision::parts::ImageParts,
+    prompt_tiers: Option<PromptTierPlan>,
+) -> Result<ToolRounds, &'static str> {
+    // Every Quarry read of the loop carries its request id and, off ZDR, its run id as advisory attribution
+    // (E4.6, 062a). The loop is awaited on this task, not spawned, so the scope reaches each search and page
+    // read it makes. The detached security publishes and semantic shadows it spawns make no Quarry call.
+    crate::quarry::attribution::scope(
+        crate::quarry::attribution::Attribution {
+            request_id: Some(request_id.to_owned()),
+            parent_run: (!zdr).then(|| run_id.to_owned()),
+        },
+        run_tool_rounds_for_model_with_attachments_inner(
+            state,
+            request_id,
+            run_id,
+            org_id,
+            user_id,
+            thread_id,
+            space_id,
+            data_plane_bearer,
+            execution_bearer,
+            inference_bearer,
+            session_bearer,
+            capability_bearer,
+            cost_bearer,
+            zdr,
+            data_plane_mode,
+            sovereign_required,
+            min_privacy_tier,
+            model,
+            requested_model,
+            provider_hint,
+            subscription_connection_id,
+            base_messages,
+            tools,
+            tool_choice,
+            ingestion_bearer,
+            sandbox_bearer,
+            sink,
+            attachments,
+            images,
+            prompt_tiers,
+        ),
+    )
+    .await
+}
+
+/// The loop of [`run_tool_rounds_for_model_with_attachments`], run inside its attribution scope. The parameters are the same.
+#[allow(clippy::too_many_arguments)] // cohesive loop entry — all are request context
+async fn run_tool_rounds_for_model_with_attachments_inner(
+    state: &AppState,
+    request_id: &str,
+    run_id: &str,
+    org_id: &str,
+    user_id: &str,
+    thread_id: &str,
+    space_id: &str,
+    data_plane_bearer: Option<&VerifiedBearer>,
+    execution_bearer: Option<&VerifiedExecutionBearer>,
+    inference_bearer: &str,
+    session_bearer: &str,
+    capability_bearer: Option<&str>,
+    cost_bearer: Option<&str>,
+    zdr: bool,
+    data_plane_mode: Option<String>,
+    sovereign_required: bool,
+    min_privacy_tier: i32,
+    model: &str,
     requested_model: &str,
     provider_hint: &str,
     subscription_connection_id: &str,

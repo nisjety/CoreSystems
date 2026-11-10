@@ -47,6 +47,7 @@ mod orchestration_nats;
 mod orchestration_store;
 mod org_policy;
 mod request_snapshots;
+mod research_runs;
 mod retention_receipt;
 mod retention_sweeper;
 mod routing_policy_grpc;

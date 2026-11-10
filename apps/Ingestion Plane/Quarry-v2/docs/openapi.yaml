@@ -2255,7 +2255,7 @@ paths:
       summary: The pages a crawl fetched, with their artifact ids (INNH-12)
       description: |
         The pages a crawl fetched, one row for each fetch (INNH-12): the page URL, the
-        fetch metadata and the ids of the stored artifacts. This is the dataset of a run; the
+        fetch metadata and the ids of the stored artifacts. This is an index of the pages fetched, not their content; the
         page content is not in the response, read it by id with `GET /v1/artifacts/{id}`
         (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the
         original document). Failed and blocked pages are not rows: they are on `/errors`.
@@ -2310,7 +2310,19 @@ paths:
             default: false
       responses:
         '200':
-          description: One page of results.
+          description: One page of results. With `format=csv` or `format=jsonl` the body is that text instead of the envelope, and the kind and cursor are in the headers.
+          headers:
+            X-Quarry-Result-Kind:
+              description: Export only (`format=csv` or `jsonl`). What the rows are; `page_index` is an index of the fetched pages, not their content. The JSON envelope carries the same value as `data.kind`.
+              schema:
+                type: string
+                enum:
+                - page_index
+                - dataset
+            X-Quarry-Next-Seq:
+              description: Export only. The `after_seq` of the next page; absent on the last page.
+              schema:
+                type: string
           content:
             application/json:
               schema:
@@ -2323,6 +2335,12 @@ paths:
                     $ref: '#/components/schemas/JobResultsView'
                   meta:
                     $ref: '#/components/schemas/ResponseMeta'
+            text/csv:
+              schema:
+                type: string
+            application/x-ndjson:
+              schema:
+                type: string
         '400':
           description: A bad `limit` (not 1 to 500), `after_seq` or `latest`. `error.details.field` names it.
         '403':
@@ -2540,7 +2558,7 @@ paths:
       summary: The pages a batch fetched, with their artifact ids (INNH-12)
       description: |
         The pages a batch fetched, one row for each fetch (INNH-12): the page URL, the
-        fetch metadata and the ids of the stored artifacts. This is the dataset of a run; the
+        fetch metadata and the ids of the stored artifacts. This is an index of the pages fetched, not their content; the
         page content is not in the response, read it by id with `GET /v1/artifacts/{id}`
         (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the
         original document). Failed and blocked pages are not rows: they are on `/errors`.
@@ -2595,7 +2613,19 @@ paths:
             default: false
       responses:
         '200':
-          description: One page of results.
+          description: One page of results. With `format=csv` or `format=jsonl` the body is that text instead of the envelope, and the kind and cursor are in the headers.
+          headers:
+            X-Quarry-Result-Kind:
+              description: Export only (`format=csv` or `jsonl`). What the rows are; `page_index` is an index of the fetched pages, not their content. The JSON envelope carries the same value as `data.kind`.
+              schema:
+                type: string
+                enum:
+                - page_index
+                - dataset
+            X-Quarry-Next-Seq:
+              description: Export only. The `after_seq` of the next page; absent on the last page.
+              schema:
+                type: string
           content:
             application/json:
               schema:
@@ -2608,6 +2638,12 @@ paths:
                     $ref: '#/components/schemas/JobResultsView'
                   meta:
                     $ref: '#/components/schemas/ResponseMeta'
+            text/csv:
+              schema:
+                type: string
+            application/x-ndjson:
+              schema:
+                type: string
         '400':
           description: A bad `limit` (not 1 to 500), `after_seq` or `latest`. `error.details.field` names it.
         '403':
@@ -2640,7 +2676,7 @@ paths:
       summary: The pages any durable job fetched, with their artifact ids (INNH-12)
       description: |
         The pages a job fetched, one row for each fetch (INNH-12): the page URL, the
-        fetch metadata and the ids of the stored artifacts. This is the dataset of a run; the
+        fetch metadata and the ids of the stored artifacts. This is an index of the pages fetched, not their content; the
         page content is not in the response, read it by id with `GET /v1/artifacts/{id}`
         (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the
         original document). Failed and blocked pages are not rows: they are on `/errors`.
@@ -2695,7 +2731,19 @@ paths:
             default: false
       responses:
         '200':
-          description: One page of results.
+          description: One page of results. With `format=csv` or `format=jsonl` the body is that text instead of the envelope, and the kind and cursor are in the headers.
+          headers:
+            X-Quarry-Result-Kind:
+              description: Export only (`format=csv` or `jsonl`). What the rows are; `page_index` is an index of the fetched pages, not their content. The JSON envelope carries the same value as `data.kind`.
+              schema:
+                type: string
+                enum:
+                - page_index
+                - dataset
+            X-Quarry-Next-Seq:
+              description: Export only. The `after_seq` of the next page; absent on the last page.
+              schema:
+                type: string
           content:
             application/json:
               schema:
@@ -2708,6 +2756,12 @@ paths:
                     $ref: '#/components/schemas/JobResultsView'
                   meta:
                     $ref: '#/components/schemas/ResponseMeta'
+            text/csv:
+              schema:
+                type: string
+            application/x-ndjson:
+              schema:
+                type: string
         '400':
           description: A bad `limit` (not 1 to 500), `after_seq` or `latest`. `error.details.field` names it.
         '403':
@@ -5079,8 +5133,15 @@ components:
       type: object
       description: The data of GET /v1/{crawl,batch,jobs}/{job_id}/results (INNH-12)
       required:
+      - kind
       - items
       properties:
+        kind:
+          type: string
+          enum:
+          - page_index
+          - dataset
+          description: What the rows are. `page_index` is an index of the pages fetched (URL, status, metadata, artifact ids), not their content; it is the only value produced today. `dataset` is reserved for extracted records (decision B2(a)).
         items:
           type: array
           items:

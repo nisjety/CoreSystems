@@ -308,6 +308,17 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_RESEARCH_RUNS",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Q4 E4.6 (062b): the gateway's research run routes (read one run, a thread's running run, cancel). Only the literal true; needs RESEARCH_RUNS_ENABLED on session-core.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_RESEARCH_RUNS", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT",
       "kind": "switch",
       "owner": "model-plane",
@@ -371,6 +382,17 @@
       "driftReason": "Code is off unless the value is 1, true, TRUE or yes (quarry_agent from_env). Compose ships 1. Owner decision: keep one side or the other.",
       "declarations": [
         { "service": "execution-core", "env": "QUARRY_BROWSER_AGENT_ENABLED", "default": "1" }
+      ]
+    },
+    {
+      "name": "RESEARCH_RUNS_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Q4 E4.6 (062b): the durable research run record store (session-core ResearchRunService). Records only; nothing starts a research run until the gateway slice (MODEL_GATEWAY_RESEARCH_RUNS) lands.",
+      "declarations": [
+        { "service": "session-core", "env": "RESEARCH_RUNS_ENABLED", "default": "false" }
       ]
     },
     {

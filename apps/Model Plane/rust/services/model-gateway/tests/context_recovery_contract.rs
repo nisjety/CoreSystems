@@ -106,7 +106,7 @@ fn the_prompt_snapshot_follows_the_round_not_the_turn() {
     );
     let rounds = function_body(
         &text,
-        "pub async fn run_tool_rounds_for_model_with_attachments(",
+        "async fn run_tool_rounds_for_model_with_attachments_inner(",
     );
     // The snapshot must be taken inside the round loop, so each round sees the
     // tool results the previous one appended.

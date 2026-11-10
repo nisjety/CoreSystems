@@ -27,6 +27,7 @@ use mp_contracts::model_plane::v1::{
     thread_reference_service_client::ThreadReferenceServiceClient,
     attention_service_client::AttentionServiceClient,
     orchestration_core_service_client::OrchestrationCoreServiceClient,
+    research_run_service_client::ResearchRunServiceClient,
     run_ledger_service_client::RunLedgerServiceClient,
     run_service_client::RunServiceClient, sandbox_manager_client::SandboxManagerClient,
     session_core_client::SessionCoreClient, space_attention_client::SpaceAttentionClient,
@@ -140,6 +141,9 @@ pub struct AppState {
     pub thread_fork_client: ThreadForkServiceClient<Channel>,
     /// Session Core's ThreadGoalService on the session_client endpoint (EP-7 S1).
     pub thread_goal_client: ThreadGoalServiceClient<Channel>,
+    /// Session Core's ResearchRunService on the session_client endpoint (Q4 E4.6, slice 062b). Reached through
+    /// `research_runs::ResearchRunsClient`.
+    pub research_run_client: ResearchRunServiceClient<Channel>,
     /// Session Core's ThreadExportService on the session_client endpoint (EP-12 S10).
     pub thread_export_client: ThreadExportServiceClient<Channel>,
     /// Session Core's ThreadShareService on the session_client endpoint (EP-12 S14).
@@ -508,6 +512,7 @@ impl AppState {
             message_tree_client: MessageTreeServiceClient::new(session_channel.clone()),
             thread_fork_client: ThreadForkServiceClient::new(session_channel.clone()),
             thread_goal_client: ThreadGoalServiceClient::new(session_channel.clone()),
+            research_run_client: ResearchRunServiceClient::new(session_channel.clone()),
             thread_export_client: ThreadExportServiceClient::new(session_channel.clone()),
             thread_share_client: ThreadShareServiceClient::new(session_channel.clone()),
             thread_reference_client: ThreadReferenceServiceClient::new(session_channel.clone()),
@@ -725,6 +730,11 @@ impl AppState {
             "http://localhost:9091",
         )?);
         let thread_goal_client = ThreadGoalServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
+        let research_run_client = ResearchRunServiceClient::new(Self::lazy_channel(
             "SESSION_CORE_URL",
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
@@ -985,6 +995,7 @@ impl AppState {
             state.message_tree_client = message_tree_client;
             state.thread_fork_client = thread_fork_client;
             state.thread_goal_client = thread_goal_client;
+            state.research_run_client = research_run_client;
             state.thread_export_client = thread_export_client;
             state.thread_share_client = thread_share_client;
             state.thread_reference_client = thread_reference_client;
@@ -1061,6 +1072,7 @@ impl AppState {
             state.message_tree_client = message_tree_client;
             state.thread_fork_client = thread_fork_client;
             state.thread_goal_client = thread_goal_client;
+            state.research_run_client = research_run_client;
             state.thread_export_client = thread_export_client;
             state.thread_share_client = thread_share_client;
             state.thread_reference_client = thread_reference_client;

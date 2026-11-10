@@ -189,6 +189,15 @@ pub async fn start_run(
             .get(crate::usage_attrs::SURFACE_HEADER)
             .and_then(|value| value.to_str().ok()),
     );
+    // E4.6 062a: the advisory parent run of this start (or resume), carried on the run to its usage
+    // segment. It is this request's value only; off unless QUARRY_EDGE__USAGE_PARENT_RUN is on.
+    let parent_run = crate::usage_attrs::parent_run_for(
+        &claims,
+        headers
+            .get(crate::usage_attrs::PARENT_RUN_HEADER)
+            .and_then(|value| value.to_str().ok()),
+        crate::usage_attrs::parent_run_enabled(),
+    );
 
     if execution_tier.is_ephemeral_evidence() && !experimental_lite_enabled() {
         return Err(status_err(
@@ -750,6 +759,7 @@ pub async fn start_run(
         )
         .with_entitlement(agent_seconds)
         .with_surface(surface)
+        .with_parent_run(parent_run)
     });
     let budget_view = budget
         .as_ref()

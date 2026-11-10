@@ -166,6 +166,9 @@ pub struct PurgeSummary {
     /// Event trigger records (W4-F T1), the member's configuration of connector-event wakes. They name
     /// no thread or run; counted here so the erasure proof names the table.
     pub event_triggers: u64,
+    /// Research run records (Q4 E4.6, 062b): the org's rows, which hold the partial results of its non-ZDR runs. They
+    /// name their chat run and thread by id only; counted here so the erasure proof names the table.
+    pub research_runs: u64,
     pub events: u64,
     pub run_trace_events: u64,
     /// Request snapshots and their system/tool blobs (EP-14 S6).
@@ -224,6 +227,7 @@ impl PurgeSummary {
             + self.tasks
             + self.cron_schedules
             + self.event_triggers
+            + self.research_runs
             + self.events
             + self.run_trace_events
             + self.run_request_snapshots
@@ -280,6 +284,7 @@ pub(crate) const HELD_THREAD_CONTENT: &[&str] = &[
     "thread_goals",
     "artifact_revisions",
     "thread_share_snapshots",
+    "research_runs",
 ];
 
 /// The most thread ids one check call may name (org-core `retention.MaxCheckThreadIDs`).
@@ -680,6 +685,14 @@ pub async fn purge_organization_data(
     // Event trigger records (W4-F T1): the org's rows, deleted before runs and threads so a later
     // reference from a run or thread cannot strand one. Nothing else in the purge reads them.
     summary.event_triggers = sqlx::query("DELETE FROM event_triggers WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    // Research run records (Q4 E4.6, 062b): the org's rows, deleted before runs and threads. A non-ZDR run's partial
+    // results are content, so the purge removes them with the organisation. Nothing else in the purge reads them.
+    summary.research_runs = sqlx::query("DELETE FROM research_runs WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
@@ -1240,6 +1253,7 @@ mod tests {
             tasks: 1,
             cron_schedules: 1,
             event_triggers: 1,
+            research_runs: 1,
             events: 1,
             run_trace_events: 1,
             run_request_snapshots: 1,
@@ -1271,7 +1285,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            38,
+            39,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );
@@ -1325,6 +1339,7 @@ mod tests {
         let tasks = pos("DELETE FROM tasks WHERE org_id = $1");
         let cron_schedules = pos("DELETE FROM cron_schedules WHERE org_id = $1");
         let event_triggers = pos("DELETE FROM event_triggers WHERE org_id = $1");
+        let research_runs = pos("DELETE FROM research_runs WHERE org_id = $1");
         let events = pos("DELETE FROM events");
         let trace_events = pos("DELETE FROM run_trace_events WHERE org_id = $1");
         let snapshot_blobs = pos("DELETE FROM run_request_snapshot_blobs WHERE org_id = $1");
@@ -1405,6 +1420,10 @@ mod tests {
         assert!(
             event_triggers < runs && event_triggers < threads,
             "event trigger records (W4-F T1) must be purged before runs and threads"
+        );
+        assert!(
+            research_runs < runs && research_runs < threads,
+            "research run records (Q4 E4.6, 062b) must be purged before runs and threads"
         );
         assert!(
             pos("DELETE FROM agent_skills WHERE org_id = $1")

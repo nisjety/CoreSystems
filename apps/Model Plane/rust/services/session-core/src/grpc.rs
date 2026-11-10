@@ -26,6 +26,7 @@ use mp_contracts::model_plane::v1::{
     message_search_server::MessageSearchServer,
     message_tree_service_server::MessageTreeServiceServer,
     orchestration_core_service_server::OrchestrationCoreServiceServer,
+    research_run_service_server::ResearchRunServiceServer,
     run_question_consume_service_server::RunQuestionConsumeServiceServer,
     routing_policy_server::RoutingPolicyServer,
     run_ledger_service_server::RunLedgerServiceServer,
@@ -937,6 +938,9 @@ pub(crate) async fn delete_thread_rows(
         "DELETE FROM thread_goals WHERE thread_id = $1",
         // EP-12 S14: also ON DELETE CASCADE from threads; named here so the erase list is complete.
         "DELETE FROM thread_share_snapshots WHERE thread_id = $1",
+        // Q4 E4.6 (062b): no foreign key to threads, so the erase names a thread's research runs here. Their partial
+        // results are content.
+        "DELETE FROM research_runs WHERE thread_id = $1",
     ] {
         sqlx::query(query)
             .bind(thread_id)
@@ -12481,6 +12485,7 @@ pub async fn serve(
     let thread_reference_pool = pool.clone();
     let thread_goal_pool = pool.clone();
     let event_trigger_pool = pool.clone();
+    let research_run_pool = pool.clone();
     let thread_share_pool = pool.clone();
     let skill_version_pool = pool.clone();
 
@@ -12590,6 +12595,11 @@ pub async fn serve(
         // W4-F T1: the event trigger record store; answers `unavailable` until its switch is on.
         .add_service(EventTriggerServiceServer::with_interceptor(
             crate::event_triggers::EventTriggerGrpc { pool: event_trigger_pool },
+            auth.clone(),
+        ))
+        // Q4 E4.6 (062b): the durable research run store; answers `unavailable` until RESEARCH_RUNS_ENABLED is on.
+        .add_service(ResearchRunServiceServer::with_interceptor(
+            crate::research_runs::ResearchRunGrpc { pool: research_run_pool },
             auth.clone(),
         ))
         // EP-11 S2: reads of immutable skill versions; answers `unavailable` until its switch is on.

@@ -365,6 +365,9 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         .route("/v1/threads/:thread_id/fork", post(fork_thread))
         // The thread's goal (Wave 3 EP-7 S1); 404 `thread_goals_disabled` while its switch is off.
         .merge(crate::thread_goal_routes::router())
+        // The research runs of a chat turn: one run, a thread's running run, and cancel (Q4 E4.6, slice 062b); 404
+        // `research_runs_disabled` while its switch is off.
+        .merge(crate::research_runs::router())
         // One read-only review of a text, as a run (F-t3-086); 404 `review_run_disabled` while its switch is off.
         .merge(crate::review_run_routes::router())
         // The owner's export of one thread (Wave 3 EP-12 S10); 404 `thread_export_disabled` while its switch is off.
@@ -9776,7 +9779,7 @@ fn message_created_at(ts: Option<&prost_types::Timestamp>) -> Option<String> {
 }
 
 /// Flatten a prost `Struct` into plain JSON for the wire envelope.
-fn prost_struct_to_json(s: &prost_types::Struct) -> Value {
+pub(crate) fn prost_struct_to_json(s: &prost_types::Struct) -> Value {
     let map = s
         .fields
         .iter()

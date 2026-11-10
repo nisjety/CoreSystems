@@ -26,6 +26,70 @@ const SEARCH_SCOPES: &[&str] = &["search:read"];
 /// timeout so the wait can never be what times the call out.
 const RENDER_SETTLE_MS: u32 = 2_500;
 
+/// Advisory request attribution for the Quarry reads of one task (E4.6, 062a).
+///
+/// A caller runs its Quarry reads inside [`attribution::scope`]. Every edge request those reads send on
+/// that task carries the scope's `x-request-id` and, when set, its `x-verevon-parent-run`, including the
+/// retry after a 401. The value lives in a task-local, so it does not follow a `tokio::spawn`: a caller
+/// must not wrap detached work. Both headers are attribution only. quarry-edge uses them for usage records
+/// and logs, never for auth, scope, budget or idempotency, and it reads the parent run from a service
+/// principal only.
+pub mod attribution {
+    use std::future::Future;
+
+    /// The request-id header quarry-edge adopts (`QUARRY_EDGE__REQUEST_ID_ADOPT`).
+    const REQUEST_ID_HEADER: &str = "x-request-id";
+    /// The advisory parent-run header quarry-edge reads from service principals only.
+    const PARENT_RUN_HEADER: &str = "x-verevon-parent-run";
+    /// The longest value, in bytes, that either header carries.
+    const MAX_VALUE_LEN: usize = 128;
+
+    tokio::task_local! {
+        /// The attribution of the Quarry reads running on this task.
+        static CURRENT: Attribution;
+    }
+
+    /// The attribution stamped on the Quarry requests made inside one [`scope`].
+    #[derive(Clone)]
+    pub struct Attribution {
+        /// The request id, sent as `x-request-id` when it is a valid value.
+        pub request_id: Option<String>,
+        /// The run the reads belong to, sent as `x-verevon-parent-run` when it is a valid value. A caller
+        /// under ZDR leaves it `None`, so no run id leaves the Model Plane.
+        pub parent_run: Option<String>,
+    }
+
+    /// Runs `fut` with `attribution` in scope, so every Quarry read it makes on this task is stamped.
+    pub async fn scope<F: Future>(attribution: Attribution, fut: F) -> F::Output {
+        CURRENT.scope(attribution, fut).await
+    }
+
+    /// Stamps the scoped attribution on a Quarry request. Outside a scope the request goes out as it was
+    /// built. A value outside 1 to 128 bytes of `[A-Za-z0-9._:-]` is left off, since quarry-edge would not
+    /// adopt it either.
+    pub(crate) fn apply(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let Ok(current) = CURRENT.try_with(Clone::clone) else {
+            return req;
+        };
+        let req = match current.request_id.as_deref().filter(|id| valid_value(id)) {
+            Some(id) => req.header(REQUEST_ID_HEADER, id),
+            None => req,
+        };
+        match current.parent_run.as_deref().filter(|run| valid_value(run)) {
+            Some(run) => req.header(PARENT_RUN_HEADER, run),
+            None => req,
+        }
+    }
+
+    /// Whether a value may go on the wire: 1 to 128 bytes from `[A-Za-z0-9._:-]`, the set quarry-edge adopts.
+    fn valid_value(value: &str) -> bool {
+        (1..=MAX_VALUE_LEN).contains(&value.len())
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')
+            })
+    }
+}
+
 /// Typed Quarry error envelope (HTTP 4xx / 5xx with structured body).
 #[derive(Debug, Error)]
 pub enum QuarryError {
@@ -824,7 +888,7 @@ impl Client {
             if !org_id.is_empty() {
                 req = req.header("X-Quarry-Org", org_id);
             }
-            let resp = req.send().await?;
+            let resp = attribution::apply(req).send().await?;
             if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
                 self.invalidate_if_matches(org_id, SCRAPE_SCOPES, &token)
                     .await?;
@@ -941,7 +1005,7 @@ impl Client {
             if !org_id.is_empty() {
                 req = req.header("X-Quarry-Org", org_id);
             }
-            let resp = req.send().await?;
+            let resp = attribution::apply(req).send().await?;
             if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
                 self.invalidate_if_matches(org_id, SCRAPE_SCOPES, &token)
                     .await?;
@@ -1121,7 +1185,7 @@ impl Client {
             if !org_id.is_empty() {
                 req = req.header("X-Quarry-Org", org_id);
             }
-            let resp = req.send().await?;
+            let resp = attribution::apply(req).send().await?;
             if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !retried_unauthorized {
                 self.invalidate_if_matches(org_id, SEARCH_SCOPES, &token)
                     .await?;
