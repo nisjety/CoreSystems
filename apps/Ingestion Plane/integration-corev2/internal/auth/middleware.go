@@ -31,6 +31,14 @@ const (
 const (
 	IntegrationReadScope  = "integration:read"
 	IntegrationWriteScope = "integration:write"
+	// IntegrationOTPReadScope is the narrow scope that admits an
+	// executor-only caller to mail.otp.read (E3.1-g). It is honored on exactly
+	// one route, OTPActionsRoute, and nowhere else.
+	IntegrationOTPReadScope = "integration:otp:read"
+	// OTPActionsRoute is the registered path of the only route a service
+	// principal holding just IntegrationOTPReadScope is admitted on. The
+	// service layer then limits it to the mail.otp.read operation.
+	OTPActionsRoute = "/api/v1/connections/:id/actions"
 )
 
 type Config struct {
@@ -245,7 +253,8 @@ func authenticateBearer(c *fiber.Ctx, cfg Config, authHeader string) error {
 	// for. A route that serves a narrower scope must admit it explicitly when it
 	// ships (E3.1-g). Checked before the single-use guard so a refused token is
 	// not consumed.
-	if principal.PrincipalType == "service" && !principal.HasScope(IntegrationReadScope) && !principal.HasScope(IntegrationWriteScope) {
+	if principal.PrincipalType == "service" && !principal.HasScope(IntegrationReadScope) && !principal.HasScope(IntegrationWriteScope) &&
+		!otpScopeAdmittedOnRoute(c, principal) {
 		return writeError(c, fiber.StatusForbidden, "integration_scope_required", "Service principals require integration:read or integration:write")
 	}
 	// A token that names an acting end user is a complete standalone
@@ -258,6 +267,20 @@ func authenticateBearer(c *fiber.Ctx, cfg Config, authHeader string) error {
 	c.Locals(internalLocal, false)
 	c.Locals(principalLocal, principal)
 	return c.Next()
+}
+
+// otpScopeAdmittedOnRoute reports whether a service principal that holds only
+// integration:otp:read may pass on this request: it may reach exactly
+// POST /api/v1/connections/{id}/actions, matched on the registered route and
+// method, never on the body. The service layer (actions.refuseOTPOnlyCaller)
+// then limits that token to the mail.otp.read operation. Every other route
+// keeps answering 403 integration_scope_required.
+func otpScopeAdmittedOnRoute(c *fiber.Ctx, principal Principal) bool {
+	if !principal.HasScope(IntegrationOTPReadScope) || c.Method() != fiber.MethodPost {
+		return false
+	}
+	route := c.Route()
+	return route != nil && route.Path == OTPActionsRoute
 }
 
 func RequirePlan(orgClient OrgPlanClient, minimumPlan string) fiber.Handler {

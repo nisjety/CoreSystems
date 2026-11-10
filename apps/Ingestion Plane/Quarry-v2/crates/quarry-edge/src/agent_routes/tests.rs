@@ -2351,6 +2351,8 @@ fn broker_grant(owner: &str, domains: &[&str], zdr: bool) -> quarry_runtime::Gra
         resource_id: String::new(),
         key_id: String::new(),
         web_policy: None,
+        mail_connection_id: String::new(),
+        grant_origin: String::new(),
     }
 }
 
@@ -2478,15 +2480,16 @@ async fn sensitive_approval_helper_forwards_the_org_it_is_handed() {
     let recording = RecordingGrantValidator::new();
     let mut state = test_state_with_static_driver();
     state.grant_validator = recording.clone();
-    let approval = SensitiveApproval {
+    let mut approval = SensitiveApproval {
         grant_id: "grant_approval_1".into(),
         parent_grant_id: "grant_run_1".into(),
         action: "respond_dialog",
         frame_id: None,
         dialog_id: Some("dlg_1".into()),
         artifact_id: None,
+        otp_binding: None,
     };
-    validate_sensitive_approval(&state, "org-handed-down", &approval)
+    validate_sensitive_approval(&state, "org-handed-down", &mut approval)
         .await
         .expect("the approval grant matches the observed action");
     assert_eq!(

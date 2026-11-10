@@ -93,6 +93,22 @@ pub struct GrantValidation {
     /// cannot read fails closed there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_policy: Option<serde_json::Value>,
+    /// Q3-E3.1-h2: the integration-corev2 mail connection a `fill_otp` approval grant is bound
+    /// to (an opaque connection id, never a mailbox address). Empty on every other grant and
+    /// from a broker that predates it; the edge refuses a `fill_otp_ref` whose approval leaves
+    /// it empty (`otp_binding_missing`). Never derived from the caller. The broker half is a
+    /// Model Plane ask (MP-ASKS, W3-E3.1-ab); the vendored gRPC proto does not carry it yet, so
+    /// the gRPC validator always yields an empty one.
+    #[serde(default)]
+    pub mail_connection_id: String,
+    /// Q3-E3.1-h2: the https origin (scheme, host, port only) a `fill_otp` approval grant is
+    /// bound to. Empty on every other grant and from a broker that predates it; the edge
+    /// refuses a `fill_otp_ref` whose approval leaves it empty or names anything but an https
+    /// origin (`otp_binding_missing`). The executor checks the frame and the top page against
+    /// it (E3.1-c). Never derived from the caller. Same broker ask and gRPC caveat as
+    /// `mail_connection_id`.
+    #[serde(default)]
+    pub grant_origin: String,
 }
 
 /// A grant's budget claim, as the broker stored it. A bound of 0 means that
@@ -267,6 +283,8 @@ impl GrantValidator for NoopGrantValidator {
             resource_id: String::new(),
             key_id: String::new(),
             web_policy: None,
+            mail_connection_id: String::new(),
+            grant_origin: String::new(),
         })
     }
 }
@@ -356,6 +374,8 @@ impl GrantValidator for HttpGrantValidator {
                 resource_id: String::new(),
                 key_id: String::new(),
                 web_policy: None,
+                mail_connection_id: String::new(),
+                grant_origin: String::new(),
             });
         }
         if !status.is_success() {
@@ -405,6 +425,8 @@ mod tests {
             resource_id: String::new(),
             key_id: String::new(),
             web_policy: None,
+            mail_connection_id: String::new(),
+            grant_origin: String::new(),
         };
         assert!(!g.is_usable());
     }
@@ -431,6 +453,8 @@ mod tests {
             resource_id: String::new(),
             key_id: String::new(),
             web_policy: None,
+            mail_connection_id: String::new(),
+            grant_origin: String::new(),
         };
         assert!(!g.is_usable());
     }
@@ -457,6 +481,8 @@ mod tests {
             resource_id: String::new(),
             key_id: String::new(),
             web_policy: None,
+            mail_connection_id: String::new(),
+            grant_origin: String::new(),
         };
         assert!(g.is_usable());
     }
@@ -483,6 +509,8 @@ mod tests {
             resource_id: String::new(),
             key_id: String::new(),
             web_policy: None,
+            mail_connection_id: String::new(),
+            grant_origin: String::new(),
         };
         assert!(g.is_usable());
     }

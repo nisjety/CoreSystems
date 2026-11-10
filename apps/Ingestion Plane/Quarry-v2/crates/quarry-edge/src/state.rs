@@ -97,6 +97,13 @@ pub struct AppState {
     /// Production Auth Core token minter. Routes use the verified JWT org to
     /// obtain bounded Model/Data Plane service tokens.
     pub service_token_provider: Option<quarry_runtime::service_tokens::SharedServiceTokenProvider>,
+    /// Q3-E3.1-h2: the executor-only source of one-time codes for a `fill_otp_ref` step
+    /// (integration-corev2 `mail.otp.read`, with the edge's own `ingestion` identity). `Some` only
+    /// when `QUARRY_EDGE__FILL_OTP` is on, `QUARRY_EDGE__INTEGRATION_CORE_URL` is set and the
+    /// cross-plane token provider exists; `None` otherwise, and a `fill_otp_ref` step is then
+    /// refused `otp_source_unavailable` before any driver call. Handed to every
+    /// `ObservationRunner` of the agent-run lanes.
+    pub otp_source: Option<Arc<dyn quarry_runtime::otp_source::OtpSource>>,
     /// Cycle 19 / cluster #18: Tavily-replacement answer pipeline.
     /// Wired only when `QUARRY_EDGE__ANSWER_SYNTHESIS` is on (QB-T17), a SearchProvider
     /// is configured and a model path exists. `/v1/answer` returns 501 Unsupported otherwise.

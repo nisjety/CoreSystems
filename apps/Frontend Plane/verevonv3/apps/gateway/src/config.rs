@@ -37,6 +37,11 @@ pub(crate) struct AppState {
     /// value; while off that route answers 404. Quarry honours the scope only with
     /// `QUARRY_EDGE__LIVE_VIEW_ONLY` on, so the gateway also drops input frames itself.
     pub(crate) browser_live_view_only: bool,
+    /// `BROWSER_CONSENT_API` (Q3-E3.2-e3-gw): whether the viewer's per-origin browser consent
+    /// decisions can be listed and revoked (`/api/v1/browser/consent`). Read once here, never in a
+    /// handler. Exactly `true` enables it; while off the routes are absent. user-core also needs
+    /// its own browser-consent switch on, or it answers `browser_consent_disabled`.
+    pub(crate) browser_consent_api: bool,
     pub(crate) auth_core_url: String,
     pub(crate) verevon_public_origin: String,
     pub(crate) session_core_url: String,
@@ -648,6 +653,9 @@ pub(crate) async fn build_state() -> Result<AppState> {
         browser_live_view_only: human_browse_enabled(
             env::var("BROWSER_LIVE_VIEW_ONLY").ok().as_deref(),
         ),
+        browser_consent_api: browser_consent_api_enabled(
+            env::var("BROWSER_CONSENT_API").ok().as_deref(),
+        ),
         auth_core_url: env_url("AUTH_CORE_URL", "http://auth-core:3011"),
         verevon_public_origin: canonical_public_origin(
             &env::var("VEREVON_PUBLIC_ORIGIN")
@@ -1022,6 +1030,12 @@ pub(crate) fn browser_grant_mode(raw: Option<&str>, app_env: &str) -> BrowserGra
 pub(crate) fn human_browse_enabled(raw: Option<&str>) -> bool {
     raw.map(|value| value.trim().to_ascii_lowercase())
         .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+}
+
+/// Parses `BROWSER_CONSENT_API` (Q3-E3.2-e3-gw). Only the literal `true` enables the consent
+/// routes; unset, blank or any other value is off, in every environment.
+pub(crate) fn browser_consent_api_enabled(raw: Option<&str>) -> bool {
+    raw == Some("true")
 }
 
 fn env_bool(key: &str, fallback: bool) -> bool {

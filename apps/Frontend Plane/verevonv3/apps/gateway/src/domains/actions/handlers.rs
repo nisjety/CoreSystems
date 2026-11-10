@@ -18,6 +18,7 @@ use super::dispatchers::{
     dispatch_browser_create_tab, dispatch_browser_delete_profile,
     dispatch_browser_probe_profile_restore, dispatch_browser_rename_profile,
     dispatch_browser_run_action, dispatch_browser_run_control, dispatch_browser_run_start,
+    dispatch_browser_list_origin_consents, dispatch_browser_revoke_origin_consent,
     dispatch_browser_select_tab, dispatch_browser_set_control_mode,
     dispatch_browser_suggest_action, dispatch_chat_approve_plan, dispatch_chat_cancel_invocation,
     dispatch_chat_clear_threads, dispatch_chat_delete_thread, dispatch_chat_queue_invocation_input,
@@ -789,6 +790,12 @@ pub(super) async fn execute_action(
         }
         "browser.set_org_policy" => {
             dispatch_browser_set_org_policy(&state, &user, &body.input).await
+        }
+        "browser.list_origin_consents" => {
+            dispatch_browser_list_origin_consents(&state, &user).await
+        }
+        "browser.revoke_origin_consent" => {
+            dispatch_browser_revoke_origin_consent(&state, &user, &body.input).await
         }
         "space.files.attach" => dispatch_space_files_attach().await,
         "space.files.list" => {

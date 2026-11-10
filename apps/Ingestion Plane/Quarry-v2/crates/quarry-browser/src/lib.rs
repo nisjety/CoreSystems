@@ -840,6 +840,33 @@ pub struct BrowserDriverCapabilities {
     /// (`BrowserDriver::set_page_emulation`). Additive on the wire.
     #[serde(default)]
     pub page_emulation: bool,
+    /// E3.1-c2: the driver can fill a one-time code into a verified input
+    /// (`BrowserDriver::otp_fill_precheck` / `otp_insert_trusted`). True only
+    /// when the driver was started with `QUARRY_EDGE__FILL_OTP` on. Additive on
+    /// the wire: an older peer omits it and reads as `false`.
+    #[serde(default)]
+    pub otp_fill: bool,
+}
+
+/// E3.1-c: what the one-time-code preconditions found on a target that passed
+/// them. No value and no page text: the loader id of the top frame (the
+/// credential-delivered mark is keyed on it and a navigation changes it), the
+/// top frame id and the origin that the page, the frame and the grant share.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtpFillPrecheck {
+    pub loader_id: String,
+    pub frame_id: String,
+    pub origin: String,
+}
+
+/// The error a driver without one-time-code fills returns: `Unsupported` with
+/// the fixed `details.reason` `otp_unsupported`. No code, page text or id.
+fn otp_unsupported() -> QuarryError {
+    QuarryError::new(
+        ErrorCode::Unsupported,
+        "the browser driver cannot fill one-time codes",
+    )
+    .with_details(serde_json::json!({ "reason": "otp_unsupported" }))
 }
 
 /// Browser-authored page state for an agent observation. Drivers return only
@@ -1525,6 +1552,59 @@ pub trait BrowserDriver: Send + Sync {
     async fn reload(&self, _session: &BrowserSession, _ignore_cache: bool) -> QuarryResult<()> {
         Err(QuarryError::unsupported_action("reload"))
     }
+
+    /// E3.1-c2: check the one-time-code fill preconditions on `target` (a
+    /// native AX target of the current page) against the approval's
+    /// `grant_origin`. Reads nothing from a mailbox. Default: Unsupported
+    /// (`details.reason` is `otp_unsupported`).
+    async fn otp_fill_precheck(
+        &self,
+        _session: &BrowserSession,
+        _target: &BrowserNativeTarget,
+        _grant_origin: &str,
+    ) -> QuarryResult<OtpFillPrecheck> {
+        Err(otp_unsupported())
+    }
+
+    /// E3.1-c2: insert `code` into `target` as trusted input, after the
+    /// preconditions were checked again. The code is only this argument: a
+    /// driver never keeps, logs or returns it in an error. Default:
+    /// Unsupported (`details.reason` is `otp_unsupported`).
+    async fn otp_insert_trusted(
+        &self,
+        _session: &BrowserSession,
+        _target: &BrowserNativeTarget,
+        _precheck: &OtpFillPrecheck,
+        _code: &str,
+    ) -> QuarryResult<()> {
+        Err(otp_unsupported())
+    }
+
+    /// E3.1-c2: mark `loader_id` of `session` credential-delivered, so reads of
+    /// that page are withheld. Default: Unsupported (`details.reason` is
+    /// `otp_unsupported`).
+    async fn mark_otp_credential_delivered(
+        &self,
+        _session: &BrowserSession,
+        _loader_id: &str,
+    ) -> QuarryResult<()> {
+        Err(otp_unsupported())
+    }
+
+    /// E3.1-c2: whether `loader_id` of `session` was marked
+    /// credential-delivered. Default: `false`.
+    async fn otp_credential_delivered(&self, _session: &BrowserSession, _loader_id: &str) -> bool {
+        false
+    }
+
+    /// E3.1-c2: whether the current page's top-frame loader was marked
+    /// credential-delivered. Default: `Ok(false)`.
+    async fn current_loader_credential_delivered(
+        &self,
+        _session: &BrowserSession,
+    ) -> QuarryResult<bool> {
+        Ok(false)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1837,6 +1917,7 @@ mod capability_wire_tests {
             parsed_oldest.scrape_actions,
             parsed_oldest.capture_options,
             parsed_oldest.page_emulation,
+            parsed_oldest.otp_fill,
         ] {
             assert!(!additive);
         }
@@ -1857,7 +1938,8 @@ mod capability_wire_tests {
             "per_tab_egress": false,
             "scrape_actions": false,
             "capture_options": false,
-            "page_emulation": false
+            "page_emulation": false,
+            "otp_fill": false
         });
         let parsed: BrowserDriverCapabilities =
             serde_json::from_value(older.clone()).expect("older shape parses");

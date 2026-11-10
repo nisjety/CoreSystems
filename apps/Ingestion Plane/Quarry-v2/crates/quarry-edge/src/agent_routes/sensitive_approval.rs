@@ -7,6 +7,81 @@ pub(super) struct SensitiveApproval {
     pub(super) frame_id: Option<String>,
     pub(super) dialog_id: Option<String>,
     pub(super) artifact_id: Option<String>,
+    /// Q3-E3.1-h2: the mail connection and origin a `fill_otp` approval grant is bound to. Always
+    /// `None` when the approval is built (it comes from the grant); `validate_sensitive_approval`
+    /// fills it for a `fill_otp` approval once the grant is read and checked, and the admission
+    /// chain hands it on to the step.
+    pub(super) otp_binding: Option<OtpGrantBinding>,
+}
+
+/// Q3-E3.1-h2: what a `fill_otp` approval grant binds a one-time-code read to: the integration
+/// connection to read from and the https origin the code is for. Both are opaque and come from the
+/// broker's grant, never from the request. `Debug` prints no field.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct OtpGrantBinding {
+    pub(super) mail_connection_id: String,
+    pub(super) origin: String,
+}
+
+impl std::fmt::Debug for OtpGrantBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtpGrantBinding").finish_non_exhaustive()
+    }
+}
+
+impl OtpGrantBinding {
+    /// The observation-context binding for the step: the grant's connection and origin, and the
+    /// run's actor as the acting user (from the verified run entry, never from a request field).
+    /// A blank actor is no acting user.
+    pub(super) fn for_run_actor(self, actor_id: &str) -> quarry_runtime::observation::OtpBinding {
+        let actor = actor_id.trim();
+        quarry_runtime::observation::OtpBinding {
+            mail_connection_id: self.mail_connection_id,
+            origin: self.origin,
+            acting_user_id: (!actor.is_empty()).then(|| actor.to_owned()),
+        }
+    }
+}
+
+/// Q3-E3.1-h2: the refusal for a `fill_otp` approval that is not bound to a mail connection and an
+/// https origin. 403, `details.reason` `otp_binding_missing`; carries no id.
+fn otp_binding_missing() -> QuarryError {
+    QuarryError::new(
+        ErrorCode::Forbidden,
+        "the fill_otp approval is not bound to a mail connection and an https origin",
+    )
+    .with_details(serde_json::json!({ "reason": "otp_binding_missing" }))
+}
+
+/// Whether `value` is exactly an https origin: scheme, host and port only, in canonical form (no
+/// userinfo, path, query or fragment, no default port, no trailing slash, lower-case host).
+fn is_https_origin(value: &str) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.origin().is_tuple()
+        && url.origin().ascii_serialization() == value
+}
+
+/// Q3-E3.1-h2: read the mail connection and origin off a `fill_otp` approval grant. Both must be
+/// non-empty and the origin an https origin, else 403 `otp_binding_missing` (a broker that does not
+/// send them yet leaves both empty, which refuses: fail closed).
+fn fill_otp_grant_binding(
+    grant: &quarry_runtime::GrantValidation,
+) -> QuarryResult<OtpGrantBinding> {
+    let connection = grant.mail_connection_id.as_str();
+    if connection.trim().is_empty() || connection.trim() != connection {
+        return Err(otp_binding_missing());
+    }
+    if !is_https_origin(&grant.grant_origin) {
+        return Err(otp_binding_missing());
+    }
+    Ok(OtpGrantBinding {
+        mail_connection_id: connection.to_owned(),
+        origin: grant.grant_origin.clone(),
+    })
 }
 
 /// E3.1-b (ADR-2a): the flag that admits `fill_otp_ref`. Default off: while it is off the
@@ -72,6 +147,7 @@ pub(super) fn fill_otp_approval(
         frame_id: target.frame_id.clone(),
         dialog_id: None,
         artifact_id: None,
+        otp_binding: None,
     })
 }
 
@@ -129,6 +205,7 @@ pub(super) fn sensitive_approval_for_action(
                 frame_id: dialog.frame_id.clone(),
                 dialog_id: Some(dialog_id.clone()),
                 artifact_id: None,
+                otp_binding: None,
             }))
         }
         AgentAction::UploadRef {
@@ -176,6 +253,7 @@ pub(super) fn sensitive_approval_for_action(
                 frame_id: target.frame_id.clone(),
                 dialog_id: None,
                 artifact_id: Some(artifact_id.to_string()),
+                otp_binding: None,
             }))
         }
         AgentAction::DownloadRef {
@@ -221,6 +299,7 @@ pub(super) fn sensitive_approval_for_action(
                 frame_id: target.frame_id.clone(),
                 dialog_id: None,
                 artifact_id: None,
+                otp_binding: None,
             }))
         }
         AgentAction::FillOtpRef {
@@ -245,7 +324,7 @@ pub(super) fn sensitive_approval_for_action(
 pub(super) async fn validate_sensitive_approval(
     state: &AppState,
     org_id: &str,
-    approval: &SensitiveApproval,
+    approval: &mut SensitiveApproval,
 ) -> QuarryResult<()> {
     let grant = state
         .grant_validator
@@ -268,6 +347,12 @@ pub(super) async fn validate_sensitive_approval(
             "sensitive browser approval grant does not match the observed action scope",
         ))
     } else {
+        // Q3-E3.1-h2: a `fill_otp` approval also names the mail connection and the origin the
+        // code is for. Checked after the exact-action rule, so a grant for another action never
+        // reaches it; the two values travel on the approval to the step.
+        if approval.action == FILL_OTP_SENSITIVE_ACTION {
+            approval.otp_binding = Some(fill_otp_grant_binding(&grant)?);
+        }
         Ok(())
     }
 }

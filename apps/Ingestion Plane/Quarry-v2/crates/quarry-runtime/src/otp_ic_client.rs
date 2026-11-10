@@ -2,7 +2,9 @@
 //! `mail.otp.read` operation (E3.1-g, ADR-2a).
 //!
 //! The client calls `POST {integration-core}/api/v1/connections/{id}/actions` with
-//! `{"operation": "mail.otp.read", "params": {"approvalId": .., "windowSeconds": ..}}`
+//! `{"operation": "mail.otp.read", "params": {"approvalId": .., "windowSeconds": ..,
+//! "acting_user_id": ..}}` (the last is the run's acting user, when it has one; integration-core
+//! binds it to the personal connection's owner)
 //! and reads back `{"found": true, "code": ".."}` or `{"found": false}` from the
 //! action envelope (`data.action.result`). Nothing else of the mailbox ever reaches
 //! Quarry: no subject, no sender, no message id.
@@ -223,6 +225,7 @@ impl OtpSource for IntegrationCoreOtpSource {
             params: ActionParams {
                 approval_id: &request.approval_grant_id,
                 window_seconds: self.window_seconds,
+                acting_user_id: request.acting_user_id.as_deref(),
             },
         };
         let bearer = self
@@ -282,6 +285,12 @@ fn validate_request(request: &OtpRequest) -> QuarryResult<()> {
     }
     if !is_opaque_id(&request.approval_grant_id) {
         return Err(bad("approval_grant_id"));
+    }
+    // The acting user is optional; when present it is a plain, bounded id (fail closed).
+    if let Some(user) = request.acting_user_id.as_deref() {
+        if user.trim().is_empty() || user.len() > MAX_ID_LEN || user.chars().any(char::is_control) {
+            return Err(bad("acting_user_id"));
+        }
     }
     Ok(())
 }
@@ -420,6 +429,12 @@ struct ActionParams<'a> {
     approval_id: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     window_seconds: Option<u32>,
+    /// The run's acting user (the `fill_otp` approval's actor), from the verified token. Its key
+    /// is snake_case on the wire (`params.acting_user_id`, Q3-E3.1-g2): integration-core compares
+    /// it with the personal connection's owner (`otp_owner_mismatch` on a difference). Left out
+    /// when the run has no acting user. Never logged.
+    #[serde(rename = "acting_user_id", skip_serializing_if = "Option::is_none")]
+    acting_user_id: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -546,6 +561,7 @@ mod tests {
             mail_connection_id: "conn-mail-1".into(),
             approval_grant_id: "grant-1".into(),
             origin: "https://login.example.test".into(),
+            acting_user_id: None,
         }
     }
 

@@ -93,6 +93,15 @@ pub(super) async fn wait_for_lanes(run_id: &str, lanes: &[LaneRef], wait: Durati
     true
 }
 
+/// E3.1-e and E3.4-4: forget a run's credential-delivered marks and its download byte-ledger
+/// row. Both hold run ids with page addresses or byte counts, never page content, so this runs
+/// whatever the run's ZDR state. Callers pass only a run that has ended or never registered
+/// (`finish_run`, a failed start), so no live run loses a withheld read.
+pub(super) fn release_run_marks(run_id: &str) {
+    quarry_runtime::observation_redaction::credential_delivered_reads().release(run_id);
+    quarry_runtime::action_runtime::downloads::session_ledger().release(run_id);
+}
+
 /// The one path that ends a run, for the owner's `DELETE` and for the sweeper. It
 /// writes the durable record first (a failure leaves the run registered and
 /// untouched), then marks the run closed so an action that was waiting for the lock
@@ -100,7 +109,9 @@ pub(super) async fn wait_for_lanes(run_id: &str, lanes: &[LaneRef], wait: Durati
 /// even while another request still holds a reference to the run.
 ///
 /// An explicit close also closes the checkpoint; an expiry leaves it `active`, so a
-/// non-ZDR run can be resumed. A ZDR run leaves nothing durable either way.
+/// non-ZDR run can be resumed. A ZDR run leaves nothing durable either way. Once the
+/// session is released, the run's marks and ledger row are forgotten too
+/// (`release_run_marks`), whatever its ZDR state.
 pub(super) async fn finish_run(
     state: &AppState,
     run_id: &str,
@@ -281,6 +292,9 @@ pub(super) async fn finish_run(
     if let Err(error) = released {
         tracing::warn!(run_id, error_class = crate::zdr_log::class(&error), "releasing a run's browser session failed");
     }
+    // E3.1-e and E3.4-4: the run's marks and download ledger row go with its session, whatever
+    // its ZDR state and even when the release failed.
+    release_run_marks(run_id);
 
     match reason {
         CloseReason::Explicit => {

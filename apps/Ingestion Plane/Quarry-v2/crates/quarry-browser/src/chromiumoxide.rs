@@ -4969,6 +4969,9 @@ impl BrowserDriver for ChromiumoxideDriver {
             capture_options: true,
             // E4.4-a: the page's locale, timezone and geolocation are emulated with CDP overrides.
             page_emulation: true,
+            // E3.1-c2: one-time-code fills are advertised only with
+            // QUARRY_EDGE__FILL_OTP on (default off).
+            otp_fill: self.fill_otp,
         }
     }
 
@@ -6883,6 +6886,48 @@ impl BrowserDriver for ChromiumoxideDriver {
         tokio::time::sleep(Duration::from_millis(100)).await;
         Ok(())
     }
+
+    // E3.1-c2: the one-time-code fill, reachable through `Arc<dyn BrowserDriver>`.
+    // Each method calls the inherent method of the same name by explicit path (an
+    // inherent method wins over this trait method, so this does not recurse).
+    // The code is only the `code` argument: never logged, never in an error.
+    async fn otp_fill_precheck(
+        &self,
+        session: &BrowserSession,
+        target: &BrowserNativeTarget,
+        grant_origin: &str,
+    ) -> QuarryResult<OtpFillPrecheck> {
+        ChromiumoxideDriver::otp_fill_precheck(self, session, target, grant_origin).await
+    }
+
+    async fn otp_insert_trusted(
+        &self,
+        session: &BrowserSession,
+        target: &BrowserNativeTarget,
+        precheck: &OtpFillPrecheck,
+        code: &str,
+    ) -> QuarryResult<()> {
+        ChromiumoxideDriver::otp_insert_trusted(self, session, target, precheck, code).await
+    }
+
+    async fn mark_otp_credential_delivered(
+        &self,
+        session: &BrowserSession,
+        loader_id: &str,
+    ) -> QuarryResult<()> {
+        ChromiumoxideDriver::mark_otp_credential_delivered(self, session, loader_id).await
+    }
+
+    async fn otp_credential_delivered(&self, session: &BrowserSession, loader_id: &str) -> bool {
+        ChromiumoxideDriver::otp_credential_delivered(self, session, loader_id).await
+    }
+
+    async fn current_loader_credential_delivered(
+        &self,
+        session: &BrowserSession,
+    ) -> QuarryResult<bool> {
+        ChromiumoxideDriver::current_loader_credential_delivered(self, session).await
+    }
 }
 
 /// Return the opaque top-level frame id for the active page. This stays inside
@@ -6920,16 +6965,9 @@ async fn root_frame_id(page: &Page) -> QuarryResult<String> {
         })
 }
 
-/// E3.1-c: what the one-time-code preconditions found on a target that passed
-/// them. No value and no page text: the loader id of the top frame (the
-/// credential-delivered mark is keyed on it and a navigation changes it), the
-/// top frame id and the origin that the page, the frame and the grant share.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OtpFillPrecheck {
-    pub loader_id: String,
-    pub frame_id: String,
-    pub origin: String,
-}
+/// E3.1-c2: the struct now lives in `lib.rs` (it exists without the chromiumoxide
+/// feature); this keeps the old `chromiumoxide::OtpFillPrecheck` path.
+pub use crate::OtpFillPrecheck;
 
 /// The top frame of a page as `Page.getFrameTree` reports it.
 struct RootFrameInfo {

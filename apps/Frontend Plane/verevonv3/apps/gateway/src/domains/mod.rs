@@ -15,6 +15,7 @@ pub mod auth;
 pub mod billing;
 pub mod briefs;
 pub mod browser;
+pub mod browser_consent;
 pub mod browser_context;
 pub mod browser_evidence;
 mod browser_redirect;

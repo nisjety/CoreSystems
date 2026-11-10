@@ -1002,7 +1002,14 @@ pub(super) async fn delegate_step(
     let receipt_run_id = entry.run_id.to_string();
     let receipt_action = req.action.clone();
     let typed_kind = quarry_runtime::observation::receipt_field_kind(&lane.ctx, &req.action);
+    // Q3-E3.1-h2: as in `step`. The acting user is the run's owner (the entry's actor), not the
+    // delegate that drives the lane.
+    lane.ctx.otp_binding = admitted
+        .otp_binding
+        .clone()
+        .map(|binding| binding.for_run_actor(&entry.actor_id));
     let runner = ObservationRunner {
+        otp_source: state.otp_source.clone(),
         browser: state.agent_driver.clone(),
         artifacts: Some(state.artifacts.clone()),
         events: Some(state.event_sink.clone()),
@@ -1226,6 +1233,8 @@ mod attach_tests {
             resource_id: resource.to_owned(),
             key_id: String::new(),
             web_policy: None,
+            mail_connection_id: String::new(),
+            grant_origin: String::new(),
         }
     }
 
@@ -1375,6 +1384,8 @@ mod delegate_lane_tests {
                 resource_id: self.0.lock().unwrap().clone(),
                 key_id: String::new(),
                 web_policy: None,
+                mail_connection_id: String::new(),
+                grant_origin: String::new(),
             })
         }
     }

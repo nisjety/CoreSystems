@@ -807,6 +807,25 @@ Why it is deferred: the WS5.B definition of done allows the step to be "landed o
 
 To pick it up: route `fetch_page` in `crates/quarry-edge/src/extract_routes.rs` through `quarry_transform::sniff::detect` and `quarry_runtime::content_route::parse_document`, answer a document it cannot read with a typed per-source `UNSUPPORTED_MEDIA` that uses the reason codes of `/v1/scrape`, and test that a PDF in a batch fails only its own source.
 
+## 9.6 Sensitive ref action `fill_otp_ref`: a one-time code into a page (E3.1-ab, dark)
+
+Status: dark, and not wired end to end. The edge refuses the action with 403 `FORBIDDEN` while `QUARRY_EDGE__FILL_OTP` is off (the default). The executor that fills the page is not connected yet (`docs/OTP_HANDOFF.md`, B3 and B4). The model may propose the action; Quarry checks the approval and the page, then executes or rejects it. A model never grants the approval. The OpenAPI schema is `FillOtpRefAction` in `docs/openapi.yaml`, and the row below is the same contract.
+
+| Action | Wire fields | Approval | Refused | Receipt |
+|---|---|---|---|---|
+| `fill_otp_ref` | `snapshot_id`, `generation`, `ref_id`, `approval_grant_id`. No value field: a value, code or text key is ignored, never kept or echoed. | A single-use `fill_otp` approval grant (child of the run grant) for the exact top-frame target, used once per live run. | 403 `FORBIDDEN` while the flag is off. 409 `TARGET_REPAIR_REQUIRED` for a stale or absent target. An API-key run is refused with `api_key_sensitive_action_refused`. The page checks below refuse with 403 `FORBIDDEN` and a closed `otp_*` `details.reason`. | Outcome `otp_filled` only. The code is never in a receipt, event or response. |
+
+The fill checks these before any code is read, in this order (`crates/quarry-browser/src/actionability.rs`, and the driver's `otp_fill_precheck`):
+
+1. The top document is `https`. Loopback `http` is for that crate's own tests only.
+2. The target is in the top frame. A child-frame target fails closed, because there is no frame variant.
+3. The frame origin equals the top origin, and the grant origin is `https` and equals the top origin too.
+4. The target is one visible, required, non-password text `<input>`, and the only visible text field on the page.
+5. The page offers no other way to get the code: no `datalist` on the target, no visible `select`, radio or listbox, and no visible QR code.
+6. After the usual actionability checks, the insert is trusted input (focus, select all, `Input.insertText`). A field that would need the in-page value setter is refused, never set from script.
+
+After a fill step, succeeded or not, the frame's reads (accessibility tree, DOM and screenshot) are withheld until the frame navigates. ZDR: the code is held only in a zeroed buffer and dropped after the insert; it is not stored. A ZDR run keeps no receipts today, and the boolean receipt that a ZDR run needs is not built (`docs/OTP_HANDOFF.md`, sections 3 and 8).
+
 ## Scrape AI formats: `json`, `summary`, `question`, `highlights` (INNH-1, U1 to U3, 2026-10-31)
 
 Status: built and tested in tests, dark. The contract and its parser are in `quarry-core` (`ai_spec.rs`, `scrape.rs`, U1), the engine and the `/v1/ai/chat` client in `quarry-runtime` (`ai_scrape.rs`, `ai_verify.rs`, `mp_client.rs`, U2), and the edge wiring in `quarry-edge` (`scrape_contract/ai_formats.rs`, `routes.rs`, U3). The flag `QUARRY_EDGE__AI_FORMATS` exists and is off, so every AI format is `400 feature_disabled` until an operator sets it. It is on no stack: the compose files default it to `0`, and no deployed stack can turn it on yet (see "Not in this version"). No real Model Plane gateway has been called; the lane is proven against a strict double only. The design and its decisions are `.plan-work/quarry-w1w2/INNH-1-design.md`.

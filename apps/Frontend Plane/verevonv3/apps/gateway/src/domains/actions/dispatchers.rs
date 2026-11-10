@@ -26,6 +26,7 @@ use crate::domains::browser::{
     RenameProfileBody, RestoreProbeBody, StartAiRunBody, SuggestActionBody, TabActorQuery,
     Viewport as BrowserViewport,
 };
+use crate::domains::browser_consent::{list_consent, revoke_consent};
 use crate::domains::chat::documents::upload_chat_document;
 use crate::domains::chat::history::{
     clear_threads as clear_chat_threads, delete_thread as delete_chat_thread,
@@ -6386,6 +6387,99 @@ pub(super) async fn dispatch_browser_probe_profile_restore(
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("browser_profile.probe_restore", user, status, payload)
+}
+
+// E3.2-e3 (Q3): Settings > Browser lists the viewer's own per-origin browser consent decisions and
+// forgets one. Both call the gateway handlers in `domains::browser_consent`, which send only the
+// session's own user to user-core and validate the key there, so no user id is read from the input.
+// The routes exist only when BROWSER_CONSENT_API is on (AppState); while it is off nothing is sent.
+fn browser_consent_unavailable() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(error(
+            "browser_consent_unavailable",
+            "browser consent is not enabled on this gateway",
+        )),
+    )
+        .into_response()
+}
+
+pub(super) async fn dispatch_browser_list_origin_consents(
+    state: &AppState,
+    user: &AuthenticatedUser,
+) -> Response {
+    if !state.browser_consent_api {
+        return browser_consent_unavailable();
+    }
+    let (status, Json(payload)) = list_consent(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+    )
+    .await;
+    owner_json_response_to_envelope("browser.list_origin_consents", user, status, payload)
+}
+
+/// The input keys `browser.revoke_origin_consent` accepts. Any other key is refused, as the gateway
+/// route refuses an unknown query key rather than dropping it.
+const ORIGIN_CONSENT_KEYS: [&str; 4] = ["startHost", "scope", "conversationId", "turnId"];
+
+pub(super) async fn dispatch_browser_revoke_origin_consent(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    input: &Value,
+) -> Response {
+    if !state.browser_consent_api {
+        return browser_consent_unavailable();
+    }
+    let Some(fields) = input.as_object() else {
+        return ticket_bad_request("browser.revoke_origin_consent requires an object input");
+    };
+    if fields
+        .keys()
+        .any(|key| !ORIGIN_CONSENT_KEYS.contains(&key.as_str()))
+    {
+        return ticket_bad_request(
+            "browser.revoke_origin_consent accepts only startHost, scope, conversationId and turnId",
+        );
+    }
+    let (Some(start_host), Some(scope)) = (
+        input.get("startHost").and_then(Value::as_str),
+        input.get("scope").and_then(Value::as_str),
+    ) else {
+        return ticket_bad_request(
+            "browser.revoke_origin_consent requires string 'startHost' and 'scope'",
+        );
+    };
+    // The gateway route validates the four keys once, so they are passed on as the same query it
+    // reads, percent-encoded here; an id that is not a string is refused rather than left out.
+    // Built in its own block so the (non-Send) serializer is gone before the await below.
+    let query_string = {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query
+            .append_pair("startHost", start_host)
+            .append_pair("scope", scope);
+        for key in ["conversationId", "turnId"] {
+            match input.get(key) {
+                None => {}
+                Some(Value::String(id)) => {
+                    query.append_pair(key, id);
+                }
+                Some(_) => {
+                    return ticket_bad_request(
+                        "browser.revoke_origin_consent 'conversationId' and 'turnId' must be strings",
+                    );
+                }
+            }
+        }
+        query.finish()
+    };
+    let (status, Json(payload)) = revoke_consent(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        axum::extract::RawQuery(Some(query_string)),
+    )
+    .await;
+    owner_json_response_to_envelope("browser.revoke_origin_consent", user, status, payload)
 }
 
 // The owner (inference-core, via router_policy.rs) enforces no admin gate of

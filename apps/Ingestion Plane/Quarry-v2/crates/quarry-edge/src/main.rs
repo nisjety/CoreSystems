@@ -1930,6 +1930,8 @@ async fn run() -> anyhow::Result<()> {
     if let Some(gate) = robots.clone() {
         metrics::register_robots(gate);
     }
+    // Q3-E3.1-h2: dark unless QUARRY_EDGE__FILL_OTP and QUARRY_EDGE__INTEGRATION_CORE_URL are set.
+    let otp_source = build_otp_source(&cfg, cross_plane_tokens.as_ref());
     let app_state = state::AppState {
         readiness: state::ReadinessState {
             durable: durable_ready,
@@ -1970,6 +1972,7 @@ async fn run() -> anyhow::Result<()> {
             .flatten(),
         page_title_enricher,
         service_token_provider: cross_plane_tokens.clone(),
+        otp_source,
         answer_pipeline,
         answer_status: answer_pipeline_status,
         model_plane: mp,
@@ -2236,6 +2239,42 @@ fn browser_grant_http_validator(
         _ => validator,
     };
     Ok(Arc::new(validator))
+}
+
+/// Q3-E3.1-h2: the executor-only one-time-code source for `fill_otp_ref`. Built only when
+/// `QUARRY_EDGE__FILL_OTP` is on AND `QUARRY_EDGE__INTEGRATION_CORE_URL` is set AND the
+/// cross-plane token provider exists (the client mints its own `mail-otp-read` bearer per org
+/// from it); any one missing leaves it `None`, and a `fill_otp_ref` step is then refused
+/// `otp_source_unavailable` before any driver call. The client reads nothing but the code, and
+/// stores nothing, so a ZDR run is unaffected. No connection id or URL credential is logged.
+fn build_otp_source(
+    cfg: &config::EdgeConfig,
+    tokens: Option<&quarry_runtime::service_tokens::SharedServiceTokenProvider>,
+) -> Option<Arc<dyn quarry_runtime::otp_source::OtpSource>> {
+    if !quarry_runtime::otp_source::fill_otp_enabled() {
+        return None;
+    }
+    let url = cfg
+        .integration_core_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())?;
+    let Some(tokens) = tokens else {
+        tracing::warn!(
+            "fill_otp is on and QUARRY_EDGE__INTEGRATION_CORE_URL is set, but no cross-plane              token provider exists (QUARRY_EDGE__QUARRY_SERVICE_API_KEY unset); no one-time-code              source is built"
+        );
+        return None;
+    };
+    match quarry_runtime::otp_ic_client::IntegrationCoreOtpSource::new(url, tokens.clone()) {
+        Ok(source) => {
+            tracing::info!("one-time-code source: integration-core mail.otp.read");
+            Some(Arc::new(source.with_enabled(true)))
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "one-time-code source init failed; fill_otp_ref stays refused");
+            None
+        }
+    }
 }
 
 pub fn routes_for_test(state: state::AppState) -> Router {

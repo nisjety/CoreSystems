@@ -1800,9 +1800,11 @@ describe('action registry', () => {
     // +1 after EP-12-S11 registered thread.export, the owner's download of one conversation.
     // +1 after EP-11-S8 registered skills.import, the Skills page's import from a file.
     // +1 after EP-10-S8 registered chat.accept_connector_suggestion, the connected-app suggestion card.
+    // +2 after Q3-E3.2-e3-reg registered browser.list_origin_consents and browser.revoke_origin_consent,
+    // the Settings > Browser consent list and forget (323 + 2 = 325).
     // Union (W-sweep): HEAD (W3-E3.2-g1 browser.get/set_org_policy: +2) and
     // model-plane (P1 chat.open_computer_viewer: +1): 320 + 3 = 323.
-    expect(ids).toHaveLength(323)
+    expect(ids).toHaveLength(325)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

@@ -280,8 +280,15 @@ pub async fn step(
     // WS12.S3: the kind of the control a typing action goes to, read from the snapshot the
     // action names. `execute` replaces `ctx.active_snapshot`, so this is read before it runs.
     let typed_kind = quarry_runtime::observation::receipt_field_kind(&lane.ctx, &req.action);
+    // Q3-E3.1-h2: a `fill_otp_ref` step reads its code for the approval grant's mail connection
+    // and origin, for the run's actor. Set on every step, so a binding never outlives its step.
+    lane.ctx.otp_binding = admitted
+        .otp_binding
+        .clone()
+        .map(|binding| binding.for_run_actor(&entry.actor_id));
 
     let runner = ObservationRunner {
+        otp_source: state.otp_source.clone(),
         browser: state.agent_driver.clone(),
         artifacts: Some(state.artifacts.clone()),
         events: Some(state.event_sink.clone()),
@@ -494,7 +501,13 @@ pub(super) async fn execute_ws_action(
     // action names. `execute` replaces `ctx.active_snapshot`, so this is read before it runs.
     let typed_kind = quarry_runtime::observation::receipt_field_kind(&lane.ctx, &req.action);
     let receipt_run_id = entry.run_id.to_string();
+    // Q3-E3.1-h2: as in `step`.
+    lane.ctx.otp_binding = admitted
+        .otp_binding
+        .clone()
+        .map(|binding| binding.for_run_actor(&entry.actor_id));
     let runner = ObservationRunner {
+        otp_source: state.otp_source.clone(),
         browser: state.agent_driver.clone(),
         artifacts: Some(state.artifacts.clone()),
         events: Some(state.event_sink.clone()),

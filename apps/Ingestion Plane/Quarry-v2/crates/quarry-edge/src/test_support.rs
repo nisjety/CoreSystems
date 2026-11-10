@@ -128,6 +128,7 @@ pub fn test_state(static_driver: Arc<dyn Driver>) -> AppState {
         model_plane_token: None,
         page_title_enricher: None,
         service_token_provider: None,
+        otp_source: None,
         answer_pipeline: None,
         answer_status: crate::answer_status::AnswerPipelineStatus::SynthesisDisabled,
         model_plane: Default::default(),

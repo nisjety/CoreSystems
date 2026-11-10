@@ -34,6 +34,8 @@ use crate::artifact_store::ArtifactStore;
 use crate::challenge::{self, BlockEpisodes, ChallengeConfig, ChallengeInput, ClassifierMode, EnforceMode};
 use crate::events::EventSink;
 use crate::observation_redaction::{self, Redactor, ScreenshotReport};
+use crate::otp_fill_target::BrowserOtpFillTarget;
+use crate::otp_source::{OtpRequest, OtpSource};
 use crate::pipeline::{pii_redaction_error, pii_redaction_settings, PiiRedactionFailure};
 use crate::vision::{VisualChangeArtifact, VisualObservationInput, VisualObservationProcessor};
 
@@ -105,6 +107,9 @@ pub struct ObservationRunner {
     /// only this tenant can read the bytes back by id. Empty means the run has
     /// no tenant attribution — such artifacts stay write-only.
     pub org_id: String,
+    /// E3.1-d: the executor-only source of one-time codes for a `fill_otp_ref` step.
+    /// Unset (the default), such a step is refused before any driver call.
+    pub otp_source: Option<Arc<dyn OtpSource>>,
 }
 
 #[derive(Default)]
@@ -159,6 +164,29 @@ pub struct ObservationContext {
     /// written (`receipt_field_kind`), and as a secret when it is `None`. In memory
     /// only, run-local, like `active_snapshot`.
     pub key_focus: Option<FieldKind>,
+    /// E3.1-d: whom a `fill_otp_ref` step reads its one-time code for, filled by the edge
+    /// from the approved grant and the verified token. Unset, the fill is refused (fail
+    /// closed, `otp_binding_missing`). Run-local, in memory only.
+    pub otp_binding: Option<OtpBinding>,
+}
+
+/// E3.1-d: the mail connection, origin and acting user a one-time-code fill is for. Opaque
+/// ids and an origin only, never a code. Its `Debug` prints no field.
+#[derive(Clone)]
+pub struct OtpBinding {
+    /// The approved mail connection (integration-corev2 connection id).
+    pub mail_connection_id: String,
+    /// The https origin of the approval the fill is for; the frame, the top page and this
+    /// origin must all match (E3.1-c).
+    pub origin: String,
+    /// The verified user the run acts for, when the run has one.
+    pub acting_user_id: Option<String>,
+}
+
+impl std::fmt::Debug for OtpBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtpBinding").finish_non_exhaustive()
+    }
 }
 
 /// Page identity captured at observation time. Deliberately tiny so carrying
@@ -242,6 +270,14 @@ impl ObservationRunner {
     /// backend cannot make a single action stage arbitrary amounts of data.
     const MAX_UPLOAD_ARTIFACT_BYTES: usize = 25 * 1024 * 1024;
     const MAX_DOWNLOAD_ARTIFACT_BYTES: usize = 25 * 1024 * 1024;
+
+    /// E3.1-d: attach the source a `fill_otp_ref` step reads its one-time code from. Without
+    /// it (the default) such a step is refused before any driver call.
+    #[must_use]
+    pub fn with_otp_source(mut self, source: Arc<dyn OtpSource>) -> Self {
+        self.otp_source = Some(source);
+        self
+    }
 
     /// Classify access/challenge pages without attempting to bypass them. The
     /// signal is conservative and evidence-bearing so the Model Plane can decide
@@ -745,14 +781,62 @@ impl ObservationRunner {
                         )
                         .await?;
                 }
-                AgentAction::FillOtpRef { .. } => {
-                    // E3.1-a: the contract exists, the executor does not yet (E3.1-c
-                    // preconditions, E3.1-d OtpSource). Fail closed before any driver
-                    // call; the edge already refuses it while QUARRY_EDGE__FILL_OTP is off.
-                    return Err(QuarryError::new(
-                        ErrorCode::Unsupported,
-                        "fill_otp_ref has no executor on this runtime",
-                    ));
+                AgentAction::FillOtpRef { approval_grant_id, .. } => {
+                    // E3.1-d: the executor for `fill_otp_ref`. The target was resolved from the
+                    // snapshot above, as an upload's is. Every refusal here comes before the page
+                    // is touched, except the read-only precheck. The code is read, inserted and
+                    // dropped inside `deliver_otp`, and nothing in this arm keeps it.
+                    if !crate::otp_source::fill_otp_enabled() {
+                        return Err(QuarryError::new(
+                            ErrorCode::Unsupported,
+                            "fill_otp is not enabled on this deployment (QUARRY_EDGE__FILL_OTP is off)",
+                        )
+                        .with_details(json!({ "reason": "otp_fill_disabled" })));
+                    }
+                    let target = transfer_target.as_ref().ok_or_else(|| {
+                        target_repair(
+                            "one-time-code fill requires an executable native input target; observe again",
+                            json!({}),
+                        )
+                    })?;
+                    let source = self.otp_source.as_deref().ok_or_else(|| {
+                        QuarryError::new(
+                            ErrorCode::Unsupported,
+                            "no one-time-code source is configured on this runtime",
+                        )
+                        .with_details(json!({ "reason": "otp_source_unavailable" }))
+                    })?;
+                    let binding = ctx.otp_binding.as_ref().ok_or_else(|| {
+                        QuarryError::new(
+                            ErrorCode::Forbidden,
+                            "this run has no approved mail connection for a one-time-code fill",
+                        )
+                        .with_details(json!({ "reason": "otp_binding_missing" }))
+                    })?;
+                    let precheck = self
+                        .browser
+                        .otp_fill_precheck(session, target, &binding.origin)
+                        .await?;
+                    let request = OtpRequest {
+                        org_id: self.org_id.clone(),
+                        mail_connection_id: binding.mail_connection_id.clone(),
+                        approval_grant_id: approval_grant_id.clone(),
+                        origin: binding.origin.clone(),
+                        acting_user_id: binding.acting_user_id.clone(),
+                    };
+                    let fill = BrowserOtpFillTarget::new(
+                        self.browser.as_ref(),
+                        session,
+                        target,
+                        precheck,
+                    );
+                    crate::otp_source::deliver_otp(
+                        crate::otp_source::fill_otp_enabled(),
+                        source,
+                        &fill,
+                        &request,
+                    )
+                    .await?;
                 }
                 AgentAction::Evaluate { .. } => {
                     // Raw script is refused before any driver call. The edge
@@ -1452,6 +1536,12 @@ impl ObservationRunner {
                 ref_id,
                 ..
             } => (snapshot_id, *generation, Some(ref_id.as_str()), None),
+            AgentAction::FillOtpRef {
+                snapshot_id,
+                generation,
+                ref_id,
+                ..
+            } => (snapshot_id, *generation, Some(ref_id.as_str()), None),
             AgentAction::ClickSemantic {
                 snapshot_id,
                 generation,
@@ -1515,6 +1605,7 @@ impl ObservationRunner {
                 | AgentAction::FrameUploadRef { .. }
                 | AgentAction::DownloadRef { .. }
                 | AgentAction::FrameDownloadRef { .. }
+                | AgentAction::FillOtpRef { .. }
         ) && target.native_target.is_none()
         {
             return Err(target_repair(
@@ -1585,6 +1676,7 @@ impl ObservationRunner {
             },
             AgentAction::UploadRef { .. } => action.clone(),
             AgentAction::DownloadRef { .. } => action.clone(),
+            AgentAction::FillOtpRef { .. } => action.clone(),
             AgentAction::FrameUploadRef {
                 snapshot_id,
                 generation,
@@ -1634,6 +1726,12 @@ impl ObservationRunner {
                     timeout_ms: *timeout_ms,
                 })
             }
+            // A transfer or a fill has no verified-target operation: it runs through its own path.
+            AgentAction::UploadRef { .. }
+            | AgentAction::FrameUploadRef { .. }
+            | AgentAction::DownloadRef { .. }
+            | AgentAction::FrameDownloadRef { .. }
+            | AgentAction::FillOtpRef { .. } => None,
             _ => unreachable!("only snapshot actions reach target resolution"),
         }
         .map(|operation| VerifiedTargetAction {
@@ -1650,6 +1748,7 @@ impl ObservationRunner {
                 | AgentAction::FrameUploadRef { .. }
                 | AgentAction::DownloadRef { .. }
                 | AgentAction::FrameDownloadRef { .. }
+                | AgentAction::FillOtpRef { .. }
         ) {
             target
                 .native_target
@@ -1873,6 +1972,7 @@ fn action_requires_atomic_target(action: &AgentAction) -> bool {
             | AgentAction::FrameUploadRef { .. }
             | AgentAction::DownloadRef { .. }
             | AgentAction::FrameDownloadRef { .. }
+            | AgentAction::FillOtpRef { .. }
     )
 }
 
@@ -3162,6 +3262,7 @@ mod tests {
 
     fn challenge_runner(driver: &Arc<ContentDriver>) -> ObservationRunner {
         ObservationRunner {
+            otp_source: None,
             browser: driver.clone(),
             artifacts: None,
             events: None,
@@ -4056,6 +4157,7 @@ mod tests {
         ctx: &mut ObservationContext,
     ) -> QuarryResult<BrowserObservation> {
         let runner = ObservationRunner {
+            otp_source: None,
             browser: driver.clone(),
             artifacts: None,
             events: None,
@@ -4277,6 +4379,7 @@ mod tests {
             ..Default::default()
         });
         let runner = ObservationRunner {
+            otp_source: None,
             browser: driver.clone(),
             artifacts: None,
             events: None,
@@ -4360,6 +4463,7 @@ mod tests {
             ..Default::default()
         });
         let runner = ObservationRunner {
+            otp_source: None,
             browser: driver.clone(),
             artifacts: None,
             events: None,
@@ -4416,6 +4520,7 @@ mod tests {
             ..Default::default()
         });
         let runner = ObservationRunner {
+            otp_source: None,
             browser: driver.clone(),
             artifacts: None,
             events: None,
@@ -4578,6 +4683,7 @@ mod tests {
             ..Default::default()
         });
         let runner = ObservationRunner {
+            otp_source: None,
             browser: driver.clone(),
             artifacts: None,
             events: None,
@@ -4796,6 +4902,7 @@ mod tests {
     async fn put_artifact_if_allowed_skips_zdr_writes() {
         let store = Arc::new(InMemoryStore::new());
         let runner = ObservationRunner {
+            otp_source: None,
             browser: Arc::new(crate::tests::MockBrowserDriver),
             artifacts: Some(store.clone()),
             events: None,
@@ -4823,6 +4930,7 @@ mod tests {
     async fn put_artifact_if_allowed_stores_visual_observation_when_zdr_off() {
         let store = Arc::new(InMemoryStore::new());
         let runner = ObservationRunner {
+            otp_source: None,
             browser: Arc::new(crate::tests::MockBrowserDriver),
             artifacts: Some(store.clone()),
             events: None,
@@ -4910,6 +5018,7 @@ mod tests {
         let store = Arc::new(InMemoryStore::new());
         let browser = Arc::new(crate::tests::MockBrowserDriver);
         let runner = ObservationRunner {
+            otp_source: None,
             browser: browser.clone(),
             artifacts: Some(store.clone()),
             events: None,
@@ -5058,6 +5167,7 @@ mod tests {
             ..Default::default()
         });
         let runner = ObservationRunner {
+            otp_source: None,
             browser: browser.clone(),
             artifacts: Some(store.clone()),
             events: None,
@@ -5111,6 +5221,7 @@ mod tests {
             ..Default::default()
         });
         let runner = ObservationRunner {
+            otp_source: None,
             browser: browser.clone(),
             artifacts: Some(store.clone()),
             events: None,
@@ -5143,6 +5254,7 @@ mod tests {
             ..Default::default()
         });
         let runner = ObservationRunner {
+            otp_source: None,
             browser: browser.clone(),
             artifacts: None,
             events: None,
@@ -5184,6 +5296,7 @@ mod tests {
                 ..Default::default()
             });
             let runner = ObservationRunner {
+                otp_source: None,
                 browser: browser.clone(),
                 artifacts: Some(store.clone()),
                 events: None,
@@ -5258,6 +5371,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let browser = withheld_run_driver(None);
         let runner = ObservationRunner {
+            otp_source: None,
             browser: browser.clone(),
             artifacts: Some(store.clone()),
             events: Some(EventSink::new(tx)),
@@ -5301,6 +5415,7 @@ mod tests {
         let store = Arc::new(InMemoryStore::new());
         let browser = withheld_run_driver(None);
         let runner = ObservationRunner {
+            otp_source: None,
             browser: browser.clone(),
             artifacts: Some(store.clone()),
             events: None,
@@ -5342,6 +5457,7 @@ mod tests {
         let _flag = FillOtpFlag::set(true);
         let browser = withheld_run_driver(Some(OTP_PAGE));
         let runner = ObservationRunner {
+            otp_source: None,
             browser: browser.clone(),
             artifacts: None,
             events: None,
@@ -5382,6 +5498,7 @@ mod tests {
                 ..Default::default()
             });
             let runner = ObservationRunner {
+                otp_source: None,
                 browser: browser.clone(),
                 artifacts: Some(store.clone()),
                 events: None,
@@ -5415,6 +5532,7 @@ mod tests {
         let store = Arc::new(InMemoryStore::new());
         let browser = withheld_run_driver(None);
         let runner = ObservationRunner {
+            otp_source: None,
             browser: browser.clone(),
             artifacts: Some(store.clone()),
             events: None,

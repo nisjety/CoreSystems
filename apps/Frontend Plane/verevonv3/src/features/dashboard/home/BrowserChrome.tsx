@@ -125,8 +125,9 @@ import { assistantBrowserTarget } from '@/features/core/assistant-agent/assistan
 import { BrowserApprovalDecisionCard } from '@/features/browser/approval/BrowserApprovalDecisionCard'
 import {
   APPROVAL_REDIRECT_ENABLED,
-  browserApprovalCardEnabled,
   browserApprovalToCardModel,
+  browserGateOnOtpCard,
+  browserGateUsesDecisionCard,
 } from '@/features/browser/approval/approval-model'
 import {
   sessionHasHumanBrowsing,
@@ -464,11 +465,15 @@ function BrowserApprovalCard(props: {
  * owns the decision: the card's `decide` hands the gate's key to `onDecide`,
  * so the in-flight keys and the refresh stay where they were. The redirect box
  * stays off (APPROVAL_REDIRECT_ENABLED) until execution-core reads redirect
- * text. Renders nothing for a gate that is no longer pending.
+ * text. Renders nothing for a gate that is no longer pending or has no approval id
+ * yet. A one-time-code fill (E3.1-i) gets the OTP variant here while
+ * VITE_BROWSER_OTP_APPROVAL_CARD is on, and no generic button is offered for it.
  */
 function BrowserGateDecisionCard(props: {
   approval: BrowserApprovalEntry
   onDecide?: (approvalKey: string, decision: ApprovalDecision) => void
+  /** "I will type it myself" on a one-time-code fill (E3.1-i). Omitted when the takeover cannot start. */
+  onTakeOver?: () => void
 }) {
   const model = () => browserApprovalToCardModel(props.approval)
   return (
@@ -481,6 +486,7 @@ function BrowserGateDecisionCard(props: {
             props.onDecide?.(props.approval.key, request.decision)
             return Promise.resolve()
           }}
+          onTakeOver={props.onTakeOver}
         />
       )}
     </Show>
@@ -877,6 +883,13 @@ export function BrowserChrome(props: {
     if (sendBrowserWsControl(nextMode)) return
     props.onBrowserControlMode?.(nextMode, session().controlEpoch ?? null)
   }
+  /**
+   * "I will type it myself" on a one-time-code approval (E3.1-i): the chrome's own takeover,
+   * offered only while it can start, so it never hands an active takeover back to the agent.
+   * It sends no decision; the approval stays pending.
+   */
+  const approvalTakeOver = () =>
+    browserControlModeDisabled() || humanTakeoverActive() ? undefined : toggleBrowserControlMode
   const runAction = (action: BrowserAction) => {
     if (controlsDisabled()) return
     if (!(action.type === 'navigate' && props.browserNavigationError && props.onBrowserAction) && sendBrowserWsAction(action)) return
@@ -2439,7 +2452,7 @@ export function BrowserChrome(props: {
             <Show when={pendingApproval()}>
               {(approval) => (
                 <Show
-                  when={browserApprovalCardEnabled() && browserApprovalToCardModel(approval())}
+                  when={browserGateUsesDecisionCard(approval().actionType) && browserApprovalToCardModel(approval())}
                   fallback={
                 <div
                   class="knowledge-browser-ai-bubble knowledge-browser-ai-bubble--approval"
@@ -2459,30 +2472,33 @@ export function BrowserChrome(props: {
                         <Show when={approval().selector}> · {approval().selector}</Show>
                       </p>
                     </Show>
-                    <div class="verevon-run-approval__actions">
-                      <button
-                        type="button"
-                        class="verevon-run-approval__approve"
-                        disabled={decidingBrowserApprovalKeys().includes(approval().key)}
-                        onClick={() => props.onDecideBrowserApproval?.(approval().key, 'approve')}
-                      >
-                        <Show when={decidingBrowserApprovalKeys().includes(approval().key)}>
-                          <Loader2 class="size-3.5 verevon-run-spin" />
-                        </Show>
-                        {i18n.tr('Godkjenn', 'Approve')}
-                      </button>
-                      <button
-                        type="button"
-                        class="verevon-run-approval__reject"
-                        disabled={decidingBrowserApprovalKeys().includes(approval().key)}
-                        onClick={() => props.onDecideBrowserApproval?.(approval().key, 'reject')}
-                      >
-                        <Show when={decidingBrowserApprovalKeys().includes(approval().key)}>
-                          <Loader2 class="size-3.5 verevon-run-spin" />
-                        </Show>
-                        {i18n.tr('Avslå', 'Reject')}
-                      </button>
-                    </div>
+                    {/* A one-time-code fill waits for the OTP card (E3.1-i): no generic buttons, even without an id. */}
+                    <Show when={!browserGateOnOtpCard(approval().actionType)}>
+                      <div class="verevon-run-approval__actions">
+                        <button
+                          type="button"
+                          class="verevon-run-approval__approve"
+                          disabled={decidingBrowserApprovalKeys().includes(approval().key)}
+                          onClick={() => props.onDecideBrowserApproval?.(approval().key, 'approve')}
+                        >
+                          <Show when={decidingBrowserApprovalKeys().includes(approval().key)}>
+                            <Loader2 class="size-3.5 verevon-run-spin" />
+                          </Show>
+                          {i18n.tr('Godkjenn', 'Approve')}
+                        </button>
+                        <button
+                          type="button"
+                          class="verevon-run-approval__reject"
+                          disabled={decidingBrowserApprovalKeys().includes(approval().key)}
+                          onClick={() => props.onDecideBrowserApproval?.(approval().key, 'reject')}
+                        >
+                          <Show when={decidingBrowserApprovalKeys().includes(approval().key)}>
+                            <Loader2 class="size-3.5 verevon-run-spin" />
+                          </Show>
+                          {i18n.tr('Avslå', 'Reject')}
+                        </button>
+                      </div>
+                    </Show>
                   </div>
                 </div>
                   }
@@ -2492,7 +2508,11 @@ export function BrowserChrome(props: {
                     class="knowledge-browser-ai-bubble knowledge-browser-ai-bubble--approval"
                     aria-label={i18n.tr('Venter på godkjenning', 'Waiting for approval')}
                   >
-                    <BrowserGateDecisionCard approval={approval()} onDecide={props.onDecideBrowserApproval} />
+                    <BrowserGateDecisionCard
+                      approval={approval()}
+                      onDecide={props.onDecideBrowserApproval}
+                      onTakeOver={approvalTakeOver()}
+                    />
                   </div>
                 </Show>
               )}
@@ -2761,7 +2781,7 @@ export function BrowserChrome(props: {
                 <For each={props.browserApprovals}>
                   {(approval) => (
                     <Show
-                      when={browserApprovalCardEnabled() && approval.status === 'pending'}
+                      when={browserGateUsesDecisionCard(approval.actionType) && approval.status === 'pending'}
                       fallback={
                         <BrowserApprovalCard
                           approval={approval}
@@ -2770,7 +2790,11 @@ export function BrowserChrome(props: {
                         />
                       }
                     >
-                      <BrowserGateDecisionCard approval={approval} onDecide={props.onDecideBrowserApproval} />
+                      <BrowserGateDecisionCard
+                        approval={approval}
+                        onDecide={props.onDecideBrowserApproval}
+                        onTakeOver={approvalTakeOver()}
+                      />
                     </Show>
                   )}
                 </For>

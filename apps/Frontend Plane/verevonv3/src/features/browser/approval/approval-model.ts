@@ -1,6 +1,7 @@
 import { ORCHESTRATION_APPROVAL_REASON_MAX } from '@/shared/actions/action-registry'
 import type { Approval } from '@/shared/api/orchestration-client'
 import type { BrowserApprovalEntry } from '@/features/dashboard/home/browser-session'
+import { browserOtpApprovalEnabled, isOtpFillApproval } from './otp-approval'
 
 /**
  * Pure view model for the shared keyboard-first approval card (E3.2-b).
@@ -31,6 +32,17 @@ export type ApprovalCardModel = {
   target: string
   /** Browser risk category key (login, checkout, ...). Empty for run approvals. */
   riskCategory: string
+  /**
+   * The page a one-time-code fill goes to, as a URL or an origin (E3.1-i). The approval
+   * event does not carry it yet (MP-ASKS W3-E3.1-i); without it the OTP card withholds Approve.
+   */
+  topOrigin?: string
+  /** The frame that holds the field, as a URL or an origin (E3.1-i). Optional, as `topOrigin`. */
+  frameOrigin?: string
+  /** integration-core's mail provider key, such as `google` (E3.1-i). Optional, as `topOrigin`. */
+  mailProviderKey?: string
+  /** The label the person gave the mail connection, never the mailbox address (E3.1-i). Optional, as `topOrigin`. */
+  mailAccountLabel?: string
 }
 
 /** One of the three things the person can do with a pending approval. */
@@ -67,8 +79,15 @@ export function approvalTargetSummary(url: string, selector: string): string {
   return parts.join(' · ')
 }
 
+/**
+ * A browser gate as the card reads it. The OTP fields are optional: the approval event
+ * does not send them yet (MP-ASKS W3-E3.1-i), so a gate without them still maps to a card.
+ */
+export type BrowserApprovalGate = BrowserApprovalEntry &
+  Pick<ApprovalCardModel, 'topOrigin' | 'frameOrigin' | 'mailProviderKey' | 'mailAccountLabel'>
+
 /** Maps a pending browser-action gate to the card model. Null when not pending. */
-export function browserApprovalToCardModel(entry: BrowserApprovalEntry): ApprovalCardModel | null {
+export function browserApprovalToCardModel(entry: BrowserApprovalGate): ApprovalCardModel | null {
   if (entry.status !== 'pending' || !entry.approvalId) return null
   return {
     approvalId: entry.approvalId,
@@ -77,6 +96,10 @@ export function browserApprovalToCardModel(entry: BrowserApprovalEntry): Approva
     actionType: entry.actionType.trim(),
     target: approvalTargetSummary(entry.url, entry.selector),
     riskCategory: entry.riskCategory,
+    topOrigin: entry.topOrigin,
+    frameOrigin: entry.frameOrigin,
+    mailProviderKey: entry.mailProviderKey,
+    mailAccountLabel: entry.mailAccountLabel,
   }
 }
 
@@ -134,6 +157,24 @@ export function buildDecisionRequest(
  */
 export function browserApprovalCardEnabled(): boolean {
   return import.meta.env.VITE_BROWSER_APPROVAL_CARD === '1'
+}
+
+/**
+ * Whether a browser gate is a one-time-code fill that the OTP card shows (E3.1-i). Such a gate
+ * never gets the generic Approve: it is shown on the OTP card, or, while it has no approval id,
+ * without buttons.
+ */
+export function browserGateOnOtpCard(actionType: string): boolean {
+  return browserOtpApprovalEnabled() && isOtpFillApproval(actionType)
+}
+
+/**
+ * Whether a browser gate goes to the shared decision card. A one-time-code fill goes there
+ * whenever the OTP card is on, even with the shared card off (E3.1-i). Every other gate
+ * follows the shared flag alone.
+ */
+export function browserGateUsesDecisionCard(actionType: string): boolean {
+  return browserApprovalCardEnabled() || browserGateOnOtpCard(actionType)
 }
 
 /**

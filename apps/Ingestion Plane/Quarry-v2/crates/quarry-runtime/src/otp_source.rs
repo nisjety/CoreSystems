@@ -73,7 +73,8 @@ thread_local! {
 }
 
 /// Which code to read. Opaque ids only: never a mail address, never a subject line.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+/// Its `Debug` prints no field, so no id reaches a log by formatting.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct OtpRequest {
     /// The org the run belongs to; the source must not read across orgs.
     pub org_id: String,
@@ -83,6 +84,15 @@ pub struct OtpRequest {
     pub approval_grant_id: String,
     /// The https origin the code is for (the grant origin, checked by E3.1-c).
     pub origin: String,
+    /// The verified user the run acts for, when the run has one. An opaque id from the
+    /// verified token, never from a request body.
+    pub acting_user_id: Option<String>,
+}
+
+impl fmt::Debug for OtpRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OtpRequest").finish_non_exhaustive()
+    }
 }
 
 /// A one-time code. The buffer is zeroed on drop; `Debug` never shows it; there is
@@ -309,6 +319,7 @@ mod tests {
             mail_connection_id: "mail-1".into(),
             approval_grant_id: "grant-1".into(),
             origin: "https://login.example.test".into(),
+            acting_user_id: None,
         }
     }
 

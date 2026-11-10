@@ -19,8 +19,8 @@ import './browser-approval-card.css'
  * and it never shows the code.
  *
  * Mount it only when `browserOtpApprovalEnabled()` is true; off, the caller keeps the
- * generic card. Nothing mounts it in this unit: the mount is the approval-card swap
- * (W3-E3.2-b-swap). Styles are the generic card's (browser-approval-card.css).
+ * generic card. BrowserApprovalDecisionCard mounts it for a browser `fill_otp` approval
+ * (E3.1-i2) and it replaces that card. Styles are the generic card's (browser-approval-card.css).
  *
  * Keys (only inside the card, as on the generic card):
  *   Cmd/Ctrl+Enter approve (refused while Approve is withheld), Cmd/Ctrl+Shift+Enter reject.

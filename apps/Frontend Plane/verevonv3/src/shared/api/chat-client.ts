@@ -257,6 +257,13 @@ export type ChatInvokeRequest = {
    * subscription route: the gateway refuses those, so this client never sends what it would refuse.
    */
   contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
+  /**
+   * The tabs the gateway resolved for the turn's `@tab` mentions (E3.3-c), from
+   * `resolveBrowserTabMentions`. Context references only: no page content and no grant. Sent as
+   * `browser_tab_refs` only when non-empty, and never on a zero-retention, conversation-only,
+   * Support-read-only or subscription turn.
+   */
+  browserTabRefs?: import('@/shared/api/browser-client').BrowserTabContextRef[]
   /** The thread goal a Continue turn works toward (EP-7 S1). Sent as `goal_id` only when set, never on a zero-retention turn. */
   goalId?: string
   /**
@@ -2130,6 +2137,19 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
   const contextRefs = request.zdr || subscriptionBacked
     ? []
     : normalizeContextRefs(request.contextRefs)
+  // Browser tab refs (E3.3-c): the tabs the gateway re-resolved for the turn's @tab mentions. Page context is
+  // never attached on a zero-retention turn, and the other blocked turns carry no browser context either.
+  const browserTabRefs = request.zdr || subscriptionBacked || supportReadOnly || conversationOnly
+    ? []
+    : (request.browserTabRefs ?? []).slice(0, 8).map((ref) => ({
+        session_id: ref.sessionId,
+        tab_id: ref.tabId,
+        label: ref.label,
+        label_source: ref.labelSource,
+        target: ref.target,
+        trust_class: ref.trustClass,
+        grant: ref.grant,
+      }))
   // Deck template (EP-5 S7): present only when the person picked one. A zero-retention turn never applies a
   // template, and the server refuses one there, so this client never sends it on the turns it would refuse.
   const deckTemplate = request.zdr || subscriptionBacked || supportReadOnly || conversationOnly
@@ -2237,6 +2257,8 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     ...(connectorScope.length > 0 ? { connector_scope: connectorScope } : {}),
     // Omitted entirely when no chip was attached, like `connector_scope`: an ordinary turn is unchanged.
     ...(contextRefs.length > 0 ? { context_refs: contextRefs } : {}),
+    // Omitted entirely when the turn named no tab, like `context_refs`: an ordinary turn is unchanged.
+    ...(browserTabRefs.length > 0 ? { browser_tab_refs: browserTabRefs } : {}),
     // Omitted entirely when no template was picked, like `context_refs`: an ordinary turn is unchanged.
     ...(deckTemplate ? { deck_template: deckTemplate } : {}),
     // The goal of a Continue turn (EP-7 S1): omitted on every other turn, so an ordinary body is unchanged.

@@ -1775,6 +1775,33 @@ const browserSetOrgPolicyOutput = z.object({
   revision: z.number().int().min(0),
   rev: z.string(),
 })
+// Settings > Browser (E3.2-e3): the viewer's own per-origin browser consent decisions, held by user-core
+// (Control Plane). The gateway proxies the session's own user only; the input names the decision's key, never a user.
+// Hosts and ids only, no page content. A decision is made from the approval card, so the one write here forgets one.
+const browserConsentScope = z.enum(['turn', 'conversation', 'always'])
+const browserConsentIdInput = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/)
+const browserListOriginConsentsInput = z.object({}).strict()
+const browserRevokeOriginConsentInput = z
+  .object({
+    startHost: z.string().min(1).max(253),
+    scope: browserConsentScope,
+    conversationId: browserConsentIdInput.optional(),
+    turnId: browserConsentIdInput.optional(),
+  })
+  .strict()
+const browserOriginConsentsOutput = z.object({
+  origins: z.array(
+    z.object({
+      startHost: z.string(),
+      hosts: z.array(z.string()),
+      decision: z.enum(['allow', 'deny']),
+      scope: browserConsentScope,
+      conversationId: z.string().optional(),
+      turnId: z.string().optional(),
+      decidedAt: z.string(),
+    }),
+  ),
+})
 // The effective policy of one thread (Wave 3 EP-9 T2): each value the gateway enforces for it, with the layer that set
 // it and a lock where a higher layer fixes it. The organization is the session's, so the input names the thread only.
 const policyReadEffectiveInput = z.object({ threadId: z.string().trim().min(1).max(200) }).strict()
@@ -3943,6 +3970,30 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: browserSetOrgPolicyInput,
     outputSchema: browserSetOrgPolicyOutput,
+  },
+  {
+    id: 'browser.list_origin_consents',
+    label: 'Read browser consents',
+    description:
+      'Read the browser consent decisions you have stored: for each site a browse started from, the hosts it may reach, whether you allowed or denied it, and whether the decision covers this turn, this conversation or always. Only your own decisions are shown. Never model-executable.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: browserListOriginConsentsInput,
+    outputSchema: browserOriginConsentsOutput,
+  },
+  {
+    id: 'browser.revoke_origin_consent',
+    label: 'Forget a browser consent',
+    description:
+      'Forget one stored browser consent decision, so the next browse from that site asks again. This cannot be undone: the decision is not restored, and a new one is made from the approval card. Only your own decisions can be forgotten. Never model-executable: a model does not change the consents it runs under.',
+    ownerPlane: 'control',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: browserRevokeOriginConsentInput,
+    outputSchema: browserOriginConsentsOutput,
   },
   {
     id: 'policy.read_effective',

@@ -23,7 +23,7 @@ import type { ApprovalDecisionRequest } from './approval-model'
 /**
  * What the approval record states about one `fill_otp` approval. The field names
  * are the ask in MP-ASKS.md (W3-E3.1-i). Until the record carries them the caller
- * cannot build this card, and the approval stays on the generic card.
+ * passes '' for each field, so the card withholds Approve and Reject stays available.
  */
 export type OtpApprovalSource = {
   approvalId: string

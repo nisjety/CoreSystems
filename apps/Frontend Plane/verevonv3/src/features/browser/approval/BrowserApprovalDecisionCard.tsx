@@ -6,12 +6,30 @@ import { matchApprovalShortcut } from '@/features/chat/lib/use-chat-shortcuts'
 import {
   APPROVAL_REDIRECT_MAX,
   approvalRiskCopy,
+  browserGateOnOtpCard,
   buildDecisionRequest,
   type ApprovalCardAction,
   type ApprovalCardModel,
   type ApprovalDecisionRequest,
 } from './approval-model'
+import { OtpApprovalNotice } from './OtpApprovalNotice'
+import { otpApprovalToCardModel, type OtpApprovalCardModel } from './otp-approval'
 import './browser-approval-card.css'
+
+type BrowserApprovalDecisionCardProps = {
+  approval: ApprovalCardModel
+  /** Offer the redirect box. Off by default; turn on when the planner path accepts it. */
+  allowRedirect?: boolean
+  /** Sends the decision. Defaults to the orchestration client's decideApproval. */
+  decide?: (request: ApprovalDecisionRequest) => Promise<unknown>
+  /** Called after the owner accepted the decision. The caller removes the card. */
+  onDecided?: (request: ApprovalDecisionRequest) => void
+  /**
+   * "I will type it myself" on a one-time-code fill: the chrome's takeover. It sends no
+   * decision. Only the OTP card shows it, and only when this is passed.
+   */
+  onTakeOver?: () => void
+}
 
 /**
  * The one keyboard-first approval card (E3.2-b). With VITE_BROWSER_APPROVAL_CARD
@@ -27,16 +45,50 @@ import './browser-approval-card.css'
  * Redirect text is optional and ships dark: it is offered only when the caller
  * passes `allowRedirect`. Until the planner path takes redirect text (E3.2 (B),
  * execution-core browser_agent.rs), a reject with text still aborts the run.
+ *
+ * A browser one-time-code fill (E3.1-i) gets OtpApprovalNotice instead of this card
+ * while VITE_BROWSER_OTP_APPROVAL_CARD is on. The notice replaces the whole card, not
+ * only its body: it carries its own Approve, which waits for the origins, so the
+ * generic Approve must not show beside it.
  */
-export function BrowserApprovalDecisionCard(props: {
-  approval: ApprovalCardModel
-  /** Offer the redirect box. Off by default; turn on when the planner path accepts it. */
-  allowRedirect?: boolean
-  /** Sends the decision. Defaults to the orchestration client's decideApproval. */
-  decide?: (request: ApprovalDecisionRequest) => Promise<unknown>
-  /** Called after the owner accepted the decision. The caller removes the card. */
-  onDecided?: (request: ApprovalDecisionRequest) => void
-}) {
+export function BrowserApprovalDecisionCard(props: BrowserApprovalDecisionCardProps) {
+  // A browser one-time-code fill is shown on the OTP card while its flag is on, never on the generic card.
+  const onOtpCard = () => props.approval.source === 'browser' && browserGateOnOtpCard(props.approval.actionType)
+  // The OTP card needs the approval id. A fill without one shows nothing, so no generic Approve appears.
+  const otpModel = createMemo<OtpApprovalCardModel | null>(() => {
+    if (!onOtpCard()) return null
+    const approval = props.approval
+    return otpApprovalToCardModel({
+      approvalId: approval.approvalId,
+      topOrigin: approval.topOrigin ?? '',
+      frameOrigin: approval.frameOrigin ?? '',
+      mailProviderKey: approval.mailProviderKey ?? '',
+      mailAccountLabel: approval.mailAccountLabel ?? '',
+    })
+  })
+  return (
+    <Show
+      when={!onOtpCard()}
+      fallback={
+        <Show when={otpModel()}>
+          {(model) => (
+            <OtpApprovalNotice
+              approval={model()}
+              decide={props.decide}
+              onDecided={props.onDecided}
+              onTakeOver={props.onTakeOver}
+            />
+          )}
+        </Show>
+      }
+    >
+      <GenericBrowserApprovalDecisionCard {...props} />
+    </Show>
+  )
+}
+
+/** The generic card: the URL, the selector and the risk shown as text, with Approve and Reject. */
+function GenericBrowserApprovalDecisionCard(props: BrowserApprovalDecisionCardProps) {
   const i18n = useI18n()
   const [redirectText, setRedirectText] = createSignal('')
   const [deciding, setDeciding] = createSignal(false)

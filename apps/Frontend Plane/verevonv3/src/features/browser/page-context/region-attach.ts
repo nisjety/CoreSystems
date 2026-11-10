@@ -1,5 +1,3 @@
-import { requestJson } from '@/shared/api/http'
-
 /**
  * Region and selection attach for the live browser frame (E3.3-d).
  *
@@ -13,8 +11,9 @@ import { requestJson } from '@/shared/api/http'
  * `browser-scraped` that grants nothing. Nothing here is a grant or an action.
  *
  * The gateway route is mounted only with `BROWSER_REGION_ATTACH` (default off);
- * with the flag off the call answers 404. The BrowserChrome drag overlay and the
- * composer chip that carries the attachment are not wired here.
+ * with the flag off the call answers 404. The client call is `attachBrowserRegion`
+ * in shared/api/browser-client.ts; the drag overlay is in InteractiveBrowserPane.
+ * The composer chip that carries the attachment is not wired here.
  *
  * The pure helpers mirror the gateway rules (browser_evidence.rs) so the UI can
  * refuse early, but the gateway answer is the one that counts.
@@ -247,19 +246,6 @@ export function cropFrameRegion(
     }
   }
   return null
-}
-
-/** POST the region to the gateway and return the ephemeral attachment. */
-export async function attachBrowserRegion(
-  sessionId: string,
-  request: RegionAttachRequest,
-  signal?: AbortSignal,
-): Promise<BrowserRegionAttachment> {
-  const response = await requestJson<{ attachment: BrowserRegionAttachment }>(
-    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/attachments/region`,
-    { method: 'POST', body: JSON.stringify(request), signal },
-  )
-  return response.attachment
 }
 
 function clamp(value: number, min: number, max: number): number {

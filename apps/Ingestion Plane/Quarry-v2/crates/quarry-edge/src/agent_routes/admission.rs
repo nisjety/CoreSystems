@@ -284,6 +284,7 @@ pub(super) fn require_action_capabilities(
             | AgentAction::FrameUploadRef { .. }
             | AgentAction::DownloadRef { .. }
             | AgentAction::FrameDownloadRef { .. }
+            | AgentAction::FillOtpRef { .. }
     );
     if uses_snapshot_target && !capabilities.atomic_target_actions {
         return Err(QuarryError::new(
@@ -311,6 +312,14 @@ pub(super) fn require_action_capabilities(
             "selected browser driver cannot provide governed artifact-only uploads",
         ));
     }
+    // E3.1-c2: a one-time-code fill needs a driver that checks the fill
+    // preconditions and inserts trusted input (`QUARRY_EDGE__FILL_OTP` on).
+    if matches!(action, AgentAction::FillOtpRef { .. }) && !capabilities.otp_fill {
+        return Err(QuarryError::new(
+            ErrorCode::Unsupported,
+            "selected browser driver cannot fill one-time codes",
+        ));
+    }
     Ok(())
 }
 
@@ -325,6 +334,10 @@ pub(super) struct Admitted {
     /// A person held the browser when the step was admitted. A person's step then never
     /// counts against the run's step budget.
     pub takeover: bool,
+    /// Q3-E3.1-h2: for a `fill_otp_ref` step, the mail connection and origin its approval grant
+    /// is bound to (checked non-empty and https in `validate_sensitive_approval`). `None` for
+    /// every other action. The step puts it, with the run's actor, on the observation context.
+    pub otp_binding: Option<OtpGrantBinding>,
 }
 
 pub(super) struct AdmitInput<'a> {
@@ -522,8 +535,10 @@ pub(super) async fn admit_action(
             crate::api_key::reason::SENSITIVE_ACTION_REFUSED,
         ));
     }
-    if let Some(approval) = sensitive? {
-        validate_sensitive_approval(state, &entry.org_id, &approval).await?;
+    let mut otp_binding = None;
+    if let Some(mut approval) = sensitive? {
+        validate_sensitive_approval(state, &entry.org_id, &mut approval).await?;
+        otp_binding = approval.otp_binding.take();
         if !entry
             .used_sensitive_approval_grants
             .insert(approval.grant_id)
@@ -553,6 +568,7 @@ pub(super) async fn admit_action(
         agent: input.initiator.agent,
         control_epoch: snapshot.epoch,
         takeover,
+        otp_binding,
     })
 }
 
@@ -575,6 +591,7 @@ pub(super) fn admit_tab_operation(
         agent: initiator.agent,
         control_epoch: snapshot.epoch,
         takeover: snapshot.mode == BrowserControlMode::HumanTakeover,
+        otp_binding: None,
     })
 }
 

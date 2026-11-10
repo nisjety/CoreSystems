@@ -646,7 +646,9 @@ pub(super) fn status_err(status: StatusCode, request_id: &str, msg: &str) -> Api
 /// The 404 for a run id this edge no longer holds.
 ///
 /// A run whose browser the sweeper (or a restart) released keeps an active
-/// checkpoint unless it ran under ZDR. When the caller owns such a checkpoint
+/// checkpoint unless it ran under ZDR; with `QUARRY_EDGE__RUN_TTL` on, an idle
+/// run's checkpoint is instead moved to `suspended` or `expired`, which are
+/// resumable too. When the caller owns such a checkpoint
 /// the 404 says so and names the id to pass as `resume_run_id`, so a client
 /// can tell "resume this" from "this never existed". Anyone else, and every ZDR
 /// run, gets the same plain 404 as before: the hint must not reveal that
@@ -663,15 +665,17 @@ pub(super) async fn run_gone_err(
     run_not_live_err(request_id, run_id, true)
 }
 
-/// Whether the caller owns an active, non-ZDR checkpoint for `run_id`, i.e. may
-/// start a run with it as `resume_run_id`. An explicitly closed run's checkpoint is
-/// `closed`, so it is not resumable.
+/// Whether the caller owns a resumable, non-ZDR checkpoint for `run_id`, i.e. may
+/// start a run with it as `resume_run_id`. Resumable means `active`, or `suspended` /
+/// `expired` (the states `QUARRY_EDGE__RUN_TTL` moves an idle run to). An explicitly
+/// closed run's checkpoint is `closed`, so it is not resumable.
 async fn run_is_resumable(state: &AppState, claims: &crate::auth::Claims, run_id: &str) -> bool {
     match run_id.parse::<RunKind>() {
         Ok(parsed) => matches!(
             state.receipts.load_run_checkpoint(&claims.org_id, &parsed).await,
             Ok(Some(checkpoint))
-                if checkpoint.status == AgentRunStatus::Active
+                if (checkpoint.status == AgentRunStatus::Active
+                    || checkpoint.status.is_resumable())
                     && !checkpoint.zdr.is_active()
                     && caller_owns_browser_run(&checkpoint.org_id, &checkpoint.actor_id, claims)
         ),
@@ -702,8 +706,8 @@ fn run_not_live_err(request_id: &str, run_id: &str, resumable: bool) -> ApiErr {
 /// The 404 for a call that was queued on the run's lock when the run was closed
 /// under it (the sweeper released it, or its owner closed it). The caller owns the
 /// run (checked before this), so the answer is `run_not_live` as for a run already
-/// gone; it carries the resume hint only when the checkpoint is still active: an
-/// expiry leaves it so, an explicit close does not.
+/// gone; it carries the resume hint only when the checkpoint is still resumable
+/// (active, suspended or expired): an expiry leaves it so, an explicit close does not.
 pub(super) async fn run_closed_err(
     state: &AppState,
     claims: &crate::auth::Claims,

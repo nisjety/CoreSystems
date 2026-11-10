@@ -104,6 +104,13 @@ pub struct EdgeConfig {
     /// Development-only static Model Plane bearer. Production uses Auth Core.
     #[serde(default)]
     pub model_plane_token: Option<String>,
+    /// integration-corev2 origin for the one-time-code read (`QUARRY_EDGE__INTEGRATION_CORE_URL`,
+    /// e.g. `http://integration-core:8080`). Unset or blank means no source: with
+    /// `QUARRY_EDGE__FILL_OTP` on, a `fill_otp_ref` step is still refused
+    /// `otp_source_unavailable`. Needs the cross-plane token provider (the client mints its own
+    /// `mail-otp-read` bearer); never carries a credential.
+    #[serde(default)]
+    pub integration_core_url: Option<String>,
     /// Routed Model Plane alias used by the page pipeline to name pages whose
     /// HTML `<title>` is missing or generic (`page_extracted.title_source =
     /// "model"`). Must be a routing alias the Model Plane intent layer
@@ -401,6 +408,8 @@ impl EdgeConfig {
             Self::defaults()
         });
         blank_model_plane_url_is_unset(&mut edge.model_plane_url);
+        // Compose passes an empty string for an unset URL here too (Q3-E3.1-h2).
+        blank_model_plane_url_is_unset(&mut edge.integration_core_url);
         if edge.redis_url.is_none() {
             edge.redis_url = edge.dragonfly_url.clone();
         }
@@ -440,6 +449,7 @@ impl EdgeConfig {
             local_index_dir: None,
             model_plane_url: None,
             model_plane_token: None,
+            integration_core_url: None,
             page_title_model: None,
             page_title_enrich: false,
             browser_grant_validator_url: None,

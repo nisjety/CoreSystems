@@ -1,5 +1,10 @@
 import { describeApiError, type ApiErrorDescription } from '@/shared/i18n/errors'
-import { requestJson } from './http'
+import type {
+  BrowserRegionAttachment,
+  RegionAttachRequest,
+  RegionImageMimeType,
+} from '@/features/browser/page-context/region-attach'
+import { ApiError, requestJson } from './http'
 
 export type BrowserAction =
   | { type: 'navigate'; url: string }
@@ -996,4 +1001,187 @@ export async function clearBrowserProfileData(
       signal,
     },
   )
+}
+
+/** One `@tab` mention as the composer sends it (E3.3-c): the token as typed and the tab id it spells (null for the bare `@tab`). */
+export type BrowserTabMentionInput = {
+  token?: string
+  tabId: string | null
+}
+
+/**
+ * One tab the gateway resolved for a turn (E3.3-c). It carries no page content and no grant:
+ * `trustClass` is always `browser-scraped` and `grant` is always `none`. `label`, `title` and
+ * `target` are page-derived text and are never trusted.
+ */
+export type BrowserTabContextRef = {
+  kind: 'browser-tab'
+  sessionId: string
+  tabId: string
+  label: string
+  labelSource: 'page' | 'url' | 'tab-id'
+  title: string | null
+  /** Origin and path only. Null when the tab has no http(s) URL. */
+  target: string | null
+  trustClass: 'browser-scraped'
+  grant: 'none'
+}
+
+/** Most mentions the gateway resolves in one call. */
+export const BROWSER_TAB_MENTIONS_MAX = 8
+
+const BROWSER_TAB_REF_LABEL_SOURCES: readonly string[] = ['page', 'url', 'tab-id']
+
+function browserTabRefFromWire(value: unknown, sessionId: string): BrowserTabContextRef | null {
+  if (!value || typeof value !== 'object') return null
+  const ref = value as Record<string, unknown>
+  if (ref.kind !== 'browser-tab' || ref.trustClass !== 'browser-scraped' || ref.grant !== 'none') return null
+  if (ref.sessionId !== sessionId) return null
+  if (typeof ref.tabId !== 'string' || !ref.tabId) return null
+  if (typeof ref.label !== 'string' || typeof ref.labelSource !== 'string') return null
+  if (!BROWSER_TAB_REF_LABEL_SOURCES.includes(ref.labelSource)) return null
+  return {
+    kind: 'browser-tab',
+    sessionId,
+    tabId: ref.tabId,
+    label: ref.label,
+    labelSource: ref.labelSource as BrowserTabContextRef['labelSource'],
+    title: typeof ref.title === 'string' ? ref.title : null,
+    target: typeof ref.target === 'string' ? ref.target : null,
+    trustClass: 'browser-scraped',
+    grant: 'none',
+  }
+}
+
+/**
+ * Has the gateway re-resolve a turn's `@tab` mentions against Quarry's live tabs (E3.3-c;
+ * `POST /api/v1/browser/sessions/{id}/context/tab-mentions`, mounted only with
+ * `BROWSER_TAB_MENTIONS`). Resolves to the refs, each one a context reference without page
+ * content or a grant. The call is all-or-nothing: if any mention does not resolve to exactly one
+ * live tab, the session is zero-retention, the flag is off or the caller does not own the session,
+ * it rejects with the typed {@link ApiError} (`browser_tab_mention_unresolved`,
+ * `browser_tab_context_refused_zdr`, 400/404/429 ...) and nothing may be attached or sent.
+ * An answer that is not a non-empty list of well-formed refs for this session also rejects.
+ */
+export async function resolveBrowserTabMentions(
+  sessionId: string,
+  mentions: readonly BrowserTabMentionInput[],
+  signal?: AbortSignal,
+): Promise<BrowserTabContextRef[]> {
+  const value = await requestJson<{ refs?: unknown }>(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/context/tab-mentions`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        mentions: mentions.map((mention) => ({
+          ...(mention.token === undefined ? {} : { token: mention.token }),
+          tabId: mention.tabId,
+        })),
+      }),
+      signal,
+    },
+  )
+  const wire = Array.isArray(value?.refs) ? value.refs : []
+  const refs = wire.map((item) => browserTabRefFromWire(item, sessionId))
+  if (refs.length === 0 || refs.length > BROWSER_TAB_MENTIONS_MAX || refs.some((ref) => ref === null)) {
+    throw new ApiError('browser_tab_mention_response_invalid', 502, 'browser_tab_mention_response_invalid')
+  }
+  return refs as BrowserTabContextRef[]
+}
+
+/** The image types the gateway accepts for a region (E3.3-d). */
+const REGION_IMAGE_MIME_TYPES: readonly string[] = ['image/png', 'image/jpeg']
+
+function recordOf(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+}
+
+function finiteNumberOf(record: Record<string, unknown> | null, key: string): number | null {
+  const value = record?.[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/**
+ * The region attachment as the gateway answered it, rebuilt field by field (as
+ * {@link resolveBrowserTabMentions} rebuilds its refs). It is refused unless it has the
+ * browser-scraped, grant-none, ephemeral shape for this session, so a malformed answer never
+ * reaches the composer.
+ */
+function browserRegionAttachmentFromWire(value: unknown, sessionId: string): BrowserRegionAttachment | null {
+  const wire = recordOf(value)
+  if (!wire || wire.kind !== 'browser-region' || wire.trustClass !== 'browser-scraped' || wire.grant !== 'none') return null
+  if (wire.retention !== 'ephemeral' || wire.sessionId !== sessionId) return null
+  const tabId = wire.tabId
+  const label = wire.label
+  if (typeof tabId !== 'string' || !tabId || typeof label !== 'string') return null
+  const region = recordOf(wire.region)
+  const viewport = recordOf(wire.viewport)
+  const image = recordOf(wire.image)
+  const x = finiteNumberOf(region, 'x')
+  const y = finiteNumberOf(region, 'y')
+  const width = finiteNumberOf(region, 'width')
+  const height = finiteNumberOf(region, 'height')
+  const viewportWidth = finiteNumberOf(viewport, 'width')
+  const viewportHeight = finiteNumberOf(viewport, 'height')
+  const imageWidth = finiteNumberOf(image, 'width')
+  const imageHeight = finiteNumberOf(image, 'height')
+  const byteLength = finiteNumberOf(image, 'byteLength')
+  if (x === null || y === null || width === null || height === null) return null
+  if (viewportWidth === null || viewportHeight === null) return null
+  if (imageWidth === null || imageHeight === null || byteLength === null) return null
+  const mimeType = image?.mimeType
+  const dataBase64 = image?.dataBase64
+  if (typeof mimeType !== 'string' || !REGION_IMAGE_MIME_TYPES.includes(mimeType)) return null
+  if (typeof dataBase64 !== 'string' || !dataBase64) return null
+  const selection = recordOf(wire.selection)
+  const selectionText = selection?.text
+  const selectionLength = finiteNumberOf(selection, 'length')
+  return {
+    kind: 'browser-region',
+    trustClass: 'browser-scraped',
+    grant: 'none',
+    retention: 'ephemeral',
+    sessionId,
+    tabId,
+    label,
+    title: typeof wire.title === 'string' ? wire.title : null,
+    target: typeof wire.target === 'string' ? wire.target : null,
+    region: { x, y, width, height },
+    viewport: { width: viewportWidth, height: viewportHeight },
+    image: {
+      mimeType: mimeType as RegionImageMimeType,
+      dataBase64,
+      width: imageWidth,
+      height: imageHeight,
+      byteLength,
+    },
+    selection: typeof selectionText === 'string' && selectionLength !== null
+      ? { text: selectionText, length: selectionLength }
+      : null,
+  }
+}
+
+/**
+ * Attaches a region of the live frame (E3.3-d): `POST /api/v1/browser/sessions/{id}/attachments/region`,
+ * mounted only with `BROWSER_REGION_ATTACH` (flag off: 404). The gateway re-resolves the tab and the
+ * region itself and answers an ephemeral `browser-scraped` attachment that grants nothing and stores
+ * nothing. A zero-data-retention session is refused with 409 `browser_attachment_refused_zdr`; that
+ * refusal names no feature, so the rejected {@link ApiError} carries a null `feature`. An answer without
+ * the expected shape for this session rejects as `browser_region_attach_response_invalid`, and nothing
+ * is attached.
+ */
+export async function attachBrowserRegion(
+  sessionId: string,
+  request: RegionAttachRequest,
+  signal?: AbortSignal,
+): Promise<BrowserRegionAttachment> {
+  const value = await requestJson<{ attachment?: unknown }>(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/attachments/region`,
+    { method: 'POST', body: JSON.stringify(request), signal },
+  )
+  const attachment = browserRegionAttachmentFromWire(value?.attachment, sessionId)
+  if (!attachment) {
+    throw new ApiError('browser_region_attach_response_invalid', 502, 'browser_region_attach_response_invalid')
+  }
+  return attachment
 }

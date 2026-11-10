@@ -6499,6 +6499,7 @@ components:
           click_semantic: '#/components/schemas/ClickSemanticAction'
           download_ref: '#/components/schemas/DownloadRefAction'
           evaluate: '#/components/schemas/EvaluateAction'
+          fill_otp_ref: '#/components/schemas/FillOtpRefAction'
           forward: '#/components/schemas/ForwardAction'
           frame_click_ref: '#/components/schemas/FrameClickRefAction'
           frame_download_ref: '#/components/schemas/FrameDownloadRefAction'
@@ -6534,6 +6535,7 @@ components:
       - $ref: '#/components/schemas/ClickSemanticAction'
       - $ref: '#/components/schemas/DownloadRefAction'
       - $ref: '#/components/schemas/EvaluateAction'
+      - $ref: '#/components/schemas/FillOtpRefAction'
       - $ref: '#/components/schemas/ForwardAction'
       - $ref: '#/components/schemas/FrameClickRefAction'
       - $ref: '#/components/schemas/FrameDownloadRefAction'
@@ -6908,6 +6910,31 @@ components:
           type: string
           description: Fresh single-use BrowserBroker approval authorizing only download_ref and the observed target frame when framed. Quarry stores only an admitted tenant-owned artifact; local download
             paths are never exposed.
+    FillOtpRefAction:
+      type: object
+      description: >-
+        Dark: refused 403 unless QUARRY_EDGE__FILL_OTP is on (default off). Fills a one-time code, read from the user's approved mail connection, into one exact input of the latest snapshot. The code is never on the wire in either direction: the caller names only the target and the approval. The approval is a single-use fill_otp approval grant (child of the run grant), used once per live run. Before any code is read, the page must pass these checks: https only; the target is in the top frame (a child-frame target is refused), and frame origin equals top origin and grant origin; exactly one visible required non-password input, the only visible text field on the page; no datalist, visible select, radio, listbox or QR code. The code is inserted through trusted input. A stale or absent target answers 409 TARGET_REPAIR_REQUIRED, and an API-key run is refused (api_key_sensitive_action_refused). The code is never in a receipt, event or response (receipt outcome otp_filled). This variant has no value field: a value, code or text key is ignored and never kept or echoed.
+      required:
+      - type
+      - snapshot_id
+      - generation
+      - ref_id
+      - approval_grant_id
+      properties:
+        type:
+          type: string
+          const: fill_otp_ref
+        snapshot_id:
+          type: string
+        generation:
+          type: integer
+          minimum: 0
+        ref_id:
+          type: string
+          example: '@e1'
+        approval_grant_id:
+          type: string
+          description: Fresh single-use fill_otp approval grant, a child of the run grant, for this exact top-frame target. Quarry consumes it once.
     SnapshotTargetBase:
       type: object
       required:

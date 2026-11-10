@@ -758,6 +758,8 @@ export type SendOptions = {
   connectorScope?: string[]
   /** See `ChatInvokeRequest.contextRefs`. Per-turn, like `connectorScope`. */
   contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
+  /** See `ChatInvokeRequest.browserTabRefs`. Per-turn, like `contextRefs`. */
+  browserTabRefs?: import('@/shared/api/browser-client').BrowserTabContextRef[]
   /** See `ChatInvokeRequest.agentMode`. Per-turn, like `connectorScope`. */
   agentMode?: AgentModeId
   actions?: ChatAction[]

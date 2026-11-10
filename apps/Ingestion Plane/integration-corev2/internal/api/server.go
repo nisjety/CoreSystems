@@ -3017,12 +3017,24 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 		// capability check — same placement as every other connection
 		// route's assertConnectionAccess.
 		principal, authenticated := auth.PrincipalFromContext(c)
-		actingUserID := ""
-		if authenticated {
-			actingUserID = principal.EffectiveUserID(auth.IsInternalCall(c))
-		}
-		if err := assertPersonalConnectionOwner(connection, actingUserID, authenticated); err != nil {
-			return actions.ExecuteResult{}, err
+		if authenticated && !auth.IsInternalCall(c) && principal.PrincipalType == "service" &&
+			actions.IsMailOTPReadOperation(body.Operation) {
+			// mail.otp.read (E3.1-g, D-E31g-5): the executor's service token
+			// names no end user, so the acting user comes from
+			// params.acting_user_id and must equal the personal connection's
+			// owner (org-shared connections: the org match above is enough).
+			// The value is never logged.
+			if err := assertOTPConnectionOwner(connection, otpActingUserID(body.Params)); err != nil {
+				return actions.ExecuteResult{}, err
+			}
+		} else {
+			actingUserID := ""
+			if authenticated {
+				actingUserID = principal.EffectiveUserID(auth.IsInternalCall(c))
+			}
+			if err := assertPersonalConnectionOwner(connection, actingUserID, authenticated); err != nil {
+				return actions.ExecuteResult{}, err
+			}
 		}
 	}
 	if err := requireActionCapability(c, connection, body); err != nil {
@@ -3143,6 +3155,7 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 		Operation:   body.Operation,
 		Params:      body.Params,
 		Body:        body.Body,
+		Caller:      actionCallerIdentity(c),
 	})
 	if err != nil {
 		if writeAction {
@@ -3189,6 +3202,23 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 		})
 	}
 	return result, nil
+}
+
+// actionCallerIdentity is the verified identity of the request for the
+// actions service: the principal's type, subject (the service id for a
+// service principal), organization and scopes, plus whether the request used
+// the shared internal key. Pre-existing operations ignore it; mail.otp.read
+// is executor-only and decides on it. Nothing here comes from a request
+// header or body field.
+func actionCallerIdentity(c *fiber.Ctx) actions.CallerIdentity {
+	caller := actions.CallerIdentity{InternalKey: auth.IsInternalCall(c)}
+	if principal, ok := auth.PrincipalFromContext(c); ok {
+		caller.PrincipalType = principal.PrincipalType
+		caller.ServiceID = principal.UserID
+		caller.OrganizationID = principal.OrganizationID
+		caller.Scopes = append([]string(nil), principal.Scopes...)
+	}
+	return caller
 }
 
 func markActionOutcomeUnknown(
@@ -3377,6 +3407,8 @@ func requiredCapabilityForOperation(providerKey, operation string) (string, bool
 			return "mail.read", true
 		case "mail.messages.get", "microsoft.mail.messages.get":
 			return "mail.read", true
+		case "mail.otp.read", "microsoft.mail.otp.read":
+			return "mail.read", true
 		case "drive.files", "microsoft.drive.files":
 			return "sharepoint.read", false
 		case "drive.file.content", "microsoft.drive.file.content":
@@ -3407,6 +3439,8 @@ func requiredCapabilityForOperation(providerKey, operation string) (string, bool
 		case "gmail.messages", "google.gmail.messages":
 			return "gmail.read", true
 		case "gmail.messages.get", "google.gmail.messages.get":
+			return "gmail.read", true
+		case "mail.otp.read", "google.mail.otp.read":
 			return "gmail.read", true
 		case "gmail.send", "google.gmail.send":
 			return "gmail.send", true
@@ -3689,6 +3723,14 @@ func actionError(c *fiber.Ctx, err error) error {
 		return apiError(c, fiber.StatusForbidden, "write_attestation_invalid", "Provider-write attestation is invalid.")
 	case errors.Is(err, errActionAttestationUnconfigured):
 		return apiError(c, fiber.StatusServiceUnavailable, "write_attestation_unconfigured", "Provider-write attestation verification is unavailable.")
+	case errors.Is(err, actions.ErrOTPReadDisabled), errors.Is(err, actions.ErrOTPProviderUnsupported):
+		// mail.otp.read is dark: while its flag is off it answers like any
+		// unsupported operation.
+		return apiError(c, fiber.StatusBadRequest, "operation_not_supported", "The provider operation is not supported.")
+	case errors.Is(err, actions.ErrOTPCallerNotAllowed), errors.Is(err, actions.ErrOTPScopeOperationRefused):
+		return apiError(c, fiber.StatusForbidden, "otp_caller_not_allowed", "This operation is limited to the executor's scoped service token.")
+	case errors.Is(err, actions.ErrOTPAuditUnavailable), errors.Is(err, actions.ErrOTPAuditFailed):
+		return apiError(c, fiber.StatusServiceUnavailable, "otp_audit_unavailable", "The read could not be audited, so no code is returned.")
 	case isProviderAuthRejection(err):
 		return reconnectRequiredError(c, err)
 	default:

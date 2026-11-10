@@ -988,6 +988,7 @@ mod tests {
 
     fn runner(driver: FixtureDriver, events: Option<EventSink>) -> ObservationRunner {
         ObservationRunner {
+            otp_source: None,
             browser: Arc::new(driver),
             artifacts: None,
             events,

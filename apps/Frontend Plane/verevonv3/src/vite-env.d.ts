@@ -58,6 +58,8 @@ interface ImportMetaEnv {
 	readonly VITE_SPACE_COMMAND_PALETTE_UI?: string;
 	/** "true" shows row checkboxes and "Ingest selected" on a run's fetched pages (re-fetch, then ingest). Default off. */
 	readonly VITE_INGEST_SELECTED?: string;
+	/** "true" offers the region select on the live browser frame and attaches the region (E3.3-d). Default off. */
+	readonly VITE_BROWSER_REGION_ATTACH?: string;
 }
 
 interface ImportMeta {

@@ -5,6 +5,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 
+	"github.com/triodelab/integration-corev2/internal/actions"
 	"github.com/triodelab/integration-corev2/internal/auth"
 	"github.com/triodelab/integration-corev2/internal/providers"
 	"github.com/triodelab/integration-corev2/internal/store"
@@ -26,6 +27,10 @@ const (
 	// reach a personal connection. Distinct from the above so a caller can
 	// tell "wrong user" apart from "no user named at all".
 	personalConnectionNoDelegatedUserCode = "personal_connection_no_delegated_user"
+	// otpOwnerMismatchCode is returned for mail.otp.read when the acting user
+	// the executor names (params.acting_user_id) is missing or is not the
+	// user who connected the personal mailbox.
+	otpOwnerMismatchCode = "otp_owner_mismatch"
 )
 
 // assertConnectionAccess enforces owner ruling (5): a personal Microsoft/
@@ -87,6 +92,31 @@ func assertPersonalConnectionOwner(connection store.Connection, actingUserID str
 			"This personal connection belongs to a different user.")
 	}
 	return nil
+}
+
+// assertOTPConnectionOwner is the owner rule for mail.otp.read by a service
+// principal (decision D-E31g-5). The executor token names no end user of its
+// own, so the acting user is params.acting_user_id (bound by Quarry to the
+// run actor of the approval) and it must equal the personal connection's
+// owner. An org-shared (non-personal) connection needs the org match only,
+// which executeConnectionAction already checked. A missing or different
+// acting user is 403 otp_owner_mismatch; the value itself is never echoed.
+func assertOTPConnectionOwner(connection store.Connection, actingUserID string) error {
+	if !providers.IsPersonalProvider(connection.ProviderKey) {
+		return nil
+	}
+	if err := assertPersonalConnectionOwner(connection, actingUserID, true); err != nil {
+		return auth.NewError(fiber.StatusForbidden, otpOwnerMismatchCode,
+			"The acting user is not the owner of this mailbox connection.")
+	}
+	return nil
+}
+
+// otpActingUserID reads params.acting_user_id for mail.otp.read; anything
+// other than a string is treated as absent so the owner rule fails closed.
+func otpActingUserID(params map[string]any) string {
+	value, _ := params[actions.OTPActingUserIDParam].(string)
+	return strings.TrimSpace(value)
 }
 
 // filterPersonalConnectionsForCaller drops, from a connection LISTING

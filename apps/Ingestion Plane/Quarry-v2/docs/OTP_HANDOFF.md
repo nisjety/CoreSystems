@@ -19,15 +19,15 @@ A pass does not show what a text scan cannot see: pixels, the model's transcript
 
 ## 2. Blockers: the chain does not run end to end yet
 
-Checked in the code at this commit. This unit changes none of them.
+Checked in the code at `ee8e689bd` (2026-11-10). This unit changes no code. The Closed by column names the Q3 unit that closes each blocker.
 
 | # | Blocker | Where | Closed by |
 |---|---|---|---|
-| B1 | integration-core does not route `mail.otp.read`. `SetOTPAuditPublisher` is never called, `executeConnectionAction` does not fill `ExecuteInput.Caller`, and neither the capability map nor the bearer middleware admits `integration:otp:read` on this route. The middleware refuses a service token that holds only that scope (`integration_scope_required`) until the route admits it. | `internal/api/server.go`, `internal/auth/middleware.go` (about line 243) | E3.1-g items 1 to 4 |
-| B2 | Personal connections: a quarry-edge `ingestion` token without `acting_user_id` is refused on a personal Outlook or Gmail connection. A dev user's own mailbox is probably personal. | the `mail.otp.read` owner check | E3.1-g item 5: a decision |
-| B3 | The edge never builds `IntegrationCoreOtpSource`. There is no config field for the integration-core URL, and nothing calls `with_enabled(fill_otp_enabled())`. | `otp_ic_client.rs`, edge config | E3.1-h wiring |
-| B4 | No executor. Nothing implements `OtpFillTarget` over the Chromium driver, and the runtime arm for `fill_otp_ref` in `observation.rs` returns `unsupported` ("no executor on this runtime"). `deliver_otp` has no caller. | `observation.rs`, `otp_source.rs` | E3.1-c and E3.1-h wiring; depth D-E31c-1 |
-| B5 | The approval card is not mounted. `OtpApprovalNotice` has no caller, so the generic card shows the page URL and the selector, not the frame or the connection. | `src/features/browser/approval` | E3.1-i and the swap unit (W3-E3.2-b-swap, not built) |
+| B1 | integration-core does not route `mail.otp.read`. `SetOTPAuditPublisher` is never called, `executeConnectionAction` does not fill `ExecuteInput.Caller`, and neither the capability map nor the bearer middleware admits `integration:otp:read` on this route. The middleware refuses a service token that holds only that scope (`integration_scope_required`) until the route admits it. | `internal/api/server.go`, `internal/auth/middleware.go` (about line 243) | Q3-E3.1-g2 (items 1 to 4) |
+| B2 | Personal connections: a quarry-edge `ingestion` token without `acting_user_id` is refused on a personal Outlook or Gmail connection. A dev user's own mailbox is probably personal. | the `mail.otp.read` owner check | Q3-E3.1-g2 (item 5, the owner rule, decision D-E31g-5 option b), with Q3-E3.1-h2 (the edge sends `acting_user_id`) |
+| B3 | The edge never builds `IntegrationCoreOtpSource`. There is no config field for the integration-core URL (`QUARRY_EDGE__INTEGRATION_CORE_URL` is not read), the approval grant does not carry a mail connection or an origin yet, and nothing calls `with_enabled(fill_otp_enabled())`. | `otp_ic_client.rs`, `grant_validator.rs`, edge config | Q3-E3.1-h2 |
+| B4 | No executor. Nothing implements `OtpFillTarget` over the Chromium driver, and the runtime arm for `fill_otp_ref` in `observation.rs` returns `unsupported` ("no executor on this runtime"). `deliver_otp` has no caller. | `observation.rs`, `otp_source.rs` | Q3-E3.1-d2/c2; depth D-E31c-1 |
+| B5 | The approval card is not mounted. `OtpApprovalNotice` has no caller, so the generic card shows the page URL and the selector, not the frame or the connection. | `src/features/browser/approval` | Q3-E3.1-i2, and the swap unit (W3-E3.2-b-swap, not built) |
 | B6 | The runtime refuses http outside `cfg!(test)` (D-E31c-3). The Rust test site is in-process only, with no standalone entry point. `--serve-fixture` is a stand-in with the same markup, and it needs a dev certificate that the stack's browser trusts. | `chromiumoxide.rs`, `test_site.rs` | E3.1-c follow-up; depth |
 | B7 | The recorded mailbox follows the shapes that integration-corev2 parses. It is not checked against live Graph or Gmail responses, and integration-core's token refresh, if it refreshes, is not covered. | `mail_otp.go`, the Gmail helpers in `service.go` | unverified |
 
@@ -136,7 +136,7 @@ The script prints one line per check (`PASS <name>: <value>`, `FAIL ...` or `NOT
 - ZDR runs need another evidence source, the boolean receipt that the plan names. It is not built.
 - The replay probe is manual.
 - The stand-in login page copies `test_site.rs` by hand. No drift check exists.
-- The personal-connection decision (B2) and the publisher question (NoopPublisher) are open.
+- The personal-connection rule (B2, D-E31g-5 option b) is open on both sides, and so is the publisher question (NoopPublisher).
 - `fill_otp_ref` names no mail connection. The connection comes from the approval binding, which is not wired (B3).
 
 ## 9. Not verified

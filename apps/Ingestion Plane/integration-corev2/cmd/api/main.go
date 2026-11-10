@@ -260,6 +260,15 @@ func main() {
 	if err != nil {
 		logger.Fatal().Err(err).Msg("initialize protected marketing provider bindings")
 	}
+	// mail.otp.read (E3.1-g) is dark behind INTEGRATION_OTP_READ, which
+	// actions.NewService reads into the service (SetOTPReadEnabled overrides
+	// it). Its audit goes through the events publisher; only a real publisher
+	// (NATS) is wired, because the no-op one would drop the audit event and
+	// the read must fail closed without one.
+	actionsService := actions.NewService(cfg, egress.SafeClient(egress.ClientConfig{RequestTimeout: 15 * time.Second}))
+	if cfg.NATSEnabled {
+		actionsService.SetOTPAuditPublisher(publisher)
+	}
 	app := api.NewServer(api.ServerConfig{
 		Config:        cfg,
 		Repo:          repo,
@@ -312,7 +321,7 @@ func main() {
 		// services call gets the same connect-timeout/DNS-pinning hardening
 		// for free since the client is shared.
 		Discovery:          discovery.NewService(cfg, egress.SafeClient(egress.ClientConfig{RequestTimeout: 8 * time.Second})),
-		Actions:            actions.NewService(cfg, egress.SafeClient(egress.ClientConfig{RequestTimeout: 15 * time.Second})),
+		Actions:            actionsService,
 		WriteAttestations:  writeAttestations,
 		HotPath:            hotpath.NewHTTPWebhookNormalizer(cfg.WebhookHotPathURL, hotPathClient),
 		CodexSubscriptions: codexSubscriptions,

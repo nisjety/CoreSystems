@@ -36,12 +36,11 @@ import (
 //     code is not returned.
 //   - It ships dark: INTEGRATION_OTP_READ must be on (default off).
 //
-// The HTTP route wiring (passing the verified principal into
-// ExecuteInput.Caller, the per-route admission of integration:otp:read in
-// internal/auth, the capability mapping in requiredCapabilityForOperation and
-// SetOTPAuditPublisher(cfg.Events)) is not part of this file; until it lands
-// the actions route refuses the operation as unsupported, so the operation is
-// inert.
+// The HTTP route wiring lives in internal/api (executeConnectionAction fills
+// ExecuteInput.Caller from the verified principal, applies the owner rule,
+// and requiredCapabilityForOperation maps the operation to mail.read /
+// gmail.read), in internal/auth (the per-route admission of
+// integration:otp:read) and in cmd/api (SetOTPAuditPublisher(cfg.Events)).
 //
 // Params (all optional):
 //
@@ -50,6 +49,11 @@ import (
 //	codeLength     exact number of digits expected, 4 to 10
 //	approvalId     the per-use fill_otp approval id, recorded in the audit
 //	               event only (never used for authorization here)
+//	acting_user_id the run's acting user (the fill_otp approval's actor). The
+//	               HTTP layer compares it with the personal connection's owner
+//	               (otp_owner_mismatch on a difference) before this service
+//	               runs; here it is only shape-checked and never audited or
+//	               logged.
 
 const (
 	// OperationMailOTPRead is the canonical operation string.
@@ -57,6 +61,10 @@ const (
 	// ScopeIntegrationOTPRead is the only scope that admits a caller to
 	// mail.otp.read (registry row quarry-edge, audience ingestion).
 	ScopeIntegrationOTPRead = "integration:otp:read"
+	// OTPActingUserIDParam is the params key that names the acting user of the
+	// run the approval belongs to. The HTTP layer binds it to the personal
+	// connection's owner (decision D-E31g-5).
+	OTPActingUserIDParam = "acting_user_id"
 	// OTPReadFlagEnv turns the operation on. Default off.
 	OTPReadFlagEnv = "INTEGRATION_OTP_READ"
 	// OTPReadAuditEventType is the events-publisher type for every attempt.
@@ -72,6 +80,7 @@ const (
 	otpMaxScanRunes    = 64 << 10
 	otpKeywordLookback = 48
 	otpMaxApprovalID   = 128
+	otpMaxActingUserID = 200
 )
 
 var (
@@ -141,6 +150,12 @@ func isMailOTPReadOperation(operation string) bool {
 	return false
 }
 
+// IsMailOTPReadOperation reports whether operation names mail.otp.read (or a
+// provider alias of it), for the HTTP layer's owner rule and capability map.
+func IsMailOTPReadOperation(operation string) bool {
+	return isMailOTPReadOperation(operation)
+}
+
 // refuseOTPOnlyCaller keeps a token scoped to integration:otp:read off every
 // other operation, independent of the HTTP layer's own admission rule.
 func refuseOTPOnlyCaller(caller CallerIdentity, operation string) error {
@@ -181,6 +196,9 @@ var otpAllowedParams = map[string]struct{}{
 	"from":          {},
 	"codeLength":    {},
 	"approvalId":    {},
+	// OTPActingUserIDParam is checked by the HTTP layer; accepted here so the
+	// strict allow-list does not refuse it.
+	OTPActingUserIDParam: {},
 }
 
 // otpSenderAddress is a single mailbox address; anything else (a display
@@ -226,6 +244,12 @@ func parseOTPReadParams(params map[string]any) (otpReadParams, error) {
 			return otpReadParams{}, fmt.Errorf("codeLength must be between 4 and 10")
 		}
 		parsed.codeLength = length
+	}
+	if raw, ok := params[OTPActingUserIDParam]; ok && raw != nil {
+		acting, isString := raw.(string)
+		if !isString || len(strings.TrimSpace(acting)) > otpMaxActingUserID {
+			return otpReadParams{}, fmt.Errorf("%s is malformed", OTPActingUserIDParam)
+		}
 	}
 	if raw, ok := params["approvalId"]; ok && raw != nil {
 		approvalID := strings.TrimSpace(stringFromAny(raw))

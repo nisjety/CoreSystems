@@ -117,3 +117,52 @@
   color: var(--verevon-danger, #b42318);
   font-size: 0.8125rem;
 }
+
+/* Region select (E3.3-d). The toggle is the header pill with a pressed state. The layer takes the drag over
+   the page; the rectangle and the hint sit above it, in a portal, so no dock ancestor moves them. */
+.browser-dock-pane__region[aria-pressed='true'] {
+  border-color: var(--verevon-chat-fjord, #0071e3);
+  color: var(--verevon-chat-fjord, #0071e3);
+}
+
+.browser-dock-pane__region:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.browser-dock-region-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+  background: rgb(0 0 0 / 6%);
+}
+
+.browser-dock-region-rect {
+  position: fixed;
+  box-sizing: border-box;
+  border: 2px solid var(--verevon-chat-fjord, #0071e3);
+  background: rgb(0 113 227 / 12%);
+  pointer-events: none;
+}
+
+.browser-dock-region-hint {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  z-index: 2147483001;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100vw - 32px);
+  padding: 8px 12px;
+  transform: translateX(-50%);
+  border: 1px solid var(--verevon-d-border, rgb(0 0 0 / 12%));
+  border-radius: 8px;
+  background: var(--verevon-surface, #fff);
+  color: var(--verevon-text, inherit);
+  font-size: 0.8125rem;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 16%);
+}

@@ -91,6 +91,11 @@ import {
   type PlanStepEdit,
 } from '@/shared/api/orchestration-client'
 import { runBrowserGiveBack, type BrowserGiveBackOutcome } from '@/features/chat/lib/browser-give-back'
+import {
+  browserErrorMessage,
+  resolveBrowserTabMentions,
+  type BrowserTabContextRef,
+} from '@/shared/api/browser-client'
 import { getRun, listRuns } from '@/shared/api/runs-client'
 import { getRunProofBundle } from '@/shared/api/run-console-client'
 import {
@@ -3798,6 +3803,7 @@ export function useChatController() {
           retrievalScope: options.retrievalScope ?? retrievalScope(),
           connectorScope: options.connectorScope,
           contextRefs: options.contextRefs,
+          browserTabRefs: options.browserTabRefs,
           agentMode: options.agentMode,
           deepResearch: options.deepResearch,
           researchPhase: options.researchPhase,
@@ -4168,8 +4174,62 @@ export function useChatController() {
     }
   }
 
+  /**
+   * E3.3-c: the `@tab` mentions of a send, resolved by the gateway against Quarry's live tabs
+   * before anything else happens. Fails closed: any refusal (tab gone, a zero-retention session,
+   * the switch off, a 4xx, a malformed answer) throws a typed message, so the composer shows it,
+   * keeps the draft and nothing reaches a model. Returns the refs (context references only: no page
+   * content, no grant), or undefined when the send carries no browser context.
+   */
+  const resolveComposerTabMentions = async (
+    payload: DashboardComposerSubmitPayload,
+  ): Promise<BrowserTabContextRef[] | undefined> => {
+    const browserContext = payload.browserContext
+    if (!browserContext || browserContext.tabMentions.length === 0) return undefined
+    // Page context is never attached on a zero-retention turn; the composer already omits it there.
+    if (payload.zdr) {
+      throw new Error(i18n.tr(
+        'Sidekontekst fra en nettleserfane kan ikke brukes i en midlertidig chat. Fjern @tab og prøv igjen.',
+        'Page context from a browser tab cannot be used in a temporary chat. Remove @tab and try again.',
+      ))
+    }
+    // A message typed mid-run is queued input, which carries no tab refs, so it is refused instead of sent without them.
+    if (state.status === 'streaming') {
+      throw new Error(i18n.tr(
+        'Vent til svaret er ferdig før du refererer til en nettleserfane med @tab. Utkastet er beholdt.',
+        'Wait for the answer to finish before referring to a browser tab with @tab. Your draft is kept.',
+      ))
+    }
+    try {
+      return await resolveBrowserTabMentions(
+        browserContext.sessionId,
+        browserContext.tabMentions.map((mention) => ({ token: mention.token, tabId: mention.tabId })),
+      )
+    } catch (error) {
+      const code = error instanceof ApiError ? error.code : null
+      if (code === 'browser_tab_mention_unresolved') {
+        throw new Error(i18n.tr(
+          'Fanen du nevnte med @tab finnes ikke lenger eller er ikke entydig. Meldingen ble ikke sendt. Utkastet er beholdt.',
+          'A tab you mentioned with @tab is gone or not unique. The message was not sent. Your draft is kept.',
+        ))
+      }
+      if (code === 'browser_tab_context_refused_zdr') {
+        throw new Error(i18n.tr(
+          'Sidekontekst fra en nettleserfane brukes ikke i en økt uten datalagring. Meldingen ble ikke sendt. Utkastet er beholdt.',
+          'Page context from a browser tab is not used in a zero-data-retention session. The message was not sent. Your draft is kept.',
+        ))
+      }
+      throw new Error(browserErrorMessage(error, i18n.tr, {
+        no: 'Kunne ikke hente fanen du nevnte med @tab. Meldingen ble ikke sendt. Utkastet er beholdt.',
+        en: 'Could not read the tab you mentioned with @tab. The message was not sent. Your draft is kept.',
+      }))
+    }
+  }
+
   const handleComposerSubmit = async (payload: DashboardComposerSubmitPayload) => {
     if (isForeignOriginThread(state.threadId)) return
+    // Before the launch motion and before any model-bound step: a refusal throws, the composer keeps the draft.
+    const browserTabRefs = await resolveComposerTabMentions(payload)
     if (!hasMessages()) triggerLaunchMotion()
     const attachments = await toStreamAttachments(payload.attachments)
     // Small text documents go to the model IN this turn, appended to the
@@ -4199,6 +4259,7 @@ export function useChatController() {
       retrievalScope: payload.retrievalScope,
       connectorScope: payload.connectorScope,
       contextRefs: payload.contextRefs,
+      browserTabRefs,
       agentMode: payload.agentMode,
       deepResearch: payload.tools.includes('research'),
       // EP-2 S5: with the plan turn on, a composer deep research first asks for the editable plan.

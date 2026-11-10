@@ -63,6 +63,7 @@ impl AgentLoop {
     ) -> Self {
         Self {
             runner: ObservationRunner {
+                otp_source: None,
                 browser,
                 artifacts: None,
                 events: None,
