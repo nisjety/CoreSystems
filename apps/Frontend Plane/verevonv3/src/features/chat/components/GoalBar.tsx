@@ -45,6 +45,16 @@ const STOP_REASON_LABEL: Record<string, { no: string; en: string }> = {
   max_turns: { no: 'Alle runder er brukt', en: 'All turns used' },
 }
 
+/** The judge's closed verdicts on a goal turn (EP-7 S3). A verdict outside this set shows no chip. */
+const GOAL_VERDICTS = ['met', 'not_met', 'blocked', 'unsure'] as const
+
+export type GoalVerdict = (typeof GOAL_VERDICTS)[number]
+
+/** The judge's verdict on the goal's last turn, when the server named one of the closed set; otherwise `null`. */
+export function goalVerdict(value: string | undefined): GoalVerdict | null {
+  return GOAL_VERDICTS.find((candidate) => candidate === value) ?? null
+}
+
 /** A token count as the usage line shows it: 950, 41k, 1.5M. */
 export function compactTokens(value: number): string {
   if (value < 1000) return String(value)
@@ -199,16 +209,21 @@ export function goalAwayRuns(fires: readonly CronScheduleFire[]): GoalAwayRun[] 
 
 /**
  * The thread goal, docked above the composer (EP-7 S1, decision D1): one line with the objective,
- * the number of success criteria and a status chip, and the actions Continue, Edit, Pause/Resume
- * and Clear. Continue sends one turn toward the goal (`chat.continue_goal`); nothing here sends a
- * turn on its own. The bar never takes focus: it sits in the dock's polite live region, and a goal
- * must not pull the cursor out of the field the person is typing in.
+ * the number of success criteria and a status chip, and the actions Continue, Edit, Pause/Resume,
+ * Mark done (Reopen once the goal is met or blocked) and Clear. Continue sends one turn toward the
+ * goal (`chat.continue_goal`); nothing here sends a turn on its own. The bar never takes focus: it
+ * sits in the dock's polite live region, and a goal must not pull the cursor out of the field the
+ * person is typing in.
  *
  * With `autoContinue` available (EP-7 S4) an active goal also offers "Keep going": after a turn the
  * judge did not find met, the bar counts down five seconds and the controller sends the next turn;
  * Stop cancels the countdown and turns it off, and the reason the pump stopped stays on the bar. The
  * countdown is plain text in a timer role, which screen readers do not announce on every tick, and
  * nothing in it moves, so there is no motion to reduce.
+ *
+ * The judge's verdict on the last goal turn (EP-7 S3) is a chip beside the status. Its reasons, and a
+ * note that the judge is a model and can be wrong, open on click. Mark done and Reopen are the person's
+ * own override of the judge: neither waits for it.
  */
 export function GoalBar(props: {
   goal: ThreadGoal
@@ -221,6 +236,10 @@ export function GoalBar(props: {
   onPause: () => void
   onResume: () => void
   onClear: () => void
+  /** Mark the open goal done (EP-7 S3), shown while the goal is active or paused. */
+  onMarkDone?: () => void
+  /** Reopen a met or blocked goal as active (EP-7 S3). */
+  onReopen?: () => void
   /** "Keep going" (EP-7 S4); hidden unless the server reports it available. */
   autoContinue?: GoalAutoContinueView
   /** "Keep working while away" (EP-7 S6); hidden unless the server reports it available. */
@@ -228,7 +247,24 @@ export function GoalBar(props: {
 }) {
   const i18n = useI18n()
   const [expanded, setExpanded] = createSignal(false)
+  // The verdict's reasons and the note that the judge can be wrong open on its chip (EP-7 S3).
+  const [verdictOpen, setVerdictOpen] = createSignal(false)
+  const verdict = () => goalVerdict(props.goal.lastVerdict)
+  const verdictText = (value: GoalVerdict): string => {
+    switch (value) {
+      case 'met':
+        return i18n.tr('Mål nådd', 'Goal met')
+      case 'not_met':
+        return i18n.tr('Ikke nådd', 'Not met')
+      case 'blocked':
+        return i18n.tr('Blokkert', 'Blocked')
+      case 'unsure':
+        return i18n.tr('Usikker', 'Unsure')
+    }
+  }
+  const reasons = () => props.goal.lastVerdictReasons ?? []
   const open = () => props.goal.status === 'active' || props.goal.status === 'paused'
+  const reopenable = () => props.goal.status === 'met' || props.goal.status === 'blocked'
   const long = () => props.goal.objective.length > COLLAPSED_CHARS
   const objective = () =>
     expanded() || !long() ? props.goal.objective : `${props.goal.objective.slice(0, COLLAPSED_CHARS).trimEnd()}…`
@@ -274,9 +310,37 @@ export function GoalBar(props: {
             </span>
           )}
         </Show>
+        <Show when={verdict()}>
+          {(value) => (
+            <button
+              type="button"
+              class="verevon-chat-goal-bar__verdict"
+              data-verdict={value()}
+              aria-expanded={verdictOpen() ? 'true' : 'false'}
+              onClick={() => setVerdictOpen((shown) => !shown)}
+            >
+              {verdictText(value())}
+            </button>
+          )}
+        </Show>
       </div>
       <Show when={usage()}>
         {(line) => <p class="verevon-chat-goal-bar__usage">{i18n.tr(line().no, line().en)}</p>}
+      </Show>
+      <Show when={verdict() !== null && verdictOpen()}>
+        <div class="verevon-chat-goal-bar__verdict-detail">
+          <Show when={reasons().length > 0}>
+            <ul
+              class="verevon-chat-goal-bar__verdict-reasons"
+              aria-label={i18n.tr('Begrunnelse fra dommeren', 'Why the judge decided')}
+            >
+              <For each={reasons()}>{(reason) => <li>{reason}</li>}</For>
+            </ul>
+          </Show>
+          <p class="verevon-chat-goal-bar__verdict-note">
+            {i18n.tr('Dommeren er en modell og kan ta feil.', 'The judge is a model and can be wrong.')}
+          </p>
+        </div>
       </Show>
       <Show when={expanded() && criteriaCount() > 0}>
         <ul class="verevon-chat-goal-bar__criteria-list" aria-label={i18n.tr('Kriterier for målet', 'Success criteria')}>
@@ -310,6 +374,14 @@ export function GoalBar(props: {
               {i18n.tr('Pause', 'Pause')}
             </button>
           </Show>
+          <button type="button" disabled={props.pending} onClick={() => props.onMarkDone?.()}>
+            {i18n.tr('Marker som ferdig', 'Mark done')}
+          </button>
+        </Show>
+        <Show when={reopenable()}>
+          <button type="button" disabled={props.pending} onClick={() => props.onReopen?.()}>
+            {i18n.tr('Gjenåpne', 'Reopen')}
+          </button>
         </Show>
         <button type="button" disabled={props.pending} onClick={() => props.onClear()}>
           {i18n.tr('Fjern', 'Clear')}

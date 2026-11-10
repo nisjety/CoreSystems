@@ -319,6 +319,13 @@ export type ChatInvokeRequest = {
    * browser only names the post.
    */
   wake?: { messageId: string; clientWakeId: string }
+  /**
+   * A builder preview (EP-6 S8): one question answered by the saved draft of this agent, as a temporary
+   * turn with no thread, Space or mention. Sent as `agent_preview: {agent_ref}` only when set, and the
+   * turn is built zero-retention (`asAgentPreview` drops the thread and Space fields). The gateway checks
+   * the builder's access and the draft, runs the turn read-only, drops the client's tools, and stores nothing.
+   */
+  agentPreview?: { agentRef: string }
   sessionKey?: string
   features?: string[]
   generateImage?: boolean
@@ -2059,7 +2066,28 @@ function storedUiLocale(): Locale | undefined {
   }
 }
 
-export function buildChatWireBody(request: ChatInvokeRequest): Record<string, unknown> {
+/**
+ * A builder preview (EP-6 S8) is a temporary, zero-retention turn outside any thread, Space or mention.
+ * The gateway refuses those fields on it, so they are dropped, and zero retention is forced, before the
+ * body is built from the request. Any other request passes through unchanged.
+ */
+function asAgentPreview(request: ChatInvokeRequest): ChatInvokeRequest {
+  if (!request.agentPreview) return request
+  return {
+    ...request,
+    threadId: undefined,
+    spaceRef: undefined,
+    mentionedAgentRef: undefined,
+    wake: undefined,
+    pinnedMessageIds: undefined,
+    regenerateOfMessageId: undefined,
+    editOfMessageId: undefined,
+    zdr: true,
+  }
+}
+
+export function buildChatWireBody(input: ChatInvokeRequest): Record<string, unknown> {
+  const request = asAgentPreview(input)
   const conversationOnly = request.sourceScope === 'conversation'
   // Per-turn retrieval-source filter (chat-wave2 scope spec): conversation
   // always wins — that mode already excludes both source families outright,
@@ -2178,6 +2206,8 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     client_utc_offset_minutes: clientUtcOffsetMinutes(new Date()),
     ...(uiLocale ? { ui_locale: uiLocale } : {}),
     mentioned_agent_ref: request.mentionedAgentRef?.trim() || undefined,
+    // Present only on a builder preview (EP-6 S8), so every other body is byte-identical to what it was.
+    ...(request.agentPreview ? { agent_preview: { agent_ref: request.agentPreview.agentRef.trim() } } : {}),
     // Present only on a wake, so every other body is byte-identical to what it was.
     ...(request.wake ? { wake: { message_id: request.wake.messageId, client_wake_id: request.wake.clientWakeId } } : {}),
     // Explicit skill picks. The KEY is absent when none — not `undefined`, not
@@ -4212,6 +4242,8 @@ export type ComposerCapabilities = {
   artifactPromote: boolean
   /** Deep research over the organization's knowledge (EP-2 S7): the gateway's switch, off for a ZDR caller. */
   deepResearchKnowledge: boolean
+  /** The composer's "Bred forskning" entry (EP-2 S8): the gateway's switch, off for a ZDR caller. */
+  wideResearch: boolean
 }
 
 export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
@@ -4222,6 +4254,7 @@ export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
   selectionEdit: false,
   artifactPromote: false,
   deepResearchKnowledge: false,
+  wideResearch: false,
 }
 
 /**
@@ -4244,6 +4277,7 @@ export async function getComposerCapabilities(): Promise<ComposerCapabilities> {
     selectionEdit: record?.selection_edit === true,
     artifactPromote: record?.artifact_promote === true,
     deepResearchKnowledge: record?.deep_research_knowledge === true,
+    wideResearch: record?.wide_research === true,
   }
 }
 

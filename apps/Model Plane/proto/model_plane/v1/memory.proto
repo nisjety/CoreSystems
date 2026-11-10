@@ -289,6 +289,13 @@ message ListMemoryRequest {
   // The signed Control `model.space.memory.manage` decision token, with
   // `space_id`. Never logged.
   string space_control_decision_token = 6;
+
+  // Lists one named agent's notes in the Space (EP-6 P3, EP-8 S10) instead of
+  // every row of the Space. Set only with `space_id`, under the same Control
+  // decision; without `space_id` it is refused. A ZDR or waived caller is
+  // refused with the `named_agent` catalogue refusal, and the list is empty
+  // while SESSION_AGENT_MEMORY_ENABLED is off. Empty keeps the Space list.
+  string agent_subject_id = 7;
 }
 
 message ListMemoryResponse {

@@ -868,9 +868,10 @@ pub async fn purge_organization_data(
     Ok(summary)
 }
 
-/// A validated per-user erasure (`user-core`'s saga, `subject_type == "user"`), read only for the
-/// one thing session-core erases per user today: that person's part of Space memory (EP-8 S7).
-/// Everything else the module note says about per-user events still holds: the org is not purged.
+/// A validated per-user erasure (`user-core`'s saga, `subject_type == "user"`), read only for what
+/// session-core erases per user: that person's part of Space memory (EP-8 S7), and their standing
+/// profile and own personal memory (EP-8 S4). Everything else the module note says about per-user
+/// events still holds: the org is not purged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserErasure {
     pub org_id: String,
@@ -878,8 +879,8 @@ pub struct UserErasure {
 }
 
 /// Decode the fan-out payload as a per-user erasure. `Ok(None)` for every other subject type
-/// (`user_anonymize` included: it keeps the records and removes the identity, which a Space row
-/// does not carry).
+/// (`user_anonymize` included: it keeps the records and removes the identity, so neither the Space
+/// rows nor the standing profile are erased by it here).
 ///
 /// # Errors
 ///
@@ -1033,6 +1034,200 @@ pub async fn erase_user_space_memory_sources(
     if summary.deleted > 0 {
         metrics::counter!("mp_session_space_memory_erased_total", "op" => "gdpr_user")
             .increment(summary.deleted);
+    }
+    Ok(summary)
+}
+
+/// Counts of one person's standing-profile and personal-memory erasure (EP-8 S4).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct UserErasureSummary {
+    /// Standing profile rows deleted: one, or none when the person had no profile.
+    pub user_profiles: u64,
+    /// The person's own durable memory rows (`scope = 'user'`) deleted.
+    pub personal_memory: u64,
+    /// Semantic-tier outcome for the copies of those rows, and of any copy the listing found that no
+    /// durable row still holds.
+    pub semantic_memory: crate::memory_erasure::SemanticErasure,
+    /// Why the semantic listing could not be read in full. The copies it would have named are then
+    /// unknown, so the erasure cannot claim completeness.
+    pub listing_degradation: Option<&'static str>,
+}
+
+impl UserErasureSummary {
+    /// Whether this erasure can honestly claim completeness: every semantic copy accounted for, and
+    /// the listing that finds orphaned copies read in full.
+    pub fn erasure_is_complete(&self) -> bool {
+        self.semantic_memory.is_complete() && self.listing_degradation.is_none()
+    }
+}
+
+/// Erases one person's standing profile and their own personal memory, in one transaction, then the
+/// semantic copies of that memory (EP-8 S4). It is the per-user counterpart of the organization purge
+/// for a `subject_type: "user"` event, called after [`erase_user_space_memory_sources`]. It never
+/// touches another member's rows or the organization's.
+///
+/// Scope: the person's `scope = 'user'` rows that have no session and are owned by them. Org-owned
+/// rows and the thread-bound rows of their threads are not erased here.
+///
+/// Legal holds are asked before anything is touched, as the organization purge asks them. A hold that
+/// covers the organization, or a check that cannot be answered, refuses with [`ErasureHoldError`] and
+/// the consumer naks with a delay.
+///
+/// The person's control row is locked first, as `reset_user_memory` locks it, so an extraction in
+/// flight finishes before this erase or is refused after it. `extract_after` moves to now, so the
+/// messages said before the erase are not mined back into memory by a later Dreaming pass. That is
+/// why the control row is kept. Each erased id is recorded as forgotten, so a late semantic mirror of
+/// one is removed rather than recalled.
+///
+/// The semantic tier is propagated after the commit, which a degraded tier never rolls back. With a
+/// Letta adapter, each erased copy is deleted by its owner, and the per-user listing finds the copies
+/// that no durable row of the organization still holds (what a degraded earlier delete leaves behind).
+/// A copy that a remaining durable row names stays. Without an adapter nothing is called, and the
+/// erased copies are reported unconfirmed, as the organization purge reports them, never as erased.
+///
+/// Idempotent: a redelivered event finds no durable row of the person left, so only the semantic tier
+/// can still have work to do.
+///
+/// # Errors
+///
+/// Returns [`ErasureHoldError`] when a hold covers the organization or cannot be ruled out. Returns an
+/// error when a statement or the commit fails, and nothing of that transaction is kept. An error from
+/// the orphan lookup after the commit makes the redelivery finish the semantic tier.
+pub async fn erase_user_personal_data(
+    pool: &Pool,
+    org_id: &str,
+    user_id: &str,
+    letta: Option<&crate::letta_adapter::LettaMemoryAdapter>,
+) -> anyhow::Result<UserErasureSummary> {
+    // EP-9 C4: asked before the transaction opens, so a refusal touches nothing and the redelivery
+    // retries it after the release.
+    erasure_hold_gate().ensure_not_held(org_id, &[]).await?;
+
+    let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
+    crate::memory_control::lock_user(&mut tx, org_id, user_id).await?;
+    let mut erased: Vec<String> = sqlx::query_scalar(
+        "DELETE FROM agent_memory \
+         WHERE org_id = $1 AND session_id IS NULL AND scope = 'user' AND owner = $2 \
+         RETURNING id",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    erased.sort();
+    sqlx::query(
+        "INSERT INTO forgotten_memory_ids (org_id, user_id, memory_id) \
+         SELECT $1, $2, id FROM unnest($3::text[]) AS erased(id) ON CONFLICT DO NOTHING",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .bind(&erased)
+    .execute(&mut *tx)
+    .await?;
+    // clock_timestamp is measured after the lock, not when a waiting tx began.
+    sqlx::query(
+        "UPDATE user_memory_controls SET extract_after = clock_timestamp() \
+         WHERE org_id = $1 AND user_id = $2",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    let user_profiles = crate::user_profile::delete_in_tx(&mut tx, org_id, user_id).await?;
+    tx.commit().await?;
+
+    // After the commit, deliberately: the durable rows are the source of truth for existence, and a
+    // degraded semantic tier must not roll back an erasure Postgres has already honoured.
+    let personal_memory = erased.len() as u64;
+    let mut targets: Vec<crate::memory_erasure::ErasedMemory> = erased
+        .iter()
+        .map(|memory_id| crate::memory_erasure::ErasedMemory {
+            memory_id: memory_id.clone(),
+            owner: user_id.to_owned(),
+        })
+        .collect();
+    let mut listing_degradation = None;
+    if let Some(letta) = letta {
+        let listed = letta
+            .list_detailed(
+                org_id,
+                user_id,
+                crate::memory_erasure::MAX_SEMANTIC_DELETES as u32,
+            )
+            .await;
+        listing_degradation = listed.degradation_reason.or_else(|| {
+            (listed.entries.len() >= crate::memory_erasure::MAX_SEMANTIC_DELETES)
+                .then_some(crate::memory_erasure::SEMANTIC_ERASURE_TRUNCATED)
+        });
+        // The listed copies this erase did not already name. An empty id cannot be addressed, and a
+        // repeated id names one memory.
+        let mut seen: std::collections::HashSet<&str> = erased.iter().map(String::as_str).collect();
+        let mut listed_ids: Vec<String> = Vec::new();
+        for entry in &listed.entries {
+            if entry.memory_id.trim().is_empty() || !seen.insert(entry.memory_id.as_str()) {
+                continue;
+            }
+            listed_ids.push(entry.memory_id.clone());
+        }
+        if !listed_ids.is_empty() {
+            // A copy whose durable row still exists is a thread memory this erase does not name, so it
+            // stays. Only the copies no durable row holds are this person's alone to erase.
+            let durable: Vec<String> = sqlx::query_scalar(
+                "SELECT id FROM agent_memory WHERE org_id = $1 AND id = ANY($2)",
+            )
+            .bind(org_id)
+            .bind(&listed_ids)
+            .fetch_all(pool)
+            .await?;
+            let durable: std::collections::HashSet<String> = durable.into_iter().collect();
+            let orphans: Vec<String> = listed_ids
+                .into_iter()
+                .filter(|memory_id| !durable.contains(memory_id))
+                .collect();
+            if !orphans.is_empty() {
+                // Recall is suppressed before the semantic delete, so a copy whose delete degrades is
+                // still filtered from every read, as ResetMemory does.
+                sqlx::query(
+                    "INSERT INTO forgotten_memory_ids (org_id, user_id, memory_id) \
+                     SELECT $1, $2, id FROM unnest($3::text[]) AS orphaned(id) ON CONFLICT DO NOTHING",
+                )
+                .bind(org_id)
+                .bind(user_id)
+                .bind(&orphans)
+                .execute(pool)
+                .await?;
+                targets.extend(orphans.into_iter().map(|memory_id| {
+                    crate::memory_erasure::ErasedMemory {
+                        memory_id,
+                        owner: user_id.to_owned(),
+                    }
+                }));
+            }
+        }
+    }
+    let semantic = crate::memory_erasure::erase_semantic_copies(letta, org_id, &targets).await;
+
+    let summary = UserErasureSummary {
+        user_profiles,
+        personal_memory,
+        semantic_memory: semantic,
+        listing_degradation,
+    };
+    if !summary.erasure_is_complete() {
+        tracing::warn!(
+            org_id,
+            considered = semantic.considered(),
+            confirmed = semantic.confirmed,
+            unconfirmed = semantic.unconfirmed,
+            listing_degradation = ?listing_degradation,
+            degradation = ?semantic.degradation_reason,
+            "GDPR user erasure incomplete: not every personal memory copy is confirmed erased"
+        );
+        metrics::counter!(
+            "mp_session_semantic_erasure_unconfirmed_total",
+            "operation" => "gdpr_user"
+        )
+        .increment(semantic.unconfirmed);
     }
     Ok(summary)
 }

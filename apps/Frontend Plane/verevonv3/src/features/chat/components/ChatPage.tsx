@@ -30,7 +30,13 @@ import {
 } from '@/features/dashboard/home/DashboardComposer'
 import { withChatWorkPeriod, type ChatWorkPeriod } from '@/shared/actions/chat-work-period'
 import type { LearnCommandContext } from '@/shared/api/chat-actions-client'
-import { getComposerCapabilities, getThreadContext, type ChatTurnTiming } from '@/shared/api/chat-client'
+import {
+  getComposerCapabilities,
+  getThreadContext,
+  listDeckTemplates,
+  type ChatTurnTiming,
+  type DeckTemplate,
+} from '@/shared/api/chat-client'
 import { getLearningAllowed } from '@/shared/api/memory-client'
 import { importUpload } from '@/shared/api/knowledge-client'
 import { getSession } from '@/shared/session/session-store'
@@ -59,6 +65,7 @@ import {
   ChatLiveRunPanel,
 } from './ChatLiveRunPanel'
 import { ComposerTrays } from './ComposerTrays'
+import { DeckTemplateContext, type DeckTemplateActions } from './artifact-renderers'
 import { researchPassFacts } from './ArtifactProvenance'
 import { ChatWideResearchPanel } from './ChatWideResearchPanel'
 import { ChatWorkspaceCanvas } from './ChatWorkspaceCanvas'
@@ -214,8 +221,15 @@ export default function ChatPage() {
     saveGoal,
     setGoalPaused,
     clearGoal,
+    markGoalDone,
+    reopenGoal,
     continueGoal,
     goalAutoContinue,
+    goalAway,
+    wideResearchRoute,
+    startWideResearch,
+    retryWideResearchItem,
+    applyDeckTemplate,
   } = useChatController()
 
   // The attachment chip that summoned the canvas stays selected when several
@@ -304,17 +318,33 @@ export default function ChatPage() {
       })
     })
   }
-  const submitWithWorkPeriod = async (payload: DashboardComposerSubmitPayload) => {
+  // The deck template the composer's next turn applies (EP-5 S7). The composer's chip sets it, and the send that starts a turn
+  // takes it. A deck draft only offers the chip: a front-end heuristic, and the server checks the template and never infers one.
+  const [composerDeckTemplate, setComposerDeckTemplate] = createSignal<DeckTemplate | null>(null)
+  const deckDraftHint = () => /\b(deck|presentasjon|presentation|lysbilde|slide)/i.test(input())
+  // Templates are offered in a chat that keeps data and that this person may write to: never a temporary or read-only thread.
+  const deckTemplatesAllowed = () => !artifactTemporary() && !isForeignOriginThread()
+  const deckTemplateChipOffered = () => deckDraftHint() && !isStreaming() && deckTemplatesAllowed()
+  // One composer turn through the page's gates (the project audience, the work period). `deckTemplate` is the template it applies.
+  const submitWithWorkPeriod = async (payload: DashboardComposerSubmitPayload, deckTemplate: DeckTemplate | null = null) => {
     const submission = {
       ...payload,
       text: withChatWorkPeriod(payload.text, workPeriod(), i18n.locale() === 'no' ? 'no' : 'en'),
     }
     const spaceRef = projectRef()
-    if (!spaceRef) return handleComposerSubmit(submission)
+    if (!spaceRef) return handleComposerSubmit(submission, deckTemplate?.skillId)
     setProjectNotice('')
     const confirmed = await confirmProjectAudience(spaceRef, temporaryChat())
     if (!confirmed) throw new Error(i18n.tr('Meldingen ble ikke sendt. Utkastet er beholdt.', 'The message was not sent. Your draft is kept.'))
-    return handleComposerSubmit(submission)
+    return handleComposerSubmit(submission, deckTemplate?.skillId)
+  }
+  // The composer's own send. Its pick is for one turn: a send made while a run streams is queued into that run, and a
+  // zero-retention send never carries a template, so the pick waits for the turn that starts on its own. It clears once the
+  // send has gone out; a send that failed keeps it.
+  const submitFromComposer = async (payload: DashboardComposerSubmitPayload) => {
+    const pick = isStreaming() || payload.zdr || artifactTemporary() ? null : composerDeckTemplate()
+    await submitWithWorkPeriod(payload, pick)
+    if (pick && composerDeckTemplate() === pick) setComposerDeckTemplate(null)
   }
   // The Output panel's "Ask for a change" (EP-3 S6) sends one composer turn that names the selected range. The panel has hashed the quote, so the selected text itself is not sent.
   const askAboutArtifactSelection = (request: ArtifactSelectionRequest) => submitWithWorkPeriod({
@@ -335,13 +365,37 @@ export default function ChatPage() {
       },
     }],
   })
-  // Temporary chat writes no thread, so it cannot be turned on for a project.
+  // Temporary chat writes no thread, so it cannot be turned on for a project. It takes no deck template either, so a pick made
+  // before it is dropped rather than left waiting unseen.
   const setTemporaryFromComposer = (value: boolean) => {
     if (value && projectRef()) {
       setProjectNotice(projectRefusalMessage('temporary'))
       return
     }
+    if (value) setComposerDeckTemplate(null)
     setTemporaryChat(value)
+  }
+  // The deck view's "Bytt mal" (EP-5 S7). A project room asks for its audience first, as a composer send does; the turn itself
+  // is the controller's `applyDeckTemplate`.
+  const applyDeckTemplateTurn = async (template: DeckTemplate | null) => {
+    const spaceRef = projectRef()
+    if (spaceRef) {
+      setProjectNotice('')
+      if (!(await confirmProjectAudience(spaceRef, temporaryChat()))) return
+    }
+    await applyDeckTemplate(template)
+  }
+  // What the deck view's "Bytt mal" may do. Where the templates are not allowed there is no list, and no pick is taken during
+  // a run: the control is disabled then, and a pick that got here anyway is not sent.
+  const deckTemplateActions: DeckTemplateActions = {
+    list: () => (deckTemplatesAllowed() ? listDeckTemplates() : Promise.resolve(null)),
+    apply: (template) => {
+      if (isStreaming() || !deckTemplatesAllowed()) return
+      applyDeckTemplateTurn(template).catch((error: unknown) => {
+        setProjectNotice(error instanceof Error ? error.message : i18n.tr('Kunne ikke bruke malen.', 'Could not use the template.'))
+      })
+    },
+    busy: () => isStreaming(),
   }
 
   // "Planlegg dette" (chat-wave2 "schedule" spec §2.1) — the message-action
@@ -573,7 +627,7 @@ export default function ChatPage() {
         onMessageChange={setInput}
         onPlanModeChange={setPlanMode}
         onStop={handleStop}
-        onSubmit={submitWithWorkPeriod}
+        onSubmit={submitFromComposer}
         onTemporaryChatChange={setTemporaryFromComposer}
         planMode={planMode()}
         agentModeCap={agentModeCap()}
@@ -1153,18 +1207,22 @@ export default function ChatPage() {
             <ChatAttachmentCanvas attachments={conversationAttachments()} selectedId={selectedAttachmentId()} />
           </Show>
           <Show when={artifactItems().length > 0}>
-            <ArtifactsPanel
-              items={artifactItems()}
-              history={{ threadId: state.threadId ?? '', temporary: artifactTemporary() }}
-              editing={{
-                enabled: composerCapabilities()?.artifactEditing === true,
-                threadId: state.threadId ?? '',
-                temporary: artifactTemporary(),
-                spaceThread: spaceScoped(),
-                onSaved: foldSavedArtifactRevision,
-              }}
-              onAskAboutSelection={askAboutArtifactSelection}
-            />
+            {/* The deck view's "Bytt mal" reads its templates from this provider (EP-5 S7). It sits inside the panel, not above
+                the page, so it follows the panel wherever the page draws it. */}
+            <DeckTemplateContext value={deckTemplateActions}>
+              <ArtifactsPanel
+                items={artifactItems()}
+                history={{ threadId: state.threadId ?? '', temporary: artifactTemporary() }}
+                editing={{
+                  enabled: composerCapabilities()?.artifactEditing === true,
+                  threadId: state.threadId ?? '',
+                  temporary: artifactTemporary(),
+                  spaceThread: spaceScoped(),
+                  onSaved: foldSavedArtifactRevision,
+                }}
+                onAskAboutSelection={askAboutArtifactSelection}
+              />
+            </DeckTemplateContext>
           </Show>
         </Show>
       </Match>
@@ -1216,7 +1274,11 @@ export default function ChatPage() {
   // the same reason as `liveRailWorkContent`: the rail reads its prop slot, and
   // each read of an inline JSX prop would build a fresh tree with its own
   // event-stream subscription.
-  const liveRailWideResearch = createMemo(() => <ChatWideResearchPanel runId={liveRunId()} threadId={state.threadId ?? null} />)
+  // The composer's "Bred forskning" entry and the per-item retry (EP-2 S8/S9) are offered only while the gateway serves
+  // wide research and this chat may send a wide-research turn. Read in the props, not in the memo below, so a card
+  // follows the stream without a fresh tree.
+  const wideResearchOffered = () => composerCapabilities()?.wideResearch === true && wideResearchRoute() !== undefined
+  const liveRailWideResearch = createMemo(() => <ChatWideResearchPanel runId={liveRunId()} threadId={state.threadId ?? null} onRetryItem={wideResearchOffered() ? retryWideResearchItem : undefined} />)
   // The layout picker for the live panel's header (WS9.G). A memo, as the panel's other slots are, so
   // the panel reads one element however often it asks. The position is read inside the component.
   const liveRailDockControls = createMemo(() => (
@@ -1641,8 +1703,19 @@ export default function ChatPage() {
                 onSaveGoal={saveGoal}
                 onContinueGoal={() => void continueGoal()}
                 goalAutoContinue={goalAutoContinue}
+                goalAway={goalAway}
                 onPauseGoal={(paused) => void setGoalPaused(paused)}
                 onClearGoal={() => void clearGoal()}
+                onMarkGoalDone={() => void markGoalDone()}
+                onReopenGoal={() => void reopenGoal()}
+                // EP-2 S8: the "Bred forskning" entry, only while the gateway serves it and the chat may send one.
+                wideResearchEntry={wideResearchOffered()}
+                wideResearchModel={wideResearchRoute()?.model}
+                onStartWideResearch={(choice) => startWideResearch(choice)}
+                // EP-5 S7: the deck template chip, offered while the draft talks about a deck and the composer is idle.
+                deckTemplateEntry={deckTemplateChipOffered()}
+                deckTemplate={composerDeckTemplate()}
+                onDeckTemplateChange={setComposerDeckTemplate}
               />
               <Show when={isStreaming()}>
                 <div class="verevon-chat-stop-wrap">

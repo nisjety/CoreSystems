@@ -238,8 +238,9 @@ pub(crate) async fn list_artifact_revisions(
 }
 
 /// What the composer and the Output panel may offer, from this gateway's own switches. Each field
-/// follows the switch behind it; the two reference fields are set by `with_reference_switches`, and
-/// `deep_research_knowledge` by `with_deep_research_switch`.
+/// follows the switch behind it; the two reference fields are set by `with_reference_switches`,
+/// `deep_research_knowledge` by `with_deep_research_switch` and `wide_research` by
+/// `with_wide_research_switch`.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ComposerCapabilities {
     artifact_history: bool,
@@ -248,6 +249,7 @@ pub(crate) struct ComposerCapabilities {
     thread_references: bool,
     selection_edit: bool,
     deep_research_knowledge: bool,
+    wide_research: bool,
 }
 
 fn capabilities_for(mode: ArtifactRevisionsMode, editing: bool, zdr: bool) -> ComposerCapabilities {
@@ -262,6 +264,8 @@ fn capabilities_for(mode: ArtifactRevisionsMode, editing: bool, zdr: bool) -> Co
         selection_edit: crate::selection_guard::enabled_for(mode) && !zdr,
         // Set by `with_deep_research_switch`, which reads the switch this pure function does not.
         deep_research_knowledge: false,
+        // Set by `with_wide_research_switch`, which reads the switch this pure function does not.
+        wide_research: false,
     }
 }
 
@@ -290,6 +294,18 @@ fn with_deep_research_switch(
     capabilities
 }
 
+/// The wide-research entry follows its own switch (EP-2 S8, read by `http_routes::wide_research_entry_enabled`:
+/// the literal `true` only). A ZDR caller is offered none: a wide-research run is refused for every
+/// zero-retention turn, and so is its estimate.
+fn with_wide_research_switch(
+    mut capabilities: ComposerCapabilities,
+    entry_enabled: bool,
+    zdr: bool,
+) -> ComposerCapabilities {
+    capabilities.wide_research = entry_enabled && !zdr;
+    capabilities
+}
+
 pub(crate) async fn composer_capabilities(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -302,16 +318,21 @@ pub(crate) async fn composer_capabilities(
     .unwrap_or(true);
     let context_refs = crate::context_refs::enabled();
     let deep_research_knowledge = crate::deep_research::knowledge_sources_enabled();
+    let wide_research = crate::http_routes::wide_research_entry_enabled();
     Json(json!({
-        "data": with_deep_research_switch(
-            with_reference_switches(
-                capabilities_for(state.artifact_revisions_mode, state.artifact_editing_enabled, zdr),
-                context_refs,
-                // A thread is referenced only through a reference, so its tools need the reference switch too.
-                context_refs && crate::thread_reference_tools::enabled(),
+        "data": with_wide_research_switch(
+            with_deep_research_switch(
+                with_reference_switches(
+                    capabilities_for(state.artifact_revisions_mode, state.artifact_editing_enabled, zdr),
+                    context_refs,
+                    // A thread is referenced only through a reference, so its tools need the reference switch too.
+                    context_refs && crate::thread_reference_tools::enabled(),
+                    zdr,
+                ),
+                deep_research_knowledge,
                 zdr,
             ),
-            deep_research_knowledge,
+            wide_research,
             zdr,
         )
     }))
@@ -708,6 +729,7 @@ mod tests {
                 "thread_references": false,
                 "selection_edit": false,
                 "deep_research_knowledge": false,
+                "wide_research": false,
             }})
         );
     }

@@ -150,6 +150,9 @@ pub(crate) struct ThreadListQuery {
     limit: Option<usize>,
     archived: Option<String>,
     starred_only: Option<bool>,
+    /// One named agent's threads (EP-6 P3). Forwarded verbatim as a query value to Model Gateway,
+    /// which validates it and reads it only while its own switch is on. Never an org or user scope.
+    agent: Option<String>,
 }
 
 /// What one ListThreads call asks Model Gateway for. `limit` is the page size.
@@ -159,6 +162,7 @@ struct ThreadListRequest<'a> {
     archived: Option<&'a str>,
     thread_id: Option<&'a str>,
     starred_only: bool,
+    agent: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -248,6 +252,11 @@ pub(super) async fn list_threads(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let agent = query
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let request = ThreadListRequest {
         cursor,
         limit: query
@@ -257,6 +266,7 @@ pub(super) async fn list_threads(
         archived,
         thread_id: None,
         starred_only: query.starred_only.unwrap_or(false),
+        agent,
     };
     let (sessions, next_cursor) =
         match fetch_durable_threads(&state, &user, &headers, request).await {
@@ -489,6 +499,7 @@ pub(crate) async fn delete_thread(
         archived: None,
         thread_id: None,
         starred_only: false,
+        agent: None,
     };
     let (sessions, _) = match fetch_durable_threads(&state, &user, &headers, request).await {
         Ok(page) => page,
@@ -1093,6 +1104,7 @@ async fn read_durable_thread(
         archived: Some("all"),
         thread_id: Some(thread_id),
         starred_only: false,
+        agent: None,
     };
     let (sessions, _) = fetch_durable_threads(state, user, headers, request).await?;
     Ok(chat_history_sessions(sessions)
@@ -1113,6 +1125,9 @@ fn durable_thread_list_url(base: &str, request: &ThreadListRequest<'_>) -> Strin
     }
     if request.starred_only {
         params.push("starred_only=true".to_owned());
+    }
+    if let Some(agent) = request.agent {
+        params.push(format!("agent={}", urlencoding::encode(agent)));
     }
     format!("{base}/v1/threads?{}", params.join("&"))
 }
@@ -2508,6 +2523,7 @@ mod thread_paging_tests {
                 archived: None,
                 thread_id: None,
                 starred_only: true,
+                agent: None,
             },
         );
         assert!(url.ends_with("&starred_only=true"));
@@ -2523,6 +2539,7 @@ mod thread_paging_tests {
                 archived: Some("all"),
                 thread_id: Some("thread-81"),
                 starred_only: false,
+                agent: None,
             },
         );
         assert_eq!(
@@ -2543,6 +2560,7 @@ mod thread_paging_tests {
                 archived: Some("all"),
                 thread_id: Some("thread-81"),
                 starred_only: false,
+                agent: None,
             },
         );
         assert!(url.contains("thread_id=thread-81"));
@@ -2559,6 +2577,7 @@ mod thread_paging_tests {
                 archived: None,
                 thread_id: None,
                 starred_only: false,
+                agent: None,
             },
         );
         assert_eq!(

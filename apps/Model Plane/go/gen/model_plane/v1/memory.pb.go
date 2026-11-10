@@ -794,8 +794,14 @@ type ListMemoryRequest struct {
 	// The signed Control `model.space.memory.manage` decision token, with
 	// `space_id`. Never logged.
 	SpaceControlDecisionToken string `protobuf:"bytes,6,opt,name=space_control_decision_token,json=spaceControlDecisionToken,proto3" json:"space_control_decision_token,omitempty"`
-	unknownFields             protoimpl.UnknownFields
-	sizeCache                 protoimpl.SizeCache
+	// Lists one named agent's notes in the Space (EP-6 P3, EP-8 S10) instead of
+	// every row of the Space. Set only with `space_id`, under the same Control
+	// decision; without `space_id` it is refused. A ZDR or waived caller is
+	// refused with the `named_agent` catalogue refusal, and the list is empty
+	// while SESSION_AGENT_MEMORY_ENABLED is off. Empty keeps the Space list.
+	AgentSubjectId string `protobuf:"bytes,7,opt,name=agent_subject_id,json=agentSubjectId,proto3" json:"agent_subject_id,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ListMemoryRequest) Reset() {
@@ -866,6 +872,13 @@ func (x *ListMemoryRequest) GetSpaceControlDecisionRef() string {
 func (x *ListMemoryRequest) GetSpaceControlDecisionToken() string {
 	if x != nil {
 		return x.SpaceControlDecisionToken
+	}
+	return ""
+}
+
+func (x *ListMemoryRequest) GetAgentSubjectId() string {
+	if x != nil {
+		return x.AgentSubjectId
 	}
 	return ""
 }
@@ -2120,14 +2133,15 @@ const file_model_plane_v1_memory_proto_rawDesc = "" +
 	"\x14MemoryHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\x12\x14\n" +
 	"\x05ready\x18\x02 \x01(\bR\x05ready\x12#\n" +
-	"\rmemory_status\x18\x03 \x01(\tR\fmemoryStatus\"\xf2\x01\n" +
+	"\rmemory_status\x18\x03 \x01(\tR\fmemoryStatus\"\x9c\x02\n" +
 	"\x11ListMemoryRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x14\n" +
 	"\x05limit\x18\x03 \x01(\rR\x05limit\x12\x19\n" +
 	"\bspace_id\x18\x04 \x01(\tR\aspaceId\x12;\n" +
 	"\x1aspace_control_decision_ref\x18\x05 \x01(\tR\x17spaceControlDecisionRef\x12?\n" +
-	"\x1cspace_control_decision_token\x18\x06 \x01(\tR\x19spaceControlDecisionToken\"\xbb\x01\n" +
+	"\x1cspace_control_decision_token\x18\x06 \x01(\tR\x19spaceControlDecisionToken\x12(\n" +
+	"\x10agent_subject_id\x18\a \x01(\tR\x0eagentSubjectId\"\xbb\x01\n" +
 	"\x12ListMemoryResponse\x125\n" +
 	"\aentries\x18\x01 \x03(\v2\x1b.model_plane.v1.MemoryEntryR\aentries\x12\x1a\n" +
 	"\bdegraded\x18\x02 \x01(\bR\bdegraded\x12-\n" +

@@ -81,10 +81,16 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         .route("/api/v1/cron/{cron_id}/fires", get(list_cron_fires))
         .route("/api/v1/cron/{cron_id}/run", post(run_cron_now))
-        .route("/api/v1/capabilities", get(list_capabilities));
+        .route("/api/v1/capabilities", get(list_capabilities))
+        // EP-6 S11: the owner actions this org's run view can offer, read by the agent presets. Read-only
+        // config with no switch of its own; the SPA consumer stays behind VITE_PRESET_AGENT_ACTIONS.
+        .route(
+            "/api/v1/agents/admitted-actions",
+            get(list_admitted_owner_actions),
+        );
     // EP-6 S8: with the switch off the builder routes do not exist, so the gateway answers
     // exactly as it did before (the fallback 404).
-    let router = if agent_definition_versions_enabled() {
+    let router = if state.agent_definition_versions {
         router.merge(agent_builder_router())
     } else {
         router
@@ -1184,16 +1190,42 @@ async fn list_capabilities(
     .await
 }
 
+/// `GET /api/v1/agents/admitted-actions` (EP-6 S11): the owner actions this org's run view can offer,
+/// as model-gateway answers them from capability-core. It mirrors `list_capabilities`: the caller's
+/// model and capability bearers, with the org taken from the verified session and never from a header
+/// the caller sends. Only ids and a mode come back; a ZDR principal is refused upstream, and that
+/// refusal passes through unchanged.
+async fn list_admitted_owner_actions(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error),
+    };
+    let url = format!(
+        "{}/v1/capabilities/owner-actions/admitted",
+        state.model_gateway_url
+    );
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
+}
+
 // EP-6 S8: the agent builder. Draft, publish and version history over the Convex functions of
 // EP-6 S7, and the draft preview a chat turn asks for. The definition stays in Convex (OD-4 (b));
-// this gateway only decides who may edit it and shapes what crosses.
-
-/// AGENT_DEFINITION_VERSIONS (EP-6 S7/S8). Read strictly: only the literal `true` mounts the
-/// builder routes and honours a preview request; anything else leaves the gateway as it was.
-// Read at router build and per preview turn, not from AppState: the state is not owned by this change.
-fn agent_definition_versions_enabled() -> bool {
-    std::env::var("AGENT_DEFINITION_VERSIONS").is_ok_and(|value| value == "true")
-}
+// this gateway only decides who may edit it and shapes what crosses. The switch is
+// `AppState::agent_definition_versions` (AGENT_DEFINITION_VERSIONS, read once in build_state): only
+// the literal `true` mounts the builder routes and honours a preview request.
 
 fn agent_builder_router() -> Router<AppState> {
     Router::new()
@@ -1782,7 +1814,7 @@ pub(crate) async fn inject_agent_draft_preview(
     org_id: &str,
     body: &mut Value,
 ) -> Result<(), (StatusCode, Json<Value>)> {
-    if !agent_definition_versions_enabled() {
+    if !state.agent_definition_versions {
         return Ok(());
     }
     apply_agent_draft_preview(state, user, org_id, body).await
@@ -2367,13 +2399,9 @@ mod tests {
         let mut state = fires_test_state(&auth, &user_core, &model);
         state.application_convex_url = convex.uri();
         state.application_convex_service_key = "test-convex-service-key".to_owned();
-        match switch {
-            Some(value) => std::env::set_var("AGENT_DEFINITION_VERSIONS", value),
-            None => std::env::remove_var("AGENT_DEFINITION_VERSIONS"),
-        }
-        // The switch is read when the router is built.
+        // The switch is read once, into AppState, by build_state; the same parser decides it here.
+        state.agent_definition_versions = crate::config::agent_definition_versions_from(switch);
         let app = crate::build_router(state);
-        std::env::remove_var("AGENT_DEFINITION_VERSIONS");
         let response = app
             .oneshot(
                 Request::builder()

@@ -408,6 +408,12 @@ pub const FEATURES: &[Feature] = &[
         key: "skill_authoring",
         label: "saving or editing skills",
     },
+    // EP-6 P3: one named agent's notes in a Space are retained content, so a ZDR or waived caller is
+    // refused the listing before any read.
+    Feature {
+        key: "named_agent",
+        label: "named agent memory",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

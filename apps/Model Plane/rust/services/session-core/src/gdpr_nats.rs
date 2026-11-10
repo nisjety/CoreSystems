@@ -158,7 +158,8 @@ async fn handle_message(
 ) -> anyhow::Result<Outcome> {
     let Some(erasure) = parse_erasure_event(payload).map_err(|e| anyhow::anyhow!(e.to_string()))?
     else {
-        // EP-8 S7: a per-user erasure drops that person's part of Space memory, nothing else.
+        // EP-8 S7 and S4: a per-user erasure drops that person's part of Space memory, then their
+        // standing profile and personal memory. It never purges the organization.
         if let Some(user) =
             crate::gdpr::parse_user_erasure_event(payload).map_err(|e| anyhow::anyhow!(e.to_string()))?
         {
@@ -169,6 +170,17 @@ async fn handle_message(
                 deleted = space.deleted,
                 narrowed = space.narrowed,
                 "GDPR user erasure: Space memory sources dropped"
+            );
+            // A legal hold refuses with ErasureHoldError, which the consumer maps to a delayed nak.
+            let personal =
+                crate::gdpr::erase_user_personal_data(pool, &user.org_id, &user.user_id, letta)
+                    .await?;
+            info!(
+                org_id = %user.org_id,
+                user_profiles = personal.user_profiles,
+                personal_memory = personal.personal_memory,
+                complete = personal.erasure_is_complete(),
+                "GDPR user erasure: standing profile and personal memory erased"
             );
         }
         return Ok(Outcome::Skipped);

@@ -1,20 +1,26 @@
 import { ArrowLeft } from '@/shared/icons'
-import { For, Show, createSignal } from 'solid-js'
+import { For, Show, createSignal, onCleanup } from 'solid-js'
 import { useParams } from '@solidjs/router'
 
-import { listModels } from '@/shared/api/chat-client'
+import { getActionDescriptor } from '@/shared/actions/action-registry'
+import { listModels, streamChat, type ChatErrorEvent } from '@/shared/api/chat-client'
 import { loadComposerSettingsItems } from '@/shared/api/composer-settings-client'
 import { requestJson } from '@/shared/api/http'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { useI18n } from '@/shared/i18n'
+import { translateApiError } from '@/shared/i18n/errors'
 
 /**
  * The agent builder (EP-6-S8, behind VITE_AGENT_BUILDER and the BFF's AGENT_DEFINITION_VERSIONS).
  * It edits one draft and publishes it as an immutable numbered version (OD-4 (b)); the history
  * below shows every published version with what changed in its instructions. Who may open it is
  * decided by the BFF (org admin, the creator, or a manager of the room a room-born agent came
- * from); this page only shows the refusal it gets.
+ * from); this page only shows the refusal it gets. The preview asks the saved draft one question
+ * in a temporary chat that stores nothing.
  */
+
+// The preview panel is shown only with the literal `true`, the same switch that mounts this page.
+const PREVIEW_ENABLED = import.meta.env.VITE_AGENT_BUILDER === 'true'
 
 export type AgentAutonomyCap = 'read_only' | 'ask_first' | 'auto'
 
@@ -70,6 +76,31 @@ export function publishAgent(agentRef: string): Promise<{ version: number; diges
 export async function listAgentVersions(agentRef: string): Promise<AgentVersion[]> {
   const response = await requestJson<{ versions: AgentVersion[] }>(agentPath(agentRef, 'versions'))
   return response.versions
+}
+
+/**
+ * One preview turn of an agent's saved draft (EP-6-S8, `agents.preview`). It is the ordinary chat
+ * stream carrying `agent_preview`: the gateway answers as the draft would, as a temporary zero-retention
+ * turn with no thread, and stores nothing. A request the `agents.preview` contract refuses is never sent.
+ */
+export function previewAgentDraft(
+  agentRef: string,
+  model: string,
+  content: string,
+  handlers: { readonly onAnswer: (text: string) => void; readonly onFailure: (failure: ChatErrorEvent) => void },
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!getActionDescriptor('agents.preview')?.inputSchema.safeParse({ agentRef, content }).success) return Promise.resolve()
+  return streamChat(
+    { content, model, agentPreview: { agentRef } },
+    {
+      onMessage: ({ content: delta }) => handlers.onAnswer(delta),
+      onError: (failure) => {
+        if (!signal?.aborted) handlers.onFailure(failure)
+      },
+    },
+    signal,
+  )
 }
 
 export type DiffLine = { kind: 'same' | 'added' | 'removed'; text: string }
@@ -321,6 +352,9 @@ function AgentBuilderForm(props: {
         <Show when={notice()}>
           {(current) => <p role={current().tone}>{current().text}</p>}
         </Show>
+        <Show when={PREVIEW_ENABLED}>
+          <AgentPreviewPanel agentRef={props.agentRef} model={model} />
+        </Show>
       </section>
 
       <section class="verevon-agent-builder__history" aria-label={i18n.tr('Publiseringshistorikk', 'Publish history')}>
@@ -377,5 +411,85 @@ function VersionRow(props: { readonly version: AgentVersion; readonly previous: 
         </pre>
       </Show>
     </li>
+  )
+}
+
+// The preview (EP-6-S8): one question to the saved draft and one streamed answer. Nothing is stored:
+// the preview is a temporary chat with no thread, no transcript and no memory, so the panel keeps no
+// history and asking again replaces the answer. The question is checked against `agents.preview` first.
+function AgentPreviewPanel(props: { readonly agentRef: string; readonly model: () => string }) {
+  const i18n = useI18n()
+  const [question, setQuestion] = createSignal('')
+  const [answer, setAnswer] = createSignal('')
+  const [busy, setBusy] = createSignal(false)
+  const [failure, setFailure] = createSignal<string | null>(null)
+  let controller: AbortController | undefined
+  onCleanup(() => controller?.abort())
+
+  const canAsk = () => !busy() && question().trim().length > 0 && props.model().length > 0
+
+  const ask = async () => {
+    const content = question().trim()
+    const model = props.model()
+    if (!model) return
+    controller?.abort()
+    const current = new AbortController()
+    controller = current
+    setBusy(true)
+    setAnswer('')
+    setFailure(null)
+    try {
+      await previewAgentDraft(
+        props.agentRef,
+        model,
+        content,
+        {
+          onAnswer: (text) => setAnswer((soFar) => soFar + text),
+          onFailure: (event) => setFailure(translateApiError(event, i18n.tr)),
+        },
+        current.signal,
+      )
+    } catch (error) {
+      if (!current.signal.aborted) setFailure(translateApiError(error, i18n.tr))
+    } finally {
+      if (controller === current) {
+        controller = undefined
+        setBusy(false)
+      }
+    }
+  }
+
+  return (
+    <section class="verevon-agent-builder__preview" aria-label={i18n.tr('Forhåndsvisning', 'Preview')}>
+      <h2>{i18n.tr('Forhåndsvisning', 'Preview')}</h2>
+      <p class="verevon-agent-builder__hint">
+        {i18n.tr(
+          'Still et spørsmål til det lagrede utkastet. Forhåndsvisningen lagrer ingenting: ingen samtale, ingen samtalelogg og ingen minner. Den svarer etter det lagrede utkastet, ikke etter endringer du ikke har lagret.',
+          'Ask the saved draft a question. The preview stores nothing: no conversation, no transcript and no memory. It answers from the saved draft, not from changes you have not saved.',
+        )}
+      </p>
+      <label class="verevon-agent-builder__field">
+        <span>{i18n.tr('Spørsmål', 'Question')}</span>
+        <textarea rows={3} maxlength={32000} value={question()} onInput={(event) => setQuestion(event.currentTarget.value)} />
+      </label>
+      <div class="verevon-agent-builder__actions">
+        <button type="button" disabled={!canAsk()} onClick={() => void ask()}>
+          {i18n.tr('Spør', 'Ask')}
+        </button>
+        <Show when={busy()}>
+          <button type="button" onClick={() => controller?.abort()}>
+            {i18n.tr('Stopp', 'Stop')}
+          </button>
+        </Show>
+      </div>
+      <Show when={failure()}>
+        {(text) => <p role="alert">{text()}</p>}
+      </Show>
+      <Show when={answer() !== '' || busy()}>
+        <div class="verevon-agent-builder__answer" role="status" aria-live="polite" style={{ 'white-space': 'pre-wrap' }}>
+          {answer()}
+        </div>
+      </Show>
+    </section>
   )
 }

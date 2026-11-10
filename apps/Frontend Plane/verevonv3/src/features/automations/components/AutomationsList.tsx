@@ -47,7 +47,8 @@ import {
  * - `compact` is the chat mount: the first `limit` rows, no filter tabs, no edits. Its "See
  *   results" stays on screen, disabled, while the results flag is off, as the chat always showed it.
  * - The full hub offers Run now (EP-6-S3) to the schedule's creator, when the server reports
- *   `features.run_now`, and never on a lapsed approval. A paused row names its reason from the
+ *   `features.run_now`, and never on a lapsed approval or on a goal-bound schedule (EP-7 S6), which runs
+ *   only on its own cadence and carries a "Goal" chip. A paused row names its reason from the
  *   `last_outcome` the list carries, so every mount names it the same way.
  *
  * A lapsed approval is never resumed by a bare toggle: renewal is the way back (WS20-S8). A goal and
@@ -91,6 +92,10 @@ const RUN_NOW_REFUSALS: Partial<Record<string, { no: string; en: string }>> = {
   fire_not_authorized: {
     no: 'Kjøringen ble ikke godkjent, så planen kjørte ikke. Sjekk planen og godkjenningen.',
     en: 'This run was not authorized, so the schedule did not run. Check the schedule and its approval.',
+  },
+  goal_schedule_run_now_refused: {
+    no: 'Planen er knyttet til et mål og kjører bare etter sin egen tidsplan.',
+    en: 'This schedule is linked to a goal, so it runs only on its own schedule.',
   },
 }
 
@@ -163,6 +168,33 @@ function workflowTypeOf(schedule: CronSchedule): string {
 }
 
 /**
+ * A goal-bound schedule (EP-7 S6) names its thread goal: its template's `purpose` is "goal", or it sets a
+ * `goal_id`. That is the rule capability-core applies to Run now, so the hub's chip and its missing button agree
+ * with the server's refusal.
+ */
+function goalBoundOf(schedule: CronSchedule): boolean {
+  const template = schedule.task_template
+  if (!template || typeof template !== 'object') return false
+  if ('purpose' in template && template.purpose === 'goal') return true
+  return 'goal_id' in template && template.goal_id !== null && template.goal_id !== ''
+}
+
+/** The thread a goal-bound schedule's template names, when it names one. The goal chip links there. */
+function goalThreadIdOf(schedule: CronSchedule): string | null {
+  const template = schedule.task_template
+  if (!template || typeof template !== 'object' || !('thread_id' in template)) return null
+  const threadId = template.thread_id
+  return typeof threadId === 'string' && threadId.trim() !== '' ? threadId.trim() : null
+}
+
+/** A plain click opens the thread in this page's chat; a modified click keeps the browser's own link behaviour. */
+function openThreadInPlace(event: MouseEvent, threadId: string): void {
+  if (event.button !== 0 || event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) return
+  event.preventDefault()
+  selectChatThread(threadId)
+}
+
+/**
  * A failure's words. A zero-retention refusal reads as the scheduled-runs refusal,
  * with its next step, the same copy the chat shows for it; anything else keeps the
  * caller's own sentence.
@@ -227,11 +259,6 @@ function ScheduleFires(props: { orgId: string; cronId: string; revision: number 
     () => [props.orgId, props.cronId, props.revision] as const,
     ([org, id]) => listScheduleFires(org, id),
   )
-  const openTranscript = (event: MouseEvent, threadId: string) => {
-    if (event.button !== 0 || event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) return
-    event.preventDefault()
-    selectChatThread(threadId)
-  }
   return (
     <div class="verevon-scheduled-runs-panel__fires">
       <Show
@@ -278,7 +305,7 @@ function ScheduleFires(props: { orgId: string; cronId: string; revision: number 
                     </Show>
                     <Show when={fire.thread_id}>
                       {(threadId) => (
-                        <a link href={chatThreadHref(threadId())} onClick={(event) => openTranscript(event, threadId())}>
+                        <a link href={chatThreadHref(threadId())} onClick={(event) => openThreadInPlace(event, threadId())}>
                           {i18n.tr('Åpne samtalen', 'Open transcript')}
                         </a>
                       )}
@@ -472,8 +499,13 @@ export function AutomationsList(props: AutomationsListProps) {
   }
 
   // Run now is the creator's, on the full hub only, and never on a lapsed approval: renewal is the way back.
+  // A goal-bound schedule runs only on its own cadence (EP-7 S6), so it never offers Run now.
   const canRunNow = (row: AutomationRow) =>
-    full() && runNow() && row.state !== 'expired' && row.schedule.creator_subject_id === myUserId()
+    full() &&
+    runNow() &&
+    row.state !== 'expired' &&
+    row.schedule.creator_subject_id === myUserId() &&
+    !goalBoundOf(row.schedule)
 
   const emptyNotice = () => {
     if (props.scope === 'org') {
@@ -575,6 +607,18 @@ export function AutomationsList(props: AutomationsListProps) {
                           <p class="verevon-automations-hub__name">{scheduleOf().name}</p>
                           <div class="verevon-automations-hub__meta">
                             <Badge tone={stateTone(stateOf())}>{stateLabel(stateOf(), i18n.tr)}</Badge>
+                            <Show when={goalBoundOf(scheduleOf())}>
+                              <Show
+                                when={goalThreadIdOf(scheduleOf())}
+                                fallback={<Badge tone="neutral">{i18n.tr('Mål', 'Goal')}</Badge>}
+                              >
+                                {(threadId) => (
+                                  <a link href={chatThreadHref(threadId())} onClick={(event) => openThreadInPlace(event, threadId())}>
+                                    <Badge tone="neutral">{i18n.tr('Mål', 'Goal')}</Badge>
+                                  </a>
+                                )}
+                              </Show>
+                            </Show>
                             <span>
                               {cronExprToLabel(scheduleOf().schedule_expr, i18n.locale() === 'no')} · {scheduleOf().timezone}
                             </span>

@@ -632,6 +632,9 @@ pub enum ChatEvent {
         status: &'static str,
         /// The closed reason beside the status; empty when none.
         status_reason: &'static str,
+        /// The completion judge's verdict on the goal's latest judged turn (`met`, `not_met`, `blocked`,
+        /// `unsure`); empty when none is known (EP-7 S3).
+        last_verdict: &'static str,
     },
     /// The workspace of the sandboxed computer a tool call used: where its files are kept, and whether they
     /// were (WS22-S6). `scope` is the workspace, `state` its outcome, and `cause` the closed reason when the
@@ -1273,6 +1276,7 @@ impl ChatEvent {
                 max_turns,
                 status,
                 status_reason,
+                last_verdict,
             } => json!({
                 "goal_id": goal_id,
                 "turn_no": turn_no,
@@ -1284,6 +1288,7 @@ impl ChatEvent {
                 "max_turns": max_turns,
                 "status": status,
                 "status_reason": status_reason,
+                "last_verdict": last_verdict,
                 "request_id": request_id,
             }),
             ChatEvent::Stopped { reason } => json!({ "reason": reason, "request_id": request_id }),
@@ -4168,6 +4173,7 @@ mod payload_contract {
                 max_turns: 10,
                 status: "active",
                 status_reason: "",
+                last_verdict: "",
             },
             ChatEvent::GoalProgress {
                 goal_id: s("goal_1"),
@@ -4180,6 +4186,7 @@ mod payload_contract {
                 max_turns: 10,
                 status: "budget_reached",
                 status_reason: "token_budget",
+                last_verdict: "not_met",
             },
             ChatEvent::SandboxState {
                 scope: "thread",

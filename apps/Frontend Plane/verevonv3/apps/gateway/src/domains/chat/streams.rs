@@ -108,6 +108,9 @@ async fn stream_chat(
     {
         return (status, body).into_response();
     }
+    // EP-6 S10: a client copy of `agent_roles` is removed on every turn, before the mention injector
+    // and whatever the switches say. The catalogue a Do turn carries is composed further down.
+    crate::domains::spaces::strip_client_agent_roles(&mut outbound_body);
     // Must run before `inject_personal_thread_context`, which is the call
     // that removes the Space reference fields this one still needs to read.
     // WS08-S4: also yields the wake the body asked for (`wake`), verified against the binding
@@ -123,6 +126,14 @@ async fn stream_chat(
         Ok(intent) => intent,
         Err((status, body)) => return (status, body).into_response(),
     };
+    // EP-6 S10: the Space's agent catalogue for a Do turn, composed from the bindings the caller may
+    // use. It reads `space_ref` as the Space layer below does, so it runs before the thread context too.
+    if let Err((status, body)) =
+        crate::domains::spaces::inject_space_agent_roles(&state, &user, &org_id, &mut outbound_body)
+            .await
+    {
+        return (status, body).into_response();
+    }
     // ADR-0003 — same ordering requirement as the mention persona above: this
     // only peeks at `space_ref` for the Space layer, so it must run before
     // `inject_personal_thread_context` consumes it.

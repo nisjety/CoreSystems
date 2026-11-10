@@ -1802,7 +1802,11 @@ describe('action registry', () => {
     // +1 after EP-10-S8 registered chat.accept_connector_suggestion, the connected-app suggestion card.
     // Union (W-sweep): HEAD (W3-E3.2-g1 browser.get/set_org_policy: +2) and
     // model-plane (P1 chat.open_computer_viewer: +1): 320 + 3 = 323.
-    expect(ids).toHaveLength(323)
+    // +1 after EP-6-S9 registered spaces.agent_binding.pin, the Space agent version pin.
+    // +1 after EP-6-S11 registered agents.admitted_actions.list (action-registry.ts, the same tree): 323 + 2 = 325.
+    // +1 after EP-6-S8 registered agents.preview, the builder's draft preview.
+    // +1 after W3-EP-7-S6-c registered chat.goal_away_start, the keep-working-while-away start.
+    expect(ids).toHaveLength(327)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

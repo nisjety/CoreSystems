@@ -101,6 +101,9 @@ async fn invoke_chat_json(
     if let Err(message) = super::history::enforce_support_thread_policy(&mut outbound_body) {
         return shared::invalid_chat_request(message);
     }
+    // EP-6 S10: a client copy of `agent_roles` is removed here too, on every turn. This route composes
+    // no catalogue of its own: only the streaming route carries one.
+    crate::domains::spaces::strip_client_agent_roles(&mut outbound_body);
     // ADR-0003 — must run before `inject_personal_thread_context`, which
     // consumes the Space reference fields this one still needs to peek at.
     if let Err((status, body)) = crate::domains::spaces::inject_authored_instructions(

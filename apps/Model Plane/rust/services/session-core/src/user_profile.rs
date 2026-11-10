@@ -7,14 +7,14 @@
 //! person's own memory list does not show them.
 //!
 //! The profile follows the memory decision exactly (D8): paused keeps it listed and editable but no
-//! rebuild runs; off and an org that disabled memory hide it; a reset deletes it; a ZDR or waived
-//! caller reads nothing and writes nothing. Deleting a memory drops its line from a built profile in
-//! the same transaction; an edited profile is kept as written and reports how many of its sources were
-//! deleted since.
+//! rebuild runs; off and an org that disabled memory hide it; a reset or a GDPR user erasure deletes
+//! it; a ZDR or waived caller reads nothing and writes nothing. Deleting a memory drops its line from a
+//! built profile in the same transaction; an edited profile is kept as written and reports how many of
+//! its sources were deleted since.
 //!
 //! Default off behind `SESSION_USER_PROFILE_ENABLED`. With it off the RPCs refuse and Dreaming never
-//! rebuilds, but erasure (reset, delete, organization purge) always reaches the table, so a profile
-//! written while the switch was on is never left behind by turning it off.
+//! rebuilds, but erasure (reset, delete, GDPR user erasure, organization purge) always reaches the
+//! table, so a profile written while the switch was on is never left behind by turning it off.
 
 use crate::dreaming::{collapse_whitespace, MemoryProvenance};
 use crate::memory_control::MemoryDecision;

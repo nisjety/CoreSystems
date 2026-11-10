@@ -2583,8 +2583,9 @@ pub(crate) async fn recall_space_memory(
     })
 }
 
-/// The thread a Space row was learned in, from its `thread:<id>` link.
-fn space_row_thread(source_links: &[String]) -> Option<String> {
+/// The thread a Space row was learned in, from its `thread:<id>` link. Shared with the agent list
+/// (EP-6 P3), whose rows carry the same link.
+pub(crate) fn space_row_thread(source_links: &[String]) -> Option<String> {
     source_links
         .iter()
         .find_map(|link| link.strip_prefix("thread:"))
@@ -2657,7 +2658,10 @@ pub(crate) async fn list_space_memory(
 
 /// Deletes one row of one Space's memory (EP-8 S7). The Space and org are in the `WHERE` clause,
 /// so a guessed id of another Space, of a person's memory or of another org deletes nothing.
-/// Space rows have no Letta copy (EP-8 S6), so the durable delete is the whole erasure.
+/// A Space's memory is its `space` rows and the `agent` rows of its bound agents (EP-6 P3, the
+/// `<space_id>:<agent>` scope ids): the same Space, so the same decision reaches both. Removing is
+/// never storing, so this is not behind the agent switch. Space rows have no Letta copy (EP-8 S6),
+/// so the durable delete is the whole erasure.
 pub(crate) async fn delete_space_memory(
     pool: &PgPool,
     org_id: &str,
@@ -2666,7 +2670,9 @@ pub(crate) async fn delete_space_memory(
 ) -> Result<bool, sqlx::Error> {
     let deleted: Option<String> = sqlx::query_scalar(
         "DELETE FROM agent_memory \
-         WHERE org_id = $1 AND scope = 'space' AND scope_id = $2 AND id = $3 \
+         WHERE org_id = $1 AND id = $3 \
+           AND ((scope = 'space' AND scope_id = $2) \
+             OR (scope = 'agent' AND split_part(scope_id, ':', 1) = $2)) \
          RETURNING id",
     )
     .bind(org_id)

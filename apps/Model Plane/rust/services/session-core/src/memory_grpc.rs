@@ -284,6 +284,84 @@ impl MemoryGrpc {
         Ok(Response::new(list_response(entries, None)))
     }
 
+    /// `ListMemory` with `space_id` and `agent_subject_id` (EP-6 P3, EP-8 S10): one named agent's notes
+    /// in the Space, under the same Control Space memory decision as the Space list. A ZDR or waived
+    /// caller is refused `named_agent` before any note is read, since a note is retained content; with
+    /// agent memory off no agent row is read and the answer is empty.
+    async fn list_agent_memory(
+        &self,
+        caller: &VerifiedIdentity,
+        req: &ListMemoryRequest,
+    ) -> Result<Response<ListMemoryResponse>, Status> {
+        let (org_id, user_id, space_id, agent_subject_id) = (
+            req.org_id.trim(),
+            req.user_id.trim(),
+            req.space_id.trim(),
+            req.agent_subject_id.trim(),
+        );
+        let verified = self
+            .authorize_space_memory(
+                caller,
+                org_id,
+                user_id,
+                space_id,
+                req.space_control_decision_ref.trim(),
+                req.space_control_decision_token.trim(),
+                crate::grpc::SPACE_MEMORY_OPERATION_LIST,
+                "",
+            )
+            .await?;
+        if !matches!(MemoryRetention::of(caller), MemoryRetention::Durable)
+            || verified.zero_data_retention
+        {
+            return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                crate::space_memory::AGENT_ZDR_FEATURE,
+            )
+            .grpc_status(tonic::Code::FailedPrecondition));
+        }
+        if !crate::space_memory::agent_enabled() {
+            return Ok(Response::new(list_response(Vec::new(), None)));
+        }
+        let Some(scope_id) = crate::space_memory::agent_scope_id(space_id, agent_subject_id) else {
+            return Err(Status::invalid_argument(
+                "space_id and agent_subject_id name no agent",
+            ));
+        };
+        let limit = if req.limit == 0 { 100 } else { req.limit };
+        let rows = crate::space_memory::list_agent_memory(
+            &self.pool,
+            org_id,
+            &scope_id,
+            &verified.recipient_audience_hash,
+            i64::from(limit),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        let entries = rows
+            .into_iter()
+            .map(|row| MemoryEntry {
+                memory_id: row.id,
+                thread_id: row.thread_id,
+                topic: row.topic,
+                content: row.content,
+                score: 0.0,
+                updated_at: Some(timestamp(row.updated_at)),
+                user_id: String::new(),
+                provenance: memory_provenance(row.provenance) as i32,
+                origin_space_ref: String::new(),
+                withheld_reason: if row.withheld {
+                    crate::dreaming::WITHHELD_AUDIENCE_CHANGED.to_owned()
+                } else {
+                    String::new()
+                },
+                scope: crate::space_memory::AGENT_SCOPE.to_owned(),
+                scope_id: scope_id.clone(),
+                source_label: row.source_label,
+            })
+            .collect();
+        Ok(Response::new(list_response(entries, None)))
+    }
+
     /// `DeleteMemory` with `space_id`: one row of the Space's memory, under a decision issued for that
     /// row. Allowed under every retention posture, as a personal delete is: removing is never storing.
     async fn delete_space_memory(
@@ -932,7 +1010,17 @@ impl MemoryService for MemoryGrpc {
             return Err(Status::invalid_argument("user_id is required"));
         }
         if !req.space_id.trim().is_empty() {
+            if !req.agent_subject_id.trim().is_empty() {
+                return self.list_agent_memory(&caller, &req).await;
+            }
             return self.list_space_memory(&caller, &req).await;
+        }
+        // A named agent's notes exist only within one Space: an agent without its Space is refused,
+        // never answered with the personal list.
+        if !req.agent_subject_id.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "agent_subject_id requires space_id",
+            ));
         }
         let org_id = req.org_id.trim();
         let user_id = req.user_id.trim();

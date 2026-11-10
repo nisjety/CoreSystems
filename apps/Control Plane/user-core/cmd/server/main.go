@@ -407,6 +407,10 @@ func main() {
 	// WS14-S1: shared-Space import decisions (room uploads). Strict literal true;
 	// off by default; a rollout control, never an authorization input.
 	httpServer.SetSharedImportDecisions(os.Getenv("CONTROL_SPACE_SHARED_IMPORT") == "true")
+	// EP-8 S7: Space memory management decisions (owner/admin list and delete of Space
+	// memory). Strict literal true; off by default; a rollout control, never an
+	// authorization input.
+	httpServer.SetSpaceMemoryDecisions(os.Getenv("CONTROL_SPACE_MEMORY_DECISIONS") == "true")
 	// WS03-S3: org-admin Space policy writes. Strict literal true; off by default.
 	httpServer.SetSpacePolicyAdminWrites(os.Getenv("SPACE_POLICY_ADMIN_WRITES") == "true")
 	// WS04-S10: durable membership events (ledger as outbox, PubAck publish,

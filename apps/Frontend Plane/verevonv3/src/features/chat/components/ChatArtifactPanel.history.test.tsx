@@ -62,6 +62,7 @@ const ON: ComposerCapabilities = {
   selectionEdit: false,
   artifactPromote: false,
   deepResearchKnowledge: false,
+  wideResearch: false,
 }
 
 beforeEach(() => {

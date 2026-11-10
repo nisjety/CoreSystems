@@ -58,12 +58,14 @@ import {
 import {
   consumePendingChatLaunchAsync,
 } from '@/features/chat/lib/pending-chat-launch'
+import { discardPendingRole, takePendingRole } from '@/features/chat/lib/pending-role'
+import { rememberMemory } from '@/shared/api/memory-client'
 import { pendingAssistantChatDraft, takeAssistantChatDraft } from '@/features/chat/lib/assistant-chat-draft'
 import {
   bindSupportChatThread,
   isSupportChatThread,
 } from '@/shared/chat/support-chat-thread'
-import { readThreadDeepLink } from '@/features/chat/lib/chat-thread-deep-link'
+import { chatThreadHref, readThreadDeepLink } from '@/features/chat/lib/chat-thread-deep-link'
 import { announceAttentionChanged } from '@/shared/api/attention-client'
 import { clearIntent, readIntent, type ConnectIntent } from '@/shared/integrations/connect-intent'
 import { getActionDescriptor } from '@/shared/actions/action-registry'
@@ -126,17 +128,19 @@ import {
   type ChatThreadMessagesPage,
 } from '@/shared/api/chat-client'
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
-import { resolveReplaySubscriptionConnectionId } from '@/shared/ai/model-selection'
+import { readAiModelSelection, resolveReplaySubscriptionConnectionId } from '@/shared/ai/model-selection'
 import { getSession } from '@/shared/session/session-store'
 import { blobToDataUrl } from '@/shared/lib/blob-data'
 import type {
   ChatQuestionAnswer,
   ChatResearchPlanEvent,
   ChatUserQuestionEvent,
+  DeckTemplate,
   ResearchPlanEdit,
+  WideResearchStart,
 } from '@/shared/api/chat-client'
 import { researchPlanTurnEnabled } from './ResearchPlanCard'
-import { useI18n } from '@/shared/i18n'
+import { translateApiError, useI18n } from '@/shared/i18n'
 import type { VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
   ApiError,
@@ -148,6 +152,13 @@ import {
   updateThreadGoal,
   type ThreadGoal,
 } from '@/shared/api/thread-goal-client'
+import {
+  createCronSchedule,
+  listCronSchedules,
+  listScheduleFires,
+  type CronSchedule,
+} from '@/shared/api/cron-client'
+import { DEFAULT_SCHEDULE_TIMEZONE, DELEGABLE_SCHEDULE_TOOLS } from '@/shared/api/schedule-from-chat'
 import {
   findArtifactById,
   foldSavedRevision,
@@ -233,7 +244,16 @@ import type {
 } from './chat-types'
 import { addLifecycleNotice } from './chat-types'
 import { applyUsageProgress, applyUsageTotal } from './RunCostMeter'
-import { applyGoalProgress } from './GoalBar'
+import {
+  GOAL_AWAY_MAX_RUNS,
+  applyGoalProgress,
+  goalAwayCron,
+  goalAwayRuns,
+  goalScheduleTemplate,
+  type GoalAwayForm,
+  type GoalAwayRun,
+  type GoalAwayView,
+} from './GoalBar'
 import type { GoalDraft } from './GoalDialog'
 import type { ChatEffectClass } from '@/shared/chat/effect-class'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
@@ -363,6 +383,17 @@ export function goalContinuationMode(input: {
     if (turn.planMode === true) return 'plan'
   }
   return 'plan'
+}
+
+/**
+ * The goal a schedule's task template names (EP-7 S6), or `null` when the schedule names none. The
+ * "Keep working while away" read groups the schedules of one goal by it.
+ */
+function goalIdOfSchedule(schedule: CronSchedule): string | null {
+  const template = schedule.task_template
+  if (!template || typeof template !== 'object' || Array.isArray(template)) return null
+  const goalId = (template as { goal_id?: unknown }).goal_id
+  return typeof goalId === 'string' && goalId.trim() !== '' ? goalId.trim() : null
 }
 
 export function useChatController() {
@@ -2680,6 +2711,47 @@ export function useChatController() {
   /** Dismisses the waiting research plan (`chat.research_plan_cancel`). Nothing is sent. */
   const cancelResearchPlan = () => setPendingResearchPlan(null)
 
+  /**
+   * The route a wide-research turn is sent on, or `undefined` when this session may not send one (EP-2 S8/S9).
+   * Refused while a turn streams (a send then queues into that run instead of starting a fan-out), on a zero-retention
+   * or temporary chat, and on the ChatGPT-subscription route. The model is the one the composer sends: its stored choice.
+   */
+  const wideResearchRoute = (): { model: string } | undefined => {
+    if (isStreaming() || temporaryChat() || isTemporaryThread(state.threadId)) return undefined
+    const selection = readAiModelSelection(getSession().activeOrg?.id?.trim() ?? '')
+    if (selection.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER) return undefined
+    return { model: selection.model }
+  }
+
+  /**
+   * Starts a wide-research run from the composer's "Bred forskning" entry (EP-2 S8, `chat.wide_research_start`): one
+   * agentic Do turn carrying the person's choice. The question is the composer's draft or, with no draft, the pasted
+   * items. The server clamps the count to the org's cap and names any item past it in the answer. Answers `false`
+   * when nothing was sent (the route is refused, or there is no question), so the card keeps the choice.
+   */
+  const startWideResearch = (choice: WideResearchStart): boolean => {
+    const route = wideResearchRoute()
+    if (!route) return false
+    const question = input().trim() || (choice.items ?? []).join('\n').trim()
+    if (!question) return false
+    void sendContent(question, route.model, { planModeOverride: true, wideResearch: choice })
+    return true
+  }
+
+  /**
+   * Runs one failed item of a wide-research batch again (EP-2 S9, `chat.wide_research_retry_item`): a one-item Do turn
+   * in the same conversation. The item is never sent from the browser: execution-core reads it back from the child run,
+   * and the new attempt joins the same batch. The turn names the retry, not the item, so the composer's draft stays.
+   */
+  const retryWideResearchItem = async (request: { childRunId: string; batchId: string }) => {
+    const route = wideResearchRoute()
+    if (!route) return
+    await sendContent(i18n.tr('Prøv igjen', 'Try again'), route.model, {
+      planModeOverride: true,
+      wideResearch: { retryOfChildRunId: request.childRunId, batchId: request.batchId },
+    })
+  }
+
   // The thread goal (EP-7 S1): the person's standing objective on the open thread, shown in the goal
   // tray above the composer. Read for a durable thread the person may set one on: never a temporary,
   // foreign, Support or project thread (the server refuses each anyway). The read is repeated whenever
@@ -2696,13 +2768,103 @@ export function useChatController() {
     && !isForeignOriginThread(threadId)
     && !isSupportChatThread(threadId)
     && !scopedThreadRefs.get(threadId ?? '')
+  // "Keep working while away" (EP-7 S6): the goal-bound schedules of the open goal and the runs they made. The server
+  // reports the feature on each goal read and write (`unattendedAvailable`); the schedules are read as the person's
+  // own (`creator=self`). Until the read of this goal has come back the start stays hidden, so no second schedule is
+  // started over one the page has not seen, and a read that fails hides it the same way.
+  type GoalAwayRead = { goalId: string; scheduled: boolean; runs: GoalAwayRun[] }
+  const [goalAwayRead, setGoalAwayRead] = createSignal<GoalAwayRead | null>(null)
+  let goalAwaySequence = 0
+  const goalAwayOrg = (): string => getSession().activeOrg?.id?.trim() ?? ''
+  /**
+   * Whether the goal bar offers "Keep working while away" for this goal: the server reports it on, the goal is
+   * active, and the thread is a durable personal one (never a temporary chat, a Space or a foreign thread).
+   */
+  const goalAwayOffered = (goal: ThreadGoal | null): goal is ThreadGoal =>
+    goal !== null
+    && goal.unattendedAvailable === true
+    && goal.status === 'active'
+    && goalThreadAllowed(state.threadId)
+    && !temporaryChat()
+    && goalAwayOrg() !== ''
+  const refreshGoalAway = async (goal: ThreadGoal): Promise<void> => {
+    const sequence = ++goalAwaySequence
+    const org = goalAwayOrg()
+    try {
+      const { schedules } = await listCronSchedules(org, { creator: 'self' })
+      const own = schedules.filter((schedule) => goalIdOfSchedule(schedule) === goal.id)
+      const fires = await Promise.all(own.map((schedule) => listScheduleFires(org, schedule.id, GOAL_AWAY_MAX_RUNS)))
+      if (sequence !== goalAwaySequence) return
+      const runs = goalAwayRuns(fires.flat().sort((left, right) => right.fired_at.localeCompare(left.fired_at)))
+      setGoalAwayRead({ goalId: goal.id, scheduled: own.some((schedule) => schedule.enabled), runs })
+    } catch {
+      if (sequence !== goalAwaySequence) return
+      setGoalAwayRead({ goalId: goal.id, scheduled: true, runs: [] })
+    }
+  }
+  /** Reads the goal's schedules when the server offers the feature on it; any other goal reads nothing. */
+  const readGoalAway = (goal: ThreadGoal | null): void => {
+    if (goalAwayOffered(goal)) void refreshGoalAway(goal)
+  }
+  const goalAwayErrorText = (error: unknown): string =>
+    translateApiError(error, i18n.tr, {
+      no: 'Kunne ikke starte. Prøv igjen.',
+      en: 'Could not start. Try again.',
+    })
+  /**
+   * Starts "Keep working while away" (EP-7 S6): one goal-bound schedule through the ordinary create, with the
+   * template the goal bar builds from the form. The server checks the switch, the judge, the zero-retention state
+   * and the template again; a refusal keeps the bar and says why. The goal's own turns are never scheduled.
+   */
+  const startGoalAway = (form: GoalAwayForm): void => {
+    const goal = threadGoal()
+    const org = goalAwayOrg()
+    const every = goalAwayCron(form.everyMinutes)
+    const template = goalAwayOffered(goal) ? goalScheduleTemplate(goal, form) : null
+    if (!goal || !org || !every || !template || goalPending()) return
+    setGoalPending(true)
+    setGoalError(null)
+    void createCronSchedule(org, {
+      name: goal.objective.slice(0, 120),
+      schedule_expr: every,
+      timezone: DEFAULT_SCHEDULE_TIMEZONE,
+      enabled: true,
+      task_template: template,
+    })
+      .then(() => refreshGoalAway(goal))
+      .catch((error: unknown) => setGoalError(goalAwayErrorText(error)))
+      .finally(() => setGoalPending(false))
+  }
+  /**
+   * "Keep working while away" on the goal bar (EP-7 S6). Until the goal's schedules are known, `scheduled` reads true,
+   * so no start is offered over a schedule the page has not seen.
+   */
+  const goalAway: GoalAwayView = {
+    available: () => goalAwayOffered(threadGoal()),
+    tools: () => DELEGABLE_SCHEDULE_TOOLS,
+    scheduled: () => {
+      const goal = threadGoal()
+      const read = goalAwayRead()
+      return !goal || !read || read.goalId !== goal.id || read.scheduled
+    },
+    runs: () => {
+      const goal = threadGoal()
+      const read = goalAwayRead()
+      return goal && read && read.goalId === goal.id ? read.runs : []
+    },
+    threadHref: (threadId) => chatThreadHref(threadId),
+    onStart: startGoalAway,
+  }
   let goalReadSequence = 0
   const refreshThreadGoal = async (threadId: string) => {
     const sequence = ++goalReadSequence
     try {
       const goal = await getThreadGoal(threadId)
       setGoalsServed(!threadGoalsUnavailable())
-      if (sequence === goalReadSequence && state.threadId === threadId) setThreadGoalState(goal)
+      if (sequence === goalReadSequence && state.threadId === threadId) {
+        setThreadGoalState(goal)
+        readGoalAway(goal)
+      }
     } catch {
       // A thread the server does not know yet (a first turn still in flight) or a failed read: no tray.
       if (sequence === goalReadSequence) setThreadGoalState(null)
@@ -2750,7 +2912,10 @@ export function useChatController() {
     setGoalError(null)
     try {
       const goal = await write()
-      if (state.threadId === threadId) setThreadGoalState(goal)
+      if (state.threadId === threadId) {
+        setThreadGoalState(goal)
+        readGoalAway(goal)
+      }
       return true
     } catch (error) {
       setGoalError(goalErrorText(error))
@@ -2805,6 +2970,28 @@ export function useChatController() {
       return Promise.resolve(true)
     }
     return runGoalWrite(threadId, () => updateThreadGoal(current, { status: 'cleared' }))
+  }
+
+  /**
+   * Marks the open goal done (`chat.goal_mark_done`): the person's own call over the judge's verdict, under
+   * the compare-and-set on the revision the bar showed (EP-7 S3). The server closes the goal, so no turn is
+   * told it and the goal pump stops.
+   */
+  const markGoalDone = (): Promise<boolean> => {
+    const threadId = state.threadId
+    const current = openGoal()
+    if (!goalThreadAllowed(threadId) || !current) return Promise.resolve(false)
+    return runGoalWrite(threadId, () => updateThreadGoal(current, { status: 'met' }))
+  }
+
+  /** Reopens a met or blocked goal as active (`chat.goal_reopen`), so later turns are told it again (EP-7 S3). */
+  const reopenGoal = (): Promise<boolean> => {
+    const threadId = state.threadId
+    const current = threadGoal()
+    if (!goalThreadAllowed(threadId) || !current || (current.status !== 'met' && current.status !== 'blocked')) {
+      return Promise.resolve(false)
+    }
+    return runGoalWrite(threadId, () => updateThreadGoal(current, { status: 'active' }))
   }
 
   /**
@@ -3484,6 +3671,9 @@ export function useChatController() {
       else setExecuteArmed(false)
     }
 
+    // EP-8-S8 (D3-356): a role stated on the empty chat waits for the first send of a personal chat. A zero-retention
+    // or temporary send never keeps it, so it is dropped here, before anything is sent.
+    if (options.zdr || isTemporaryThread(state.threadId)) discardPendingRole()
     let activeThreadId = state.threadId ?? createId('thread')
     const provisionalThreadId = activeThreadId
     // Temporary chat locks in at the first send of a thread: once ANY
@@ -3613,11 +3803,13 @@ export function useChatController() {
         ...buildTaskSteps(content, tools, appendUser ? 'submit' : 'regenerate', assistantId, options.actions ?? []),
       ]
     })
-    // The approve-then-execute turn (WS14 S2) is never typed in the composer, so the person's draft stays.
+    // The approve-then-execute turn (WS14 S2) is never typed in the composer, so the person's draft stays; so is
+    // a wide-research retry (EP-2 S9), which names its item by id and never reads the composer, and a deck template
+    // pick from the deck view (EP-5 S7, `keepDraft`).
     // Any other turn clears the composer, but the text stays stored until the send settles, so a failed send
     // can give it back (see the draft hook).
     let settleDraft: ((outcome: ChatDraftOutcome) => void) | undefined
-    if (!options.approvedPlanId) {
+    if (!options.approvedPlanId && !options.wideResearch?.retryOfChildRunId && !options.keepDraft) {
       settleDraft = chatDraft.beginSend()
       setInput('')
     }
@@ -3710,6 +3902,11 @@ export function useChatController() {
       if (!isTemporaryThread(serverThreadId)) setActiveChatThreadId(serverThreadId)
       writeThreadSnapshot(serverThreadId, state.turns, { preview: content, updatedAt: submittedAt })
       if (runId) updateLocalRunHint(serverThreadId, 'running', runId)
+      // EP-8-S8 (D3-356): the first send of a personal chat saves a role stated on the empty chat, once. A Space
+      // chat keeps the role for a later personal chat; a zero-retention or temporary chat never keeps it.
+      if (isNewThread && !options.zdr && !requestedSpaceRef && !isTemporaryThread(serverThreadId)) {
+        flushPendingRole(serverThreadId)
+      }
     }
 
     // A Stop pressed before `connected` has no request id to cancel, and
@@ -3797,7 +3994,12 @@ export function useChatController() {
           sourceScope: options.sourceScope ?? sourceScope(),
           retrievalScope: options.retrievalScope ?? retrievalScope(),
           connectorScope: options.connectorScope,
+          // Wide research (EP-2 S8/S9): set only by `startWideResearch` and `retryWideResearchItem`; the wire builder
+          // sends it on an agentic turn that keeps data and nothing else.
+          wideResearch: options.wideResearch,
           contextRefs: options.contextRefs,
+          // The deck template (EP-5 S7): a skill id the picker chose; the wire builder drops it on a zero-retention turn.
+          deckTemplate: options.deckTemplate,
           agentMode: options.agentMode,
           deepResearch: options.deepResearch,
           researchPhase: options.researchPhase,
@@ -4168,7 +4370,9 @@ export function useChatController() {
     }
   }
 
-  const handleComposerSubmit = async (payload: DashboardComposerSubmitPayload) => {
+  // `deckTemplate` is the skill id of the deck template this send applies (EP-5 S7). The page takes the pick, so only a
+  // send the page makes carries one; a send without it is unchanged.
+  const handleComposerSubmit = async (payload: DashboardComposerSubmitPayload, deckTemplate?: string) => {
     if (isForeignOriginThread(state.threadId)) return
     if (!hasMessages()) triggerLaunchMotion()
     const attachments = await toStreamAttachments(payload.attachments)
@@ -4199,6 +4403,7 @@ export function useChatController() {
       retrievalScope: payload.retrievalScope,
       connectorScope: payload.connectorScope,
       contextRefs: payload.contextRefs,
+      deckTemplate,
       agentMode: payload.agentMode,
       deepResearch: payload.tools.includes('research'),
       // EP-2 S5: with the plan turn on, a composer deep research first asks for the editable plan.
@@ -4222,6 +4427,18 @@ export function useChatController() {
       // the awaits above. It is only a request: `sendContent` decides.
       executeGranted: executeArmed(),
     })
+  }
+
+  /**
+   * A deck template pick from the deck view (EP-5 S7, "Bytt mal"): a turn of its own that names the template and carries its
+   * skill id. `null` is Standard, the neutral theme, and carries none. The turn is not typed in the composer, so the draft
+   * stays (`keepDraft`). The page checks the project audience first; the gateway checks the template again.
+   */
+  const applyDeckTemplate = (template: DeckTemplate | null) => {
+    const text = template
+      ? i18n.tr(`Bruk malen ${template.name}`, `Use the template ${template.name}`)
+      : i18n.tr('Bruk standardmalen', 'Use the standard template')
+    return sendContent(text, undefined, { deckTemplate: template?.skillId, keepDraft: true })
   }
 
   /** Materialize composer blob URLs before DashboardComposer revokes them. */
@@ -4830,6 +5047,22 @@ export function useChatController() {
   onCleanup(() => {
     if (feedbackNoticeTimer !== undefined) window.clearTimeout(feedbackNoticeTimer)
   })
+
+  /**
+   * EP-8-S8 (D3-356): saves the role the person stated on the empty chat as a memory on the thread that the first send
+   * just created. The role is taken once, so a later call finds nothing. A save that fails is said in the feedback notice,
+   * with the same words the card uses; the role is not kept for another try.
+   */
+  const flushPendingRole = (threadId: string) => {
+    const role = takePendingRole()
+    if (!role) return
+    void rememberMemory(threadId, i18n.tr(`Rolle: ${role}`, `Role: ${role}`)).catch(() => {
+      showFeedbackNotice(i18n.tr(
+        'Svarene dine er lagret. Rollen din ble ikke lagret; du kan legge den inn igjen senere.',
+        'Your answers are saved. Your role was not saved; you can add it again later.',
+      ))
+    })
+  }
 
   /**
    * Rate one turn. The failure path is the point of this function: the POST used
@@ -5582,6 +5815,13 @@ export function useChatController() {
     pendingResearchPlan: () => pendingResearchPlan()?.plan,
     startResearchPlan,
     cancelResearchPlan,
+    // EP-2 S8/S9: the composer's "Bred forskning" entry and a wide-research card's retry. `wideResearchRoute` is
+    // undefined while the entry must not be offered (a turn streams, a temporary chat, the subscription route).
+    wideResearchRoute,
+    startWideResearch,
+    retryWideResearchItem,
+    // EP-5 S7: the deck view's template pick (`applyDeckTemplate`).
+    applyDeckTemplate,
     // EP-7 S1: the thread goal tray and its actions. `goalEntryAvailable` offers "Set a goal" only on a
     // thread that may hold one, while the server serves goals.
     threadGoal,
@@ -5591,9 +5831,14 @@ export function useChatController() {
     saveGoal,
     setGoalPaused,
     clearGoal,
+    // EP-7 S3: Mark done and Reopen, the person's own override of the judge.
+    markGoalDone,
+    reopenGoal,
     continueGoal,
     // EP-7 S4: "Keep going" on the goal bar, its countdown and Stop.
     goalAutoContinue,
+    // EP-7 S6: "Keep working while away" on the goal bar: the start, the goal's schedules and their runs.
+    goalAway,
     rejectTurnPlan,
     planApprovalPending,
     planApprovalError,

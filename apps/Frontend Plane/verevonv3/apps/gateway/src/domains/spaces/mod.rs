@@ -1040,6 +1040,9 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(personal_space_deletion_receipt),
         )
         .merge(module_routes())
+        // EP-6 S9: the agent version pin. Registered only behind `AGENT_VERSION_PINNING` (read once in
+        // `build_state`), so with the switch off the path is not in the route table at all.
+        .merge(agent_policy::routes(state.space_features.agent_version_pinning))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
@@ -4788,6 +4791,172 @@ fn agent_version_unavailable() -> (StatusCode, Json<Value>) {
             "This agent's version could not be read right now.",
         )),
     )
+}
+
+/// The agent role catalogue a Do turn carries to the model gateway (EP-6 S10). A client copy is
+/// removed on every turn, whatever `AGENT_VERSION_PINNING` says, so the only catalogue that can reach
+/// the gateway is the one [`inject_space_agent_roles`] composes from the Space's own bindings.
+const AGENT_ROLES_FIELDS: [&str; 2] = ["agent_roles", "agentRoles"];
+
+/// The most agents of one Space that become roles of one Do turn (EP-6 S10). The model gateway keeps
+/// at most this many as well.
+const MAX_SPACE_AGENT_ROLES: usize = 8;
+
+/// A role's instructions are cut to this many bytes, on a character boundary (EP-6 S10). The model
+/// gateway applies the same cut.
+const MAX_SPACE_AGENT_ROLE_INSTRUCTIONS_BYTES: usize = 4_096;
+
+/// Removes every client-supplied `agent_roles` from a chat turn, on every turn and whatever the
+/// switches say. Each chat path calls it before its injectors run, so no later step sees a forged
+/// catalogue.
+pub(crate) fn strip_client_agent_roles(body: &mut Value) {
+    if let Some(object) = body.as_object_mut() {
+        for field in AGENT_ROLES_FIELDS {
+            object.remove(field);
+        }
+    }
+}
+
+/// EP-6 S10: the agent role catalogue of a Do turn in a Space, composed by the BFF from the Space's
+/// bindings and never taken from the browser. It is composed only with `AGENT_VERSION_PINNING` on,
+/// for a Do turn (the agentic run or an execute grant) that names a Space the caller may use, and
+/// never for a zero-retention turn. Each active agent Control authorizes in that Space, up to
+/// `MAX_SPACE_AGENT_ROLES`, contributes the version it runs now: its pin, else the published one. An
+/// agent whose version cannot be read is left out. A Space the caller cannot read gets no catalogue,
+/// and Control refuses the turn itself further down. The catalogue grants nothing: the model gateway
+/// and execution-core only narrow a delegated child's tools.
+///
+/// Must run before `inject_personal_thread_context_for_wake`, which consumes the `space_ref` this
+/// reads, and after the mention injector, so a mention turn that lost its `agentic` run to its binding
+/// policy is not a Do turn here.
+pub(crate) async fn inject_space_agent_roles(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    body: &mut Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let object = body.as_object_mut().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_chat_request",
+                "Chat request must be an object.",
+            )),
+        )
+    })?;
+    if !state.space_features.agent_version_pinning || !is_do_turn(object) {
+        return Ok(());
+    }
+    let Some(space_ref) = peek_space_ref(object) else {
+        return Ok(());
+    };
+    let org_id = org_id.trim();
+    // The body's own flag, then the organisation's posture: `apply_org_zdr_posture` folds the
+    // organisation's in only later, and its lookup fails closed, so an outage here reads as ZDR too.
+    let zdr = object.get("zdr").and_then(Value::as_bool).unwrap_or(false);
+    if org_id.is_empty() || zdr || crate::zdr::org_zdr_enabled(state, user).await {
+        return Ok(());
+    }
+    // The same roster the mention path resolves against: Control's members, joined with the binding.
+    let Ok(agents) = compose_space_agents(state, user, org_id, &space_ref).await else {
+        return Ok(());
+    };
+    let bound = agents
+        .iter()
+        .filter(|agent| agent.get("status").and_then(Value::as_str) == Some("active"))
+        // A binding that blocks invocation in this Space is no role either.
+        .filter(|agent| agent.get("approval_mode").and_then(Value::as_str) != Some("blocked"))
+        .filter_map(|agent| {
+            let agent_ref = agent.get("agent_ref").and_then(Value::as_str)?;
+            (!agent_ref.is_empty()).then_some((agent, agent_ref))
+        })
+        .take(MAX_SPACE_AGENT_ROLES);
+    let mut roles = Vec::new();
+    for (agent, agent_ref) in bound {
+        let pinned_version = agent.get("pinned_version").and_then(Value::as_u64);
+        let Some(persona) =
+            fetch_agent_version_persona(state, user, org_id, agent_ref, pinned_version).await
+        else {
+            continue;
+        };
+        if let Some(role) = space_agent_role(agent, agent_ref, &persona) {
+            roles.push(role);
+        }
+    }
+    if !roles.is_empty() {
+        object.insert("agent_roles".to_owned(), Value::Array(roles));
+    }
+    Ok(())
+}
+
+/// Whether a turn is a Do turn (EP-6 S10): the agentic run, or an execute grant. Read after the mention
+/// injector, which strips both from a mention turn that its binding does not let run unattended.
+fn is_do_turn(object: &Map<String, Value>) -> bool {
+    let agentic = object
+        .get("features")
+        .and_then(Value::as_array)
+        .is_some_and(|features| {
+            features
+                .iter()
+                .any(|feature| feature.as_str() == Some("agentic"))
+        });
+    let granted = |field: &str| object.get(field).and_then(Value::as_bool) == Some(true);
+    agentic || granted("execute_granted") || granted("executeGranted")
+}
+
+/// One Do-turn role (EP-6 S10) in the shape the model gateway reads (`AgentRoleInput`): the version a
+/// Space agent runs, with its digest, instructions, tool allowlist and autonomy cap. `None` when that
+/// version has no number, no digest or no closed autonomy cap, since a role that cannot say what it
+/// runs is left out.
+fn space_agent_role(agent: &Value, agent_ref: &str, persona: &Value) -> Option<Value> {
+    let version = persona
+        .get("version")
+        .and_then(Value::as_u64)
+        .filter(|version| (1..=u64::from(u32::MAX)).contains(version))?;
+    let digest = persona
+        .get("digest")
+        .and_then(Value::as_str)
+        .filter(|digest| !digest.is_empty())?;
+    let autonomy_cap = persona
+        .get("autonomyCap")
+        .and_then(Value::as_str)
+        .filter(|cap| matches!(*cap, "read_only" | "ask_first" | "auto"))?;
+    let instructions = persona
+        .get("systemPrompt")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let tool_capability_ids: Vec<&str> = persona
+        .get("toolCapabilityIds")
+        .and_then(Value::as_array)
+        .map(|ids| ids.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let name = agent
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| agent.get("subject_id").and_then(Value::as_str))
+        .unwrap_or(agent_ref);
+    Some(json!({
+        "agent_ref": agent_ref,
+        "version": version,
+        "digest": digest,
+        "name": name,
+        "instructions": within_bytes(instructions, MAX_SPACE_AGENT_ROLE_INSTRUCTIONS_BYTES),
+        "tool_capability_ids": tool_capability_ids,
+        "autonomy_cap": autonomy_cap,
+    }))
+}
+
+/// The longest prefix of `text` within `max_bytes`, cut on a character boundary.
+fn within_bytes(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// Read (never consume) whichever spelling of the Space reference the request

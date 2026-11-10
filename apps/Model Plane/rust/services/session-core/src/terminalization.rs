@@ -39,6 +39,8 @@ const MAX_RUN_ID_BYTES: usize = 128;
 const MAX_START_KEY_BYTES: usize = 128;
 const MAX_GOAL_BYTES: usize = 64 * 1024;
 const MAX_AGENT_ID_BYTES: usize = 256;
+/// The longest `agent_ref` a version pin carries (EP-6 S9).
+const MAX_AGENT_REF_BYTES: usize = 128;
 const MAX_MODE_BYTES: usize = 64;
 const TERMINALIZE_SCOPE: &str = "session:terminalize";
 const HEARTBEAT_SCOPE: &str = "session:heartbeat";
@@ -70,6 +72,8 @@ pub(crate) struct ManagedStartPersistence {
     pub run_started_payload: serde_json::Value,
     pub create_metadata_thread: bool,
     pub create_plan: bool,
+    /// The agent version recorded on `runs.metadata.agent` (EP-6 S9). Never set for a ZDR run.
+    pub agent_version_pin: Option<pb::AgentVersionPin>,
 }
 
 #[must_use]
@@ -87,6 +91,7 @@ pub(crate) fn managed_start_persistence(
             run_started_payload: serde_json::json!({ "zdr": true }),
             create_metadata_thread: true,
             create_plan: false,
+            agent_version_pin: None,
         };
     }
 
@@ -104,6 +109,7 @@ pub(crate) fn managed_start_persistence(
         }),
         create_metadata_thread: false,
         create_plan: true,
+        agent_version_pin: request.agent_version_pin.clone(),
     }
 }
 
@@ -388,6 +394,28 @@ fn validate_start_key(value: &str) -> Result<(), Status> {
     Ok(())
 }
 
+/// A version pin is ids and a digest only (EP-6 S9): an `agent_ref` of `[A-Za-z0-9_.:-]` at most
+/// 128 bytes, a published version from 1, and a `sha256:` digest of 64 lowercase hex characters.
+#[allow(clippy::result_large_err)]
+fn validate_agent_version_pin(pin: &pb::AgentVersionPin) -> Result<(), Status> {
+    let agent_ref_ok = !pin.agent_ref.is_empty()
+        && pin.agent_ref.len() <= MAX_AGENT_REF_BYTES
+        && pin
+            .agent_ref
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'));
+    let digest_ok = pin.digest.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    });
+    if !agent_ref_ok || pin.version == 0 || !digest_ok {
+        return Err(Status::invalid_argument("invalid_agent_version_pin"));
+    }
+    Ok(())
+}
+
 #[allow(clippy::result_large_err)]
 fn validate_managed_start_request(
     request: &pb::StartManagedRunRequest,
@@ -402,6 +430,10 @@ fn validate_managed_start_request(
         return Err(Status::invalid_argument(
             "unsupported managed terminal source",
         ));
+    }
+    // EP-6 S9: a malformed pin is refused for every caller. A ZDR run never records it.
+    if let Some(pin) = request.agent_version_pin.as_ref() {
+        validate_agent_version_pin(pin)?;
     }
     if zdr {
         if !request.thread_id.is_empty() {
@@ -598,12 +630,27 @@ async fn insert_managed_run_started(
         ),
     )
     .await?;
-    let origin_metadata = match inherited_origin {
+    let mut origin_metadata = match inherited_origin {
         Some(origin) => {
             serde_json::json!({ mp_contracts::run_origin::ORIGIN_METADATA_KEY: origin.as_str() })
         }
         None => serde_json::json!({}),
     };
+    // EP-6 S9: the agent version the run runs under, ids and a digest only, merged into the run's
+    // metadata by this same insert (no migration). `persisted` carries it for a non-ZDR run only.
+    if let (Some(pin), Some(map)) = (
+        persisted.agent_version_pin.as_ref(),
+        origin_metadata.as_object_mut(),
+    ) {
+        map.insert(
+            "agent".to_owned(),
+            serde_json::json!({
+                "ref": &pin.agent_ref,
+                "version": pin.version,
+                "digest": &pin.digest,
+            }),
+        );
+    }
     // The thread was created only after verifying its signed Space decision.
     // Copy that durable, non-secret context here instead of trusting any
     // managed-run caller to restate it. The exact tenant/owner predicate is a
@@ -3003,6 +3050,7 @@ mod tests {
             user_id: "user-1".to_owned(),
             start_key: "opaque-start-1".to_owned(),
             terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+            agent_version_pin: None,
         };
 
         let persisted = super::managed_start_persistence(&request, true);
@@ -3245,6 +3293,7 @@ mod resume_question_db_tests {
                 user_id: user.clone(),
                 start_key: format!("rq-{tag}-{sfx}"),
                 terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+                agent_version_pin: None,
             },
             RunRetention::persistent(),
         )
@@ -3474,6 +3523,7 @@ mod spent_click_db_tests {
                 user_id: user.clone(),
                 start_key: format!("sc-{tag}-{sfx}"),
                 terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+                agent_version_pin: None,
             },
             RunRetention::persistent(),
         )
@@ -3719,6 +3769,7 @@ mod park_recovery_db_tests {
                 user_id: user.clone(),
                 start_key: format!("pr-{tag}-{sfx}"),
                 terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+                agent_version_pin: None,
             },
             RunRetention::persistent(),
         )
@@ -4097,6 +4148,7 @@ mod park_recovery_db_tests {
                 user_id: user.clone(),
                 start_key: format!("pk-{tag}-{sfx}"),
                 terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+                agent_version_pin: None,
             },
             RunRetention::persistent(),
         )
@@ -4482,6 +4534,7 @@ mod park_recovery_db_tests {
                 user_id: user,
                 start_key: format!("cp-{tag}-{sfx}"),
                 terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+                agent_version_pin: None,
             },
             retention,
         )

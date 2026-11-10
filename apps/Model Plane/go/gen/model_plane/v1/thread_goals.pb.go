@@ -44,8 +44,9 @@ type ThreadGoal struct {
 	// The most continuation turns the goal may take, 1 to 50 (default 10).
 	MaxTurns uint32 `protobuf:"varint,9,opt,name=max_turns,json=maxTurns,proto3" json:"max_turns,omitempty"`
 	// One closed token: "active", "paused", "met", "budget_reached",
-	// "turns_reached", "blocked" or "cleared". This service writes only
-	// "active", "paused" and "cleared"; the other states come from EP-7 S2/S3.
+	// "turns_reached", "blocked" or "cleared". The owner's update writes "active",
+	// "paused", "cleared" and "met"; the judge (RecordGoalVerdict, EP-7 S3) writes "met"
+	// and "blocked"; the budget ledger (EP-7 S2) writes the two budget states.
 	Status string `protobuf:"bytes,10,opt,name=status,proto3" json:"status,omitempty"`
 	// A closed token saying why the status was last written; empty when none.
 	StatusReason string `protobuf:"bytes,11,opt,name=status_reason,json=statusReason,proto3" json:"status_reason,omitempty"`
@@ -61,7 +62,8 @@ type ThreadGoal struct {
 	CostUsedUsdMicros uint64 `protobuf:"varint,16,opt,name=cost_used_usd_micros,json=costUsedUsdMicros,proto3" json:"cost_used_usd_micros,omitempty"`
 	// Continuation turns settled against `max_turns` (EP-7 S2).
 	TurnsUsed uint32 `protobuf:"varint,17,opt,name=turns_used,json=turnsUsed,proto3" json:"turns_used,omitempty"`
-	// The completion judge's last verdict token (EP-7 S3); empty until the judge exists.
+	// The completion judge's verdict on the goal's latest judged turn (EP-7 S3); empty
+	// until a turn is judged.
 	LastVerdict   string `protobuf:"bytes,18,opt,name=last_verdict,json=lastVerdict,proto3" json:"last_verdict,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -410,8 +412,9 @@ type UpdateThreadGoalRequest struct {
 	CostBudgetUsdMicros uint64 `protobuf:"varint,7,opt,name=cost_budget_usd_micros,json=costBudgetUsdMicros,proto3" json:"cost_budget_usd_micros,omitempty"`
 	// The new turn cap, 1 to 50 (path "max_turns").
 	MaxTurns uint32 `protobuf:"varint,8,opt,name=max_turns,json=maxTurns,proto3" json:"max_turns,omitempty"`
-	// The new status (path "status"): only "active", "paused" or "cleared".
-	// A closed goal ("met", a stop state or "cleared") cannot be changed.
+	// The new status (path "status"): "active", "paused", "cleared" or "met" (the owner's
+	// own mark). A met or blocked goal may be reopened to "active"; no other closed goal
+	// can be changed.
 	Status string `protobuf:"bytes,9,opt,name=status,proto3" json:"status,omitempty"`
 	// The fields this update writes, by the names above. Empty is refused.
 	UpdatePaths   []string `protobuf:"bytes,10,rep,name=update_paths,json=updatePaths,proto3" json:"update_paths,omitempty"`
@@ -980,6 +983,289 @@ func (x *SettleGoalTurnRequest) GetUsageSource() string {
 	return ""
 }
 
+// EP-7 S3. Record the completion judge's verdict on a settled goal turn. Only the judge's own
+// service principal, model-gateway, may record one; a person or any other caller is refused.
+// `met` closes an open goal as met, `blocked` stops it as "judge_blocked", and `not_met` and
+// `unsure` leave it open. Idempotent per turn: a turn already judged answers the goal as it
+// stands. The judge's tokens count toward the turn and the goal.
+type RecordGoalVerdictRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The goal the judged turn belongs to.
+	GoalId string `protobuf:"bytes,1,opt,name=goal_id,json=goalId,proto3" json:"goal_id,omitempty"`
+	// The org the goal belongs to; must match the caller's org.
+	OrgId string `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The settled turn the verdict judges; a turn not yet settled is refused.
+	TurnNo uint32 `protobuf:"varint,3,opt,name=turn_no,json=turnNo,proto3" json:"turn_no,omitempty"`
+	// One closed token: "met", "not_met", "blocked" or "unsure".
+	Verdict string `protobuf:"bytes,4,opt,name=verdict,proto3" json:"verdict,omitempty"`
+	// At most 3 reasons of at most 200 characters each; blank lines are dropped. Model
+	// text, erased with the goal; not kept on a thread that holds a waived run.
+	Reasons []string `protobuf:"bytes,5,rep,name=reasons,proto3" json:"reasons,omitempty"`
+	// The ids of the evidence the verdict cites: at most 32 of at most 200 characters
+	// each; blank ids are dropped. Not kept on a thread that holds a waived run.
+	EvidenceIds []string `protobuf:"bytes,6,rep,name=evidence_ids,json=evidenceIds,proto3" json:"evidence_ids,omitempty"`
+	// The model that gave the verdict, at most 128 characters; empty when none is named.
+	JudgeModel string `protobuf:"bytes,7,opt,name=judge_model,json=judgeModel,proto3" json:"judge_model,omitempty"`
+	// Metered tokens the judge spent on this turn. Added to the turn's judge_tokens and to
+	// the goal's tokens_used here; do not count them again in SettleGoalTurn.judge_tokens.
+	JudgeTokens   uint64 `protobuf:"varint,8,opt,name=judge_tokens,json=judgeTokens,proto3" json:"judge_tokens,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RecordGoalVerdictRequest) Reset() {
+	*x = RecordGoalVerdictRequest{}
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RecordGoalVerdictRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RecordGoalVerdictRequest) ProtoMessage() {}
+
+func (x *RecordGoalVerdictRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RecordGoalVerdictRequest.ProtoReflect.Descriptor instead.
+func (*RecordGoalVerdictRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *RecordGoalVerdictRequest) GetGoalId() string {
+	if x != nil {
+		return x.GoalId
+	}
+	return ""
+}
+
+func (x *RecordGoalVerdictRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *RecordGoalVerdictRequest) GetTurnNo() uint32 {
+	if x != nil {
+		return x.TurnNo
+	}
+	return 0
+}
+
+func (x *RecordGoalVerdictRequest) GetVerdict() string {
+	if x != nil {
+		return x.Verdict
+	}
+	return ""
+}
+
+func (x *RecordGoalVerdictRequest) GetReasons() []string {
+	if x != nil {
+		return x.Reasons
+	}
+	return nil
+}
+
+func (x *RecordGoalVerdictRequest) GetEvidenceIds() []string {
+	if x != nil {
+		return x.EvidenceIds
+	}
+	return nil
+}
+
+func (x *RecordGoalVerdictRequest) GetJudgeModel() string {
+	if x != nil {
+		return x.JudgeModel
+	}
+	return ""
+}
+
+func (x *RecordGoalVerdictRequest) GetJudgeTokens() uint64 {
+	if x != nil {
+		return x.JudgeTokens
+	}
+	return 0
+}
+
+// EP-7 S6. Read the unattended turn one scheduled fire of a goal-bound schedule ledgered on its goal,
+// for the completion judge. Only model-gateway may read it, for a goal of its own org. The fire is
+// named by its run, schedule and fire key, so the judge is pointed at that fire and no other.
+type GetGoalTurnForJudgeRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The goal the fire belongs to.
+	GoalId string `protobuf:"bytes,1,opt,name=goal_id,json=goalId,proto3" json:"goal_id,omitempty"`
+	// The org the goal belongs to; must match the caller's org.
+	OrgId string `protobuf:"bytes,2,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The scheduled run the fire started.
+	RunId string `protobuf:"bytes,3,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	// The schedule the fire belongs to; it must be bound to the goal.
+	ScheduleId string `protobuf:"bytes,4,opt,name=schedule_id,json=scheduleId,proto3" json:"schedule_id,omitempty"`
+	// The fire's key within its schedule.
+	FireKey       string `protobuf:"bytes,5,opt,name=fire_key,json=fireKey,proto3" json:"fire_key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetGoalTurnForJudgeRequest) Reset() {
+	*x = GetGoalTurnForJudgeRequest{}
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetGoalTurnForJudgeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetGoalTurnForJudgeRequest) ProtoMessage() {}
+
+func (x *GetGoalTurnForJudgeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetGoalTurnForJudgeRequest.ProtoReflect.Descriptor instead.
+func (*GetGoalTurnForJudgeRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *GetGoalTurnForJudgeRequest) GetGoalId() string {
+	if x != nil {
+		return x.GoalId
+	}
+	return ""
+}
+
+func (x *GetGoalTurnForJudgeRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *GetGoalTurnForJudgeRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *GetGoalTurnForJudgeRequest) GetScheduleId() string {
+	if x != nil {
+		return x.ScheduleId
+	}
+	return ""
+}
+
+func (x *GetGoalTurnForJudgeRequest) GetFireKey() string {
+	if x != nil {
+		return x.FireKey
+	}
+	return ""
+}
+
+// EP-7 S6. The goal and the unattended turn a fire ledgered, or none.
+type GetGoalTurnForJudgeResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The goal; absent when `found` is false.
+	Goal *ThreadGoal `protobuf:"bytes,1,opt,name=goal,proto3" json:"goal,omitempty"`
+	// The turn's number within the goal.
+	TurnNo uint32 `protobuf:"varint,2,opt,name=turn_no,json=turnNo,proto3" json:"turn_no,omitempty"`
+	// The turn's closed outcome: "completed", "failed" or "unknown".
+	Outcome string `protobuf:"bytes,3,opt,name=outcome,proto3" json:"outcome,omitempty"`
+	// The tail of the scheduled answer, at most 4,000 characters. Empty unless the turn completed.
+	// Model text, handed to the judge and not stored on the goal.
+	Answer string `protobuf:"bytes,4,opt,name=answer,proto3" json:"answer,omitempty"`
+	// Whether the goal has an unattended turn for the fire.
+	Found         bool `protobuf:"varint,5,opt,name=found,proto3" json:"found,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetGoalTurnForJudgeResponse) Reset() {
+	*x = GetGoalTurnForJudgeResponse{}
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetGoalTurnForJudgeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetGoalTurnForJudgeResponse) ProtoMessage() {}
+
+func (x *GetGoalTurnForJudgeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetGoalTurnForJudgeResponse.ProtoReflect.Descriptor instead.
+func (*GetGoalTurnForJudgeResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *GetGoalTurnForJudgeResponse) GetGoal() *ThreadGoal {
+	if x != nil {
+		return x.Goal
+	}
+	return nil
+}
+
+func (x *GetGoalTurnForJudgeResponse) GetTurnNo() uint32 {
+	if x != nil {
+		return x.TurnNo
+	}
+	return 0
+}
+
+func (x *GetGoalTurnForJudgeResponse) GetOutcome() string {
+	if x != nil {
+		return x.Outcome
+	}
+	return ""
+}
+
+func (x *GetGoalTurnForJudgeResponse) GetAnswer() string {
+	if x != nil {
+		return x.Answer
+	}
+	return ""
+}
+
+func (x *GetGoalTurnForJudgeResponse) GetFound() bool {
+	if x != nil {
+		return x.Found
+	}
+	return false
+}
+
 var File_model_plane_v1_thread_goals_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_thread_goals_proto_rawDesc = "" +
@@ -1066,14 +1352,39 @@ const file_model_plane_v1_thread_goals_proto_rawDesc = "" +
 	"cost_basis\x18\t \x01(\tR\tcostBasis\x12!\n" +
 	"\fjudge_tokens\x18\n" +
 	" \x01(\x04R\vjudgeTokens\x12!\n" +
-	"\fusage_source\x18\v \x01(\tR\vusageSource2\xc9\x04\n" +
+	"\fusage_source\x18\v \x01(\tR\vusageSource\"\xfe\x01\n" +
+	"\x18RecordGoalVerdictRequest\x12\x17\n" +
+	"\agoal_id\x18\x01 \x01(\tR\x06goalId\x12\x15\n" +
+	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x17\n" +
+	"\aturn_no\x18\x03 \x01(\rR\x06turnNo\x12\x18\n" +
+	"\averdict\x18\x04 \x01(\tR\averdict\x12\x18\n" +
+	"\areasons\x18\x05 \x03(\tR\areasons\x12!\n" +
+	"\fevidence_ids\x18\x06 \x03(\tR\vevidenceIds\x12\x1f\n" +
+	"\vjudge_model\x18\a \x01(\tR\n" +
+	"judgeModel\x12!\n" +
+	"\fjudge_tokens\x18\b \x01(\x04R\vjudgeTokens\"\x9f\x01\n" +
+	"\x1aGetGoalTurnForJudgeRequest\x12\x17\n" +
+	"\agoal_id\x18\x01 \x01(\tR\x06goalId\x12\x15\n" +
+	"\x06org_id\x18\x02 \x01(\tR\x05orgId\x12\x15\n" +
+	"\x06run_id\x18\x03 \x01(\tR\x05runId\x12\x1f\n" +
+	"\vschedule_id\x18\x04 \x01(\tR\n" +
+	"scheduleId\x12\x19\n" +
+	"\bfire_key\x18\x05 \x01(\tR\afireKey\"\xae\x01\n" +
+	"\x1bGetGoalTurnForJudgeResponse\x12.\n" +
+	"\x04goal\x18\x01 \x01(\v2\x1a.model_plane.v1.ThreadGoalR\x04goal\x12\x17\n" +
+	"\aturn_no\x18\x02 \x01(\rR\x06turnNo\x12\x18\n" +
+	"\aoutcome\x18\x03 \x01(\tR\aoutcome\x12\x16\n" +
+	"\x06answer\x18\x04 \x01(\tR\x06answer\x12\x14\n" +
+	"\x05found\x18\x05 \x01(\bR\x05found2\x9c\x06\n" +
 	"\x11ThreadGoalService\x12Y\n" +
 	"\rSetThreadGoal\x12$.model_plane.v1.SetThreadGoalRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12Y\n" +
 	"\rGetThreadGoal\x12$.model_plane.v1.GetThreadGoalRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12_\n" +
 	"\x10UpdateThreadGoal\x12'.model_plane.v1.UpdateThreadGoalRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12\\\n" +
 	"\rClaimGoalTurn\x12$.model_plane.v1.ClaimGoalTurnRequest\x1a%.model_plane.v1.ClaimGoalTurnResponse\x12b\n" +
 	"\x0fBindGoalTurnRun\x12&.model_plane.v1.BindGoalTurnRunRequest\x1a'.model_plane.v1.BindGoalTurnRunResponse\x12[\n" +
-	"\x0eSettleGoalTurn\x12%.model_plane.v1.SettleGoalTurnRequest\x1a\".model_plane.v1.ThreadGoalResponseB\xb8\x01\n" +
+	"\x0eSettleGoalTurn\x12%.model_plane.v1.SettleGoalTurnRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12a\n" +
+	"\x11RecordGoalVerdict\x12(.model_plane.v1.RecordGoalVerdictRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12n\n" +
+	"\x13GetGoalTurnForJudge\x12*.model_plane.v1.GetGoalTurnForJudgeRequest\x1a+.model_plane.v1.GetGoalTurnForJudgeResponseB\xb8\x01\n" +
 	"\x12com.model_plane.v1B\x10ThreadGoalsProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -1088,41 +1399,49 @@ func file_model_plane_v1_thread_goals_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_thread_goals_proto_rawDescData
 }
 
-var file_model_plane_v1_thread_goals_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_model_plane_v1_thread_goals_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_model_plane_v1_thread_goals_proto_goTypes = []any{
-	(*ThreadGoal)(nil),              // 0: model_plane.v1.ThreadGoal
-	(*SetThreadGoalRequest)(nil),    // 1: model_plane.v1.SetThreadGoalRequest
-	(*GetThreadGoalRequest)(nil),    // 2: model_plane.v1.GetThreadGoalRequest
-	(*UpdateThreadGoalRequest)(nil), // 3: model_plane.v1.UpdateThreadGoalRequest
-	(*ThreadGoalResponse)(nil),      // 4: model_plane.v1.ThreadGoalResponse
-	(*ClaimGoalTurnRequest)(nil),    // 5: model_plane.v1.ClaimGoalTurnRequest
-	(*ClaimGoalTurnResponse)(nil),   // 6: model_plane.v1.ClaimGoalTurnResponse
-	(*BindGoalTurnRunRequest)(nil),  // 7: model_plane.v1.BindGoalTurnRunRequest
-	(*BindGoalTurnRunResponse)(nil), // 8: model_plane.v1.BindGoalTurnRunResponse
-	(*SettleGoalTurnRequest)(nil),   // 9: model_plane.v1.SettleGoalTurnRequest
-	(*timestamppb.Timestamp)(nil),   // 10: google.protobuf.Timestamp
+	(*ThreadGoal)(nil),                  // 0: model_plane.v1.ThreadGoal
+	(*SetThreadGoalRequest)(nil),        // 1: model_plane.v1.SetThreadGoalRequest
+	(*GetThreadGoalRequest)(nil),        // 2: model_plane.v1.GetThreadGoalRequest
+	(*UpdateThreadGoalRequest)(nil),     // 3: model_plane.v1.UpdateThreadGoalRequest
+	(*ThreadGoalResponse)(nil),          // 4: model_plane.v1.ThreadGoalResponse
+	(*ClaimGoalTurnRequest)(nil),        // 5: model_plane.v1.ClaimGoalTurnRequest
+	(*ClaimGoalTurnResponse)(nil),       // 6: model_plane.v1.ClaimGoalTurnResponse
+	(*BindGoalTurnRunRequest)(nil),      // 7: model_plane.v1.BindGoalTurnRunRequest
+	(*BindGoalTurnRunResponse)(nil),     // 8: model_plane.v1.BindGoalTurnRunResponse
+	(*SettleGoalTurnRequest)(nil),       // 9: model_plane.v1.SettleGoalTurnRequest
+	(*RecordGoalVerdictRequest)(nil),    // 10: model_plane.v1.RecordGoalVerdictRequest
+	(*GetGoalTurnForJudgeRequest)(nil),  // 11: model_plane.v1.GetGoalTurnForJudgeRequest
+	(*GetGoalTurnForJudgeResponse)(nil), // 12: model_plane.v1.GetGoalTurnForJudgeResponse
+	(*timestamppb.Timestamp)(nil),       // 13: google.protobuf.Timestamp
 }
 var file_model_plane_v1_thread_goals_proto_depIdxs = []int32{
-	10, // 0: model_plane.v1.ThreadGoal.created_at:type_name -> google.protobuf.Timestamp
-	10, // 1: model_plane.v1.ThreadGoal.updated_at:type_name -> google.protobuf.Timestamp
+	13, // 0: model_plane.v1.ThreadGoal.created_at:type_name -> google.protobuf.Timestamp
+	13, // 1: model_plane.v1.ThreadGoal.updated_at:type_name -> google.protobuf.Timestamp
 	0,  // 2: model_plane.v1.ThreadGoalResponse.goal:type_name -> model_plane.v1.ThreadGoal
-	1,  // 3: model_plane.v1.ThreadGoalService.SetThreadGoal:input_type -> model_plane.v1.SetThreadGoalRequest
-	2,  // 4: model_plane.v1.ThreadGoalService.GetThreadGoal:input_type -> model_plane.v1.GetThreadGoalRequest
-	3,  // 5: model_plane.v1.ThreadGoalService.UpdateThreadGoal:input_type -> model_plane.v1.UpdateThreadGoalRequest
-	5,  // 6: model_plane.v1.ThreadGoalService.ClaimGoalTurn:input_type -> model_plane.v1.ClaimGoalTurnRequest
-	7,  // 7: model_plane.v1.ThreadGoalService.BindGoalTurnRun:input_type -> model_plane.v1.BindGoalTurnRunRequest
-	9,  // 8: model_plane.v1.ThreadGoalService.SettleGoalTurn:input_type -> model_plane.v1.SettleGoalTurnRequest
-	4,  // 9: model_plane.v1.ThreadGoalService.SetThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
-	4,  // 10: model_plane.v1.ThreadGoalService.GetThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
-	4,  // 11: model_plane.v1.ThreadGoalService.UpdateThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
-	6,  // 12: model_plane.v1.ThreadGoalService.ClaimGoalTurn:output_type -> model_plane.v1.ClaimGoalTurnResponse
-	8,  // 13: model_plane.v1.ThreadGoalService.BindGoalTurnRun:output_type -> model_plane.v1.BindGoalTurnRunResponse
-	4,  // 14: model_plane.v1.ThreadGoalService.SettleGoalTurn:output_type -> model_plane.v1.ThreadGoalResponse
-	9,  // [9:15] is the sub-list for method output_type
-	3,  // [3:9] is the sub-list for method input_type
-	3,  // [3:3] is the sub-list for extension type_name
-	3,  // [3:3] is the sub-list for extension extendee
-	0,  // [0:3] is the sub-list for field type_name
+	0,  // 3: model_plane.v1.GetGoalTurnForJudgeResponse.goal:type_name -> model_plane.v1.ThreadGoal
+	1,  // 4: model_plane.v1.ThreadGoalService.SetThreadGoal:input_type -> model_plane.v1.SetThreadGoalRequest
+	2,  // 5: model_plane.v1.ThreadGoalService.GetThreadGoal:input_type -> model_plane.v1.GetThreadGoalRequest
+	3,  // 6: model_plane.v1.ThreadGoalService.UpdateThreadGoal:input_type -> model_plane.v1.UpdateThreadGoalRequest
+	5,  // 7: model_plane.v1.ThreadGoalService.ClaimGoalTurn:input_type -> model_plane.v1.ClaimGoalTurnRequest
+	7,  // 8: model_plane.v1.ThreadGoalService.BindGoalTurnRun:input_type -> model_plane.v1.BindGoalTurnRunRequest
+	9,  // 9: model_plane.v1.ThreadGoalService.SettleGoalTurn:input_type -> model_plane.v1.SettleGoalTurnRequest
+	10, // 10: model_plane.v1.ThreadGoalService.RecordGoalVerdict:input_type -> model_plane.v1.RecordGoalVerdictRequest
+	11, // 11: model_plane.v1.ThreadGoalService.GetGoalTurnForJudge:input_type -> model_plane.v1.GetGoalTurnForJudgeRequest
+	4,  // 12: model_plane.v1.ThreadGoalService.SetThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
+	4,  // 13: model_plane.v1.ThreadGoalService.GetThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
+	4,  // 14: model_plane.v1.ThreadGoalService.UpdateThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
+	6,  // 15: model_plane.v1.ThreadGoalService.ClaimGoalTurn:output_type -> model_plane.v1.ClaimGoalTurnResponse
+	8,  // 16: model_plane.v1.ThreadGoalService.BindGoalTurnRun:output_type -> model_plane.v1.BindGoalTurnRunResponse
+	4,  // 17: model_plane.v1.ThreadGoalService.SettleGoalTurn:output_type -> model_plane.v1.ThreadGoalResponse
+	4,  // 18: model_plane.v1.ThreadGoalService.RecordGoalVerdict:output_type -> model_plane.v1.ThreadGoalResponse
+	12, // 19: model_plane.v1.ThreadGoalService.GetGoalTurnForJudge:output_type -> model_plane.v1.GetGoalTurnForJudgeResponse
+	12, // [12:20] is the sub-list for method output_type
+	4,  // [4:12] is the sub-list for method input_type
+	4,  // [4:4] is the sub-list for extension type_name
+	4,  // [4:4] is the sub-list for extension extendee
+	0,  // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_thread_goals_proto_init() }
@@ -1136,7 +1455,7 @@ func file_model_plane_v1_thread_goals_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_thread_goals_proto_rawDesc), len(file_model_plane_v1_thread_goals_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

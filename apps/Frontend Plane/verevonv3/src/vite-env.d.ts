@@ -60,6 +60,10 @@ interface ImportMetaEnv {
 	readonly VITE_INGEST_SELECTED?: string;
 	/** "true" offers `/learn` in the composer's slash menu: a request to learn from a saved conversation (EP-11 S7). Default off. */
 	readonly VITE_LEARN_COMMAND?: string;
+	/** "true" lets the agent presets carry owner actions the org admits (EP-6 S11). Default off. */
+	readonly VITE_PRESET_AGENT_ACTIONS?: string;
+	/** "true" shows "What this agent remembers" on each agent a room owner or admin governs (EP-6 P3-c). Default off. */
+	readonly VITE_SPACE_AGENT_MEMORY?: string;
 }
 
 interface ImportMeta {

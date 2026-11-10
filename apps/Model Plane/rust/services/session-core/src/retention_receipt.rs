@@ -900,6 +900,7 @@ mod db_tests {
             user_id: seeded.user.clone(),
             start_key: start_key.to_owned(),
             terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+            agent_version_pin: None,
         }
     }
 

@@ -7,9 +7,11 @@
 //! convincing cannot close a goal. The user can override the verdict either way.
 //!
 //! Everything here is pure: the prompt, the request, the verdict parser and the
-//! gates. The call site (after the turn is settled) belongs with the goal ledger
-//! of S2. Switch `MODEL_GATEWAY_GOAL_JUDGE_ENABLED`, off by default: off means no
-//! judge call, the verdict stays empty and the user closes goals by hand.
+//! gates. The call site is `agentic_run_stream` in `sse.rs`, after the goal turn
+//! is settled (`judge_settled_goal_turn`); the verdict is recorded through
+//! `thread_goal::record_verdict`. Switch `MODEL_GATEWAY_GOAL_JUDGE_ENABLED`, off by
+//! default: off means no judge call, the verdict stays empty and the user closes
+//! goals by hand.
 
 use mp_contracts::model_plane::v1::{ChatMessage, InferPurpose, InferRequest, InferResponse};
 use serde_json::Value;

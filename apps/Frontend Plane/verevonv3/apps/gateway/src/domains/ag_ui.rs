@@ -90,6 +90,8 @@ async fn stream_agent_ui(
         return shared::invalid_chat_request(message).into_response();
     }
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
+    // EP-6 S10: the same strip as native chat, on every turn, before the mention injector.
+    crate::domains::spaces::strip_client_agent_roles(&mut body);
     // WS08-S4: same wake handling as native chat (the injector chain is shared).
     let wake_intent = match crate::domains::spaces::inject_mentioned_space_agent(
         &state, &user, &org_id, &mut body,
@@ -99,6 +101,12 @@ async fn stream_agent_ui(
         Ok(intent) => intent,
         Err((status, body)) => return (status, body).into_response(),
     };
+    // EP-6 S10: the same Space agent catalogue for a Do turn as native chat, before the thread context.
+    if let Err((status, body)) =
+        crate::domains::spaces::inject_space_agent_roles(&state, &user, &org_id, &mut body).await
+    {
+        return (status, body).into_response();
+    }
     if let Err((status, body)) =
         crate::domains::spaces::inject_authored_instructions(&state, &user, &org_id, &mut body)
             .await

@@ -256,6 +256,10 @@
     {
       "key": "skill_authoring",
       "label_en": "saving or editing skills"
+    },
+    {
+      "key": "named_agent",
+      "label_en": "named agent memory"
     }
   ],
   "generated_by": "mp-contracts zdr_refusal tests (MP_UPDATE_GOLDEN=1)",

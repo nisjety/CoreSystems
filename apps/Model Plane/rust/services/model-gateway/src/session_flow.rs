@@ -779,6 +779,7 @@ pub async fn prepare_managed_run_authenticated(
         retrieval_scope,
         None,
         None,
+        None,
     )
     .await
 }
@@ -811,6 +812,9 @@ pub async fn prepare_managed_run_authenticated_with_receipt(
     // Wake mode (WS08-S3): start the run from the caller's stored post. No user turn is appended
     // (the post is already the row), and the Control-signed wake travels on the start request.
     wake: Option<&WakeContext>,
+    // The agent version the run runs under (EP-6 S9), from the switch-gated invoke pin. It is
+    // recorded on the run for a non-ZDR caller only.
+    agent_pin: Option<&mp_contracts::model_plane::v1::AgentVersionPin>,
 ) -> Result<SessionRun> {
     prepare_managed_run_with_bearer(
         state,
@@ -832,6 +836,7 @@ pub async fn prepare_managed_run_authenticated_with_receipt(
         client_message_id,
         wake.is_none(),
         wake,
+        agent_pin,
     )
     .await
 }
@@ -873,6 +878,7 @@ pub(crate) async fn prepare_managed_run_with_token(
         None,
         None,
         true,
+        None,
         None,
     )
     .await
@@ -935,6 +941,7 @@ pub(crate) async fn prepare_idempotent_browser_run(
                 start_key: start_key.to_owned(),
                 terminal_source: ManagedRunSource::GatewayBrowser as i32,
                 wake: None,
+                agent_version_pin: None,
             },
             bearer_str,
         )?)
@@ -1121,6 +1128,7 @@ pub async fn prepare_version_run_authenticated(
         None,
         matches!(turn, crate::normalize::VersionTurn::Edit { .. }),
         None,
+        None,
     )
     .await
 }
@@ -1146,6 +1154,8 @@ async fn prepare_managed_run_with_bearer(
     client_message_id: Option<&str>,
     append_goal: bool,
     wake: Option<&WakeContext>,
+    // The agent version the run runs under (EP-6 S9). Session Core gets it for non-ZDR callers.
+    agent_pin: Option<&mp_contracts::model_plane::v1::AgentVersionPin>,
 ) -> Result<SessionRun> {
     // A wake is a durable write from a stored post: it is never started for a zero-retention
     // caller (the invoke stream refuses first, typed; this is the backstop) and never without
@@ -1227,6 +1237,8 @@ async fn prepare_managed_run_with_bearer(
                 start_key: start_key.to_owned(),
                 terminal_source: source as i32,
                 wake: wake.map(WakeContext::to_proto),
+                // A ZDR run carries no pin: Session Core never receives one for it.
+                agent_version_pin: if zdr { None } else { agent_pin.cloned() },
             },
             bearer,
         )?)

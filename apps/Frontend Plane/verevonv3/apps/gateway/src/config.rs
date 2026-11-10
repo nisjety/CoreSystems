@@ -146,6 +146,13 @@ pub(crate) struct AppState {
     /// `{"enabled": false}` so the SPA hides the section, every write and explain is a 404, and
     /// the ZDR gate answers as it did before the policy existed.
     pub(crate) model_entitlement_admin_enabled: bool,
+    /// `AGENT_DEFINITION_VERSIONS` (EP-6 S7/S8): the agent builder routes (draft, publish, versions)
+    /// and the draft preview of a chat body (`agent_preview`). Read once from the environment in
+    /// `build_state`, exactly `true` turns it on, never by default in development. Off, the builder
+    /// routes do not exist (the gateway answers 404 as it did before) and a chat body's
+    /// `agent_preview` is left as it came. A rollout control, never an authorization input: the
+    /// builder's own access check and Convex decide who may read or write a draft.
+    pub(crate) agent_definition_versions: bool,
     /// "Forward an email to create a task" inbound pipeline (chat-wave2
     /// mail-task spec, owner ruling 2026-09-28: Postmark inbound,
     /// self-forward only). Empty token = the whole `/internal/mail-task/ingest`
@@ -762,6 +769,7 @@ pub(crate) async fn build_state() -> Result<AppState> {
         allow_dev_auth_bypass: dev_only_flag("ALLOW_DEV_AUTH_BYPASS"),
         continue_park_form: continue_park_form_enabled(),
         model_entitlement_admin_enabled: model_entitlement_admin_enabled(),
+        agent_definition_versions: agent_definition_versions_enabled(),
         mail_task_ingest_service_token: optional_env("MAIL_TASK_INGEST_SERVICE_TOKEN"),
         mail_task_nats_url: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_URL"),
         mail_task_nats_user: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_USER"),
@@ -952,6 +960,18 @@ fn model_entitlement_admin_enabled() -> bool {
 /// that a stray `1` or `TRUE` switches on would let an operator set a policy that inference-core
 /// is not yet enforcing.
 fn model_entitlement_admin_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// `AGENT_DEFINITION_VERSIONS`, read once by `build_state` (EP-6 S7/S8). Off unless it is exactly
+/// `true`. The agent builder reads it from `AppState` at router build and per preview turn.
+fn agent_definition_versions_enabled() -> bool {
+    agent_definition_versions_from(env::var("AGENT_DEFINITION_VERSIONS").ok().as_deref())
+}
+
+/// Exactly the word `true`, for the same reason as `continue_park_form_from`: a stray `1` or `TRUE`
+/// would publish agent versions and expose a draft preview before anyone chose to.
+pub(crate) fn agent_definition_versions_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 

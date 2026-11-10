@@ -484,8 +484,14 @@ services:
       # EP-7 S4: Keep going on the goal bar (pump-sent goal turns). Needs MODEL_GATEWAY_THREAD_GOALS_ENABLED. Only the
       # literal true.
       MODEL_GATEWAY_GOAL_AUTO_CONTINUE: ${MODEL_GATEWAY_GOAL_AUTO_CONTINUE:-false}
+      # EP-7 S3: the completion judge judges a settled goal turn that completed and records its verdict. Needs
+      # MODEL_GATEWAY_THREAD_GOALS_ENABLED. Only the literal true.
+      MODEL_GATEWAY_GOAL_JUDGE_ENABLED: ${MODEL_GATEWAY_GOAL_JUDGE_ENABLED:-false}
       # EP-6 S9: a mention turn's agent tool allowlist and autonomy cap narrow the offered tools. Only the literal true.
       MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST: ${MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST:-false}
+      # EP-6 P3: a thread listing takes the agent filter (one named agent's threads). Off, the parameter is ignored.
+      # Only the literal true.
+      MODEL_GATEWAY_NAMED_AGENT_THREADS: ${MODEL_GATEWAY_NAMED_AGENT_THREADS:-false}
       # WS27-S2: a turn's usage frame and ledger rows count every tool round and the overhead calls, with run_id. Off by
       # default; only the literal `true`. Billing attribution (DEC-18, WS27-D5) must be confirmed before it is turned on.
       MODEL_GATEWAY_TURN_USAGE_COMPLETE: ${MODEL_GATEWAY_TURN_USAGE_COMPLETE:-false}

@@ -1134,6 +1134,14 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   invalid_policy: { no: 'Valget er ikke gyldig. Velg minst én person for en liste, og høyst 50. Ingenting er endret.', en: 'That choice is not valid. A list needs at least one person and at most 50. Nothing was changed.' },
   policy_conflict: { no: 'Noen andre har endret hvem som kan tilkalle agenten. Den nyeste innstillingen er lastet inn; se over og lagre på nytt.', en: 'Someone else changed who can wake the agent. The latest setting is loaded; review it and save again.' },
   space_role_cannot_manage_agent: { no: 'Bare en eier eller leder kan endre hvem som kan tilkalle agenten.', en: 'Only an owner or manager can change who can wake the agent.' },
+  // EP-6 S9 agent version pin (the other pin refusals reuse the codes above)
+  agent_version_not_found: { no: 'Den versjonen av agenten er ikke publisert. Ingenting er endret.', en: 'That version of the agent is not published. Nothing was changed.' },
+  // EP-7 S6 keep working while away: the BFF refuses a goal-bound schedule that names a shared room, and the model
+  // gateway admits one only with its switch, its judge and a read-only template.
+  goal_schedule_personal_only: { no: 'Et mål som fortsetter mens du er borte, kjører bare i ditt personlige rom, ikke i et delt rom.', en: 'A goal that keeps working while you are away runs only in your personal space, not in a shared room.' },
+  goal_unattended_disabled: { no: 'Å la et mål fortsette mens du er borte er ikke slått på her.', en: 'Keeping a goal working while you are away is not turned on here.' },
+  goal_unattended_needs_judge: { no: 'Et mål kan bare fortsette mens du er borte når dommeren for målet er slått på.', en: 'A goal keeps working while you are away only when its completion judge is on.' },
+  invalid_goal_schedule: { no: 'Planen for målet kunne ikke lagres med disse innstillingene. Ingenting er endret.', en: 'The schedule for this goal could not be saved with these settings. Nothing was changed.' },
 
   // WS02 realtime stream
   space_stream_capacity: { no: 'Live-oppdateringer er midlertidig full. Rommet oppdateres hvert par sekunder.', en: 'Live updates are temporarily at capacity. The room is refreshing every few seconds.' },

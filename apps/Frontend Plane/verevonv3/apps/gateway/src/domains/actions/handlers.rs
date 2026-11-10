@@ -88,7 +88,9 @@ use super::dispatchers_spaces::ws04::{
     dispatch_spaces_change_member_role, dispatch_spaces_join_room, dispatch_spaces_leave_room,
     dispatch_spaces_update_room_details, dispatch_spaces_update_room_settings,
 };
-use super::dispatchers_spaces::ws08::dispatch_spaces_set_agent_wake_policy;
+use super::dispatchers_spaces::ws08::{
+    dispatch_spaces_set_agent_pin, dispatch_spaces_set_agent_wake_policy,
+};
 use super::dispatchers_spaces::ws09::dispatch_spaces_stop_run;
 use super::dispatchers_spaces::ws10::{
     dispatch_spaces_decide_approval, dispatch_spaces_revoke_approval_grant,
@@ -727,6 +729,9 @@ pub(super) async fn execute_action(
         }
         "spaces.set_agent_wake_policy" => {
             dispatch_spaces_set_agent_wake_policy(&state, &user, &body.input).await
+        }
+        "spaces.agent_binding.pin" => {
+            dispatch_spaces_set_agent_pin(&state, &user, &body.input).await
         }
         "spaces.decide_approval" => {
             dispatch_spaces_decide_approval(&state, &user, &headers, &body.input, &body.idempotency_key)

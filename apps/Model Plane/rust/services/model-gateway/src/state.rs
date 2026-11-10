@@ -188,6 +188,10 @@ pub struct AppState {
     /// matches `mail_task.rs`'s existing `MailTaskPipeline: None` default on
     /// the gateway BFF side of this same, still-not-fully-wired pipeline.
     pub(crate) mail_task_bridge_tokens: Option<Arc<crate::mail_task_bridge_auth::MailTaskBridgeTokenProvider>>,
+    /// The gateway's own minting client for the completion judge's verdict write (EP-7 S3), a token
+    /// for `session:write` per settled goal turn. `None` when `MODEL_GATEWAY_SERVICE_API_KEY` is unset:
+    /// the judge then records no verdict and the goal stays as it is.
+    pub(crate) goal_verdict_tokens: Option<Arc<crate::thread_goal::GoalVerdictTokens>>,
     /// Keyed, opaque transformer for all values persisted as managed start
     /// identities. This prevents public request/idempotency strings from
     /// becoming durable data (including on ZDR paths).
@@ -524,6 +528,7 @@ impl AppState {
             managed_run_client: ManagedRunLifecycleClient::new(managed_run_channel),
             session_terminal_tokens: None,
             mail_task_bridge_tokens: None,
+            goal_verdict_tokens: None,
             managed_start_keys: ManagedStartKeyDeriver::test_only(),
             run_start_guard: Arc::default(),
             run_client: RunServiceClient::new(run_channel),
@@ -936,6 +941,20 @@ impl AppState {
                 }
             };
 
+        // EP-7 S3 — the completion judge's verdict credential, from the gateway's own service key.
+        // Optional like the mail-task bridge: without it the judge records no verdict and the goal
+        // stays as it is, and the boot does not fail.
+        let goal_verdict_tokens = match crate::thread_goal::GoalVerdictTokens::from_env() {
+            Ok(provider) => Some(Arc::new(provider)),
+            Err(error) => {
+                tracing::info!(
+                    %error,
+                    "goal verdict credential not configured; the goal judge cannot record verdicts"
+                );
+                None
+            }
+        };
+
         // Wave 9 — Quarry edge for Fetch + ExtractStructured. Empty
         // QUARRY_EDGE_URL → client reports Available() == false and
         // the gRPC handlers return Unimplemented; safe in dev.
@@ -1001,6 +1020,7 @@ impl AppState {
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens.clone();
+            state.goal_verdict_tokens = goal_verdict_tokens.clone();
             state.managed_start_keys = managed_start_keys;
             state.run_client = run_client;
             state.orchestration_client = orchestration_client;
@@ -1077,6 +1097,7 @@ impl AppState {
             state.managed_run_client = managed_run_client;
             state.session_terminal_tokens = Some(session_terminal_tokens);
             state.mail_task_bridge_tokens = mail_task_bridge_tokens;
+            state.goal_verdict_tokens = goal_verdict_tokens;
             state.managed_start_keys = managed_start_keys;
             state.run_client = run_client;
             state.orchestration_client = orchestration_client;

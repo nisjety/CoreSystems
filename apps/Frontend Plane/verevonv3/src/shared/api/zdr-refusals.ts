@@ -69,6 +69,7 @@ export type ZdrFeatureKey =
   | 'run_inspection'
   | 'context_references'
   | 'thread_goal'
+  | 'named_agent'
 
 /** The reader's-language chooser, the same shape the rest of the SPA passes around. */
 export type Translate = (noText: string, enText: string) => string
@@ -76,7 +77,7 @@ export type Translate = (noText: string, enText: string) => string
 type Copy = { readonly no: string; readonly en: string }
 
 /** The sha256 of `./contracts/zdr-refusals.json`. Changing the golden changes this too. */
-export const ZDR_REFUSALS_CONTRACT_SHA256 = 'ae4473ce0a3ddd3d6d104aad3f90509014da63b60e2db27766983956708437d7'
+export const ZDR_REFUSALS_CONTRACT_SHA256 = '1e36a26fcdb56f0b7010caae13dd40e0a7b453e035e6424f09befec367b8b385'
 
 export type ZdrRefusalText = {
   /** Norwegian. A feature refusal names the feature with `{feature}`. */
@@ -206,6 +207,7 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   run_inspection: { no: 'tidslinje og innsyn i kjøringer', en: 'run timing and request inspection' },
   context_references: { no: 'referanser til dokumenter, samtaler eller utvalg', en: 'references to documents, threads or selections' },
   thread_goal: { no: 'varige mål', en: 'persistent goals' },
+  named_agent: { no: 'minnet til navngitte agenter', en: 'named agent memory' },
 }
 
 /** A refusal whose feature the SPA does not know names it this way. */

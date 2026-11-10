@@ -218,6 +218,7 @@ fn start_request(org: &str, user: &str, thread: &str, start_key: &str) -> pb::St
         user_id: user.to_owned(),
         start_key: start_key.to_owned(),
         terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+        agent_version_pin: None,
     }
 }
 

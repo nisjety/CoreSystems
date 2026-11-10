@@ -47678,6 +47678,48 @@ so it
   font-size: 12px;
 }
 
+/* The judge's verdict (EP-7 S3): a chip beside the status, with its reasons and a note on click. */
+.verevon-chat-goal-bar__verdict {
+  padding: 2px 8px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: none;
+  color: var(--verevon-j-text-soft);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.verevon-chat-goal-bar__verdict[data-verdict='met'] {
+  border-color: var(--verevon-a-earth);
+  color: var(--verevon-a-earth);
+}
+
+.verevon-chat-goal-bar__verdict[data-verdict='blocked'] {
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+}
+
+.verevon-chat-goal-bar__verdict-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--verevon-j-text-soft);
+  font-size: 12px;
+}
+
+.verevon-chat-goal-bar__verdict-reasons {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.verevon-chat-goal-bar__verdict-note {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 11.5px;
+}
+
 .verevon-chat-goal-bar__away {
   display: grid;
   gap: 8px;
@@ -50568,6 +50610,13 @@ so it
   margin: 6px 0 0;
   font-size: 11px;
   color: var(--verevon-text-muted);
+}
+
+/* The entries a person may open from the dock (the goal and wide research), side by side when both are offered. */
+.verevon-chat-composer-trays__entries {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 /* What the transcript keeps of a docked control: one line saying where it went. */

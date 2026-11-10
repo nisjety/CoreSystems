@@ -190,6 +190,7 @@ fn test_state(quarry_edge_url: String) -> AppState {
         mail_task_nats_password: String::new(),
         continue_park_form: false,
         model_entitlement_admin_enabled: false,
+        agent_definition_versions: false,
         mail_task_pipeline: None,
         space_features: Default::default(),
     }

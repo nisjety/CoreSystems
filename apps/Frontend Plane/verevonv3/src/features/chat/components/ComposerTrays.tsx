@@ -1,20 +1,25 @@
-import { For, Match, Show, Switch, createSignal } from 'solid-js'
+import { For, Match, Show, Switch, createEffect, createSignal } from 'solid-js'
 import type {
   AutonomyRung,
   ChatQuestionAnswer,
   ChatResearchPlanEvent,
   ChatUserQuestionEvent,
   ResearchPlanEdit,
+  WideResearchStart as WideResearchChoice,
 } from '@/shared/api/chat-client'
+import { listDeckTemplates, type DeckTemplate } from '@/shared/api/chat-client'
 import type { ApprovalDecision, ApprovalEdit, PlanStepEdit } from '@/shared/api/orchestration-client'
 import { QuestionCard } from '@/shared/chat-nodes/QuestionCard'
+import { X } from '@/shared/icons'
 import { useI18n } from '@/shared/i18n'
 import type { DockedTray, DockedTrayKind } from '../lib/composer-trays'
 import type { GoalAutoContinueView } from '../lib/goal-pump'
 import { ApprovalRequests, PlanApprovalControl, QueuedInputStrip } from './ChatMessages'
-import { GoalBar } from './GoalBar'
+import { DeckTemplatePicker } from './DeckTemplatePicker'
+import { GoalBar, type GoalAwayView } from './GoalBar'
 import { GoalDialog, type GoalDraft } from './GoalDialog'
 import { ResearchPlanCard } from './ResearchPlanCard'
+import { WideResearchStart } from './WideResearchStart'
 
 const TRAY_NAME: Record<DockedTrayKind, { no: string; en: string }> = {
   approval: { no: 'godkjenning', en: 'approval' },
@@ -65,8 +70,29 @@ export function ComposerTrays(props: {
   onContinueGoal?: () => void
   onPauseGoal?: (paused: boolean) => void
   onClearGoal?: () => void
+  /** Mark the open goal done, or reopen a met or blocked one (EP-7 S3): the person's own override of the judge. */
+  onMarkGoalDone?: () => void
+  onReopenGoal?: () => void
   /** "Keep going" on the goal bar (EP-7 S4). */
   goalAutoContinue?: GoalAutoContinueView
+  /** "Keep working while away" on the goal bar (EP-7 S6); hidden unless the server reports it available. */
+  goalAway?: GoalAwayView
+  /**
+   * The composer's "Bred forskning" entry (EP-2 S8). Offered only when the page says the gateway serves it and the
+   * chat may send a wide-research turn. `wideResearchModel` is the model its estimate names; `onStartWideResearch`
+   * takes the person's choice once they press Start, and answers `false` when it sent nothing (the card then stays).
+   */
+  wideResearchEntry?: boolean
+  wideResearchModel?: string
+  onStartWideResearch?: (choice: WideResearchChoice) => boolean | void
+  /**
+   * The composer's deck template chip (EP-5 S7). Offered while the draft talks about a deck and no run streams; the
+   * gateway's list decides whether it shows at all. `deckTemplate` is the pick the next send carries, and
+   * `onDeckTemplateChange` sets it (`null` is Standard, which carries none).
+   */
+  deckTemplateEntry?: boolean
+  deckTemplate?: DeckTemplate | null
+  onDeckTemplateChange?: (template: DeckTemplate | null) => void
 }) {
   const i18n = useI18n()
   const active = () => props.trays[0]
@@ -97,6 +123,47 @@ export function ComposerTrays(props: {
   }
   const goalEntryShown = () =>
     props.goalEntry === true && !dockedGoal() && props.trays.length === 0 && !props.question && !props.researchPlan
+  // The wide-research card is the person's own click too: it takes the dock until it is started or cancelled.
+  const [wideResearchOpen, setWideResearchOpen] = createSignal(false)
+  const wideResearchEntryShown = () =>
+    props.wideResearchEntry === true
+    && props.trays.length === 0
+    && !props.question
+    && !props.researchPlan
+    && !goalDialogOpen()
+    && !wideResearchOpen()
+  // The deck template picker is the person's own click as well: its card takes the dock until a pick or Close. The
+  // entry hides once a pick is made, and the pick shows as its own row below the dock.
+  const [deckPickerOpen, setDeckPickerOpen] = createSignal(false)
+  // The gateway's list decides whether the entry exists: it is asked once the draft first talks about a deck, and it is
+  // offered only with at least one template (the list route answers 404 while the templates are off, and null in a
+  // zero-retention session). A reply that arrives after the hint has gone is dropped.
+  const [deckListed, setDeckListed] = createSignal(false)
+  let deckListing = 0
+  createEffect(
+    () => props.deckTemplateEntry === true,
+    (wanted) => {
+      const request = ++deckListing
+      if (!wanted) return
+      listDeckTemplates()
+        .then((listed) => {
+          if (request === deckListing) setDeckListed((listed?.length ?? 0) > 0)
+        })
+        .catch(() => {
+          if (request === deckListing) setDeckListed(false)
+        })
+    },
+  )
+  const deckEntryShown = () =>
+    props.deckTemplateEntry === true
+    && deckListed()
+    && !props.deckTemplate
+    && props.trays.length === 0
+    && !props.question
+    && !props.researchPlan
+    && !goalDialogOpen()
+    && !wideResearchOpen()
+    && !deckPickerOpen()
   const saveGoal = async (draft: GoalDraft) => {
     if (await props.onSaveGoal?.(draft)) setGoalDialogOpen(false)
   }
@@ -107,7 +174,16 @@ export function ComposerTrays(props: {
     <div
       class="verevon-chat-composer-trays"
       data-empty={
-        props.trays.length === 0 && !props.question && !props.researchPlan && !goalEntryShown() && !goalDialogOpen()
+        props.trays.length === 0
+        && !props.question
+        && !props.researchPlan
+        && !goalEntryShown()
+        && !goalDialogOpen()
+        && !wideResearchEntryShown()
+        && !wideResearchOpen()
+        && !deckEntryShown()
+        && !deckPickerOpen()
+        && !props.deckTemplate
           ? ''
           : undefined
       }
@@ -206,17 +282,80 @@ export function ComposerTrays(props: {
               onPause={() => props.onPauseGoal?.(true)}
               onResume={() => props.onPauseGoal?.(false)}
               onClear={() => props.onClearGoal?.()}
+              onMarkDone={() => props.onMarkGoalDone?.()}
+              onReopen={() => props.onReopenGoal?.()}
               autoContinue={props.goalAutoContinue}
+              away={props.goalAway}
             />
           )}
         </Match>
         <Match when={queue()}>{(tray) => <QueuedInputStrip entries={tray().entries} />}</Match>
-        <Match when={goalEntryShown()}>
-          <button type="button" class="verevon-chat-goal-entry" onClick={() => setGoalDialogOpen(true)}>
-            {i18n.tr('Sett et mål for samtalen', 'Set a goal for this conversation')}
-          </button>
+        <Match when={wideResearchOpen()}>
+          <WideResearchStart
+            model={props.wideResearchModel}
+            onStart={(choice) => {
+              if (props.onStartWideResearch?.(choice) !== false) setWideResearchOpen(false)
+            }}
+            onCancel={() => setWideResearchOpen(false)}
+          />
+        </Match>
+        <Match when={deckPickerOpen()}>
+          <div class="verevon-chat-composer-trays__entries">
+            <DeckTemplatePicker
+              selected={props.deckTemplate?.skillId ?? null}
+              onSelect={(template) => {
+                props.onDeckTemplateChange?.(template)
+                setDeckPickerOpen(false)
+              }}
+            />
+            <button type="button" class="verevon-chat-goal-entry" onClick={() => setDeckPickerOpen(false)}>
+              {i18n.tr('Lukk', 'Close')}
+            </button>
+          </div>
+        </Match>
+        <Match when={goalEntryShown() || wideResearchEntryShown() || deckEntryShown()}>
+          <div class="verevon-chat-composer-trays__entries">
+            <Show when={goalEntryShown()}>
+              <button type="button" class="verevon-chat-goal-entry" onClick={() => setGoalDialogOpen(true)}>
+                {i18n.tr('Sett et mål for samtalen', 'Set a goal for this conversation')}
+              </button>
+            </Show>
+            <Show when={wideResearchEntryShown()}>
+              <button type="button" class="verevon-chat-goal-entry" onClick={() => setWideResearchOpen(true)}>
+                {i18n.tr('Bred forskning', 'Wide research')}
+              </button>
+            </Show>
+            <Show when={deckEntryShown()}>
+              <button type="button" class="verevon-chat-goal-entry" onClick={() => setDeckPickerOpen(true)}>
+                {i18n.tr('Velg mal', 'Choose template')}
+              </button>
+            </Show>
+          </div>
         </Match>
       </Switch>
+      {/* The pick the next send carries. It stays in view while a tray waits, so a template is never applied unseen. */}
+      <Show when={props.deckTemplate}>
+        {(template) => (
+          <div class="verevon-chat-composer-trays__entries">
+            <button
+              type="button"
+              class="verevon-chat-goal-entry"
+              aria-expanded={deckPickerOpen() ? 'true' : 'false'}
+              onClick={() => setDeckPickerOpen(true)}
+            >
+              {i18n.tr('Mal', 'Template')}: {template().name}
+            </button>
+            <button
+              type="button"
+              class="verevon-chat-goal-entry"
+              aria-label={i18n.tr('Fjern malen', 'Remove the template')}
+              onClick={() => props.onDeckTemplateChange?.(null)}
+            >
+              <X class="size-3" aria-hidden="true" />
+            </button>
+          </div>
+        )}
+      </Show>
       <Show when={others().length > 0}>
         <p class="verevon-chat-composer-trays__more">
           {i18n.tr('Venter også:', 'Also waiting:')}{' '}

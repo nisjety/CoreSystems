@@ -733,6 +733,19 @@ enum TerminalOutcome {
   TERMINAL_OUTCOME_FAILED = 2;
 }
 
+// The agent version a managed run runs under (EP-6 S9; owner: model-gateway sends it,
+// session-core records it). Ids and a digest only, never the agent's instructions or
+// tools. Session Core writes it to `runs.metadata.agent` in the run's own insert for a
+// non-ZDR caller, and never for a ZDR caller.
+message AgentVersionPin {
+  // The agent definition's stable id: `[A-Za-z0-9_.:-]`, at most 128 bytes.
+  string agent_ref = 1;
+  // The published version the run runs: immutable, and from 1.
+  uint32 version = 2;
+  // The version's canonical digest: `sha256:` and 64 lowercase hex characters.
+  string digest = 3;
+}
+
 // Starts a run and its durable terminalization obligation in one transaction.
 // This is additive; StartRun keeps its existing behavior for legacy clients.
 message StartManagedRunRequest {
@@ -754,6 +767,9 @@ message StartManagedRunRequest {
   // Wake mode (WS08-S2): start this run from a stored human post for one addressed agent.
   // Absent keeps every existing start unchanged. Refused for a zero-retention caller.
   RunWakeContext wake = 10;
+  // The agent version this run runs under (EP-6 S9). Absent keeps every existing start
+  // unchanged. A malformed pin is refused as invalid_agent_version_pin, for every caller.
+  AgentVersionPin agent_version_pin = 11;
 }
 
 message StartManagedRunResponse {
@@ -1520,6 +1536,12 @@ message ListThreadsRequest {
   // ordinary listing, so a starred page never skips a starred thread beyond the
   // first page.
   bool starred_only = 11;
+  // Optional named-agent filter (EP-6 P3). When set, only threads with a run woken
+  // for this agent (runs.agent_subject_id) are listed. It narrows the caller's
+  // already-visible set inside the same owner-bound query, so it never widens what
+  // the caller may list. The gateway sends it only while its named-agent thread
+  // switch is on. Empty means no agent filter.
+  string agent_subject_id = 12;
 }
 
 // Which archive state a ListThreads call returns. Values are prefixed because

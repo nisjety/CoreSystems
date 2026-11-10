@@ -477,6 +477,9 @@ services:
             CONTROL_SPACE_SUBJECT_GRANTS: ${CONTROL_SPACE_SUBJECT_GRANTS:-false}
             # WS14-S1: shared-Space import decisions (room uploads). Strict literal true; off by default.
             CONTROL_SPACE_SHARED_IMPORT: ${CONTROL_SPACE_SHARED_IMPORT:-false}
+            # EP-8 S7: Space memory management decisions (a shared Space's manager or owner lists or
+            # deletes the Space's memory). Strict literal true; off by default and in production.
+            CONTROL_SPACE_MEMORY_DECISIONS: ${CONTROL_SPACE_MEMORY_DECISIONS:-false}
             CONTROL_SPACE_DECISION_KEY_ID: ${CONTROL_SPACE_DECISION_KEY_ID:?CONTROL_SPACE_DECISION_KEY_ID is required}
             CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64: ${CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64:?CONTROL_SPACE_DECISION_PRIVATE_KEY_BASE64 is required}
             AUTH_CORE_JWT_PUBLIC_KEY_FILE: /app/keys/convex-auth.pub

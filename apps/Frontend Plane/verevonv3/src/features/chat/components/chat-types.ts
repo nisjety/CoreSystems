@@ -764,6 +764,16 @@ export type SendOptions = {
   connectorScope?: string[]
   /** See `ChatInvokeRequest.contextRefs`. Per-turn, like `connectorScope`. */
   contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
+  /**
+   * The brand deck template this turn applies (EP-5 S7): a skill id from `listDeckTemplates`. See
+   * `ChatInvokeRequest.deckTemplate`; per-turn, like `contextRefs`, and never sent on a zero-retention turn.
+   */
+  deckTemplate?: string
+  /**
+   * This send is not the composer's text (a deck template pick from the deck view, EP-5 S7), so the composer keeps its
+   * draft. Like the approved-plan turn and a wide-research retry, which are never typed in the composer either.
+   */
+  keepDraft?: boolean
   /** See `ChatInvokeRequest.agentMode`. Per-turn, like `connectorScope`. */
   agentMode?: AgentModeId
   actions?: ChatAction[]
@@ -791,6 +801,12 @@ export type SendOptions = {
   modelContent?: string
   browseWeb?: boolean
   deepResearch?: boolean
+  /**
+   * Wide research from the composer's "Bred forskning" entry (EP-2 S8/S9): the choice a start sends, or a one-item
+   * retry. Set only by `startWideResearch` and `retryWideResearchItem` on an agentic Do turn; see
+   * `ChatInvokeRequest.wideResearch` for what the wire carries.
+   */
+  wideResearch?: import('@/shared/api/chat-client').WideResearchStart
   createdAt?: string
   displayAttachments?: ChatTurnAttachment[]
   generateImage?: boolean

@@ -125,14 +125,12 @@ describe('PersonalSetupCard', () => {
     expect(screen.queryByTestId('personal-setup-role')).toBeNull()
   })
 
-  it('hides the role step without a thread, since a role can only be saved on one', async () => {
+  it('offers the role step on an empty chat, since the role is held until the first send', async () => {
     offerSetup()
     getMemoryControls.mockResolvedValue(memoryOn)
     render(() => <PersonalSetupCard threadId={null} />)
-    await screen.findByTestId('personal-setup-card')
-    await settle()
-    expect(getMemoryControls).not.toHaveBeenCalled()
-    expect(screen.queryByTestId('personal-setup-role')).toBeNull()
+    await screen.findByTestId('personal-setup-role')
+    expect(getMemoryControls).toHaveBeenCalled()
   })
 
   it('saves a ticked role on the open thread, after the answers', async () => {

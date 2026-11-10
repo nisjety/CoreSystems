@@ -19,11 +19,17 @@
 //! The switch is `MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED`, default off. Off, a template naming a
 //! goal is refused, because session-core would bind it; every other create is untouched.
 
-use axum::{http::StatusCode, Json};
+use axum::extract::{Path, State};
+use axum::{http::StatusCode, Extension, Json};
+use mp_contracts::model_plane::v1::{GetGoalTurnForJudgeRequest, InferRequest};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth::Claims;
-use crate::http_routes::HttpJsonError;
+use crate::auth::{verify_goal_judge_caller, Claims, VerifiedInferenceBearer};
+use crate::goal_judge::{should_judge_turn, EvidenceLine};
+use crate::http_routes::{require_non_zdr_durable_mutation, HttpJsonError};
+use crate::state::AppState;
+use crate::thread_goal::{judge_goal_turn, read_goal_turn_for_judge, GoalJudgeCall};
 
 /// The switch. Opt-in: only the literal `true` enables it.
 pub const ENABLED_ENV: &str = "MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED";
@@ -243,6 +249,238 @@ fn contract_is_read_only(text: &str) -> bool {
         && tools
             .iter()
             .all(|tool| tool.get("class").and_then(Value::as_str) == Some(READ_CLASS))
+}
+
+/// The longest id the judge route carries (run, org, schedule or fire key), in bytes.
+const MAX_JUDGE_ID_LEN: usize = 128;
+
+/// The body of `POST /internal/v1/goals/:goal_id/judge-turn` (EP-7 S6): ids only. The objective, the
+/// criteria and the answer are read by the gateway from session-core, never sent by the caller.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct JudgeTurnBody {
+    /// The scheduled run the fire started.
+    run_id: String,
+    /// The org the goal belongs to; must be the caller's own org.
+    org_id: String,
+    /// The schedule the fire belongs to.
+    schedule_id: String,
+    /// The fire's key within its schedule.
+    fire_key: String,
+}
+
+/// An id the judge route carries: 1 to 128 bytes of ASCII letters, digits, `_`, `-`, `.` or `:`.
+fn valid_judge_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_JUDGE_ID_LEN
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+}
+
+/// A judge-route field that does not hold to the rules, named so the caller can see which one.
+fn invalid_judge(field: &str, message: &str) -> HttpJsonError {
+    typed(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_goal_judge_turn",
+        message,
+        json!({ "field": field }),
+    )
+}
+
+/// How session-core's refusal of the judge's read reaches the caller. A catalogued ZDR refusal keeps its
+/// own typed body; a fire the goal does not ledger is not found; a refused credential is forbidden; any
+/// other failure is a retryable outage that leaves the goal as it stands.
+fn judge_read_error(status: &tonic::Status) -> HttpJsonError {
+    if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_status(status) {
+        return crate::zdr_posture::http(&refusal);
+    }
+    match status.code() {
+        tonic::Code::NotFound => typed(
+            StatusCode::NOT_FOUND,
+            "goal_turn_not_found",
+            "no unattended turn of this goal names the fire",
+            json!({}),
+        ),
+        tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => typed(
+            StatusCode::FORBIDDEN,
+            "goal_judge_forbidden",
+            "the goal judge may not read this goal",
+            json!({}),
+        ),
+        _ => typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "goal_judge_unavailable",
+            "the goal could not be read for its judge; the goal stays as it was",
+            json!({}),
+        ),
+    }
+}
+
+/// `POST /internal/v1/goals/:goal_id/judge-turn` (EP-7 S6): the completion judge of one unattended fire
+/// of a goal-bound schedule, called by orchestrator-core once the fire's run has settled. The caller
+/// presents its own service token (`model:goal_judge`, pinned to the body's org) and the
+/// `aud=inference-core` bearer that the judge call spends. The gateway reads the goal, the fire's turn and
+/// its answer from session-core, judges them and records the verdict. The body is ids only; the only
+/// content read is the answer, and the response carries the verdict and nothing else. `404` while either
+/// switch is off.
+pub(crate) async fn judge_goal_turn_route(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: Option<Extension<VerifiedInferenceBearer>>,
+    Path(goal_id): Path<String>,
+    Json(body): Json<JudgeTurnBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !(enabled() && crate::goal_judge::goal_judge_enabled()) {
+        return Err(typed(
+            StatusCode::NOT_FOUND,
+            "goal_unattended_disabled",
+            "keeping a goal working while away is not enabled on this deployment",
+            json!({}),
+        ));
+    }
+    verify_goal_judge_caller(&claims, &body.org_id).map_err(|status| {
+        typed(
+            status,
+            "goal_judge_forbidden",
+            "the goal judge is for orchestrator-core, in its own org",
+            json!({}),
+        )
+    })?;
+    // The judge's read and verdict are durable writes about the goal, and the scheduled lane denies ZDR.
+    require_non_zdr_durable_mutation(&claims)?;
+    if !valid_goal_id(&goal_id) {
+        return Err(invalid_judge("goal_id", "goal_id is not a goal id"));
+    }
+    for (field, value) in [
+        ("run_id", &body.run_id),
+        ("org_id", &body.org_id),
+        ("schedule_id", &body.schedule_id),
+        ("fire_key", &body.fire_key),
+    ] {
+        if !valid_judge_id(value) {
+            return Err(invalid_judge(
+                field,
+                "a judge id is letters, digits and _ - . : only",
+            ));
+        }
+    }
+    let Some(Extension(inference_bearer)) = bearer else {
+        return Err(typed(
+            StatusCode::UNAUTHORIZED,
+            "goal_judge_bearer_required",
+            "the judge call needs the caller's inference bearer",
+            json!({}),
+        ));
+    };
+    let Some(tokens) = state.goal_verdict_tokens.clone() else {
+        return Err(typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "goal_judge_unavailable",
+            "the goal judge credential is not configured",
+            json!({}),
+        ));
+    };
+    let read_token = tokens.read_token(&body.org_id).await.map_err(|error| {
+        tracing::warn!(%error, "goal judge read token was not minted; the judge did not run");
+        typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "goal_judge_unavailable",
+            "the goal judge credential is unavailable",
+            json!({}),
+        )
+    })?;
+    let read = read_goal_turn_for_judge(
+        state.thread_goal_client.clone(),
+        &read_token,
+        GetGoalTurnForJudgeRequest {
+            goal_id: goal_id.clone(),
+            org_id: body.org_id.clone(),
+            run_id: body.run_id.clone(),
+            schedule_id: body.schedule_id.clone(),
+            fire_key: body.fire_key.clone(),
+        },
+    )
+    .await
+    .map_err(|status| judge_read_error(&status))?;
+    let not_found = || {
+        typed(
+            StatusCode::NOT_FOUND,
+            "goal_turn_not_found",
+            "no unattended turn of this goal names the fire",
+            json!({}),
+        )
+    };
+    let found = read.found;
+    let Some(goal) = read.goal.filter(|_| found) else {
+        return Err(not_found());
+    };
+    if goal.id != goal_id || goal.org_id != body.org_id {
+        return Err(not_found());
+    }
+    // Only a completed fire is judged, as an attended turn is (EP-7 S3): a parked, failed or unknown
+    // run has no finished answer to judge.
+    if !should_judge_turn(true, &read.outcome) {
+        return Err(typed(
+            StatusCode::CONFLICT,
+            "goal_turn_not_judged",
+            "only a completed fire is judged",
+            json!({ "outcome": read.outcome.clone() }),
+        ));
+    }
+    if read.answer.trim().is_empty() {
+        return Err(typed(
+            StatusCode::CONFLICT,
+            "goal_turn_has_no_answer",
+            "the fire recorded no answer to judge",
+            json!({}),
+        ));
+    }
+    // The fire's run and closed outcome are the evidence the judge may cite. The run's tool-step ids are
+    // not readable without its action ids, so the judge cites the run it judges.
+    let evidence = vec![EvidenceLine {
+        id: format!("run:{}", body.run_id),
+        line: format!("scheduled_run outcome={}", read.outcome),
+    }];
+    let request_id = format!("goal-judge-{}", body.run_id);
+    // The scheduled lane names no model of its own, so the judge runs on the auxiliary model with no
+    // route floors. The scheduled lane denies ZDR, so the judge is never zero-retention.
+    let route = InferRequest::default();
+    let recorded = judge_goal_turn(
+        &state,
+        &inference_bearer,
+        GoalJudgeCall {
+            route: &route,
+            served_model: crate::sse::aux_model(),
+            request_id: &request_id,
+            org_id: &body.org_id,
+            zdr: false,
+            goal: &goal,
+            turn_no: read.turn_no,
+            answer: &read.answer,
+            evidence: &evidence,
+        },
+    )
+    .await
+    .ok_or_else(|| {
+        typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "goal_judge_failed",
+            "the goal judge recorded no verdict; the goal stays as it was",
+            json!({}),
+        )
+    })?;
+    if recorded.last_verdict.is_empty() {
+        return Err(typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "goal_judge_failed",
+            "the goal judge recorded no verdict; the goal stays as it was",
+            json!({}),
+        ));
+    }
+    Ok(Json(
+        json!({ "data": { "verdict": recorded.last_verdict } }),
+    ))
 }
 
 #[cfg(test)]

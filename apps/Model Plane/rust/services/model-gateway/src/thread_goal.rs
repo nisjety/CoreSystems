@@ -14,19 +14,35 @@
 //! judge's tokens count; D10, the run cap a goal turn may use is `min(remaining, org per-run
 //! ceiling)` per dimension, never above the org's, whatever budget the goal was given. No switch of
 //! its own: it runs only for a turn MODEL_GATEWAY_THREAD_GOALS_ENABLED already let name a goal.
-//! Counts, ids and closed tokens only: nothing here carries content.
+//! Counts, ids and closed tokens only, except the completion judge's reasons (EP-7 S3): model text
+//! that rides the one verdict write to session-core and is never logged.
+//!
+//! The completion judge (EP-7 S3) answers after a settled, completed turn. Its verdict is the
+//! gateway's one write to the goal store: [`record_verdict`] sends `RecordGoalVerdict` under a token
+//! that [`GoalVerdictTokens`] mints from the gateway's own service credential.
+
+use std::fmt;
+use std::time::Duration;
 
 use mp_contracts::model_plane::v1::{
     thread_goal_service_client::ThreadGoalServiceClient, BindGoalTurnRunRequest,
-    ClaimGoalTurnRequest, ClaimGoalTurnResponse, RunUsage, SettleGoalTurnRequest, ThreadGoal,
+    ClaimGoalTurnRequest, ClaimGoalTurnResponse, GetGoalTurnForJudgeRequest,
+    GetGoalTurnForJudgeResponse, InferRequest, RecordGoalVerdictRequest, RunUsage,
+    SettleGoalTurnRequest, ThreadGoal,
 };
 use tonic::transport::Channel;
 
-use crate::auth::VerifiedSessionBearer;
+use crate::auth::{VerifiedInferenceBearer, VerifiedSessionBearer};
+use crate::goal_judge::{
+    goal_judge_prompt, goal_judge_request, judge_metered_tokens, parse_goal_verdict, EvidenceLine,
+    JudgeVerdict,
+};
+use crate::http_routes::authenticated_inference_request;
 use crate::pricing::CostBasis;
 use crate::sse::AgenticRunOutcome;
 use crate::sse_events::run_ceiling::RunCeiling;
 use crate::sse_events::ChatEvent;
+use crate::state::AppState;
 
 /// The statuses a goal can be in (the table's CHECK). A frame names only these.
 const GOAL_STATUSES: [&str; 7] = [
@@ -47,6 +63,9 @@ const STATUS_REASONS: [&str; 5] = [
     "replaced",
     "user_marked_met",
 ];
+
+/// The completion judge's closed verdict tokens, as a `goal_progress` frame names them (EP-7 S3).
+const VERDICTS: [&str; 4] = ["met", "not_met", "blocked", "unsure"];
 
 /// What a claim says the goal still allows; `None` where the goal sets no budget.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -294,7 +313,8 @@ fn unavailable() -> ClaimRefusal {
 }
 
 /// The `goal_progress` frame of a settled goal, or `None` when session-core answered a status this
-/// build does not know (the frame names closed tokens only).
+/// build does not know (the frame names closed tokens only). `last_verdict` is the judge's verdict on
+/// the goal's latest judged turn, or empty when none is known.
 #[must_use]
 pub(crate) fn progress_event(goal: &ThreadGoal, turn_no: u32) -> Option<ChatEvent> {
     let status = GOAL_STATUSES
@@ -305,6 +325,11 @@ pub(crate) fn progress_event(goal: &ThreadGoal, turn_no: u32) -> Option<ChatEven
         .iter()
         .copied()
         .find(|known| *known == goal.status_reason)
+        .unwrap_or("");
+    let last_verdict = VERDICTS
+        .iter()
+        .copied()
+        .find(|known| *known == goal.last_verdict)
         .unwrap_or("");
     Some(ChatEvent::GoalProgress {
         goal_id: goal.id.clone(),
@@ -318,7 +343,15 @@ pub(crate) fn progress_event(goal: &ThreadGoal, turn_no: u32) -> Option<ChatEven
         max_turns: goal.max_turns,
         status,
         status_reason,
+        last_verdict,
     })
+}
+
+/// A settled goal turn: the goal as session-core answered the settle, objective and criteria
+/// included for the judge, and the turn it settled.
+pub(crate) struct SettledGoalTurn {
+    pub(crate) goal: ThreadGoal,
+    pub(crate) turn_no: u32,
 }
 
 /// One claimed goal turn. Settled explicitly from the run's answer; any other exit of the stream
@@ -419,13 +452,17 @@ impl GoalTurnLedger {
         self.end = outcome;
     }
 
-    /// Settle the turn from its run's answer and return the `goal_progress` frame of the settled
-    /// goal; `None` when the settle failed (logged) or answered nothing to show.
-    pub(crate) async fn settle(mut self, settlement: &TurnSettlement) -> Option<ChatEvent> {
+    /// Settle the turn from its run's answer and return the settled goal with its turn number; `None`
+    /// when the settle failed (logged). The caller answers the goal's `goal_progress` frame and judges
+    /// the turn from it.
+    pub(crate) async fn settle(mut self, settlement: &TurnSettlement) -> Option<SettledGoalTurn> {
         self.settled = true;
         let request = self.request(settlement);
         let goal = send_settle(self.client.clone(), &self.bearer, request).await?;
-        progress_event(&goal, self.turn_no)
+        Some(SettledGoalTurn {
+            goal,
+            turn_no: self.turn_no,
+        })
     }
 
     fn request(&self, settlement: &TurnSettlement) -> SettleGoalTurnRequest {
@@ -484,6 +521,344 @@ async fn send_settle(
             None
         }
     }
+}
+
+/// The scope the verdict write checks. `RecordGoalVerdict` answers only a caller that holds it and
+/// is the `model-gateway` principal (see [`record_verdict`]).
+const VERDICT_SCOPE: &str = "session:write";
+/// The reason Auth Core records beside a minted verdict token.
+const VERDICT_REASON: &str = "model-gateway goal verdict";
+/// The Auth Core audience every Session Core token names.
+const SESSION_CORE_AUDIENCE: &str = "session-core";
+/// The longest lifetime a minted verdict token may claim; a longer one is refused as invalid.
+const MAX_VERDICT_TOKEN_TTL_SECONDS: u64 = 3600;
+/// The longest judge model name session-core keeps; a longer one is cut before the write.
+const JUDGE_MODEL_MAX_CHARS: usize = 128;
+/// The longest a verdict-token request to Auth Core may take.
+const VERDICT_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// The scope the judge's read of an unattended fire holds (EP-7 S6): session-core's
+/// `GetGoalTurnForJudge`, which answers only the judge's own principal.
+const JUDGE_READ_SCOPE: &str = "session:read";
+/// The reason Auth Core records beside a minted judge read token.
+const JUDGE_READ_REASON: &str = "model-gateway goal judge read";
+/// The longest a completion judge call may take. The judge answers one short structured verdict once
+/// the run has ended, so it may take longer than the source judge; a timeout leaves the goal as it
+/// stands (EP-7 S3).
+const GOAL_JUDGE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Why a verdict token could not be minted. It names no credential and no content.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum GoalVerdictTokenError {
+    #[error("the goal verdict credential is not configured: {0}")]
+    Configuration(&'static str),
+    #[error("a goal verdict token needs an organization")]
+    MissingOrganization,
+    #[error("Auth Core goal verdict token request failed: {0}")]
+    Transport(#[from] reqwest::Error),
+    #[error("Auth Core refused the goal verdict credential ({0})")]
+    Refused(reqwest::StatusCode),
+    #[error("Auth Core returned an invalid goal verdict token")]
+    InvalidResponse,
+}
+
+/// The gateway's minting client for the verdict write: its own service credential, exchanged at Auth
+/// Core for a short-lived `aud=session-core` token that holds [`VERDICT_SCOPE`] for one org. The
+/// long-lived credential is never logged or shown in `Debug`.
+///
+/// Auth Core grants the scope only when the registry does, and session-core accepts a write only from
+/// a persistent credential (`refuse_retention_exempt`). The gateway's `session-core` principal is
+/// registered zero-retention and holds neither today, so the mint is refused, the judge does not run
+/// and the goal stays as it is, until the owner decides the principal that records verdicts.
+/// `mail_task_bridge_auth.rs` explains why a durable write needs its own registry row rather than the
+/// gateway's.
+#[derive(Clone)]
+pub(crate) struct GoalVerdictTokens {
+    auth_core_url: String,
+    service_id: String,
+    credential: String,
+    http: reqwest::Client,
+}
+
+impl fmt::Debug for GoalVerdictTokens {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GoalVerdictTokens")
+            .field("auth_core_url", &self.auth_core_url)
+            .field("service_id", &self.service_id)
+            .field("credential", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MintedVerdictToken {
+    token: String,
+    expires_in_seconds: u64,
+    #[serde(default)]
+    audience: String,
+}
+
+impl GoalVerdictTokens {
+    /// Read from the gateway's own service credential, as the terminalization tokens are:
+    /// `MODEL_GATEWAY_SERVICE_ID` (default `model-gateway`) and `MODEL_GATEWAY_SERVICE_API_KEY`.
+    pub(crate) fn from_env() -> Result<Self, GoalVerdictTokenError> {
+        let auth_core_url = required_env("AUTH_CORE_URL")?;
+        let service_id = std::env::var("MODEL_GATEWAY_SERVICE_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "model-gateway".to_owned());
+        let credential = required_env("MODEL_GATEWAY_SERVICE_API_KEY")?;
+        Self::from_service_credential(&auth_core_url, service_id, credential)
+    }
+
+    pub(crate) fn from_service_credential(
+        auth_core_url: &str,
+        service_id: String,
+        credential: String,
+    ) -> Result<Self, GoalVerdictTokenError> {
+        let http = reqwest::Client::builder()
+            .timeout(VERDICT_TOKEN_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+        Ok(Self {
+            auth_core_url: auth_core_url.trim_end_matches('/').to_owned(),
+            service_id,
+            credential,
+            http,
+        })
+    }
+
+    /// A fresh token for `org_id`, holding [`VERDICT_SCOPE`]. One is minted per settled, completed goal
+    /// turn, so no cache is kept.
+    pub(crate) async fn verdict_token(
+        &self,
+        org_id: &str,
+    ) -> Result<String, GoalVerdictTokenError> {
+        self.mint(org_id, VERDICT_SCOPE, VERDICT_REASON).await
+    }
+
+    /// A fresh token for `org_id`, holding [`JUDGE_READ_SCOPE`], for the judge's read of an unattended
+    /// fire's goal (EP-7 S6). Minted per judged fire, so no cache is kept.
+    pub(crate) async fn read_token(&self, org_id: &str) -> Result<String, GoalVerdictTokenError> {
+        self.mint(org_id, JUDGE_READ_SCOPE, JUDGE_READ_REASON).await
+    }
+
+    /// Mint a short-lived `aud=session-core` token that holds `scope` for `org_id`, with `reason`
+    /// recorded beside it at Auth Core.
+    async fn mint(
+        &self,
+        org_id: &str,
+        scope: &str,
+        reason: &str,
+    ) -> Result<String, GoalVerdictTokenError> {
+        let org_id = org_id.trim();
+        if org_id.is_empty() {
+            return Err(GoalVerdictTokenError::MissingOrganization);
+        }
+        let mut credential = reqwest::header::HeaderValue::from_str(&self.credential)
+            .map_err(|_| GoalVerdictTokenError::Configuration("MODEL_GATEWAY_SERVICE_API_KEY"))?;
+        credential.set_sensitive(true);
+        let response = self
+            .http
+            .post(format!(
+                "{}/api/{SESSION_CORE_AUDIENCE}/internal-token",
+                self.auth_core_url
+            ))
+            .header("x-service-id", &self.service_id)
+            .header("x-service-api-key", credential)
+            .json(&serde_json::json!({
+                "orgId": org_id,
+                "scopes": [scope],
+                "reason": reason,
+            }))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(GoalVerdictTokenError::Refused(response.status()));
+        }
+        let minted = response
+            .json::<MintedVerdictToken>()
+            .await
+            .map_err(|_| GoalVerdictTokenError::InvalidResponse)?;
+        if minted.token.trim().is_empty()
+            || !(1..=MAX_VERDICT_TOKEN_TTL_SECONDS).contains(&minted.expires_in_seconds)
+            || minted.audience != SESSION_CORE_AUDIENCE
+        {
+            return Err(GoalVerdictTokenError::InvalidResponse);
+        }
+        Ok(minted.token)
+    }
+}
+
+fn required_env(name: &'static str) -> Result<String, GoalVerdictTokenError> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(GoalVerdictTokenError::Configuration(name))
+}
+
+/// The verdict write for one judged turn. The judge's reasons and evidence ids are kept as the parser
+/// left them (already held to the evidence rule); the judge model's name is cut to session-core's cap,
+/// so a long name from a provider cannot refuse the write.
+#[must_use]
+pub(crate) fn verdict_request(
+    goal_id: &str,
+    org_id: &str,
+    turn_no: u32,
+    judged: JudgeVerdict,
+    judge_model: &str,
+    judge_tokens: u64,
+) -> RecordGoalVerdictRequest {
+    RecordGoalVerdictRequest {
+        goal_id: goal_id.to_owned(),
+        org_id: org_id.to_owned(),
+        turn_no,
+        verdict: judged.verdict.as_str().to_owned(),
+        reasons: judged.reasons,
+        evidence_ids: judged.evidence_ids,
+        judge_model: judge_model.chars().take(JUDGE_MODEL_MAX_CHARS).collect(),
+        judge_tokens,
+    }
+}
+
+/// `RecordGoalVerdict` under the gateway's verdict token. `None` when session-core refused the write or
+/// could not be reached; the failure is logged by its code, never by content, and the goal stays as it
+/// was.
+pub(crate) async fn record_verdict(
+    mut client: ThreadGoalServiceClient<Channel>,
+    token: &str,
+    request: RecordGoalVerdictRequest,
+) -> Option<ThreadGoal> {
+    let turn_no = request.turn_no;
+    let authorization =
+        format!("Bearer {token}").parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>();
+    let Ok(authorization) = authorization else {
+        tracing::warn!(
+            turn_no,
+            "goal verdict token is not forwardable; the goal stays as it was"
+        );
+        return None;
+    };
+    let mut request = tonic::Request::new(request);
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    match client.record_goal_verdict(request).await {
+        Ok(response) => {
+            let response = response.into_inner();
+            response.goal.filter(|_| response.found)
+        }
+        Err(status) => {
+            tracing::warn!(code = ?status.code(), turn_no, "goal verdict write failed; the goal stays as it was");
+            None
+        }
+    }
+}
+
+/// `GetGoalTurnForJudge` under the judge's read token (EP-7 S6): the goal and the unattended turn one
+/// scheduled fire ledgered. The status is session-core's, and the caller maps it. Nothing is logged
+/// here, so no ids or content leave the call.
+pub(crate) async fn read_goal_turn_for_judge(
+    mut client: ThreadGoalServiceClient<Channel>,
+    token: &str,
+    request: GetGoalTurnForJudgeRequest,
+) -> Result<GetGoalTurnForJudgeResponse, tonic::Status> {
+    let authorization = format!("Bearer {token}")
+        .parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
+        .map_err(|_| tonic::Status::internal("goal judge read token is not forwardable"))?;
+    let mut request = tonic::Request::new(request);
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    client
+        .get_goal_turn_for_judge(request)
+        .await
+        .map(tonic::Response::into_inner)
+}
+
+/// One settled goal turn to judge (EP-7 S3, S6): the route the judge request copies, the model the turn
+/// served, the request id and org, the turn's retention, the goal, the turn's number, the answer the
+/// judge reads and the evidence it may cite.
+pub(crate) struct GoalJudgeCall<'a> {
+    pub(crate) route: &'a InferRequest,
+    pub(crate) served_model: &'a str,
+    pub(crate) request_id: &'a str,
+    pub(crate) org_id: &'a str,
+    pub(crate) zdr: bool,
+    pub(crate) goal: &'a ThreadGoal,
+    pub(crate) turn_no: u32,
+    pub(crate) answer: &'a str,
+    pub(crate) evidence: &'a [EvidenceLine],
+}
+
+/// The completion judge of one settled goal turn, shared by the attended settle (`sse.rs`) and the
+/// unattended judge route (EP-7 S3, S6). The verdict credential is minted first, so a judge call whose
+/// verdict could not be recorded never spends tokens. The judge's reply is held to the evidence rule and
+/// recorded. Best-effort: every failure is logged by its code, with no content, and leaves the goal as it
+/// stands. Returns the goal session-core answered the verdict write with.
+pub(crate) async fn judge_goal_turn(
+    state: &AppState,
+    inference_bearer: &VerifiedInferenceBearer,
+    call: GoalJudgeCall<'_>,
+) -> Option<ThreadGoal> {
+    let GoalJudgeCall {
+        route,
+        served_model,
+        request_id,
+        org_id,
+        zdr,
+        goal,
+        turn_no,
+        answer,
+        evidence,
+    } = call;
+    let Some(provider) = state.goal_verdict_tokens.as_ref() else {
+        tracing::warn!(%request_id, turn_no, "goal verdict credential is not configured; the judge did not run");
+        return None;
+    };
+    let token = match provider.verdict_token(org_id).await {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::warn!(%error, %request_id, turn_no, "goal verdict token was not minted; the judge did not run");
+            return None;
+        }
+    };
+    let prompt = goal_judge_prompt(&goal.objective, &goal.success_criteria, answer, evidence);
+    let request = goal_judge_request(route, served_model, request_id, org_id, prompt, zdr);
+    let mut client = state.inference_client.clone();
+    let reply = tokio::time::timeout(
+        GOAL_JUDGE_TIMEOUT,
+        client.infer(authenticated_inference_request(request, inference_bearer)),
+    )
+    .await;
+    let response = match reply {
+        Ok(Ok(response)) => response.into_inner(),
+        Ok(Err(status)) => {
+            tracing::warn!(code = ?status.code(), %request_id, turn_no, "goal judge call failed; the goal stays active");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(%request_id, turn_no, "goal judge call timed out; the goal stays active");
+            return None;
+        }
+    };
+    // The judge's tokens count toward the goal only when metered (EP-7 D2).
+    let judge_tokens = judge_metered_tokens(&response, route);
+    let supplied: Vec<String> = evidence.iter().map(|item| item.id.clone()).collect();
+    let judged = parse_goal_verdict(&response.content, &supplied);
+    let verdict = judged.verdict;
+    let record = verdict_request(
+        &goal.id,
+        org_id,
+        turn_no,
+        judged,
+        &response.model_used,
+        judge_tokens,
+    );
+    let recorded = record_verdict(state.thread_goal_client.clone(), &token, record).await?;
+    tracing::info!(%request_id, turn_no, verdict = verdict.as_str(), "goal verdict recorded");
+    Some(recorded)
 }
 
 #[cfg(test)]

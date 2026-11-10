@@ -171,6 +171,9 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'spaces.set_agent_state': exempt('agent_cannot_self_govern', 'external_write'),
   'spaces.revoke_agent': exempt('agent_cannot_self_govern', 'external_write'),
   'spaces.set_agent_wake_policy': exempt('agent_cannot_self_govern', 'external_write'),
+  'spaces.agent_binding.pin': exempt('agent_cannot_self_govern', 'external_write'),
+  'spaces.agent_memory.list': exempt('no_owner_executor', 'read'),
+  'spaces.agent_memory.delete': exempt('agent_cannot_self_govern', 'destructive'),
   'spaces.decide_approval': exempt('approval_authority', 'destructive'),
   'spaces.revoke_approval_grant': exempt('agent_cannot_self_govern', 'external_write'),
   'spaces.set_tool_policy': exempt('agent_cannot_self_govern', 'external_write'),
@@ -370,6 +373,10 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'chat.clear_goal': exempt('agent_cannot_self_govern', 'context_write'),
   'chat.continue_goal': exempt('no_owner_executor', 'external_write'),
   'chat.goal_auto_toggle': exempt('agent_cannot_self_govern', 'context_write'),
+  'chat.goal_mark_done': exempt('agent_cannot_self_govern', 'context_write'),
+  'chat.goal_reopen': exempt('agent_cannot_self_govern', 'context_write'),
+  // EP-7 S6: the person starts a goal-bound schedule; a goal never schedules itself.
+  'chat.goal_away_start': exempt('agent_cannot_self_govern', 'external_write'),
   'chat.stage_widget_followup': exempt('ui_state_only', 'read'),
   'chat.open_widget_link': exempt('ui_state_only', 'read'),
   'chat.open_mcp_app': exempt('ui_state_only', 'read'),
@@ -420,6 +427,8 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'agents.draft.save': exempt('agent_cannot_self_govern', 'external_write'),
   'agents.publish': exempt('agent_cannot_self_govern', 'external_write'),
   'agents.versions.list': exempt('no_owner_executor', 'read'),
+  'agents.preview': exempt('agent_cannot_self_govern', 'read'),
+  'agents.admitted_actions.list': exempt('no_owner_executor', 'read'),
 }
 
 /**

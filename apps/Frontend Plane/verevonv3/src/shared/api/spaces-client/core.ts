@@ -1255,6 +1255,85 @@ export async function revokeSpaceAgent(
 }
 
 /**
+ * Pin one bound agent in this room to one published version of its definition, or clear the pin
+ * (`version: null`) so the binding follows the published version again (EP-6 S9).
+ *
+ * With the gateway switch off the route is not registered, so the call gets a bare 404 and the UI
+ * should not offer the pin. Otherwise: 403 `forbidden` for anyone but the room's owner or manager,
+ * 404 `agent_version_not_found` for a version never published for this agent, 404
+ * `agent_binding_not_found`, 400 `invalid_policy` / `unsupported_policy_field`, and 503
+ * `agent_binding_unavailable`. The action contract is `spaces.agent_binding.pin`
+ * (shared/actions/domains/spaces/ws08.ts).
+ */
+export async function setSpaceAgentPin(
+  spaceRef: string,
+  bindingRef: string,
+  version: number | null,
+): Promise<{ bindingRef: string; pinnedVersion: number | null; changed: boolean }> {
+  const response = await requestJson<{
+    binding_ref?: string
+    pinned_version?: number | null
+    changed?: boolean
+  }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/agents/${encodeURIComponent(bindingRef)}/pin`,
+    { method: 'PUT', body: JSON.stringify({ version }) },
+  )
+  return {
+    bindingRef: response.binding_ref ?? bindingRef,
+    pinnedVersion: response.pinned_version ?? null,
+    changed: response.changed === true,
+  }
+}
+
+/**
+ * One note a bound agent kept in this Space (EP-6 P3-c). It is quoted context the agent may read, never an
+ * instruction, and it grants nothing. `withheld` marks a note learned before the room's audience last changed:
+ * it is listed here, but the agent does not recall it.
+ */
+export type SpaceAgentMemoryRow = {
+  memory_id: string
+  content: string
+  updated_at: string
+  provenance: string
+  source_label: string
+  thread_id: string
+  withheld: boolean
+}
+
+export type SpaceAgentMemoryList = {
+  memories: readonly SpaceAgentMemoryRow[]
+  withheld: number
+}
+
+/**
+ * The notes one bound agent kept in this room (`GET /api/v1/spaces/{space_ref}/memory?agent_subject_id=`, EP-6 P3-c).
+ * Control gates it to the room's owner or an admin, so anyone else gets 403 `space_memory_not_authorized`. Under
+ * Zero Data Retention the gateway refuses with 412 `zdr_feature_not_supported` naming the feature `named_agent`.
+ * With the gateway's Space memory switch off the route answers 404 `feature_unavailable`. The action contract is
+ * `spaces.agent_memory.list` (shared/actions/action-registry.ts).
+ */
+export function listSpaceAgentMemory(spaceRef: string, agentSubjectId: string): Promise<SpaceAgentMemoryList> {
+  return requestJson<SpaceAgentMemoryList>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/memory?agent_subject_id=${encodeURIComponent(agentSubjectId)}`,
+  )
+}
+
+/**
+ * Delete one note an agent kept in this room (`DELETE /api/v1/spaces/{space_ref}/memory/{memory_id}`, EP-6 P3-c).
+ * This is the Space's own delete route: the note is named by its id alone, and the room stops remembering it for
+ * every member. It is allowed under every retention setting. The action contract is `spaces.agent_memory.delete`.
+ */
+export function deleteSpaceAgentMemory(
+  spaceRef: string,
+  memoryId: string,
+): Promise<{ memory_id: string; deleted: boolean }> {
+  return requestJson<{ memory_id: string; deleted: boolean }>(
+    `/api/v1/spaces/${encodeURIComponent(spaceRef)}/memory/${encodeURIComponent(memoryId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+/**
  * One agent definition and every Space it is installed in, org-wide —
  * ADR-0002 (`apps/CROSS_SPACE_AGENT_REGISTRY_ADR_2026-08-19.md`). Each
  * installation's `status` is the Application binding's own status field, the

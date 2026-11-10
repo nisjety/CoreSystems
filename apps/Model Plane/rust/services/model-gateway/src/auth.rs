@@ -1456,6 +1456,23 @@ async fn verify_delegated_service_inference_bearer(
     Ok(Some(VerifiedInferenceBearer::new(&token)))
 }
 
+/// The judge route's caller check (EP-7 S6), held to the rules of the delegated service bearers: the
+/// verified token must be orchestrator-core's own service principal (its `service_id` is its `sub`),
+/// hold the judge scope, and name the org the request body names. A token that is not a well-formed
+/// principal is `401`; any other caller is `403`.
+pub(crate) fn verify_goal_judge_caller(claims: &Claims, org_id: &str) -> Result<(), StatusCode> {
+    if claims.principal_kind()? != PrincipalKind::Service
+        || claims.sub != SERVICE_GOAL_JUDGE_CALLER
+        || claims.service_id.as_deref() != Some(SERVICE_GOAL_JUDGE_CALLER)
+        || !claims.has_scope(SERVICE_SCOPE_MODEL_GOAL_JUDGE)
+        || claims.org_id.is_empty()
+        || claims.org_id != org_id
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
+}
+
 async fn decode_delegated_bearer(
     headers: &HeaderMap,
     header_name: &'static str,
@@ -1841,6 +1858,13 @@ const CONTROL_SPACE_DELETION_SERVICE: &str = "service:control-space-deletion";
 /// authenticates to audit-core/org-core/billing-core.
 const MAIL_TASK_BRIDGE_CALLER_SERVICE: &str = "service:verevon-gateway";
 const SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD: &str = "mail-task:prepare-thread";
+/// EP-7 S6: the one caller that asks for the completion judge of an unattended goal fire,
+/// orchestrator-core, which runs the scheduled fire (owner decision D9). Only this principal holds
+/// the judge scope.
+const SERVICE_GOAL_JUDGE_CALLER: &str = "service:orchestrator-core";
+const SERVICE_SCOPE_MODEL_GOAL_JUDGE: &str = "model:goal_judge";
+/// EP-7 S6: the judge route's path, written as the router names it (`:goal_id` is one segment).
+pub const GOAL_JUDGE_TURN_PATH: &str = "/internal/v1/goals/:goal_id/judge-turn";
 
 /// One row of the service route table: a service principal may call `method path` when it holds
 /// `scope` and, if `service` is set, is exactly that service. `service: None` means any service
@@ -1898,6 +1922,15 @@ pub const SERVICE_ROUTE_GRANTS: &[ServiceRouteGrant] = &[
         scope: SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD,
         flag: None,
     },
+    // EP-7 S6: orchestrator-core asks for the completion judge of one unattended goal fire. The route
+    // answers 404 while its two switches are off (goal_unattended), so this row carries no flag.
+    ServiceRouteGrant {
+        service: Some(SERVICE_GOAL_JUDGE_CALLER),
+        method: "POST",
+        path: GOAL_JUDGE_TURN_PATH,
+        scope: SERVICE_SCOPE_MODEL_GOAL_JUDGE,
+        flag: None,
+    },
     // E3.6-8: the two routes below exist for a service only while their switch is on.
     ServiceRouteGrant {
         service: None,
@@ -1919,11 +1952,35 @@ pub const SERVICE_ROUTE_GRANTS: &[ServiceRouteGrant] = &[
 pub const SERVICE_INFERENCE_BEARER_HEADER: &str = "x-inference-authorization";
 const SERVICE_INFERENCE_BEARER_AUDIENCE: &str = "inference-core";
 
+/// Whether a route-table `template` names the request `path`. A `:name` segment of the template
+/// matches one non-empty segment of the path; every other segment must be equal, so a template with
+/// no parameter matches exactly what it always did.
+fn route_path_matches(template: &str, path: &str) -> bool {
+    let mut template_segments = template.split('/');
+    let mut path_segments = path.split('/');
+    loop {
+        match (template_segments.next(), path_segments.next()) {
+            (None, None) => return true,
+            (Some(expected), Some(actual)) => {
+                let segment_ok = if expected.starts_with(':') {
+                    !actual.is_empty()
+                } else {
+                    expected == actual
+                };
+                if !segment_ok {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
 /// Whether `claims`, a service principal, may call `method path`.
 fn service_route_allowed(claims: &Claims, method: &str, path: &str) -> bool {
     SERVICE_ROUTE_GRANTS.iter().any(|grant| {
         grant.method == method
-            && grant.path == path
+            && route_path_matches(grant.path, path)
             && grant.service.is_none_or(|service| claims.sub == service)
             && claims.has_scope(grant.scope)
     })
@@ -1946,7 +2003,7 @@ fn service_route_switched_off(
 ) -> bool {
     SERVICE_ROUTE_GRANTS.iter().any(|grant| {
         grant.method == method
-            && grant.path == path
+            && route_path_matches(grant.path, path)
             && grant.service.is_none_or(|service| claims.sub == service)
             && claims.has_scope(grant.scope)
             && grant

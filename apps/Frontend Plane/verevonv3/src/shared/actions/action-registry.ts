@@ -1457,7 +1457,8 @@ const chatSetGoalInput = z
   .strict()
 
 // `expectedRevision` is the revision the goal bar showed, the server's compare-and-set. The status a
-// person may write is `active` or `paused` here; `met` and the stop states come only from the server.
+// person may write is `active` or `paused` here; `met` is marked only by `chat.goal_mark_done` (EP-7 S3), and the
+// stop states come only from the server.
 const chatUpdateGoalInput = z
   .object({
     threadId: z.string().min(1).max(128),
@@ -1493,6 +1494,38 @@ const chatGoalAutoToggleInput = z
     threadId: z.string().min(1).max(128),
     goalId: z.string().min(1).max(128),
     on: z.boolean(),
+  })
+  .strict()
+
+// The person's own override of the judge (EP-7 S3): mark the open goal done, or reopen a met or blocked one. Only
+// the goal, its thread and the revision the goal bar showed; the server decides which status change is allowed.
+const chatGoalMarkDoneInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+    goalId: z.string().min(1).max(128),
+    expectedRevision: z.number().int().min(1),
+  })
+  .strict()
+
+const chatGoalReopenInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+    goalId: z.string().min(1).max(128),
+    expectedRevision: z.number().int().min(1),
+  })
+  .strict()
+
+// "Keep working while away" (EP-7 S6): the person's own start of a goal-bound schedule. The schedule is the stored
+// consent, so the form names the read tools it may use, the most runs, how often it fires (the four intervals the
+// goal bar offers) and for how many days. No org or user field: the server reads the owner from the session.
+const chatGoalAwayStartInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+    goalId: z.string().min(1).max(128),
+    tools: z.array(z.string().trim().min(1).max(128)).min(1).max(32),
+    maxRuns: z.number().int().min(1).max(20),
+    everyMinutes: z.union([z.literal(30), z.literal(60), z.literal(240), z.literal(1440)]),
+    days: z.number().int().min(1).max(90),
   })
   .strict()
 
@@ -2606,6 +2639,60 @@ const agentVersionsListOutput = z.object({
   ),
 })
 
+// The builder's preview (EP-6-S8): one question answered by an agent's saved draft in a temporary chat.
+// Strict and bounded: it names the agent and the question, and nothing a thread, a Space or a mention
+// would bind it to. The BFF enforces the same refusals and the builder's access check, and stores nothing.
+const agentPreviewInput = z
+  .object({
+    agentRef: z.string().trim().min(1).max(128),
+    content: z.string().trim().min(1).max(32_000),
+  })
+  .strict()
+
+// The owner actions an org's run view can offer (EP-6 S11), read by the agent presets. Strict and
+// empty: the organisation comes from the session. The answer is a mode and action ids, never a schema.
+const agentAdmittedActionsListInput = z.object({}).strict()
+
+const agentAdmittedActionsListOutput = z.object({
+  mode: z.string(),
+  action_ids: z.array(z.string()),
+})
+
+// EP-6 P3-c: the notes one bound agent kept in one Space (`GET /api/v1/spaces/{space_ref}/memory?agent_subject_id=`).
+// The Space comes from the path, and Control decides who may read it (the room's owner or an admin). The notes
+// are quoted context and grant the agent nothing. A Zero Data Retention caller is refused as `named_agent`.
+const spaceAgentMemoryListInput = z.object({
+  spaceRef: z.string().min(1),
+  agentSubjectId: z.string().min(1).max(64),
+})
+
+const spaceAgentMemoryListOutput = z.object({
+  memories: z.array(
+    z.object({
+      memory_id: z.string(),
+      content: z.string(),
+      updated_at: z.string(),
+      provenance: z.string(),
+      source_label: z.string(),
+      thread_id: z.string(),
+      withheld: z.boolean(),
+    }),
+  ),
+  withheld: z.number().int().min(0),
+})
+
+// EP-6 P3-c: one note of one bound agent, removed for every member of the Space through the Space's own delete
+// route. It names the memory id only, and Control decides who may delete (the room's owner or an admin).
+const spaceAgentMemoryDeleteInput = z.object({
+  spaceRef: z.string().min(1),
+  memoryId: z.string().min(1).max(64),
+})
+
+const spaceAgentMemoryDeleteOutput = z.object({
+  memory_id: z.string(),
+  deleted: z.boolean(),
+})
+
 // Registry entries are the product contract shared by humans and the Model Plane.
 export const actionRegistry = [
   {
@@ -3589,6 +3676,28 @@ export const actionRegistry = [
     reversible: false,
     inputSchema: memoryProfileRebuildInput,
     outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'spaces.agent_memory.list',
+    label: 'List a Space agent\'s notes',
+    description: 'List the notes one bound agent kept in this room, for the room\'s owner or manager. Read only. The notes are quoted context and grant the agent nothing. Refused under Zero Data Retention.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceAgentMemoryListInput,
+    outputSchema: spaceAgentMemoryListOutput,
+  },
+  {
+    id: 'spaces.agent_memory.delete',
+    label: 'Delete a Space agent\'s note',
+    description: 'Delete one note an agent kept in this room. The room stops remembering it for every member. Destructive and non-recoverable; allowed under every retention setting.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: spaceAgentMemoryDeleteInput,
+    outputSchema: spaceAgentMemoryDeleteOutput,
   },
   {
     id: 'learning.accept_skill',
@@ -5112,6 +5221,39 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'chat.goal_mark_done',
+    label: 'Mark the conversation goal done',
+    description: 'Mark the conversation\'s open goal met, as the person\'s own call over the judge\'s verdict, under a compare-and-set on the revision the goal bar showed. The goal closes, so no later turn is told it and the goal pump stops. Owner only, with the same refusals as an edit. Never model-executable: the person closes a goal, and the model never does.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatGoalMarkDoneInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.goal_reopen',
+    label: 'Reopen the conversation goal',
+    description: 'Reopen the conversation\'s met or blocked goal as active, under a compare-and-set on the revision the goal bar showed, so later turns are told it again and it can continue. Owner only, with the same refusals as an edit. Never model-executable: a goal never reopens itself.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatGoalReopenInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.goal_away_start',
+    label: 'Keep the conversation goal working while away',
+    description: 'Start a schedule that keeps one of the person\'s own goals working while they are away: at most 20 runs, one every 30 minutes, hourly, every four hours or daily, for at most 90 days. Each run is read only and runs as the service under a stored-consent contract that names the read tools; each run answers in its own scheduled thread, and a change it would make is held as a draft. Owner only, on an active goal in a durable personal conversation, and the server reads the switch, the judge and the zero-retention state again. Refused under zero data retention, in a Space conversation and while the feature is off. Never model-executable: the person starts it, and a goal never schedules itself.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatGoalAwayStartInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'chat.stage_widget_followup',
     label: 'Stage a follow-up an inline widget proposed',
     description: 'Show a follow-up question an inline widget in a chat answer proposed as a chip under that widget, labelled as coming from the widget. Nothing is sent: only the person\'s click on the chip puts it through the answer\'s ordinary follow-up handler, the same one the answer\'s suggested follow-ups use. At most one chip per widget at a time, five per answer per minute, and 500 characters; anything over is dropped. Never model-executable: a widget is model output, and the person decides every turn it proposes.',
@@ -5660,6 +5802,28 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: agentRefInput,
     outputSchema: agentVersionsListOutput,
+  },
+  {
+    id: 'agents.preview',
+    label: 'Preview agent draft',
+    description: 'Ask one question of an agent\'s saved draft in a temporary chat, to see how it answers before it is published. The preview runs in read-only mode with zero retention, and stores nothing (no thread, no transcript, no memory). It answers from the saved draft, not from unsaved edits on screen. Org admin, the agent\'s creator, or a manager of the room it was created in.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: agentPreviewInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'agents.admitted_actions.list',
+    label: 'List admitted owner actions',
+    description: 'List the owner actions this organization admits for agent runs, so a preset that needs one is offered only where it is admitted. Read only: it shows which actions are admitted, not what an agent may do with them.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: agentAdmittedActionsListInput,
+    outputSchema: agentAdmittedActionsListOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]
 

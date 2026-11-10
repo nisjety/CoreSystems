@@ -341,6 +341,30 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_GOAL_JUDGE_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-7 S3 completion judge: judges a settled, completed goal turn and records its verdict. Needs MODEL_GATEWAY_THREAD_GOALS_ENABLED. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_GOAL_JUDGE_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_NAMED_AGENT_THREADS",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-6 P3: a thread listing takes the agent filter (one named agent's threads). Off, the parameter is ignored. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_NAMED_AGENT_THREADS", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT",
       "kind": "switch",
       "owner": "model-plane",

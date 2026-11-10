@@ -10396,6 +10396,9 @@ impl SessionCore for SessionService {
                       AND (NULLIF($7, '') IS NULL OR t.id = $7)
                       AND ($11 = 'all' OR (($11 = 'archived') = (t.archived_at IS NOT NULL)))
                       AND (NOT $12::BOOLEAN OR t.starred_at IS NOT NULL)
+                      AND (NULLIF($14, '') IS NULL
+                           OR EXISTS (SELECT 1 FROM runs ar
+                                      WHERE ar.thread_id = t.id AND ar.agent_subject_id = $14))
                       AND ($8::BOOLEAN IS NULL
                            OR ((t.pinned_at IS NOT NULL), t.last_activity_at, t.id)
                               < ($8::BOOLEAN, $9::TIMESTAMPTZ, $10::TEXT))
@@ -10492,6 +10495,7 @@ impl SessionCore for SessionService {
             .bind(archive_state)
             .bind(req.starred_only)
             .bind(history_floor)
+            .bind(&req.agent_subject_id)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
@@ -18218,6 +18222,7 @@ mod tests {
                 user_id: user_id.clone(),
                 start_key: format!("managed-space-start-{suffix}"),
                 terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+                agent_version_pin: None,
             },
             false,
         )
@@ -18338,6 +18343,7 @@ mod tests {
             user_id: user_id.clone(),
             start_key: format!("managed-race-start-{suffix}"),
             terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+            agent_version_pin: None,
         };
         let first_pool = pool.clone();
         let second_pool = pool.clone();
@@ -19812,6 +19818,7 @@ mod tests {
                 user_id: "user-1".to_owned(),
                 start_key: format!("managed-terminal-{suffix}"),
                 terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+                agent_version_pin: None,
             },
             false,
         )
@@ -23688,6 +23695,7 @@ mod waived_run_count_db_tests {
                 user_id: user.to_owned(),
                 start_key: key.to_owned(),
                 terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+                agent_version_pin: None,
             },
             retention,
         )

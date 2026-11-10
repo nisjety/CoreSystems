@@ -33,14 +33,14 @@ type Server struct {
 	aclRepo                    *users.AclRepository
 	spaceRepo                  *spaces.Repository
 	// WS05-S5: Space decision audit events (flag-gated, off by default).
-	spaceDecisionAudit decisionAuditSink
-	spaceOrgPolicy             spaceOrgPolicyConfig // org-admin Space policy (WS03-S3)
-	peopleDirectory            peopleDirectory      // people search (WS04-S3)
-	mailTaskService            *mailtask.Service
-	mailTaskUserLookup         MailTaskUserLookup
-	mailTaskEffectPolicy       MailTaskEffectPolicyResolver
-	runActionAuthority         RunActionAuthorityResolver
-	scheduledStepAuthority     ScheduledStepAuthorityResolver
+	spaceDecisionAudit     decisionAuditSink
+	spaceOrgPolicy         spaceOrgPolicyConfig // org-admin Space policy (WS03-S3)
+	peopleDirectory        peopleDirectory      // people search (WS04-S3)
+	mailTaskService        *mailtask.Service
+	mailTaskUserLookup     MailTaskUserLookup
+	mailTaskEffectPolicy   MailTaskEffectPolicyResolver
+	runActionAuthority     RunActionAuthorityResolver
+	scheduledStepAuthority ScheduledStepAuthorityResolver
 	// scheduleContractsEnabled is SCHEDULE_CONTRACT_ENABLED. Off by default: a
 	// create request carrying a stored-consent contract is refused.
 	scheduleContractsEnabled bool
@@ -54,7 +54,12 @@ type Server struct {
 	// sharedImportDecisions is CONTROL_SPACE_SHARED_IMPORT (WS14-S1). Off: a
 	// shared Space import-decision answers 404 shared_import_disabled and the
 	// execution decision keeps the personal-only path.
-	sharedImportDecisions  bool
+	sharedImportDecisions bool
+
+	// spaceMemoryDecisions is CONTROL_SPACE_MEMORY_DECISIONS (EP-8 S7). Off: the
+	// memory-decision route answers 404 and the BFF reports not authorized.
+	spaceMemoryDecisions bool
+
 	port                   string
 	httpClient             *http.Client
 	orgService             string

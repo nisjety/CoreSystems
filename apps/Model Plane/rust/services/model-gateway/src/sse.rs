@@ -431,6 +431,16 @@ fn agent_pin(
     }))
 }
 
+/// The version a managed run records on `runs.metadata.agent` (EP-6 S9): its id and digest only,
+/// never the instructions or the tool list.
+fn agent_version_pin_of(pin: &AgentPin) -> mp_contracts::model_plane::v1::AgentVersionPin {
+    mp_contracts::model_plane::v1::AgentVersionPin {
+        agent_ref: pin.agent_ref.clone(),
+        version: pin.version,
+        digest: pin.digest.clone(),
+    }
+}
+
 /// Narrows a turn to its agent's tool allowlist: one more intersection beside the binding policy
 /// (BFF), the org policy and the WS05 bindings, so it only ever removes. The gateway holds no binding
 /// from a client-declared or built-in tool name to its governed capability (execution-core does), so
@@ -2048,6 +2058,9 @@ pub async fn invoke_stream_sse(
             "agent version pinned for the turn"
         );
     }
+    // The version a managed run records on `runs.metadata.agent` (EP-6 S9): ids and a digest only.
+    // None with the switch off, so the start carries no pin and nothing is recorded.
+    let agent_version_pin = agent_pin.as_ref().map(agent_version_pin_of);
     if let Err(code) = narrow_to_agent_allowlist(
         agent_pin.as_ref(),
         req.execute_granted,
@@ -3025,6 +3038,7 @@ pub async fn invoke_stream_sse(
             req.idempotency_key.as_deref(),
         ),
         req.wake_context.as_ref(),
+        agent_version_pin.as_ref(),
     ))
     .await
     {
@@ -10969,6 +10983,69 @@ async fn judge_sources(
     }
 }
 
+/// The evidence the goal judge may cite for a settled run (EP-7 S3): the knowledge search that
+/// grounded the answer, and each round's tool-call count. Ids and counts only. The run's response
+/// names no tool calls, so none are named here; the answer excerpt is the only content the judge reads
+/// besides the goal itself.
+fn goal_judge_evidence(response: &RunAgentResponse) -> Vec<crate::goal_judge::EvidenceLine> {
+    let mut evidence = Vec::new();
+    if response.grounded {
+        evidence.push(crate::goal_judge::EvidenceLine {
+            id: "tool:knowledge_search".to_owned(),
+            line: "knowledge_search status=ok".to_owned(),
+        });
+    }
+    for round in &response.round_timing {
+        if round.tool_count > 0 {
+            evidence.push(crate::goal_judge::EvidenceLine {
+                id: format!("round:{}", round.round),
+                line: format!("round {} tool_calls={}", round.round, round.tool_count),
+            });
+        }
+    }
+    evidence.truncate(crate::goal_judge::MAX_EVIDENCE_LINES);
+    evidence
+}
+
+/// The completion judge of a settled goal turn (EP-7 S3): whether the run's answer meets the goal's
+/// criteria, judged on the evidence the run offers. It records the verdict and the judge's own metered
+/// tokens on the turn, and answers the goal with one more `goal_progress` frame carrying the verdict.
+/// Best-effort: every failure is logged by its code and leaves the goal as it stands (active), so the
+/// user closes it by hand.
+async fn judge_settled_goal_turn(
+    state: &AppState,
+    inference_bearer: &VerifiedInferenceBearer,
+    route: &InferRequest,
+    served_model: &str,
+    request_id: &str,
+    org_id: &str,
+    zdr: bool,
+    settled: &crate::thread_goal::SettledGoalTurn,
+    answer: &str,
+    evidence: &[crate::goal_judge::EvidenceLine],
+) -> Option<crate::sse_events::ChatEvent> {
+    let turn_no = settled.turn_no;
+    // The judge is the one shared path (`thread_goal::judge_goal_turn`), the same one the unattended
+    // judge route runs (EP-7 S6): credential first, then the call, then the verdict write.
+    let recorded = crate::thread_goal::judge_goal_turn(
+        state,
+        inference_bearer,
+        crate::thread_goal::GoalJudgeCall {
+            route,
+            served_model,
+            request_id,
+            org_id,
+            zdr,
+            goal: &settled.goal,
+            turn_no,
+            answer,
+            evidence,
+        },
+    )
+    .await?;
+    crate::thread_goal::progress_event(&recorded, turn_no)
+}
+
 /// Re-ask the question and see whether the answer holds.
 ///
 /// The signal available exactly when retrieval had nothing to say: truth is
@@ -14431,8 +14508,10 @@ fn agentic_run_stream(
                 ),
                 (None, _) => None,
             };
+            let outcome =
+                crate::thread_goal::settle_outcome(classify_agentic_run_outcome(&response.status));
             let settlement = crate::thread_goal::TurnSettlement::of_run(
-                crate::thread_goal::settle_outcome(classify_agentic_run_outcome(&response.status)),
+                outcome,
                 response.usage.as_ref(),
                 progress,
                 cost_usd,
@@ -14443,8 +14522,49 @@ fn agentic_run_stream(
                 &route.provider_hint,
                 &route.subscription_connection_id,
             );
-            if let Some(frame) = ledger.settle(&settlement).await {
-                let _ = tx.send(Ok(frame.to_sse(&request_id))).await;
+            if let Some(settled) = ledger.settle(&settlement).await {
+                if let Some(frame) =
+                    crate::thread_goal::progress_event(&settled.goal, settled.turn_no)
+                {
+                    let _ = tx.send(Ok(frame.to_sse(&request_id))).await;
+                }
+                // EP-7 S3: the completion judge judges a completed turn that has an answer. A ZDR or
+                // waived turn is never judged, so no content reaches the judge or the verdict write
+                // for one; a goal turn is never either (no goal exists under ZDR).
+                if crate::goal_judge::should_judge_turn(
+                    crate::goal_judge::goal_judge_enabled(),
+                    outcome,
+                ) && !zdr
+                    && retention_class.is_none()
+                    && !response.final_output.trim().is_empty()
+                {
+                    let judge_route = InferRequest {
+                        model: model.clone(),
+                        provider_hint: route.provider_hint.clone(),
+                        subscription_connection_id: route.subscription_connection_id.clone(),
+                        min_privacy_tier: min_privacy_tier_wire,
+                        run_id: run.run_id.clone(),
+                        zdr,
+                        ..Default::default()
+                    };
+                    let evidence = goal_judge_evidence(&response);
+                    if let Some(frame) = judge_settled_goal_turn(
+                        &state,
+                        &inference_bearer,
+                        &judge_route,
+                        &model,
+                        &request_id,
+                        &org_id,
+                        zdr,
+                        &settled,
+                        &response.final_output,
+                        &evidence,
+                    )
+                    .await
+                    {
+                        let _ = tx.send(Ok(frame.to_sse(&request_id))).await;
+                    }
+                }
             }
         }
 

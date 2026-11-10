@@ -39,6 +39,7 @@ import type { AgentBlueprint } from '@/features/agents/lib/verevon-agent-page-ty
 import { controlFocusClass } from '@/features/agents/lib/verevon-agent-page-styles'
 import {
   getPresetAgent,
+  presetAgentActionsEnabled,
   presetAgentChatActions,
   presetAgents,
   resolvePresetAgent,
@@ -46,6 +47,7 @@ import {
   type PresetAgentId,
   type ResolvedPresetAgent,
 } from '@/shared/actions/preset-agents'
+import { listAdmittedOwnerActions } from '@/shared/api/agent-actions-client'
 import { listAuthored, type AuthoredBehaviour } from '@/shared/api/authored-kinds-client'
 import {
   streamChat,
@@ -282,6 +284,18 @@ export default function AgentRunConsole() {
   const authoredPresetList = createMemo<AuthoredBehaviour[]>(() =>
     authoredPresets.error != null ? [] : authoredPresets() ?? [],
   )
+
+  // The owner actions this org admits for presets (EP-6 S11). Read once, and only while the preset
+  // switch is on. Until it has answered, and on any failure, the set stays empty: a preset that needs
+  // an owner action then reads "Not available in this org" and sends nothing.
+  const [admittedActions] = createResource(async () => {
+    if (!presetAgentActionsEnabled()) return null
+    return listAdmittedOwnerActions()
+  })
+  const admittedActionIds = createMemo<ReadonlySet<string>>(() => {
+    const admitted = admittedActions.error != null ? null : admittedActions() ?? null
+    return new Set(admitted?.actionIds ?? [])
+  })
 
   const [runs] = createResource(
     () => {
@@ -731,10 +745,11 @@ export default function AgentRunConsole() {
   const runTask = () => {
     const content = goal().trim()
     if (!content || isActive()) return
-    // An unavailable preset sends nothing, so the check runs before the run state is reset. The
-    // empty Set stands in until an admitted-set client exists; with the switch off this is a no-op.
+    // An unavailable preset sends nothing, so the check runs before the run state is reset. The admitted
+    // set is empty until it has loaded and on any failure, so no owner action is sent unless the org
+    // admits it; with the switch off this is a no-op.
     const preset = presetId() ? getPresetAgent(presetId()!) : undefined
-    const resolved: ResolvedPresetAgent | undefined = preset ? resolvePresetAgent(preset, new Set<string>()) : undefined
+    const resolved: ResolvedPresetAgent | undefined = preset ? resolvePresetAgent(preset, admittedActionIds()) : undefined
     if (resolved && !resolved.available) return
 
     // A new run aborts the previous controller first — no leaked streams. Any
@@ -1006,6 +1021,7 @@ export default function AgentRunConsole() {
               isActive={isActive()}
               modeId={modeId()}
               presetId={presetId()}
+              admittedActionIds={admittedActionIds()}
               authoredPresets={authoredPresetList()}
               onAuthoredPreset={applyAuthoredPreset}
               onBlueprint={setBlueprintId}
@@ -1197,6 +1213,7 @@ function Launcher(props: {
   isActive: boolean
   modeId: string
   presetId: PresetAgentId | null
+  admittedActionIds: ReadonlySet<string>
   authoredPresets: AuthoredBehaviour[]
   onAuthoredPreset: (preset: AuthoredBehaviour) => void
   onBlueprint: (id: AgentBlueprint['id']) => void
@@ -1217,6 +1234,7 @@ function Launcher(props: {
     <div class="verevon-run-launcher">
       <PresetPicker
         activeId={props.presetId}
+        admitted={props.admittedActionIds}
         disabled={props.isActive}
         onSelect={props.onPreset}
       />
@@ -1390,6 +1408,8 @@ function Launcher(props: {
 
 function PresetPicker(props: {
   activeId: PresetAgentId | null
+  /** The owner actions this org admits (EP-6 S11); empty until they have loaded. */
+  admitted: ReadonlySet<string>
   disabled: boolean
   onSelect: (preset: PresetAgent) => void
 }) {
@@ -1401,7 +1421,7 @@ function PresetPicker(props: {
         <For each={presetAgents}>
           {(preset) => {
             const active = () => props.activeId === preset.id
-            const available = () => resolvePresetAgent(preset, new Set<string>()).available
+            const available = () => resolvePresetAgent(preset, props.admitted).available
             return (
               <button
                 type="button"

@@ -235,6 +235,10 @@ services:
       MODEL_ENTITLEMENT_ADMIN_ENABLED: ${MODEL_ENTITLEMENT_ADMIN_ENABLED:-false}
       # EP-3 S8: save a document artifact version to knowledge from the Output panel. Only the literal `true`.
       CHAT_ARTIFACT_PROMOTE_ENABLED: ${CHAT_ARTIFACT_PROMOTE_ENABLED:-false}
+      # EP-6 S7/S8: the agent builder routes (draft, publish, versions) and the draft preview of a chat turn.
+      # Only the literal `true` enables them; off, the builder routes answer 404. Pairs with VITE_AGENT_BUILDER
+      # on the frontend service, which mounts the page. Both default off.
+      AGENT_DEFINITION_VERSIONS: ${AGENT_DEFINITION_VERSIONS:-false}
       # WS03-S5: map Control's typed Space denials to the browser envelope. Off restores pass-through.
       # A rollout control only; it never decides who may do anything.
       SPACE_DENIALS_TYPED: ${SPACE_DENIALS_TYPED:-true}
@@ -477,6 +481,9 @@ services:
       VITE_PLAN_EXECUTE_ENABLED: ${VITE_PLAN_EXECUTE_ENABLED:-false}
       VITE_DEEP_RESEARCH_PLAN_TURN: ${VITE_DEEP_RESEARCH_PLAN_TURN:-false}
       VITE_CHAT_PROJECTS_ENABLED: ${VITE_CHAT_PROJECTS_ENABLED:-false}
+      # EP-6 S8: mounts the agent builder page at /agents/:agentId/edit. Only the literal `true`; pairs with
+      # AGENT_DEFINITION_VERSIONS on the gateway, without which the page cannot load a draft.
+      VITE_AGENT_BUILDER: ${VITE_AGENT_BUILDER:-false}
       # WS08-S4: images ride as parts. Flip together with the gateway's CHAT_VISION_AS_PARTS_ENABLED.
       VITE_CHAT_VISION_AS_PARTS_ENABLED: ${VITE_CHAT_VISION_AS_PARTS_ENABLED:-false}
     healthcheck:

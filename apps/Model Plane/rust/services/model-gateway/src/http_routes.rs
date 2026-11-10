@@ -358,6 +358,12 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
             "/v1/internal/mail-task/prepare-thread",
             post(prepare_mail_task_thread_for_gateway_bff),
         )
+        // EP-7 S6: the completion judge of one unattended goal fire, called by orchestrator-core
+        // (`auth::SERVICE_ROUTE_GRANTS` names that caller). 404 while its two switches are off.
+        .route(
+            crate::auth::GOAL_JUDGE_TURN_PATH,
+            post(crate::goal_unattended::judge_goal_turn_route),
+        )
         .route("/v1/threads/:thread_id/messages", get(list_thread_messages))
         // Move a thread's active branch: a version switch or a rewind (build plan WS17 S8).
         .route("/v1/threads/:thread_id/branch", post(branch_thread))
@@ -13830,6 +13836,33 @@ struct ListThreadsQuery {
     /// Lists only the owner's starred threads. Session Core applies the filter
     /// inside the owner-bound query, so a starred listing pages like any other.
     starred_only: Option<bool>,
+    /// Lists only the threads one named agent was woken in (EP-6 P3), by its agent subject id:
+    /// 1 to 128 bytes of letters, digits, `_`, `.`, `:` or `-`. Read only while
+    /// `MODEL_GATEWAY_NAMED_AGENT_THREADS` is on; off, the parameter is ignored.
+    agent: Option<String>,
+}
+
+/// The switch that lets a thread listing narrow to one named agent's threads (EP-6 P3). Read at
+/// each call, as the thread switches are; only the literal `true` turns it on.
+const NAMED_AGENT_THREADS_ENV: &str = "MODEL_GATEWAY_NAMED_AGENT_THREADS";
+
+/// Whether the named-agent thread filter is on in this process (EP-6 P3).
+fn named_agent_threads_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(NAMED_AGENT_THREADS_ENV).ok().as_deref())
+}
+
+/// The longest agent subject id a thread listing filters by (EP-6 P3).
+const NAMED_AGENT_FILTER_MAX_BYTES: usize = 128;
+
+/// Whether `value` may stand as the `agent` filter of a thread listing: 1 to 128 bytes of ASCII
+/// letters, digits, `_`, `.`, `:` or `-`. Anything else is refused rather than cleaned, so the
+/// filter never matches a different agent than the one named.
+fn is_named_agent_filter(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= NAMED_AGENT_FILTER_MAX_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-'))
 }
 
 /// The wire name of a derived attention state (WS16 S1). `None` for the unspecified value, which
@@ -14196,6 +14229,24 @@ async fn list_threads(
             ))
         }
     };
+    // EP-6 P3: the named-agent filter is read only while its switch is on. Off, the parameter is
+    // ignored outright, so the listing is what it was before the parameter existed.
+    let agent_subject_id = if named_agent_threads_enabled() {
+        query
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_owned()
+    } else {
+        String::new()
+    };
+    if !agent_subject_id.is_empty() && !is_named_agent_filter(&agent_subject_id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "agent must be 1 to 128 letters, digits, or _ . : -" })),
+        ));
+    }
 
     let response = state
         .session_client
@@ -14213,6 +14264,7 @@ async fn list_threads(
                 thread_id: query.thread_id.unwrap_or_default(),
                 archived: archived as i32,
                 starred_only: query.starred_only.unwrap_or(false),
+                agent_subject_id,
             },
             &bearer,
         )?)
@@ -15718,7 +15770,8 @@ const SPACE_MEMORY_MAX_DECISION_REF_BYTES: usize = 512;
 const SPACE_MEMORY_MAX_DECISION_TOKEN_BYTES: usize = 8 * 1024;
 
 /// `POST /v1/spaces/:space_id/memory/{list,delete}` body. The Control `model.space.memory.manage`
-/// decision rides in the body; `memory_id` only on a delete.
+/// decision rides in the body; `memory_id` only on a delete; `agent_subject_id` only on a list that
+/// names one agent (EP-6 P3).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpaceMemoryBody {
@@ -15730,6 +15783,8 @@ struct SpaceMemoryBody {
     memory_id: String,
     #[serde(default)]
     limit: Option<u32>,
+    #[serde(default)]
+    agent_subject_id: String,
 }
 
 /// The decision and ids of a Space memory call, bounded; `None` is a malformed request.
@@ -15747,7 +15802,11 @@ fn space_memory_fields(space_id: &str, body: &SpaceMemoryBody) -> Option<(String
 
 /// Session Core's refusal of a Space memory call in fixed words. A permission refusal is one code
 /// whatever its cause (no decision, another role, a revoked member), so nothing about the Space leaks.
+/// A typed ZDR refusal (`named_agent`, EP-6 P3) keeps its catalogue body, as every gateway route does.
 fn space_memory_error(status: &tonic::Status) -> HttpJsonError {
+    if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_status(status) {
+        return crate::zdr_posture::http(&refusal);
+    }
     let (code, http, message) = match status.code() {
         tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => (
             "space_memory_not_authorized",
@@ -15791,9 +15850,10 @@ struct SpaceMemorySummaryResponse {
     withheld_reason: String,
 }
 
-/// The memory of one Space, for its owner or admin (EP-8 S7). Session Core verifies the Control
-/// Space memory decision; this hop checks the shape only. A read: a zero-retention caller is
-/// answered empty by Session Core, as the personal list is.
+/// The memory of one Space, for its owner or admin (EP-8 S7), or one named agent's notes in it when
+/// the body names an `agent_subject_id` (EP-6 P3). Session Core verifies the Control Space memory
+/// decision; this hop checks the shape only. A read: a zero-retention caller is answered empty by
+/// Session Core for the Space list, and refused `named_agent` for an agent's notes.
 async fn list_space_memories(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -15805,6 +15865,12 @@ async fn list_space_memories(
     let (space_id, decision_ref, token) = space_memory_fields(&space_id, &body).ok_or_else(|| {
         space_memory_error(&tonic::Status::invalid_argument("invalid Space memory request"))
     })?;
+    let agent_subject_id = body.agent_subject_id.trim().to_owned();
+    if agent_subject_id.len() > SPACE_MEMORY_MAX_ID_BYTES {
+        return Err(space_memory_error(&tonic::Status::invalid_argument(
+            "invalid Space memory request",
+        )));
+    }
     let response = state
         .memory_client
         .clone()
@@ -15816,6 +15882,7 @@ async fn list_space_memories(
                 space_id,
                 space_control_decision_ref: decision_ref,
                 space_control_decision_token: token,
+                agent_subject_id,
             },
             &bearer,
         )?)
@@ -15935,6 +16002,7 @@ mod space_memory_route_tests {
             space_control_decision_token: token.to_owned(),
             memory_id: memory_id.to_owned(),
             limit: None,
+            agent_subject_id: String::new(),
         }
     }
 
@@ -17016,6 +17084,8 @@ async fn invoke(
                     req.edited_resubmit,
                     req.idempotency_key.as_deref(),
                 ),
+                None,
+                // The unary route computes no agent pin: the pin is read on the SSE turn only.
                 None,
             )
             .await

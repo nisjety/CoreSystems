@@ -22,10 +22,24 @@ export type ThreadGoal = {
   tokensUsed: number
   maxTurns?: number
   turnsUsed: number
+  /**
+   * The judge's verdict on the last goal turn (EP-7 S3): `met`, `not_met`, `blocked` or `unsure`.
+   * Absent before the first judged turn.
+   */
   lastVerdict?: string
+  /**
+   * The judge's reasons for `lastVerdict` (EP-7 S3): at most three short texts. Absent when the server
+   * sends none.
+   */
+  lastVerdictReasons?: string[]
   revision?: number
   /** The gateway offers Keep going on this deployment (EP-7 S4, `autoContinueAvailable` on the read). */
   autoContinueAvailable?: boolean
+  /**
+   * The gateway offers Keep working while away on this deployment (EP-7 S6, `unattendedAvailable` on the read
+   * and on each write). The goal bar offers it only on an active goal in a durable personal thread.
+   */
+  unattendedAvailable?: boolean
 }
 
 /** The D11 limits the server holds; the dialog checks them first so a refusal is rare. */
@@ -119,13 +133,17 @@ export type UpdateThreadGoalInput = {
   successCriteria?: string[]
   maxTurns?: number
   tokenBudget?: number
-  status?: 'active' | 'paused' | 'cleared'
+  /**
+   * `met` marks the goal done and `active` reopens a met or blocked one: the person's own override of
+   * the judge (EP-7 S3).
+   */
+  status?: 'active' | 'paused' | 'met' | 'cleared'
 }
 
 /**
- * Edit, pause, resume or clear a goal under a compare-and-set on the revision the bar showed. A
- * goal changed elsewhere is refused as `thread_goal_revision_conflict`. Answers `null` once the
- * goal is cleared.
+ * Edit, pause, resume, clear, mark done or reopen a goal under a compare-and-set on the revision the
+ * bar showed. A goal changed elsewhere is refused as `thread_goal_revision_conflict`. Answers `null`
+ * once the goal is cleared.
  */
 export async function updateThreadGoal(
   goal: Pick<ThreadGoal, 'id' | 'threadId' | 'revision'>,
@@ -155,7 +173,12 @@ export function normalizeGoalResponse(value: unknown): ThreadGoal | null {
   const record = objectValue(value)
   if (!record || record.found === false) return null
   const goal = normalizeGoal(record.goal)
-  return goal && record.autoContinueAvailable === true ? { ...goal, autoContinueAvailable: true } : goal
+  if (!goal) return null
+  return {
+    ...goal,
+    ...(record.autoContinueAvailable === true ? { autoContinueAvailable: true } : {}),
+    ...(record.unattendedAvailable === true ? { unattendedAvailable: true } : {}),
+  }
 }
 
 function normalizeGoal(value: unknown): ThreadGoal | null {
@@ -171,6 +194,7 @@ function normalizeGoal(value: unknown): ThreadGoal | null {
   const tokenBudget = count(record.tokenBudget)
   const maxTurns = count(record.maxTurns)
   const lastVerdict = text(record.lastVerdict)
+  const lastVerdictReasons = verdictReasons(record.lastVerdictReasons)
   const revision = count(record.revision)
   return {
     id,
@@ -184,6 +208,7 @@ function normalizeGoal(value: unknown): ThreadGoal | null {
     ...(maxTurns > 0 ? { maxTurns } : {}),
     turnsUsed: count(record.turnsUsed),
     ...(lastVerdict ? { lastVerdict } : {}),
+    ...(lastVerdictReasons.length > 0 ? { lastVerdictReasons } : {}),
     ...(revision > 0 ? { revision } : {}),
   }
 }
@@ -198,4 +223,16 @@ function text(value: unknown): string {
 
 function count(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0
+}
+
+/** The most judge reasons a verdict carries (EP-7 S3), the same as the judge's own output limit. */
+const VERDICT_REASONS_MAX = 3
+
+/** The judge's reasons as the goal bar shows them: non-empty texts, at most three; anything else is dropped. */
+function verdictReasons(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((line) => text(line))
+    .filter((line) => line.length > 0)
+    .slice(0, VERDICT_REASONS_MAX)
 }
