@@ -492,3 +492,92 @@ Merge-pass decisions (new):
 | DEC-M6 | D2-299,307,309,311 | Switch name for the Space browser floor: BROWSER_SPACE_FLOOR_ENABLED (F-f03-03) vs BROWSER_SITE_SPACE_FLOOR (F-f02-20, dropped) | one name only, read in browser-broker and execution-core | BROWSER_SPACE_FLOOR_ENABLED | A | F-f03-03 |
 
 Not determined (carried from the chunk triage files): see the "Not determined" and "Notes for the integrator" sections of each f0x/_triage.md. This pass did not run any code, tests or docker, so all "verified" statements in the specs are the chunk analysts, spot-checked here against  for file paths (every non-[new] path exists), session-core migration numbers, the session-core crate layout and the audit-core switch parser.
+
+### 3.6 Owner answers to the triage decisions (2026-11-11)
+
+The owner answered every entry of section 3.5 in chat on 2026-11-11. These answers replace the "recommended" and "class" columns of 3.5: every entry is now decided. Each answer is attached to the units it names as an OWNER DECISION note in the unit spec. Where the owner chose another option than the triage recommended (marked NO or owner's own option), the affected units follow the owner, and answers that need work no unit covers yet are listed after the table.
+
+| id | answer | matches recommendation |
+|---|---|---|
+| DEC-F01-01 | Split new growth + reviewed time-boxed exception list for the backlog | yes |
+| DEC-F01-02 | capability:write:self after a route-by-route owner-check audit | yes |
+| DEC-F01-03 | Allow retraction of a queued mid-run message, leaving a visible "retracted" note in the thread | NO (rec: keep save-first) |
+| DEC-F01-04 | Entitlement gates chat + image analysis + image generation; embeddings ungated | yes |
+| DEC-F01-05 | The Codex broker advertises its accepted reasoning levels; inference-core reads them | yes |
+| DEC-F01-06 | Stable-prefix order on Anthropic routes behind a dark switch, on after an A/B | yes |
+| DEC-F01-07 | Keep organization_siem_audit_outbox rows on org erasure | yes |
+| DEC-F01-08 | Owner-signed re-anchor runbook for a broken audit chain head (owner names the signers) | yes |
+| DEC-F01-09 | Keep hosted URL image attachments, https only and only hosts on an operator allowlist (allowlist on) | yes |
+| DEC-F01-10 | Crash-parked run kept 24 h; the person gets a notice after 4 h of waiting | yes, with a 4 h notice delay added by the owner |
+| DEC-F01-11 | Commit the auth-core base schema as an operator pg_dump of the live schema | yes |
+| DEC-F01-12 | Scope name capability:admin | yes |
+| DEC-F01-13 | audit details guard redacts the offending field (never rejects) | yes |
+| DEC-F02-1 | CRON_CONTRACT_GUARDS_ENABLED defaults to true whenever schedule contracts (SCHEDULE_CONTRACT_ENABLED) are on | NO (rec: off, flip together) |
+| DEC-F02-2 | Browser site-policy host cap dedupes entries before counting against the 32 cap | NO (rec: keep raw count) |
+| DEC-F02-3 | MODEL_EXECUTION_SERVICE_API_KEY: accepted as a dev-only key, no rotation | NO (rec: rotate if used outside dev) |
+| DEC-F02-4 | Per-cap budget windows | yes |
+| DEC-F02-5 / DEC-F03-1 | org-core resolves the Space browser floor from user-core (scope spaces:browser-floor:read) | yes |
+| DEC-F03-2 | Scheduled runs: web_search withheld after the run read external content | yes |
+| DEC-F03-3 | The auto posture never grants a step-up cause; it stays pending for a person | yes |
+| DEC-F03-4 | Honour a Space append context on a ZDR follow-up (it only narrows retrieval) | yes |
+| DEC-F03-5 | Skill bundle manifests follow skill visibility | yes |
+| DEC-F03-6 | Read-class owner actions are ADDED to the model action admission table (a read-class validator), not kept on owner_reads pins | NO (rec: keep on pins) |
+| DEC-F03-7 | Scheduled-run token ceiling: default 120,000 input+output tokens, org-configurable | NO (rec: fixed 120,000 lane constant) |
+| DEC-F04-1 | Marker scan flags only; content withheld only when the classifier agrees | yes |
+| DEC-F04-2 | Unpriced metered call under a USD-only run cap: charge a conservative default price and continue | NO (rec: stop, fail closed) |
+| DEC-F04-3 | Separate narrow principal execution-core-screening for the Do classifier, never for ZDR/waived | yes |
+| DEC-F04-4 | ZDR/waived Do runs may send tool results for the deterministic in-memory scan only | yes |
+| DEC-F04-5 | After a flagged connector read in an Ask turn, web tools are withdrawn for the rest of the turn | yes |
+| DEC-F04-6 | Accept one late "needs approval" notice within the outbox latency | yes |
+| DEC-F04-7 | BUILTIN_OFFICE_SKILLS_ENABLED may go on after at least 40 labelled NO/EN requests with zero false injection flags, then monitor | changed (rec: 100+) |
+| DEC-F04-8 | Space Do overlay lost on another process: typed workspace_lost now, upload overlay at pause later | yes |
+| DEC-F04-9 | Stop then regenerate on a versioned thread: regenerate names the question it answers (works after a stop) | yes |
+| DEC-F04-10 | EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY: accepted as a dev-only key, no rotation | NO (rec: rotate before shared deploy) |
+| D-F05-1 | Expired schedule approval is renewed by an in-place PATCH of the existing schedule (new work) | NO (rec: new schedule) |
+| D-F05-2 | approval:grant_use goes to execution-core only, through Control's principal train with the golden re-pin | yes |
+| D-F05-3 | Push notice while a window is visible: show then close, behind VITE_PUSH_SHOW_WHEN_VISIBLE, after a live Safari/Chrome check | yes |
+| D-F05-4 | Browser bearer near expiry mid-turn: park the run and re-mint now (new work) | NO (rec: typed refusal now) |
+| D-F05-5 | Action-surface contract: add a gateway dispatcher arm for every action id | NO (rec: closed client-routed list) |
+| D-F05-6 | Overlay tombstones built now, dark | yes |
+| D-F05-7 | A fork does not copy artifact revisions | yes |
+| D-F05-8 | Org purge extends to every notification-core table (follow-up unit) | yes |
+| D-F05-9 | Server WORKING state wins over legacy needs_approval when present | yes |
+| D-f06-A | Thread ownership checked in the gateway AND in sandbox-manager now (sandbox-manager principal + orphan sweep) | NO (rec: gateway now, both later) |
+| D-f06-B | Lockdown withdraws the inline code interpreter from Ask turns; read-only keeps it | yes |
+| D-f06-C | Chat projects: first release append-only; live following, approvals, plan hydration before wide enablement | yes |
+| D-f06-D | Run question answered_message_id linked atomically (client sends its message id; append + link in one step) | NO (rec: leave empty) |
+| D-f06-E | Owner-only browser_session_opened event with the Quarry run id binds the Do browser session to the live panel | yes |
+| DEC-F07-1 | Plan approval covers the whole approved plan: every task listed in the plan and only those. If a new task is added outside the plan, the run stops and asks the person whether to continue following the plan; it also stops when the person deviates from the plan | owner's own option (rec: one approval, one run) |
+| DEC-F07-2 | Gemini on Vertex: sourced vendor rows at S8 plus an owner-funded live run before enabling | yes |
+| DEC-F07-3 | Local time in the date notice at minute precision, switched with the stable prompt order | yes |
+| DEC-F08-01 | Keep the public Cohere rerank endpoint for tenant retrieval (no Azure-only refusal) | NO (rec: refuse non-Azure) |
+| DEC-F08-02 | Fifteen not_gated egress destinations: declare now, publish nothing until counsel, then gate one at a time | yes |
+| DEC-F08-03 | Model picker data-use line behind VITE_MODEL_DATA_USE_LABEL, off until counsel approves the copy | yes |
+| DEC-F08-04 | API-key turns: build the real budget check, and let cost-core accept the API-key principal (no interim refusal) | owner's own option (rec: interim refusal + service-principal check) |
+| DEC-F08-05 | Grant execution-core the narrow scope orchestration:question:service-origin via the principal train -> W3-EP-4-S7 (MCP elicitation) is unblocked | yes |
+| DEC-F08-06 | Held MCP elicitation calls: single gateway replica until WS04, then sticky routing | yes |
+| D-f09-1 | Do browser session: single replica now, sticky by run id when scaled | yes |
+| D-f09-2 | Skill bundle blobs read with a narrow service credential, only after the person's own manifest read | yes |
+| D-f09-3 | Build both behaviours and let the org choose: an org setting decides whether web mode off also turns off the browser tools (default: covers browser, behind CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER) | owner's own option (rec: yes, own switch) |
+| D-f09-4 | Document and skill references on a Do turn: carry them with a scoped search now (new work) | NO (rec: typed refusal now) |
+| D-f09-5 | Action-surface contract long term: executor field on the action registry (changes the action contract type and admission golden) | yes |
+| D-f09-6 | Shell approval may become an Always rule only for read-only programs in an argument-screened table | yes |
+| D-f09-7 | Goal turn USD budget: tokens enforced in the run, USD at settle; streamed-meter cancel later | yes |
+| D-f10-1 | Legal holds: add a real compliance role end to end; the owner and org admins may also place and release holds | owner's own option (rec: owner only) |
+| D-f10-2 | Effective-policy panel mounted in Space settings now (space_id route) | NO (rec: wait for the Space ownership check) |
+| D-f10-3 | Org web domain rules also bind the BFF person search and crawl links | NO (rec: model calls + Quarry enforce) |
+| D-f10-4 | Scheduled Do lane non-completed step: FailRunActivity with a closed code (as built) | yes |
+| D-f10-5 | Agent API-key turn budget check: both - cost-core accepts the api_key principal AND model-gateway checks with its own service credential plus the key principal | owner's own option (rec: gateway service credential) |
+| D-f10-6 | org-core asks session-core through a dedicated read-only gRPC whether a thread retains anything | yes |
+| D-f10-7 | Retention sweeper erases a thread workspace through a new sandbox-manager service RPC with its own narrow scope | yes |
+| D-f10-8 | Thread export joins the cost-core usage ledger at export time for run model and token totals | yes |
+| D-f10-9 | A waived Space run's approval stores neither the gate tool key nor the action digest | yes |
+| D-f10-10 | Space skill authoring needs the same role as model.space.memory.manage | yes |
+| DEC-M1 | Learning review budget counters in Postgres (capability-core's own database) | yes |
+| DEC-M2 | Scheduled step retention sent as two booleans zdr/zdr_waived; missing or unknown refused as scheduled_retention_unknown | yes |
+| DEC-M3 | audit-core switches change to the literal "true" like every other service (parseStrictSwitch and every audit-core switch's deploy value) | NO (rec: keep "1") |
+| DEC-M4 | The five new narrow service scopes go through Control's principal train as one approval, built dark, pins re-pinned by the repo script; owner reviews them together | yes |
+| DEC-M5 | API-key spend ceilings: real check only (cost-core accepts api_key + gateway service-credential check); no interim guard F-f08-14 | owner's own option, consistent with DEC-F08-04 and D-f10-5 |
+| DEC-M6 | Space browser floor switch name BROWSER_SPACE_FLOOR_ENABLED | yes |
+
+Owner answers that need new work no unit covers yet (to be written as units in the next phase): DEC-F01-10 (crash-parked run: 24 h, notice after 4 h), DEC-F02-1 (CRON_CONTRACT_GUARDS_ENABLED follows SCHEDULE_CONTRACT_ENABLED), DEC-F02-2 (dedupe the browser host cap), DEC-F07-1 (plan approval covers exactly the approved plan; stop and ask on a new task or when the person deviates), D-f10-1 (a compliance role end to end; owner and admins may also hold), D-f10-2 (mount the effective-policy panel in Space settings), D-f06-A (sandbox-manager checks thread ownership too, beside the gateway check built in F-f06-01), D-f10-3 (the BFF person search and crawl links follow the org web domain rules, beside F-f10-04/05), DEC-F08-04 / DEC-M5 / D-f10-5 (cost-core accepts the API-key principal and the gateway also checks; no interim guard F-f08-14), DEC-F08-05 (the withheld MCP elicitation unit W3-EP-4-S7 is unblocked), DEC-M3 (audit-core switches move to the literal true). No work: DEC-F02-3 and DEC-F04-10 (the two keys are accepted as dev-only keys).
