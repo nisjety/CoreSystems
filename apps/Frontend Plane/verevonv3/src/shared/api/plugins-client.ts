@@ -165,6 +165,17 @@ export interface PluginKillResult {
   children_removed: number
 }
 
+/** One kill-list entry an org admin reads: a digest killed for this org, by the org itself or by the platform. */
+export interface PluginKillEntry {
+  digest: string
+  /** `org` when the org killed it. `global` when the platform killed it for every org; only an org kill is lifted here. */
+  source: string
+  /** The reason the kill recorded, as written. Empty when none was given. */
+  reason: string
+  /** When the kill was written, as an RFC 3339 time. */
+  killed_at: string
+}
+
 /** The answer to a kill-list removal. */
 export interface PluginKillRemoval {
   digest: string
@@ -220,6 +231,11 @@ export function liftPluginKill(digest: string): Promise<PluginKillRemoval> {
   return requestJson<PluginKillRemoval>(`/api/v1/plugin-kill-list?${query.toString()}`, {
     method: 'DELETE',
   })
+}
+
+/** The org's kill list: its own kills and the platform's global kills that cover it. Org admin only. */
+export function listPluginKills(): Promise<{ kills: PluginKillEntry[] }> {
+  return requestJson<{ kills: PluginKillEntry[] }>('/api/v1/plugin-kill-list')
 }
 
 /** A source pin or a digest in short form for a person to read: 12 hex digits, with `sha256:` kept when it has one. */

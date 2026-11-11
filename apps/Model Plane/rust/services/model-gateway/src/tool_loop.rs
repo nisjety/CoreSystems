@@ -3571,6 +3571,11 @@ const MAX_SKILL_MOUNTS: usize = 3;
 /// step with `skill_mounts::RESERVED_NAMES` there, so a skill that would be refused takes no name.
 const RESERVED_MOUNT_NAMES: [&str; 2] = ["skills", "attachments"];
 
+/// What the model is told about a turn's skill bundle mounts (WS19-S8). Appended to the
+/// `code_interpreter` description only on a turn that carries at least one mount, so a turn without
+/// one is offered the unchanged definition.
+const SKILL_MOUNT_TOOL_DESCRIPTION_LINE: &str = " Matched skill bundles, when present, are available read-only under /skills/<name>/ and cannot be written.";
+
 /// Whether `raw` (the value of [`SKILL_BUNDLE_MOUNT_ENV`], if set) is the literal on-word.
 #[must_use]
 fn skill_bundle_mounts_enabled_from(raw: Option<&str>) -> bool {
@@ -3645,6 +3650,57 @@ fn skill_mounts_from_bundles(
     mounts
 }
 
+/// The skills of the turn's record that the caller may read, in record order, as `(id, name)`
+/// (WS19-S8). Empty when the record is gone or belongs to another caller.
+fn record_readable_skills(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+) -> Vec<(String, String)> {
+    let Some(record) = crate::chat_turn_registry::global().lookup(request_id) else {
+        return Vec::new();
+    };
+    if record.org_id != org_id || record.user_id != user_id {
+        return Vec::new();
+    }
+    readable_skills(
+        state,
+        org_id,
+        user_id,
+        // A pinned skill is recorded as `id@version` (EP-11 S3); the catalogue knows the bare id.
+        record
+            .skill_ids
+            .iter()
+            .map(|skill_ref| crate::chat_turn_registry::skill_id_of_ref(skill_ref)),
+    )
+}
+
+/// The `(id, name)` of each of `skill_ids` the caller may read, in order (WS19-S8). The gateway's own
+/// skill read decides visibility, so a skill the caller could not read takes no mount.
+fn readable_skills<'a>(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    skill_ids: impl Iterator<Item = &'a str>,
+) -> Vec<(String, String)> {
+    use mp_contracts::model_plane::v1::GetSkillRequest;
+
+    skill_ids
+        .filter_map(|skill_id| {
+            let request = GetSkillRequest {
+                request_id: String::new(),
+                org_id: org_id.to_owned(),
+                skill_id: skill_id.to_owned(),
+            };
+            crate::skills::handle_get_skill(&state.skills, request, &state.ownership, user_id)
+                .ok()
+                .and_then(|response| response.skill)
+                .map(|skill| (skill.id, skill.name))
+        })
+        .collect()
+}
+
 /// The `/skills` mounts a turn's `code_interpreter` calls carry (WS19-S8): the bundles of the skills
 /// the turn injected, read once for the turn from the record the gateway wrote before the loop
 /// started. Empty while the switch is off (no call is made), under zero retention, without a
@@ -3659,7 +3715,7 @@ async fn skill_mounts_for_turn(
     capability_bearer: Option<&str>,
     zdr: bool,
 ) -> Vec<SkillMount> {
-    use mp_contracts::model_plane::v1::{GetSkillRequest, ListSkillBundlesRequest};
+    use mp_contracts::model_plane::v1::ListSkillBundlesRequest;
 
     if zdr || !skill_bundle_mounts_enabled() {
         return Vec::new();
@@ -3667,27 +3723,7 @@ async fn skill_mounts_for_turn(
     let Some(bearer) = capability_bearer.filter(|bearer| !bearer.trim().is_empty()) else {
         return Vec::new();
     };
-    let Some(record) = crate::chat_turn_registry::global().lookup(request_id) else {
-        return Vec::new();
-    };
-    if record.org_id != org_id || record.user_id != user_id {
-        return Vec::new();
-    }
-    let mut matched: Vec<(String, String)> = Vec::new();
-    for skill_ref in &record.skill_ids {
-        let request = GetSkillRequest {
-            request_id: String::new(),
-            org_id: org_id.to_owned(),
-            // A pinned skill is recorded as `id@version` (EP-11 S3); the catalogue knows the id.
-            skill_id: crate::chat_turn_registry::skill_id_of_ref(skill_ref).to_owned(),
-        };
-        let found = crate::skills::handle_get_skill(&state.skills, request, &state.ownership, user_id)
-            .ok()
-            .and_then(|response| response.skill);
-        if let Some(skill) = found {
-            matched.push((skill.id, skill.name));
-        }
-    }
+    let matched = record_readable_skills(state, request_id, org_id, user_id);
     if matched.is_empty() {
         return Vec::new();
     }
@@ -3700,6 +3736,27 @@ async fn skill_mounts_for_turn(
             Vec::new()
         }
     }
+}
+
+/// The `/skills` mounts this turn's `code_interpreter` calls will carry, for the bundle footers that
+/// name those paths (WS19-S8). The footers are built before the tool loop runs, so they read the same
+/// record `skill_mounts_for_turn` reads and take the bundle listing the footers came from. Empty on
+/// the conditions `skill_mounts_for_turn` returns empty on, except its own listing call.
+pub(crate) fn skill_mounts_for_footers(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+    zdr: bool,
+    bundles: &[SkillBundleSummary],
+) -> Vec<SkillMount> {
+    if zdr || !skill_bundle_mounts_enabled() || bundles.is_empty() {
+        return Vec::new();
+    }
+    skill_mounts_from_bundles(
+        &record_readable_skills(state, request_id, org_id, user_id),
+        bundles,
+    )
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -5351,6 +5408,13 @@ async fn dispatch_tool_with_cost(
             .await,
         ),
         "knowledge_list_documents" | "knowledge.list_documents" => {
+            // WS18-S5 (D2-774): the organisation-wide document inventory is not a Space's inventory. With the Space
+            // retrieval switch on, a turn scoped to a Space is refused here, before any call crosses to Data Plane:
+            // a fixed token with no rows, so ZDR gets the same refusal and nothing is stored. Off, or with no Space,
+            // this arm is unchanged.
+            if !space_id.is_empty() && crate::sse::space_agentic_retrieval_enabled() {
+                return err_outcome(call, "knowledge_list_documents refused: space_scoped");
+            }
             let Some(bearer) = data_plane_bearer else {
                 return err_outcome(
                     call,
@@ -6915,13 +6979,15 @@ pub struct ToolRounds {
 }
 
 /// The usage of one provider call the tool phase made, as the provider reported
-/// it. The basis is the route's, or the serving provider's once it has answered.
+/// it. The basis is the route's (a customer gateway's when the call names one),
+/// or the serving provider's once it has answered.
 pub(crate) fn metered_call(
     phase: crate::usage_meter::CallPhase,
     response: &mp_contracts::model_plane::v1::InferResponse,
     model: &str,
     provider_hint: &str,
     subscription_connection_id: &str,
+    model_connection_id: &str,
 ) -> crate::usage_meter::CallUsage {
     crate::usage_meter::CallUsage {
         phase,
@@ -6931,8 +6997,12 @@ pub(crate) fn metered_call(
             response.model_used.clone()
         },
         provider: response.provider_used.clone(),
-        basis: crate::pricing::CostBasis::of_route(provider_hint, subscription_connection_id)
-            .served_by(&response.provider_used),
+        basis: crate::pricing::CostBasis::of_request(
+            provider_hint,
+            subscription_connection_id,
+            model_connection_id,
+        )
+        .served_by(&response.provider_used),
         input: i64::from(response.input_tokens),
         output: i64::from(response.output_tokens),
         cache_read: i64::from(response.cache_read_input_tokens),
@@ -9006,6 +9076,16 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         let (files, bytes) = attachments.summary();
         tracing::info!(%request_id, files, bytes, "attached files staged for code_interpreter");
     }
+    // A turn that mounts skill bundles says where they are in the same tool's description (WS19-S8).
+    // Like the attachments line, it is added only on such a turn; every other turn is unchanged.
+    if !skill_mounts.is_empty() {
+        for tool in tools
+            .iter_mut()
+            .filter(|tool| tool.name == "code_interpreter")
+        {
+            tool.description.push_str(SKILL_MOUNT_TOOL_DESCRIPTION_LINE);
+        }
+    }
     // The connected-account read is offered on a turn the person selected accounts for (WS23-S5). The
     // selection rides on the live sink, as the turn's clock does, so a caller without a sink offers nothing.
     let connector_turn = sink.and_then(crate::sse_events::RichEventSink::connector_turn);
@@ -9578,12 +9658,14 @@ pub async fn run_tool_rounds_for_model_with_attachments(
 
         // The round's tokens are the provider's own counts. The route guard above has
         // already accepted the answer, so a round a wrong provider answered is not billed.
+        // A tool round never names a customer-gateway connection (W4-BYO-5), so its basis is the route's.
         let round_usage = metered_call(
             crate::usage_meter::CallPhase::ToolRound,
             &resp,
             model,
             provider_hint,
             subscription_connection_id,
+            "",
         );
         if let Some(sink) = sink {
             stream_call_usage(
@@ -9809,6 +9891,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                                 model,
                                 provider_hint,
                                 subscription_connection_id,
+                                "",
                             );
                             if let Some(sink) = sink {
                                 stream_call_usage(state, sink, &overhead, None).await;

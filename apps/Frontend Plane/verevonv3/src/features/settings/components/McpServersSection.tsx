@@ -14,6 +14,7 @@ import {
 import { ApiError } from '@/shared/api/http'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
+import { setPendingStoredTokenUrl } from '@/features/settings/components/CustomConnectorSection'
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
 import { getSession } from '@/shared/session/session-store'
 import { hasWorkspaceAdminAccess } from '@/shared/session/access'
@@ -542,7 +543,20 @@ export function McpServersSection() {
                 when={customConnectorsEnabled()}
                 fallback={<>Verevon kan ikke koble til slike tjenere herfra ennå.</>}
               >
-                Legg den til under egendefinerte koblinger, der tokenet lagres i stedet for i dette skjemaet.
+                Legg den til under{' '}
+                <Show when={isAdmin()} fallback={<>egendefinerte koblinger</>}>
+                  <a
+                    href="/settings/integrations"
+                    link
+                    onClick={() => {
+                      const current = probeCurrent()
+                      if (current) setPendingStoredTokenUrl(current.url)
+                    }}
+                  >
+                    egendefinerte koblinger
+                  </a>
+                </Show>
+                , der tokenet lagres i stedet for i dette skjemaet.
               </Show>
             </p>
           </Show>

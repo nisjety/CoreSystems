@@ -85,11 +85,30 @@ async function removeBinding(bindingId: string): Promise<boolean> {
 }
 
 /**
+ * The server address the MCP servers section hands to the stored-token form (W4-CC-2). The section sets it just before
+ * it links here, and the next mount of the form takes it once. It lives in memory only, so a reload drops it, and the
+ * address reaches neither the URL nor any storage.
+ */
+let pendingStoredTokenUrl: string | null = null
+
+/** Opens the stored-token form with this server address filled in, on its next mount. */
+export function setPendingStoredTokenUrl(url: string): void {
+  pendingStoredTokenUrl = url
+}
+
+/** The address set by `setPendingStoredTokenUrl`, or an empty string. Taken once, so a later mount starts empty. */
+function takePendingStoredTokenUrl(): string {
+  const url = pendingStoredTokenUrl ?? ''
+  pendingStoredTokenUrl = null
+  return url
+}
+
+/**
  * Custom connectors (W4-CC-8): an organisation's stored keys and the connectors that use them. An owner or admin stores
  * a key for one host, then creates a custom REST connector that calls it, or registers an MCP server with a stored
  * token. Integration Core seals each key and the browser never reads one back; each form clears its key field as soon
  * as it is submitted. Behind `VITE_CUSTOM_CONNECTORS`, for owners and admins, and hidden for a zero-retention
- * organisation.
+ * organisation. The stored-token form opens with a server address that was handed over, when one is waiting.
  */
 export function CustomConnectorSection(props: { orgId?: string | null }) {
   const i18n = useI18n()
@@ -132,7 +151,7 @@ export function CustomConnectorSection(props: { orgId?: string | null }) {
   const [restSecret, setRestSecret] = createSignal('')
 
   const [mcpName, setMcpName] = createSignal('')
-  const [mcpUrl, setMcpUrl] = createSignal('')
+  const [mcpUrl, setMcpUrl] = createSignal(takePendingStoredTokenUrl())
   const [mcpTools, setMcpTools] = createSignal('')
   const [mcpSecret, setMcpSecret] = createSignal('')
 

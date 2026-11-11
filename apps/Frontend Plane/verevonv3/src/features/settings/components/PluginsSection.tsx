@@ -5,8 +5,10 @@ import {
   createPlugin,
   deletePlugin,
   killPluginDigest,
+  liftPluginKill,
   listPlugins,
   listPluginCatalog,
+  listPluginKills,
   setPluginCatalogApproval,
   shortPin,
   uninstallPlugin,
@@ -54,6 +56,12 @@ export function PluginsSection() {
     () => (loaderOn && orgId() ? orgId() : undefined),
     () => listPluginCatalog().then((result) => result.plugins),
   )
+  // The org's kill list (W4-PL-4): the digests killed for this org, and the platform's global kills that cover it. Only an
+  // org admin reads it, the one role the route answers.
+  const [kills, { refetch: refetchKills }] = createResource(
+    () => (loaderOn && isAdmin() && orgId() ? orgId() : undefined),
+    () => listPluginKills().then((result) => result.kills),
+  )
 
   const [name, setName] = createSignal('')
   const [version, setVersion] = createSignal('')
@@ -69,9 +77,6 @@ export function PluginsSection() {
   const [formError, setFormError] = createSignal<string | null>(null)
   const [actionError, setActionError] = createSignal<string | null>(null)
   const [notice, setNotice] = createSignal<string | null>(null)
-  // The digests this page has seen killed. The kill list has no read route, so a kill shows only once this page made
-  // it, or was refused a request for a killed digest.
-  const [killed, setKilled] = createSignal<Record<string, boolean>>({})
   const [killingId, setKillingId] = createSignal<string | null>(null)
   const [killReason, setKillReason] = createSignal('')
   const [installing, setInstalling] = createSignal<Plugin | null>(null)
@@ -79,24 +84,30 @@ export function PluginsSection() {
   const list = createMemo(() => plugins() ?? [])
   const catalogueEntries = createMemo(() => catalogue() ?? [])
   const listed = createMemo(() => new Set(catalogueEntries().map((entry) => entry.id)))
-  const isKilled = (digest: string | undefined) => digest !== undefined && killed()[digest] === true
+  const killEntries = createMemo(() => kills() ?? [])
+  // Whether a digest is killed for this org, by the org itself or by the platform.
+  const isKilled = (digest: string | undefined) =>
+    digest !== undefined && killEntries().some((entry) => entry.digest === digest)
+  // The org's own kill of a digest: the one an org admin lifts here. A platform kill is shown, and never lifted from here.
+  const orgKillOf = (digest: string | undefined) =>
+    digest === undefined
+      ? undefined
+      : killEntries().find((entry) => entry.digest === digest && entry.source === 'org')
 
-  const markKilled = (digest: string) => {
-    setKilled({ ...killed(), [digest]: true })
-  }
-
-  // A refusal that names a killed digest is a kill this page has seen.
-  const noteRefusal = (err: unknown, plugin: Plugin) => {
-    if (hasErrorCode(err, 'plugin_killed') && plugin.manifest_digest) markKilled(plugin.manifest_digest)
+  // A refusal that names a killed digest means the org's kill list has changed since it was read.
+  const noteRefusal = (err: unknown) => {
+    if (hasErrorCode(err, 'plugin_killed')) void refetchKills()
   }
 
   const sourceLabel = (kind: string | undefined) =>
     kind === 'archive' ? i18n.tr('arkiv', 'archive') : i18n.tr('git-commit', 'git commit')
 
-  // After a change, reload what this page shows: the registry for an admin, and the catalogue when the loader is on.
+  // After a change, reload what this page shows: the registry for an admin, the catalogue when the loader is on, and the
+  // kill list for an admin with the loader on.
   const reload = async () => {
     if (!catalogueOnly()) await refetch()
     if (loaderOn) await refetchCatalogue()
+    if (loaderOn && isAdmin()) await refetchKills()
   }
 
   const resetForm = () => {
@@ -179,7 +190,7 @@ export function PluginsSection() {
       await updatePlugin(id, plugin.id, { enabled: !plugin.enabled })
       await reload()
     } catch (err) {
-      noteRefusal(err, plugin)
+      noteRefusal(err)
       setActionError(
         pluginRefusalText(err, i18n.tr, { no: 'Kunne ikke oppdatere plugin-pakken.', en: 'Could not update the plugin package.' }),
       )
@@ -234,7 +245,7 @@ export function PluginsSection() {
       await updatePlugin(orgId(), plugin.id, { pinned: !plugin.pinned })
       await reload()
     } catch (err) {
-      noteRefusal(err, plugin)
+      noteRefusal(err)
       setActionError(
         pluginRefusalText(err, i18n.tr, { no: 'Kunne ikke endre festingen.', en: 'Could not change the pin.' }),
       )
@@ -287,7 +298,7 @@ export function PluginsSection() {
       await setPluginCatalogApproval(plugin.id, approve)
       await reload()
     } catch (err) {
-      noteRefusal(err, plugin)
+      noteRefusal(err)
       setActionError(
         pluginRefusalText(
           err,
@@ -319,7 +330,6 @@ export function PluginsSection() {
     setNotice(null)
     try {
       const result = await killPluginDigest(digest, reason)
-      markKilled(result.digest)
       setKillingId(null)
       setKillReason('')
       setNotice(
@@ -332,6 +342,42 @@ export function PluginsSection() {
     } catch (err) {
       setActionError(
         pluginRefusalText(err, i18n.tr, { no: 'Kunne ikke sperre digesten.', en: 'Could not kill the digest.' }),
+      )
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  // Lifts the org's kill of a package's digest. What the kill removed stays removed: the package is installed and listed again.
+  const handleLift = async (plugin: Plugin) => {
+    const digest = plugin.manifest_digest
+    if (busyId() || !digest) return
+    if (
+      typeof window !== 'undefined' &&
+      !window.confirm(
+        i18n.tr(
+          `Løfte sperringen av «${plugin.name}»? Digesten kan installeres og listes på nytt. Det sperringen fjernet, kommer ikke tilbake av seg selv.`,
+          `Lift the kill on “${plugin.name}”? Its digest can be installed and listed again. What the kill removed does not come back by itself.`,
+        ),
+      )
+    ) {
+      return
+    }
+    setBusyId(plugin.id)
+    setActionError(null)
+    setNotice(null)
+    try {
+      await liftPluginKill(digest)
+      setNotice(
+        i18n.tr(
+          'Sperringen er løftet. Pakken må installeres og listes i katalogen på nytt.',
+          'The kill is lifted. The package must be installed and listed in the catalogue again.',
+        ),
+      )
+      await reload()
+    } catch (err) {
+      setActionError(
+        pluginRefusalText(err, i18n.tr, { no: 'Kunne ikke løfte sperringen.', en: 'Could not lift the kill.' }),
       )
     } finally {
       setBusyId(null)
@@ -432,6 +478,12 @@ export function PluginsSection() {
         </p>
       </Show>
 
+      <Show when={kills.error}>
+        <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
+          {i18n.tr('Kunne ikke laste sperrelisten.', 'Could not load the kill list.')}
+        </p>
+      </Show>
+
       <Show when={!catalogueOnly()} fallback={catalogueView()}>
         <Show
           when={!plugins.loading}
@@ -497,7 +549,9 @@ export function PluginsSection() {
                           <Show when={isKilled(plugin.manifest_digest)}>
                             {' '}
                             <span class="verevon-trust-chip" role="status">
-                              {i18n.tr('sperret', 'killed')}
+                              {orgKillOf(plugin.manifest_digest)
+                                ? i18n.tr('sperret', 'killed')
+                                : i18n.tr('sperret globalt', 'killed globally')}
                             </span>
                           </Show>
                         </span>
@@ -604,6 +658,17 @@ export function PluginsSection() {
                                 aria-label={`${i18n.tr('Sperr', 'Kill')} ${plugin.name}`}
                               >
                                 <ShieldAlert size={14} aria-hidden="true" /> {i18n.tr('Sperr…', 'Kill…')}
+                              </SettingsButton>
+                            </Show>
+                            <Show when={orgKillOf(plugin.manifest_digest)}>
+                              {' '}
+                              <SettingsButton
+                                settingsSize="sm"
+                                disabled={busyId() === plugin.id}
+                                onClick={() => void handleLift(plugin)}
+                                aria-label={`${i18n.tr('Løft sperringen av', 'Lift the kill on')} ${plugin.name}`}
+                              >
+                                {i18n.tr('Løft sperringen', 'Lift the kill')}
                               </SettingsButton>
                             </Show>
                             <Show when={killingId() === plugin.id}>
@@ -790,8 +855,8 @@ export function PluginsSection() {
       <Show when={loaderOn && isAdmin()}>
         <p class="verevon-settings-subnote">
           {i18n.tr(
-            'Sperrelisten kan ikke leses herfra. Sperringer vises bare når de er gjort eller avvist i denne visningen.',
-            'The kill list cannot be read from here. Kills show only when they were made, or refused, in this view.',
+            'Sperringene leses fra sperrelisten til organisasjonen. En global sperring gjelder alle organisasjoner og kan ikke løftes herfra.',
+            'Kills are read from the kill list of the organization. A global kill applies to every organization and cannot be lifted here.',
           )}
         </p>
       </Show>
@@ -807,10 +872,7 @@ export function PluginsSection() {
             plugin={plugin()}
             onClose={() => setInstalling(null)}
             onChanged={() => void reload()}
-            onKilled={() => {
-              const digest = plugin().manifest_digest
-              if (digest) markKilled(digest)
-            }}
+            onKilled={() => void refetchKills()}
           />
         )}
       </Show>

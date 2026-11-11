@@ -69,7 +69,15 @@ export type ZdrFeatureKey =
   | 'run_inspection'
   | 'context_references'
   | 'thread_goal'
+  | 'legal_hold'
+  | 'learn_command'
+  | 'skill_authoring'
   | 'named_agent'
+  | 'process_output_spill'
+  | 'mcp_secret_ref'
+  | 'custom_rest'
+  | 'teach_mode'
+  | 'reasoning_translation'
 
 /** The reader's-language chooser, the same shape the rest of the SPA passes around. */
 export type Translate = (noText: string, enText: string) => string
@@ -207,7 +215,15 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   run_inspection: { no: 'tidslinje og innsyn i kjøringer', en: 'run timing and request inspection' },
   context_references: { no: 'referanser til dokumenter, samtaler eller utvalg', en: 'references to documents, threads or selections' },
   thread_goal: { no: 'varige mål', en: 'persistent goals' },
+  legal_hold: { no: 'juridisk bevaring av en samtale', en: 'a legal hold on a thread' },
+  learn_command: { no: 'læring fra denne samtalen', en: 'learning from this conversation' },
+  skill_authoring: { no: 'lagring og redigering av ferdigheter', en: 'saving or editing skills' },
   named_agent: { no: 'minnet til navngitte agenter', en: 'named agent memory' },
+  process_output_spill: { no: 'lagring av utdata fra bakgrunnsprosesser i filer', en: 'saving background process output to files' },
+  mcp_secret_ref: { no: 'MCP-servere som bruker lagret legitimasjon', en: 'MCP servers that use a stored credential' },
+  custom_rest: { no: 'egendefinerte REST-tilkoblinger', en: 'custom REST connectors' },
+  teach_mode: { no: 'lagring av stegene i en kjøring som ferdighet', en: "saving a run's steps as a skill" },
+  reasoning_translation: { no: 'oversettelse av en resonneringstekst', en: 'translating a reasoning text' },
 }
 
 /** A refusal whose feature the SPA does not know names it this way. */

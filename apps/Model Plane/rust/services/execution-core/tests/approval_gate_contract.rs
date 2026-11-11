@@ -58,7 +58,7 @@ const PAUSES: &[(&str, &str, &str)] = &[
     (
         "runtime_loop/agent.rs",
         "run_rounds",
-        "cause: Some(CauseCode::RiskyEffectUnderAsk)",
+        "cause: Some(CauseCode::TaintedEgress)",
     ),
     (
         "runtime_loop/agent.rs",
@@ -93,6 +93,7 @@ fn variant_and_token(code: CauseCode) -> (&'static str, &'static str) {
             ("AutoPostureProviderWrite", "auto_posture_provider_write")
         }
         CauseCode::BrowserHumanAssist => ("BrowserHumanAssist", "browser_human_assist"),
+        CauseCode::TaintedEgress => ("TaintedEgress", "tainted_egress"),
         CauseCode::UnclassifiedGate => ("UnclassifiedGate", "unclassified_gate"),
     }
 }

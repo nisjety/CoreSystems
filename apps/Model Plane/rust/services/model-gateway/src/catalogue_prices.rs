@@ -94,7 +94,10 @@ pub fn model_price(
     let source = match price.source {
         PriceSource::Exact => "exact",
         PriceSource::Prefix => "prefix",
-        PriceSource::Default | PriceSource::Subscription | PriceSource::Unavailable => return None,
+        PriceSource::Default
+        | PriceSource::Subscription
+        | PriceSource::CustomerBilled
+        | PriceSource::Unavailable => return None,
     };
     // A rate with no currency would be a bare number the picker has to guess at.
     if price.currency.trim().is_empty() {

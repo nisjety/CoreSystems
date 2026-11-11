@@ -148,10 +148,11 @@ fn space_append_retrieval_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> 
 /// The switch that lets a Do run's `knowledge_search` retrieve under the Space decision its turn holds
 /// (WS18-S5). Opt-in: only the literal `true` enables it. Off, a Do run searches the organisation's own
 /// knowledge, as it always has. execution-core reads no switch of its own: this one decides whether the
-/// run carries the Space retrieval header at all.
+/// run carries the Space retrieval header at all. The inline loop reads it too, to refuse the
+/// organisation-wide document inventory on a Space-scoped turn (WS18-S5-b).
 const SPACE_AGENTIC_RETRIEVAL_VAR: &str = "AGENTIC_SPACE_RETRIEVAL_ENABLED";
 
-fn space_agentic_retrieval_enabled() -> bool {
+pub(crate) fn space_agentic_retrieval_enabled() -> bool {
     space_agentic_retrieval_enabled_with(&|key| std::env::var(key).ok())
 }
 
@@ -3907,39 +3908,45 @@ pub async fn invoke_stream_sse(
     // behaviour that was previously absent (MatchSkills had no internal caller).
     let SkillContext {
         blocks: skill_context,
-        requested_ids: requested_skill_ids,
         skills_truncated,
         skills_dropped,
         skill_file_offered,
         pins: skill_pins,
-    } = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly { SkillContext::default() } else { fetch_skill_context(
-        &state,
-        &model_bearer,
-        capability_bearer.as_ref().map(VerifiedCapabilityBearer::as_str),
-        &org_id,
-        &user_id,
-        &session_run.thread_id,
-        &req.content,
-        &crate::context_refs::merged_skill_ids(&req.skill_ids, context_refs.as_ref()),
-    )
-    .await };
+    } = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly {
+        // Nothing is injected, but the turn still records its keyword matches for rating. A turn that
+        // injects skills records itself inside `fetch_skill_context`, before its footers are built.
+        crate::chat_turn_registry::record_chat_turn(
+            &state,
+            &req_id,
+            &org_id,
+            &user_id,
+            &session_run.run_id,
+            &req.content,
+            &[],
+            MAX_INJECTED_SKILLS,
+            &[],
+        );
+        SkillContext::default()
+    } else {
+        fetch_skill_context(
+            &state,
+            &model_bearer,
+            capability_bearer
+                .as_ref()
+                .map(VerifiedCapabilityBearer::as_str),
+            &org_id,
+            &user_id,
+            &session_run.thread_id,
+            &req.content,
+            &crate::context_refs::merged_skill_ids(&req.skill_ids, context_refs.as_ref()),
+            &req_id,
+            &session_run.run_id,
+            turn_posture.zdr(),
+        )
+        .await
+    };
     // Counts only: the skill guidance that was cut to its budget, sent after the compaction frame.
     let skills_frame = lifecycle_events::skills_truncated(skills_truncated, skills_dropped);
-    // Remember which skills this turn injected, keyed by the request_id the SPA
-    // already has. A thumbs-up has to credit the skills that actually shaped the
-    // answer, and the client must not be trusted to name them — so the mapping
-    // is recorded server-side here and resolved at rating time.
-    crate::chat_turn_registry::record_chat_turn(
-        &state,
-        &req_id,
-        &org_id,
-        &user_id,
-        &session_run.run_id,
-        &req.content,
-        &requested_skill_ids,
-        MAX_INJECTED_SKILLS,
-        &skill_pins,
-    );
     // EP-11 S3: stamp the versions this turn injected on its run record, spawned so
     // the turn never waits on it. Never for a ZDR or waived turn: session-core
     // refuses both, and their run record keeps nothing durable about the turn.
@@ -5075,12 +5082,13 @@ pub async fn invoke_stream_sse(
             ..Default::default()
         };
         crate::vision::parts::attach(&mut grpc_req, &image_parts);
-        // Read before any retry rewrites the request: on a subscription route
+        // Read before any retry rewrites the request: on a subscription or customer-gateway route
         // the turn is never priced from API list prices, including an
         // artifact turn whose synthetic answer names no serving provider.
-        let route_cost_basis = crate::pricing::CostBasis::of_route(
+        let route_cost_basis = crate::pricing::CostBasis::of_request(
             &grpc_req.provider_hint,
             &grpc_req.subscription_connection_id,
+            &grpc_req.model_connection_id,
         );
         // Advisory cache-miss classification (WS02-S2): digest the leading
         // system messages now, before any retry rewrites the request. A ZDR
@@ -6694,7 +6702,8 @@ pub async fn invoke_stream_sse(
                     // A summary as of now, beside the unchanged `latency_ms`.
                     usage_envelope.payload["timing"] = timing.summary();
                     if let Some(reason) = cache_telemetry::miss_reason_for_turn(
-                        cache_prefix.filter(|_| cost_basis != crate::pricing::CostBasis::Subscription),
+                        // Only a platform-metered call is classified: a subscription's or a customer gateway's cache is not ours to read.
+                        cache_prefix.filter(|_| cost_basis == crate::pricing::CostBasis::Metered),
                         &org_clone,
                         &session_thread_id,
                         &model_used,
@@ -7195,13 +7204,11 @@ const MAX_INJECTED_SKILLS: i32 = 3;
 /// context budget (`skills::SKILL_CONTEXT_BUDGET_CHARS`) still bounds the total.
 const MAX_REQUESTED_SKILLS: usize = 4;
 
-/// What `fetch_skill_context` injected: the formatted blocks, plus the ids of
-/// the member's explicit picks that actually resolved — the server's list, for
-/// the turn registry, never the client's claim.
+/// What `fetch_skill_context` injected: the formatted blocks, plus the counts and
+/// the pins the turn carries.
 #[derive(Default)]
 struct SkillContext {
     blocks: Vec<String>,
-    requested_ids: Vec<String>,
     /// Blocks shortened, and blocks left out, to fit the context budget.
     skills_truncated: usize,
     skills_dropped: usize,
@@ -7258,7 +7265,9 @@ fn answer_token_budget() -> i32 {
 /// with. Reaching it means a cut-off answer only where the provider enforces
 /// it. The subscription broker does not (Codex takes no output cap) and
 /// counts reasoning inside its output tokens, so on that route the check gets
-/// no budget (0) and a long answer is not scored as truncated.
+/// no budget (0) and a long answer is not scored as truncated. A customer
+/// gateway is sent the same output cap (`max_tokens`) as a platform route, so
+/// it is checked the same way.
 ///
 /// `reasoning_allowance` is what the effort level may add to the ceiling (0
 /// without a level): reasoning tokens count toward `output_tokens`, so a
@@ -7266,11 +7275,13 @@ fn answer_token_budget() -> i32 {
 fn truncation_budget(cost_basis: crate::pricing::CostBasis, reasoning_allowance: i32) -> u32 {
     match cost_basis {
         crate::pricing::CostBasis::Subscription => 0,
-        crate::pricing::CostBasis::Metered => u32::try_from(crate::thinking::raised_ceiling(
-            answer_token_budget(),
-            reasoning_allowance,
-        ))
-        .unwrap_or(0),
+        crate::pricing::CostBasis::Metered | crate::pricing::CostBasis::CustomerBilled => {
+            u32::try_from(crate::thinking::raised_ceiling(
+                answer_token_budget(),
+                reasoning_allowance,
+            ))
+            .unwrap_or(0)
+        }
     }
 }
 
@@ -8456,7 +8467,9 @@ async fn budget_compacted_thread(
 /// actually steers the model — the load-bearing Claude-Code skill behaviour.
 /// Lazy-loads the org's LEARNED skills from session-core once per org (mirrors
 /// the `MatchSkills` gRPC read path). Advisory: any failure yields an empty Vec
-/// so inference still proceeds.
+/// so inference still proceeds. The turn is recorded here, once its skills are
+/// matched and before its footers are built, because a footer names a `/skills`
+/// mount only where the turn's record puts that skill's bundle on the turn (WS19-S8).
 async fn fetch_skill_context(
     state: &AppState,
     bearer: &VerifiedModelBearer,
@@ -8466,8 +8479,13 @@ async fn fetch_skill_context(
     thread_id: &str,
     query: &str,
     requested: &[String],
+    request_id: &str,
+    run_id: &str,
+    zdr: bool,
 ) -> SkillContext {
-    use mp_contracts::model_plane::v1::{ListAgentSkillsRequest, MatchSkillsRequest, Skill};
+    use mp_contracts::model_plane::v1::{
+        ListAgentSkillsRequest, MatchSkillsRequest, Skill, SkillPin,
+    };
 
     if org_id.trim().is_empty() {
         return SkillContext::default();
@@ -8617,7 +8635,7 @@ async fn fetch_skill_context(
     let skill_ids: Vec<String> = chosen.iter().map(|s| s.id.clone()).collect();
     // EP-11 S3: pin every skill the turn set out to inject, a block the budget cut
     // or dropped included: `reattach_skill` recovers exactly those, at this version.
-    let pins = if crate::skills::skill_pins_enabled() {
+    let pins: Vec<SkillPin> = if crate::skills::skill_pins_enabled() {
         chosen
             .iter()
             .filter(|s| !s.body.trim().is_empty())
@@ -8626,7 +8644,27 @@ async fn fetch_skill_context(
     } else {
         Vec::new()
     };
+    // Remember which skills this turn injected, keyed by the request_id the SPA
+    // already has. A thumbs-up has to credit the skills that actually shaped the
+    // answer, and the client must not be trusted to name them — so the mapping
+    // is recorded server-side here and resolved at rating time.
+    crate::chat_turn_registry::record_chat_turn(
+        state,
+        request_id,
+        org_id,
+        user_id,
+        run_id,
+        query,
+        &requested_ids,
+        MAX_INJECTED_SKILLS,
+        &pins,
+    );
     let bundles = skill_bundle_summaries(state, capability_bearer, org_id, &skill_ids).await;
+    // The `/skills` mounts this turn carries (WS19-S8), read from the record just written: a footer
+    // names one only where the turn's bundle is mounted.
+    let mounts = crate::tool_loop::skill_mounts_for_footers(
+        state, request_id, org_id, user_id, zdr, &bundles,
+    );
     // Bounded by SIZE as well as count — see `skills::fit_skill_blocks_with_footers`.
     let fitted = crate::skills::fit_skill_blocks_with_footers(
         chosen
@@ -8637,7 +8675,15 @@ async fn fetch_skill_context(
                     .iter()
                     .find(|bundle| bundle.skill_id == s.id)
                     .map(|bundle| {
-                        crate::skills::bundle_footer(&s.name, bundle.file_count, bundle.total_bytes)
+                        let footer = crate::skills::bundle_footer(
+                            &s.name,
+                            bundle.file_count,
+                            bundle.total_bytes,
+                        );
+                        match mounts.iter().find(|mount| mount.skill_id == s.id) {
+                            Some(mount) => bundle_footer_naming_mount(&footer, &mount.name),
+                            None => footer,
+                        }
                     })
                     .unwrap_or_default();
                 (crate::skills::format_skill_block(&s), footer)
@@ -8655,12 +8701,20 @@ async fn fetch_skill_context(
     }
     SkillContext {
         blocks: fitted.blocks,
-        requested_ids,
         skills_truncated: fitted.truncated,
         skills_dropped: fitted.dropped,
         skill_file_offered: !bundles.is_empty(),
         pins,
     }
+}
+
+/// The bundle footer with the path its mount has inside `code_interpreter` (WS19-S8): one plain
+/// sentence, placed inside the footer's brackets, before the closing `]`.
+fn bundle_footer_naming_mount(footer: &str, mount_name: &str) -> String {
+    let open = footer.strip_suffix(']').unwrap_or(footer);
+    format!(
+        "{open} Inside code_interpreter its files can be read and run under /skills/{mount_name}/, read-only, and cannot be written.]"
+    )
 }
 
 /// The bundles of the skills a turn injected (WS19-S7). Asked only while
@@ -9481,9 +9535,10 @@ async fn run_infer_fallback(
     let fallback_zdr = grpc_req.zdr;
     let reasoning_allowance = crate::thinking::allowance_for_wire(grpc_req.reasoning_effort);
     let subscription_route = !grpc_req.subscription_connection_id.trim().is_empty();
-    let route_cost_basis = crate::pricing::CostBasis::of_route(
+    let route_cost_basis = crate::pricing::CostBasis::of_request(
         &grpc_req.provider_hint,
         &grpc_req.subscription_connection_id,
+        &grpc_req.model_connection_id,
     );
     // Advisory cache-miss classification (WS02-S2); never for a ZDR turn.
     let cache_prefix =
@@ -9949,7 +10004,8 @@ async fn run_infer_fallback(
             }
             usage.payload["timing"] = timing.summary();
             if let Some(reason) = cache_telemetry::miss_reason_for_turn(
-                cache_prefix.filter(|_| cost_basis != crate::pricing::CostBasis::Subscription),
+                // Only a platform-metered call is classified, as on the streaming path.
+                cache_prefix.filter(|_| cost_basis == crate::pricing::CostBasis::Metered),
                 org_id,
                 &thread_id,
                 &model_used,
@@ -11162,6 +11218,7 @@ async fn judge_sources(
                 &route.model,
                 &route.provider_hint,
                 &route.subscription_connection_id,
+                &route.model_connection_id,
             );
             crate::tool_loop::stream_call_usage(state, sink, &call, None).await;
             sink.record_overhead(call);
@@ -11303,6 +11360,7 @@ async fn resample_answer(
                     model,
                     &route.provider_hint,
                     &route.subscription_connection_id,
+                    &route.model_connection_id,
                 );
                 crate::tool_loop::stream_call_usage(state, sink, &call, None).await;
                 sink.record_overhead(call);
@@ -15365,11 +15423,18 @@ async fn turn_usage(
     }
 }
 
-/// The cost a usage frame states: the metered total, `0.0` for a turn the subscription carried
-/// (older clients read that field), or null when a metered call's price is unknown.
+/// The cost a usage frame states: the metered total, `0.0` for a turn the subscription or the customer's own
+/// gateway carried (older clients read that field), or null when a metered call's price is unknown.
 fn frame_cost_usd(turn: &crate::usage_meter::Snapshot) -> Option<f64> {
-    turn.cost_usd
-        .or_else(|| (turn.basis == Some(crate::pricing::CostBasis::Subscription)).then_some(0.0))
+    turn.cost_usd.or_else(|| {
+        matches!(
+            turn.basis,
+            Some(
+                crate::pricing::CostBasis::Subscription | crate::pricing::CostBasis::CustomerBilled
+            )
+        )
+        .then_some(0.0)
+    })
 }
 
 /// The ledger rows of a turn's calls other than its answer, one per call and stamped with the

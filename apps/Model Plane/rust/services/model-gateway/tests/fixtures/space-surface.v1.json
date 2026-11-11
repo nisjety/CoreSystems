@@ -3146,6 +3146,23 @@
       "reason": "Takes a plugin package out of the org catalogue through Capability Core (org admin): the shared proxy refuses a zero-retention or waived token before anything is forwarded."
     },
     {
+      "id": "mg:GET:/v1/plugin-kill-list",
+      "kind": "route",
+      "plane": "model",
+      "service": "model-gateway",
+      "method": "GET",
+      "path": "/v1/plugin-kill-list",
+      "handler": "http_routes.rs::list_plugin_kill_proxy",
+      "decision_type": "token_posture",
+      "min_role": "authenticated",
+      "zdr_class": "n/a",
+      "basis": "path-rule",
+      "idempotency": "n/a",
+      "flag": "PLUGIN_LOADER_ENABLED",
+      "payload_allow_list": [],
+      "reason": "Lists the org's plugin kill-list entries through Capability Core (org admin): digest, source, the stored reason and the time. A read stores nothing, and the shared proxy refuses only mutations, so a zero-retention caller may read it."
+    },
+    {
       "id": "mg:POST:/v1/plugin-kill-list",
       "kind": "route",
       "plane": "model",

@@ -251,11 +251,16 @@ pub fn goal_judge_request(
 }
 
 /// The judge's tokens the goal debits: metered tokens only, the rule of the goal
-/// budget and the run ceiling. A subscription call spends no metered tokens.
+/// budget and the run ceiling. A subscription or customer-gateway call spends no
+/// metered tokens.
 #[must_use]
 pub fn judge_metered_tokens(response: &InferResponse, route: &InferRequest) -> u64 {
-    let basis = crate::pricing::CostBasis::of_route(&route.provider_hint, &route.subscription_connection_id)
-        .served_by(&response.provider_used);
+    let basis = crate::pricing::CostBasis::of_request(
+        &route.provider_hint,
+        &route.subscription_connection_id,
+        &route.model_connection_id,
+    )
+    .served_by(&response.provider_used);
     if basis != crate::pricing::CostBasis::Metered {
         return 0;
     }

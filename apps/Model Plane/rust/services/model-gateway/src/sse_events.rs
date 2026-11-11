@@ -2620,6 +2620,12 @@ mod tests {
                     source: PriceSource::Subscription,
                     note: None,
                 },
+                CostBasis::CustomerBilled => Priced {
+                    usd: Some(0.0),
+                    by_category: None,
+                    source: PriceSource::CustomerBilled,
+                    note: None,
+                },
                 CostBasis::Metered => Priced {
                     usd,
                     by_category: usd.map(|usd| CategoryCost {

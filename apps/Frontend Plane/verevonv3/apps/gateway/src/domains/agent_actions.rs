@@ -98,7 +98,9 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         .route(
             "/api/v1/plugin-kill-list",
-            post(create_plugin_kill).delete(delete_plugin_kill),
+            get(list_plugin_kill)
+                .post(create_plugin_kill)
+                .delete(delete_plugin_kill),
         )
         .route("/api/v1/cron", get(list_cron).post(create_cron))
         .route(
@@ -916,6 +918,24 @@ async fn uninstall_plugin(
 ) -> impl IntoResponse {
     let path = format!("plugins/{}/uninstall", urlencoding::encode(&plugin_id));
     proxy_plugin_request(&state, &user, &headers, Method::POST, &path, None).await
+}
+
+/// Lists the org's kill-list entries, its own and the platform's global ones (W4-PL-4). capability-core answers only
+/// an org admin acting as a person.
+async fn list_plugin_kill(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    proxy_plugin_request(
+        &state,
+        &user,
+        &headers,
+        Method::GET,
+        "plugin-kill-list",
+        None,
+    )
+    .await
 }
 
 /// Adds a kill-list entry (W4-PL-3). The org is never taken from the body: capability-core derives it from the

@@ -1948,6 +1948,7 @@ components:
             - browser_action_risk
             - auto_posture_provider_write
             - browser_human_assist
+            - tainted_egress
             - unclassified_gate
         tool:
           type: string

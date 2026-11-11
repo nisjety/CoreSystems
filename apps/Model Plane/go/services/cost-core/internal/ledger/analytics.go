@@ -85,7 +85,7 @@ func (s *Store) UsageAnalytics(_ context.Context, f AggregateFilter) ([]UsageBuc
 		b.OutputTokens += e.OutputTokens
 		b.MeteredCostUSD += basisCost(e, CostBasisMetered)
 		b.UnmeasuredRequests += zeroTokenCount(e)
-		if e.CostBasis != CostBasisSubscription {
+		if IsPlatformSpend(e.CostBasis) {
 			b.CacheReadInputTokens += e.CacheReadInputTokens
 			b.CacheCreationInputTokens += e.CacheCreationInputTokens
 			if cacheReported(e) {
@@ -118,7 +118,7 @@ func (s *Store) CacheMissAnalytics(_ context.Context, f AggregateFilter) ([]Cach
 	defer s.mu.Unlock()
 	buckets := map[[4]string]*CacheMissBucket{}
 	for _, e := range s.entries {
-		if !matches(e, f) || e.CacheMissReason == "" || e.CostBasis == CostBasisSubscription {
+		if !matches(e, f) || e.CacheMissReason == "" || !IsPlatformSpend(e.CostBasis) {
 			continue
 		}
 		key := [4]string{e.CreatedAt.UTC().Format("2006-01-02"), e.Model, e.ProviderUsed, e.CacheMissReason}

@@ -469,6 +469,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'plugins.uninstall': exempt('agent_cannot_self_govern', 'destructive'),
   'plugins.approve_catalog': exempt('agent_cannot_self_govern', 'context_write'),
   'plugins.kill_digest': exempt('irreversible_destructive', 'destructive'),
+  'plugins.lift_kill': exempt('agent_cannot_self_govern', 'context_write'),
 }
 
 /**

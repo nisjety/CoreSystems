@@ -4966,7 +4966,7 @@ async fn run_rounds(
                             output: String::new(),
                             error: String::new(),
                             compaction_triggered: false,
-                            cause: Some(CauseCode::RiskyEffectUnderAsk),
+                            cause: Some(CauseCode::TaintedEgress),
                             screening_taint: false,
                         });
                     }

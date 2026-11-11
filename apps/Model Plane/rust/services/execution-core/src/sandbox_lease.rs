@@ -117,7 +117,9 @@ pub struct SandboxLeaseContext<'a> {
 /// none is cached yet. A run's SECOND and later Space-scoped
 /// `code_interpreter` step reuses the first step's lease — `AcquireLease`
 /// mints a fresh lease id on every call (it is not idempotent by scope), so
-/// without this cache every step would open its own, orphaned lease.
+/// without this cache every step would open its own, orphaned lease. Two first
+/// calls of one run that race here are serialised by `StateStore::setup_guard`:
+/// the second waits, then reuses the lease the first caches.
 ///
 /// # Errors
 /// Fails closed — never falls back to running `code_interpreter` without a
@@ -132,6 +134,13 @@ pub async fn ensure_sandbox_lease(
     org_id: &str,
     user_id: &str,
 ) -> Result<SandboxLease, Status> {
+    if let Some(existing) = state.sandbox_lease(run_id) {
+        return Ok(existing);
+    }
+    // The run's first-setup guard, held until the lease is cached below. A concurrent first call
+    // waits here and finds that lease on the second check, so it never acquires a second, orphaned
+    // one. The guard is an owned value, so every error return below releases it.
+    let _setup = state.setup_guard(run_id).await;
     if let Some(existing) = state.sandbox_lease(run_id) {
         return Ok(existing);
     }
@@ -253,7 +262,9 @@ pub async fn ensure_thread_lease(
 /// ACTIVE — this module's own first real caller of `ActivateLease`, since
 /// nothing durable existed for this lease to read before now), fetches its
 /// current workspace manifest, and hydrates it. Every later call reuses the
-/// cached directory without any further sandbox-manager round trip.
+/// cached directory without any further sandbox-manager round trip. Concurrent
+/// first calls are serialised the same way as the lease, by
+/// `StateStore::setup_guard`, so one run hydrates one directory.
 ///
 /// # Errors
 /// Fails closed — never runs `code_interpreter` against an unhydrated or
@@ -267,6 +278,12 @@ pub async fn ensure_hydrated_workspace(
     org_id: &str,
     lease: &SandboxLease,
 ) -> Result<PathBuf, Status> {
+    if let Some(existing) = state.hydrated_workspace(run_id) {
+        return Ok(existing.path);
+    }
+    // The same guard as the lease, held through the activate, manifest and hydrate steps and the
+    // cache write. A concurrent first call waits here and finds the directory this call hydrates.
+    let _setup = state.setup_guard(run_id).await;
     if let Some(existing) = state.hydrated_workspace(run_id) {
         return Ok(existing.path);
     }

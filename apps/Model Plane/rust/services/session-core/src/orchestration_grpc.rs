@@ -6258,7 +6258,7 @@ mod tests {
 
     #[test]
     fn an_unknown_cause_code_is_stored_as_unclassified_gate() {
-        let mut req = create_with_cause("tainted_egress");
+        let mut req = create_with_cause("tainted_egress_retired");
         req.cause.as_mut().expect("cause").scope_options = vec!["run".to_owned()];
         let (metadata, code) = new_approval_metadata(&req, false);
         assert_eq!(code, Some("unclassified_gate"));

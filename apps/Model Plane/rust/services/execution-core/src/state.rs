@@ -143,6 +143,10 @@ pub struct StateStore {
     thread_locks: Arc<DashMap<String, WorkspaceLock>>,
     /// One lock per run with a workspace, shared by its file tools and dropped with the workspace.
     workspace_locks: Arc<DashMap<String, WorkspaceLock>>,
+    /// One lock per run while its first Space-scoped setup (its lease or its workspace) runs. Taken
+    /// through `setup_guard`, so two concurrent first calls of one run cannot both acquire or
+    /// hydrate.
+    setup_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Scheduled Do runs with no one attached to answer an approval. Each run's
     /// withheld effects accumulate here until its step takes them.
     unattended: Arc<DashMap<String, Arc<std::sync::Mutex<Vec<WithheldEffect>>>>>,
@@ -372,11 +376,11 @@ impl StateStore {
     }
 
     /// Cache the lease this run acquired for its first Space-scoped
-    /// `code_interpreter` step. Unconditional insert-or-replace: a caller that
-    /// already checked `sandbox_lease` and found nothing is the only caller
-    /// that should reach this, so there is no existing value worth preserving
-    /// over a fresh one (unlike `cache_verified_owner`, which must never let a
-    /// second principal silently rebind an owner).
+    /// `code_interpreter` step. Unconditional insert-or-replace: only a caller
+    /// that found nothing under this run's `setup_guard` reaches this, so there
+    /// is no existing value worth preserving over a fresh one (unlike
+    /// `cache_verified_owner`, which must never let a second principal silently
+    /// rebind an owner).
     pub fn cache_sandbox_lease(&self, run_id: &str, lease: SandboxLease) {
         self.leases.insert(run_id.to_owned(), lease);
     }
@@ -385,9 +389,11 @@ impl StateStore {
     /// Used only at a run's actual end (cancel or terminal completion) —
     /// removing rather than merely reading means a second release attempt for
     /// the same `run_id` sees `None` and is a no-op, and the map does not grow
-    /// forever for runs that ever used `code_interpreter` in a Space.
+    /// forever for runs that ever used `code_interpreter` in a Space. It also
+    /// drops the run's setup lock, unless a setup still holds it.
     #[must_use]
     pub fn take_sandbox_lease(&self, run_id: &str) -> Option<SandboxLease> {
+        self.drop_idle_setup_lock(run_id);
         self.leases.remove(run_id).map(|(_, lease)| lease)
     }
 
@@ -399,8 +405,8 @@ impl StateStore {
 
     /// Cache the workspace this run hydrated for its first Space-scoped
     /// `code_interpreter` call. Unconditional insert-or-replace, mirroring
-    /// `cache_sandbox_lease`: only a caller that already checked
-    /// `hydrated_workspace` and found nothing reaches here.
+    /// `cache_sandbox_lease`: only a caller that found nothing under this run's
+    /// `setup_guard` reaches here.
     pub fn cache_hydrated_workspace(&self, run_id: &str, workspace: HydratedWorkspace) {
         self.workspaces.insert(run_id.to_owned(), workspace);
     }
@@ -412,6 +418,7 @@ impl StateStore {
     #[must_use]
     pub fn take_hydrated_workspace(&self, run_id: &str) -> Option<HydratedWorkspace> {
         self.workspace_locks.remove(run_id);
+        self.drop_idle_setup_lock(run_id);
         self.workspaces
             .remove(run_id)
             .map(|(_, workspace)| workspace)
@@ -461,6 +468,33 @@ impl StateStore {
             .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(())))
             .value()
             .clone()
+    }
+
+    /// The guard that serialises a run's first Space-scoped setup, its lease or its workspace. A
+    /// caller takes it after finding nothing cached, checks the cache again under it, and only then
+    /// acquires or hydrates. So two concurrent first calls of one run run one after the other, and
+    /// the second finds what the first cached. The guard owns its lock and is released when it
+    /// drops, on every path, errors included. Locks no setup holds any longer are dropped when the
+    /// next one is made, as `thread_lock` does.
+    #[must_use]
+    pub(crate) async fn setup_guard(&self, run_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.setup_locks
+            .retain(|_, lock| Arc::strong_count(lock) > 1);
+        let lock = self
+            .setup_locks
+            .entry(run_id.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .value()
+            .clone();
+        lock.lock_owned().await
+    }
+
+    /// Drops the run's setup lock unless a setup still holds or waits on it. Removal happens under
+    /// the map's shard lock and only when nothing else holds the lock, so a setup in flight at the
+    /// run's end keeps the lock it is queued on, and a new first call cannot run beside it.
+    fn drop_idle_setup_lock(&self, run_id: &str) {
+        self.setup_locks
+            .remove_if(run_id, |_, lock| Arc::strong_count(lock) == 1);
     }
 }
 

@@ -3068,6 +3068,16 @@ const pluginKillDigestOutput = z.object({
   children_removed: z.number().int().min(0),
 })
 
+// The admin's lift of an org kill-list entry (W4-PL-4): the digest in, the removal the route answers with out.
+const pluginLiftKillInput = z.object({ digest: pluginDigestInput }).strict()
+
+const pluginKillRemovalOutput = z.object({
+  digest: z.string(),
+  scope: z.string(),
+  org_id: z.string(),
+  removed: z.boolean(),
+})
+
 // Registry entries are the product contract shared by humans and the Model Plane.
 export const actionRegistry = [
   {
@@ -6551,6 +6561,17 @@ export const actionRegistry = [
     reversible: false,
     inputSchema: pluginKillDigestInput,
     outputSchema: pluginKillDigestOutput,
+  },
+  {
+    id: 'plugins.lift_kill',
+    label: 'Lift a plugin kill',
+    description: 'Remove the organization\'s kill-list entry for one manifest digest, so the package can be installed and listed again. It restores nothing: what the kill uninstalled stays removed, and the package must be installed and listed again. Org scope only; a platform-wide kill is shown but not lifted here. Admin only, acting as a person; the removal is audited server-side. The agent is never offered it.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: pluginLiftKillInput,
+    outputSchema: pluginKillRemovalOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]
 

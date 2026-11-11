@@ -59,13 +59,16 @@ pub enum CauseCode {
     /// The person holds the run's browser, or the agent asked them for help in it (EP-1). The
     /// approval is the hand-back: consuming it lets the held browser call run again.
     BrowserHumanAssist,
+    /// An egress call (a web fetch or a provider action) held for a person after a connected-app
+    /// read came back flagged by screening (WS23-S3). Only `once` is offered.
+    TaintedEgress,
     /// A gate that did not say why, or a code this reader does not know.
     UnclassifiedGate,
 }
 
 impl CauseCode {
     /// Every code, in the order the golden lists them.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::OwnerEffectReserved,
         Self::ConsentToDisclose,
         Self::RiskyEffectUnderAsk,
@@ -76,6 +79,7 @@ impl CauseCode {
         Self::BrowserActionRisk,
         Self::AutoPostureProviderWrite,
         Self::BrowserHumanAssist,
+        Self::TaintedEgress,
         Self::UnclassifiedGate,
     ];
 
@@ -93,6 +97,7 @@ impl CauseCode {
             Self::BrowserActionRisk => "browser_action_risk",
             Self::AutoPostureProviderWrite => "auto_posture_provider_write",
             Self::BrowserHumanAssist => "browser_human_assist",
+            Self::TaintedEgress => "tainted_egress",
             Self::UnclassifiedGate => "unclassified_gate",
         }
     }
@@ -586,12 +591,12 @@ mod tests {
             "",
             " provider_write",
             "PROVIDER_WRITE",
-            "tainted_egress",
+            "tainted_egress_retired",
             "nope",
         ] {
             assert_eq!(CauseCode::from_wire(token), CauseCode::UnclassifiedGate);
         }
-        assert!(!CauseCode::is_known("tainted_egress"));
+        assert!(!CauseCode::is_known("tainted_egress_retired"));
     }
 
     #[test]
@@ -660,7 +665,7 @@ mod tests {
     #[test]
     fn normalising_degrades_an_unknown_code_and_fixes_the_scope_options() {
         let (cause, known) = normalized(ApprovalCause {
-            code: "tainted_egress".to_owned(),
+            code: "tainted_egress_retired".to_owned(),
             scope_options: vec!["run".to_owned(), "thread".to_owned()],
             tool: "x".repeat(MAX_FIELD_CHARS + 50),
             ..ApprovalCause::default()

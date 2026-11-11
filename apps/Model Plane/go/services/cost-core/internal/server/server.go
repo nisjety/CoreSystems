@@ -687,16 +687,18 @@ func budgetDecision(maxCostUSD float64, maxTokens int64, cost float64, tokens in
 // publishes token counts only), cost-core prices it authoritatively from the
 // catalogue so the dollar ledger and the budget posture are real, never $0.
 //
-// The exception is a subscription entry (cost_basis "subscription"): the call
-// was served by the user's own ChatGPT subscription, so there is no per-token
-// charge to price. It keeps cost 0 with its real token counts, and API list
-// prices never reach it. An entry with no basis is priced as metered.
+// The exception is a subscription entry (cost_basis "subscription") or a
+// customer-gateway entry (cost_basis "customer_connection", W4-BYO-5): the call
+// was served by the user's own ChatGPT subscription or the organisation's own
+// gateway, so there is no per-token charge to price. It keeps cost 0 with its
+// real token counts, and API list prices never reach it. An entry with no basis
+// is priced as metered.
 func (s *Server) RecordUsage(ctx context.Context, e ledger.Entry) error {
 	if err := ledger.ValidateEntry(e); err != nil {
 		return err
 	}
 	if e.CostUSD == 0 && (e.InputTokens > 0 || e.OutputTokens > 0) && s.pricing != nil &&
-		e.CostBasis != ledger.CostBasisSubscription {
+		ledger.IsPlatformSpend(e.CostBasis) {
 		e.CostUSD = s.pricing.CostWithCache(e.Model, e.InputTokens, e.OutputTokens, e.CacheReadInputTokens, e.CacheCreationInputTokens)
 	}
 	return s.recordPriced(ctx, e)
@@ -722,7 +724,7 @@ func (s *Server) RecordImageUsage(ctx context.Context, e ledger.Entry, image Ima
 		return err
 	}
 	known := true
-	if e.CostUSD == 0 && e.CostBasis != ledger.CostBasisSubscription {
+	if e.CostUSD == 0 && ledger.IsPlatformSpend(e.CostBasis) {
 		if s.pricing != nil && (e.InputTokens > 0 || e.OutputTokens > 0) {
 			e.CostUSD = s.pricing.CostWithCache(e.Model, e.InputTokens, e.OutputTokens, e.CacheReadInputTokens, e.CacheCreationInputTokens)
 		}

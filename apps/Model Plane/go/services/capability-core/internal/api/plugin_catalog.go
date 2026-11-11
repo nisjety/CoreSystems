@@ -9,8 +9,8 @@
 // Who may write: an org admin acting as a person, with the write scope and an explicit non-ZDR posture, for
 // the catalogue and for an org-scope kill. A global kill needs a platform service principal: the service
 // type, the global org and capability:global:write, the scope reserved for process-wide registries. Reads of
-// the catalogue are open to any member of the org, ZDR included. Off (PLUGIN_LOADER_ENABLED is not the
-// literal true), nothing here is mounted and the paths answer 404.
+// the catalogue are open to any member of the org, ZDR included. The kill list is read by an org admin. Off
+// (PLUGIN_LOADER_ENABLED is not the literal true), nothing here is mounted and the paths answer 404.
 package api
 
 import (
@@ -23,6 +23,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/triodelab/model-plane/pkg/authctx"
@@ -119,6 +120,7 @@ func (h *PluginCatalogHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET "+pluginCatalogPath, h.listCatalogue)
 	mux.HandleFunc("POST "+pluginCatalogPath+"/{id}/approve", h.approve)
 	mux.HandleFunc("POST "+pluginCatalogPath+"/{id}/unapprove", h.unapprove)
+	mux.HandleFunc("GET "+pluginKillListPath, h.listKills)
 	mux.HandleFunc("POST "+pluginKillListPath, h.createKill)
 	mux.HandleFunc("DELETE "+pluginKillListPath, h.deleteKill)
 }
@@ -432,6 +434,66 @@ type pluginKillRemoval struct {
 	result pluginloader.Result
 }
 
+// pluginKillListSQL reads the kill entries that cover an org: its own and the platform's global ones. Parameter $1 is
+// the org. Only the digest, the scope the row was written under, the reason POST stored and the time are read.
+const pluginKillListSQL = `
+	SELECT digest, org_id, reason, created_at
+	FROM plugin_kill_list
+	WHERE org_id IN ('global', $1::text)
+	ORDER BY created_at DESC, digest, org_id`
+
+// pluginKillEntry is one kill-list entry an org admin reads: the digest, the source that put it on the list (org, or
+// global for a platform-wide kill), the reason POST stored and when the kill was written. It carries no actor.
+type pluginKillEntry struct {
+	Digest   string    `json:"digest"`
+	Source   string    `json:"source"`
+	Reason   string    `json:"reason"`
+	KilledAt time.Time `json:"killed_at"`
+}
+
+// listKills is GET /api/v1/plugin-kill-list. An org admin acting as a person reads the kill entries that cover the
+// org, its own and the platform's global ones, each with its source, so a global kill is shown as one the org cannot
+// lift here. It reads no content and writes nothing, so a zero-retention admin may read it, as the catalogue is read.
+func (h *PluginCatalogHandler) listKills(w http.ResponseWriter, r *http.Request) {
+	principal, ok := authctx.PrincipalFromContext(r.Context())
+	if !ok || principal.OrganizationID == "" || principal.ActorID == "" {
+		jsonErr(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	if !pluginOrgAdmin(w, r, principal) {
+		return
+	}
+	rows, err := h.pool.Query(r.Context(), pluginKillListSQL, principal.OrganizationID)
+	if err != nil {
+		slog.Error("list plugin kill list failed", "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+	kills := []pluginKillEntry{}
+	for rows.Next() {
+		var entry pluginKillEntry
+		var entryOrg string
+		if err := rows.Scan(&entry.Digest, &entryOrg, &entry.Reason, &entry.KilledAt); err != nil {
+			slog.Error("scan plugin kill list failed", "error", err)
+			jsonErr(w, "database unavailable", http.StatusInternalServerError)
+			return
+		}
+		entry.Source = pluginKillScopeOrg
+		if entryOrg == pluginGlobalOrg {
+			entry.Source = pluginKillScopeGlobal
+		}
+		entry.KilledAt = entry.KilledAt.UTC()
+		kills = append(kills, entry)
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("list plugin kill list failed", "error", err)
+		jsonErr(w, "database unavailable", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"kills": kills})
+}
+
 // createKill is POST /api/v1/plugin-kill-list. It writes the entry, clears the catalogue approval of the digest in
 // scope and uninstalls every installed copy of it, all in one transaction. A repeat of a kill keeps the entry and
 // still removes any copy installed since: 201 when the entry is new, 200 when it already existed.
@@ -485,8 +547,23 @@ func (h *PluginCatalogHandler) createKill(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// deleteKill is DELETE /api/v1/plugin-kill-list?digest=&scope=. It removes the entry for the scope. What the kill
-// removed stays removed: a plugin must be installed, and approved for the catalogue, again.
+// deleteKillSQL removes one kill-list entry and appends the audit row of the lift in the same statement, so the row is
+// written only when an entry was removed. The row names the digest and the scope, never the reason. Parameters: $1 the
+// digest, $2 the org the entry covers, $3 the audit id, $4 the acting principal, $5 the scope.
+const deleteKillSQL = `
+	WITH removed AS (
+	    DELETE FROM plugin_kill_list
+	    WHERE digest = $1::text AND org_id = $2::text
+	    RETURNING digest, org_id
+	)
+	INSERT INTO registry_audit_log (id, entity_kind, entity_id, action, actor, org_id, diff_json)
+	SELECT $3::text, 'plugin_kill', removed.digest, 'lifted', $4::text, removed.org_id,
+	       jsonb_build_object('scope', $5::text)
+	FROM removed`
+
+// deleteKill is DELETE /api/v1/plugin-kill-list?digest=&scope=. It removes the entry for the scope and appends the audit
+// row of the lift in the same statement, so a lift is audited exactly when it lands. What the kill removed stays
+// removed: a plugin must be installed, and approved for the catalogue, again.
 func (h *PluginCatalogHandler) deleteKill(w http.ResponseWriter, r *http.Request) {
 	principal, ok := pluginWriter(w, r)
 	if !ok {
@@ -497,8 +574,8 @@ func (h *PluginCatalogHandler) deleteKill(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	result, err := h.pool.Exec(r.Context(),
-		`DELETE FROM plugin_kill_list WHERE digest = $1 AND org_id = $2`, target.digest, target.orgID)
+	result, err := h.pool.Exec(r.Context(), deleteKillSQL,
+		target.digest, target.orgID, "ral_"+uuid.NewString(), principal.ActorID, target.scope)
 	if !writeSingleScopedMutation(w, "plugin kill entry", result, err) {
 		return
 	}

@@ -87,10 +87,10 @@ type envelope struct {
 // predate this field simply omit the JSON keys, which decodes to the correct
 // zero value here -- no version gate needed.
 //
-// CostBasis is model-gateway's pricing::CostBasis ("metered" or
-// "subscription"). A subscription turn is never priced from API list prices
-// (see server.RecordUsage). An older gateway omits the key, which decodes to
-// the unknown basis and is priced as before.
+// CostBasis is model-gateway's pricing::CostBasis ("metered", "subscription"
+// or "customer_connection"). A subscription or customer-gateway turn is never
+// priced from API list prices (see server.RecordUsage). An older gateway omits
+// the key, which decodes to the unknown basis and is priced as before.
 type usagePayload struct {
 	RequestID                string  `json:"request_id"`
 	OrgID                    string  `json:"org_id"`

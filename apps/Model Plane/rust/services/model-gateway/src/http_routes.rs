@@ -774,7 +774,9 @@ fn proxy_routes() -> Router<AppState> {
         )
         .route(
             "/v1/plugin-kill-list",
-            post(create_plugin_kill_proxy).delete(delete_plugin_kill_proxy),
+            get(list_plugin_kill_proxy)
+                .post(create_plugin_kill_proxy)
+                .delete(delete_plugin_kill_proxy),
         )
         .route("/v1/plugins/:id/components", get(plugin_components_proxy))
         .route("/v1/plugins/:id/install", post(install_plugin_proxy))
@@ -9590,6 +9592,15 @@ async fn unapprove_plugin_catalog_proxy(
     let path = format!("plugin-catalog/{}/unapprove", plugin_path_segment(&id)?);
     proxy_to_capability_core(&s, &c, &bearer, &path, "POST", None).await
 }
+/// W4-PL-4: the org's kill-list entries, its own and the platform's global ones. capability-core answers only an org
+/// admin acting as a person. A read stores nothing, so the shared proxy forwards it for a zero-retention caller too.
+async fn list_plugin_kill_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "plugin-kill-list", "GET", None).await
+}
 /// W4-PL-3: add a kill-list entry. The org is never in the body; capability-core derives it from the caller.
 async fn create_plugin_kill_proxy(
     State(s): State<AppState>,
@@ -17692,10 +17703,11 @@ async fn invoke(
     info!(run_id = %session_run.run_id, thread_id = %session_run.thread_id, request_id = %request_id, "http invoke completed");
 
     let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-    // A subscription call is never priced from API list prices.
-    let cost_basis = crate::pricing::CostBasis::of_route(
+    // A subscription or customer-gateway call is never priced from API list prices.
+    let cost_basis = crate::pricing::CostBasis::of_request(
         &normalized.provider_hint,
         &normalized.subscription_connection_id,
+        &normalized.model_connection_id,
     )
     .served_by(&infer_resp.provider_used);
     let usage = invoke_usage(
