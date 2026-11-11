@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse, AnswerRunQuestionRequest, AnswerRunQuestionResponse, AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse, ClaimOnceApprovalRequest, ClaimOnceApprovalResponse, ClaimQuarantineReleaseRequest, ClaimQuarantineReleaseResponse, ConsumeApprovalRequest, ConsumeApprovalResponse, ConsumeRunQuestionRequest, ConsumeRunQuestionResponse, CreateApprovalRequest, CreateApprovalResponse, CreateRunQuestionRequest, CreateRunQuestionResponse, DecideApprovalRequest, DecideApprovalResponse, GetApprovalContinuationRequest, GetApprovalContinuationResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetQuarantinePreviewRequest, GetQuarantinePreviewResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, HoldQuarantinedOutputRequest, HoldQuarantinedOutputResponse, ListApprovalScopeGrantsRequest, ListApprovalScopeGrantsResponse, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListRunQuestionsRequest, ListRunQuestionsResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, ProposePlanRequest, ProposePlanResponse, RecordApprovalContinuationOutcomeRequest, RecordApprovalContinuationOutcomeResponse, RecordApprovalContinuationStartedRequest, RecordApprovalContinuationStartedResponse, RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, RerouteApprovalRequest, RerouteApprovalResponse, RevokeApprovalScopeGrantRequest, RevokeApprovalScopeGrantResponse, StartWorkflowRequest, StartWorkflowResponse, StreamRunEventsRequest, TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse, UseApprovalScopeGrantRequest, UseApprovalScopeGrantResponse } from "./orchestration_pbjs";
+import { AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse, AnswerRunQuestionRequest, AnswerRunQuestionResponse, AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse, ClaimOnceApprovalRequest, ClaimOnceApprovalResponse, ClaimQuarantineReleaseRequest, ClaimQuarantineReleaseResponse, ConsumeApprovalRequest, ConsumeApprovalResponse, ConsumeRunQuestionRequest, ConsumeRunQuestionResponse, CreateApprovalRequest, CreateApprovalResponse, CreateRunQuestionRequest, CreateRunQuestionResponse, DecideApprovalRequest, DecideApprovalResponse, GetApprovalContinuationRequest, GetApprovalContinuationResponse, GetApprovalPreviewRequest, GetApprovalPreviewResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetQuarantinePreviewRequest, GetQuarantinePreviewResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, HoldQuarantinedOutputRequest, HoldQuarantinedOutputResponse, ListApprovalScopeGrantsRequest, ListApprovalScopeGrantsResponse, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListRunQuestionsRequest, ListRunQuestionsResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, ProposePlanRequest, ProposePlanResponse, RecordApprovalContinuationOutcomeRequest, RecordApprovalContinuationOutcomeResponse, RecordApprovalContinuationStartedRequest, RecordApprovalContinuationStartedResponse, RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, RerouteApprovalRequest, RerouteApprovalResponse, RevokeApprovalScopeGrantRequest, RevokeApprovalScopeGrantResponse, StartWorkflowRequest, StartWorkflowResponse, StreamRunEventsRequest, TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse, UseApprovalScopeGrantRequest, UseApprovalScopeGrantResponse } from "./orchestration_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { GetRunProofBundleRequest, GetRunProofBundleResponse, GetVerificationMetricsRequest, GetVerificationMetricsResponse } from "./proof_bundle_pbjs";
 
@@ -244,6 +244,19 @@ export const OrchestrationCoreService = {
       kind: MethodKind.Unary,
     },
     /**
+     * EP-10 S1: the full draft a pending approval would release, shaped from its retained
+     * descriptor, for the run owner only. Refused for zero-retention and waived callers; every
+     * other miss (unknown, other org, not the owner, decided, expired) is NOT_FOUND. Read-only.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.GetApprovalPreview
+     */
+    getApprovalPreview: {
+      name: "GetApprovalPreview",
+      I: GetApprovalPreviewRequest,
+      O: GetApprovalPreviewResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
      * Claim due durable approval deliveries for an authenticated internal
      * worker. Claims are tenant-scoped, leased, and opaque; the caller identity
      * is derived from its verified service credential, never from this request.
@@ -428,7 +441,7 @@ export const OrchestrationCoreService = {
  * OrchestratorWorkflowService — the production entry point into the durable
  * Temporal orchestration tier, served by orchestrator-core on the same gRPC
  * listener as its OrchestrationCoreService proxy.
- * 
+ *
  * It is a separate service, not another method on OrchestrationCoreService,
  * because that service's authority lives in session-core (Rust) which
  * implements every one of its methods; adding a Temporal-start method there
@@ -442,7 +455,7 @@ export const OrchestratorWorkflowService = {
   methods: {
     /**
      * Start one durable Temporal workflow on the orchestrator task queue.
-     * 
+     *
      * Before this RPC existed, every workflow the worker registers had zero
      * production callers. It is deliberately narrow:
      *   * `workflow_type` is matched against a server-side ALLOWLIST of the

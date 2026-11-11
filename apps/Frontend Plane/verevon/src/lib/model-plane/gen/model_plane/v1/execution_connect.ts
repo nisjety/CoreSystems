@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { ExecuteScheduledStepRequest, ExecuteScheduledStepResponse, ExecuteStepRequest, ExecuteStepResponse, PauseRunRequest, PauseRunResponse, ResumeRunRequest, ResumeRunResponse, RunAgentRequest, RunAgentResponse } from "./execution_pbjs";
+import { BrowserAgentCapabilitiesRequest, BrowserAgentCapabilitiesResponse, ExecuteScheduledStepRequest, ExecuteScheduledStepResponse, ExecuteStepRequest, ExecuteStepResponse, PauseRunRequest, PauseRunResponse, ResumeRunRequest, ResumeRunResponse, RunAgentRequest, RunAgentResponse } from "./execution_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { CancelRunRequest, CancelRunResponse } from "./runs_pbjs";
 
@@ -18,7 +18,37 @@ export const ExecutionCore = {
   typeName: "model_plane.v1.ExecutionCore",
   methods: {
     /**
-     * Execute a single step within a run.
+     * Authenticated execution-protocol handshake. This says only what this
+     * deployment implements; Quarry must still acknowledge every attachment.
+     *
+     * @generated from rpc model_plane.v1.ExecutionCore.BrowserAgentCapabilities
+     */
+    browserAgentCapabilities: {
+      name: "BrowserAgentCapabilities",
+      I: BrowserAgentCapabilitiesRequest,
+      O: BrowserAgentCapabilitiesResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Restricted attached browser runs use a distinct RPC so mixed-version
+     * deployments fail closed: an older execution instance cannot accidentally
+     * accept and drop a restriction it does not understand. It takes the ExecuteStep
+     * request and response on purpose: the payload is the same step, only the route differs.
+     * buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+     * buf:lint:ignore RPC_REQUEST_STANDARD_NAME
+     * buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+     *
+     * @generated from rpc model_plane.v1.ExecutionCore.ExecuteRestrictedBrowserStep
+     */
+    executeRestrictedBrowserStep: {
+      name: "ExecuteRestrictedBrowserStep",
+      I: ExecuteStepRequest,
+      O: ExecuteStepResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Execute a single step within a run. ExecuteRestrictedBrowserStep shares its types.
+     * buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
      *
      * @generated from rpc model_plane.v1.ExecutionCore.ExecuteStep
      */

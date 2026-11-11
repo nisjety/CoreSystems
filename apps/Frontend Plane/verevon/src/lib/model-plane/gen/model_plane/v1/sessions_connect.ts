@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, BindGrantToRunRequest, BindGrantToRunResponse, ClaimLoopCheckpointRequest, ClaimLoopCheckpointResponse, ClaimScheduledStepRequest, ClaimScheduledStepResponse, CloseLoopCheckpointRequest, CloseLoopCheckpointResponse, CompactNowRequest, CompactNowResponse, CompleteDirectRunWithMessageRequest, CompleteDirectRunWithMessageResponse, CompleteStepRequest, CompleteStepResponse, CountWaivedRunsRequest, CountWaivedRunsResponse, CreateThreadRequest, CreateThreadResponse, DecideSkillProposalRequest, DecideSkillProposalResponse, DeleteSpaceThreadsRequest, DeleteSpaceThreadsResponse, DeleteThreadRequest, DeleteThreadResponse, DeleteThreadsRequest, DeleteThreadsResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, ForkThreadRequest, ForkThreadResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, GetThreadGrantRequest, GetThreadGrantResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListLearningLedgerRequest, ListLearningLedgerResponse, ListThreadsRequest, ListThreadsResponse, ListToolActionsRequest, ListToolActionsResponse, PrepareScheduledRunThreadRequest, PrepareScheduledRunThreadResponse, PrepareUserOwnedThreadRequest, PrepareUserOwnedThreadResponse, RecordRunContextRequest, RecordRunContextResponse, RecordRunOutputRequest, RecordRunOutputResponse, RecordScheduledRunResultRequest, RecordScheduledRunResultResponse, RecordScheduledStepReceiptRequest, RecordScheduledStepReceiptResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, ResolveMessageTargetRequest, ResolveMessageTargetResponse, ReviseMessageRequest, ReviseMessageResponse, SaveCheckpointRequest, SaveCheckpointResponse, SaveLoopCheckpointRequest, SaveLoopCheckpointResponse, SearchMessagesRequest, SearchMessagesResponse, SetActiveLeafRequest, SetActiveLeafResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, StartScheduledRunRequest, UndoLearningEntryRequest, UndoLearningEntryResponse, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
+import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, BindGrantToRunRequest, BindGrantToRunResponse, ClaimLoopCheckpointRequest, ClaimLoopCheckpointResponse, ClaimScheduledStepRequest, ClaimScheduledStepResponse, CloseLoopCheckpointRequest, CloseLoopCheckpointResponse, CompactNowRequest, CompactNowResponse, CompleteDirectRunWithMessageRequest, CompleteDirectRunWithMessageResponse, CompleteStepRequest, CompleteStepResponse, CountWaivedRunsRequest, CountWaivedRunsResponse, CreateThreadRequest, CreateThreadResponse, DecideSkillProposalRequest, DecideSkillProposalResponse, DeleteSpaceThreadsRequest, DeleteSpaceThreadsResponse, DeleteThreadRequest, DeleteThreadResponse, DeleteThreadsRequest, DeleteThreadsResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, ForkThreadRequest, ForkThreadResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, GetThreadGrantRequest, GetThreadGrantResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListLearningLedgerRequest, ListLearningLedgerResponse, ListThreadsRequest, ListThreadsResponse, ListToolActionsRequest, ListToolActionsResponse, PrepareScheduledRunThreadRequest, PrepareScheduledRunThreadResponse, PrepareUserOwnedThreadRequest, PrepareUserOwnedThreadResponse, ReadThreadForReferenceRequest, ReadThreadForReferenceResponse, RecordRunContextRequest, RecordRunContextResponse, RecordRunOutputRequest, RecordRunOutputResponse, RecordScheduledRunResultRequest, RecordScheduledRunResultResponse, RecordScheduledStepReceiptRequest, RecordScheduledStepReceiptResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, ResolveMessageTargetRequest, ResolveMessageTargetResponse, ReviseMessageRequest, ReviseMessageResponse, SaveCheckpointRequest, SaveCheckpointResponse, SaveLoopCheckpointRequest, SaveLoopCheckpointResponse, SearchMessagesRequest, SearchMessagesResponse, SetActiveLeafRequest, SetActiveLeafResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, StartScheduledRunRequest, UndoLearningEntryRequest, UndoLearningEntryResponse, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { Event } from "./events_pbjs";
 
@@ -183,14 +183,14 @@ export const SessionCore = {
      * S7a). Digest-only: the status, class and argument digest of each action, never
      * its arguments or output. The loop that resumes a run reads it to close a call
      * honestly instead of running it again.
-     * 
+     *
      * Answers only while the loop checkpoint store is switched on (otherwise the same
      * closed "loop_checkpoint_disabled" refusal the checkpoint RPCs give), and only for a
      * run that persists: a zero-retention or waived run never keeps a fold, so it gets the
      * durable-mutation refusal. The caller must be allowed to read the run under the same
      * rule as GetRun, which includes refusing a run whose owner was removed from its
      * Space. Rows written under zero retention are never returned.
-     * 
+     *
      * ABSENCE IS NOT PROOF. An action id missing from the answer is UNKNOWN. It may never
      * have been reserved, may be reserved by a concurrent writer that has not committed
      * yet, or may be a row this read hides. Never read absence as "the call did not run".
@@ -271,7 +271,7 @@ export const SessionCore = {
     },
     /**
      * SetAgentSkillEnabled — flip one skill's injection switch by id.
-     * 
+     *
      * UpsertAgentSkill cannot do this: it is keyed by (org_id, name) and upserts
      * the WHOLE skill, so calling it with only `enabled` would blank the content,
      * triggers and restrictions of the skill it was meant to pause. The quality
@@ -511,7 +511,7 @@ export const ManagedRunLifecycle = {
     /**
      * Persist a completed run's final answer, so a caller that restarts can still
      * read what the run concluded.
-     * 
+     *
      * Deliberately SEPARATE from RecordTerminalOutcome, which is metadata-only by
      * design: that receipt must stay content-free so it is safe on every run,
      * including a zero-retention one. This call is the explicit, separately
@@ -529,7 +529,7 @@ export const ManagedRunLifecycle = {
     /**
      * Save a gateway-direct run's final assistant message and record its
      * Completed terminal receipt in ONE transaction.
-     * 
+     *
      * Replaces AppendMessage followed by RecordTerminalOutcome for a completed
      * direct turn. Two calls let a durable cancel land between them, leaving a
      * saved answer on a cancelled run, and the append rode a short-lived
@@ -584,6 +584,8 @@ export const SessionRetentionService = {
  * is, so that SessionCore and every mock of it stay source-compatible. The
  * grant is WRITTEN by SessionCore.SetRunMode (with `approved_plan_id` set), in
  * the same transaction as the run update.
+ * Service name is used by generated code and deployed callers; renaming it would break them.
+ * buf:lint:ignore SERVICE_SUFFIX
  *
  * @generated from service model_plane.v1.ThreadAutonomy
  */
@@ -630,6 +632,8 @@ export const ThreadAutonomy = {
  * MessageSearch: full-text search over the durable conversation record. A
  * separate service, as ThreadAutonomy and SessionRetentionService are, so that
  * SessionCore and every mock of it stay source-compatible. Read-only.
+ * Service name is used by generated code and deployed callers; renaming it would break them.
+ * buf:lint:ignore SERVICE_SUFFIX
  *
  * @generated from service model_plane.v1.MessageSearch
  */
@@ -667,7 +671,8 @@ export const MessageTreeService = {
      * Make a branch of the thread the active one. A target on the active path is a
      * rewind: the leaf becomes the target and nothing is deleted. Any other target is
      * a version switch: the leaf becomes the newest turn beneath it, so the chosen
-     * branch shows its own continuation. Owner only, with `session:write`. Refused
+     * branch shows its own continuation. With `exact` set, the leaf is the target
+     * itself (an undo of a rewind). Owner only, with `session:write`. Refused
      * for a Space thread, a thread that holds a waived run and a thread with a queued
      * or running run. Refused with unavailable `message_versions_disabled` while
      * SESSION_CORE_MESSAGE_VERSIONS_ENABLED is not `true`.
@@ -801,6 +806,36 @@ export const ThreadForkService = {
       name: "ForkThread",
       I: ForkThreadRequest,
       O: ForkThreadResponse,
+      kind: MethodKind.Unary,
+    },
+  }
+} as const;
+
+/**
+ * ThreadReferenceService: reads one of the owner's earlier chat threads that the person attached
+ * to a turn as a reference, for the gateway's read-only thread reference tools (EP-3 S7). A
+ * separate service, as ThreadForkService is, so that SessionCore and every mock of it stay
+ * source-compatible.
+ *
+ * @generated from service model_plane.v1.ThreadReferenceService
+ */
+export const ThreadReferenceService = {
+  typeName: "model_plane.v1.ThreadReferenceService",
+  methods: {
+    /**
+     * Read an outline or a page of an attached thread's active path, newest first. Owner only, with
+     * `session:read`; a zero-retention credential and a service credential are refused. Refused with
+     * failed_precondition for the current thread (`thread_reference_current_thread`), a Space or
+     * non-chat thread (`thread_reference_not_chat`), an archived thread (`thread_reference_archived`)
+     * and a thread that holds a zero-retention or waived run (`thread_reference_retention`). A thread
+     * the caller does not own answers not_found, as a missing one does. Writes nothing.
+     *
+     * @generated from rpc model_plane.v1.ThreadReferenceService.ReadThreadForReference
+     */
+    readThreadForReference: {
+      name: "ReadThreadForReference",
+      I: ReadThreadForReferenceRequest,
+      O: ReadThreadForReferenceResponse,
       kind: MethodKind.Unary,
     },
   }

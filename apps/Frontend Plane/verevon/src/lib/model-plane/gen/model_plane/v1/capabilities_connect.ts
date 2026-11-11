@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { CapabilityDetail, CheckSkillPromotionRequest, CheckSkillPromotionResponse, EvaluatePolicyRequest, EvaluatePolicyResponse, GetCapabilityRequest, GetSkillBlobRequest, GetSkillBlobResponse, GetSkillBundleManifestRequest, ListCapabilitiesRequest, ListCapabilitiesResponse, ListSkillBundlesRequest, ListSkillBundlesResponse, PromoteSkillRequest, PromoteSkillResponse, ResolveToolBindingsRequest, ResolveToolBindingsResponse, SkillBundleManifest, ValidateSkillBundleRequest, ValidateSkillBundleResponse } from "./capabilities_pbjs";
+import { CapabilityDetail, CheckSkillPromotionRequest, CheckSkillPromotionResponse, EvaluatePolicyRequest, EvaluatePolicyResponse, GetCapabilityRequest, GetProcedureVersionRequest, GetSkillBlobRequest, GetSkillBlobResponse, GetSkillBundleManifestRequest, ListCapabilitiesRequest, ListCapabilitiesResponse, ListSkillBundlesRequest, ListSkillBundlesResponse, ProcedureVersion, PromoteSkillRequest, PromoteSkillResponse, ResolveToolBindingsRequest, ResolveToolBindingsResponse, SkillBundleManifest, ValidateSkillBundleRequest, ValidateSkillBundleResponse } from "./capabilities_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 
 /**
@@ -110,6 +110,8 @@ export const CapabilityCore = {
     },
     /**
      * Read one skill bundle manifest: its files, digests and sizes.
+     * The response is the shared SkillBundleManifest message; renaming it would break generated code.
+     * buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
      *
      * @generated from rpc model_plane.v1.CapabilityCore.GetSkillBundleManifest
      */
@@ -128,6 +130,21 @@ export const CapabilityCore = {
       name: "GetSkillBlob",
       I: GetSkillBlobRequest,
       O: GetSkillBlobResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Read one saved browser procedure version (plan 3.4 E4.2 step 3): its canonical body, its digest,
+     * its name and the tags that point at it. A user caller reads its own procedures; a service caller
+     * reads for the person named in for_user_id. Read only: writes nothing.
+     * The response is the ProcedureVersion message itself; the name is fixed by the contract.
+     * buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+     *
+     * @generated from rpc model_plane.v1.CapabilityCore.GetProcedureVersion
+     */
+    getProcedureVersion: {
+      name: "GetProcedureVersion",
+      I: GetProcedureVersionRequest,
+      O: ProcedureVersion,
       kind: MethodKind.Unary,
     },
   }

@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/browser.proto.
  */
 export const file_model_plane_v1_browser: GenFile = /*@__PURE__*/
-  fileDesc("Chxtb2RlbF9wbGFuZS92MS9icm93c2VyLnByb3RvEg5tb2RlbF9wbGFuZS52MSKCBAoTQWNxdWlyZUdyYW50UmVxdWVzdBITCgtzZXNzaW9uX2tleRgBIAEoCRIMCgRtb2RlGAIgASgJEg4KBm9yZ19pZBgDIAEoCRIXCg9hbGxvd2VkX2RvbWFpbnMYBCADKAkSFwoPYWxsb3dlZF9hY3Rpb25zGAUgAygJEhkKEWFsbG93ZWRfZnJhbWVfaWRzGAYgAygJEhoKEmFsbG93ZWRfZGlhbG9nX2lkcxgHIAMoCRIcChRhbGxvd2VkX2FydGlmYWN0X2lkcxgIIAMoCRIXCg9wYXJlbnRfZ3JhbnRfaWQYCSABKAkSCwoDemRyGAogASgIEhgKEGJ1ZGdldF9taWNyb191c2QYKCABKAMSGAoQYnVkZ2V0X21heF9zdGVwcxgpIAEoBRIcChRidWRnZXRfbWF4X3J1bnRpbWVfcxgqIAEoBRIVCg1idWRnZXRfc291cmNlGCsgASgJEh0KFWJ1ZGdldF9taW50ZWRfYXRfdW5peBgsIAEoAxISCgpncmFudF9raW5kGDIgASgJEhUKDWNvbnNlbnRfc2NvcGUYFSABKAkSHgoWY29uc2VudF9kZW5pZWRfZG9tYWlucxgWIAMoCRIQCghzcGFjZV9pZBgLIAEoCRIRCglyZWFkX29ubHkYDCABKAgSEwoLdHRsX3NlY29uZHMYDSABKAUi0wQKFEFjcXVpcmVHcmFudFJlc3BvbnNlEhAKCGdyYW50X2lkGAEgASgJEhAKCGVuZHBvaW50GAIgASgJEi4KCmV4cGlyZXNfYXQYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhcKD2FsbG93ZWRfZG9tYWlucxgEIAMoCRIXCg9hbGxvd2VkX2FjdGlvbnMYBSADKAkSGQoRYWxsb3dlZF9mcmFtZV9pZHMYBiADKAkSGgoSYWxsb3dlZF9kaWFsb2dfaWRzGAcgAygJEhwKFGFsbG93ZWRfYXJ0aWZhY3RfaWRzGAggAygJEhcKD3BhcmVudF9ncmFudF9pZBgJIAEoCRIMCgRraW5kGAogASgJEgsKA3pkchgLIAEoCBIYChBidWRnZXRfbWljcm9fdXNkGCggASgDEhgKEGJ1ZGdldF9tYXhfc3RlcHMYKSABKAUSHAoUYnVkZ2V0X21heF9ydW50aW1lX3MYKiABKAUSFQoNYnVkZ2V0X3NvdXJjZRgrIAEoCRIdChVidWRnZXRfbWludGVkX2F0X3VuaXgYLCABKAMSEwoLcG9saWN5X21vZGUYMiABKAkSFgoOZGVuaWVkX2RvbWFpbnMYMyADKAkSNwoTYWJzb2x1dGVfZXhwaXJlc19hdBg0IAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEQoJcmVhZF9vbmx5GAwgASgIEhUKDWNvbnNlbnRfc2NvcGUYFSABKAkSDgoGa2V5X2lkGDwgASgJSgQIDRAOIjYKElJldm9rZUdyYW50UmVxdWVzdBIQCghncmFudF9pZBgBIAEoCRIOCgZyZWFzb24YAiABKAkiJgoTUmV2b2tlR3JhbnRSZXNwb25zZRIPCgdyZXZva2VkGAEgASgIIhYKFEJyb3dzZXJIZWFsdGhSZXF1ZXN0IicKFUJyb3dzZXJIZWFsdGhSZXNwb25zZRIOCgZzdGF0dXMYASABKAkiKAoUVmFsaWRhdGVHcmFudFJlcXVlc3QSEAoIZ3JhbnRfaWQYASABKAkiiAUKFVZhbGlkYXRlR3JhbnRSZXNwb25zZRIQCghncmFudF9pZBgBIAEoCRIOCgZhY3RpdmUYAiABKAgSLgoKZXhwaXJlc19hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASFwoPYWxsb3dlZF9kb21haW5zGAQgAygJEhcKD2FsbG93ZWRfYWN0aW9ucxgFIAMoCRIZChFhbGxvd2VkX2ZyYW1lX2lkcxgGIAMoCRIaChJhbGxvd2VkX2RpYWxvZ19pZHMYByADKAkSHAoUYWxsb3dlZF9hcnRpZmFjdF9pZHMYCCADKAkSFwoPcGFyZW50X2dyYW50X2lkGAkgASgJEgwKBGtpbmQYCiABKAkSEAoIb3duZXJfaWQYCyABKAkSCwoDemRyGAwgASgIEhgKEGJ1ZGdldF9taWNyb191c2QYKCABKAMSGAoQYnVkZ2V0X21heF9zdGVwcxgpIAEoBRIcChRidWRnZXRfbWF4X3J1bnRpbWVfcxgqIAEoBRIVCg1idWRnZXRfc291cmNlGCsgASgJEh0KFWJ1ZGdldF9taW50ZWRfYXRfdW5peBgsIAEoAxITCgtwb2xpY3lfbW9kZRgyIAEoCRIWCg5kZW5pZWRfZG9tYWlucxgzIAMoCRI3ChNhYnNvbHV0ZV9leHBpcmVzX2F0GDQgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBITCgtyZXNvdXJjZV9pZBg1IAEoCRITCgtzZXNzaW9uX2tleRgNIAEoCRIRCglyZWFkX29ubHkYDiABKAgSFQoNY29uc2VudF9zY29wZRgVIAEoCRIOCgZrZXlfaWQYPCABKAkisQIKFURlcml2ZVJ1bkdyYW50UmVxdWVzdBIXCg9wYXJlbnRfZ3JhbnRfaWQYASABKAkSEwoLc2Vzc2lvbl9rZXkYAiABKAkSDgoGb3JnX2lkGAMgASgJEhcKD2FsbG93ZWRfZG9tYWlucxgEIAMoCRIPCgdwdXJwb3NlGAUgASgJEhMKC3R0bF9zZWNvbmRzGAYgASgFEhgKEGJ1ZGdldF9taWNyb191c2QYKCABKAMSGAoQYnVkZ2V0X21heF9zdGVwcxgpIAEoBRIcChRidWRnZXRfbWF4X3J1bnRpbWVfcxgqIAEoBRIVCg1idWRnZXRfc291cmNlGCsgASgJEh0KFWJ1ZGdldF9taW50ZWRfYXRfdW5peBgsIAEoAxITCgtyZXNvdXJjZV9pZBgyIAEoCSLWAgoWRGVyaXZlUnVuR3JhbnRSZXNwb25zZRIQCghncmFudF9pZBgBIAEoCRIQCghlbmRwb2ludBgCIAEoCRIuCgpleHBpcmVzX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIXCg9hbGxvd2VkX2RvbWFpbnMYBCADKAkSFwoPcGFyZW50X2dyYW50X2lkGAUgASgJEgwKBGtpbmQYBiABKAkSCwoDemRyGAcgASgIEhgKEGJ1ZGdldF9taWNyb191c2QYKCABKAMSGAoQYnVkZ2V0X21heF9zdGVwcxgpIAEoBRIcChRidWRnZXRfbWF4X3J1bnRpbWVfcxgqIAEoBRIVCg1idWRnZXRfc291cmNlGCsgASgJEh0KFWJ1ZGdldF9taW50ZWRfYXRfdW5peBgsIAEoAxITCgtyZXNvdXJjZV9pZBgyIAEoCSI1ChFSZW5ld0dyYW50UmVxdWVzdBIQCghncmFudF9pZBgBIAEoCRIOCgZvcmdfaWQYAiABKAkifQoSUmVuZXdHcmFudFJlc3BvbnNlEi4KCmV4cGlyZXNfYXQYASABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjcKE2Fic29sdXRlX2V4cGlyZXNfYXQYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wMq0ECg1Ccm93c2VyQnJva2VyElkKDEFjcXVpcmVHcmFudBIjLm1vZGVsX3BsYW5lLnYxLkFjcXVpcmVHcmFudFJlcXVlc3QaJC5tb2RlbF9wbGFuZS52MS5BY3F1aXJlR3JhbnRSZXNwb25zZRJWCgtSZXZva2VHcmFudBIiLm1vZGVsX3BsYW5lLnYxLlJldm9rZUdyYW50UmVxdWVzdBojLm1vZGVsX3BsYW5lLnYxLlJldm9rZUdyYW50UmVzcG9uc2USXAoNVmFsaWRhdGVHcmFudBIkLm1vZGVsX3BsYW5lLnYxLlZhbGlkYXRlR3JhbnRSZXF1ZXN0GiUubW9kZWxfcGxhbmUudjEuVmFsaWRhdGVHcmFudFJlc3BvbnNlEl8KDkRlcml2ZVJ1bkdyYW50EiUubW9kZWxfcGxhbmUudjEuRGVyaXZlUnVuR3JhbnRSZXF1ZXN0GiYubW9kZWxfcGxhbmUudjEuRGVyaXZlUnVuR3JhbnRSZXNwb25zZRJTCgpSZW5ld0dyYW50EiEubW9kZWxfcGxhbmUudjEuUmVuZXdHcmFudFJlcXVlc3QaIi5tb2RlbF9wbGFuZS52MS5SZW5ld0dyYW50UmVzcG9uc2USVQoGSGVhbHRoEiQubW9kZWxfcGxhbmUudjEuQnJvd3NlckhlYWx0aFJlcXVlc3QaJS5tb2RlbF9wbGFuZS52MS5Ccm93c2VySGVhbHRoUmVzcG9uc2VCPVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjFiBnByb3RvMw", [file_google_protobuf_timestamp]);
+  fileDesc("Chxtb2RlbF9wbGFuZS92MS9icm93c2VyLnByb3RvEg5tb2RlbF9wbGFuZS52MSK0BAoTQWNxdWlyZUdyYW50UmVxdWVzdBITCgtzZXNzaW9uX2tleRgBIAEoCRIMCgRtb2RlGAIgASgJEg4KBm9yZ19pZBgDIAEoCRIXCg9hbGxvd2VkX2RvbWFpbnMYBCADKAkSFwoPYWxsb3dlZF9hY3Rpb25zGAUgAygJEhkKEWFsbG93ZWRfZnJhbWVfaWRzGAYgAygJEhoKEmFsbG93ZWRfZGlhbG9nX2lkcxgHIAMoCRIcChRhbGxvd2VkX2FydGlmYWN0X2lkcxgIIAMoCRIXCg9wYXJlbnRfZ3JhbnRfaWQYCSABKAkSCwoDemRyGAogASgIEhgKEGJ1ZGdldF9taWNyb191c2QYKCABKAMSGAoQYnVkZ2V0X21heF9zdGVwcxgpIAEoBRIcChRidWRnZXRfbWF4X3J1bnRpbWVfcxgqIAEoBRIVCg1idWRnZXRfc291cmNlGCsgASgJEh0KFWJ1ZGdldF9taW50ZWRfYXRfdW5peBgsIAEoAxISCgpncmFudF9raW5kGDIgASgJEhUKDWNvbnNlbnRfc2NvcGUYFSABKAkSHgoWY29uc2VudF9kZW5pZWRfZG9tYWlucxgWIAMoCRIaChJtYWlsX2Nvbm5lY3Rpb25faWQYFyABKAkSFAoMZ3JhbnRfb3JpZ2luGBggASgJEhAKCHNwYWNlX2lkGAsgASgJEhEKCXJlYWRfb25seRgMIAEoCBITCgt0dGxfc2Vjb25kcxgNIAEoBSK0BQoUQWNxdWlyZUdyYW50UmVzcG9uc2USEAoIZ3JhbnRfaWQYASABKAkSEAoIZW5kcG9pbnQYAiABKAkSLgoKZXhwaXJlc19hdBgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASFwoPYWxsb3dlZF9kb21haW5zGAQgAygJEhcKD2FsbG93ZWRfYWN0aW9ucxgFIAMoCRIZChFhbGxvd2VkX2ZyYW1lX2lkcxgGIAMoCRIaChJhbGxvd2VkX2RpYWxvZ19pZHMYByADKAkSHAoUYWxsb3dlZF9hcnRpZmFjdF9pZHMYCCADKAkSFwoPcGFyZW50X2dyYW50X2lkGAkgASgJEi0KCndlYl9wb2xpY3kYFCABKAsyGS5tb2RlbF9wbGFuZS52MS5XZWJQb2xpY3kSDAoEa2luZBgKIAEoCRILCgN6ZHIYCyABKAgSGAoQYnVkZ2V0X21pY3JvX3VzZBgoIAEoAxIYChBidWRnZXRfbWF4X3N0ZXBzGCkgASgFEhwKFGJ1ZGdldF9tYXhfcnVudGltZV9zGCogASgFEhUKDWJ1ZGdldF9zb3VyY2UYKyABKAkSHQoVYnVkZ2V0X21pbnRlZF9hdF91bml4GCwgASgDEhMKC3BvbGljeV9tb2RlGDIgASgJEhYKDmRlbmllZF9kb21haW5zGDMgAygJEjcKE2Fic29sdXRlX2V4cGlyZXNfYXQYNCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhEKCXJlYWRfb25seRgMIAEoCBIVCg1jb25zZW50X3Njb3BlGBUgASgJEhoKEm1haWxfY29ubmVjdGlvbl9pZBgXIAEoCRIUCgxncmFudF9vcmlnaW4YGCABKAkSDgoGa2V5X2lkGDwgASgJSgQIDRAOItcBCglXZWJQb2xpY3kSCQoBdhgBIAEoDRILCgNyZXYYAiABKAkSMQoEY2FwcxgDIAMoCzIjLm1vZGVsX3BsYW5lLnYxLldlYlBvbGljeS5DYXBzRW50cnkSEgoKcm9ib3RzX21heBgEIAEoCRIRCglwcm94eV9tYXgYBSABKAkSFQoNZG9tYWluc19hbGxvdxgGIAMoCRIUCgxkb21haW5zX2RlbnkYByADKAkaKwoJQ2Fwc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEiNgoSUmV2b2tlR3JhbnRSZXF1ZXN0EhAKCGdyYW50X2lkGAEgASgJEg4KBnJlYXNvbhgCIAEoCSImChNSZXZva2VHcmFudFJlc3BvbnNlEg8KB3Jldm9rZWQYASABKAgiFgoUQnJvd3NlckhlYWx0aFJlcXVlc3QiJwoVQnJvd3NlckhlYWx0aFJlc3BvbnNlEg4KBnN0YXR1cxgBIAEoCSIoChRWYWxpZGF0ZUdyYW50UmVxdWVzdBIQCghncmFudF9pZBgBIAEoCSLpBQoVVmFsaWRhdGVHcmFudFJlc3BvbnNlEhAKCGdyYW50X2lkGAEgASgJEg4KBmFjdGl2ZRgCIAEoCBIuCgpleHBpcmVzX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIXCg9hbGxvd2VkX2RvbWFpbnMYBCADKAkSFwoPYWxsb3dlZF9hY3Rpb25zGAUgAygJEhkKEWFsbG93ZWRfZnJhbWVfaWRzGAYgAygJEhoKEmFsbG93ZWRfZGlhbG9nX2lkcxgHIAMoCRIcChRhbGxvd2VkX2FydGlmYWN0X2lkcxgIIAMoCRIXCg9wYXJlbnRfZ3JhbnRfaWQYCSABKAkSLQoKd2ViX3BvbGljeRgUIAEoCzIZLm1vZGVsX3BsYW5lLnYxLldlYlBvbGljeRIMCgRraW5kGAogASgJEhAKCG93bmVyX2lkGAsgASgJEgsKA3pkchgMIAEoCBIYChBidWRnZXRfbWljcm9fdXNkGCggASgDEhgKEGJ1ZGdldF9tYXhfc3RlcHMYKSABKAUSHAoUYnVkZ2V0X21heF9ydW50aW1lX3MYKiABKAUSFQoNYnVkZ2V0X3NvdXJjZRgrIAEoCRIdChVidWRnZXRfbWludGVkX2F0X3VuaXgYLCABKAMSEwoLcG9saWN5X21vZGUYMiABKAkSFgoOZGVuaWVkX2RvbWFpbnMYMyADKAkSNwoTYWJzb2x1dGVfZXhwaXJlc19hdBg0IAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASEwoLcmVzb3VyY2VfaWQYNSABKAkSEwoLc2Vzc2lvbl9rZXkYDSABKAkSEQoJcmVhZF9vbmx5GA4gASgIEhUKDWNvbnNlbnRfc2NvcGUYFSABKAkSGgoSbWFpbF9jb25uZWN0aW9uX2lkGBcgASgJEhQKDGdyYW50X29yaWdpbhgYIAEoCRIOCgZrZXlfaWQYPCABKAkisQIKFURlcml2ZVJ1bkdyYW50UmVxdWVzdBIXCg9wYXJlbnRfZ3JhbnRfaWQYASABKAkSEwoLc2Vzc2lvbl9rZXkYAiABKAkSDgoGb3JnX2lkGAMgASgJEhcKD2FsbG93ZWRfZG9tYWlucxgEIAMoCRIPCgdwdXJwb3NlGAUgASgJEhMKC3R0bF9zZWNvbmRzGAYgASgFEhgKEGJ1ZGdldF9taWNyb191c2QYKCABKAMSGAoQYnVkZ2V0X21heF9zdGVwcxgpIAEoBRIcChRidWRnZXRfbWF4X3J1bnRpbWVfcxgqIAEoBRIVCg1idWRnZXRfc291cmNlGCsgASgJEh0KFWJ1ZGdldF9taW50ZWRfYXRfdW5peBgsIAEoAxITCgtyZXNvdXJjZV9pZBgyIAEoCSKFAwoWRGVyaXZlUnVuR3JhbnRSZXNwb25zZRIQCghncmFudF9pZBgBIAEoCRIQCghlbmRwb2ludBgCIAEoCRIuCgpleHBpcmVzX2F0GAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIXCg9hbGxvd2VkX2RvbWFpbnMYBCADKAkSFwoPcGFyZW50X2dyYW50X2lkGAUgASgJEi0KCndlYl9wb2xpY3kYFCABKAsyGS5tb2RlbF9wbGFuZS52MS5XZWJQb2xpY3kSDAoEa2luZBgGIAEoCRILCgN6ZHIYByABKAgSGAoQYnVkZ2V0X21pY3JvX3VzZBgoIAEoAxIYChBidWRnZXRfbWF4X3N0ZXBzGCkgASgFEhwKFGJ1ZGdldF9tYXhfcnVudGltZV9zGCogASgFEhUKDWJ1ZGdldF9zb3VyY2UYKyABKAkSHQoVYnVkZ2V0X21pbnRlZF9hdF91bml4GCwgASgDEhMKC3Jlc291cmNlX2lkGDIgASgJIjUKEVJlbmV3R3JhbnRSZXF1ZXN0EhAKCGdyYW50X2lkGAEgASgJEg4KBm9yZ19pZBgCIAEoCSJ9ChJSZW5ld0dyYW50UmVzcG9uc2USLgoKZXhwaXJlc19hdBgBIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASNwoTYWJzb2x1dGVfZXhwaXJlc19hdBgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAyrQQKDUJyb3dzZXJCcm9rZXISWQoMQWNxdWlyZUdyYW50EiMubW9kZWxfcGxhbmUudjEuQWNxdWlyZUdyYW50UmVxdWVzdBokLm1vZGVsX3BsYW5lLnYxLkFjcXVpcmVHcmFudFJlc3BvbnNlElYKC1Jldm9rZUdyYW50EiIubW9kZWxfcGxhbmUudjEuUmV2b2tlR3JhbnRSZXF1ZXN0GiMubW9kZWxfcGxhbmUudjEuUmV2b2tlR3JhbnRSZXNwb25zZRJcCg1WYWxpZGF0ZUdyYW50EiQubW9kZWxfcGxhbmUudjEuVmFsaWRhdGVHcmFudFJlcXVlc3QaJS5tb2RlbF9wbGFuZS52MS5WYWxpZGF0ZUdyYW50UmVzcG9uc2USXwoORGVyaXZlUnVuR3JhbnQSJS5tb2RlbF9wbGFuZS52MS5EZXJpdmVSdW5HcmFudFJlcXVlc3QaJi5tb2RlbF9wbGFuZS52MS5EZXJpdmVSdW5HcmFudFJlc3BvbnNlElMKClJlbmV3R3JhbnQSIS5tb2RlbF9wbGFuZS52MS5SZW5ld0dyYW50UmVxdWVzdBoiLm1vZGVsX3BsYW5lLnYxLlJlbmV3R3JhbnRSZXNwb25zZRJVCgZIZWFsdGgSJC5tb2RlbF9wbGFuZS52MS5Ccm93c2VySGVhbHRoUmVxdWVzdBolLm1vZGVsX3BsYW5lLnYxLkJyb3dzZXJIZWFsdGhSZXNwb25zZUK0AQoSY29tLm1vZGVsX3BsYW5lLnYxQgxCcm93c2VyUHJvdG9QAVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjGiAgNNWFiqAg1Nb2RlbFBsYW5lLlYxygINTW9kZWxQbGFuZVxWMeICGU1vZGVsUGxhbmVcVjFcR1BCTWV0YWRhdGHqAg5Nb2RlbFBsYW5lOjpWMWIGcHJvdG8z", [file_google_protobuf_timestamp]);
 
 /**
  * @generated from message model_plane.v1.AcquireGrantRequest
@@ -169,6 +169,26 @@ export type AcquireGrantRequest = Message<"model_plane.v1.AcquireGrantRequest"> 
   consentDeniedDomains: string[];
 
   /**
+   * fill_otp approval binding (Q3-E3.1-b1-c, ADR-2a; tags 23-24 of F-t2-032's
+   * band). The mail connection the one-time code is read from: required, and
+   * matching ^[A-Za-z0-9_-]{1,128}$, when allowed_actions is ["fill_otp"];
+   * refused for any other grant. Stored verbatim, never logged. Dark behind
+   * BROWSER_BROKER_FILL_OTP_ENABLED.
+   *
+   * @generated from field: string mail_connection_id = 23;
+   */
+  mailConnectionId: string;
+
+  /**
+   * The canonical https origin (scheme https, lowercase host, optional port,
+   * no path, query or fragment) the code may be typed into: required for a
+   * fill_otp approval and refused for any other grant.
+   *
+   * @generated from field: string grant_origin = 24;
+   */
+  grantOrigin: string;
+
+  /**
    * The Space the run belongs to (WS21-S8). The site policy reads the Space
    * floor from it; empty outside a Space. Tag 11 (R-6 allocates 10 to zdr).
    *
@@ -257,6 +277,15 @@ export type AcquireGrantResponse = Message<"model_plane.v1.AcquireGrantResponse"
    * @generated from field: string parent_grant_id = 9;
    */
   parentGrantId: string;
+
+  /**
+   * WS7.K (R-6: field 20 is the web-policy snapshot): the org web policy the
+   * broker stored on this grant. Unset means the grant carries no snapshot,
+   * which is no grant layer. See WebPolicy.
+   *
+   * @generated from field: model_plane.v1.WebPolicy web_policy = 20;
+   */
+  webPolicy?: WebPolicy | undefined;
 
   /**
    * "session" or "sensitive_approval" (a "run" grant is derived from a session
@@ -359,6 +388,22 @@ export type AcquireGrantResponse = Message<"model_plane.v1.AcquireGrantResponse"
   consentScope: string;
 
   /**
+   * Q3-E3.1-b1-c: the mail connection a fill_otp approval is bound to; empty
+   * for every other grant.
+   *
+   * @generated from field: string mail_connection_id = 23;
+   */
+  mailConnectionId: string;
+
+  /**
+   * Q3-E3.1-b1-c: the canonical https origin a fill_otp approval is bound to;
+   * empty for every other grant.
+   *
+   * @generated from field: string grant_origin = 24;
+   */
+  grantOrigin: string;
+
+  /**
    * INNH-10: the API key this grant was issued for (the key id, never the
    * key). Empty for every grant not acquired by an api_key principal. 60:
    * 54-59 stay reserved for the WS8.C follow-ons.
@@ -374,6 +419,75 @@ export type AcquireGrantResponse = Message<"model_plane.v1.AcquireGrantResponse"
  */
 export const AcquireGrantResponseSchema: GenMessage<AcquireGrantResponse> = /*@__PURE__*/
   messageDesc(file_model_plane_v1_browser, 1);
+
+/**
+ * The org web-policy snapshot a grant carries (WS7.K). The broker derives it
+ * from the verified principal's `web_policy` claim, never from a request field,
+ * and a derived run grant may only tighten its parent's. It has the claim's
+ * content: the version, the issuer's revision, the capability modes, the robots
+ * and proxy ceilings and the domain rules. Unset means the grant carries no
+ * snapshot, which is no grant layer.
+ *
+ * @generated from message model_plane.v1.WebPolicy
+ */
+export type WebPolicy = Message<"model_plane.v1.WebPolicy"> & {
+  /**
+   * Claim version (1).
+   *
+   * @generated from field: uint32 v = 1;
+   */
+  v: number;
+
+  /**
+   * The issuer's policy revision; "0" when the org has no policy.
+   *
+   * @generated from field: string rev = 2;
+   */
+  rev: string;
+
+  /**
+   * Capability modes keyed by capability name. Only the entries the issuer
+   * states are present.
+   *
+   * @generated from field: map<string, string> caps = 3;
+   */
+  caps: { [key: string]: string };
+
+  /**
+   * The ceiling the org sets on robots.txt handling; empty when none is stated.
+   *
+   * @generated from field: string robots_max = 4;
+   */
+  robotsMax: string;
+
+  /**
+   * The ceiling the org sets on proxy use; empty when none is stated.
+   *
+   * @generated from field: string proxy_max = 5;
+   */
+  proxyMax: string;
+
+  /**
+   * Hosts the org allows; empty when the policy states no allow rule.
+   *
+   * @generated from field: repeated string domains_allow = 6;
+   */
+  domainsAllow: string[];
+
+  /**
+   * Hosts the org denies.
+   *
+   * @generated from field: repeated string domains_deny = 7;
+   */
+  domainsDeny: string[];
+};
+
+/**
+ * Describes the message model_plane.v1.WebPolicy.
+ * Use `create(WebPolicySchema)` to create a new message.
+ */
+export const WebPolicySchema: GenMessage<WebPolicy> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_browser, 2);
 
 /**
  * @generated from message model_plane.v1.RevokeGrantRequest
@@ -399,7 +513,7 @@ export type RevokeGrantRequest = Message<"model_plane.v1.RevokeGrantRequest"> & 
  * Use `create(RevokeGrantRequestSchema)` to create a new message.
  */
 export const RevokeGrantRequestSchema: GenMessage<RevokeGrantRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_browser, 2);
+  messageDesc(file_model_plane_v1_browser, 3);
 
 /**
  * @generated from message model_plane.v1.RevokeGrantResponse
@@ -418,7 +532,7 @@ export type RevokeGrantResponse = Message<"model_plane.v1.RevokeGrantResponse"> 
  * Use `create(RevokeGrantResponseSchema)` to create a new message.
  */
 export const RevokeGrantResponseSchema: GenMessage<RevokeGrantResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_browser, 3);
+  messageDesc(file_model_plane_v1_browser, 4);
 
 /**
  * @generated from message model_plane.v1.BrowserHealthRequest
@@ -431,7 +545,7 @@ export type BrowserHealthRequest = Message<"model_plane.v1.BrowserHealthRequest"
  * Use `create(BrowserHealthRequestSchema)` to create a new message.
  */
 export const BrowserHealthRequestSchema: GenMessage<BrowserHealthRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_browser, 4);
+  messageDesc(file_model_plane_v1_browser, 5);
 
 /**
  * @generated from message model_plane.v1.BrowserHealthResponse
@@ -450,7 +564,7 @@ export type BrowserHealthResponse = Message<"model_plane.v1.BrowserHealthRespons
  * Use `create(BrowserHealthResponseSchema)` to create a new message.
  */
 export const BrowserHealthResponseSchema: GenMessage<BrowserHealthResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_browser, 5);
+  messageDesc(file_model_plane_v1_browser, 6);
 
 /**
  * @generated from message model_plane.v1.ValidateGrantRequest
@@ -469,7 +583,7 @@ export type ValidateGrantRequest = Message<"model_plane.v1.ValidateGrantRequest"
  * Use `create(ValidateGrantRequestSchema)` to create a new message.
  */
 export const ValidateGrantRequestSchema: GenMessage<ValidateGrantRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_browser, 6);
+  messageDesc(file_model_plane_v1_browser, 7);
 
 /**
  * @generated from message model_plane.v1.ValidateGrantResponse
@@ -528,6 +642,15 @@ export type ValidateGrantResponse = Message<"model_plane.v1.ValidateGrantRespons
    * @generated from field: string parent_grant_id = 9;
    */
   parentGrantId: string;
+
+  /**
+   * WS7.K (R-6: field 20 is the web-policy snapshot): the grant's org web-policy
+   * snapshot as stored when the grant was issued. Unset from a broker that
+   * predates it, which a consumer reads as no grant layer. See WebPolicy.
+   *
+   * @generated from field: model_plane.v1.WebPolicy web_policy = 20;
+   */
+  webPolicy?: WebPolicy | undefined;
 
   /**
    * Same values as AcquireGrantResponse.kind.
@@ -602,11 +725,15 @@ export type ValidateGrantResponse = Message<"model_plane.v1.ValidateGrantRespons
   policyMode: string;
 
   /**
+   * Hosts this grant may never reach; same meaning as AcquireGrantResponse.denied_domains.
+   *
    * @generated from field: repeated string denied_domains = 51;
    */
   deniedDomains: string[];
 
   /**
+   * Hard backstop a renewal can never pass; see AcquireGrantResponse.absolute_expires_at.
+   *
    * @generated from field: google.protobuf.Timestamp absolute_expires_at = 52;
    */
   absoluteExpiresAt?: Timestamp | undefined;
@@ -649,6 +776,24 @@ export type ValidateGrantResponse = Message<"model_plane.v1.ValidateGrantRespons
   consentScope: string;
 
   /**
+   * Q3-E3.1-b1-c: the mail connection a fill_otp approval is bound to; empty
+   * for every other grant. A consumer reads the one-time code only from this
+   * connection.
+   *
+   * @generated from field: string mail_connection_id = 23;
+   */
+  mailConnectionId: string;
+
+  /**
+   * Q3-E3.1-b1-c: the canonical https origin a fill_otp approval is bound to;
+   * empty for every other grant. A consumer types the code only into a frame
+   * whose origin equals it.
+   *
+   * @generated from field: string grant_origin = 24;
+   */
+  grantOrigin: string;
+
+  /**
    * INNH-10: the API key the grant was issued for (the key id, never the
    * key); empty for a grant not acquired by an api_key principal. A consumer
    * running a key-driven run binds the grant to the key it was started for.
@@ -664,9 +809,11 @@ export type ValidateGrantResponse = Message<"model_plane.v1.ValidateGrantRespons
  * Use `create(ValidateGrantResponseSchema)` to create a new message.
  */
 export const ValidateGrantResponseSchema: GenMessage<ValidateGrantResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_browser, 7);
+  messageDesc(file_model_plane_v1_browser, 8);
 
 /**
+ * Request to derive a run grant from an active session grant.
+ *
  * @generated from message model_plane.v1.DeriveRunGrantRequest
  */
 export type DeriveRunGrantRequest = Message<"model_plane.v1.DeriveRunGrantRequest"> & {
@@ -774,23 +921,31 @@ export type DeriveRunGrantRequest = Message<"model_plane.v1.DeriveRunGrantReques
  * Use `create(DeriveRunGrantRequestSchema)` to create a new message.
  */
 export const DeriveRunGrantRequestSchema: GenMessage<DeriveRunGrantRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_browser, 8);
+  messageDesc(file_model_plane_v1_browser, 9);
 
 /**
+ * The run grant derived by DeriveRunGrant.
+ *
  * @generated from message model_plane.v1.DeriveRunGrantResponse
  */
 export type DeriveRunGrantResponse = Message<"model_plane.v1.DeriveRunGrantResponse"> & {
   /**
+   * Identifier of the derived run grant.
+   *
    * @generated from field: string grant_id = 1;
    */
   grantId: string;
 
   /**
+   * Browser endpoint of the run grant (CDP URL or local ws).
+   *
    * @generated from field: string endpoint = 2;
    */
   endpoint: string;
 
   /**
+   * Expiry of the run grant; never later than the parent grant's expiry.
+   *
    * @generated from field: google.protobuf.Timestamp expires_at = 3;
    */
   expiresAt?: Timestamp | undefined;
@@ -806,6 +961,15 @@ export type DeriveRunGrantResponse = Message<"model_plane.v1.DeriveRunGrantRespo
    * @generated from field: string parent_grant_id = 5;
    */
   parentGrantId: string;
+
+  /**
+   * WS7.K (R-6: field 20 is the web-policy snapshot): the snapshot the run grant
+   * inherited from its parent, which a derive may only tighten. Unset when the
+   * parent carried none. See WebPolicy.
+   *
+   * @generated from field: model_plane.v1.WebPolicy web_policy = 20;
+   */
+  webPolicy?: WebPolicy | undefined;
 
   /**
    * "run" for purpose ai_run, "attach" for purpose attach.
@@ -876,9 +1040,11 @@ export type DeriveRunGrantResponse = Message<"model_plane.v1.DeriveRunGrantRespo
  * Use `create(DeriveRunGrantResponseSchema)` to create a new message.
  */
 export const DeriveRunGrantResponseSchema: GenMessage<DeriveRunGrantResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_browser, 9);
+  messageDesc(file_model_plane_v1_browser, 10);
 
 /**
+ * Request to extend a renewable grant by one TTL.
+ *
  * @generated from message model_plane.v1.RenewGrantRequest
  */
 export type RenewGrantRequest = Message<"model_plane.v1.RenewGrantRequest"> & {
@@ -902,9 +1068,11 @@ export type RenewGrantRequest = Message<"model_plane.v1.RenewGrantRequest"> & {
  * Use `create(RenewGrantRequestSchema)` to create a new message.
  */
 export const RenewGrantRequestSchema: GenMessage<RenewGrantRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_browser, 10);
+  messageDesc(file_model_plane_v1_browser, 11);
 
 /**
+ * Result of RenewGrant: the new expiry and the hard backstop.
+ *
  * @generated from message model_plane.v1.RenewGrantResponse
  */
 export type RenewGrantResponse = Message<"model_plane.v1.RenewGrantResponse"> & {
@@ -928,7 +1096,7 @@ export type RenewGrantResponse = Message<"model_plane.v1.RenewGrantResponse"> & 
  * Use `create(RenewGrantResponseSchema)` to create a new message.
  */
 export const RenewGrantResponseSchema: GenMessage<RenewGrantResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_browser, 11);
+  messageDesc(file_model_plane_v1_browser, 12);
 
 /**
  * BrowserBroker — trusted browser grant lifecycle.
