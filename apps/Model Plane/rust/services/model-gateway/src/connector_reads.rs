@@ -65,6 +65,17 @@ pub fn enabled() -> bool {
     parse_enabled(std::env::var(ENABLED_ENV).ok().as_deref())
 }
 
+/// Whether the switch that lets the read name a document by its link is on in this process (Q4-E4.3), read on
+/// every offer and every call so a restart is not needed to turn it off.
+#[must_use]
+pub fn document_url_enabled() -> bool {
+    provider_reads::parse_document_url_enabled(
+        std::env::var(provider_reads::DOCUMENT_URL_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
 /// What the connected-app reads of one turn may use: the connected accounts the person selected, and
 /// whether the turn reads every source. The route refuses a selection on a turn that does not read every
 /// source, so `all_sources` is a second check on the same rule, not the only one.
@@ -261,7 +272,7 @@ pub fn tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: provider_reads::READ_TOOL_NAME.to_owned(),
         description: provider_reads::READ_TOOL_DESCRIPTION.to_owned(),
-        parameters_json: provider_reads::read_tool_parameters_json(),
+        parameters_json: provider_reads::read_tool_parameters_json(document_url_enabled()),
     }
 }
 
@@ -278,7 +289,10 @@ pub fn selection_refusal(turn: Option<&ConnectorTurn>, connection_id: &str) -> O
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReadArgs {
     pub connection_id: String,
+    /// Empty while the read names a document by its link and [`resolve_document_args`] has not settled it.
     pub operation: String,
+    /// A link to the document to read (Q4-E4.3), settled into `operation` and `params` before any call.
+    pub document_url: Option<String>,
     pub params: Map<String, Value>,
     pub max_results: Option<u64>,
     pub page_token: Option<String>,
@@ -288,8 +302,8 @@ pub struct ReadArgs {
 ///
 /// # Errors
 ///
-/// A message the model reads as the tool error, when the arguments are not an object, name no connection
-/// or operation, or carry a body.
+/// A message the model reads as the tool error, when the arguments are not an object, name no connection,
+/// name neither an operation nor a document link, or carry a body.
 pub fn parse_args(arguments_json: &str) -> Result<ReadArgs, String> {
     let value: Value = serde_json::from_str(arguments_json)
         .map_err(|_| "read_provider_action requires a JSON object of arguments".to_owned())?;
@@ -314,13 +328,15 @@ pub fn parse_args(arguments_json: &str) -> Result<ReadArgs, String> {
         );
     }
     let operation = text("operation");
-    if operation.is_empty() {
-        return Err("read_provider_action requires operation".to_owned());
+    let document_url = Some(text("document_url")).filter(|url| !url.is_empty());
+    if operation.is_empty() && document_url.is_none() {
+        return Err("read_provider_action requires operation, or document_url".to_owned());
     }
     let page_token = Some(text("page_token")).filter(|token| !token.is_empty());
     Ok(ReadArgs {
         connection_id,
         operation,
+        document_url,
         params: value
             .get("params")
             .and_then(Value::as_object)
@@ -329,6 +345,34 @@ pub fn parse_args(arguments_json: &str) -> Result<ReadArgs, String> {
         max_results: value.get("max_results").and_then(Value::as_u64),
         page_token,
     })
+}
+
+/// Settles a read that names a document by its link into the operation and parameters it reads (Q4-E4.3). A read
+/// with no link is returned as it was. With one, the switch must be on, and the link then decides the read as
+/// [`provider_reads::resolve_read_request`] states. The connection is not touched here: the caller has checked
+/// that the person selected it, and the link never chooses one.
+///
+/// # Errors
+///
+/// A message the model reads as the tool error: the link is refused while the switch is off, or it does not
+/// resolve to a read this loop serves.
+pub fn resolve_document_args(mut args: ReadArgs, switched_on: bool) -> Result<ReadArgs, String> {
+    let Some(document_url) = args.document_url.take() else {
+        return Ok(args);
+    };
+    if !switched_on {
+        return Err(provider_reads::DOCUMENT_URL_NOT_SWITCHED_ON.to_owned());
+    }
+    let operation = Some(args.operation.as_str()).filter(|operation| !operation.is_empty());
+    let params = Value::Object(std::mem::take(&mut args.params));
+    let (operation, params) =
+        provider_reads::resolve_read_request(operation, &params, Some(document_url.as_str()))
+            .map_err(|error| error.message().to_owned())?;
+    args.operation = operation;
+    if let Value::Object(params) = params {
+        args.params = params;
+    }
+    Ok(args)
 }
 
 /// What one call to integration-corev2 came back with: the provider that served it, and the shaped read.
@@ -470,6 +514,12 @@ pub(super) async fn read_outcome(
     if let Some(message) = selection_refusal(turn, &args.connection_id) {
         return err_outcome(call, message);
     }
+    // A link is settled into the read it names before `fetch` checks the operation (Q4-E4.3). Off, it is
+    // refused here; on, nothing is sent for it until it has resolved to a read the contract lists.
+    let args = match resolve_document_args(args, document_url_enabled()) {
+        Ok(args) => args,
+        Err(message) => return err_outcome(call, message),
+    };
     let Some(bearer) = ingestion_bearer else {
         return err_outcome(call, "read_provider_action requires a verified ingestion bearer");
     };
@@ -647,6 +697,7 @@ pub fn research_args(connection_id: &str, operation: &str, question: &str) -> Re
     ReadArgs {
         connection_id: connection_id.to_owned(),
         operation: operation.to_owned(),
+        document_url: None,
         params,
         max_results: Some(RESEARCH_MAX_RESULTS),
         page_token: None,
@@ -773,6 +824,7 @@ async fn research_read(
     let profile = ReadArgs {
         connection_id: connection_id.to_owned(),
         operation: "profile".to_owned(),
+        document_url: None,
         params: Map::new(),
         max_results: None,
         page_token: None,

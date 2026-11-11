@@ -37,6 +37,10 @@ export function createDesktopBrowser(contents, publish) {
   let isolatedWorld;
   let cursor;
   let expectedPopup;
+  // Reject-only cookie dismissal is opt-in per run (startRun({ consentReject: true })).
+  let consentRejectRun = false;
+  // Consent-reject receipts not yet returned by snapshot(). Host only, never path or query.
+  const receipts = [];
   let disposed = false;
 
   function getState() {
@@ -194,13 +198,13 @@ export function createDesktopBrowser(contents, publish) {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const { url, title, canGoBack, canGoForward } = getState();
       if (!url || url === 'about:blank' || !/^https?:/.test(url)) {
-        return { url, title, heading: null, text: '', targets: [], canGoBack, canGoForward, status, loadError };
+        return { url, title, heading: null, text: '', targets: [], canGoBack, canGoForward, status, loadError, receipts: receipts.splice(0) };
       }
       const revision = navigationRevision;
       try {
         const result = await page('snapshot');
         if (contents.getURL() === url && navigationRevision === revision) {
-          return { url, title, ...result, canGoBack, canGoForward, status, loadError };
+          return { url, title, ...result, canGoBack, canGoForward, status, loadError, receipts: receipts.splice(0) };
         }
       } catch (error) {
         if (contents.getURL() === url && navigationRevision === revision) throw error;
@@ -264,7 +268,8 @@ export function createDesktopBrowser(contents, publish) {
           worldName: 'quarry-desktop-consent',
         });
         const choice = await evaluateInWorld(executionContextId, 'consentChoice');
-        if (!choice || choice.x < 0 || choice.y < 0 || choice.x >= frame.width || choice.y >= frame.height) continue;
+        // Only a reject control is ever clicked (ADR-5 rule 4).
+        if (!choice || choice.reject !== true || choice.x < 0 || choice.y < 0 || choice.x >= frame.width || choice.y >= frame.height) continue;
         signal.throwIfAborted();
         const point = { x: Math.round(frame.x + choice.x), y: Math.round(frame.y + choice.y) };
         await moveCursor(id, point, 'click');
@@ -280,15 +285,20 @@ export function createDesktopBrowser(contents, publish) {
           button: 'left', buttons: 0, clickCount: completed ? 1 : 0 });
         assertRun(id);
         clicked = true;
+        if (completed) {
+          const receipt = { kind: 'consent_reject', host: new URL(contents.getURL()).host, at: new Date().toISOString() };
+          receipts.push(receipt);
+          publish({ type: 'receipt', ...receipt });
+        }
         await delay(320);
-        if (choice.reject) return;
-        break;
+        return;
       }
       if (!clicked) await delay(150);
     }
   }
 
   async function dismissOptionalCookies(id, waitForFrame = false) {
+    if (!consentRejectRun || run !== id) return;
     const controller = new AbortController();
     let timeout;
     try {
@@ -449,6 +459,7 @@ export function createDesktopBrowser(contents, publish) {
     if (run !== id) return Promise.resolve();
     run = undefined;
     expectedPopup = undefined;
+    consentRejectRun = false;
     const promise = (async () => {
       if (inFlight) {
         if (!contents.isDestroyed()) contents.stop();
@@ -466,11 +477,13 @@ export function createDesktopBrowser(contents, publish) {
 
   return {
     getState,
-    startRun() {
+    startRun(options) {
       if (run || inFlight || releasing || manualNavigation || contents.isLoadingMainFrame()) {
         throw new Error('Vent til nettleseren er klar.');
       }
       run = randomUUID();
+      // Strict opt-in: anything but boolean true leaves reject-only dismissal off.
+      consentRejectRun = options?.consentReject === true;
       return run;
     },
     execute(id, action) {
@@ -517,6 +530,7 @@ export function createDesktopBrowser(contents, publish) {
     dispose() {
       disposed = true;
       run = undefined;
+      consentRejectRun = false;
       contents.close({ waitForBeforeUnload: false });
     },
   };

@@ -520,6 +520,7 @@ mod tests {
             locale: Some("nb_NO".to_owned()),
             timezone: Some("Europe/Oslo".to_owned()),
             location: None,
+            send_accept_language: false,
         };
         let named: Vec<(String, String)> = page_emulation_unsupported(&emulation)
             .into_iter()

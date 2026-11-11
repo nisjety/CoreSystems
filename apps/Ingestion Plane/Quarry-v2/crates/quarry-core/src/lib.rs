@@ -17,6 +17,7 @@ pub mod driver_meta;
 pub mod envelope;
 pub mod error;
 pub mod event;
+pub mod identity;
 pub mod ids;
 pub mod job_history;
 pub mod json_schema;

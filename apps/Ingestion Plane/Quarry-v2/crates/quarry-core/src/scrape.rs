@@ -533,7 +533,15 @@ pub struct ScrapeOptions {
     /// Accepted only while `ScrapeLimits::no_egress_enabled`; refused under zero data retention
     /// by the edge, and never with a capture, an action or a page emulation.
     pub no_egress: Option<bool>,
+    /// E4.4-b: the stored browser profile (`prof_<ulid>`) this one scrape restores, read-only.
+    /// Accepted only while `ScrapeLimits::profile_pin_enabled`; never with `actions`. A pinned
+    /// scrape is personalised, so it is never cached and never echoes the id back.
+    pub profile_id: Option<String>,
 }
+
+/// E4.4-b: the two spellings of the profile-pin option. While its switch is off the edge
+/// treats them as unknown keys and strips them before the options are read.
+pub const PROFILE_PIN_KEYS: [&str; 2] = ["profile_id", "profileId"];
 
 /// The longest `max_age` a request may ask for: 30 days, in milliseconds.
 pub const MAX_AGE_CEILING_MS: u64 = 2_592_000_000;
@@ -541,7 +549,7 @@ pub const MAX_AGE_CEILING_MS: u64 = 2_592_000_000;
 /// Request keys the options own: each field in snake_case and its camelCase
 /// alias. A body key that is neither one of these nor a key of the request
 /// itself is unknown. A unit test pins this against a fully populated value.
-const OPTION_KEYS: [(&str, &str); 16] = [
+const OPTION_KEYS: [(&str, &str); 17] = [
     ("formats", "formats"),
     ("only_main_content", "onlyMainContent"),
     ("include_tags", "includeTags"),
@@ -558,6 +566,7 @@ const OPTION_KEYS: [(&str, &str); 16] = [
     ("timezone", "timezone"),
     ("location", "location"),
     ("no_egress", "noEgress"),
+    ("profile_id", "profileId"),
 ];
 
 /// Keys a body may carry that are never a scrape option and never lenient: they
@@ -699,6 +708,14 @@ impl ScrapeOptions {
                     Err(mut found) => errors.append(&mut found),
                 },
                 "no_egress" => read_bool(snake, value, &mut options.no_egress, &mut errors),
+                "profile_id" => match value.as_str() {
+                    Some(text) => options.profile_id = Some(text.to_owned()),
+                    None => errors.push(FieldError::new(
+                        snake,
+                        "invalid_type",
+                        "profile_id must be a profile id string (prof_...)",
+                    )),
+                },
                 _ => {}
             }
         }
@@ -932,6 +949,7 @@ impl ScrapeOptions {
                 ));
             }
         }
+        let profile_id = self.profile_id_checked(limits, no_egress, &mut errors);
         // Captures: at most one screenshot and one PDF among the formats.
         let mut capture = CapturePlan::default();
         for format in &formats {
@@ -1028,7 +1046,61 @@ impl ScrapeOptions {
             redact_pii,
             page_emulation,
             no_egress,
+            profile_id,
         })
+    }
+
+    /// E4.4-b: the pinned profile of the request, checked and in its canonical form. Refused
+    /// as `feature_disabled` while the limit is off (the edge keeps the keys unknown then, so
+    /// this is reached only by a caller that builds the options itself). With `actions` it is
+    /// `conflicting_option`: an authenticated action run needs its own gate (X-20), not this
+    /// one. With `no_egress` too: a stored capture has no live page to restore a profile into.
+    /// `None` when none is asked. Whether the profile exists and belongs to the caller is the
+    /// edge's question (an unknown id is a 404, never created), not the contract's.
+    fn profile_id_checked(
+        &self,
+        limits: &ScrapeLimits,
+        no_egress: bool,
+        errors: &mut Vec<FieldError>,
+    ) -> Option<String> {
+        let raw = self.profile_id.as_deref()?;
+        if !limits.profile_pin_enabled {
+            errors.push(FieldError::new(
+                "profile_id",
+                "feature_disabled",
+                "profile_id is not enabled on this endpoint",
+            ));
+            return None;
+        }
+        let mut ok = true;
+        if self.actions.is_some() {
+            errors.push(FieldError::new(
+                "profile_id",
+                "conflicting_option",
+                "profile_id cannot be combined with actions",
+            ));
+            ok = false;
+        }
+        if no_egress {
+            errors.push(FieldError::new(
+                "profile_id",
+                "conflicting_option",
+                "profile_id needs the live page, so it cannot be combined with no_egress",
+            ));
+            ok = false;
+        }
+        match raw.trim().parse::<crate::ids::kinds::ProfileKind>() {
+            Ok(id) if ok => Some(id.to_string()),
+            Ok(_) => None,
+            Err(_) => {
+                errors.push(FieldError::new(
+                    "profile_id",
+                    "invalid_profile_id",
+                    "profile_id must be a profile id such as prof_<ulid>",
+                ));
+                None
+            }
+        }
     }
 
     /// E4.4-a: the locale, timezone and location of the request, checked. Refused as
@@ -1084,6 +1156,9 @@ impl ScrapeOptions {
                 )),
             }
         }
+        // E4.4-a2: the header follows the checked locale only; it is never caller text.
+        emulation.send_accept_language =
+            limits.page_accept_language_enabled && emulation.locale.is_some();
         Some(emulation)
     }
 }
@@ -1349,6 +1424,13 @@ pub struct ScrapeLimits {
     /// `no_egress` is accepted only when this is set. Off by default: a request for it is
     /// `feature_disabled` at `no_egress`. Q3-E3.8.8w sets it from `QUARRY_EDGE__NO_EGRESS`.
     pub no_egress_enabled: bool,
+    /// E4.4-a2: a page that emulates a locale also sends `Accept-Language` derived from it
+    /// (`PageEmulation::send_accept_language`). Off by default; the edge sets it from
+    /// `QUARRY_EDGE__PAGE_ACCEPT_LANGUAGE`. It needs `per_page_emulation_enabled` to matter.
+    pub page_accept_language_enabled: bool,
+    /// E4.4-b: `profile_id` is accepted only when this is set. Off by default: a request for it
+    /// is `feature_disabled` at `profile_id`. The edge sets it from `QUARRY_EDGE__SCRAPE_PROFILE_PIN`.
+    pub profile_pin_enabled: bool,
 }
 
 impl Default for ScrapeLimits {
@@ -1369,6 +1451,8 @@ impl Default for ScrapeLimits {
             max_age_enabled: false,
             per_page_emulation_enabled: false,
             no_egress_enabled: false,
+            page_accept_language_enabled: false,
+            profile_pin_enabled: false,
         }
     }
 }
@@ -1409,6 +1493,11 @@ pub struct ResolvedScrapeOptions {
     /// no connection is opened to its host. A stored capture is not the live page, so it
     /// neither reads nor writes a cache (see [`Self::is_default`]) and keys apart.
     pub no_egress: bool,
+    /// E4.4-b: the pinned stored browser profile, canonical `prof_<ulid>`. `None` when the
+    /// request pinned none. A pinned scrape is personalised: it neither reads nor writes a cache
+    /// (see [`Self::is_default`] and [`Self::result_cache_admissible`]), so it is deliberately
+    /// NOT part of [`Self::canonical_options_key`].
+    pub profile_id: Option<String>,
 }
 
 impl ResolvedScrapeOptions {
@@ -1440,6 +1529,7 @@ impl ResolvedScrapeOptions {
             && self.redact_pii == PiiRedaction::Off
             && self.page_emulation.is_none()
             && !self.no_egress
+            && self.profile_id.is_none()
     }
 
     /// Whether the page cache may serve or store this request. Only a default
@@ -1461,6 +1551,8 @@ impl ResolvedScrapeOptions {
             && self.ai_specs().is_empty()
             && self.redact_pii == PiiRedaction::Off
             && !self.no_egress
+            // E4.4-b: a pinned profile serves personalised content: never cached.
+            && self.profile_id.is_none()
     }
 
     /// A stable key for the options that change the result, independent of the
@@ -1585,6 +1677,10 @@ pub struct EffectiveScrapeOptions {
     /// no connection was opened to its host. Absent for the default request.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_egress: bool,
+    /// E4.4-b: `true` when the scrape ran with a pinned stored browser profile. The id itself
+    /// is never echoed. Absent for the default request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub profile_pinned: bool,
 }
 
 impl EffectiveScrapeOptions {
@@ -1627,6 +1723,7 @@ impl EffectiveScrapeOptions {
             redact_pii: resolved.redact_pii,
             page_emulation: resolved.page_emulation.clone(),
             no_egress: resolved.no_egress,
+            profile_pinned: resolved.profile_id.is_some(),
         }
     }
 }
@@ -1843,6 +1940,7 @@ mod tests {
                 accuracy: Some(3.0),
             }),
             no_egress: Some(true),
+            profile_id: Some("prof_01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned()),
         };
         let value = serde_json::to_value(&full).unwrap();
         let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
@@ -1865,7 +1963,11 @@ mod tests {
         assert!(names.contains(&"redactPii") && names.contains(&"redact_pii"));
         assert!(names.contains(&"locale") && names.contains(&"timezone") && names.contains(&"location"));
         assert!(names.contains(&"noEgress") && names.contains(&"no_egress"));
-        assert_eq!(OPTION_KEYS.len(), 16);
+        assert!(names.contains(&"profileId") && names.contains(&"profile_id"));
+        for key in PROFILE_PIN_KEYS {
+            assert!(names.contains(&key), "{key}");
+        }
+        assert_eq!(OPTION_KEYS.len(), 17);
     }
 
     // ---- E4.4-a: locale, timezone and location

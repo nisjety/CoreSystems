@@ -25,6 +25,7 @@ async fn page_emulation_is_kept_for_the_session_and_an_empty_one_keeps_nothing()
         locale: Some("nb_NO".to_owned()),
         timezone: Some("Europe/Oslo".to_owned()),
         location: None,
+        send_accept_language: false,
     };
     driver
         .set_page_emulation(&session, &emulation)
@@ -71,6 +72,7 @@ async fn page_emulation_sets_the_locale_and_timezone_of_the_first_page() {
                 locale: Some("nb_NO".to_owned()),
                 timezone: Some("Europe/Oslo".to_owned()),
                 location: None,
+                send_accept_language: false,
             },
         )
         .await

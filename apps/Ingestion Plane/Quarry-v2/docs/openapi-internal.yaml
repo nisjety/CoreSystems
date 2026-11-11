@@ -8,8 +8,8 @@ info:
     This file is repository documentation only: it is never served, and no SDK is generated
     from it. Internal routes never appear in docs/openapi.yaml or in the generated SDKs
     (decision 3.13, OPENAPI-INTERNAL, 2026-10-28). Who can reach these routes is decided by
-    gateway routing, not by this file (D2-312). The last eight paths are quarry-control's (Go,
-    default port 8081, not the edge): seven are called by the orchestrator and verified with
+    gateway routing, not by this file (D2-312). The last ten paths are quarry-control's (Go,
+    default port 8081, not the edge): nine are called by the orchestrator and verified with
     QUARRY_CONTROL_INTERNAL_SECRET, one (zdr-tombstones) is called by the edge and verified with
     QUARRY_INTERNAL_SECRET (D2-050).
   license:
@@ -353,6 +353,69 @@ paths:
                 $ref: '#/components/schemas/InternalErrorEnvelope'
         '501':
           description: UNSUPPORTED when QUARRY_EDGE_INTERNAL_TOKEN is not set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/orgs/{org}/users/{user}/receipts:
+    delete:
+      operationId: edgeInternalUserReceiptsDelete
+      summary: Erase one user's step receipts in an organization (Control Plane GDPR consumer -> edge)
+      description: >-
+        Called by quarry-control's GDPR consumer for a user or user_anonymize erasure, once for each
+        organization the user belonged to, when QUARRY_CONTROL_GDPR_USER_RECEIPTS is on (W2-U49). The
+        route deletes the step receipts and the browser timeline events whose org_id and actor_id both
+        match the path, and answers in the counts-only shape of the org purge, with one step_receipts
+        family. It is idempotent: a second call for the same user reports zeros. The shared internal
+        token gates it, the same check as the org purge; no user token is read.
+      tags:
+      - internal
+      security:
+      - internalToken: []
+      parameters:
+      - name: org
+        in: path
+        required: true
+        description: The organization id. 1 to 256 characters, with no surrounding whitespace.
+        schema:
+          type: string
+          maxLength: 256
+      - name: user
+        in: path
+        required: true
+        description: The user id. 1 to 256 characters, with no surrounding whitespace.
+        schema:
+          type: string
+          maxLength: 256
+      responses:
+        '200':
+          description: The purge report, in an envelope. rows_deleted is the receipts and the timeline events removed together.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalPurgeOrgEnvelope'
+        '400':
+          description: BAD_REQUEST when the org id or the user id is empty, too long or has surrounding whitespace.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: UNAUTHORIZED when the bearer token is not QUARRY_EDGE_INTERNAL_TOKEN.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '500':
+          description: INTERNAL when the delete fails in the store. The purge is idempotent, so a retry is safe.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '501':
+          description: >-
+            UNSUPPORTED when QUARRY_EDGE_INTERNAL_TOKEN is not set, or when the receipt store cannot
+            erase one user's receipts.
           content:
             application/json:
               schema:
@@ -948,6 +1011,127 @@ paths:
                 $ref: '#/components/schemas/InternalControlScheduleListEnvelope'
         '401':
           description: The request is not signed with the control-internal secret. The body is plain text.
+  /v1/internal/schedules/requests/claim:
+    post:
+      operationId: controlInternalSchedulesRequestsClaim
+      summary: Claim pending schedule trigger and backfill requests (orchestrator -> control)
+      description: >-
+        quarry-control. A tenant's trigger or backfill is stored as a request row: POST
+        /v1/schedules/{id}/trigger or /backfill answers 202 pending. The orchestrator claims about
+        every two seconds. This route leases up to limit requests that are pending, or whose lease has
+        run out, oldest first, and records the caller as their holder. The orchestrator then asks
+        Temporal to run the fire and posts the outcome to the result route. Mounted only when
+        QUARRY_CONTROL__SCHEDULE_REQUESTS is on; otherwise the path is 404. Verified with the
+        control-internal HMAC.
+      tags:
+      - internal
+      security:
+      - controlInternalHmac: []
+      parameters:
+      - $ref: '#/components/parameters/ControlSigTimestamp'
+      - $ref: '#/components/parameters/ControlSigNonce'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalControlClaimRequestsRequest'
+      responses:
+        '200':
+          description: The claimed requests, in an envelope. An empty array when nothing is claimable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalControlClaimRequestsEnvelope'
+        '400':
+          description: >-
+            BAD_REQUEST when the body is not JSON, or when worker is empty after trimming or longer than
+            128 characters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: The request is not signed with the control-internal secret. The body is plain text.
+        '500':
+          description: INTERNAL when the claim fails.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '501':
+          description: UNSUPPORTED when the store has no schedule request table.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/schedules/requests/{rid}/result:
+    post:
+      operationId: controlInternalSchedulesRequestsResult
+      summary: Post the outcome of a claimed schedule request (orchestrator -> control)
+      description: >-
+        quarry-control. The worker that claimed a request posts what became of its trigger or backfill.
+        Only the holder can post: a post from another worker, or a late post after the lease was
+        reclaimed, answers 409 and changes nothing. done ends the request with its result, failed and
+        rejected end it with an error, and retry returns it to the pending queue. Mounted only when
+        QUARRY_CONTROL__SCHEDULE_REQUESTS is on; otherwise the path is 404. Verified with the
+        control-internal HMAC.
+      tags:
+      - internal
+      security:
+      - controlInternalHmac: []
+      parameters:
+      - $ref: '#/components/parameters/ControlSigTimestamp'
+      - $ref: '#/components/parameters/ControlSigNonce'
+      - name: rid
+        in: path
+        required: true
+        description: The request id, a request-kind id.
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalControlRequestResultRequest'
+      responses:
+        '204':
+          description: The outcome was recorded. No body.
+        '400':
+          description: >-
+            BAD_REQUEST when the id is not a request id, the body is not JSON, worker is empty after
+            trimming or longer than 128 characters, or status is not done, failed, rejected or retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: The request is not signed with the control-internal secret. The body is plain text.
+        '404':
+          description: NOT_FOUND when no request has that id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '409':
+          description: CONFLICT when the request is not held by this worker (not claimed, or claimed by another worker).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '500':
+          description: INTERNAL when the outcome cannot be stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '501':
+          description: UNSUPPORTED when the store has no schedule request table.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
   /v1/internal/schedules/{id}/runs:
     post:
       operationId: controlInternalSchedulesRegisterRun
@@ -2277,6 +2461,99 @@ components:
           $ref: '#/components/schemas/InternalMeta'
         error:
           description: Always null on success.
+    InternalControlClaimRequestsRequest:
+      type: object
+      required:
+      - worker
+      properties:
+        worker:
+          type: string
+          maxLength: 128
+          description: The orchestrator's worker name, trimmed. It must not be empty. The lease is held under this name, and only this name can post the result.
+        limit:
+          type: integer
+          description: 1 to 50. Zero, negative or absent means 10. A value above 50 is capped at 50.
+        lease_s:
+          type: integer
+          format: int64
+          description: Lease length in seconds, 5 to 300. Zero, negative or absent means 30. A value outside the range is clamped to it.
+    InternalControlClaimedRequest:
+      type: object
+      required:
+      - id
+      - schedule_id
+      - org_id
+      - action
+      - attempts
+      - lease_until
+      properties:
+        id:
+          type: string
+          description: The request id.
+        schedule_id:
+          type: string
+        org_id:
+          type: string
+        action:
+          type: string
+          enum:
+          - trigger
+          - backfill
+        params:
+          type: object
+          additionalProperties: true
+          description: For a backfill, start_at and end_at (RFC 3339, UTC), windows, and overlap_policy when one was sent. Absent for a trigger.
+        attempts:
+          type: integer
+          description: How many times the request has been claimed, this claim included.
+        lease_until:
+          type: integer
+          format: int64
+          description: Unix milliseconds. The lease ends here unless the result is posted first.
+    InternalControlClaimRequestsEnvelope:
+      type: object
+      required:
+      - data
+      - meta
+      properties:
+        data:
+          type: object
+          required:
+          - requests
+          properties:
+            requests:
+              type: array
+              items:
+                $ref: '#/components/schemas/InternalControlClaimedRequest'
+        meta:
+          $ref: '#/components/schemas/InternalMeta'
+        error:
+          description: Always null on success.
+    InternalControlRequestResultRequest:
+      type: object
+      required:
+      - worker
+      - status
+      properties:
+        worker:
+          type: string
+          maxLength: 128
+          description: The worker that holds the claim. It must match the claim, or the answer is 409.
+        status:
+          type: string
+          enum:
+          - done
+          - failed
+          - rejected
+          - retry
+          description: done ends the request with its result. failed and rejected end it with an error. retry returns it to the pending queue.
+        result:
+          type: object
+          additionalProperties: true
+          description: For done. What the orchestrator reports, such as the workflow or schedule id. Not stored for the other statuses.
+        error:
+          type: string
+          description: For failed, rejected and retry. The reason, clipped by the store.
     InternalControlZdrTombstone:
       description: >-
         The only fields a ZDR run tombstone may carry. The authority is

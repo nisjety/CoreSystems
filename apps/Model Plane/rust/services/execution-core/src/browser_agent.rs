@@ -724,6 +724,23 @@ pub fn steer_enabled() -> bool {
     steer_enabled_from(std::env::var(STEER_ENV).ok().as_deref())
 }
 
+/// E4.3: the switch that shows the planner the browser environment a run leased (its
+/// tier and the capabilities Quarry reports), as advisory text. Read at launch; only
+/// the literal `true` turns it on, and the default is off.
+pub const RUN_ENVIRONMENT_ENV: &str = "EXECUTION_CORE_PLANNER_RUN_ENV";
+
+/// Whether `value` (an env value) turns the run environment line on.
+#[must_use]
+pub fn run_environment_enabled_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// Whether the run environment line is on in this process.
+#[must_use]
+pub fn run_environment_enabled() -> bool {
+    run_environment_enabled_from(std::env::var(RUN_ENVIRONMENT_ENV).ok().as_deref())
+}
+
 /// E3.2-c: the longest redirect text the planner is shown, in characters.
 pub const MAX_REDIRECT_CHARS: usize = 1000;
 /// E3.2-c: redirects one run accepts. Past it a rejection aborts as before, so
@@ -868,6 +885,10 @@ pub struct AgentPlan {
     /// E3.3-f: texts taken from the run's steer queue, waiting for the next
     /// planner call (shown once). At most `MAX_QUEUED_MESSAGES`.
     steer_pending: Vec<String>,
+    /// E4.3: the browser environment line of the leased run, shown to the planner
+    /// with each call. Set at launch while `EXECUTION_CORE_PLANNER_RUN_ENV` is on;
+    /// `None` for an attached run and with the switch off.
+    run_environment: Option<String>,
 }
 
 impl AgentPlan {
@@ -894,6 +915,7 @@ impl AgentPlan {
             planner_active: false,
             final_answer: None,
             steer_pending: Vec::new(),
+            run_environment: None,
         }
     }
 
@@ -1492,6 +1514,14 @@ pub async fn run_browser_agent_loop(
             };
         }
     };
+    // E4.3: the browser environment this lease runs under, shown to the planner as
+    // advisory text while `EXECUTION_CORE_PLANNER_RUN_ENV` is on. An attached run
+    // acquires no lease of its own, so it carries no line.
+    if let QuarryRun::Leased(response) = &run {
+        if run_environment_enabled() {
+            plan.run_environment = Some(response.environment_line());
+        }
+    }
     // An attached run uses the person's own session, and so their cookie jar:
     // recorded once, as an audit event, in place of the persistent-profile
     // gate (an attached run never names a profile).
@@ -2222,6 +2252,7 @@ async fn decide_next_action(
                     failed_total: plan.failures.total(),
                     redirect: redirect_line.as_deref(),
                     steer: steer_lines.as_deref(),
+                    environment: plan.run_environment.as_deref(),
                 };
                 match planner
                     .plan_next_with_progress(&context, &plan.recent_successes)

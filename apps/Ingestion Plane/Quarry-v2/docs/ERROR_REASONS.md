@@ -349,7 +349,7 @@ The same routes answer 501 `UNSUPPORTED` while `QUARRY_EDGE__JOB_RESULTS` is off
 | `sitemap` | `invalid_option`, `invalid_type` | flag on: a string other than `skip`, `include`, `only`; not a string |
 | `scrape_options` | `unsupported_option` | `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS` is off (any value) |
 | `scrape_options` | `invalid_type` | flag on: not an object |
-| `scrape_options.<key>` | `unsupported_option` | `actions`, `actions_on_error`, `max_inline_bytes`, `screenshot`, `pdf`, `json`, `summary`, `question`, `highlights`: they cannot apply to every page |
+| `scrape_options.<key>` | `unsupported_option` | `actions`, `actions_on_error`, `max_inline_bytes`, `screenshot`, `pdf`, `json`, `summary`, `question`, `highlights`, `locale`, `timezone`, `location`, `profile_id`, `profileId`: they cannot apply to every page (a crawl page has no per-request browser set-up; the refusal holds whatever the `/v1/scrape` emulation switch says) |
 | `scrape_options.formats[i]` | `unsupported_option`, `unsupported_format` | a capture, object or AI format; an unknown name |
 | `scrape_options.<key>` | `reserved_field`, `unknown_field` | a key `/v1/scrape` refuses (`headers`, `proxy`, ...); an unknown key in strict mode (a warning in lenient) |
 | `scrape_options.include_tags[i]`, `.exclude_tags[i]` | `empty`, `too_long`, `too_many` | the `/v1/scrape` selector limits (32 selectors, 256 characters) |
@@ -383,6 +383,19 @@ A 200 may carry `warnings[]` (`document_has_no_text_layer`, `some_pages_have_no_
 Field errors (400, in `details.fields[]`, each with a path and never a value): `invalid_locale` (at `locale`: not a language tag such as en-US or nb-NO), `invalid_timezone` (at `timezone`: not an IANA-shaped name), `out_of_range` (at `location.latitude`, `location.longitude` or `location.accuracy`), `missing_field` (at `location.latitude` or `location.longitude`), `unknown_field` (at `location.<key>`: the object takes latitude, longitude and accuracy), and `invalid_type` (at `locale`, `timezone` or `location`). While `QUARRY_EDGE__PER_PAGE_LOCALE` is off these keys are not errors at all: they are unknown fields, a warning (or `unknown_field` in strict validation), as they were before.
 
 Browser errors: 400 `BAD_REQUEST` with `details.reason` `page_emulation_failed`, `details.field` (`locale`, `timezone` or `location`) and `details.error_class` (`invalid_value`, `already_set` or `cdp_error`), when the browser refuses a value. Any other browser failure of this kind is `DRIVER_FAILED` with the same details. The value is never in the error. No browser on the edge: 400 `BAD_REQUEST` with one field error per emulated field in `details.fields[]`, each with code `unsupported_option` (paths `locale`, `timezone` and `location`). A browser that serves the request but cannot emulate (a remote provider): 501 `UNSUPPORTED` with `details.reason` `browser_capability_unavailable`.
+
+## Scrape `profile_id` (E4.4-b)
+
+Pins one stored browser profile to one `POST /v1/scrape`. Off unless `QUARRY_EDGE__SCRAPE_PROFILE_PIN` is on; while off, `profile_id` and `profileId` are unknown keys (ignored with an `unknown_field` warning, or a 400 `unknown_field` under strict) and are never read. Field errors are 400 `BAD_REQUEST` in `details.fields[]`, each with a path and never a value.
+
+| field code | path | meaning | what a caller does |
+|---|---|---|---|
+| `invalid_profile_id` | `profile_id` | the value is not a profile id (`prof_<ulid>`) | send the id `GET /v1/profiles` lists |
+| `conflicting_option` | `profile_id` | `profile_id` with `actions` (an authenticated action run needs its own gate) or with `no_egress` (a stored capture has no live page to restore a profile into) | drop one of them |
+| `feature_disabled` | `profile_id` | the option reached the contract while its switch is off (only a caller that builds the options itself; the edge strips the key) | ask the operator |
+| `invalid_type` | `profile_id` | the value is not a string | send a string |
+| `conflicting_aliases` | `profile_id` | `profile_id` and `profileId` with different values | send one spelling |
+
 ## `POST /v1/profiles/:id/clear-data`: removing a stored profile's browsing data (F-t2-068)
 
 | status | code | `details.reason` | meaning | what to do |
@@ -405,3 +418,17 @@ A step may carry `expect`, a list of up to 8 conditions that must all hold once 
 | 400 | `BAD_REQUEST` | `field`, the path of the refused field (for example `all[0].pattern`) | the expectation is out of bounds: 1 to 8 conditions; a `pattern` 1 to 512 bytes; a `text` 1 to 256 bytes; a locator string 1 to 256 bytes; a locator of kind `nth`, which is order-dependent | fix the named field |
 
 A verdict is not an error. A step whose `expect` is checked answers 200 with the observation, and the verdict is on `proof_bundle.expectation` (`met`, `not_met` with the zero-based `unmet` indexes, or `unevaluable` with a closed `reason`). `action_outcome` follows it: `expect_satisfied` (verified, for a step whose own outcome was unknown), `expect_not_met` (failed), and for an unknown outcome that could not be checked the detail `expect_unevaluable: <reason>`. A ZDR run may send `expect`; the verdict is returned and nothing is stored for it.
+
+## `POST /v1/agent/runs/{run_id}/procedure` and `POST /v1/agent/procedures/replay-check`: canonical compile and prefix replay (E4.2 step 2)
+
+A compile with `canonical` true builds a version 2 procedure: semantic targets, typed-text slots and the postconditions Quarry verified. It is dark: while `QUARRY_EDGE__PROCEDURE_CANONICAL` is off (the default) a request that sets `canonical` is refused before any receipt is read, and a request without it compiles version 1 as before. A replay check with `prefix` true takes the actions as a leading part of a version 2 procedure. No refusal below carries typed text, a value or page content: `details` holds a step number, a field name or a closed reason, and the message of an unsupported action names its type only.
+
+| status | code | `details` | meaning | what to do |
+|---|---|---|---|---|
+| 400 | `BAD_REQUEST` | `reason` `procedure_canonical_disabled`, `env` `QUARRY_EDGE__PROCEDURE_CANONICAL` | `canonical` is true and the switch is off on this deployment | omit `canonical`, or ask the operator to turn the switch on |
+| 409 | `TARGET_REPAIR_REQUIRED` | `step` | a ref or semantic step has no locator a recipe can store: the observation names no target, or the locator it names is positional (`nth`), carries a redaction marker or an `@`, holds six digits in a row, or is longer than 120 bytes | observe the page again, then record the step again |
+| 501 | `UNSUPPORTED` | `step` | the receipt holds an action outside the canonical vocabulary: navigate, click, type, press, scroll, wait, back, get_content, and the ref and semantic forms of click, type, select and wait_for. Every other action is refused, among them evaluate, upload, download, frame actions, a click at a point, a mouse wheel, forward, reload, a screenshot, a PDF, a dialog response, a one-time-code fill, and a raw select or wait_for | do not record that step; a recipe cannot hold it |
+| 501 | `UNSUPPORTED` | `step`, `field` (`key` or `option value`) | a key press or an option value carries a redaction marker, so no recipe could reproduce it | record the step with a value that is not masked, or leave it out |
+| 400 | `BAD_REQUEST` | `reason` `prefix_needs_v2` | the replay check sets `prefix` on a version 1 procedure | compile a canonical procedure and check against that, or send the whole action list |
+
+A version 2 replay check compares each action with its step after two fields are set aside: `snapshot_id` and `generation` of a semantic action (handles scoped to one run) and `text` of a slot step (bound at replay). Every other field must match. With `prefix` the replay may stop early; actions beyond the procedure are always a repair. A version 1 procedure is compared as before.

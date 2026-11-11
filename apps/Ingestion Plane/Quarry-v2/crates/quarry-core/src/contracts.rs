@@ -515,6 +515,13 @@ pub struct ResolvedTargetProof {
     pub fingerprint: ElementFingerprint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locator: Option<SemanticLocator>,
+    /// An exact semantic locator that matched only this target in the
+    /// snapshot. A later recipe compile reads it. It is never an `Nth` locator.
+    /// Values that look like personal data or carry a redaction marker are
+    /// not used. Child-frame targets have none. Absent when no candidate passes,
+    /// and the compile then fails closed with `TARGET_REPAIR_REQUIRED`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_locator: Option<SemanticLocator>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

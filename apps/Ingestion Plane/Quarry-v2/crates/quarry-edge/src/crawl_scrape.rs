@@ -15,10 +15,11 @@
 //!   the pipeline stage; it needs `QUARRY_EDGE__PII_REDACTION` on (see `crawl_request`)
 //!
 //! `actions`, `actions_on_error`, `max_inline_bytes`, `screenshot`, `pdf`, `json`,
-//! `summary`, `question`, `highlights` and the capture or AI formats cannot apply
-//! per page and are `unsupported_option`. The validators are the ones `/v1/scrape`
-//! uses (`ScrapeOptions::from_value` and `resolve`), so the same limits and codes
-//! apply; only the set of accepted keys is narrower.
+//! `summary`, `question`, `highlights`, `locale`, `timezone`, `location`, `profile_id`
+//! and `profileId` (a browser set-up or profile for one request) and the capture or AI
+//! formats cannot apply per page and are `unsupported_option`. The validators are the
+//! ones `/v1/scrape` uses (`ScrapeOptions::from_value` and `resolve`), so the same limits
+//! and codes apply; only the set of accepted keys is narrower.
 //!
 //! The handoff validates and stamps the canonical form ([`CrawlScrapeOptions`])
 //! into the job params. `POST /v1/internal/run_page` re-validates it (defense in
@@ -61,8 +62,9 @@ const KEYS: [(&str, &str); 8] = [
     ("redact_pii", "redactPii"),
 ];
 
-/// Keys that exist on `/v1/scrape` (or are Firecrawl options) and cannot apply per page.
-const UNSUPPORTED_KEYS: [&str; 16] = [
+/// Keys that exist on `/v1/scrape` (or are Firecrawl options, or name a request's own browser
+/// set-up) and cannot apply per page.
+const UNSUPPORTED_KEYS: [&str; 21] = [
     // Q3-E3.8.8w: a stored-capture read is a per-request mode; dropped here, a crawl page
     // would be fetched live while the caller asked for no egress.
     "no_egress",
@@ -81,6 +83,13 @@ const UNSUPPORTED_KEYS: [&str; 16] = [
     "render",
     "wait_for",
     "waitFor",
+    // E4.4-a / E4.4-b: a request's own browser set-up (page emulation, a profile). A crawl's
+    // pages have none, so a crawl refuses these instead of reading them as unknown fields.
+    "locale",
+    "timezone",
+    "location",
+    "profile_id",
+    "profileId",
 ];
 
 /// The checked, canonical `scrape_options` of a crawl. This is what the handoff
@@ -412,15 +421,22 @@ mod tests {
             "summary",
             "question",
             "highlights",
+            "locale",
+            "timezone",
+            "location",
+            "profile_id",
+            "profileId",
         ] {
-            let mut body = Map::new();
-            body.insert(key.to_owned(), json!([]));
-            let result = check(&Value::Object(body), false);
-            assert_eq!(
-                codes(&result),
-                vec![pair(key, "unsupported_option")],
-                "{key}"
-            );
+            for strict in [false, true] {
+                let mut body = Map::new();
+                body.insert(key.to_owned(), json!([]));
+                let result = check(&Value::Object(body), strict);
+                assert_eq!(
+                    codes(&result),
+                    vec![pair(key, "unsupported_option")],
+                    "{key} strict={strict}"
+                );
+            }
         }
     }
 

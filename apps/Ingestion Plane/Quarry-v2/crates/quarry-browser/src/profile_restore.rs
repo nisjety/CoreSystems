@@ -760,7 +760,10 @@ mod cdp {
     use ::chromiumoxide::{Browser, Page};
     use chrono::{DateTime, Utc};
     use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
-    use quarry_core::page_emulation::{Location, PageEmulation, DEFAULT_ACCURACY_M};
+    use quarry_core::identity::strip_product_token;
+    use quarry_core::page_emulation::{
+        accept_language_for, Location, PageEmulation, DEFAULT_ACCURACY_M,
+    };
     use serde_json::json;
 
     use super::{
@@ -867,10 +870,12 @@ mod cdp {
         }
 
         // 3. Is the browser the one that captured the profile? Recorded, never overridden.
+        // E4.4-a2: a trailing product token (QUARRY_BROWSER__PRODUCT_TOKEN) is not a different
+        // browser, so it is stripped from both sides before they are compared.
         if let Some(saved) = plan.saved_user_agent.as_deref() {
             if let Ok(result) = page.evaluate("navigator.userAgent").await {
                 if let Ok(live) = result.into_value::<String>() {
-                    report.ua_changed = live != saved;
+                    report.ua_changed = strip_product_token(&live) != strip_product_token(saved);
                 }
             }
         }
@@ -926,6 +931,19 @@ mod cdp {
             })
             .await
             .map_err(|error| emulation_failed("locale", &error.to_string()))?;
+            // E4.4-a2: `Accept-Language` derived from the checked locale, set once here from the
+            // request, never in reaction to a response (ADR 5 rules 1 and 3). Only this header is
+            // added; the user agent is never touched.
+            if emulation.send_accept_language {
+                let value = accept_language_for(locale).ok_or_else(|| {
+                    emulation_failed("accept_language", "Invalid accept-language value")
+                })?;
+                page.execute(net::SetExtraHttpHeadersParams::new(net::Headers::new(
+                    json!({ "Accept-Language": value }),
+                )))
+                .await
+                .map_err(|error| emulation_failed("accept_language", &error.to_string()))?;
+            }
         }
         if let Some(timezone) = emulation.timezone.as_ref() {
             page.execute(SetTimezoneOverrideParams::new(timezone.clone()))

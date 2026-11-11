@@ -392,6 +392,69 @@ pub struct WireRunAgent {
 pub struct StartRunResponse {
     pub run_id: String,
     pub lease_id: String,
+    /// What the run's driver can supply for this lease (Quarry `driver_capabilities`).
+    /// Absent from a Quarry that predates the field.
+    #[serde(default)]
+    pub driver_capabilities: Option<WireDriverCapabilities>,
+    /// The run's execution tier as Quarry names it (`chromium` or
+    /// `ephemeral_evidence`). Read only through [`StartRunResponse::environment_line`],
+    /// which allowlists it. Absent from a Quarry that predates the field.
+    #[serde(default)]
+    pub execution_tier: Option<String>,
+}
+
+/// The driver capabilities a start response reports (Quarry `driver_capabilities`):
+/// the five the planner's environment line names. A key Quarry omits reads as
+/// `false`, which is Quarry's deny-by-default rule, and an unknown key is ignored.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub struct WireDriverCapabilities {
+    /// The driver can keep a browser profile across runs.
+    #[serde(default)]
+    pub persistent_profile: bool,
+    /// The driver can save downloads as Quarry artifacts.
+    #[serde(default)]
+    pub downloads_to_artifacts: bool,
+    /// The driver can attach a Quarry artifact to a native file input.
+    #[serde(default)]
+    pub uploads_from_artifacts: bool,
+    /// The driver renders the full Chromium-compatible visual surface.
+    #[serde(default)]
+    pub full_visual_fidelity: bool,
+    /// Ref-targeted click, type and select send trusted input.
+    #[serde(default)]
+    pub trusted_input: bool,
+}
+
+impl StartRunResponse {
+    /// The browser environment of this run as one advisory line for the planner: the
+    /// execution tier, then the five capabilities of [`WireDriverCapabilities`]. The
+    /// tier passes a closed allowlist (`chromium` or `ephemeral_evidence`; anything
+    /// else prints `unknown`) and each capability prints `yes` or `no`, so no value
+    /// Quarry sends is echoed. A response without `driver_capabilities` says so, and
+    /// does not claim `no` for what Quarry did not report. The line informs the
+    /// planner and grants nothing.
+    #[must_use]
+    pub fn environment_line(&self) -> String {
+        let tier = match self.execution_tier.as_deref() {
+            Some("chromium") => "chromium",
+            Some("ephemeral_evidence") => "ephemeral_evidence",
+            _ => "unknown",
+        };
+        let Some(capabilities) = self.driver_capabilities else {
+            return format!("Browser environment: tier {tier}; capabilities not reported.");
+        };
+        let yes_no = |on: bool| if on { "yes" } else { "no" };
+        format!(
+            "Browser environment: tier {tier}; trusted input {}; persistent profile {}; \
+             downloads to artifacts {}; uploads from artifacts {}; full visual fidelity {}.",
+            yes_no(capabilities.trusted_input),
+            yes_no(capabilities.persistent_profile),
+            yes_no(capabilities.downloads_to_artifacts),
+            yes_no(capabilities.uploads_from_artifacts),
+            yes_no(capabilities.full_visual_fidelity),
+        )
+    }
 }
 
 /// `POST /v1/agent/runs/{id}/step` request body. Mirrors quarry-core

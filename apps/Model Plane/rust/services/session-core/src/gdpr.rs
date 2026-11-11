@@ -8,8 +8,10 @@
 //! of every org-scoped row session-core owns: threads/messages,
 //! runs/checkpoints/subagent edges, plans/plan_steps/todos/approvals, the
 //! append-only event log, tasks and their cron/dependency/artifact rows,
-//! hook configs, agent skills/memory, fine-tune jobs, dream runs, and any
-//! not-yet-delivered audit-outbox rows for the org.
+//! hook configs, agent skills/memory, saved browser procedures with their
+//! versions and tags (capability-core's tables, on this same database),
+//! fine-tune jobs, dream runs, and any not-yet-delivered audit-outbox rows
+//! for the org.
 //!
 //! Scope note: session-core does NOT own Model Plane cost/usage records —
 //! those live in the sibling `cost-core` Go service's own Postgres database
@@ -182,6 +184,14 @@ pub struct PurgeSummary {
     /// Immutable skill versions and their bodies (EP-11 S2). A skill's delete also removes them;
     /// they are purged before the skills so the erasure proof counts them.
     pub agent_skill_versions: u64,
+    /// Saved browser procedures (Q4 E4.2 3j): capability-core's tables, on this database under
+    /// migration 0039. Erased with their organization. Each count is zero where that migration is
+    /// not applied, since the purge checks for the tables before it touches them.
+    pub procedure_versions: u64,
+    /// Tags point at a version of their procedure; they are purged before the versions.
+    pub procedure_tags: u64,
+    /// The recipes themselves, purged last.
+    pub procedures: u64,
     pub agent_memory: u64,
     pub user_memory_controls: u64,
     /// Standing user profiles (EP-8 S4).
@@ -238,6 +248,9 @@ impl PurgeSummary {
             + self.agent_skills
             + self.skill_revisions
             + self.agent_skill_versions
+            + self.procedure_versions
+            + self.procedure_tags
+            + self.procedures
             + self.agent_memory
             + self.user_memory_controls
             + self.user_profiles
@@ -783,6 +796,47 @@ pub async fn purge_organization_data(
         .execute(&mut *tx)
         .await?;
 
+    // Saved browser procedures (Q4 E4.2 3a, capability-core migration 0039) live on this database,
+    // so the organization's recipes, versions and tags go with it. Where that migration is not
+    // applied the tables are absent, and a missing table must not abort the erasure, so the check
+    // runs first, inside this transaction. Scope is the organization only: the per-owner path
+    // (owner_user_id) is not built, as for skills (register D1-643). No ZDR branch: a recipe is
+    // org configuration, not conversation content.
+    let procedures_present: bool =
+        sqlx::query_scalar("SELECT to_regclass('public.procedure_versions') IS NOT NULL")
+            .fetch_one(&mut *tx)
+            .await?;
+    if procedures_present {
+        // A version row refuses any delete outside erasure (migration 0039), so the setting is on
+        // only for the tags and versions, and is put back at once, as for the skill versions above.
+        sqlx::query("SELECT set_config('mp.version_erasure', 'on', true)")
+            .execute(&mut *tx)
+            .await?;
+        summary.procedure_tags = sqlx::query(
+            "DELETE FROM procedure_tags WHERE procedure_id IN (SELECT id FROM procedures WHERE org_id = $1)",
+        )
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        summary.procedure_versions =
+            sqlx::query("DELETE FROM procedure_versions WHERE org_id = $1")
+                .bind(org_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+        sqlx::query("SELECT set_config('mp.version_erasure', '', true)")
+            .execute(&mut *tx)
+            .await?;
+        // The recipes last. A version still left for one would cascade with it, which the
+        // immutability trigger allows, since the parent row is already gone by then.
+        summary.procedures = sqlx::query("DELETE FROM procedures WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    }
+
     summary.agent_skills = sqlx::query("DELETE FROM agent_skills WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
@@ -1264,6 +1318,9 @@ mod tests {
             agent_skills: 1,
             skill_revisions: 1,
             agent_skill_versions: 1,
+            procedure_versions: 1,
+            procedure_tags: 1,
+            procedures: 1,
             agent_memory: 1,
             user_memory_controls: 1,
             user_profiles: 1,
@@ -1285,7 +1342,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            39,
+            42,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );
@@ -1442,6 +1499,34 @@ mod tests {
         assert!(
             erasure_off < pos("DELETE FROM agent_skills WHERE org_id = $1"),
             "skill versions are purged before the skills"
+        );
+        // Q4 E4.2 3j: the saved-procedure block has the same setting discipline. The skill block
+        // above holds the first occurrence of each setting string, so this block is searched for
+        // from its own table guard onwards.
+        let procedures_guard = pos("to_regclass('public.procedure_versions') IS NOT NULL");
+        let after_guard = |needle: &str| {
+            source[procedures_guard..]
+                .find(needle)
+                .map(|offset| procedures_guard + offset)
+                .unwrap_or_else(|| panic!("expected to find {needle:?} after the procedure guard"))
+        };
+        let procedure_erasure_on = after_guard("set_config('mp.version_erasure', 'on', true)");
+        let procedure_tags = after_guard("DELETE FROM procedure_tags WHERE procedure_id IN");
+        let procedure_versions = after_guard("DELETE FROM procedure_versions WHERE org_id = $1");
+        let procedure_erasure_off = after_guard("set_config('mp.version_erasure', '', true)");
+        let procedure_recipes = after_guard("DELETE FROM procedures WHERE org_id = $1");
+        assert!(
+            procedures_guard < procedure_erasure_on
+                && procedure_erasure_on < procedure_tags
+                && procedure_tags < procedure_versions
+                && procedure_versions < procedure_erasure_off
+                && procedure_erasure_off < procedure_recipes,
+            "saved procedure tags and versions are purged inside the erasure setting, which is \
+             put back before the recipes are deleted, and all of it follows the table check"
+        );
+        assert!(
+            procedure_recipes < pos("tx.commit().await?;"),
+            "the saved procedures are purged inside the org transaction, before its commit"
         );
     }
 

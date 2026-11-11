@@ -13,6 +13,8 @@
 
 use serde_json::{json, Map, Value};
 
+use crate::document_url::resolve_document_url;
+
 /// One read operation of a connected provider, as the executor serves it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderReadOperation {
@@ -199,6 +201,94 @@ pub fn read_operation_params(operation: &str) -> Option<Vec<&'static str>> {
     found.then_some(names)
 }
 
+/// The environment switch for a read that names a document by its link (Q4-E4.3). Execution-core and
+/// model-gateway both read it, and only the literal `true` turns it on. It is read on every offer and call, so a
+/// restart is not needed to turn it off.
+pub const DOCUMENT_URL_ENV: &str = "PROVIDER_READ_DOCUMENT_URL";
+
+/// Whether a value of [`DOCUMENT_URL_ENV`] turns the document-link read on: only the literal `true`.
+#[must_use]
+pub fn parse_document_url_enabled(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// The refusal for a read that names a `document_url` while the switch is off. The schema does not offer the
+/// property then, so only a call that was not offered it can name one.
+pub const DOCUMENT_URL_NOT_SWITCHED_ON: &str =
+    "read_provider_action takes no document_url here: this deployment has not switched it on";
+
+/// Why a read request does not resolve to a read the tool serves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocumentUrlError {
+    /// The request is not valid as given: it names neither an operation nor a link, the link is not a document
+    /// the resolver knows, or the operation given is not the one the link names.
+    Invalid(String),
+    /// The link names a document this tool does not read. The message names the call that does.
+    Refused(String),
+}
+
+impl DocumentUrlError {
+    /// The message the model reads as the tool error.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Invalid(message) | Self::Refused(message) => message.as_str(),
+        }
+    }
+}
+
+/// Resolves what a read asks for to the one read operation the tool serves, with the parameters that read takes.
+///
+/// Without a link the operation and parameters given stand as they are. With one, the link decides: its read is
+/// served when the contract lists it for the link's provider, and its parameters replace the given ones, so a link
+/// names the file it points at and nothing else. An operation given alongside the link must be the link's own. The
+/// connection is not chosen here: the caller has already checked that the person selected it.
+///
+/// # Errors
+///
+/// [`DocumentUrlError::Invalid`] when the request names neither an operation nor a link, when the link is not a
+/// document the resolver knows, or when the operation is not the link's. [`DocumentUrlError::Refused`] when the link
+/// names a document this tool does not read; the message names the operation and parameters the execute tool takes
+/// for it.
+pub fn resolve_read_request(
+    operation: Option<&str>,
+    params: &Value,
+    document_url: Option<&str>,
+) -> Result<(String, Value), DocumentUrlError> {
+    let operation = operation.filter(|operation| !operation.trim().is_empty());
+    let Some(url) = document_url.filter(|url| !url.trim().is_empty()) else {
+        return operation
+            .map(|operation| (operation.to_owned(), params.clone()))
+            .ok_or_else(|| {
+                DocumentUrlError::Invalid(
+                    "read_provider_action requires operation, or document_url".to_owned(),
+                )
+            });
+    };
+    let read = resolve_document_url(url).ok_or_else(|| {
+        DocumentUrlError::Invalid(
+            "document_url is not a link to a document this tool can read".to_owned(),
+        )
+    })?;
+    if operation.is_some_and(|operation| operation.trim() != read.operation) {
+        return Err(DocumentUrlError::Invalid(format!(
+            "operation does not match document_url, which names a {} read; give one or the other",
+            read.operation
+        )));
+    }
+    let served = READ_OPERATIONS
+        .iter()
+        .any(|row| row.provider == read.provider && row.operation == read.operation);
+    let params = Value::Object(read.params);
+    if served {
+        return Ok((read.operation.to_owned(), params));
+    }
+    Err(DocumentUrlError::Refused(format!(
+        "use execute_provider_action with operation \"{}\" and params {params}; read_provider_action does not read this {} document",
+        read.operation, read.provider
+    )))
+}
+
 /// A connection id is spliced into the gateway path, so only the characters an id is made of may reach
 /// it: a `/`, `?` or `#` could retarget the authenticated read.
 #[must_use]
@@ -211,9 +301,13 @@ pub fn is_connection_id(connection_id: &str) -> bool {
 }
 
 /// The read tool's parameters schema: a closed `operation` enum of the contract's reads, and no body.
+///
+/// With `with_document_url` (the document-link switch is on, see [`DOCUMENT_URL_ENV`]) the schema also takes a
+/// `document_url`, a link the read is derived from, and asks for `connection_id` and one of `operation` or
+/// `document_url`. Off, the schema is the one the model was offered before the switch existed.
 #[must_use]
-pub fn read_tool_parameters_json() -> String {
-    json!({
+pub fn read_tool_parameters_json(with_document_url: bool) -> String {
+    let mut schema = json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -234,8 +328,16 @@ pub fn read_tool_parameters_json() -> String {
             "page_token": {"type": "string", "description": "next_page_token from the previous read"}
         },
         "required": ["connection_id", "operation"]
-    })
-    .to_string()
+    });
+    if with_document_url {
+        schema["properties"]["document_url"] = json!({
+            "type": "string",
+            "description": "A link to a document in the selected account. The operation and the file id are derived from it. Give this or operation"
+        });
+        schema["required"] = json!(["connection_id"]);
+        schema["anyOf"] = json!([{"required": ["operation"]}, {"required": ["document_url"]}]);
+    }
+    schema.to_string()
 }
 
 /// The typed status of one read, as the model is told it.
@@ -537,7 +639,8 @@ mod tests {
 
     #[test]
     fn the_read_schema_names_no_body_and_a_closed_read_enum() {
-        let schema: Value = serde_json::from_str(&read_tool_parameters_json()).expect("valid schema");
+        let schema: Value =
+            serde_json::from_str(&read_tool_parameters_json(false)).expect("valid schema");
         assert!(schema["properties"].get("body").is_none(), "a read carries no body");
         assert_eq!(schema["additionalProperties"], json!(false));
         let names: Vec<&str> = schema["properties"]["operation"]["enum"]

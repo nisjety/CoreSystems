@@ -45,6 +45,7 @@ pub enum CapKey {
     ActUpload,
     ActDownload,
     ProfilePersistent,
+    ConsentReject,
     Recording,
     SearchPaidProvider,
     RequestCredentials,
@@ -56,13 +57,14 @@ pub enum CapKey {
 
 impl CapKey {
     /// Every key, in catalogue order.
-    pub const ALL: [CapKey; 13] = [
+    pub const ALL: [CapKey; 14] = [
         CapKey::ActScript,
         CapKey::ActInput,
         CapKey::ActInteract,
         CapKey::ActUpload,
         CapKey::ActDownload,
         CapKey::ProfilePersistent,
+        CapKey::ConsentReject,
         CapKey::Recording,
         CapKey::SearchPaidProvider,
         CapKey::RequestCredentials,
@@ -81,6 +83,7 @@ impl CapKey {
             Self::ActUpload => "browser.act.upload",
             Self::ActDownload => "browser.act.download",
             Self::ProfilePersistent => "browser.profile.persistent",
+            Self::ConsentReject => "browser.consent.reject",
             Self::Recording => "browser.recording",
             Self::SearchPaidProvider => "search.paid_provider",
             Self::RequestCredentials => "request.credentials",

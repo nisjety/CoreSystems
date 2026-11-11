@@ -5,8 +5,13 @@
 //! unknown keys, as they were before this slice. The checks here are the contract: a value the
 //! browser would refuse is a 400, never a page that quietly has the host's locale.
 //!
-//! Out of this slice on purpose: the user agent and `Accept-Language` (a change of identity, ADR
-//! 5), a country-level egress (E4.4-c, behind ADR 5 and ADR 10) and a device profile.
+//! Out of this slice on purpose: the user agent (a change of identity, ADR 5), a country-level
+//! egress (E4.4-c, behind ADR 5 and ADR 10) and a device profile.
+//!
+//! E4.4-a2 (D-W5-2): with `QUARRY_EDGE__PAGE_ACCEPT_LANGUAGE` also on, a page that emulates a
+//! locale sends an `Accept-Language` header derived from that already-checked locale
+//! ([`accept_language_for`]). The user agent is never touched, and the header is set once when the
+//! tab opens from the request, never in reaction to a response.
 
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +38,36 @@ pub struct PageEmulation {
     /// The position `navigator.geolocation` reports to the origin the scrape navigates to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<Location>,
+    /// E4.4-a2: whether the page also sends `Accept-Language` derived from `locale`
+    /// ([`accept_language_for`]). Set by the scrape check only, never by the caller: true only
+    /// while `QUARRY_EDGE__PAGE_ACCEPT_LANGUAGE` is on and a locale is set.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub send_accept_language: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// The largest `Accept-Language` value [`accept_language_for`] returns.
+pub const MAX_ACCEPT_LANGUAGE_LEN: usize = 64;
+
+/// The `Accept-Language` header for a locale already checked by [`parse_locale`] (ICU style,
+/// `nb_NO`): the full tag first, then its bare language at `q=0.9` (`nb-NO,nb;q=0.9`). A bare
+/// language is sent alone (`de`). `None` when the locale is not a checked locale or the value
+/// would be longer than [`MAX_ACCEPT_LANGUAGE_LEN`]. Never built from caller text directly.
+#[must_use]
+pub fn accept_language_for(locale_icu: &str) -> Option<String> {
+    let checked = parse_locale(locale_icu)?;
+    let tag = checked.replace('_', "-");
+    let language = tag.split('-').next()?;
+    let value = if language.len() == tag.len() {
+        tag.clone()
+    } else {
+        format!("{tag},{language};q=0.9")
+    };
+    (value.len() <= MAX_ACCEPT_LANGUAGE_LEN).then_some(value)
 }
 
 impl PageEmulation {
@@ -187,6 +222,27 @@ mod tests {
         assert_eq!(at(0.0, 0.0, Some(0.0)), Err("accuracy"));
         assert_eq!(at(0.0, 0.0, Some(100_001.0)), Err("accuracy"));
         assert!(at(-90.0, 180.0, Some(5.0)).is_ok());
+    }
+
+    #[test]
+    fn accept_language_is_derived_from_the_checked_locale_only() {
+        assert_eq!(
+            accept_language_for("nb_NO").as_deref(),
+            Some("nb-NO,nb;q=0.9")
+        );
+        assert_eq!(accept_language_for("de").as_deref(), Some("de"));
+        assert_eq!(
+            accept_language_for("zh_Hant_TW").as_deref(),
+            Some("zh-Hant-TW,zh;q=0.9")
+        );
+        assert_eq!(accept_language_for("en_US; drop"), None);
+        assert_eq!(accept_language_for(""), None);
+        let off = serde_json::to_value(PageEmulation {
+            locale: Some("de".to_owned()),
+            ..PageEmulation::default()
+        })
+        .expect("serializes");
+        assert!(off.get("send_accept_language").is_none());
     }
 
     #[test]

@@ -379,6 +379,11 @@ pub struct PlannerContext<'a> {
     /// E3.3-f: what the person sent while the run worked, already bounded and one
     /// `- ` line per message. Shown for one call, as unverified text.
     pub steer: Option<&'a str>,
+    /// E4.3: the browser environment line of the run (`Browser environment: ...`),
+    /// built from Quarry's capability booleans and a closed tier list. Shown after the
+    /// run-state line as advisory text, never as authority. `None` for an attached run
+    /// and whenever `EXECUTION_CORE_PLANNER_RUN_ENV` is off.
+    pub environment: Option<&'a str>,
 }
 
 /// Planner token usage for one reply, counts only.
@@ -783,6 +788,7 @@ pub fn planner_request_from_view(
             failed_total: 0,
             redirect: None,
             steer: None,
+            environment: None,
         },
         model,
         structured_output_schema,
@@ -862,6 +868,12 @@ fn planner_request_with_progress(
             "\n\nRun state: step {} of {}; failed actions so far: {}.",
             ctx.step, config.max_steps, ctx.failed_total
         ));
+    }
+    // E4.3: the run's browser environment, advisory text from Quarry's capability
+    // booleans. Absent for an attached run and while the switch is off.
+    if let Some(environment) = ctx.environment {
+        observation_text.push_str("\n\n");
+        observation_text.push_str(environment);
     }
     let mut system = if let Some(menu) = indexed {
         let mut system = system_message_with_procedure(config, INDEXED_PROCEDURE);
@@ -1517,6 +1529,7 @@ mod tests {
                     failed_total: 2,
                     redirect: None,
                     steer: None,
+                    environment: None,
                 },
                 DEFAULT_MODEL,
                 ACTION_SCHEMA,
@@ -1542,6 +1555,7 @@ mod tests {
             failed_total: 0,
             redirect: None,
             steer: None,
+            environment: None,
         };
         let plain = planner_request_with_context(&context, DEFAULT_MODEL, ACTION_SCHEMA);
         let request = planner_request_with_progress(
@@ -1574,6 +1588,7 @@ mod tests {
                     failed_total: 0,
                     redirect,
                     steer: None,
+                    environment: None,
                 },
                 DEFAULT_MODEL,
                 ACTION_SCHEMA,
@@ -1606,6 +1621,7 @@ mod tests {
                     failed_total: 0,
                     redirect: None,
                     steer,
+                    environment: None,
                 },
                 DEFAULT_MODEL,
                 ACTION_SCHEMA,
@@ -1638,6 +1654,7 @@ mod tests {
                 failed_total: 2,
                 redirect: None,
                 steer: None,
+                environment: None,
             },
             DEFAULT_MODEL,
             ACTION_SCHEMA,

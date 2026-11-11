@@ -150,7 +150,7 @@ test('the internal spec documents exactly the /v1/internal routes the edge and t
 
 test('the control routes are documented with their methods, and each names the secret that verifies it', () => {
   const routes = controlInternalRoutes(root);
-  assert.equal(routes.length, 8, `the Go control service registers ${routes.length} /v1/internal routes, expected 8: ${routes.join(', ')}`);
+  assert.equal(routes.length, 10, `the Go control service registers ${routes.length} /v1/internal routes, expected 10: ${routes.join(', ')}`);
   const spec = parseSpec(internalText);
   const byPath = new Map(Object.entries(spec.paths ?? {}).map(([route, item]) => [normalize(route), item]));
 

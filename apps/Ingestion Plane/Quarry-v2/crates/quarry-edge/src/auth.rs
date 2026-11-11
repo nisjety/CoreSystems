@@ -22,7 +22,13 @@
 //! - `AUTH_CORE_AUDIENCE`             — required by default; enforces `aud`.
 //!   Set `AUTH_CORE_AUDIENCE_OPTIONAL=1` to opt out (warn-only mode).
 //! - `AUTH_CORE_JWKS_TTL_SECS`        — optional; default 300s.
-//! - `AUTH_CORE_JWT_LEEWAY_SECS`      — optional; default 30s. Clock-skew
+//! - `AUTH_CORE_JWKS_STALE_IF_ERROR_SECS` — optional; default 0 (off), clamped
+//!   to 3600. When > 0, an expired cache may still be served while a refresh
+//!   fails TRANSIENTLY (connect error, timeout, HTTP 5xx, unparseable body),
+//!   but only until `ttl + window` after the last successful fetch. Never on
+//!   a 4xx, never on a forced (unknown-kid) refresh, and a stale serve never
+//!   moves `fetched_at`, so the window cannot extend itself.
+//! - `AUTH_CORE_JWT_LEEWAY_SECS`     — optional; default 30s. Clock-skew
 //!   tolerance applied to `exp` and `nbf` validation.
 //! - `QUARRY_EDGE_AUTH_DEV_BYPASS`    — `1`/`true` to accept a bearer that
 //!   FAILS real verification and inject a stub `Claims` for local dev, so a
@@ -473,6 +479,22 @@ static JWKS_CACHE: LazyLock<RwLock<Option<CachedJwks>>> = LazyLock::new(|| RwLoc
 
 const DEFAULT_JWKS_TTL_SECS: u64 = 300;
 const DEFAULT_JWT_LEEWAY_SECS: u64 = 30;
+/// Upper bound for `AUTH_CORE_JWKS_STALE_IF_ERROR_SECS`: a stale JWKS can
+/// delay a key revocation by at most `ttl + MAX_JWKS_STALE_IF_ERROR_SECS`.
+const MAX_JWKS_STALE_IF_ERROR_SECS: u64 = 3600;
+/// Whole-request timeout for one JWKS fetch (`reqwest::get` has none).
+const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Stale-if-error window for the JWKS cache, read per call like
+/// [`jwks_ttl`]. `0` (the default, also for an unparseable value) = off.
+fn jwks_stale_if_error_window() -> Duration {
+    let secs = std::env::var("AUTH_CORE_JWKS_STALE_IF_ERROR_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(MAX_JWKS_STALE_IF_ERROR_SECS);
+    Duration::from_secs(secs)
+}
 
 fn jwks_ttl() -> Duration {
     std::env::var("AUTH_CORE_JWKS_TTL_SECS")
@@ -556,40 +578,130 @@ pub fn production_with_dev_bypass(env_name: &str, raw_bypass: Option<&str>) -> b
     production && raw_bypass.is_some_and(dev_bypass_flag_value)
 }
 
-async fn fetch_jwks() -> Result<JwkSet, StatusCode> {
+/// Why a JWKS fetch failed. Only a [`JwksFetchError::Transient`] failure may
+/// ever be answered from a stale cache; a [`JwksFetchError::Rejected`] one
+/// (auth-core answered with a 4xx, or the fetch is misconfigured) never is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JwksFetchError {
+    /// Connect error, timeout, HTTP 5xx or an unparseable body.
+    Transient,
+    /// Any 4xx (e.g. 401/403/404), another non-success status, or a
+    /// configuration error such as an unset `AUTH_CORE_JWKS_URL`.
+    Rejected,
+}
+
+impl JwksFetchError {
+    /// The status a caller sees when no cached set is served (unchanged: 500).
+    fn status(self) -> StatusCode {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
+/// Classifies a non-success HTTP status from the JWKS endpoint.
+fn classify_jwks_status(status: reqwest::StatusCode) -> JwksFetchError {
+    if status.is_server_error() {
+        JwksFetchError::Transient
+    } else {
+        JwksFetchError::Rejected
+    }
+}
+
+async fn fetch_jwks() -> Result<JwkSet, JwksFetchError> {
     let url = std::env::var("AUTH_CORE_JWKS_URL").map_err(|_| {
         error!("AUTH_CORE_JWKS_URL not set");
-        StatusCode::INTERNAL_SERVER_ERROR
+        JwksFetchError::Rejected
     })?;
-    let resp = reqwest::get(&url).await.map_err(|e| {
+    let client = reqwest::Client::builder()
+        .timeout(JWKS_FETCH_TIMEOUT)
+        .build()
+        .map_err(|e| {
+            // zdr-log-ok: runs inside require_auth, before the claims exist and before mark_floor can mark the span, so the filter cannot see a ZDR posture here; the text is an HTTP client build error, never caller data
+            error!(error = %e, "failed to build JWKS HTTP client");
+            JwksFetchError::Rejected
+        })?;
+    let resp = client.get(&url).send().await.map_err(|e| {
         // zdr-log-ok: runs inside require_auth, before the claims exist and before mark_floor can mark the span, so the filter cannot see a ZDR posture here; the text is a JWT or JWKS error, never caller data, and the url is the operator-set JWKS endpoint
         error!(error = %e, url = %url, "failed to fetch JWKS");
-        StatusCode::INTERNAL_SERVER_ERROR
+        JwksFetchError::Transient
     })?;
+    let status = resp.status();
+    if !status.is_success() {
+        let kind = classify_jwks_status(status);
+        // zdr-log-ok: runs inside require_auth, before the claims exist and before mark_floor can mark the span, so the filter cannot see a ZDR posture here; the status is auth-core's HTTP status and the url is the operator-set JWKS endpoint, never caller data
+        error!(status = status.as_u16(), kind = ?kind, url = %url, "JWKS endpoint returned non-success status");
+        return Err(kind);
+    }
     let jwks: JwkSet = resp.json().await.map_err(|e| {
         // zdr-log-ok: runs inside require_auth, before the claims exist and before mark_floor can mark the span, so the filter cannot see a ZDR posture here; the text is a JWT or JWKS error, never caller data
         error!(error = %e, "failed to parse JWKS JSON");
-        StatusCode::INTERNAL_SERVER_ERROR
+        JwksFetchError::Transient
     })?;
     Ok(jwks)
 }
 
+/// Whether an expired cached JWKS may be served after a failed refresh.
+///
+/// True ONLY when the refresh failed transiently, the window is on, the
+/// refresh was not forced (an unknown `kid` never gets a stale answer), and
+/// the cached set is younger than `ttl + window` measured from its last
+/// SUCCESSFUL fetch.
+fn jwks_stale_serve_allowed(
+    error: JwksFetchError,
+    force_refresh: bool,
+    age: Duration,
+    ttl: Duration,
+    window: Duration,
+) -> bool {
+    error == JwksFetchError::Transient
+        && !window.is_zero()
+        && !force_refresh
+        && age < ttl.saturating_add(window)
+}
+
 async fn get_jwks(force_refresh: bool) -> Result<JwkSet, StatusCode> {
+    let ttl = jwks_ttl();
     if !force_refresh {
         let guard = JWKS_CACHE.read().await;
         if let Some(cached) = guard.as_ref() {
-            if cached.fetched_at.elapsed() < jwks_ttl() {
+            if cached.fetched_at.elapsed() < ttl {
                 return Ok(cached.jwks.clone());
             }
         }
     }
-    let jwks = fetch_jwks().await?;
-    let mut guard = JWKS_CACHE.write().await;
-    *guard = Some(CachedJwks {
-        fetched_at: Instant::now(),
-        jwks: jwks.clone(),
-    });
-    Ok(jwks)
+    match fetch_jwks().await {
+        Ok(jwks) => {
+            // A successful fetch ALWAYS replaces the whole set (never merged),
+            // including an empty-but-valid set: all keys revoked = deny.
+            let mut guard = JWKS_CACHE.write().await;
+            *guard = Some(CachedJwks {
+                fetched_at: Instant::now(),
+                jwks: jwks.clone(),
+            });
+            Ok(jwks)
+        }
+        Err(err) => {
+            let window = jwks_stale_if_error_window();
+            if !force_refresh && err == JwksFetchError::Transient && !window.is_zero() {
+                let guard = JWKS_CACHE.read().await;
+                if let Some(cached) = guard.as_ref() {
+                    let age = cached.fetched_at.elapsed();
+                    if jwks_stale_serve_allowed(err, force_refresh, age, ttl, window) {
+                        // fetched_at is deliberately NOT touched: the window is
+                        // measured from the last successful fetch and cannot
+                        // extend itself.
+                        // zdr-log-ok: runs inside require_auth, before the claims exist; only the cache age and window are logged, never key material or caller data
+                        warn!(
+                            age_secs = age.as_secs(),
+                            window_secs = window.as_secs(),
+                            "JWKS refresh failed transiently; serving stale cached JWKS inside the stale-if-error window"
+                        );
+                        return Ok(cached.jwks.clone());
+                    }
+                }
+            }
+            Err(err.status())
+        }
+    }
 }
 
 /// Verifies a bearer against the real Auth Core JWKS path: header decode,
@@ -924,6 +1036,7 @@ mod tests {
         std::env::remove_var("AUTH_CORE_AUDIENCE");
         std::env::remove_var("AUTH_CORE_AUDIENCE_OPTIONAL");
         std::env::remove_var("AUTH_CORE_JWKS_TTL_SECS");
+        std::env::remove_var("AUTH_CORE_JWKS_STALE_IF_ERROR_SECS");
         std::env::remove_var("AUTH_CORE_JWT_LEEWAY_SECS");
         std::env::remove_var("QUARRY_EDGE_AUTH_DEV_BYPASS");
     }
@@ -1929,6 +2042,239 @@ mod tests {
             verified_posture(absent, "kid-zdr-absent").await,
             "floor=false effective_for_body_false=false"
         );
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
+    }
+
+    // -----------------------------------------------------------------
+    // Q5-S2a — bounded JWKS stale-if-error window that never extends a
+    // revocation.
+    // -----------------------------------------------------------------
+
+    fn one_key_jwks(kid: &str) -> JwkSet {
+        let (n, e) = jwk_n_e();
+        serde_json::from_value(serde_json::json!({
+            "keys": [{ "kty": "RSA", "use": "sig", "alg": "RS256", "kid": kid, "n": n, "e": e }]
+        }))
+        .expect("valid jwks")
+    }
+
+    /// Seeds the cache with a set whose last successful fetch was `age` ago.
+    async fn seed_jwks_cache(kid: &str, age: Duration) {
+        *JWKS_CACHE.write().await = Some(CachedJwks {
+            fetched_at: Instant::now().checked_sub(age).expect("backdate instant"),
+            jwks: one_key_jwks(kid),
+        });
+    }
+
+    async fn cached_age() -> Duration {
+        JWKS_CACHE
+            .read()
+            .await
+            .as_ref()
+            .expect("cache populated")
+            .fetched_at
+            .elapsed()
+    }
+
+    async fn start_jwks_status_mock(
+        status: u16,
+        body: Option<serde_json::Value>,
+    ) -> wiremock::MockServer {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let server = MockServer::start().await;
+        let mut template = ResponseTemplate::new(status);
+        if let Some(body) = body {
+            template = template.set_body_json(body);
+        }
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(template)
+            .mount(&server)
+            .await;
+        std::env::set_var("AUTH_CORE_JWKS_URL", format!("{}/jwks", server.uri()));
+        server
+    }
+
+    #[test]
+    #[serial]
+    fn stale_if_error_window_defaults_off_and_is_clamped() {
+        std::env::remove_var("AUTH_CORE_JWKS_STALE_IF_ERROR_SECS");
+        assert_eq!(jwks_stale_if_error_window(), Duration::ZERO);
+        std::env::set_var("AUTH_CORE_JWKS_STALE_IF_ERROR_SECS", "not-a-number");
+        assert_eq!(jwks_stale_if_error_window(), Duration::ZERO);
+        std::env::set_var("AUTH_CORE_JWKS_STALE_IF_ERROR_SECS", "600");
+        assert_eq!(jwks_stale_if_error_window(), Duration::from_secs(600));
+        std::env::set_var("AUTH_CORE_JWKS_STALE_IF_ERROR_SECS", "999999");
+        assert_eq!(
+            jwks_stale_if_error_window(),
+            Duration::from_secs(MAX_JWKS_STALE_IF_ERROR_SECS)
+        );
+        std::env::remove_var("AUTH_CORE_JWKS_STALE_IF_ERROR_SECS");
+    }
+
+    #[test]
+    fn jwks_status_classification_splits_5xx_from_4xx() {
+        for code in [500_u16, 502, 503, 504] {
+            let status = reqwest::StatusCode::from_u16(code).unwrap();
+            assert_eq!(classify_jwks_status(status), JwksFetchError::Transient);
+        }
+        for code in [400_u16, 401, 403, 404, 410] {
+            let status = reqwest::StatusCode::from_u16(code).unwrap();
+            assert_eq!(classify_jwks_status(status), JwksFetchError::Rejected);
+        }
+    }
+
+    #[test]
+    fn stale_serve_decision_needs_every_condition() {
+        let ttl = Duration::from_secs(300);
+        let window = Duration::from_secs(600);
+        let inside = Duration::from_secs(400);
+        let outside = Duration::from_secs(901);
+        assert!(jwks_stale_serve_allowed(
+            JwksFetchError::Transient,
+            false,
+            inside,
+            ttl,
+            window
+        ));
+        assert!(!jwks_stale_serve_allowed(
+            JwksFetchError::Transient,
+            false,
+            outside,
+            ttl,
+            window
+        ));
+        assert!(!jwks_stale_serve_allowed(
+            JwksFetchError::Rejected,
+            false,
+            inside,
+            ttl,
+            window
+        ));
+        assert!(!jwks_stale_serve_allowed(
+            JwksFetchError::Transient,
+            true,
+            inside,
+            ttl,
+            window
+        ));
+        assert!(!jwks_stale_serve_allowed(
+            JwksFetchError::Transient,
+            false,
+            inside,
+            ttl,
+            Duration::ZERO
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn stale_jwks_served_on_503_inside_the_window_without_moving_fetched_at() {
+        clear_env();
+        std::env::set_var("AUTH_CORE_JWKS_STALE_IF_ERROR_SECS", "600");
+        let _server = start_jwks_status_mock(503, None).await;
+        seed_jwks_cache("kid-stale", Duration::from_secs(400)).await;
+
+        let jwks = get_jwks(false).await.expect("stale set served");
+        assert!(jwks.find("kid-stale").is_some());
+        // The stale serve never refreshes fetched_at, so the window cannot extend.
+        assert!(cached_age().await >= Duration::from_secs(400));
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn stale_jwks_refused_outside_the_window() {
+        clear_env();
+        std::env::set_var("AUTH_CORE_JWKS_STALE_IF_ERROR_SECS", "600");
+        let _server = start_jwks_status_mock(503, None).await;
+        // ttl 300 + window 600 = 900 < 1000.
+        seed_jwks_cache("kid-stale", Duration::from_secs(1000)).await;
+
+        assert_eq!(
+            get_jwks(false).await.unwrap_err(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn stale_jwks_refused_when_the_window_is_off() {
+        clear_env();
+        let _server = start_jwks_status_mock(503, None).await;
+        seed_jwks_cache("kid-stale", Duration::from_secs(400)).await;
+
+        assert_eq!(
+            get_jwks(false).await.unwrap_err(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn stale_jwks_refused_on_403_and_404() {
+        for status in [403_u16, 404] {
+            clear_env();
+            std::env::set_var("AUTH_CORE_JWKS_STALE_IF_ERROR_SECS", "600");
+            let _server = start_jwks_status_mock(status, None).await;
+            seed_jwks_cache("kid-stale", Duration::from_secs(400)).await;
+
+            assert_eq!(
+                get_jwks(false).await.unwrap_err(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "status {status} must never serve stale"
+            );
+        }
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn stale_jwks_refused_on_forced_refresh() {
+        clear_env();
+        std::env::set_var("AUTH_CORE_JWKS_STALE_IF_ERROR_SECS", "600");
+        let _server = start_jwks_status_mock(503, None).await;
+        seed_jwks_cache("kid-stale", Duration::from_secs(400)).await;
+
+        assert_eq!(
+            get_jwks(true).await.unwrap_err(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        clear_env();
+        reset_jwks_cache_for_test().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
+    async fn empty_jwks_is_authoritative_and_replaces_the_cache() {
+        clear_env();
+        std::env::set_var("AUTH_CORE_JWKS_STALE_IF_ERROR_SECS", "600");
+        let _server = start_jwks_status_mock(200, Some(serde_json::json!({ "keys": [] }))).await;
+        seed_jwks_cache("kid-revoked", Duration::from_secs(400)).await;
+
+        let jwks = get_jwks(false).await.expect("empty set is a valid answer");
+        assert!(jwks.keys.is_empty());
+        let guard = JWKS_CACHE.read().await;
+        let cached = guard.as_ref().expect("cache replaced");
+        assert!(cached.jwks.keys.is_empty());
+        assert!(cached.jwks.find("kid-revoked").is_none());
+        drop(guard);
 
         clear_env();
         reset_jwks_cache_for_test().await;

@@ -49,16 +49,16 @@ export function evaluatePage(operation, input) {
   }
 
   if (operation === 'consentChoice') {
+    // Reject-only (ADR-5 rule 4): a 'customise or reject' control is never returned.
     const reject = /^(avvis alle|avslå alle|avvis valgfrie|kun nødvendige|bare nødvendige|reject all|decline all|reject optional cookies|only necessary cookies|essential cookies only)$/i;
-    const manage = /^(tilpass eller avvis|customi[sz]e or reject|manage or reject)$/i;
     const choices = Array.from(document.querySelectorAll('button,[role=button]')).filter((button) => visible(button) && !disabled(button));
-    const button = choices.find((item) => reject.test(name(item))) ?? choices.find((item) => manage.test(name(item)));
+    const button = choices.find((item) => reject.test(name(item)));
     if (!button) return null;
     button.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'instant' });
     const rect = button.getBoundingClientRect();
     const x = Math.round(rect.left + rect.width / 2);
     const y = Math.round(rect.top + rect.height / 2);
-    return button.contains(document.elementFromPoint(x, y)) ? { x, y, reject: reject.test(name(button)) } : null;
+    return button.contains(document.elementFromPoint(x, y)) ? { x, y, reject: true } : null;
   }
 
   if (operation === 'snapshot') {

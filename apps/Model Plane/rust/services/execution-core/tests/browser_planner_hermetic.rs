@@ -693,6 +693,7 @@ fn rendered_prompt(
             failed_total: failures.len() as u32,
             redirect: None,
             steer: None,
+            environment: None,
         },
         "verevon-balance",
         schema,

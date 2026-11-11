@@ -9,7 +9,7 @@ if (process.isMainFrame) {
     setViewport: (bounds) => invoke('setViewport', bounds),
     navigate: (url) => invoke('navigate', url),
     command: (command) => invoke('command', command),
-    startRun: () => invoke('startRun'),
+    startRun: (options) => invoke('startRun', options),
     execute: (runId, action) => invoke('execute', runId, action),
     endRun: (runId) => invoke('endRun', runId),
     reset: () => invoke('reset'),

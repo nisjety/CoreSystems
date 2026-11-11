@@ -148,6 +148,17 @@
       ]
     },
     {
+      "name": "EXECUTION_CORE_PLANNER_RUN_ENV",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "E4.3: the planner's view of a leased browser run names the browser environment (tier and Quarry's capability booleans), as advisory text. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_CORE_PLANNER_RUN_ENV", "default": "false" }
+      ]
+    },
+    {
       "name": "EXECUTION_DO_COMPUTER_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -380,6 +391,18 @@
       "default": "false",
       "purpose": "Counts promote-on-use candidates and logs them. Only the exact lowercase value true enables it.",
       "codePath": "apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs"
+    },
+    {
+      "name": "PROVIDER_READ_DOCUMENT_URL",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Q4-E4.3: read_provider_action also takes document_url, a link to a document in the selected account (Google, GitHub or Notion). Parsed, never fetched. Off: reads by operation only.",
+      "declarations": [
+        { "service": "execution-core", "env": "PROVIDER_READ_DOCUMENT_URL", "default": "false" },
+        { "service": "model-gateway", "env": "PROVIDER_READ_DOCUMENT_URL", "default": "false" }
+      ]
     },
     {
       "name": "QUARRY_BROWSER_AGENT_ENABLED",

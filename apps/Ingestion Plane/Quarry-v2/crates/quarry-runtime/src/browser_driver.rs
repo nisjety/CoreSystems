@@ -630,6 +630,11 @@ impl BrowserDriverAdapter {
         if hints.render.page_emulation.is_some() && !self.inner.capabilities().page_emulation {
             return Err(page_emulation_unavailable());
         }
+        // E4.4-b: a profile pin needs a browser that can restore a profile read-only. Refused
+        // the same way.
+        if hints.render.profile_pin.is_some() && !self.inner.capabilities().profile_pin {
+            return Err(profile_pin_unavailable());
+        }
         // WS13.5: a request with actions holds one heavy-lane permit for the whole page
         // run. A busy lane is a 429 at once, never a queue (a capture crops instead).
         let _heavy_permit = if hints.render.actions.is_some() {
@@ -647,7 +652,11 @@ impl BrowserDriverAdapter {
         // stamped on this call's copy rather than on the pooled one.
         // E4.4-a: an emulated fetch never reuses a pooled session, whose page another request may
         // hold, so its overrides are set on a page no other request can see.
-        let isolated = self.session_isolation || hints.render.page_emulation.is_some();
+        // E4.4-b: a pinned fetch is isolated for the same reason: the profile it restores
+        // reaches no other request.
+        let isolated = self.session_isolation
+            || hints.render.page_emulation.is_some()
+            || hints.render.profile_pin.is_some();
         let mut call_lease = if isolated {
             // WS13.1: a fresh lease id per fetch, so every fetch gets its own
             // browser context and cookie jar, even for the same host and across
@@ -682,6 +691,13 @@ impl BrowserDriverAdapter {
             }
             guard.lease.as_ref().expect("lease set above").clone()
         };
+        // E4.4-b: the pinned profile is this lease's profile. It loads only because the lease
+        // persists a profile (the browser reads a snapshot for a persisting lease alone); the
+        // session's read-only pin is what keeps it from being saved back.
+        if let Some(pin) = hints.render.profile_pin.as_ref() {
+            call_lease.profile_id = pin.clone();
+            call_lease.persist_profile = true;
+        }
         call_lease.org_id = hints.org_id.clone();
         let lease_ref = &call_lease;
         let start = Instant::now();
@@ -706,6 +722,15 @@ impl BrowserDriverAdapter {
         // fails fails the fetch, and the session is released.
         if let Some(emulation) = hints.render.page_emulation.as_ref() {
             if let Err(e) = self.inner.set_page_emulation(session, emulation).await {
+                let _ = held.finish(true).await;
+                return Err(e);
+            }
+        }
+
+        // E4.4-b: the pinned profile is restored read-only, before the egress policy and the first
+        // navigation (the restore runs with the session's first tab). A refusal fails the fetch.
+        if hints.render.profile_pin.is_some() {
+            if let Err(e) = self.inner.set_profile_pin(session, true).await {
                 let _ = held.finish(true).await;
                 return Err(e);
             }
@@ -921,6 +946,15 @@ fn page_emulation_unavailable() -> QuarryError {
     QuarryError::new(
         ErrorCode::Unsupported,
         "this browser cannot emulate a page's locale, timezone or location",
+    )
+    .with_details(serde_json::json!({ "reason": "browser_capability_unavailable" }))
+}
+
+/// E4.4-b: the refusal for a profile pin when the browser cannot restore a profile read-only.
+fn profile_pin_unavailable() -> QuarryError {
+    QuarryError::new(
+        ErrorCode::Unsupported,
+        "this browser cannot restore a stored profile read-only",
     )
     .with_details(serde_json::json!({ "reason": "browser_capability_unavailable" }))
 }

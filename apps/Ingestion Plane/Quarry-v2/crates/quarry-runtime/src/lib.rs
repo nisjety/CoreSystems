@@ -134,7 +134,11 @@ pub use autoprompt::{ModelPlaneQueryRewriter, QueryRewriter};
 pub use autoscale::{global_autoscale, next_target, AutoscaledPool};
 pub use browser_driver::BrowserDriverAdapter;
 pub use browser_egress_proxy::PinnedBrowserEgressProxy;
-pub use browser_procedure::{compare_replay, compile_procedure, BrowserProcedure, ReplayDecision};
+pub use browser_procedure::{
+    compare_replay, compare_replay_canonical, compile_procedure, compile_procedure_v2,
+    procedure_canonical_enabled, BrowserProcedure, ProcedureSlot, ReplayDecision, SlotKind,
+    StepTarget, PROCEDURE_CANONICAL_FLAG,
+};
 pub use crawl_frontier::{
     CrawlFrontier, FrontierCheckpoint, FrontierConfigSnapshot, FrontierEntry,
 };

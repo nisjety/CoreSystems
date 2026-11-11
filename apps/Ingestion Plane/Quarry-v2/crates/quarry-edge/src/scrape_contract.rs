@@ -30,7 +30,7 @@ use axum::http::{HeaderName, HeaderValue};
 use chrono::{DateTime, NaiveDate, Utc};
 use quarry_core::page_emulation::PAGE_EMULATION_KEYS;
 use quarry_core::scrape::{
-    FieldError, ScrapeLimits, ScrapeOptions, ScrapeWarning, RESERVED_REJECTED,
+    FieldError, ScrapeLimits, ScrapeOptions, ScrapeWarning, PROFILE_PIN_KEYS, RESERVED_REJECTED,
 };
 use serde_json::Value;
 
@@ -71,13 +71,27 @@ pub struct ScrapeSettings {
     /// E4.4-a: `QUARRY_EDGE__PER_PAGE_LOCALE=on` (or `1`, `true`) accepts `locale`, `timezone` and
     /// `location`. Off by default: while it is off those keys are unknown keys, as they were before.
     pub per_page_emulation_enabled: bool,
+    /// E4.4-a2: `QUARRY_EDGE__PAGE_ACCEPT_LANGUAGE=on` (or `1`, `true`) makes a page that emulates
+    /// a locale also send `Accept-Language` derived from it. Off by default. It needs
+    /// `QUARRY_EDGE__PER_PAGE_LOCALE`: without that no locale is accepted, so nothing is sent.
+    pub page_accept_language_enabled: bool,
+    /// E4.4-b: `QUARRY_EDGE__SCRAPE_PROFILE_PIN=on` (or `1`, `true`) accepts `profile_id`, which
+    /// pins one stored browser profile to one scrape. Off by default: while it is off
+    /// `profile_id`/`profileId` are unknown keys, stripped before the options are read.
+    pub profile_pin_enabled: bool,
 }
+
+/// The environment name of the profile-pin switch (E4.4-b).
+pub const ENV_SCRAPE_PROFILE_PIN: &str = "QUARRY_EDGE__SCRAPE_PROFILE_PIN";
 
 /// The environment name of the `max_age` switch.
 pub const ENV_SCRAPE_MAX_AGE: &str = "QUARRY_EDGE__SCRAPE_MAX_AGE";
 
 /// The environment name of the per-page locale, timezone and location switch (E4.4-a).
 pub const ENV_PER_PAGE_LOCALE: &str = "QUARRY_EDGE__PER_PAGE_LOCALE";
+
+/// The environment name of the per-page `Accept-Language` switch (E4.4-a2).
+pub const ENV_PAGE_ACCEPT_LANGUAGE: &str = "QUARRY_EDGE__PAGE_ACCEPT_LANGUAGE";
 
 impl Default for ScrapeSettings {
     fn default() -> Self {
@@ -156,6 +170,20 @@ impl ScrapeSettings {
                 .as_deref(),
             Some("on" | "1" | "true")
         );
+        let page_accept_language_enabled = matches!(
+            lookup(ENV_PAGE_ACCEPT_LANGUAGE)
+                .as_deref()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .as_deref(),
+            Some("on" | "1" | "true")
+        );
+        let profile_pin_enabled = matches!(
+            lookup(ENV_SCRAPE_PROFILE_PIN)
+                .as_deref()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .as_deref(),
+            Some("on" | "1" | "true")
+        );
         Self {
             strict_validation,
             strict_after,
@@ -164,6 +192,8 @@ impl ScrapeSettings {
             records_enabled,
             max_age_enabled,
             per_page_emulation_enabled,
+            page_accept_language_enabled,
+            profile_pin_enabled,
         }
     }
 
@@ -185,6 +215,8 @@ impl ScrapeSettings {
             ai_formats_enabled: ai_formats::enabled(),
             max_age_enabled: self.max_age_enabled,
             per_page_emulation_enabled: self.per_page_emulation_enabled,
+            page_accept_language_enabled: self.page_accept_language_enabled,
+            profile_pin_enabled: self.profile_pin_enabled,
             // Q3-E3.8.8w: `QUARRY_EDGE__NO_EGRESS`, default off, read once by the runtime's reader.
             no_egress_enabled: quarry_runtime::fetch::no_egress_enabled(),
             ..ScrapeLimits::default()
@@ -242,6 +274,8 @@ pub fn parse_body(
     let option_names: Vec<&str> = ScrapeOptions::field_names()
         .into_iter()
         .filter(|name| settings.per_page_emulation_enabled || !PAGE_EMULATION_KEYS.contains(name))
+        // E4.4-b: likewise the profile-pin keys while their switch is off.
+        .filter(|name| settings.profile_pin_enabled || !PROFILE_PIN_KEYS.contains(name))
         .collect();
     let mut unknown_keys: Vec<String> = object
         .keys()
@@ -268,10 +302,18 @@ pub fn parse_body(
     }
 
     let options = if settings.options_enabled {
-        let options = if settings.per_page_emulation_enabled {
+        // A key whose switch is off is not an option: it is stripped before the options read.
+        let mut stripped: Vec<&str> = Vec::new();
+        if !settings.per_page_emulation_enabled {
+            stripped.extend(PAGE_EMULATION_KEYS);
+        }
+        if !settings.profile_pin_enabled {
+            stripped.extend(PROFILE_PIN_KEYS);
+        }
+        let options = if stripped.is_empty() {
             ScrapeOptions::from_value(&value)?
         } else {
-            ScrapeOptions::from_value(&without_keys(&value, &PAGE_EMULATION_KEYS))?
+            ScrapeOptions::from_value(&without_keys(&value, &stripped))?
         };
         let mut bad = Vec::new();
         for (name, selectors) in [

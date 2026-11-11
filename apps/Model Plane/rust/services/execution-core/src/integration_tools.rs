@@ -1123,6 +1123,17 @@ pub fn parse_provider_read_tool_enabled(raw: Option<&str>) -> bool {
     raw == Some("true")
 }
 
+/// Whether the deployment has switched the document-link read on (Q4-E4.3). With it on,
+/// `read_provider_action` takes a `document_url`. Read on every offer and call, as the read tool's switch is.
+#[must_use]
+pub fn provider_read_document_url_enabled() -> bool {
+    mp_contracts::provider_reads::parse_document_url_enabled(
+        std::env::var(mp_contracts::provider_reads::DOCUMENT_URL_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
 /// Whether a run is offered `read_provider_action` (WS23-S3, K3-15). It needs the switch, a run
 /// that is neither zero-retention nor Space-scoped, and at least one connection the user selected
 /// for the run. Nothing else selects a connection, so a run with no selection never gets the tool.

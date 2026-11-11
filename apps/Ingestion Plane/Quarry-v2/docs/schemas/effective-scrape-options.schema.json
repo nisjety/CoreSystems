@@ -93,6 +93,11 @@
         }
       ]
     },
+    "profile_pinned": {
+      "description": "E4.4-b: `true` when the scrape ran with a pinned stored browser profile. The id itself\nis never echoed. Absent for the default request.",
+      "type": "boolean",
+      "default": false
+    },
     "redact_pii": {
       "description": "E3.6-5: `on` when the returned text went through the PII scanner, `off` (the default)\nwhen it did not. Always reported, so a caller can see what was applied.",
       "$ref": "#/$defs/PiiRedaction",

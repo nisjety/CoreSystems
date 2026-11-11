@@ -948,6 +948,9 @@ services:
       # WS23-S5: Ask-mode connector reads (read_provider_action) for the connections the person selected, with citations
       # and no body text in history. Off by default; only the literal `true`. Reads go to integration-corev2.
       CONNECTOR_ASK_READS_ENABLED: ${CONNECTOR_ASK_READS_ENABLED:-false}
+      # Q4-E4.3: read_provider_action also takes document_url, a link to a document in the selected account. Off by default;
+      # only the literal `true`. The link is parsed, never fetched. Execution-core reads the same variable.
+      PROVIDER_READ_DOCUMENT_URL: ${PROVIDER_READ_DOCUMENT_URL:-false}
       # EP-10 S8: the suggest_connector tool and its connector_suggestion card in Ask. Only the literal true.
       CONNECTOR_SUGGESTIONS_ENABLED: ${CONNECTOR_SUGGESTIONS_ENABLED:-false}
       INTEGRATION_COREV2_URL: ${INTEGRATION_COREV2_URL:-http://integration-api:3026}
@@ -1825,6 +1828,9 @@ services:
       BROWSER_AGENT_POLICY_ENFORCED: ${BROWSER_AGENT_POLICY_ENFORCED:-false}
       MCP_DO_TOOLS: ${MCP_DO_TOOLS:-off}
       MCP_DO_TOOL_CAP: ${MCP_DO_TOOL_CAP:-40}
+      # Q4-E4.3: read_provider_action also takes document_url, a link to a document in the selected account. Off by default;
+      # only the literal `true`. The link is parsed, never fetched. Model-gateway reads the same variable.
+      PROVIDER_READ_DOCUMENT_URL: ${PROVIDER_READ_DOCUMENT_URL:-false}
       # Per-call capability decisions are signed by capability-core and
       # verified immediately before execution. Development may leave these
       # unset (allow decisions then carry no evidence); production overlays
@@ -1951,6 +1957,9 @@ services:
       QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT: ${QUARRY_BROWSER_AGENT_APPROVAL_REDIRECT:-0}
       QUARRY_BROWSER_AGENT_STEER: ${QUARRY_BROWSER_AGENT_STEER:-0}
       QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY: ${QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY:-0}
+      # E4.3, OFF by default: the planner's view of a leased browser run names the browser environment
+      # (its tier and the capabilities Quarry reports, as advisory text). Only the literal true turns it on.
+      EXECUTION_CORE_PLANNER_RUN_ENV: ${EXECUTION_CORE_PLANNER_RUN_ENV:-false}
       # Data Plane v2 retrieval — backs the real knowledge_search agentic tool
       # (RAG over the org's ingested docs). DATAPLANE_INTERNAL_KEY is sent as
       # the x-api-key credential.

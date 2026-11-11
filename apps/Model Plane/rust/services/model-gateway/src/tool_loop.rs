@@ -18658,7 +18658,10 @@ mod connector_scope_tests {
             .filter(|tool| tool.name == READ_TOOL_NAME)
             .collect();
         assert_eq!(reads.len(), 1, "one read, the server's own");
-        assert_eq!(reads[0].parameters_json, read_tool_parameters_json());
+        assert_eq!(
+            reads[0].parameters_json,
+            read_tool_parameters_json(connector_reads::document_url_enabled())
+        );
         assert_eq!(
             open.last().map(|tool| tool.name.as_str()),
             Some(READ_TOOL_NAME),

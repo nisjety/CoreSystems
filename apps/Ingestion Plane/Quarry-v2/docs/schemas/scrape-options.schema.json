@@ -101,6 +101,13 @@
         "null"
       ]
     },
+    "profile_id": {
+      "description": "E4.4-b: the stored browser profile (`prof_<ulid>`) this one scrape restores, read-only.\nAccepted only while `ScrapeLimits::profile_pin_enabled`; never with `actions`. A pinned\nscrape is personalised, so it is never cached and never echoes the id back.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "redact_pii": {
       "description": "E3.6-5: `off` (the default) or `on`: pass the returned text through the PII scanner.\n`on` is served under zero data retention only, and never with a capture or an action.\nAbsent and `off` are the same request.",
       "anyOf": [

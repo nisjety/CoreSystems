@@ -3193,7 +3193,12 @@ async fn execute_read_provider_action(
     #[serde(deny_unknown_fields)]
     struct ReadInput {
         connection_id: String,
-        operation: String,
+        /// The operation to read. Absent when the read names a document by its link instead.
+        #[serde(default)]
+        operation: Option<String>,
+        /// A link to the document to read, resolved to its read (Q4-E4.3). Refused while the switch is off.
+        #[serde(default)]
+        document_url: Option<String>,
         #[serde(default)]
         params: serde_json::Value,
         #[serde(default)]
@@ -3214,6 +3219,23 @@ async fn execute_read_provider_action(
                 .to_owned(),
         );
     }
+    // A link is refused while the deployment has not switched the document-link read on (Q4-E4.3),
+    // before it is resolved or any client is built.
+    if input.document_url.is_some()
+        && !crate::integration_tools::provider_read_document_url_enabled()
+    {
+        return tool_error(mp_contracts::provider_reads::DOCUMENT_URL_NOT_SWITCHED_ON.to_owned());
+    }
+    // The read that runs is the one the request names, or the one its link names. The link only
+    // chooses the operation and the file: the connection was checked above, and only reads resolve.
+    let (operation, params) = match mp_contracts::provider_reads::resolve_read_request(
+        input.operation.as_deref(),
+        &input.params,
+        input.document_url.as_deref(),
+    ) {
+        Ok(resolved) => resolved,
+        Err(error) => return tool_error(error.message().to_owned()),
+    };
     let Some(client) = crate::integration_tools::IntegrationActionsClient::from_env() else {
         return tool_error(
             "read_provider_action unavailable: integration client could not be built".to_owned(),
@@ -3223,8 +3245,8 @@ async fn execute_read_provider_action(
         .read_action(
             org_id,
             &input.connection_id,
-            &input.operation,
-            &input.params,
+            &operation,
+            &params,
             input.max_results,
             input.page_token.as_deref(),
             session_bearer,

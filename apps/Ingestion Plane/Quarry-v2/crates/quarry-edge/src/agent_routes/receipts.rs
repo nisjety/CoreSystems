@@ -1,4 +1,7 @@
 use super::*;
+use quarry_runtime::browser_procedure::{
+    compare_replay_canonical, compile_procedure_v2, procedure_canonical_enabled,
+};
 
 /// A receipt as a reader may see it (WS12.S3, D2-063). Every receipt passes the secret masking
 /// first (`redact_for_read`, idempotent). A receipt read under ZDR then keeps no page URL beyond
@@ -106,7 +109,9 @@ pub async fn list_receipts(
 /// `POST /v1/agent/runs/{run_id}/procedure` — compile a deterministic
 /// replay candidate from a tenant-owned verified receipt stream. Unknown,
 /// failed, or unobserved effects are rejected by the runtime compiler;
-/// Model Plane remains the planner and policy owner.
+/// Model Plane remains the planner and policy owner. With `canonical` true
+/// (dark behind `QUARRY_EDGE__PROCEDURE_CANONICAL`) the candidate is version 2:
+/// semantic targets, typed-text slots and verified postconditions.
 pub async fn compile_run_procedure(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -114,6 +119,21 @@ pub async fn compile_run_procedure(
     Json(body): Json<CompileProcedureBody>,
 ) -> Result<Json<Envelope<BrowserProcedure>>, ApiErr> {
     let request_id = crate::request_id::current();
+    // E4.2 step 2: the canonical compile is dark, so a request for it is refused before any
+    // receipt is read. The refusal names the switch and nothing about the run.
+    if body.canonical && !procedure_canonical_enabled() {
+        return Err(driver_err(
+            &request_id,
+            QuarryError::new(
+                ErrorCode::BadRequest,
+                "canonical procedures are not enabled on this deployment",
+            )
+            .with_details(serde_json::json!({
+                "reason": "procedure_canonical_disabled",
+                "env": "QUARRY_EDGE__PROCEDURE_CANONICAL",
+            })),
+        ));
+    }
     let parsed_run_id = run_id
         .parse::<RunKind>()
         .map_err(|_| status_err(StatusCode::NOT_FOUND, &request_id, "agent run not found"))?;
@@ -141,24 +161,46 @@ pub async fn compile_run_procedure(
         .procedure_id
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| format!("proc_{run_id}"));
-    let procedure = compile_procedure(procedure_id, &receipts)
-        .map_err(|error| driver_err(&request_id, error))?;
+    // The default is the version 1 compile, unchanged. A canonical compile refuses a ref it cannot
+    // map to a stored target (TARGET_REPAIR_REQUIRED, 409) and an action outside its vocabulary
+    // (UNSUPPORTED, 501); driver_err keeps both codes.
+    let compiled = if body.canonical {
+        compile_procedure_v2(procedure_id, &receipts)
+    } else {
+        compile_procedure(procedure_id, &receipts)
+    };
+    let procedure = compiled.map_err(|error| driver_err(&request_id, error))?;
     Ok(Json(Envelope::ok(request_id, procedure)))
 }
 
 /// `POST /v1/agent/procedures/replay-check` — compare a proposed action
 /// sequence with a compiled procedure without executing browser effects.
 /// Any mismatch is an explicit repair/refusal decision, never a silent
-/// selector or business-action substitution.
+/// selector or business-action substitution. With `prefix` the actions may be
+/// a leading part of a version 2 procedure; a version 1 procedure refuses it.
 pub async fn replay_check(
     Extension(_claims): Extension<crate::auth::Claims>,
     Json(body): Json<ReplayCheckBody>,
-) -> Json<Envelope<ReplayDecision>> {
+) -> Result<Json<Envelope<ReplayDecision>>, ApiErr> {
     let request_id = crate::request_id::current();
-    Json(Envelope::ok(
-        request_id,
-        compare_replay(&body.procedure, &body.actions),
-    ))
+    if body.prefix && body.procedure.version < 2 {
+        return Err(driver_err(
+            &request_id,
+            QuarryError::new(
+                ErrorCode::BadRequest,
+                "a prefix replay needs a version 2 procedure",
+            )
+            .with_details(serde_json::json!({ "reason": "prefix_needs_v2" })),
+        ));
+    }
+    // A version 2 procedure is compared canonically. A version 1 procedure keeps the strict
+    // comparison it always had, so its verdicts and reasons do not change.
+    let decision = if body.procedure.version >= 2 {
+        compare_replay_canonical(&body.procedure, &body.actions, body.prefix)
+    } else {
+        compare_replay(&body.procedure, &body.actions)
+    };
+    Ok(Json(Envelope::ok(request_id, decision)))
 }
 
 /// `POST /v1/agent/procedures/quality-check` — deterministic promotion

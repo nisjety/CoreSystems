@@ -165,6 +165,19 @@ pub const CATALOGUE: &[CapSpec] = &[
         site: Some("quarry-edge profile routes (WS7.E)"),
     },
     CapSpec {
+        key: CapKey::ConsentReject,
+        kind: Kind::Ability,
+        applies_to: AppliesTo::All,
+        baseline: Baseline::Mode(Mode::Disabled),
+        unlockable: true,
+        zdr_implies_disabled: false,
+        reserved: false,
+        since: "W5-FENCE-1",
+        site: Some(
+            "Verevon desktop browser: SPA reads the effective view and passes consentReject to the adapter (D-W5-4)",
+        ),
+    },
+    CapSpec {
         key: CapKey::Recording,
         kind: Kind::Ability,
         applies_to: AppliesTo::All,

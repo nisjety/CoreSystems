@@ -153,7 +153,7 @@ app.whenReady().then(async () => {
   register('setViewport', setViewport);
   register('navigate', async (url) => (await getGuest()).browser.navigate(url));
   register('command', async (command) => (await getGuest()).browser.command(command));
-  register('startRun', async () => (await getGuest()).browser.startRun());
+  register('startRun', async (options) => (await getGuest()).browser.startRun(options));
   register('execute', async (runId, action) => (await getGuest()).browser.execute(runId, action));
   register('endRun', async (runId) => {
     await reset;

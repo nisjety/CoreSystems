@@ -1712,12 +1712,14 @@ impl ObservationRunner {
                 ));
             }
         }
+        let canonical_locator = canonical_locator_for(&snapshot, &ref_id);
         let proof = ResolvedTargetProof {
             snapshot_id: snapshot.snapshot.snapshot_id,
             generation: snapshot.snapshot.generation,
             ref_id,
             fingerprint: expected.clone(),
             locator: locator.cloned(),
+            canonical_locator,
         };
         let selector = target.selector.clone().unwrap_or_default();
         let resolved_action = match action {
@@ -2487,6 +2489,85 @@ fn resolve_semantic_ref(
             json!({ "match_count": matches.len() }),
         )),
     }
+}
+
+/// Longest page-authored string a canonical locator may carry.
+const CANONICAL_LOCATOR_MAX_BYTES: usize = 120;
+
+/// Derive one exact semantic locator that matches only `ref_id` in the
+/// active snapshot. A later recipe compile stores this locator. The rule is a
+/// unique match or nothing: a positional `Nth` locator is never used, a
+/// child-frame target gets none, and a value that may carry personal data is
+/// not used.
+fn canonical_locator_for(snapshot: &ActiveSnapshot, ref_id: &str) -> Option<SemanticLocator> {
+    let target = &snapshot.targets.get(ref_id)?.target;
+    if target.frame_id.is_some() {
+        return None;
+    }
+    let accepted = |value: Option<&str>| -> Option<String> {
+        let value = value?.trim();
+        canonical_locator_value_allowed(value).then(|| value.to_owned())
+    };
+    let mut candidates: Vec<SemanticLocator> = Vec::with_capacity(5);
+    if let Some(test_id) = accepted(target.test_id.as_deref()) {
+        candidates.push(SemanticLocator::TestId {
+            test_id,
+            exact: true,
+        });
+    }
+    if let (Some(role), Some(name)) = (
+        accepted(target.role.as_deref()),
+        accepted(target.name.as_deref()),
+    ) {
+        candidates.push(SemanticLocator::Role {
+            role,
+            name: Some(name),
+            exact: true,
+        });
+    }
+    if let Some(label) = accepted(target.name.as_deref()) {
+        candidates.push(SemanticLocator::Label { label, exact: true });
+    }
+    if let Some(placeholder) = accepted(target.placeholder.as_deref()) {
+        candidates.push(SemanticLocator::Placeholder {
+            placeholder,
+            exact: true,
+        });
+    }
+    if let Some(text) = accepted(target.text.as_deref()) {
+        candidates.push(SemanticLocator::Text { text, exact: true });
+    }
+    candidates.into_iter().find(|locator| {
+        let mut matches = snapshot
+            .targets
+            .iter()
+            .filter(|(_, candidate)| semantic_matches(&candidate.target, locator));
+        matches.next().map(|(id, _)| id.as_str()) == Some(ref_id) && matches.next().is_none()
+    })
+}
+
+/// A canonical locator value is trimmed, non-empty, at most
+/// [`CANONICAL_LOCATOR_MAX_BYTES`] long, and has no redaction marker, no `@`,
+/// and no run of six or more digits.
+fn canonical_locator_value_allowed(value: &str) -> bool {
+    if value.is_empty() || value.len() > CANONICAL_LOCATOR_MAX_BYTES {
+        return false;
+    }
+    if value.to_ascii_lowercase().contains("[redacted") || value.contains('@') {
+        return false;
+    }
+    let mut digit_run = 0usize;
+    for ch in value.chars() {
+        if ch.is_ascii_digit() {
+            digit_run += 1;
+            if digit_run >= 6 {
+                return false;
+            }
+        } else {
+            digit_run = 0;
+        }
+    }
+    true
 }
 
 pub(crate) fn semantic_matches(target: &SnapshotTarget, locator: &SemanticLocator) -> bool {

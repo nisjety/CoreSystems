@@ -501,6 +501,328 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
+  /v1/search/images:
+    post:
+      operationId: searchImages
+      summary: Image search through the SearXNG image vertical
+      description: >-
+        Focused image search. The query goes to the SearXNG the edge is configured with (QUARRY_EDGE__SEARXNG_URL),
+        in its image category, and nothing else. Without that URL the route answers 501 UNSUPPORTED. A successful
+        call, even one with no images, is metered as one SEARCH_QUERY unit with kind images. Zero data retention:
+        the route reads no zdr field and makes no ZDR decision. The query is not cached, and the usage event carries
+        the org, the user, the vertical and the result count, never the query text. Codes from SearXNG are the
+        upper-cased names of the error code (DRIVERFAILED, BADREQUEST, NOTFOUND), not the underscore wire names;
+        the 429 envelope carries RATE_LIMITED. A service principal is refused with a bare 403. A body that is not
+        JSON, or does not match the schema, gets the framework's plain-text 400 or 422 before the handler runs.
+      tags:
+      - search
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ImageSearchRequest'
+      responses:
+        '200':
+          description: Image hits in the provider order, with the query as sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ImageSearchResponse'
+        '400':
+          description: BAD_REQUEST when the query is empty after trimming, or BADREQUEST when SearXNG answers another 4xx
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '403':
+          description: FORBIDDEN when SearXNG answers 401 or 403
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '422':
+          description: The body does not match the schema (no query, or a wrong type); the framework answers in plain text
+        '429':
+          description: RATE_LIMITED when SearXNG answers 429, with the structured retry envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RateLimitError'
+        '500':
+          description: INTERNAL when the SearXNG client cannot be built; NOTFOUND when SearXNG answers 404
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: UNSUPPORTED when no SearXNG URL is configured; the hint names QUARRY_EDGE__SEARXNG_URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '502':
+          description: DRIVERFAILED when SearXNG cannot be reached, answers a 5xx, or sends a body that does not decode
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/search/videos:
+    post:
+      operationId: searchVideos
+      summary: Video search through the SearXNG video vertical
+      description: >-
+        Focused video search. The query goes to the SearXNG the edge is configured with (QUARRY_EDGE__SEARXNG_URL),
+        in its video category, and nothing else. Without that URL the route answers 501 UNSUPPORTED. A successful
+        call, even one with no videos, is metered as one SEARCH_QUERY unit with kind videos. Zero data retention:
+        the route reads no zdr field and makes no ZDR decision. The query is not cached, and the usage event carries
+        the org, the user, the vertical and the result count, never the query text. Codes from SearXNG are the
+        upper-cased names of the error code (DRIVERFAILED, BADREQUEST, NOTFOUND), not the underscore wire names;
+        the 429 envelope carries RATE_LIMITED. A service principal is refused with a bare 403. A body that is not
+        JSON, or does not match the schema, gets the framework's plain-text 400 or 422 before the handler runs.
+      tags:
+      - search
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VideoSearchRequest'
+      responses:
+        '200':
+          description: Video hits in the provider order, with the query as sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VideoSearchResponse'
+        '400':
+          description: BAD_REQUEST when the query is empty after trimming, or BADREQUEST when SearXNG answers another 4xx
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '403':
+          description: FORBIDDEN when SearXNG answers 401 or 403
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '422':
+          description: The body does not match the schema (no query, or a wrong type); the framework answers in plain text
+        '429':
+          description: RATE_LIMITED when SearXNG answers 429, with the structured retry envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RateLimitError'
+        '500':
+          description: INTERNAL when the SearXNG client cannot be built; NOTFOUND when SearXNG answers 404
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: UNSUPPORTED when no SearXNG URL is configured; the hint names QUARRY_EDGE__SEARXNG_URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '502':
+          description: DRIVERFAILED when SearXNG cannot be reached, answers a 5xx, or sends a body that does not decode
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/search/similar:
+    post:
+      operationId: searchSimilar
+      summary: Semantic neighbours of a passage, a page or both
+      description: >-
+        Find-similar, from the Data Plane vector index. Send text (a passage), url (a page, whose markdown seeds
+        the search) or both. A body with neither after trimming is 400 BAD_REQUEST. The route needs the Data Plane
+        vector leg: QUARRY_EDGE__VECTOR_RETRIEVAL set to true, QUARRY_EDGE__DATA_PLANE_URL, and a service identity.
+        Without it the route answers 501 UNSUPPORTED. A url is checked against the web policy before anything is
+        fetched, even when text is also sent; a refusal is 403 FORBIDDEN, and its message never carries the url.
+        The page is fetched only when text is absent, and when that fetch yields nothing the url
+        itself seeds the search. The response query is the literal string text when a passage seeded the search,
+        and the url otherwise. Results come in the Data Plane's order with no score, and provider is similar. Each
+        call that runs the vector leg is metered as one SEARCH_QUERY unit with kind similar. Zero data retention:
+        there is no zdr field, so the posture is the token's ZDR floor alone. Under ZDR the vector leg does not run
+        (no Data Plane call, no hits, no meter) and the answer is 200 with no results; a url is still fetched under
+        the ZDR posture first. Codes from the vector leg are the upper-cased names of the error code (UPSTREAMBLOCKED,
+        DRIVERFAILED, RATELIMITED, TIMEOUT), not the underscore wire names. A service principal is refused with a bare
+        403. A body that is not JSON gets the framework's plain-text 400.
+      tags:
+      - search
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SimilarRequest'
+      responses:
+        '200':
+          description: The neighbours, in the Data Plane's order, with provider similar and no score
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+        '400':
+          description: BAD_REQUEST when neither text nor url is non-empty after trimming
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '403':
+          description: FORBIDDEN when the web policy refuses the url, or the token service refuses the Data Plane call
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '422':
+          description: The body does not match the schema (a wrong type); the framework answers in plain text
+        '429':
+          description: RATELIMITED when the Data Plane or the token service answers 429; a plain error body, not the retry envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '500':
+          description: INTERNAL, or an upstream code the route does not map
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: UNSUPPORTED while the vector leg is not wired; the hint names the two settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '502':
+          description: UPSTREAMBLOCKED or DRIVERFAILED when the Data Plane or the token service refuses, fails or cannot be reached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '504':
+          description: TIMEOUT when the Data Plane or the token service misses its deadline
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/search/suggest:
+    post:
+      operationId: searchSuggest
+      summary: Spelling correction, related searches and a panel for one query
+      description: >-
+        Did-you-mean, related searches and a knowledge panel for one query, from the Model Plane. The route is
+        degrade-safe and always answers 200: with nothing to give, the answer is an object whose related_queries is
+        empty. It is off unless QUARRY_EDGE__SEARCH_SUGGEST is set to on, and boot must also find a Model Plane path
+        (QUARRY_EDGE__MODEL_PLANE_URL, a service identity and a granted model-invoke row). When the switch is off, or
+        boot refuses it, the route answers the same empty 200 and makes no Model Plane call; so does an empty query.
+        The model's reply is read leniently: a correction equal to the query is dropped, related queries are trimmed,
+        de-duplicated and capped at five, and a reply that does not parse gives no suggestions. Zero data retention is
+        not honoured: the handler reads no ZDR posture and the Model Plane call carries none, so under ZDR the query
+        still reaches the model whenever the route runs. The edge keeps no copy. A service principal is refused with a
+        bare 403. A body that is not JSON, or does not match the schema, gets the framework's plain-text 400 or 422.
+      tags:
+      - search
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuggestRequest'
+      responses:
+        '200':
+          description: The suggestions for the query, or the empty answer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuggestResponse'
+        '400':
+          description: The body is not JSON (the framework's plain-text rejection)
+        '422':
+          description: The body does not match the schema (no query, or a wrong type); the framework answers in plain text
+  /v1/audio:
+    post:
+      operationId: audio
+      summary: Speech synthesis or transcription through the Model Plane
+      description: >-
+        One route with two shapes. A body with a string input is text to speech. A body with a string audio_url, and
+        no string input, is transcription. Both are forwarded to the Model Plane, which does the work. Any other
+        object is 400 BAD_REQUEST. The route is off unless QUARRY_EDGE__MODEL_AUDIO is set to on, and boot must also
+        find a Model Plane path: QUARRY_EDGE__MODEL_PLANE_URL, a service identity, and a granted model-audio row in the
+        cross-plane token-request manifest. Otherwise it answers 501 UNSUPPORTED, with no token mint and no Model
+        Plane call. A transcription's audio_url passes the web policy before anything leaves the edge; a refused URL
+        is 403 and never reaches the token service or the Model Plane. Zero data retention: the edge keeps no copy,
+        the request's zdr is forwarded to the Model Plane (which owns retention for audio), and a token of a ZDR
+        organisation raises it to true whatever the body says. A status the edge does not set itself is the Model
+        Plane's answer, passed through with its JSON body (an empty object when that body is not JSON). A service
+        principal is refused with a bare 403.
+      tags:
+      - audio
+      security:
+      - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - $ref: '#/components/schemas/AudioSpeechRequest'
+              - $ref: '#/components/schemas/AudioTranscriptionRequest'
+      responses:
+        '200':
+          description: The Model Plane's JSON answer, unchanged
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          description: >-
+            BAD_REQUEST when the object matches neither shape, including one whose fields have the wrong types.
+            A body that is not JSON gets the framework's plain-text 400.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AudioUsageError'
+        '403':
+          description: FORBIDDEN when the web policy refuses the audio_url, with closed details that never carry the url
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AudioPolicyRefusal'
+        '422':
+          description: The body is JSON but not an object; the framework answers in plain text
+        '500':
+          description: INTERNAL when the HTTP client cannot be built or the service-token request manifest is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: UNSUPPORTED while the switch is off or boot refuses it; no token is minted and no Model Plane call is made
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '502':
+          description: UPSTREAM_BLOCKED when the Model Plane token cannot be minted; DRIVER_FAILED when the Model Plane cannot be reached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
   /v1/answer:
     post:
       operationId: answer
@@ -992,6 +1314,127 @@ paths:
           description: Run not found
         '409':
           description: An attachment is already live on the run
+  /v1/agent/runs/{run_id}/attach-current-tab:
+    post:
+      operationId: attachAgentCurrentTab
+      summary: Attach an agent to a tab the person already has open (dark; service principal only)
+      description: >-
+        WS8.F, the hand-over of a tab the person already has open. Off unless QUARRY_EDGE__ATTACH is on.
+        The same gates as `POST .../attach` apply: the caller is a service principal holding
+        browser:execute, it holds an attach grant (a child of the run's grant, for this run, owned by the
+        run's owner, one to eight hosts), and the run is not ZDR. The body must name the tab in
+        `attach_tab` and must not carry `start_url` (both are a 400). The delegate gets that tab, not a new
+        one, so `attached_existing_tab` is true. The tab must be the person's active tab, at
+        `expected_epoch` and `expected_origin`, held by the person and with no attachment, and the grant
+        must allow exactly that tab's host; otherwise the call is 409 browser_continue_tab_changed. Upload
+        and download are disabled for this attachment whatever `policy` asks: browser.act.upload and
+        browser.act.download are added to the ask's `disable` list. Refusal reasons (in error.message):
+        attach_disabled, attach_requires_service_principal, attach_zdr_refused,
+        attach_current_tab_requires_personal_browser (the run is not on the open web), attach_requires_grant,
+        attach_grant_invalid, attach_driver_unsupported (UNSUPPORTED), attach_exists (CONFLICT) and
+        browser_continue_tab_changed (CONFLICT).
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - grant_id
+              - attach_tab
+              properties:
+                grant_id:
+                  type: string
+                attach_tab:
+                  type: object
+                  additionalProperties: false
+                  required:
+                  - tab_id
+                  - expected_epoch
+                  - expected_origin
+                  properties:
+                    tab_id:
+                      type: string
+                    expected_epoch:
+                      type: integer
+                      minimum: 0
+                    expected_origin:
+                      type: string
+                      description: >-
+                        The tab's origin as the browser serialises it, for example https://example.com
+                constraints:
+                  type: object
+                  properties:
+                    max_steps:
+                      type: integer
+                      minimum: 1
+                      maximum: 200
+                    max_runtime_s:
+                      type: integer
+                      minimum: 1
+                      maximum: 3600
+                    max_cost_usd:
+                      type: number
+                policy:
+                  $ref: '#/components/schemas/RequestAsk'
+      responses:
+        '200':
+          description: The attachment, bound to the tab the person already has open
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      attach_id:
+                        type: string
+                      tab_id:
+                        type: string
+                      tab_epoch:
+                        type: integer
+                      control_epoch:
+                        type: integer
+                      opened_by:
+                        type: string
+                        enum:
+                        - human
+                        - agent
+                        description: Who opened the tab (human for a tab the person opened)
+                      holder:
+                        type: string
+                        enum:
+                        - agent
+                      allowed_domains:
+                        type: array
+                        items:
+                          type: string
+                      policy_applied:
+                        type: boolean
+                        description: Always true on this route
+                      attached_existing_tab:
+                        type: boolean
+                        description: Always true on this route
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: attach_tab is missing, start_url is present, or a constraint is outside its bounds
+        '403':
+          description: Refused (the reason is in error.message); a service principal without browser:execute gets a bare 403
+        '404':
+          description: Run not found, in another organisation, or no longer live
+        '409':
+          description: An attachment is already live on the run (attach_exists), or the tab changed (browser_continue_tab_changed)
+        '501':
+          description: The browser driver cannot hand over a tab (attach_driver_unsupported)
   /v1/agent/runs/{run_id}/attach/{attach_id}:
     delete:
       operationId: releaseAgentAttach
@@ -1097,6 +1540,85 @@ paths:
                 $ref: '#/components/schemas/Envelope_Error'
         '409':
           description: USER_TOOK_OVER, as for opening a tab
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+  /v1/agent/runs/{run_id}/tabs/{tab_id}/mark:
+    post:
+      operationId: markAgentTab
+      summary: Nominate the delegate's attached tab for handoff (dark; the delegate only)
+      description: >-
+        WS8.F. The service principal that holds a live attachment on this tab, with its attach grant,
+        nominates the tab. The nomination hands the tab to the person at once: its holder becomes human,
+        so the delegate takes no further step on it. A successful release (`DELETE .../attach/{attach_id}`
+        with the default `release`) then keeps an agent-opened tab open for the owner, if the grant still
+        passes the check made at release; a borrowed tab always goes back to its owner. Both `mark` values
+        are accepted and echoed, and the ledger keeps no separate deliverable state, so they have the same
+        effect today. A closed run, a ZDR run, or a tab that is not this delegate's attached tab is 404. A
+        grant that is no longer usable for the run is 403 attach_grant_invalid.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      - $ref: '#/components/parameters/AgentTabId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - grant_id
+              - mark
+              properties:
+                grant_id:
+                  type: string
+                mark:
+                  type: string
+                  enum:
+                  - deliverable
+                  - handoff
+      responses:
+        '200':
+          description: The tab and the mark that was recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    type: object
+                    required:
+                    - tab_id
+                    - mark
+                    properties:
+                      tab_id:
+                        type: string
+                      mark:
+                        type: string
+                        enum:
+                        - deliverable
+                        - handoff
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: mark is neither deliverable nor handoff (invalid tab mark)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '403':
+          description: The attach grant is no longer usable for this run (attach_grant_invalid)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '404':
+          description: Run not found, closed or under ZDR, or the tab is not this delegate's attached tab
           content:
             application/json:
               schema:
@@ -1416,6 +1938,80 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_Error'
+  /v1/agent/runs/{run_id}/hit-test:
+    get:
+      operationId: agentHitTest
+      summary: Map a viewport point to the observed target under it (dark)
+      description: >-
+        E3.3-h. A read-only point hit test: it executes nothing, navigates nowhere, focuses or scrolls
+        nothing, and writes nothing (no receipt, timeline row, artifact or cache entry). Off unless
+        QUARRY_EDGE__HIT_TEST is on (default off): off, the call is refused with 403 hit_test_disabled
+        before the run is looked up. `x` and `y` are CSS pixels from the viewport's top-left corner,
+        rounded to whole pixels. A missing or non-finite value, or a point outside the run's viewport
+        (1280 by 800 when its lease names none), is a 400. The browser's hit test finds the DOM node
+        under the point and its accessibility ancestors. The answer names an observed target in `ref`
+        only when one of those nodes is a target of the caller's last observation of the run; then
+        `snapshotId` and `generation` name that snapshot, so the caller can tell that it is stale.
+        Without a `ref`, `reason` says why: no_node (nothing under the point), no_snapshot (a node is
+        there, but the run has observed no page) or not_observed (a node is there, but no observed
+        target is on its ancestors). The answer carries no backend node id and no frame id. A ZDR run
+        may use it: nothing is stored or logged, and `zdr` echoes the run's flag. Only the actor that
+        started the run, in its organisation, may call it; anyone else gets 404.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      - name: x
+        in: query
+        required: true
+        description: The point's horizontal position, in CSS pixels from the viewport's left edge.
+        schema:
+          type: number
+      - name: y
+        in: query
+        required: true
+        description: The point's vertical position, in CSS pixels from the viewport's top edge.
+        schema:
+          type: number
+      responses:
+        '200':
+          description: The node under the point, and the observed target it names when there is one
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/HitTestData'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: x or y is missing, not finite, or outside the viewport; a value that is not a number gets the framework's plain-text rejection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '403':
+          description: The switch is off (hit_test_disabled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '404':
+          description: Run not found, not started by the caller, or no longer live
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '501':
+          description: The browser driver has no point hit test (UNSUPPORTED)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/agent/runs/{run_id}/procedure:
     post:
       operationId: compileAgentProcedure
@@ -1437,8 +2033,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_BrowserProcedure'
+        '400':
+          description: >-
+            With `canonical` true while QUARRY_EDGE__PROCEDURE_CANONICAL is off (the default),
+            `procedure_canonical_disabled` (details.reason, details.env). See ERROR_REASONS.md.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
         '409':
-          description: Receipt stream contains unverified or incomplete effects
+          description: >-
+            Receipt stream contains unverified or incomplete effects. With `canonical` true, a ref or
+            semantic step with no storable target answers TARGET_REPAIR_REQUIRED (details.step).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '501':
+          description: >-
+            With `canonical` true, a receipt holds an action outside the canonical vocabulary, or a key
+            or option value carries a redaction marker: UNSUPPORTED (details.step).
           content:
             application/json:
               schema:
@@ -1462,6 +2076,13 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_ReplayDecision'
+        '400':
+          description: >-
+            `prefix_needs_v2` (details.reason) when `prefix` is true and the procedure is version 1.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/agent/procedures/quality-check:
     post:
       operationId: qualityCheckAgentProcedure
@@ -1611,6 +2232,154 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
+  /v1/audit/page:
+    post:
+      operationId: auditPage
+      summary: Bounded public-page evidence for the audit rules
+      description: >-
+        Bounded public-page evidence (`bounded_page_v1`) for Marketing Core's audit rules. It reads
+        `robots.txt` for the page's origin first, then the page, following redirects only inside the
+        discovery scope with every hop traced into `redirects`. It runs no analysis and stores nothing, and
+        calls no browser fallback, provider or ingest. The URL passes the web policy before any fetch, as
+        `POST /v1/map` does, and a refusal names the layer that decided, not the URL. A 2xx source must be an
+        HTML document (text/html or application/xhtml+xml), or the answer is 503 UNSUPPORTED. An upstream 404
+        or 500 is evidence in `status`, not a failure. A title or description over its limit is 502
+        UPSTREAM_LIMIT, never a truncated value. Link and heading text is cut at 512 characters, and the lists
+        are capped at 100 and 200, with `partial` set when the source has more. The
+        success body is the `AuditPage` object itself, not wrapped in the typed envelope. A service principal
+        needs scrape:read (a bare 403 otherwise); a person's token passes this gate. At most eight captures run
+        per process, and an excess request is 429 RATE_LIMITED without queueing. The whole capture has a 10
+        second deadline, past which the answer is 504 TIMEOUT.
+      tags:
+      - scrape
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - url
+              additionalProperties: false
+              properties:
+                url:
+                  type: string
+                  maxLength: 4096
+      responses:
+        '200':
+          description: The bounded evidence for the page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditPage'
+        '400':
+          description: The body is not JSON (the framework's plain-text rejection)
+        '403':
+          description: Refused by the web policy, not a public URL, blocked, or with an unreadable robots.txt (FORBIDDEN)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '422':
+          description: The body does not match the schema (an unknown field, or a wrong type); the framework answers in plain text
+        '429':
+          description: At most eight captures are in flight, or the discovery transport is rate limited (RATE_LIMITED)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RateLimitError'
+        '502':
+          description: The evidence exceeds a field limit, or the source exceeds the bounded response limit (UPSTREAM_LIMIT)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '503':
+          description: The source is a 2xx document that is not HTML, or the bounded transport is unavailable (UNSUPPORTED)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '504':
+          description: The capture passed its 10 second deadline (TIMEOUT)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/browser/redirect-hop:
+    post:
+      operationId: browserRedirectHop
+      summary: One credentialless redirect hop for assistant navigation
+      description: >-
+        Inspects one public HTTP(S) response and answers where its redirect points, if it redirects at all.
+        The probe sends no cookies, reads no storage and reads the response headers only; the URL's fragment
+        is dropped. The probe pins public DNS addresses and refuses a URL that is not public or is blocked
+        (403 SECURITY_BLOCKED). The web policy is checked for the URL and again for the target (403 FORBIDDEN).
+        `target` is the absolute URL of a validated 301, 302, 303, 307 or 308 redirect, and null for any other
+        status; a redirect without exactly one usable Location, or one that downgrades https to http, is refused
+        (403 SECURITY_BLOCKED). A DNS or transport failure is answered with the probe's own code and a generic
+        message that never names an internal host or address. A service principal needs browser:execute (a bare
+        403 otherwise); a person's token passes this gate. At most 16 probes run per process, and an excess
+        request is 429 RATE_LIMITED without queueing. The whole probe has a 4 second deadline, past which the
+        answer is 504 TIMEOUT.
+      tags:
+      - agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - url
+              additionalProperties: false
+              properties:
+                url:
+                  type: string
+                  maxLength: 4096
+      responses:
+        '200':
+          description: The redirect target, or null when the response is not a redirect
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/RedirectProbeResult'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '403':
+          description: Blocked, not a public URL, refused by the web policy, or a redirect that is refused (SECURITY_BLOCKED or FORBIDDEN)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '400':
+          description: The body is not JSON (the framework's plain-text rejection)
+        '422':
+          description: The body does not match the schema (an unknown field, or a wrong type); the framework answers in plain text
+        '429':
+          description: Probe capacity is busy (RATE_LIMITED); retry later
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '502':
+          description: The public URL could not be resolved or read (DRIVER_FAILED, or the probe's own code)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '504':
+          description: The probe passed its 4 second deadline (TIMEOUT)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/extract:
     post:
       operationId: extract
@@ -6380,6 +7149,14 @@ components:
             select_ref on a top-level ref is then checked (visible, enabled, still, not covered) and a click
             and a type are real browser input (event.isTrusted is true). Reported only: a requirement for it in
             driver_requirements is ignored. An older peer omits it and it reads as false.
+        profile_pin:
+          type: boolean
+          default: false
+          description: >-
+            True when the driver can restore a stored browser profile read-only into a scrape pinned to it (E4.4-b,
+            the scrape option is dark behind QUARRY_EDGE__SCRAPE_PROFILE_PIN). The profile is never saved back.
+            Reported only: a requirement for it in driver_requirements is ignored. An older peer omits it and it
+            reads as false.
     AgentConstraints:
       type: object
       required:
@@ -6581,6 +7358,51 @@ components:
           $ref: '#/components/schemas/AdvisoryIdentifier'
         agentLabel:
           $ref: '#/components/schemas/AdvisoryIdentifier'
+    HitTestData:
+      type: object
+      description: >-
+        E3.3-h. The answer for one point. `hit` says whether the browser found a node under it. `ref` is set
+        only when that node, or one of its accessibility ancestors, is a target of the caller's last
+        observation of the run; `snapshotId` and `generation` then name that snapshot. Without a `ref`,
+        `reason` says why. No backend node id and no frame id are carried.
+      required:
+      - hit
+      - ref
+      - snapshotId
+      - generation
+      - role
+      - name
+      - reason
+      - zdr
+      properties:
+        hit:
+          type: boolean
+          description: Whether the browser found a node under the point
+        ref:
+          type: [string, 'null']
+          description: The observed target's ref, for example @e1, or null
+        snapshotId:
+          type: [string, 'null']
+          description: The observed snapshot that the ref belongs to, or null
+        generation:
+          type: [integer, 'null']
+          minimum: 0
+          description: The snapshot's generation, or null
+        role:
+          type: [string, 'null']
+          description: The observed target's accessibility role, or null
+        name:
+          type: [string, 'null']
+          description: The observed target's accessible name, or null
+        reason:
+          type: [string, 'null']
+          description: >-
+            Why there is no ref: no_node (nothing under the point), no_snapshot (a node is there, but the run
+            has observed no page) or not_observed (a node is there, but no observed target is on its
+            ancestors). Null when there is a ref.
+        zdr:
+          type: boolean
+          description: Whether the run is under zero data retention. Nothing is stored either way.
     Envelope_AgentTabs:
       type: object
       required:
@@ -8415,6 +9237,14 @@ components:
         procedure_id:
           type: string
           nullable: true
+        canonical:
+          type: boolean
+          default: false
+          description: >-
+            E4.2 step 2: compile a version 2 (canonical) procedure, with semantic targets, typed-text
+            slots and the postconditions Quarry verified. Dark: while QUARRY_EDGE__PROCEDURE_CANONICAL is
+            off (the default) a request that sets it is refused with 400 `procedure_canonical_disabled`.
+            Absent or false compiles version 1, as before.
     BrowserProcedure:
       type: object
       required:
@@ -8427,6 +9257,9 @@ components:
           type: string
         version:
           type: integer
+          description: >-
+            1 for a receipt-literal procedure. 2 for a canonical one (compiled with `canonical` true):
+            semantic targets (`target`), typed-text slots (`slots`) and verified postconditions (`expect`).
         source_receipt_ids:
           type: array
           items:
@@ -8457,7 +9290,61 @@ components:
                 description: |
                   True when the action carries a redaction marker: what was typed or selected
                   was masked when the receipt was written, so a replay must supply it. The
-                  replay check answers repair_required for such a step, never exact.
+                  replay check answers repair_required for such a step, never exact. In a
+                  version 2 procedure a typed value is a slot the replay supplies, so the flag
+                  only records the mask there; a masked step outside a slot is still never exact.
+              target:
+                $ref: '#/components/schemas/StepTarget'
+              slot:
+                type: string
+                nullable: true
+                description: |
+                  Version 2 only: the name of the slot this step types into (`slot_<step>`).
+              expect:
+                $ref: '#/components/schemas/StepExpectation'
+        slots:
+          type: array
+          description: |
+            Version 2 only: the typed-input slots. The step types into each at replay and the
+            value is supplied then, never stored. Absent on a version 1 procedure.
+          items:
+            $ref: '#/components/schemas/ProcedureSlot'
+    StepTarget:
+      type: object
+      description: |
+        Version 2 only: the element a ref or semantic step acts on. The locator is the one
+        Quarry resolved the element to. The fingerprint's normalized text is never included.
+      required:
+      - locator
+      - fingerprint_id
+      - tag
+      properties:
+        locator:
+          $ref: '#/components/schemas/SemanticLocator'
+        fingerprint_id:
+          type: string
+        tag:
+          type: string
+    ProcedureSlot:
+      type: object
+      description: |
+        Version 2 only: a named input a procedure leaves open. The step types into it at
+        replay; the value is supplied then and is never stored in the procedure.
+      required:
+      - name
+      - step
+      - kind
+      properties:
+        name:
+          type: string
+          description: slot_<step>, unique within the procedure.
+        step:
+          type: integer
+        kind:
+          type: string
+          enum:
+          - text
+          - secret
     Envelope_BrowserProcedure:
       type: object
       required:
@@ -8483,6 +9370,13 @@ components:
           items:
             type: object
             additionalProperties: true
+        prefix:
+          type: boolean
+          default: false
+          description: >-
+            E4.2 step 2: the actions are a leading part of the procedure, so the replay may stop early.
+            Only a version 2 procedure takes it; a version 1 procedure with `prefix` true is refused with
+            400 `prefix_needs_v2`. Actions beyond the procedure are always a repair.
     Envelope_ReplayDecision:
       type: object
       required:
@@ -8928,6 +9822,264 @@ components:
           type: string
           nullable: true
           description: The rerank profile that ran, or would have run (web-v1).
+    ImageSearchRequest:
+      type: object
+      required:
+      - query
+      properties:
+        query:
+          type: string
+          minLength: 1
+          description: The search text. It is trimmed before the search, and empty after trimming is refused with BAD_REQUEST.
+        limit:
+          type: [integer, 'null']
+          minimum: 0
+          description: Most images to return. Absent or null means 24. The handler clamps any value to 1 through 50.
+    ImageSearchResponse:
+      type: object
+      required:
+      - query
+      - provider
+      - images
+      properties:
+        query:
+          type: string
+          description: The query as the caller sent it, untrimmed.
+        provider:
+          type: string
+          description: Always searxng.
+        images:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImageResult'
+    ImageResult:
+      type: object
+      required:
+      - img_src
+      - thumbnail_src
+      - source_url
+      - title
+      properties:
+        img_src:
+          type: string
+          description: The full-resolution image URL. When SearXNG gave none, the thumbnail URL is used here.
+        thumbnail_src:
+          type: [string, 'null']
+          description: The thumbnail URL, possibly a SearXNG-proxied path. Null when SearXNG gave none.
+        source_url:
+          type: string
+          description: The page the image was found on. Empty when SearXNG gave none.
+        title:
+          type: [string, 'null']
+          description: The image title or alt text. Null when SearXNG gave none.
+    VideoSearchRequest:
+      type: object
+      required:
+      - query
+      properties:
+        query:
+          type: string
+          minLength: 1
+          description: The search text. It is trimmed before the search, and empty after trimming is refused with BAD_REQUEST.
+        limit:
+          type: [integer, 'null']
+          minimum: 0
+          description: Most videos to return. Absent or null means 24. The handler clamps any value to 1 through 50.
+    VideoSearchResponse:
+      type: object
+      required:
+      - query
+      - provider
+      - videos
+      properties:
+        query:
+          type: string
+          description: The query as the caller sent it, untrimmed.
+        provider:
+          type: string
+          description: Always searxng.
+        videos:
+          type: array
+          items:
+            $ref: '#/components/schemas/VideoResult'
+    VideoResult:
+      type: object
+      description: One video hit. Every field is present; a field the engine did not give is null.
+      required:
+      - url
+      - title
+      - thumbnail_src
+      - iframe_src
+      - author
+      - length
+      - published_date
+      - content
+      properties:
+        url:
+          type: string
+          description: The watch page, for attribution and click-through.
+        title:
+          type: [string, 'null']
+        thumbnail_src:
+          type: [string, 'null']
+          description: The poster or preview image, possibly a SearXNG-proxied path.
+        iframe_src:
+          type: [string, 'null']
+          description: The embeddable player URL, when the engine exposes one.
+        author:
+          type: [string, 'null']
+          description: The uploader or channel name.
+        length:
+          type: [string, 'null']
+          description: The duration exactly as the upstream reported it. Not parsed, because engines disagree on the format.
+        published_date:
+          type: [string, 'null']
+          description: The publication date exactly as the upstream reported it. Not parsed.
+        content:
+          type: [string, 'null']
+          description: A description snippet.
+    SimilarRequest:
+      type: object
+      properties:
+        url:
+          type: [string, 'null']
+          description: A page whose markdown seeds the search. Checked against the web policy even when text is also sent, and fetched only when text is absent.
+        text:
+          type: [string, 'null']
+          description: A passage that seeds the search. It wins over url when both are sent, and it is trimmed and cut to 2000 characters.
+        limit:
+          type: [integer, 'null']
+          minimum: 0
+          description: Most neighbours to return. Absent or null means 10. The handler clamps any value to 1 through 50.
+    SuggestRequest:
+      type: object
+      required:
+      - query
+      properties:
+        query:
+          type: string
+          description: The query as the user typed it. An empty query is answered with an empty result, not refused.
+    SuggestResponse:
+      type: object
+      description: >-
+        The suggestions for one query. related_queries is always present, and may be empty. corrected_query is
+        present only when the query likely has a typo, and entity only when the query names one specific entity.
+      required:
+      - related_queries
+      properties:
+        corrected_query:
+          type: string
+          description: The corrected spelling. Present only when it differs from the query.
+        related_queries:
+          type: array
+          maxItems: 5
+          items:
+            type: string
+          description: Up to five distinct follow-up searches.
+        entity:
+          $ref: '#/components/schemas/SuggestEntityPanel'
+    SuggestEntityPanel:
+      type: object
+      required:
+      - name
+      - facts
+      properties:
+        name:
+          type: string
+        kind:
+          type: string
+          description: A short type label. Absent when the model gave none.
+        summary:
+          type: string
+          description: One or two factual sentences. Absent when the model gave none.
+        facts:
+          type: array
+          maxItems: 5
+          description: Up to five key facts. May be empty.
+          items:
+            $ref: '#/components/schemas/SuggestEntityFact'
+    SuggestEntityFact:
+      type: object
+      required:
+      - label
+      - value
+      properties:
+        label:
+          type: string
+        value:
+          type: string
+    AudioSpeechRequest:
+      type: object
+      description: Text to speak. The fields are forwarded to the Model Plane as sent; the edge checks only their types.
+      required:
+      - input
+      properties:
+        input:
+          type: string
+          description: The text to speak. The edge does not check its length; the Model Plane does.
+        voice:
+          type: [string, 'null']
+          description: The voice the Model Plane should use.
+        format:
+          type: [string, 'null']
+          description: The audio format the caller asks for, in the Model Plane's values.
+        speed:
+          type: [number, 'null']
+          format: float
+          description: The speaking rate, as the Model Plane reads it.
+        provider:
+          type: [string, 'null']
+          description: The speech provider the caller asks for, where the Model Plane offers a choice.
+        zdr:
+          type: [boolean, 'null']
+          description: >-
+            Zero data retention for this request, forwarded to the Model Plane. A token of a ZDR organisation raises
+            it to true whatever this says.
+    AudioTranscriptionRequest:
+      type: object
+      description: Audio to transcribe. The audio_url passes the web policy before anything leaves the edge, and the Model Plane fetches it.
+      required:
+      - audio_url
+      properties:
+        audio_url:
+          type: string
+          description: The URL of the recording.
+        mime:
+          type: [string, 'null']
+          description: The recording's MIME type, when the caller knows it.
+        language:
+          type: [string, 'null']
+          description: The language of the recording, when the caller knows it.
+        provider:
+          type: [string, 'null']
+          description: The transcription provider the caller asks for, where the Model Plane offers a choice.
+        zdr:
+          type: [boolean, 'null']
+          description: >-
+            Zero data retention for this request, forwarded to the Model Plane. A token of a ZDR organisation raises
+            it to true whatever this says. The web policy is checked with the same posture.
+    AudioUsageError:
+      allOf:
+      - $ref: '#/components/schemas/ErrorBody'
+      - type: object
+        required:
+        - received_url
+        properties:
+          received_url:
+            type: [string, 'null']
+            description: The body's url field when it had one, otherwise null.
+    AudioPolicyRefusal:
+      allOf:
+      - $ref: '#/components/schemas/ErrorBody'
+      - type: object
+        required:
+        - details
+        properties:
+          details:
+            type: object
+            description: >-
+              The closed denial: a reason, the deciding layer where there is one, the capability for a domain denial
+              (domains.deny or domains.allow), and the host only when zero data retention is off. The url is never included.
     MapRequest:
       type: object
       required:
@@ -9251,6 +10403,236 @@ components:
             type: array
             items:
               type: string
+    RedirectProbeResult:
+      type: object
+      description: >-
+        The answer of POST /v1/browser/redirect-hop. `target` is always present: the absolute URL of a
+        validated redirect, or null for any other status.
+      required:
+      - target
+      properties:
+        target:
+          type: [string, 'null']
+    AuditPage:
+      type: object
+      description: >-
+        The bounded_page_v1 evidence of one public page (POST /v1/audit/page). No raw HTML, no artifact,
+        no ingest and no durable storage. `metadata.title` and `metadata.description` are the page's own
+        title and standard description tag, not Open Graph fallbacks. Links are capped at 100 and headings
+        at 200, and `partial` is true when the source exceeds either cap.
+      required:
+      - version
+      - url
+      - final_url
+      - status
+      - fetched_at
+      - run_id
+      - fingerprint
+      - metadata
+      - canonical
+      - links
+      - headings
+      - seo
+      - redirects
+      - partial
+      - limits
+      properties:
+        version:
+          type: string
+          enum:
+          - bounded_page_v1
+        url:
+          type: string
+          description: The URL as requested
+        final_url:
+          type: string
+          description: The URL the page was read from, after its redirects
+        status:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          description: The page's HTTP status; a 404 or a 500 is evidence, not a failure
+        fetched_at:
+          type: string
+          format: date-time
+          description: When the page was fetched, as an RFC 3339 time
+        run_id:
+          type: string
+          description: An id for this capture, run_ prefixed; not a Quarry agent run
+        fingerprint:
+          type: string
+          pattern: '^blake3:[0-9a-f]{64}$'
+          description: The blake3 hash of the response body
+        metadata:
+          $ref: '#/components/schemas/AuditPageMetadata'
+        canonical:
+          type: [string, 'null']
+          description: The page's canonical URL when it is public and within the length bound, or null
+        links:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/AuditPageLink'
+        headings:
+          type: array
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/AuditPageHeading'
+        seo:
+          $ref: '#/components/schemas/AuditPageSeo'
+        redirects:
+          type: array
+          description: One entry per followed redirect, in order
+          items:
+            $ref: '#/components/schemas/AuditPageRedirect'
+        partial:
+          type: boolean
+          description: True when the source has more links or headings than the caps allow
+        limits:
+          $ref: '#/components/schemas/AuditPageLimits'
+    AuditPageMetadata:
+      type: object
+      required:
+      - title
+      - description
+      - content_type
+      properties:
+        title:
+          type: [string, 'null']
+          maxLength: 512
+        description:
+          type: [string, 'null']
+          maxLength: 2048
+        content_type:
+          type: [string, 'null']
+          description: The response's Content-Type, at most 256 bytes
+    AuditPageLink:
+      type: object
+      required:
+      - url
+      properties:
+        url:
+          type: string
+          maxLength: 4096
+        text:
+          type: string
+          maxLength: 512
+          description: The link text, when the link has any; absent otherwise
+    AuditPageHeading:
+      type: object
+      required:
+      - level
+      - text
+      properties:
+        level:
+          type: integer
+          minimum: 1
+          maximum: 6
+        text:
+          type: string
+          maxLength: 512
+    AuditPageSeo:
+      type: object
+      description: The structural SEO evidence of the page (seo_page_v1). Interpreting it is the caller's job.
+      required:
+      - version
+      - noindex
+      - nofollow
+      - robots_status
+      - word_count
+      - hreflang
+      - invalid_alternates
+      - alternates_partial
+      - structured_data
+      properties:
+        version:
+          type: string
+          enum:
+          - seo_page_v1
+        noindex:
+          type: boolean
+        nofollow:
+          type: boolean
+        robots_status:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          description: The HTTP status of the robots.txt that was read
+        word_count:
+          type: integer
+          minimum: 0
+        hreflang:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditPageAlternate'
+        invalid_alternates:
+          type: integer
+          minimum: 0
+        alternates_partial:
+          type: boolean
+        structured_data:
+          $ref: '#/components/schemas/AuditPageStructuredData'
+    AuditPageAlternate:
+      type: object
+      required:
+      - lang
+      - url
+      properties:
+        lang:
+          type: string
+        url:
+          type: string
+    AuditPageStructuredData:
+      type: object
+      required:
+      - documents
+      - invalid
+      - types
+      - partial
+      properties:
+        documents:
+          type: integer
+          minimum: 0
+        invalid:
+          type: integer
+          minimum: 0
+        types:
+          type: array
+          items:
+            type: string
+        partial:
+          type: boolean
+    AuditPageRedirect:
+      type: object
+      required:
+      - url
+      - status
+      - target
+      properties:
+        url:
+          type: string
+        status:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        target:
+          type: string
+    AuditPageLimits:
+      type: object
+      required:
+      - body_bytes
+      - timeout_ms
+      - max_links
+      properties:
+        body_bytes:
+          type: integer
+          minimum: 0
+        timeout_ms:
+          type: integer
+          minimum: 0
+        max_links:
+          type: integer
+          minimum: 0
     RobotsFetchDenial:
       type: object
       description: >-
@@ -9612,6 +10994,26 @@ components:
             out_of_range with path location.latitude, location.longitude or
             location.accuracy; missing_field or unknown_field inside the object; invalid_type
             for a value that is not a number or an object.
+        profile_id:
+          type: string
+          maxLength: 64
+          pattern: '^prof_[0-9A-HJKMNP-TV-Z]{26}$'
+          description: >-
+            E4.4-b. Pins one stored browser profile (prof_<ulid>) to this one scrape: the
+            page is loaded in the browser with that profile restored read-only, so nothing
+            the page sets is written back to the profile. Alias profileId. Off unless
+            QUARRY_EDGE__SCRAPE_PROFILE_PIN is on (default off); while off the key is an
+            unknown field (stripped, never read). Accepted for person tokens only: the
+            profile must belong to the caller's verified identity, and a profile id that is
+            unknown to the caller is 404 NOT_FOUND (a profile is never created by this
+            option). A pinned scrape is personalised, logged-in content: it never reads or
+            writes the page or result cache, it is refused with ingest and under zero data
+            retention, and its effective_options carry profile_pinned true, never the id.
+            400 feature_disabled (path profile_id) while the switch is off on a caller that
+            builds the options itself; 400 invalid_profile_id (path profile_id) for a value
+            that is not a profile id; 400 conflicting_option (path profile_id) with actions
+            (an authenticated action run needs its own gate) or with no_egress; 400
+            invalid_type for a value that is not a string.
       description: >-
         Fields not listed here are unknown: ignored with an unknown_field warning
         (and Deprecation and Sunset headers) unless the edge runs strict, where they
@@ -9713,8 +11115,10 @@ components:
             The same validators as /v1/scrape; the same limits (32 selectors of 256 characters,
             `timeout_ms` 1000 to 55000) and the same camelCase aliases. Only the options that can
             apply per page are accepted: `actions`, `actions_on_error`, `max_inline_bytes`,
-            `screenshot`, `pdf`, `json`, `summary`, `question`, `highlights` and capture or AI
-            `formats` are a 400 `unsupported_option` with the path (`scrape_options.actions`). The
+            `screenshot`, `pdf`, `json`, `summary`, `question`, `highlights`, `locale`, `timezone`,
+            `location`, `profile_id` and `profileId` (a browser set-up or profile for one request,
+            which a crawl page does not have) and capture or AI `formats` are a 400
+            `unsupported_option` with the path (`scrape_options.actions`). The
             stored markdown and html artifacts of each page, and the text `ingest: true` sends to
             the Data Plane, are the cleaned content. Links are discovered from the whole page
             whatever `include_tags` and `exclude_tags` cut. A page cleaned differently from the
@@ -10257,7 +11661,7 @@ components:
             description: Inline fields left out for exceeding max_inline_bytes (not ZDR); read the matching formats.* artifact.
           effective_options:
             type: object
-            description: The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict. With max_age, `max_age` (echo, in ms) and, on a result served from the cache, `cached_at` (RFC 3339, the original fetch) and `cache_age_ms`. With actions, `actions` is a summary (count, types, total_wait_ms, capture_count, on_error), never a selector or a typed text. `redact_pii` (off or on, E3.6-5) is always reported. `page_emulation` (E4.4-a) carries the locale, timezone and location the page emulated, and is absent when the request asked for none. `no_egress` (true, Q3-E3.8.8w) is present only on a page served from a stored capture.
+            description: The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict. With max_age, `max_age` (echo, in ms) and, on a result served from the cache, `cached_at` (RFC 3339, the original fetch) and `cache_age_ms`. With actions, `actions` is a summary (count, types, total_wait_ms, capture_count, on_error), never a selector or a typed text. `redact_pii` (off or on, E3.6-5) is always reported. `page_emulation` (E4.4-a) carries the locale, timezone and location the page emulated, and is absent when the request asked for none; its `send_accept_language` (true, E4.4-a2) is present only when QUARRY_EDGE__PAGE_ACCEPT_LANGUAGE is on and a locale was set, and means the page also sent an Accept-Language header derived from that locale (the user agent is unchanged). `no_egress` (true, Q3-E3.8.8w) is present only on a page served from a stored capture.
           warnings:
             type: array
             items:
@@ -10865,3 +12269,5 @@ tags:
   description: Webhook subscriptions for change events (INNH-5)
 - name: parse
   description: Parse an uploaded PDF or DOCX to text without storing it
+- name: audio
+  description: Speech synthesis and transcription through the Model Plane

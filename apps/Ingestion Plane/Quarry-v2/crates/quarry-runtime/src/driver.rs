@@ -109,12 +109,20 @@ pub struct RenderHints {
     /// E4.4-a: the locale, timezone and location the page emulates. `None` (default): nothing is
     /// emulated. Only a browser driver that can emulate takes it; any other refuses the fetch.
     pub page_emulation: Option<quarry_core::page_emulation::PageEmulation>,
+    /// E4.4-b: the stored browser profile the fetch restores, read-only (never saved back).
+    /// `None` (default): no profile is restored. Only a browser driver takes it, and the browser
+    /// driver refuses the fetch when its browser cannot pin a profile.
+    pub profile_pin: Option<quarry_core::ids::kinds::ProfileKind>,
 }
 
 impl RenderHints {
-    /// Whether this render needs a browser: a capture, an action or a page emulation is asked for.
+    /// Whether this render needs a browser: a capture, an action, a page emulation or a
+    /// profile pin is asked for.
     pub fn needs_browser(&self) -> bool {
-        self.capture.is_some() || self.actions.is_some() || self.page_emulation.is_some()
+        self.capture.is_some()
+            || self.actions.is_some()
+            || self.page_emulation.is_some()
+            || self.profile_pin.is_some()
     }
 }
 

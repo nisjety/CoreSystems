@@ -1204,6 +1204,18 @@ pub(crate) async fn run_action(
         Ok(projection) => projection,
         Err(response) => return response,
     };
+    // E5.1: a ZDR run stores no artifacts, so a PDF capture is refused here,
+    // before any Quarry control or step call.
+    if pdf_refused_for_zdr(&action, &current_projection) {
+        return (
+            StatusCode::CONFLICT,
+            Json(error(
+                "browser_pdf_unavailable_zdr",
+                "PDF capture is not kept under Zero Data Retention.",
+            )),
+        )
+            .into_response();
+    }
     let current_mode = BrowserControlMode::from_owner_value(
         current_projection
             .get("controlMode")
@@ -2703,22 +2715,28 @@ async fn get_artifact(
 
             let content_type =
                 safe_browser_artifact_content_type(upstream_content_type.as_deref(), &bytes);
-            Response::builder()
+            // D-W5-5: a PDF artifact is served inline on the app origin, so it
+            // gets `Content-Security-Policy: sandbox` on top of the `%PDF-` magic
+            // check in `safe_browser_artifact_content_type`.
+            let is_pdf = content_type.as_bytes() == b"application/pdf";
+            let mut builder = Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, content_type)
                 .header(header::CACHE_CONTROL, "private, max-age=30")
-                .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-                .body(Body::from(bytes))
-                .unwrap_or_else(|_| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        Json(error(
-                            "browser_artifact_failed",
-                            "The browser artifact could not be returned.",
-                        )),
-                    )
-                        .into_response()
-                })
+                .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+            if is_pdf {
+                builder = builder.header(header::CONTENT_SECURITY_POLICY, "sandbox");
+            }
+            builder.body(Body::from(bytes)).unwrap_or_else(|_| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(error(
+                        "browser_artifact_failed",
+                        "The browser artifact could not be returned.",
+                    )),
+                )
+                    .into_response()
+            })
         }
         Err(_) => (
             StatusCode::BAD_GATEWAY,
@@ -4346,6 +4364,10 @@ fn observation_replay_event(
     let screenshot_url = screenshot_artifact_id
         .as_deref()
         .map(|artifact_id| artifact_url(run_id, artifact_id));
+    let pdf_artifact_id = pdf_artifact_id(observation);
+    let pdf_url = pdf_artifact_id
+        .as_deref()
+        .map(|artifact_id| artifact_url(run_id, artifact_id));
     let visual_observation_url = visual_observation_artifact_id
         .as_deref()
         .map(|artifact_id| artifact_url(run_id, artifact_id));
@@ -4364,6 +4386,8 @@ fn observation_replay_event(
         "observedAt": observation.get("observed_at").and_then(Value::as_str).unwrap_or_default(),
         "screenshotArtifactId": screenshot_artifact_id,
         "screenshotUrl": screenshot_url,
+        "pdfArtifactId": pdf_artifact_id,
+        "pdfUrl": pdf_url,
         "visualObservationArtifactId": visual_observation_artifact_id,
         "visualObservationUrl": visual_observation_url,
         "consoleCount": observation
@@ -5102,6 +5126,17 @@ fn screenshot_artifact_id(observation: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// E5.1: the artifact id of a `pdf` action's capture, with the same strict
+/// artifact-id filter as `screenshot_artifact_id`.
+fn pdf_artifact_id(observation: &Value) -> Option<String> {
+    observation
+        .get("pdf_artifact_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|artifact_id| is_valid_artifact_id(artifact_id))
+        .map(str::to_owned)
+}
+
 fn visual_observation_artifact_id(observation: &Value) -> Option<String> {
     observation
         .get("visual_observation_artifact_id")
@@ -5276,6 +5311,14 @@ fn reload_refused_for_actor(action: &Value, actor: BrowserActionActor) -> bool {
         && action.get("type").and_then(Value::as_str) == Some("reload")
 }
 
+/// E5.1: a PDF capture writes an artifact, and a ZDR run stores none, so a
+/// `pdf` action on a session whose owner projection says `zdr: true` is refused
+/// before any Quarry call.
+fn pdf_refused_for_zdr(action: &Value, projection: &Value) -> bool {
+    action.get("type").and_then(Value::as_str) == Some("pdf")
+        && projection.get("zdr").and_then(Value::as_bool) == Some(true)
+}
+
 fn sanitize_action(mut action: Value) -> Result<Value, (&'static str, String)> {
     let action_type = action
         .get("type")
@@ -5296,8 +5339,44 @@ fn sanitize_action(mut action: Value) -> Result<Value, (&'static str, String)> {
             action["url"] = Value::String(normalized);
             Ok(action)
         }
-        "click" | "press" | "scroll" | "select" | "wait" | "wait_for" | "screenshot" | "back"
-        | "forward" | "get_content" => Ok(action),
+        "click" | "press" | "scroll" | "select" | "wait" | "wait_for" | "back" | "forward"
+        | "get_content" => Ok(action),
+        "screenshot" => {
+            let known_keys = action
+                .as_object()
+                .map(|object| object.keys().all(|key| key == "type" || key == "full_page"))
+                .unwrap_or(false);
+            if !known_keys {
+                return Err((
+                    "invalid_browser_action",
+                    "Screenshot accepts only full_page.".to_owned(),
+                ));
+            }
+            let full_page = match action.get("full_page") {
+                None => false,
+                Some(Value::Bool(value)) => *value,
+                Some(_) => {
+                    return Err((
+                        "invalid_browser_action",
+                        "full_page must be a boolean.".to_owned(),
+                    ))
+                }
+            };
+            Ok(json!({ "type": "screenshot", "full_page": full_page }))
+        }
+        "pdf" => {
+            let known_keys = action
+                .as_object()
+                .map(|object| object.keys().all(|key| key == "type"))
+                .unwrap_or(false);
+            if !known_keys {
+                return Err((
+                    "invalid_browser_action",
+                    "Pdf accepts no options.".to_owned(),
+                ));
+            }
+            Ok(json!({ "type": "pdf" }))
+        }
         "click_point" => {
             validate_viewport_coordinate(&action, "x")?;
             validate_viewport_coordinate(&action, "y")?;

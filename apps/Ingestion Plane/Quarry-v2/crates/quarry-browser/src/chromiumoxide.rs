@@ -19,6 +19,7 @@ use ::chromiumoxide::cdp::browser_protocol::dom::{
 };
 use ::chromiumoxide::cdp::browser_protocol::emulation::{
     SetDeviceMetricsOverrideParams, SetFocusEmulationEnabledParams, SetTouchEmulationEnabledParams,
+    SetUserAgentOverrideParams,
 };
 use ::chromiumoxide::cdp::browser_protocol::fetch::{
     ContinueRequestParams, EnableParams as FetchEnableParams, EventRequestPaused, FailRequestParams,
@@ -331,6 +332,9 @@ struct SessionPages {
     /// E4.4-a: the locale, timezone and location each tab of this session emulates, set by
     /// `set_page_emulation` before the first tab opens and applied as each tab opens.
     page_emulation: Option<quarry_core::page_emulation::PageEmulation>,
+    /// E4.4-b: the session's profile is pinned read-only (`set_profile_pin`). It is restored into
+    /// the context, and nothing is saved back: not on release, not by the web-storage journal.
+    profile_read_only: bool,
 }
 
 /// Local Chromium driver backed by chromiumoxide.
@@ -1525,8 +1529,13 @@ impl ChromiumoxideDriver {
             ),
         )
         .await?;
+        // E4.4-a2 / D-W5-2: the native user agent plus the product token, from static config at
+        // tab open. Warn-only: on a failure the tab keeps its stock user agent.
+        if product_token_enabled() {
+            apply_product_token(&page).await;
+        }
         // WS17.C2: the profile's locale and timezone, on every tab of a restored context.
-        // The user agent is never overridden. Warn-only, and bounded as a whole.
+        // The profile's user agent is never applied. Warn-only, and bounded as a whole.
         let profile_emulation = snapshot
             .as_ref()
             .map(ProfileEmulation::from_snapshot)
@@ -1972,7 +1981,8 @@ impl ChromiumoxideDriver {
     }
 
     /// WS17.C1: a profile-enabled session under capture v2 keeps an origin journal and
-    /// installs the pagehide flush on its tabs. Everything else records nothing.
+    /// installs the pagehide flush on its tabs. Everything else records nothing. E4.4-b: a
+    /// session pinned read-only never saves, so it keeps no journal and installs no flush.
     async fn enable_profile_journal(
         &self,
         session: &BrowserSession,
@@ -1984,6 +1994,9 @@ impl ChromiumoxideDriver {
         }
         let mut pages = self.pages.lock().await;
         let session_pages = pages.entry(session_key.to_owned()).or_default();
+        if session_pages.profile_read_only {
+            return None;
+        }
         if let Ok(mut journal) = session_pages.journal.lock() {
             journal.enable();
         }
@@ -2139,6 +2152,21 @@ impl ChromiumoxideDriver {
         let Some(store) = self.profiles.as_ref() else {
             return Ok(());
         };
+        // E4.4-b: a session pinned read-only restored its profile and saves nothing back, whatever
+        // its pages did. The check comes before both the capture v1 and the capture v2 saves.
+        let read_only = {
+            let pages = self.pages.lock().await;
+            pages
+                .get(&Self::session_key(session))
+                .is_some_and(|session_pages| session_pages.profile_read_only)
+        };
+        if read_only {
+            tracing::info!(
+                event = "profile_save_skipped_read_only",
+                "browser profile not saved: this session restored it read-only"
+            );
+            return Ok(());
+        }
         // SC4 D1: a session whose context never restored the profile (it only observed a
         // placeholder tab) does not save its empty jar over the stored profile.
         let never_restored = {
@@ -4659,6 +4687,78 @@ fn page_hygiene_enabled() -> bool {
     )
 }
 
+/// E4.4-a2 / D-W5-2: append the product token to the tab's native user agent.
+const PRODUCT_TOKEN_ENV: &str = "QUARRY_BROWSER__PRODUCT_TOKEN";
+
+/// Whether a raw `QUARRY_BROWSER__PRODUCT_TOKEN` value is on: `on`, `1` or `true`, trimmed,
+/// any case. Unset or anything else is off.
+fn parse_product_token(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("on" | "1" | "true")
+    )
+}
+
+/// Whether local Chromium tabs carry the product token. Read once per process.
+fn product_token_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| parse_product_token(std::env::var(PRODUCT_TOKEN_ENV).ok().as_deref()))
+}
+
+/// Why the product token could not be installed on a tab. A closed class; the user agent text
+/// itself is never logged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentityOverrideFailure {
+    /// `Browser.getVersion` failed, so the native user agent is unknown.
+    NativeUnavailable,
+    /// `Emulation.setUserAgentOverride` failed.
+    OverrideRejected,
+}
+
+impl IdentityOverrideFailure {
+    fn class(self) -> &'static str {
+        match self {
+            Self::NativeUnavailable => "native_unavailable",
+            Self::OverrideRejected => "override_rejected",
+        }
+    }
+}
+
+/// D-W5-2: keep the browser's own native user agent and append the single product token to it
+/// on `page`. Installed once at tab open from static config: nothing here reads a block status
+/// or a challenge signal (ADR 5 rules 1-3), and nothing else is overridden (no platform, no
+/// accept-language, no client-hint metadata). Never fatal: on a failure the tab keeps its stock
+/// user agent.
+async fn apply_product_token(page: &Page) {
+    // `Browser.getVersion`: the browser's own string, never an earlier override.
+    let (failure, text) = match best_effort(Op::TabAttach, page.user_agent()).await {
+        Err(text) => (IdentityOverrideFailure::NativeUnavailable, text),
+        Ok(native) => {
+            let honest = quarry_core::identity::append_product_token(&native);
+            if honest == native.trim_end() {
+                // Already carries the token.
+                return;
+            }
+            match best_effort(
+                Op::TabAttach,
+                page.execute(SetUserAgentOverrideParams::new(honest)),
+            )
+            .await
+            {
+                Ok(_) => return,
+                Err(text) => (IdentityOverrideFailure::OverrideRejected, text),
+            }
+        }
+    };
+    tracing::warn!(
+        event = "browser_identity_override_failed",
+        failure_class = failure.class(),
+        error_class = crate::deadlines::cdp_class(&text),
+        "product token not installed; the tab keeps its stock user agent"
+    );
+}
+
 fn viewport_emulation_error(error: impl std::fmt::Display) -> QuarryError {
     QuarryError::new(
         ErrorCode::DriverFailed,
@@ -4989,6 +5089,9 @@ impl BrowserDriver for ChromiumoxideDriver {
             // E3.1-c2: one-time-code fills are advertised only with
             // QUARRY_EDGE__FILL_OTP on (default off).
             otp_fill: self.fill_otp,
+            // E4.4-b: a stored profile restores read-only only with a profile store to read it
+            // from.
+            profile_pin: self.profiles.is_some(),
         }
     }
 
@@ -5048,6 +5151,29 @@ impl BrowserDriver for ChromiumoxideDriver {
             .with_details(json!({ "reason": "page_already_open" })));
         }
         session_pages.page_emulation = (!emulation.is_empty()).then(|| emulation.clone());
+        Ok(())
+    }
+
+    /// E4.4-b: the session's stored profile is restored into its context before the first
+    /// navigation, and with `read_only` nothing is saved back (see `persist_current_page`). Set
+    /// before the first page, like `set_page_emulation`. A driver without a profile store refuses:
+    /// there is no profile to pin.
+    async fn set_profile_pin(&self, session: &BrowserSession, read_only: bool) -> QuarryResult<()> {
+        self.refuse_lost(session)?;
+        if self.profiles.is_none() {
+            return Err(QuarryError::unsupported_action("profile_pin"));
+        }
+        let session_key = Self::session_key(session);
+        let mut pages = self.pages.lock().await;
+        let session_pages = pages.entry(session_key).or_default();
+        if !session_pages.tabs.is_empty() {
+            return Err(QuarryError::new(
+                ErrorCode::DriverFailed,
+                "a profile pin must be set before the session opens its first page",
+            )
+            .with_details(json!({ "reason": "page_already_open" })));
+        }
+        session_pages.profile_read_only = read_only;
         Ok(())
     }
 

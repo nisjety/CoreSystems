@@ -31,7 +31,10 @@ fn the_ask_loop_offers_the_contract_read_by_name_schema_and_enum() {
     let def = connector_reads::tool_definition();
     assert_eq!(def.name, READ_TOOL_NAME);
     assert_eq!(def.description, READ_TOOL_DESCRIPTION);
-    assert_eq!(def.parameters_json, read_tool_parameters_json());
+    assert_eq!(
+        def.parameters_json,
+        read_tool_parameters_json(connector_reads::document_url_enabled())
+    );
 
     let schema: Value = serde_json::from_str(&def.parameters_json).expect("the schema is JSON");
     assert!(

@@ -27,7 +27,7 @@ runtime dep for us (Rust/Go), but its *practice* — read source, not marketing 
 | **`/extract`** — prompt+schema across `domain/*` wildcards | per-page StructuredExtractClient only | 🟡 | **P1** multi-URL/wildcard extract fan-out |
 | `agent` (FIRE-1) NL extraction | AgentLoop + Planner exist, not exposed as one call | 🟡 | fold into P1 `/v1/extract {prompt,schema}` |
 | media parsing (PDF/DOCX) | PDF and DOCX text on `/v1/scrape` (`pdf.rs`, `docx.rs`) when `QUARRY_EDGE__DOC_ROUTING=on`; the default `shadow` only detects. The parse runs in a child process under address-space, CPU and file-descriptor limits (`QUARRY_EDGE__DOC_PARSE_ISOLATION`, default `process` on Unix for the edge binary). No OCR, no XLSX, PPTX, ODF or EPUB | 🟡 | OCR for scans; XLSX, PPTX, ODF and EPUB extraction |
-| MCP server (agents connect in 1 cmd) | none | ⛔ | deferred — **Verevon** is Quarry-v2's client, not external agents |
+| MCP server (agents connect in 1 cmd) | none | ⛔ | deferred — **Verevon** is Quarry-v2's client, not external agents. Decision record: ADR-7 note, parked; CLI and n8n deleted (`docs/decisions/ADR-7-external-contract-mcp-cli.md`, applied 2026-11-11) |
 | reliability claims (96% web, P95 3.4s) | unproven | 🟡 | benchmark lens → P2 live runs |
 
 ### Tavily (LLM-optimized search/extract/crawl/map/research)
@@ -111,7 +111,7 @@ Cloud hosting, captcha solving, 1000+ SaaS integrations, keyless public tier, re
 ownership (stays in Model/Data planes).
 **MCP server (deferred):** Verevon is Quarry-v2's driver/client — Quarry serves Verevon over its
 REST/GraphQL surface, not external AI agents over MCP. Revisit only if third-party agent access
-becomes a goal.
+becomes a goal. Decision record: ADR-7 note, parked; CLI and n8n deleted (`docs/decisions/ADR-7-external-contract-mcp-cli.md`, applied 2026-11-11).
 
 ---
 

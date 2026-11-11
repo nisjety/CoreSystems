@@ -69,6 +69,17 @@
     {
       "applies_to": "all",
       "baseline": "disabled",
+      "key": "browser.consent.reject",
+      "kind": "ability",
+      "reserved": false,
+      "since": "W5-FENCE-1",
+      "site": "Verevon desktop browser: SPA reads the effective view and passes consentReject to the adapter (D-W5-4)",
+      "unlockable": true,
+      "zdr_implies_disabled": false
+    },
+    {
+      "applies_to": "all",
+      "baseline": "disabled",
       "key": "browser.recording",
       "kind": "ability",
       "reserved": true,

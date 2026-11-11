@@ -846,6 +846,11 @@ pub struct BrowserDriverCapabilities {
     /// the wire: an older peer omits it and reads as `false`.
     #[serde(default)]
     pub otp_fill: bool,
+    /// E4.4-b: the driver can restore a stored profile read-only into a session pinned to it
+    /// (`BrowserDriver::set_profile_pin`). True only with a profile store. Additive on the wire:
+    /// an older peer omits it and reads as `false`.
+    #[serde(default)]
+    pub profile_pin: bool,
 }
 
 /// E3.1-c: what the one-time-code preconditions found on a target that passed
@@ -1193,6 +1198,20 @@ pub trait BrowserDriver: Send + Sync {
         _emulation: &quarry_core::page_emulation::PageEmulation,
     ) -> QuarryResult<()> {
         Err(QuarryError::unsupported_action("page_emulation"))
+    }
+
+    /// E4.4-b: pin the stored profile this session restores. With `read_only` the profile is
+    /// restored into the session's context before its first navigation and nothing is saved back:
+    /// not on release, and not by the web-storage flush. `read_only == false` leaves the save on
+    /// release in place. It is set after `acquire` and before the session's first page, as
+    /// `set_page_emulation` is; a session whose page is open refuses it. A driver without a profile
+    /// store refuses here too. Default: refused (a remote provider fails closed).
+    async fn set_profile_pin(
+        &self,
+        _session: &BrowserSession,
+        _read_only: bool,
+    ) -> QuarryResult<()> {
+        Err(QuarryError::unsupported_action("profile_pin"))
     }
     async fn goto(&self, session: &BrowserSession, url: &str) -> QuarryResult<()>;
 
@@ -1957,12 +1976,13 @@ mod capability_wire_tests {
             parsed_oldest.capture_options,
             parsed_oldest.page_emulation,
             parsed_oldest.otp_fill,
+            parsed_oldest.profile_pin,
         ] {
             assert!(!additive);
         }
         // A peer that predates trusted_input but has the later additive keys (WS8.E tab keys,
-        // WS13.3 capture keys, E4.4-a page emulation) sends them as false, and the new key is the
-        // only difference.
+        // WS13.3 capture keys, E4.4-a page emulation, E3.1-c2 one-time-code fills, E4.4-b profile
+        // pin) sends them as false, and the new key is the only difference.
         let older = serde_json::json!({
             "persistent_profile": true,
             "devtools_trace": false,
@@ -1978,7 +1998,8 @@ mod capability_wire_tests {
             "scrape_actions": false,
             "capture_options": false,
             "page_emulation": false,
-            "otp_fill": false
+            "otp_fill": false,
+            "profile_pin": false
         });
         let parsed: BrowserDriverCapabilities =
             serde_json::from_value(older.clone()).expect("older shape parses");

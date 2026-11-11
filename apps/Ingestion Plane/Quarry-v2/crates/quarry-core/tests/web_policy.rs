@@ -68,6 +68,7 @@ fn arb_layer() -> impl Strategy<Value = PolicyLayer> {
         CapKey::ActUpload,
         CapKey::ActDownload,
         CapKey::ProfilePersistent,
+        CapKey::ConsentReject,
         CapKey::SearchPaidProvider,
         CapKey::Recording,
         CapKey::RequestCredentials,

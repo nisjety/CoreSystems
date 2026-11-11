@@ -286,6 +286,12 @@ jobs:
       - name: OpenAPI challenge parity
         run: node --test scripts/tests/openapi-challenge-parity.test.mjs
 
+      # The internal spec must document exactly the /v1/internal routes the edge and quarry-control
+      # register (decision 3.13), and the public spec must carry no bare type null, which the pinned
+      # SDK generator cannot handle. Neither guard ran in CI before this step.
+      - name: OpenAPI internal spec guard and no bare null
+        run: node --test scripts/tests/openapi-internal-guard.test.mjs scripts/tests/openapi-no-bare-null.test.mjs
+
       - name: Check quarry-browser (chromiumoxide feature)
         run: cargo check -p quarry-browser --features chromiumoxide
 

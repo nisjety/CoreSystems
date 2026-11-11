@@ -479,6 +479,12 @@ pub struct CompileProcedureBody {
     /// never silently promoted to an autonomous action policy.
     #[serde(default)]
     pub procedure_id: Option<String>,
+    /// E4.2 step 2: compile a version 2 (canonical) procedure, with semantic targets, typed-text
+    /// slots and the postconditions Quarry verified. Dark: while `QUARRY_EDGE__PROCEDURE_CANONICAL`
+    /// is off (the default) a request that sets it is refused with 400 `procedure_canonical_disabled`.
+    /// Absent or false compiles version 1, as before.
+    #[serde(default)]
+    pub canonical: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -486,6 +492,11 @@ pub struct ReplayCheckBody {
     pub procedure: BrowserProcedure,
     #[serde(default)]
     pub actions: Vec<AgentAction>,
+    /// E4.2 step 2: the actions are a leading part of the procedure, so the replay may stop early.
+    /// Only a version 2 procedure takes it; a version 1 procedure with `prefix` true is refused with
+    /// 400 `prefix_needs_v2`. Actions beyond the procedure are always a repair.
+    #[serde(default)]
+    pub prefix: bool,
 }
 
 #[derive(Debug, Deserialize)]

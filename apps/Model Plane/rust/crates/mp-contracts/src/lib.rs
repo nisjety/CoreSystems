@@ -10,6 +10,7 @@ pub mod context_refs;
 pub mod dataplane_posture;
 pub mod deck_manifest;
 pub mod deck_theme;
+pub mod document_url;
 pub mod durable_gate;
 pub mod effect_ledger;
 pub mod egress_tiers;
