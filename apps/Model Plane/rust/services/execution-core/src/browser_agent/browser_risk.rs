@@ -940,6 +940,7 @@ mod tests {
                         name: target.name.clone(),
                         text: target.text.clone(),
                         frame_id: target.frame_id.clone(),
+                        ..WireSnapshotTarget::default()
                     })
                     .collect(),
                 frames: Vec::new(),

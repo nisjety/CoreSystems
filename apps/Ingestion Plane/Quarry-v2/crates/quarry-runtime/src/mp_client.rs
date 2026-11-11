@@ -434,11 +434,17 @@ impl std::fmt::Debug for AiChatResponse {
 /// into report codes and no other layer reads a status.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ModelHopError {
-    /// Quarry holds no credential for this lane (the Dynamic path is not built
-    /// until the grant exists, and an unauthenticated client has none). Nothing
-    /// was sent and nothing was minted.
+    /// Quarry holds no credential for this lane: the client has no static
+    /// development token and no token provider. Nothing was sent and nothing
+    /// was minted.
     #[error("the Model Plane lane is not granted to Quarry")]
     LaneNotGranted,
+    /// The Dynamic path could not produce the lane's two org-bound bearers
+    /// (`model-extract` and `model-extract-inference`): the verified org was
+    /// empty, a manifest row could not be built, or Auth Core did not mint.
+    /// Nothing was sent. Status reason `model_lane_unavailable`.
+    #[error("the Model Plane lane credentials are unavailable")]
+    LaneUnavailable,
     /// 401: the gateway did not accept the token.
     #[error("the Model Plane did not accept the credential")]
     Unauthorized,
@@ -471,6 +477,18 @@ pub enum ModelHopError {
 /// The longest answer body read.
 const MAX_CHAT_BODY_BYTES: usize = 4 * 1024 * 1024;
 
+/// The two manifest rows of a WS16 model lane call, in header order: the
+/// user-ingress bearer (`model-extract`, aud `model-gateway`) and the
+/// `x-inference-authorization` bearer (`model-extract-inference`, aud
+/// `inference-core`). Both are `granted: true` since WS16.S2. String
+/// literals on purpose: the manifest tests find call sites by scanning.
+fn lane_token_requests() -> QuarryResult<(ServiceTokenRequest, ServiceTokenRequest)> {
+    Ok((
+        ServiceTokenRequest::from_manifest("model-extract")?,
+        ServiceTokenRequest::from_manifest("model-extract-inference")?,
+    ))
+}
+
 impl ModelPlaneClient {
     /// Development bypass only: the token sent as `x-inference-authorization`.
     /// Without it the one dev token (`with_bearer_token`) is sent in both
@@ -494,34 +512,28 @@ impl ModelPlaneClient {
         self
     }
 
-    /// One chat call on behalf of `org_id`.
+    /// One chat call on behalf of `org_id`, the verified org of the run.
     ///
-    /// Only the static development credential works today. The Dynamic path
-    /// (Auth Core minted tokens) needs the grant and the manifest rows that are
-    /// owner decision OD-1, so it returns [`ModelHopError::LaneNotGranted`]
-    /// without minting anything; so does a client with no credential.
+    /// The two bearers come from [`Self::lane_bearers`]: the static
+    /// development pair, or (Dynamic) the `model-extract` and
+    /// `model-extract-inference` tokens Auth Core mints for `org_id`. A
+    /// client with no credential answers [`ModelHopError::LaneNotGranted`];
+    /// a Dynamic client that cannot mint answers
+    /// [`ModelHopError::LaneUnavailable`]. Both send nothing.
     ///
     /// A connect error, 502 or 503 is retried once; a read timeout never is.
+    /// A 401 on the Dynamic path invalidates both tokens and is retried once
+    /// with freshly minted ones.
     pub async fn chat_for_org(
         &self,
         org_id: &str,
         req: &AiChatRequest,
     ) -> Result<AiChatResponse, ModelHopError> {
-        // The org will pick the minted token once the Dynamic path exists.
-        let _ = org_id;
-        let (bearer, inference) = match &self.auth {
-            ModelPlaneAuth::StaticDev(token) => (
-                token.clone(),
-                self.inference_token.clone().unwrap_or_else(|| token.clone()),
-            ),
-            ModelPlaneAuth::Dynamic(_) | ModelPlaneAuth::None => {
-                return Err(ModelHopError::LaneNotGranted)
-            }
-        };
+        let (mut bearer, mut inference) = self.lane_bearers(org_id, false).await?;
         let url = format!("{}/v1/ai/chat", self.base_url.trim_end_matches('/'));
-        let mut attempt = 0u8;
+        let mut transient_retried = false;
+        let mut refreshed = false;
         loop {
-            attempt += 1;
             let sent = self
                 .http
                 .post(&url)
@@ -534,19 +546,122 @@ impl ModelPlaneClient {
             let resp = match sent {
                 Ok(resp) => resp,
                 Err(e) if e.is_timeout() => return Err(ModelHopError::Timeout),
-                Err(e) if e.is_connect() && attempt == 1 => {
+                Err(e) if e.is_connect() && !transient_retried => {
+                    transient_retried = true;
                     tokio::time::sleep(self.retry_backoff).await;
                     continue;
                 }
                 Err(_) => return Err(ModelHopError::Transport),
             };
             let status = resp.status().as_u16();
-            if matches!(status, 502 | 503) && attempt == 1 {
+            if matches!(status, 502 | 503) && !transient_retried {
+                transient_retried = true;
                 tokio::time::sleep(self.retry_backoff).await;
+                continue;
+            }
+            if status == 401 && !refreshed && self.is_dynamic() {
+                refreshed = true;
+                (bearer, inference) = self.refresh_lane_bearers(org_id).await?;
                 continue;
             }
             return Self::decode_chat(resp).await;
         }
+    }
+
+    fn is_dynamic(&self) -> bool {
+        matches!(self.auth, ModelPlaneAuth::Dynamic(_))
+    }
+
+    /// The two bearers of a WS16 model lane call (`/v1/ai/chat` and the
+    /// document lanes): the user-ingress bearer and the
+    /// `x-inference-authorization` bearer, in that order.
+    ///
+    /// - No credential: [`ModelHopError::LaneNotGranted`].
+    /// - Static development: the dev token, and the dev inference token (or
+    ///   the one dev token again).
+    /// - Dynamic: the `model-extract` row (aud `model-gateway`) and the
+    ///   `model-extract-inference` row (aud `inference-core`), both minted by
+    ///   Auth Core for `org_id`, the run's verified org, never a header or
+    ///   body value. An empty org, a row that cannot be built or a refused
+    ///   mint is [`ModelHopError::LaneUnavailable`]; nothing is sent.
+    ///
+    /// The bearer values are never logged and never part of an error.
+    async fn lane_bearers(
+        &self,
+        org_id: &str,
+        force_refresh: bool,
+    ) -> Result<(String, String), ModelHopError> {
+        match &self.auth {
+            ModelPlaneAuth::None => Err(ModelHopError::LaneNotGranted),
+            ModelPlaneAuth::StaticDev(token) => Ok((
+                token.clone(),
+                self.inference_token.clone().unwrap_or_else(|| token.clone()),
+            )),
+            ModelPlaneAuth::Dynamic(provider) => {
+                let org_id = org_id.trim();
+                if org_id.is_empty() {
+                    tracing::warn!(
+                        reason = "model_lane_unavailable",
+                        detail = "missing_org",
+                        "model lane bearers not minted"
+                    );
+                    return Err(ModelHopError::LaneUnavailable);
+                }
+                let (ingress_request, inference_request) =
+                    lane_token_requests().map_err(|_| {
+                        tracing::warn!(
+                            reason = "model_lane_unavailable",
+                            detail = "manifest_row",
+                            "model lane bearers not minted"
+                        );
+                        ModelHopError::LaneUnavailable
+                    })?;
+                let ingress = provider
+                    .token_for_org(org_id, &ingress_request, force_refresh)
+                    .await
+                    .map_err(|_| {
+                        tracing::warn!(
+                            reason = "model_lane_unavailable",
+                            row = "model-extract",
+                            "model lane bearer mint failed"
+                        );
+                        ModelHopError::LaneUnavailable
+                    })?;
+                let inference = provider
+                    .token_for_org(org_id, &inference_request, force_refresh)
+                    .await
+                    .map_err(|_| {
+                        tracing::warn!(
+                            reason = "model_lane_unavailable",
+                            row = "model-extract-inference",
+                            "model lane bearer mint failed"
+                        );
+                        ModelHopError::LaneUnavailable
+                    })?;
+                Ok((ingress.expose().to_owned(), inference.expose().to_owned()))
+            }
+        }
+    }
+
+    /// After a 401 on the Dynamic path: drop both cached tokens for `org_id`
+    /// and mint them again. The gateway already refused the request, so a
+    /// refresh that cannot mint answers the 401's own error
+    /// ([`ModelHopError::Unauthorized`]), not `LaneUnavailable` (which means
+    /// nothing was sent).
+    async fn refresh_lane_bearers(
+        &self,
+        org_id: &str,
+    ) -> Result<(String, String), ModelHopError> {
+        if let ModelPlaneAuth::Dynamic(provider) = &self.auth {
+            if let Ok((ingress_request, inference_request)) = lane_token_requests() {
+                let org_id = org_id.trim();
+                provider.invalidate(org_id, &ingress_request).await;
+                provider.invalidate(org_id, &inference_request).await;
+            }
+        }
+        self.lane_bearers(org_id, true)
+            .await
+            .map_err(|_| ModelHopError::Unauthorized)
     }
 
     async fn decode_chat(resp: reqwest::Response) -> Result<AiChatResponse, ModelHopError> {
@@ -587,10 +702,12 @@ impl ModelPlaneClient {
 // passed through and never empty text. The caller turns the error into a
 // failed page (`pages_failed`), as the approved fail-closed PII decision says.
 //
-// Credentials follow `chat_for_org`: only the static development pair works
-// today. The production grant (two service-route rows on model-gateway and the
-// Auth Core manifest rows) is a Control Plane and Model Plane item (DR-15.1),
-// so the Dynamic path answers `LaneNotGranted` without minting anything.
+// Credentials follow `chat_for_org` (`lane_bearers`, WS16.S3): the static
+// development pair, or on the Dynamic path the `model-extract` and
+// `model-extract-inference` tokens minted for the verified org (granted by
+// WS16.S2, DR-15.1), with the same one-refresh retry of a 401. Whether the
+// gateway admits the service principal on these two routes is the gateway's
+// answer, mapped like any other status.
 
 /// The switch for the OCR lane. Off unless set to 1, true, on or yes.
 pub const OCR_FLAG_ENV: &str = "QUARRY_EDGE__OCR";
@@ -709,6 +826,7 @@ impl DocumentLaneError {
             DocumentLaneError::InvalidInput { .. } => "invalid_input",
             DocumentLaneError::Hop { hop, .. } => match hop {
                 ModelHopError::LaneNotGranted => "lane_not_granted",
+                ModelHopError::LaneUnavailable => "lane_unavailable",
                 ModelHopError::Unauthorized | ModelHopError::RouteDenied => "not_authorized",
                 ModelHopError::ZdrRefused => "zdr_refused",
                 ModelHopError::RateLimited { .. } => "rate_limited",
@@ -1067,28 +1185,19 @@ impl ModelPlaneClient {
     }
 
     /// One POST on a document lane with the chat lane's retry rule: a connect
-    /// error, 502 or 503 once; a timeout never (the provider may have charged).
+    /// error, 502 or 503 once; a timeout never (the provider may have charged);
+    /// a 401 on the Dynamic path once, with both tokens minted again.
     async fn post_document_lane<B: Serialize + ?Sized>(
         &self,
         org_id: &str,
         lane: DocumentLane,
         body: &B,
     ) -> Result<bytes::Bytes, ModelHopError> {
-        // The org will pick the minted token once the Dynamic path exists.
-        let _ = org_id;
-        let (bearer, inference) = match &self.auth {
-            ModelPlaneAuth::StaticDev(token) => (
-                token.clone(),
-                self.inference_token.clone().unwrap_or_else(|| token.clone()),
-            ),
-            ModelPlaneAuth::Dynamic(_) | ModelPlaneAuth::None => {
-                return Err(ModelHopError::LaneNotGranted)
-            }
-        };
+        let (mut bearer, mut inference) = self.lane_bearers(org_id, false).await?;
         let url = format!("{}{}", self.base_url.trim_end_matches('/'), lane.route());
-        let mut attempt = 0u8;
+        let mut transient_retried = false;
+        let mut refreshed = false;
         loop {
-            attempt += 1;
             let sent = self
                 .http
                 .post(&url)
@@ -1101,15 +1210,22 @@ impl ModelPlaneClient {
             let resp = match sent {
                 Ok(resp) => resp,
                 Err(e) if e.is_timeout() => return Err(ModelHopError::Timeout),
-                Err(e) if e.is_connect() && attempt == 1 => {
+                Err(e) if e.is_connect() && !transient_retried => {
+                    transient_retried = true;
                     tokio::time::sleep(self.retry_backoff).await;
                     continue;
                 }
                 Err(_) => return Err(ModelHopError::Transport),
             };
             let status = resp.status().as_u16();
-            if matches!(status, 502 | 503) && attempt == 1 {
+            if matches!(status, 502 | 503) && !transient_retried {
+                transient_retried = true;
                 tokio::time::sleep(self.retry_backoff).await;
+                continue;
+            }
+            if status == 401 && !refreshed && self.is_dynamic() {
+                refreshed = true;
+                (bearer, inference) = self.refresh_lane_bearers(org_id).await?;
                 continue;
             }
             if !resp.status().is_success() {

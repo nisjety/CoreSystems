@@ -23,6 +23,8 @@ export type BrowserAction =
   | { type: 'get_content' }
   /** Human-only (WS9.B): the gateway refuses it for agent actors. */
   | { type: 'reload'; ignore_cache?: boolean }
+  /** Saves the page as a PDF artifact (E5.1, behind VITE_BROWSER_PDF). The gateway refuses it for zero-retention sessions. */
+  | { type: 'pdf' }
 
 export type BrowserInteractiveElement = {
   role?: string | null
@@ -64,6 +66,8 @@ export type BrowserObservation = {
   dom_summary?: BrowserDomSummary | null
   network_summary?: Array<{ content_type?: string | null; method: string; status: number; url: string }>
   observed_at?: string
+  /** The artifact of the page's PDF capture (a `pdf` action, E5.1); absent unless the page was saved as a PDF. */
+  pdf_artifact_id?: string | null
   policy_denials?: string[]
   run_id: string
   screenshot_artifact_id?: string | null
@@ -179,6 +183,9 @@ export type BrowserTimelineEntry = {
   domNodeCount?: number | null
   networkSummary?: Array<{ content_type?: string | null; method: string; status: number; url: string }> | null
   observedAt?: string | null
+  /** The page's PDF capture for this step (E5.1), when the step was a `pdf` action. */
+  pdfArtifactId?: string | null
+  pdfUrl?: string | null
   policyDenials?: string[] | null
   screenshotArtifactId?: string | null
   screenshotUrl?: string | null
@@ -211,6 +218,9 @@ export type BrowserReplayEvent = {
   networkCount?: number | null
   observedAt?: string | null
   operation?: 'new' | 'select' | 'close' | string | null
+  /** The page's PDF capture for this event (E5.1), when the event was a `pdf` action. */
+  pdfArtifactId?: string | null
+  pdfUrl?: string | null
   persisted?: boolean | null
   policyDenialCount?: number | null
   screenshotArtifactId?: string | null
@@ -384,6 +394,18 @@ export type BrowserProcedureStepView = {
   /** The action; a typed `text` is replaced by `{ redacted: true, length }`. */
   action: Record<string, unknown>
   expectedOutcome: string
+  /** Version 2 only: the element a semantic step acts on, by its locator alone. */
+  target?: { locator: Record<string, unknown> }
+  /** Version 2 only: the name of the slot this step types into. A name, never a value. */
+  slot?: string
+  /** Version 2 only: the postcondition Quarry verified for this step; every condition in `all` held. */
+  expect?: { all: Array<Record<string, unknown>> }
+}
+
+/** An open input of a version 2 procedure, by name and kind only. A replay supplies its value. */
+export type BrowserProcedureSlotView = {
+  name: string
+  kind: 'text' | 'secret'
 }
 
 export type BrowserProcedureView = {
@@ -391,6 +413,8 @@ export type BrowserProcedureView = {
   version: number
   sourceReceiptIds: string[]
   steps: BrowserProcedureStepView[]
+  /** Version 2 only: the open inputs of the procedure. Absent for version 1. */
+  slots?: BrowserProcedureSlotView[]
 }
 
 export type BrowserProcedureQuality = {

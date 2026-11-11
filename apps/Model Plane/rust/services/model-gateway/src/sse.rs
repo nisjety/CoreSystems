@@ -2089,25 +2089,31 @@ async fn finish_research_run(
     }
 }
 
-/// The end a research pipeline's outcome makes (E4.6 062b). The status is the one the pipeline's stop maps to:
-/// `completed`, `cancelled`, or `stopped` for a deadline, a cost stop or no evidence. A run that is not zero-retention
-/// keeps its partial result, and its report's id when it wrote a report; a zero-retention run keeps neither, since
-/// Session Core refuses them.
-fn research_finish(
-    run_id: &str,
-    research: &crate::deep_research::DeepResearchOutcome,
-    request_id: &str,
-    zdr: bool,
-) -> mp_contracts::model_plane::v1::FinishRequest {
+/// The status a research pipeline's stop ends its run with (E4.6 062b): the closed word the run record is finished
+/// with, and the `research_run` frame carries. `completed`, `cancelled`, or `stopped` for a deadline, a cost stop or
+/// no evidence. `expired` is Session Core's deadline status, which this stream never writes.
+fn research_status(stop: crate::deep_research::ResearchStop) -> &'static str {
     use crate::deep_research::ResearchStop;
-    let status = match research.stop {
+    match stop {
         ResearchStop::Completed => "completed",
         ResearchStop::Cancelled => "cancelled",
         ResearchStop::Deadline
         | ResearchStop::BudgetUsd
         | ResearchStop::CostUnpriced
         | ResearchStop::NoEvidence => "stopped",
-    };
+    }
+}
+
+/// The end a research pipeline's outcome makes (E4.6 062b). The status is [`research_status`] of the pipeline's stop. A
+/// run that is not zero-retention keeps its partial result, and its report's id when it wrote a report; a zero-retention
+/// run keeps neither, since Session Core refuses them.
+fn research_finish(
+    run_id: &str,
+    research: &crate::deep_research::DeepResearchOutcome,
+    request_id: &str,
+    zdr: bool,
+) -> mp_contracts::model_plane::v1::FinishRequest {
+    let status = research_status(research.stop);
     let report_artifact_id = match &research.report {
         Some(_) if !zdr => crate::deep_research::report_artifact_id(request_id),
         _ => String::new(),
@@ -4755,6 +4761,24 @@ pub async fn invoke_stream_sse(
             } else {
                 None
             };
+            // The run's id goes out before the pipeline starts (E4.6 062b). The sink then takes the cursor this frame
+            // advanced, so the pipeline's own frames never reuse its `id:`.
+            if let Some(id) = &research_run {
+                emit_and_buffer(
+                    &tx,
+                    &stream_buffers,
+                    &buffer_key,
+                    &mut seq,
+                    &features,
+                    &req_id,
+                    crate::sse_events::ChatEvent::ResearchRun {
+                        id: id.clone(),
+                        status: "running",
+                    },
+                )
+                .await;
+                seq = sink.sync_cursor(seq).await;
+            }
             let research_progress = research_run.as_ref().map(|id| ResearchRunProgress {
                 client: crate::research_runs::ResearchRunsClient::new(
                     session_state.research_run_client.clone(),
@@ -4795,6 +4819,19 @@ pub async fn invoke_stream_sse(
                         ..Default::default()
                     };
                     finish_research_run(&session_state, &session_bearer, failed).await;
+                    emit_and_buffer(
+                        &tx,
+                        &stream_buffers,
+                        &buffer_key,
+                        &mut seq,
+                        &features,
+                        &req_id,
+                        crate::sse_events::ChatEvent::ResearchRun {
+                            id: id.clone(),
+                            status: "failed",
+                        },
+                    )
+                    .await;
                 }
                 emit_prepared_failure(
                     &tx,
@@ -4816,6 +4853,23 @@ pub async fn invoke_stream_sse(
             // than answering from evidence the user already declined to wait
             // for. Same terminal shape as the streaming loop's cancel branch.
             if research.cancelled {
+                // The run's end goes out before the stream's terminal frame, so it is buffered before the stream is
+                // marked ended. Its status is the one the finish below records.
+                if let Some(id) = &research_run {
+                    emit_and_buffer(
+                        &tx,
+                        &stream_buffers,
+                        &buffer_key,
+                        &mut seq,
+                        &features,
+                        &req_id,
+                        crate::sse_events::ChatEvent::ResearchRun {
+                            id: id.clone(),
+                            status: research_status(research.stop),
+                        },
+                    )
+                    .await;
+                }
                 emit_turn_timing(
                     &tx,
                     &timing,
@@ -4858,6 +4912,20 @@ pub async fn invoke_stream_sse(
             if let Some(id) = &research_run {
                 let ended = research_finish(id, &research, &req_id, effective_zdr);
                 finish_research_run(&session_state, &session_bearer, ended).await;
+                emit_and_buffer(
+                    &tx,
+                    &stream_buffers,
+                    &buffer_key,
+                    &mut seq,
+                    &features,
+                    &req_id,
+                    crate::sse_events::ChatEvent::ResearchRun {
+                        id: id.clone(),
+                        status: research_status(research.stop),
+                    },
+                )
+                .await;
+                seq = sink.sync_cursor(seq).await;
             }
             turn_evidence.tool_successes += research.tool_successes;
             turn_evidence.tool_failures += research.tool_failures;

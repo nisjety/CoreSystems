@@ -293,6 +293,10 @@ type AcquireGrantResponse struct {
 	AllowedDialogIds   []string `protobuf:"bytes,7,rep,name=allowed_dialog_ids,json=allowedDialogIds,proto3" json:"allowed_dialog_ids,omitempty"`
 	AllowedArtifactIds []string `protobuf:"bytes,8,rep,name=allowed_artifact_ids,json=allowedArtifactIds,proto3" json:"allowed_artifact_ids,omitempty"`
 	ParentGrantId      string   `protobuf:"bytes,9,opt,name=parent_grant_id,json=parentGrantId,proto3" json:"parent_grant_id,omitempty"`
+	// WS7.K (R-6: field 20 is the web-policy snapshot): the org web policy the
+	// broker stored on this grant. Unset means the grant carries no snapshot,
+	// which is no grant layer. See WebPolicy.
+	WebPolicy *WebPolicy `protobuf:"bytes,20,opt,name=web_policy,json=webPolicy,proto3" json:"web_policy,omitempty"`
 	// "session" or "sensitive_approval" (a "run" grant is derived from a session
 	// grant, not acquired). Consumers must treat an unknown value as not valid.
 	Kind string `protobuf:"bytes,10,opt,name=kind,proto3" json:"kind,omitempty"`
@@ -434,6 +438,13 @@ func (x *AcquireGrantResponse) GetParentGrantId() string {
 	return ""
 }
 
+func (x *AcquireGrantResponse) GetWebPolicy() *WebPolicy {
+	if x != nil {
+		return x.WebPolicy
+	}
+	return nil
+}
+
 func (x *AcquireGrantResponse) GetKind() string {
 	if x != nil {
 		return x.Kind
@@ -525,6 +536,112 @@ func (x *AcquireGrantResponse) GetKeyId() string {
 	return ""
 }
 
+// The org web-policy snapshot a grant carries (WS7.K). The broker derives it
+// from the verified principal's `web_policy` claim, never from a request field,
+// and a derived run grant may only tighten its parent's. It has the claim's
+// content: the version, the issuer's revision, the capability modes, the robots
+// and proxy ceilings and the domain rules. Unset means the grant carries no
+// snapshot, which is no grant layer.
+type WebPolicy struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Claim version (1).
+	V uint32 `protobuf:"varint,1,opt,name=v,proto3" json:"v,omitempty"`
+	// The issuer's policy revision; "0" when the org has no policy.
+	Rev string `protobuf:"bytes,2,opt,name=rev,proto3" json:"rev,omitempty"`
+	// Capability modes keyed by capability name. Only the entries the issuer
+	// states are present.
+	Caps map[string]string `protobuf:"bytes,3,rep,name=caps,proto3" json:"caps,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// The ceiling the org sets on robots.txt handling; empty when none is stated.
+	RobotsMax string `protobuf:"bytes,4,opt,name=robots_max,json=robotsMax,proto3" json:"robots_max,omitempty"`
+	// The ceiling the org sets on proxy use; empty when none is stated.
+	ProxyMax string `protobuf:"bytes,5,opt,name=proxy_max,json=proxyMax,proto3" json:"proxy_max,omitempty"`
+	// Hosts the org allows; empty when the policy states no allow rule.
+	DomainsAllow []string `protobuf:"bytes,6,rep,name=domains_allow,json=domainsAllow,proto3" json:"domains_allow,omitempty"`
+	// Hosts the org denies.
+	DomainsDeny   []string `protobuf:"bytes,7,rep,name=domains_deny,json=domainsDeny,proto3" json:"domains_deny,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WebPolicy) Reset() {
+	*x = WebPolicy{}
+	mi := &file_model_plane_v1_browser_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WebPolicy) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WebPolicy) ProtoMessage() {}
+
+func (x *WebPolicy) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_browser_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WebPolicy.ProtoReflect.Descriptor instead.
+func (*WebPolicy) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *WebPolicy) GetV() uint32 {
+	if x != nil {
+		return x.V
+	}
+	return 0
+}
+
+func (x *WebPolicy) GetRev() string {
+	if x != nil {
+		return x.Rev
+	}
+	return ""
+}
+
+func (x *WebPolicy) GetCaps() map[string]string {
+	if x != nil {
+		return x.Caps
+	}
+	return nil
+}
+
+func (x *WebPolicy) GetRobotsMax() string {
+	if x != nil {
+		return x.RobotsMax
+	}
+	return ""
+}
+
+func (x *WebPolicy) GetProxyMax() string {
+	if x != nil {
+		return x.ProxyMax
+	}
+	return ""
+}
+
+func (x *WebPolicy) GetDomainsAllow() []string {
+	if x != nil {
+		return x.DomainsAllow
+	}
+	return nil
+}
+
+func (x *WebPolicy) GetDomainsDeny() []string {
+	if x != nil {
+		return x.DomainsDeny
+	}
+	return nil
+}
+
 type RevokeGrantRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Grant to revoke.
@@ -537,7 +654,7 @@ type RevokeGrantRequest struct {
 
 func (x *RevokeGrantRequest) Reset() {
 	*x = RevokeGrantRequest{}
-	mi := &file_model_plane_v1_browser_proto_msgTypes[2]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -549,7 +666,7 @@ func (x *RevokeGrantRequest) String() string {
 func (*RevokeGrantRequest) ProtoMessage() {}
 
 func (x *RevokeGrantRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_browser_proto_msgTypes[2]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -562,7 +679,7 @@ func (x *RevokeGrantRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeGrantRequest.ProtoReflect.Descriptor instead.
 func (*RevokeGrantRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{2}
+	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *RevokeGrantRequest) GetGrantId() string {
@@ -589,7 +706,7 @@ type RevokeGrantResponse struct {
 
 func (x *RevokeGrantResponse) Reset() {
 	*x = RevokeGrantResponse{}
-	mi := &file_model_plane_v1_browser_proto_msgTypes[3]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -601,7 +718,7 @@ func (x *RevokeGrantResponse) String() string {
 func (*RevokeGrantResponse) ProtoMessage() {}
 
 func (x *RevokeGrantResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_browser_proto_msgTypes[3]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -614,7 +731,7 @@ func (x *RevokeGrantResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeGrantResponse.ProtoReflect.Descriptor instead.
 func (*RevokeGrantResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{3}
+	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *RevokeGrantResponse) GetRevoked() bool {
@@ -632,7 +749,7 @@ type BrowserHealthRequest struct {
 
 func (x *BrowserHealthRequest) Reset() {
 	*x = BrowserHealthRequest{}
-	mi := &file_model_plane_v1_browser_proto_msgTypes[4]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -644,7 +761,7 @@ func (x *BrowserHealthRequest) String() string {
 func (*BrowserHealthRequest) ProtoMessage() {}
 
 func (x *BrowserHealthRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_browser_proto_msgTypes[4]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -657,7 +774,7 @@ func (x *BrowserHealthRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BrowserHealthRequest.ProtoReflect.Descriptor instead.
 func (*BrowserHealthRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{4}
+	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{5}
 }
 
 type BrowserHealthResponse struct {
@@ -670,7 +787,7 @@ type BrowserHealthResponse struct {
 
 func (x *BrowserHealthResponse) Reset() {
 	*x = BrowserHealthResponse{}
-	mi := &file_model_plane_v1_browser_proto_msgTypes[5]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -682,7 +799,7 @@ func (x *BrowserHealthResponse) String() string {
 func (*BrowserHealthResponse) ProtoMessage() {}
 
 func (x *BrowserHealthResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_browser_proto_msgTypes[5]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -695,7 +812,7 @@ func (x *BrowserHealthResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BrowserHealthResponse.ProtoReflect.Descriptor instead.
 func (*BrowserHealthResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{5}
+	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *BrowserHealthResponse) GetStatus() string {
@@ -715,7 +832,7 @@ type ValidateGrantRequest struct {
 
 func (x *ValidateGrantRequest) Reset() {
 	*x = ValidateGrantRequest{}
-	mi := &file_model_plane_v1_browser_proto_msgTypes[6]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -727,7 +844,7 @@ func (x *ValidateGrantRequest) String() string {
 func (*ValidateGrantRequest) ProtoMessage() {}
 
 func (x *ValidateGrantRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_browser_proto_msgTypes[6]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -740,7 +857,7 @@ func (x *ValidateGrantRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateGrantRequest.ProtoReflect.Descriptor instead.
 func (*ValidateGrantRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{6}
+	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ValidateGrantRequest) GetGrantId() string {
@@ -766,6 +883,10 @@ type ValidateGrantResponse struct {
 	AllowedDialogIds   []string `protobuf:"bytes,7,rep,name=allowed_dialog_ids,json=allowedDialogIds,proto3" json:"allowed_dialog_ids,omitempty"`
 	AllowedArtifactIds []string `protobuf:"bytes,8,rep,name=allowed_artifact_ids,json=allowedArtifactIds,proto3" json:"allowed_artifact_ids,omitempty"`
 	ParentGrantId      string   `protobuf:"bytes,9,opt,name=parent_grant_id,json=parentGrantId,proto3" json:"parent_grant_id,omitempty"`
+	// WS7.K (R-6: field 20 is the web-policy snapshot): the grant's org web-policy
+	// snapshot as stored when the grant was issued. Unset from a broker that
+	// predates it, which a consumer reads as no grant layer. See WebPolicy.
+	WebPolicy *WebPolicy `protobuf:"bytes,20,opt,name=web_policy,json=webPolicy,proto3" json:"web_policy,omitempty"`
 	// Same values as AcquireGrantResponse.kind.
 	Kind string `protobuf:"bytes,10,opt,name=kind,proto3" json:"kind,omitempty"`
 	// The user (or service actor) the grant was issued to. A consumer may bind a
@@ -825,7 +946,7 @@ type ValidateGrantResponse struct {
 
 func (x *ValidateGrantResponse) Reset() {
 	*x = ValidateGrantResponse{}
-	mi := &file_model_plane_v1_browser_proto_msgTypes[7]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -837,7 +958,7 @@ func (x *ValidateGrantResponse) String() string {
 func (*ValidateGrantResponse) ProtoMessage() {}
 
 func (x *ValidateGrantResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_browser_proto_msgTypes[7]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -850,7 +971,7 @@ func (x *ValidateGrantResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ValidateGrantResponse.ProtoReflect.Descriptor instead.
 func (*ValidateGrantResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{7}
+	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ValidateGrantResponse) GetGrantId() string {
@@ -914,6 +1035,13 @@ func (x *ValidateGrantResponse) GetParentGrantId() string {
 		return x.ParentGrantId
 	}
 	return ""
+}
+
+func (x *ValidateGrantResponse) GetWebPolicy() *WebPolicy {
+	if x != nil {
+		return x.WebPolicy
+	}
+	return nil
 }
 
 func (x *ValidateGrantResponse) GetKind() string {
@@ -1075,7 +1203,7 @@ type DeriveRunGrantRequest struct {
 
 func (x *DeriveRunGrantRequest) Reset() {
 	*x = DeriveRunGrantRequest{}
-	mi := &file_model_plane_v1_browser_proto_msgTypes[8]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1087,7 +1215,7 @@ func (x *DeriveRunGrantRequest) String() string {
 func (*DeriveRunGrantRequest) ProtoMessage() {}
 
 func (x *DeriveRunGrantRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_browser_proto_msgTypes[8]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1100,7 +1228,7 @@ func (x *DeriveRunGrantRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeriveRunGrantRequest.ProtoReflect.Descriptor instead.
 func (*DeriveRunGrantRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{8}
+	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *DeriveRunGrantRequest) GetParentGrantId() string {
@@ -1199,6 +1327,10 @@ type DeriveRunGrantResponse struct {
 	// Canonical hosts of the run grant.
 	AllowedDomains []string `protobuf:"bytes,4,rep,name=allowed_domains,json=allowedDomains,proto3" json:"allowed_domains,omitempty"`
 	ParentGrantId  string   `protobuf:"bytes,5,opt,name=parent_grant_id,json=parentGrantId,proto3" json:"parent_grant_id,omitempty"`
+	// WS7.K (R-6: field 20 is the web-policy snapshot): the snapshot the run grant
+	// inherited from its parent, which a derive may only tighten. Unset when the
+	// parent carried none. See WebPolicy.
+	WebPolicy *WebPolicy `protobuf:"bytes,20,opt,name=web_policy,json=webPolicy,proto3" json:"web_policy,omitempty"`
 	// "run" for purpose ai_run, "attach" for purpose attach.
 	Kind string `protobuf:"bytes,6,opt,name=kind,proto3" json:"kind,omitempty"`
 	// Inherited from the parent; never lower than the parent's.
@@ -1228,7 +1360,7 @@ type DeriveRunGrantResponse struct {
 
 func (x *DeriveRunGrantResponse) Reset() {
 	*x = DeriveRunGrantResponse{}
-	mi := &file_model_plane_v1_browser_proto_msgTypes[9]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1240,7 +1372,7 @@ func (x *DeriveRunGrantResponse) String() string {
 func (*DeriveRunGrantResponse) ProtoMessage() {}
 
 func (x *DeriveRunGrantResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_browser_proto_msgTypes[9]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1253,7 +1385,7 @@ func (x *DeriveRunGrantResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeriveRunGrantResponse.ProtoReflect.Descriptor instead.
 func (*DeriveRunGrantResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{9}
+	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *DeriveRunGrantResponse) GetGrantId() string {
@@ -1289,6 +1421,13 @@ func (x *DeriveRunGrantResponse) GetParentGrantId() string {
 		return x.ParentGrantId
 	}
 	return ""
+}
+
+func (x *DeriveRunGrantResponse) GetWebPolicy() *WebPolicy {
+	if x != nil {
+		return x.WebPolicy
+	}
+	return nil
 }
 
 func (x *DeriveRunGrantResponse) GetKind() string {
@@ -1360,7 +1499,7 @@ type RenewGrantRequest struct {
 
 func (x *RenewGrantRequest) Reset() {
 	*x = RenewGrantRequest{}
-	mi := &file_model_plane_v1_browser_proto_msgTypes[10]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1372,7 +1511,7 @@ func (x *RenewGrantRequest) String() string {
 func (*RenewGrantRequest) ProtoMessage() {}
 
 func (x *RenewGrantRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_browser_proto_msgTypes[10]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1385,7 +1524,7 @@ func (x *RenewGrantRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewGrantRequest.ProtoReflect.Descriptor instead.
 func (*RenewGrantRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{10}
+	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *RenewGrantRequest) GetGrantId() string {
@@ -1415,7 +1554,7 @@ type RenewGrantResponse struct {
 
 func (x *RenewGrantResponse) Reset() {
 	*x = RenewGrantResponse{}
-	mi := &file_model_plane_v1_browser_proto_msgTypes[11]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1427,7 +1566,7 @@ func (x *RenewGrantResponse) String() string {
 func (*RenewGrantResponse) ProtoMessage() {}
 
 func (x *RenewGrantResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_browser_proto_msgTypes[11]
+	mi := &file_model_plane_v1_browser_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1440,7 +1579,7 @@ func (x *RenewGrantResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RenewGrantResponse.ProtoReflect.Descriptor instead.
 func (*RenewGrantResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{11}
+	return file_model_plane_v1_browser_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *RenewGrantResponse) GetExpiresAt() *timestamppb.Timestamp {
@@ -1487,7 +1626,7 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\bspace_id\x18\v \x01(\tR\aspaceId\x12\x1b\n" +
 	"\tread_only\x18\f \x01(\bR\breadOnly\x12\x1f\n" +
 	"\vttl_seconds\x18\r \x01(\x05R\n" +
-	"ttlSeconds\"\x84\a\n" +
+	"ttlSeconds\"\xbe\a\n" +
 	"\x14AcquireGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x129\n" +
@@ -1498,7 +1637,9 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x11allowed_frame_ids\x18\x06 \x03(\tR\x0fallowedFrameIds\x12,\n" +
 	"\x12allowed_dialog_ids\x18\a \x03(\tR\x10allowedDialogIds\x120\n" +
 	"\x14allowed_artifact_ids\x18\b \x03(\tR\x12allowedArtifactIds\x12&\n" +
-	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\x12\x12\n" +
+	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\x128\n" +
+	"\n" +
+	"web_policy\x18\x14 \x01(\v2\x19.model_plane.v1.WebPolicyR\twebPolicy\x12\x12\n" +
 	"\x04kind\x18\n" +
 	" \x01(\tR\x04kind\x12\x10\n" +
 	"\x03zdr\x18\v \x01(\bR\x03zdr\x12(\n" +
@@ -1513,7 +1654,19 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x13absolute_expires_at\x184 \x01(\v2\x1a.google.protobuf.TimestampR\x11absoluteExpiresAt\x12\x1b\n" +
 	"\tread_only\x18\f \x01(\bR\breadOnly\x12#\n" +
 	"\rconsent_scope\x18\x15 \x01(\tR\fconsentScope\x12\x15\n" +
-	"\x06key_id\x18< \x01(\tR\x05keyIdJ\x04\b\r\x10\x0e\"G\n" +
+	"\x06key_id\x18< \x01(\tR\x05keyIdJ\x04\b\r\x10\x0e\"\xa1\x02\n" +
+	"\tWebPolicy\x12\f\n" +
+	"\x01v\x18\x01 \x01(\rR\x01v\x12\x10\n" +
+	"\x03rev\x18\x02 \x01(\tR\x03rev\x127\n" +
+	"\x04caps\x18\x03 \x03(\v2#.model_plane.v1.WebPolicy.CapsEntryR\x04caps\x12\x1d\n" +
+	"\n" +
+	"robots_max\x18\x04 \x01(\tR\trobotsMax\x12\x1b\n" +
+	"\tproxy_max\x18\x05 \x01(\tR\bproxyMax\x12#\n" +
+	"\rdomains_allow\x18\x06 \x03(\tR\fdomainsAllow\x12!\n" +
+	"\fdomains_deny\x18\a \x03(\tR\vdomainsDeny\x1a7\n" +
+	"\tCapsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"G\n" +
 	"\x12RevokeGrantRequest\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"/\n" +
@@ -1523,7 +1676,7 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x15BrowserHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\"1\n" +
 	"\x14ValidateGrantRequest\x12\x19\n" +
-	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\xd8\a\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\x92\b\n" +
 	"\x15ValidateGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06active\x18\x02 \x01(\bR\x06active\x129\n" +
@@ -1534,7 +1687,9 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x11allowed_frame_ids\x18\x06 \x03(\tR\x0fallowedFrameIds\x12,\n" +
 	"\x12allowed_dialog_ids\x18\a \x03(\tR\x10allowedDialogIds\x120\n" +
 	"\x14allowed_artifact_ids\x18\b \x03(\tR\x12allowedArtifactIds\x12&\n" +
-	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\x12\x12\n" +
+	"\x0fparent_grant_id\x18\t \x01(\tR\rparentGrantId\x128\n" +
+	"\n" +
+	"web_policy\x18\x14 \x01(\v2\x19.model_plane.v1.WebPolicyR\twebPolicy\x12\x12\n" +
 	"\x04kind\x18\n" +
 	" \x01(\tR\x04kind\x12\x19\n" +
 	"\bowner_id\x18\v \x01(\tR\aownerId\x12\x10\n" +
@@ -1570,14 +1725,16 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\rbudget_source\x18+ \x01(\tR\fbudgetSource\x121\n" +
 	"\x15budget_minted_at_unix\x18, \x01(\x03R\x12budgetMintedAtUnix\x12\x1f\n" +
 	"\vresource_id\x182 \x01(\tR\n" +
-	"resourceId\"\xff\x03\n" +
+	"resourceId\"\xb9\x04\n" +
 	"\x16DeriveRunGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x129\n" +
 	"\n" +
 	"expires_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12'\n" +
 	"\x0fallowed_domains\x18\x04 \x03(\tR\x0eallowedDomains\x12&\n" +
-	"\x0fparent_grant_id\x18\x05 \x01(\tR\rparentGrantId\x12\x12\n" +
+	"\x0fparent_grant_id\x18\x05 \x01(\tR\rparentGrantId\x128\n" +
+	"\n" +
+	"web_policy\x18\x14 \x01(\v2\x19.model_plane.v1.WebPolicyR\twebPolicy\x12\x12\n" +
 	"\x04kind\x18\x06 \x01(\tR\x04kind\x12\x10\n" +
 	"\x03zdr\x18\a \x01(\bR\x03zdr\x12(\n" +
 	"\x10budget_micro_usd\x18( \x01(\x03R\x0ebudgetMicroUsd\x12(\n" +
@@ -1616,47 +1773,53 @@ func file_model_plane_v1_browser_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_browser_proto_rawDescData
 }
 
-var file_model_plane_v1_browser_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_model_plane_v1_browser_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_model_plane_v1_browser_proto_goTypes = []any{
 	(*AcquireGrantRequest)(nil),    // 0: model_plane.v1.AcquireGrantRequest
 	(*AcquireGrantResponse)(nil),   // 1: model_plane.v1.AcquireGrantResponse
-	(*RevokeGrantRequest)(nil),     // 2: model_plane.v1.RevokeGrantRequest
-	(*RevokeGrantResponse)(nil),    // 3: model_plane.v1.RevokeGrantResponse
-	(*BrowserHealthRequest)(nil),   // 4: model_plane.v1.BrowserHealthRequest
-	(*BrowserHealthResponse)(nil),  // 5: model_plane.v1.BrowserHealthResponse
-	(*ValidateGrantRequest)(nil),   // 6: model_plane.v1.ValidateGrantRequest
-	(*ValidateGrantResponse)(nil),  // 7: model_plane.v1.ValidateGrantResponse
-	(*DeriveRunGrantRequest)(nil),  // 8: model_plane.v1.DeriveRunGrantRequest
-	(*DeriveRunGrantResponse)(nil), // 9: model_plane.v1.DeriveRunGrantResponse
-	(*RenewGrantRequest)(nil),      // 10: model_plane.v1.RenewGrantRequest
-	(*RenewGrantResponse)(nil),     // 11: model_plane.v1.RenewGrantResponse
-	(*timestamppb.Timestamp)(nil),  // 12: google.protobuf.Timestamp
+	(*WebPolicy)(nil),              // 2: model_plane.v1.WebPolicy
+	(*RevokeGrantRequest)(nil),     // 3: model_plane.v1.RevokeGrantRequest
+	(*RevokeGrantResponse)(nil),    // 4: model_plane.v1.RevokeGrantResponse
+	(*BrowserHealthRequest)(nil),   // 5: model_plane.v1.BrowserHealthRequest
+	(*BrowserHealthResponse)(nil),  // 6: model_plane.v1.BrowserHealthResponse
+	(*ValidateGrantRequest)(nil),   // 7: model_plane.v1.ValidateGrantRequest
+	(*ValidateGrantResponse)(nil),  // 8: model_plane.v1.ValidateGrantResponse
+	(*DeriveRunGrantRequest)(nil),  // 9: model_plane.v1.DeriveRunGrantRequest
+	(*DeriveRunGrantResponse)(nil), // 10: model_plane.v1.DeriveRunGrantResponse
+	(*RenewGrantRequest)(nil),      // 11: model_plane.v1.RenewGrantRequest
+	(*RenewGrantResponse)(nil),     // 12: model_plane.v1.RenewGrantResponse
+	nil,                            // 13: model_plane.v1.WebPolicy.CapsEntry
+	(*timestamppb.Timestamp)(nil),  // 14: google.protobuf.Timestamp
 }
 var file_model_plane_v1_browser_proto_depIdxs = []int32{
-	12, // 0: model_plane.v1.AcquireGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
-	12, // 1: model_plane.v1.AcquireGrantResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
-	12, // 2: model_plane.v1.ValidateGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
-	12, // 3: model_plane.v1.ValidateGrantResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
-	12, // 4: model_plane.v1.DeriveRunGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
-	12, // 5: model_plane.v1.RenewGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
-	12, // 6: model_plane.v1.RenewGrantResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
-	0,  // 7: model_plane.v1.BrowserBroker.AcquireGrant:input_type -> model_plane.v1.AcquireGrantRequest
-	2,  // 8: model_plane.v1.BrowserBroker.RevokeGrant:input_type -> model_plane.v1.RevokeGrantRequest
-	6,  // 9: model_plane.v1.BrowserBroker.ValidateGrant:input_type -> model_plane.v1.ValidateGrantRequest
-	8,  // 10: model_plane.v1.BrowserBroker.DeriveRunGrant:input_type -> model_plane.v1.DeriveRunGrantRequest
-	10, // 11: model_plane.v1.BrowserBroker.RenewGrant:input_type -> model_plane.v1.RenewGrantRequest
-	4,  // 12: model_plane.v1.BrowserBroker.Health:input_type -> model_plane.v1.BrowserHealthRequest
-	1,  // 13: model_plane.v1.BrowserBroker.AcquireGrant:output_type -> model_plane.v1.AcquireGrantResponse
-	3,  // 14: model_plane.v1.BrowserBroker.RevokeGrant:output_type -> model_plane.v1.RevokeGrantResponse
-	7,  // 15: model_plane.v1.BrowserBroker.ValidateGrant:output_type -> model_plane.v1.ValidateGrantResponse
-	9,  // 16: model_plane.v1.BrowserBroker.DeriveRunGrant:output_type -> model_plane.v1.DeriveRunGrantResponse
-	11, // 17: model_plane.v1.BrowserBroker.RenewGrant:output_type -> model_plane.v1.RenewGrantResponse
-	5,  // 18: model_plane.v1.BrowserBroker.Health:output_type -> model_plane.v1.BrowserHealthResponse
-	13, // [13:19] is the sub-list for method output_type
-	7,  // [7:13] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	14, // 0: model_plane.v1.AcquireGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
+	2,  // 1: model_plane.v1.AcquireGrantResponse.web_policy:type_name -> model_plane.v1.WebPolicy
+	14, // 2: model_plane.v1.AcquireGrantResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
+	13, // 3: model_plane.v1.WebPolicy.caps:type_name -> model_plane.v1.WebPolicy.CapsEntry
+	14, // 4: model_plane.v1.ValidateGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
+	2,  // 5: model_plane.v1.ValidateGrantResponse.web_policy:type_name -> model_plane.v1.WebPolicy
+	14, // 6: model_plane.v1.ValidateGrantResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
+	14, // 7: model_plane.v1.DeriveRunGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
+	2,  // 8: model_plane.v1.DeriveRunGrantResponse.web_policy:type_name -> model_plane.v1.WebPolicy
+	14, // 9: model_plane.v1.RenewGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
+	14, // 10: model_plane.v1.RenewGrantResponse.absolute_expires_at:type_name -> google.protobuf.Timestamp
+	0,  // 11: model_plane.v1.BrowserBroker.AcquireGrant:input_type -> model_plane.v1.AcquireGrantRequest
+	3,  // 12: model_plane.v1.BrowserBroker.RevokeGrant:input_type -> model_plane.v1.RevokeGrantRequest
+	7,  // 13: model_plane.v1.BrowserBroker.ValidateGrant:input_type -> model_plane.v1.ValidateGrantRequest
+	9,  // 14: model_plane.v1.BrowserBroker.DeriveRunGrant:input_type -> model_plane.v1.DeriveRunGrantRequest
+	11, // 15: model_plane.v1.BrowserBroker.RenewGrant:input_type -> model_plane.v1.RenewGrantRequest
+	5,  // 16: model_plane.v1.BrowserBroker.Health:input_type -> model_plane.v1.BrowserHealthRequest
+	1,  // 17: model_plane.v1.BrowserBroker.AcquireGrant:output_type -> model_plane.v1.AcquireGrantResponse
+	4,  // 18: model_plane.v1.BrowserBroker.RevokeGrant:output_type -> model_plane.v1.RevokeGrantResponse
+	8,  // 19: model_plane.v1.BrowserBroker.ValidateGrant:output_type -> model_plane.v1.ValidateGrantResponse
+	10, // 20: model_plane.v1.BrowserBroker.DeriveRunGrant:output_type -> model_plane.v1.DeriveRunGrantResponse
+	12, // 21: model_plane.v1.BrowserBroker.RenewGrant:output_type -> model_plane.v1.RenewGrantResponse
+	6,  // 22: model_plane.v1.BrowserBroker.Health:output_type -> model_plane.v1.BrowserHealthResponse
+	17, // [17:23] is the sub-list for method output_type
+	11, // [11:17] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_browser_proto_init() }
@@ -1670,7 +1833,7 @@ func file_model_plane_v1_browser_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_browser_proto_rawDesc), len(file_model_plane_v1_browser_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

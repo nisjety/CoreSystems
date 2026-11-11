@@ -165,6 +165,13 @@ pub(super) fn is_user_facing_event(event_type: quarry_core::event::EventType) ->
             | EventType::AgentExpired
             | EventType::AgentBudgetExhausted
             | EventType::AgentFailed
+            | EventType::BrowserSessionOpened
+            | EventType::BrowserSessionClosed
+            | EventType::BrowserControlChanged
+            | EventType::BrowserTabChanged
+            | EventType::StepReceiptRecorded
+            | EventType::EgressDecided
+            | EventType::ArtifactRecorded
     )
 }
 
@@ -199,6 +206,14 @@ pub(super) fn event_name(event_type: quarry_core::event::EventType) -> &'static 
         EventType::AgentExpired => "agent.expired",
         EventType::AgentBudgetExhausted => "agent.budget_exhausted",
         EventType::AgentFailed => "agent.failed",
+        // WS10.S4 browser trace events.
+        EventType::BrowserSessionOpened => "browser.session.opened",
+        EventType::BrowserSessionClosed => "browser.session.closed",
+        EventType::BrowserControlChanged => "browser.control",
+        EventType::BrowserTabChanged => "browser.tab",
+        EventType::StepReceiptRecorded => "browser.receipt",
+        EventType::EgressDecided => "browser.egress",
+        EventType::ArtifactRecorded => "browser.artifact",
         // Defensive: every other event type is filtered before
         // this is called, but never panic on a future type.
         _ => "internal",

@@ -342,12 +342,16 @@ export function attachBrowserObservation(
   const screenshotUrl = browserArtifactUrl(session.id, screenshotArtifactId)
   const visualObservationArtifactId = observation.visual_observation_artifact_id ?? null
   const visualObservationUrl = browserArtifactUrl(session.id, visualObservationArtifactId)
+  const pdfArtifactId = observation.pdf_artifact_id ?? null
+  const pdfUrl = browserArtifactUrl(session.id, pdfArtifactId)
   const timelineEntry: BrowserTimelineEntry = {
     consoleSummary: observation.console_summary ?? [],
     domInteractiveCount: observation.dom_summary?.interactive_elements?.length ?? null,
     domNodeCount: observation.dom_summary?.node_count ?? null,
     networkSummary: observation.network_summary ?? [],
     observedAt: observation.observed_at ?? null,
+    pdfArtifactId,
+    pdfUrl,
     policyDenials: observation.policy_denials ?? [],
     screenshotArtifactId,
     screenshotUrl,
@@ -506,6 +510,7 @@ function normalizeTimeline(entries?: BrowserTimelineEntry[] | null): BrowserTime
   return (entries ?? []).map((entry) => ({
     ...entry,
     screenshotUrl: resolveBrowserArtifactUrl(entry.screenshotUrl),
+    pdfUrl: resolveBrowserArtifactUrl(entry.pdfUrl),
     visualObservationUrl: resolveBrowserArtifactUrl(entry.visualObservationUrl),
   }))
 }
@@ -514,6 +519,7 @@ function normalizeReplayEvents(entries?: BrowserReplayEvent[] | null): BrowserRe
   return (entries ?? []).map((entry) => ({
     ...entry,
     screenshotUrl: resolveBrowserArtifactUrl(entry.screenshotUrl),
+    pdfUrl: resolveBrowserArtifactUrl(entry.pdfUrl),
     visualObservationUrl: resolveBrowserArtifactUrl(entry.visualObservationUrl),
   }))
 }
@@ -526,6 +532,7 @@ function replayEventFromObservation(
 ): BrowserReplayEvent {
   const screenshotArtifactId = observation.screenshot_artifact_id ?? null
   const visualObservationArtifactId = observation.visual_observation_artifact_id ?? null
+  const pdfArtifactId = observation.pdf_artifact_id ?? null
   const timestampMs = observation.observed_at
     ? Date.parse(observation.observed_at)
     : Number.NaN
@@ -539,6 +546,8 @@ function replayEventFromObservation(
     kind: 'observation',
     networkCount: observation.network_summary?.length ?? 0,
     observedAt: observation.observed_at ?? null,
+    pdfArtifactId,
+    pdfUrl: browserArtifactUrl(sessionId, pdfArtifactId),
     policyDenialCount: observation.policy_denials?.length ?? 0,
     screenshotArtifactId,
     screenshotUrl: browserArtifactUrl(sessionId, screenshotArtifactId),
@@ -604,7 +613,7 @@ export type BrowserArtifactMediaKind = 'image' | 'json' | 'pdf'
 
 export type BrowserArtifactDescriptor = {
   artifactId: string
-  kind: 'screenshot' | 'visual_observation'
+  kind: 'screenshot' | 'visual_observation' | 'pdf'
   label: string
   mediaKind: BrowserArtifactMediaKind
   url: string
@@ -629,6 +638,15 @@ export function artifactsForTimelineEntry(entry: BrowserTimelineViewEntry): Brow
       label: 'visual_observation.json',
       mediaKind: 'json',
       url: entry.visualObservationUrl,
+    })
+  }
+  if (entry.pdfArtifactId && entry.pdfUrl) {
+    artifacts.push({
+      artifactId: entry.pdfArtifactId,
+      kind: 'pdf',
+      label: 'page.pdf',
+      mediaKind: 'pdf',
+      url: entry.pdfUrl,
     })
   }
   return artifacts

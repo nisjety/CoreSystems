@@ -31,6 +31,7 @@ use serde_json::{json, Value};
 
 use crate::{
     config::AppState,
+    domains::chat::shared,
     envelope::{error, error_with_details, ok, unwrap_data},
     middleware::{require_session, AuthenticatedUser},
     rate_limit::{with_rate_class, RateClass},
@@ -52,9 +53,9 @@ const DEVTOOLS_LEVELS: [&str; 7] = ["debug", "info", "log", "warn", "warning", "
 const DEVTOOLS_CATEGORIES: [&str; 3] = ["console", "network", "lifecycle"];
 const PROCEDURE_ID_MAX_CHARS: usize = 64;
 
-/// `BROWSER_REGION_ATTACH` (E3.3-d): mounts the region and selection attach route.
-/// Default off. Read once when the router is built, never inside a handler.
-const REGION_ATTACH_FLAG: &str = "BROWSER_REGION_ATTACH";
+/// `BROWSER_REGION_ATTACH` (E3.3-d): mounts the region and selection attach route and
+/// enables `browser_region.attach` on the action surface (QF-7). Default off. Read once
+/// into `AppState::browser_region_attach` in `build_state`, never inside a handler.
 const REGION_ATTACH_PATH: &str = "/api/v1/browser/sessions/{session_id}/attachments/region";
 /// Decoded bytes of one cropped region image. The base64 body stays under the
 /// router's default 2 MB request limit.
@@ -71,19 +72,32 @@ const TAB_LABEL_MAX_CHARS: usize = 200;
 /// The wire name of `TrustClass::BrowserScraped` (mp-content-safety `trust.rs`).
 const REGION_TRUST_CLASS: &str = "browser-scraped";
 
+/// Saved recipes (Q4-E4.2-4a), mounted only with `AppState::browser_recipes` (`BROWSER_RECIPES`).
+const SESSION_RECIPES_PATH: &str = "/api/v1/browser/sessions/{session_id}/recipes";
+const RECIPES_PATH: &str = "/api/v1/browser/recipes";
+/// capability-core's `procedures.MaxNameRunes` and `MaxDescriptionRunes`.
+const RECIPE_NAME_MAX_CHARS: usize = 120;
+const RECIPE_DESCRIPTION_MAX_CHARS: usize = 500;
+/// capability-core's `procedures.MaxListLimit`.
+const RECIPES_LIST_LIMIT_MAX: u64 = 100;
+/// The longest recipe id the list cursor may carry.
+const RECIPE_ID_MAX_CHARS: usize = 128;
+/// Quality reasons a refusal carries at most, each at most this many characters.
+const RECIPE_REASONS_MAX: usize = 32;
+const RECIPE_REASON_MAX_CHARS: usize = 200;
+/// The action id of the save on the generic action surface.
+const SAVE_RECIPE_ACTION_ID: &str = "browser_evidence.save_recipe";
+
 pub(crate) fn router(state: AppState) -> Router<AppState> {
-    router_with(state, region_attach_enabled_from_env())
+    let region_attach = state.browser_region_attach;
+    router_with(state, region_attach)
 }
 
+/// The `BROWSER_REGION_ATTACH` grammar; `build_state` parses the switch with the
+/// same `crate::config::human_browse_enabled`.
+#[cfg(test)]
 fn region_attach_flag_on(value: Option<&str>) -> bool {
-    matches!(
-        value.map(|value| value.trim().to_ascii_lowercase()).as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
-}
-
-fn region_attach_enabled_from_env() -> bool {
-    region_attach_flag_on(std::env::var(REGION_ATTACH_FLAG).ok().as_deref())
+    crate::config::human_browse_enabled(value)
 }
 
 fn router_with(state: AppState, region_attach: bool) -> Router<AppState> {
@@ -102,6 +116,11 @@ fn router_with(state: AppState, region_attach: bool) -> Router<AppState> {
         );
     if region_attach {
         routes = routes.route(REGION_ATTACH_PATH, post(attach_session_region));
+    }
+    if state.browser_recipes {
+        routes = routes
+            .route(SESSION_RECIPES_PATH, post(save_session_recipe))
+            .route(RECIPES_PATH, get(list_saved_recipes));
     }
     with_rate_class(routes, &state.rate_limiter, RateClass::Interactive)
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
@@ -420,23 +439,58 @@ fn procedure_view(procedure: &Value) -> Value {
             steps
                 .iter()
                 .map(|step| {
+                    // Version 2 fields (Q4-E4.2-4a): the target keeps only its locator (the
+                    // fingerprint identity stays in Quarry), and the slot is a name, never a value.
+                    let target = step
+                        .get("target")
+                        .and_then(|target| target.get("locator"))
+                        .filter(|locator| !locator.is_null())
+                        .map(|locator| json!({ "locator": locator.clone() }));
                     without_nulls(json!({
                         "step": step.get("step").cloned(),
                         "action": redact_action(
                             step.get("action").cloned().unwrap_or(Value::Null),
                         ),
                         "expectedOutcome": step.get("expected_outcome").cloned(),
+                        "target": target,
+                        "slot": step.get("slot").filter(|slot| slot.is_string()).cloned(),
+                        "expect": step.get("expect").cloned(),
                     }))
                 })
                 .collect()
         })
         .unwrap_or_default();
+    let slots = slots_view(procedure);
     without_nulls(json!({
         "procedureId": procedure.get("procedure_id").cloned(),
         "version": procedure.get("version").cloned(),
         "sourceReceiptIds": procedure.get("source_receipt_ids").cloned(),
         "steps": steps,
+        "slots": if slots.is_empty() { Value::Null } else { Value::Array(slots) },
     }))
+}
+
+/// A version 2 procedure's open inputs, by name and kind only. A slot never carries a value: the
+/// replay supplies it. Absent (version 1) is an empty list.
+fn slots_view(procedure: &Value) -> Vec<Value> {
+    procedure
+        .get("slots")
+        .and_then(Value::as_array)
+        .map(|slots| {
+            slots
+                .iter()
+                .filter_map(|slot| {
+                    let name = slot.get("name").and_then(Value::as_str)?;
+                    // An unknown kind is shown as secret, never as plain text.
+                    let kind = match slot.get("kind").and_then(Value::as_str) {
+                        Some("text") => "text",
+                        _ => "secret",
+                    };
+                    Some(json!({ "name": name, "kind": kind }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn quality_view(report: &Value) -> Value {
@@ -591,14 +645,44 @@ async fn compile_procedure_view(
     session_id: &str,
     procedure_id: Option<String>,
 ) -> Result<Value, Response> {
+    // With saved recipes on, the browser sees the canonical (version 2) compile it would save.
+    let (procedure, quality) = compile_with_quality(
+        state,
+        user,
+        headers,
+        session_id,
+        procedure_id,
+        state.browser_recipes,
+    )
+    .await?;
+    Ok(json!({
+        "procedure": procedure_view(&procedure),
+        "quality": quality_view(&quality),
+    }))
+}
+
+/// Owner gate, zero-data-retention refusal, compile and quality check. Returns the procedure as
+/// Quarry compiled it and Quarry's quality report, both unprojected: callers project them before
+/// anything reaches the browser. `canonical` asks Quarry for a version 2 procedure (Q4-E4.2-2c).
+async fn compile_with_quality(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    session_id: &str,
+    procedure_id: Option<String>,
+    canonical: bool,
+) -> Result<(Value, Value), Response> {
     let (token, projection) = owner_gate(state, user, headers, session_id).await?;
     if receipts_refused(&projection) {
         return Err(zdr_receipts_unavailable());
     }
-    let compile_body = match procedure_id {
+    let mut compile_body = match procedure_id {
         Some(id) => json!({ "procedure_id": id }),
         None => json!({}),
     };
+    if canonical {
+        compile_body["canonical"] = Value::Bool(true);
+    }
     let (status, body) = quarry_call(
         state,
         Method::POST,
@@ -633,10 +717,296 @@ async fn compile_procedure_view(
         return Err(forward_quarry_failure(quality_status, quality_body));
     }
     let quality = unwrap_data(&quality_body);
-    Ok(json!({
-        "procedure": procedure_view(&procedure),
-        "quality": quality_view(&quality),
+    Ok((procedure, quality))
+}
+
+// ---------------------------------------------------------------------------
+// Saved recipes (Q4-E4.2-4a)
+// ---------------------------------------------------------------------------
+
+/// The action surface's answer while `BROWSER_RECIPES` is off. The HTTP routes are absent then.
+fn recipes_unavailable() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(error(
+            "browser_recipes_unavailable",
+            "Saved browser recipes are not enabled.",
+        )),
+    )
+        .into_response()
+}
+
+fn invalid_recipe(message: &'static str) -> Response {
+    bad_request("invalid_browser_recipe", message)
+}
+
+/// The quality check refused promotion: the session's procedure cannot be saved as a recipe.
+/// The reasons are Quarry's closed reason strings, capped.
+fn recipe_not_promotable(quality: &Value) -> Response {
+    let reasons: Vec<Value> = quality
+        .get("reasons")
+        .and_then(Value::as_array)
+        .map(|reasons| {
+            reasons
+                .iter()
+                .filter_map(Value::as_str)
+                .take(RECIPE_REASONS_MAX)
+                .map(|reason| Value::String(reason.chars().take(RECIPE_REASON_MAX_CHARS).collect()))
+                .collect()
+        })
+        .unwrap_or_default();
+    (
+        StatusCode::CONFLICT,
+        Json(error_with_details(
+            "recipe_not_promotable",
+            "This session's procedure did not pass the quality check and cannot be saved as a recipe.",
+            without_nulls(json!({
+                "reasons": reasons,
+                "stepCount": quality.get("step_count").cloned(),
+                "verifiedStepCount": quality.get("verified_step_count").cloned(),
+            })),
+        )),
+    )
+        .into_response()
+}
+
+/// A closed upstream reason: lower-case letters, digits and underscores, at most 64 characters.
+fn closed_reason(raw: Option<&str>) -> Option<String> {
+    raw.filter(|code| {
+        (1..=64).contains(&code.len())
+            && code
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    })
+    .map(str::to_owned)
+}
+
+/// Maps a model-gateway / capability-core recipe failure to the gateway's own codes. Only the
+/// upstream's closed error code passes, as `details.reason`; its message, and anything naming an
+/// upstream URL or credential, never reaches the browser.
+fn recipe_upstream_failure(status: StatusCode, body: &Value) -> Response {
+    let reason = closed_reason(body.pointer("/error/code").and_then(Value::as_str));
+    let (status, code, message): (StatusCode, &'static str, &'static str) = match status {
+        StatusCode::NOT_FOUND if reason.as_deref() == Some("procedures_disabled") => (
+            StatusCode::NOT_FOUND,
+            "browser_recipes_unavailable",
+            "Saved browser recipes are not enabled.",
+        ),
+        StatusCode::NOT_FOUND => (
+            StatusCode::NOT_FOUND,
+            "browser_recipe_not_found",
+            "The recipe was not found.",
+        ),
+        StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE | StatusCode::UNPROCESSABLE_ENTITY => (
+            StatusCode::BAD_REQUEST,
+            "browser_recipe_rejected",
+            "The recipe store refused this recipe.",
+        ),
+        StatusCode::CONFLICT => (
+            StatusCode::CONFLICT,
+            "browser_recipe_limit_reached",
+            "The recipe store has reached a limit for this recipe.",
+        ),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => (
+            StatusCode::FORBIDDEN,
+            "browser_recipe_forbidden",
+            "You may not use saved recipes here.",
+        ),
+        StatusCode::GATEWAY_TIMEOUT => (
+            StatusCode::GATEWAY_TIMEOUT,
+            "browser_recipe_timeout",
+            "The recipe store did not answer in time.",
+        ),
+        _ => return (StatusCode::BAD_GATEWAY, Json(crate::envelope::upstream_unavailable())).into_response(),
+    };
+    match reason {
+        Some(reason) => (
+            status,
+            Json(error_with_details(code, message, json!({ "reason": reason }))),
+        )
+            .into_response(),
+        None => (status, Json(error(code, message))).into_response(),
+    }
+}
+
+/// A recipe's name and optional description from a request object. `allowed` names the keys the
+/// object may carry; any other key is refused, so nothing untyped reaches the recipe store.
+fn recipe_meta_of(
+    input: &Value,
+    allowed: &[&str],
+) -> Result<(String, Option<String>), &'static str> {
+    let Some(object) = input.as_object() else {
+        return Err("The recipe request must be a JSON object.");
+    };
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err("The recipe request may carry only a name and a description.");
+    }
+    let name = match object.get("name") {
+        Some(Value::String(raw)) => raw.trim(),
+        _ => return Err("A recipe needs a 'name'."),
+    };
+    let name_chars = name.chars().count();
+    if name_chars == 0 || name_chars > RECIPE_NAME_MAX_CHARS || name.chars().any(char::is_control) {
+        return Err("A recipe name is 1 to 120 characters without control characters.");
+    }
+    let description = match object.get("description") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(raw)) => {
+            let description = raw.trim();
+            if description.chars().count() > RECIPE_DESCRIPTION_MAX_CHARS
+                || description
+                    .chars()
+                    .any(|c| c.is_control() && c != '\n' && c != '\t')
+            {
+                return Err("A recipe description is at most 500 characters.");
+            }
+            (!description.is_empty()).then(|| description.to_owned())
+        }
+        Some(_) => return Err("A recipe description must be a string."),
+    };
+    Ok((name.to_owned(), description))
+}
+
+/// Saves the session's canonical procedure as a recipe (Q4-E4.2-4a). Only the session's owner may
+/// save; a zero-data-retention session is refused before Quarry is asked; a procedure the quality
+/// check does not promote is refused with its reasons. The recipe store is reached through
+/// model-gateway `/v1/recipes` with the caller's own capability token, so capability-core binds the
+/// owner and the org from that token, never from this body.
+async fn save_recipe_view(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    session_id: &str,
+    name: String,
+    description: Option<String>,
+) -> Result<Value, Response> {
+    let (procedure, quality) =
+        compile_with_quality(state, user, headers, session_id, None, true).await?;
+    if quality.get("promotion_allowed").and_then(Value::as_bool) != Some(true) {
+        return Err(recipe_not_promotable(&quality));
+    }
+    let capability = match shared::required_capability_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(cause) => return Err(shared::delegated_auth_unavailable(cause).into_response()),
+    };
+    let token = shared::model_token(state, user, headers).await;
+    let mut create = json!({
+        "name": name,
+        "source_run_id": session_id,
+        "procedure": procedure,
+    });
+    if let Some(description) = description {
+        create["description"] = Value::String(description);
+    }
+    let (status, Json(body)) = shared::proxy_model_json_with_capability(
+        state,
+        Method::POST,
+        &format!("{}/v1/recipes", state.model_gateway_url),
+        Some(create),
+        token.as_deref(),
+        Some(&capability),
+        user,
+    )
+    .await;
+    if !status.is_success() {
+        return Err(recipe_upstream_failure(status, &body));
+    }
+    let written = unwrap_data(&body);
+    Ok(without_nulls(json!({
+        "recipeId": written.get("procedure_id").filter(|id| id.is_string()).cloned(),
+        "version": written.get("version").filter(|version| version.is_u64()).cloned(),
+        "digest": written.get("digest").filter(|digest| digest.is_string()).cloned(),
+        "slots": slots_view(&procedure),
+    })))
+}
+
+/// The list query the recipe store may receive: `limit` (1 to 100) and `afterId` (the previous
+/// page's `nextAfterId`), each validated. Any other key is dropped. Returns `?query` or "".
+fn recipes_list_query(uri: &Uri) -> Result<String, &'static str> {
+    let query = query_map(uri);
+    let mut pairs: Vec<String> = Vec::new();
+    if let Some(raw) = query.get("limit").filter(|raw| !raw.is_empty()) {
+        let limit: u64 = raw.parse().map_err(|_| "limit must be a whole number")?;
+        if !(1..=RECIPES_LIST_LIMIT_MAX).contains(&limit) {
+            return Err("limit must be between 1 and 100");
+        }
+        pairs.push(format!("limit={limit}"));
+    }
+    if let Some(raw) = query.get("afterId").filter(|raw| !raw.is_empty()) {
+        if raw.len() > RECIPE_ID_MAX_CHARS
+            || !raw
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return Err("afterId is not a recipe id");
+        }
+        pairs.push(format!("after_id={raw}"));
+    }
+    Ok(if pairs.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", pairs.join("&"))
+    })
+}
+
+/// One saved recipe in the list, projected to the fields the browser reads.
+fn recipe_list_item_view(item: &Value) -> Value {
+    without_nulls(json!({
+        "recipeId": item.get("id").cloned(),
+        "name": item.get("name").cloned(),
+        "description": item
+            .get("description")
+            .filter(|description| description.as_str().is_some_and(|text| !text.is_empty()))
+            .cloned(),
+        "sourceRunId": item
+            .get("source_run_id")
+            .filter(|run| run.as_str().is_some_and(|text| !text.is_empty()))
+            .cloned(),
+        "latestVersion": item.get("latest_version").cloned(),
+        "createdAt": item.get("created_at").cloned(),
+        "updatedAt": item.get("updated_at").cloned(),
     }))
+}
+
+/// The caller's saved recipes, one page at a time, through model-gateway with the caller's own
+/// capability token: capability-core lists only the verified caller's recipes.
+async fn recipes_list_view(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    query: &str,
+) -> Result<Value, Response> {
+    let capability = match shared::required_capability_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(cause) => return Err(shared::delegated_auth_unavailable(cause).into_response()),
+    };
+    let token = shared::model_token(state, user, headers).await;
+    let (status, Json(body)) = shared::proxy_model_json_with_capability(
+        state,
+        Method::GET,
+        &format!("{}/v1/recipes{query}", state.model_gateway_url),
+        None,
+        token.as_deref(),
+        Some(&capability),
+        user,
+    )
+    .await;
+    if !status.is_success() {
+        return Err(recipe_upstream_failure(status, &body));
+    }
+    let data = unwrap_data(&body);
+    let recipes: Vec<Value> = data
+        .get("procedures")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().map(recipe_list_item_view).collect())
+        .unwrap_or_default();
+    Ok(without_nulls(json!({
+        "recipes": recipes,
+        "nextAfterId": data
+            .get("next_after_id")
+            .filter(|next| next.as_str().is_some_and(|text| !text.is_empty()))
+            .cloned(),
+    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -1193,6 +1563,107 @@ async fn attach_session_region(
     }
 }
 
+/// `POST /api/v1/browser/sessions/{session_id}/recipes` with `{ name, description? }`
+/// (Q4-E4.2-4a, mounted only with `BROWSER_RECIPES`). Answers `{ recipeId, version, digest, slots }`.
+async fn save_session_recipe(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return invalid_session();
+    }
+    let input: Value = match serde_json::from_slice(&body) {
+        Ok(input) => input,
+        Err(_) => return invalid_recipe("The recipe request body must be JSON."),
+    };
+    let (name, description) = match recipe_meta_of(&input, &["name", "description"]) {
+        Ok(meta) => meta,
+        Err(message) => return invalid_recipe(message),
+    };
+    match save_recipe_view(&state, &user, &headers, &session_id, name, description).await {
+        Ok(data) => (
+            StatusCode::CREATED,
+            [(header::CACHE_CONTROL, "private, no-store")],
+            Json(ok(data)),
+        )
+            .into_response(),
+        Err(response) => response,
+    }
+}
+
+/// `GET /api/v1/browser/recipes?limit=&afterId=` (Q4-E4.2-4a, mounted only with `BROWSER_RECIPES`).
+async fn list_saved_recipes(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    let query = match recipes_list_query(&uri) {
+        Ok(query) => query,
+        Err(message) => return bad_request("invalid_browser_recipe_query", message),
+    };
+    match recipes_list_view(&state, &user, &headers, &query).await {
+        Ok(data) => (
+            StatusCode::OK,
+            [(header::CACHE_CONTROL, "private, no-store")],
+            Json(ok(data)),
+        )
+            .into_response(),
+        Err(response) => response,
+    }
+}
+
+/// `browser_evidence.save_recipe` with `{ sessionId, name, description? }` on the generic action
+/// surface (Q4-E4.2-4a). Answers 404 `browser_recipes_unavailable` while `BROWSER_RECIPES` is off.
+/// The envelope matches the other human actions.
+pub(crate) async fn dispatch_save_recipe(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    if !state.browser_recipes {
+        return recipes_unavailable();
+    }
+    let Some(session_id) = input
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return bad_request(
+            "invalid_input",
+            "browser_evidence.save_recipe requires a 'sessionId'",
+        );
+    };
+    if !is_valid_path_segment(session_id) {
+        return invalid_session();
+    }
+    let (name, description) =
+        match recipe_meta_of(input, &["sessionId", "name", "description"]) {
+            Ok(meta) => meta,
+            Err(message) => return invalid_recipe(message),
+        };
+    match save_recipe_view(state, user, headers, session_id, name, description).await {
+        Ok(result) => (
+            StatusCode::OK,
+            [(header::CACHE_CONTROL, "private, no-store")],
+            Json(ok(json!({
+                "actionId": SAVE_RECIPE_ACTION_ID,
+                "runId": format!("{}_{}", SAVE_RECIPE_ACTION_ID, user.user_id),
+                "status": "completed",
+                "auditId": format!("audit_{}_{}", SAVE_RECIPE_ACTION_ID, user.user_id),
+                "result": result,
+            }))),
+        )
+            .into_response(),
+        Err(response) => response,
+    }
+}
+
 /// `browser_evidence.compile_procedure` with `{ sessionId, procedureId? }` on the
 /// generic action surface (WS9.C). The envelope matches the other human actions.
 pub(crate) async fn dispatch_compile_procedure(
@@ -1228,6 +1699,84 @@ pub(crate) async fn dispatch_compile_procedure(
                 "runId": format!("{}_{}", action_id, user.user_id),
                 "status": "completed",
                 "auditId": format!("audit_{}_{}", action_id, user.user_id),
+                "result": result,
+            }))),
+        )
+            .into_response(),
+        Err(response) => response,
+    }
+}
+
+/// The action id of the region attach on the generic action surface (QF-7).
+const REGION_ATTACH_ACTION_ID: &str = "browser_region.attach";
+
+/// The action surface's answer while `BROWSER_REGION_ATTACH` is off. The HTTP route is absent then.
+fn region_attach_unavailable() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(error(
+            "browser_region_attach_unavailable",
+            "Attaching a browser page region is not enabled.",
+        )),
+    )
+        .into_response()
+}
+
+/// `browser_region.attach` with `{ sessionId, tabId, region: { x, y, width, height },
+/// image: { mimeType, dataBase64 }, selectionText? }` on the generic action surface (QF-7).
+/// Human-only (the model-access map exempts it). Unknown keys are refused, and the rest of
+/// the input goes through the same `region_attach_view` the route uses, so the owner gate,
+/// the ZDR refusal and the tab and region re-resolution are identical. Nothing is stored.
+/// Answers 404 `browser_region_attach_unavailable` while `BROWSER_REGION_ATTACH` is off.
+pub(crate) async fn dispatch_region_attach(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    if !state.browser_region_attach {
+        return region_attach_unavailable();
+    }
+    let Some(object) = input.as_object() else {
+        return bad_request(
+            "invalid_input",
+            "browser_region.attach input must be an object",
+        );
+    };
+    let Some(session_id) = object
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return bad_request(
+            "invalid_input",
+            "browser_region.attach requires a 'sessionId'",
+        );
+    };
+    if !is_valid_path_segment(session_id) {
+        return invalid_session();
+    }
+    let mut body = object.clone();
+    body.remove("sessionId");
+    let body: RegionAttachBody = match serde_json::from_value(Value::Object(body)) {
+        Ok(body) => body,
+        Err(_) => {
+            return bad_request(
+                "invalid_input",
+                "browser_region.attach input must be sessionId, tabId, region, image and an optional selectionText only.",
+            )
+        }
+    };
+    match region_attach_view(state, user, headers, session_id, body).await {
+        Ok(result) => (
+            StatusCode::OK,
+            [(header::CACHE_CONTROL, "private, no-store")],
+            Json(ok(json!({
+                "actionId": REGION_ATTACH_ACTION_ID,
+                "runId": format!("{}_{}", REGION_ATTACH_ACTION_ID, user.user_id),
+                "status": "completed",
+                "auditId": format!("audit_{}_{}", REGION_ATTACH_ACTION_ID, user.user_id),
                 "result": result,
             }))),
         )

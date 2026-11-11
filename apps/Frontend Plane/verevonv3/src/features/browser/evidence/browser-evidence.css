@@ -181,3 +181,57 @@
   flex-direction: column;
   gap: 0.25rem;
 }
+
+/* Step badges of a compiled procedure (Q4-E4.2-4b): the slot a step types into and its checks. */
+.browser-evidence-row__badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.browser-evidence-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.0625rem 0.375rem;
+  border: 1px solid var(--border-subtle, #d4d4d8);
+  border-radius: 0.25rem;
+  color: var(--text-secondary, #3f3f46);
+  font-size: 0.6875rem;
+  white-space: nowrap;
+}
+
+/* Save as recipe under a compiled procedure (Q4-E4.2-4b, behind VITE_BROWSER_RECIPES=true). */
+.browser-evidence-recipe {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  padding-top: 0.25rem;
+}
+
+.browser-evidence-recipe__label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1875rem;
+  color: var(--text-secondary, #3f3f46);
+  font-size: 0.75rem;
+}
+
+.browser-evidence-recipe__input {
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border-subtle, #d4d4d8);
+  border-radius: 0.375rem;
+  background: var(--surface-base, #ffffff);
+  color: var(--text-primary, #1f1f1f);
+  font: inherit;
+}
+
+.browser-evidence-recipe__input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.browser-evidence-recipe__saved {
+  margin: 0;
+  color: var(--text-success, #15803d);
+  font-weight: 600;
+}

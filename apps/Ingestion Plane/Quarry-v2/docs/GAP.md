@@ -5,6 +5,8 @@
 > **Scope:** Three-way comparison of Quarry v2, Quarry v1 (Go), and Firecrawl OSS.  
 > Sources: live codebase review of all three repos.
 
+> **Verified 2026-11-11:** the ad-blocking claims in this file were checked against `apps/Ingestion Plane/Quarry-v2/crates`. No ad or tracker blocking and no `blockAds` option exist, so those claims are marked "Not built" in place. Nothing else in this file was checked in this pass.
+
 ---
 
 ## 1. Executive Summary
@@ -37,7 +39,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 | Challenge / CAPTCHA detection | ✅ heuristics in driver | ✅ `urlsig::analyze` + `SecurityEngine` | V2 more principled |
 | Mobile emulation | ✅ Rod + DevMetrics | 🟡 Static/mobile UA, Browserless viewport, and chromiumoxide + Browserbase device metrics/touch are wired; full fingerprint benchmarking pending | **V2 partial gap** |
 | Geo / locale targeting | ✅ | 🟡 Locale is threaded edge → runtime → static/browser paths; chromiumoxide country proxy routing is wired, but provider-wide geo enforcement and benchmark evidence are still uneven | **V2 partial gap** |
-| Ad blocking | ✅ Rod HijackRequests | ✅ CDP Fetch domain intercept: ad/tracker URLs matched against block list and blocked at network level | Equivalent |
+| Ad blocking | ✅ Rod HijackRequests | ❌ Not built. No ad or tracker filter exists in `crates/`. The CDP Fetch listener (`install_network_guard` in `crates/quarry-browser/src/chromiumoxide.rs`) is a fail-closed egress guard: it checks the egress policy and an optional host reputation list (`QUARRY_EDGE__REPUTATION_MODE`), not ad or tracker URLs (checked 2026-11-11) | Not built |
 | `waitFor` (JS render delay) | ✅ | ✅ | Equivalent |
 | Custom request headers | ✅ | ✅ | Equivalent |
 | `onlyMainContent` / tag filters | ✅ | ✅ (readability) | V2 ahead (scored readability) |
@@ -54,7 +56,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 | PDF ingest (LlamaParse) | ✅ | 🟡 Self-hosted text-PDF extraction; no hosted OCR/layout parser | **V2 partial gap for OCR/layout fidelity** |
 | Wikipedia Enterprise | ✅ | ✅ Configurable Wikipedia source adapter with enterprise base URL/token support | Equivalent |
 | `mobile` emulation | ✅ | 🟡 Static UA + Browserless viewport + chromiumoxide/Browserbase metrics/touch wired; fingerprint benchmark pending | **V2 partial gap** |
-| `blockAds` | ✅ | ✅ CDP Fetch domain intercept implemented; ad/tracker patterns blocked at network level | Equivalent |
+| `blockAds` | ✅ | ❌ Not built. No `ScrapeRequest` field (`crates/quarry-edge/src/routes.rs:559`), no ad or tracker filter, and `crates/quarry-browser/src/browserless.rs:14` is a comment only (checked 2026-11-11) | Not built |
 | Geo / `location.country` | ✅ | 🟡 Locale threading is implemented and chromiumoxide country proxy routing exists, but provider-wide geo proof is still pending | **V2 partial gap** |
 | `storeInCache` per-request | ✅ | ✅ (cache layer in edge) | Equivalent |
 | `zeroDataRetention` | ✅ | ✅ Scrape fast path bypasses cache, artifacts, and durable event publishing while preserving live SSE fanout | Equivalent for `/v1/scrape`; future async/indexing features must preserve it |
@@ -62,10 +64,10 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 
 ### 2.3 Progress Update — 2026-05-03
 
-- Edge `/v1/scrape` now accepts request-scoped `mobile`, `locale`, `location.country`, `blockAds`, and custom `headers`.
+- Edge `/v1/scrape` now accepts request-scoped `mobile`, `locale`, `location.country`, and custom `headers`. `blockAds` is not accepted: it is not a `ScrapeRequest` field (`crates/quarry-edge/src/routes.rs:559`), so a request that sends it gets an `unknown_field` warning, or a 400 in strict mode, and nothing applies it (checked 2026-11-11).
 - `FetchContext` is threaded edge → runtime → driver boundary; static fetch now applies mobile user-agent, `Accept-Language`, and validated custom headers.
-- Browser path now has a typed request-configuration hook; Browserless receives mobile viewport, locale, extra headers, and `blockAds` intent in its request body.
-- **2026-05-03 (update):** geo-backed proxy/session routing (`--proxy-server`) and ad/tracker blocking (CDP Fetch domain intercept) are now implemented. Remaining proof gaps: fingerprint benchmarking and provider-wide geo/device parity.
+- Browser path now has a typed request-configuration hook; Browserless receives mobile viewport, locale, and extra headers. It receives no `blockAds` intent: no code writes that key into its request body (`crates/quarry-browser/src/browserless.rs:14` is a comment; checked 2026-11-11).
+- **2026-05-03 (update):** geo-backed proxy/session routing (`--proxy-server`) is now implemented. The ad/tracker blocking this line claimed is not built: no ad or tracker filter exists (checked 2026-11-11; see the `blockAds` row in section 2.2). Remaining proof gaps: fingerprint benchmarking and provider-wide geo/device parity.
 
 ### 2.4 Progress Update — 2026-05-04
 
@@ -74,7 +76,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 ### 2.5 Progress Update — 2026-05-06
 
 - Quarry edge now ships public handlers for `POST /v1/search`, `POST /v1/extract`, `POST /v1/agent`, `POST /v1/change/check`, and `GET /v1/change/latest`, plus a compatibility shim for `POST /v1/security/blocklist` and proxied run-event access at `GET/POST /v1/runs/:id/events`.
-- Browserbase request configuration is now wired for mobile device metrics, locale/headers, touch emulation, ad blocking, PDF output, and fail-fast empty environment validation.
+- Browserbase request configuration is now wired for mobile device metrics, locale/headers, touch emulation, PDF output, and fail-fast empty environment validation. Ad blocking is not wired: no code sends it to Browserbase (checked 2026-11-11).
 - Remaining browser parity work is now evidence-oriented: provider-wide geo/fingerprint benchmarking and acceptance-matrix proof rather than missing request-path wiring.
 - Browserbase support is wired through module exports and implements the full `BrowserDriver` contract.
 - Browser action runtime now supports action-level retry (`on_error=retry`) with a single retry attempt per failed action.
@@ -84,7 +86,7 @@ Gap closure now follows the phase system in Section 14. The `Owner Phase` column
 - Static/TLS drivers now fail fast on browser actions, while the browser adapter executes public action scripts before content extraction.
 - Source routing is partly implemented. The pipeline detects the body kind (quarry-transform `sniff`: magic bytes first, then Content-Type) and records it as `metadata.content_kind`. With `QUARRY_EDGE__DOC_ROUTING=skip` or `on` a body it cannot extract (image, archive, spreadsheet, ...) is refused with a typed 415 `UNSUPPORTED_MEDIA`. With `on`, PDF and DOCX bodies are parsed for their text (15 s deadline, 2 concurrent parses, 8 MiB text cap, DOCX input, entry-count and unpacked-size caps) and stored as `formats.raw` + `formats.markdown`; under ZDR the text is returned inline in `ScrapeResponse.markdown` with no artifact. Since WS5.C the parse runs in a child process under address-space, CPU and file-descriptor limits (`QUARRY_EDGE__DOC_PARSE_ISOLATION=process`, the default on Unix for the edge binary; `inprocess` is the rollback). Not done: OCR for scans, the streaming body cap in the drivers (a driver buffers the whole body and the pipeline refuses bodies above 16 MiB, so 16 to 25 MiB documents are refused earlier), XLSX/PPTX/ODF/EPUB extraction, an image parser. Default mode is `shadow` (detect and record only). `on` has run on a rebuilt image: the child round-trips a PDF, the boot line `document parser isolation` reports `isolation=process`, and one public PDF was scraped through the child. Not run for the scrape path: the memory bomb through the full HTTP path. `POST /v1/parse` (INNH-11, dark behind `QUARRY_EDGE__PARSE_ROUTE`) parses an uploaded PDF or DOCX to plain text without storing it; its test starts the real edge binary and sends a decompression bomb through the whole route (tests/parse_route_process.rs). Corrected 2026-10-16 (WS5.A, WS5.B); updated 2026-10-18 (WS5.C, WS5.H).
 - Wikipedia pages can be fetched through a configurable source adapter, including enterprise-style base URL and bearer token configuration.
-- Chromiumoxide applies request-scoped mobile metrics, touch emulation, locale override, timezone hint, headers, ad blocking, and country proxy selection. It injects no stealth script (the one that existed was never loaded and was removed in WS3.E).
+- Chromiumoxide applies request-scoped mobile metrics, touch emulation, locale override, timezone hint, headers, and country proxy selection. It does no ad blocking (checked 2026-11-11). It injects no stealth script (the one that existed was never loaded and was removed in WS3.E).
 
 ---
 
@@ -551,7 +553,7 @@ Owns open or partial gaps: #6, #13.
 | Work item | Implementation | Dependencies | Acceptance evidence |
 |-----------|----------------|--------------|---------------------|
 | Fingerprint benchmark | Add internet-gated tests against TLS/HTTP fingerprint endpoints. Capture JA3/JA4/H2, UA, viewport, timezone, locale, proxy country, and device metrics per driver. | Keep `wreq` exact-pinned for hot path. Do not add `wreq-util` until license review. Use `curl_cffi` only as Python lab control. | Scoreboard proves static TLS, chromiumoxide, Browserless, and Browserbase profiles match intended browser/device families within accepted thresholds. |
-| Mobile and geo provider parity | Request-level mobile, locale, header, touch, and ad-block wiring now exists in static, chromiumoxide, Browserless, and Browserbase paths. Remaining work is provider-specific geo validation, country-routing proof, and benchmark evidence. | Existing browser drivers. Add provider-specific test fixtures only. | Provider matrix marks each dimension pass/fail with captured artifacts. |
+| Mobile and geo provider parity | Request-level mobile, locale, header, and touch wiring now exists in static, chromiumoxide, Browserless, and Browserbase paths. Ad-block wiring is not built (checked 2026-11-11; see the `blockAds` row in section 2.2). Remaining work is provider-specific geo validation, country-routing proof, and benchmark evidence. | Existing browser drivers. Add provider-specific test fixtures only. | Provider matrix marks each dimension pass/fail with captured artifacts. |
 | Crawl policy parity | Closed for path-scope, matcher semantics, and typed denial reasons: backward crawling alias + `crawl_entire_domain` canonicalized; include/exclude now supports path + full-URL regex/glob; orchestrator decisions return stable denial codes plus operator-readable messages. | Existing Go matcher implementation; no new dependency required. | Workflow fixtures cover include/exclude, external links, subdomains, backward links, whole-domain behavior, sitemap scope, and typed denial-code/message pairs. |
 | Adaptive throttling and session health | Implement per-host EWMA latency, max/min delay, block-response penalty, and session/proxy `good`/`bad`/`retired` states. | Prefer small in-house EWMA; add no dependency unless benchmark proves value. Use Crawlee/Scrapy behavior as reference only. | E2E crawl under synthetic 200/429/5xx server slows down on errors and never decreases delay from non-200 latency. |
 | Rust frontier decision | Keep Go BFS if Phase 8 scoreboards prove it meets restart/cancel/SLO goals. Move to Rust frontier only if Go activity overhead or crash recovery misses targets. | No dependency until measurement. | Decision record in `PROGRESS.md`: keep Go BFS, or start Rust frontier implementation with measured reason. |
@@ -713,7 +715,7 @@ After re-checking the live codebase and validating the new tests, the old “mis
 - `POST /v1/security/blocklist` now provides an add/list compatibility shim over canonical `/v1/blocklists`.
 - `GET /v1/runs/:id/events` and `POST /v1/runs/:id/events` now proxy the control-plane event log surface.
 - `POST /v1/presets` and `POST /v1/deep-research` now fail explicitly with `501 UNSUPPORTED` instead of silent route gaps.
-- Browserbase now applies request-level mobile metrics, locale/header overrides, touch emulation, ad blocking, PDF support, and fail-fast environment validation.
+- Browserbase now applies request-level mobile metrics, locale/header overrides, touch emulation, PDF support, and fail-fast environment validation. It applies no ad blocking (checked 2026-11-11).
 
 ### Current Endpoint Gap Snapshot
 
@@ -745,13 +747,13 @@ After re-checking the live codebase and validating the new tests, the old “mis
 ### Implementation Completeness Assessment
 
 #### ✅ Fully Implemented
-- **Request parameters:** mobile, locale, location, blockAds, headers, cache, fingerprint, org_id, zero_data_retention, browser actions
+- **Request parameters:** mobile, locale, location, headers, cache, fingerprint, org_id, zero_data_retention, browser actions. `blockAds` is not built and is not a request parameter (checked 2026-11-11; `crates/quarry-edge/src/routes.rs:559`).
 - **Output formats:** markdown, html, rawHtml, links, images, attributes, screenshot, pdf, chunks, change, meta
 - **LLM bridge formats:** summary, json extraction, query/Q&A
 - **Operational routing:** change endpoints, job history, blocklist proxy surface, and run-event log routing
 - **Browser actions:** All 8 core actions + screenshotAfterEach + retry support
 - **Durability:** Postgres append-only events, idempotency keys, webhook DLQ, 50-page checkpoints, full job history
-- **Browserbase request parity wiring:** mobile metrics, locale/header overrides, touch, ad blocking, PDF, and fail-fast env validation
+- **Browserbase request parity wiring:** mobile metrics, locale/header overrides, touch, PDF, and fail-fast env validation. Ad blocking is not built (checked 2026-11-11)
 
 #### ✅ Newly Closed (2026-05-06)
 - **Security blocklist parity:** add/list/remove fully wired through shim → `DELETE /v1/blocklists/:id` → control plane Postgres. Tests: `blocklist_delete_is_forwarded`, `security_blocklist_shim_removes_by_id/pattern`.

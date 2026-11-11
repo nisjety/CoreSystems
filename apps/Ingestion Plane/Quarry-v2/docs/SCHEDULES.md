@@ -24,13 +24,15 @@ Through the edge, with a user token. The org comes from the verified JWT, never 
 | `POST` | `/v1/schedules/:id/unpause` | `enabled = true`. The Temporal schedule unpauses on the next pass |
 | `POST` | `/v1/schedules/:id/trigger` | Fire once now. Control answers `501` unless `QUARRY_CONTROL__SCHEDULE_REQUESTS` is on; then it answers `202` with a request row (see Trigger and backfill) |
 | `POST` | `/v1/schedules/:id/backfill` | Replay a past range of a scrape schedule. Same flag and rules as trigger |
+| `GET` | `/v1/schedules/:id/runs` | The fires of one schedule, newest first, keyset-paged (`limit`, `cursor`). Control's job rows (WS15.S3a) |
+| `GET` | `/v1/schedules/:id/requests/:rid` | One trigger or backfill request row: status, attempts, result, short error (WS15.S3a) |
 | `DELETE` | `/v1/schedules/:id` | Remove the row. The orchestrator deletes the Temporal schedule on its next pass, unless it was the org's last row (Known gaps, item 10) |
 
 The edge also serves `POST /v1/internal/schedules/preflight` for the orchestrator (runtime token and run binding). Clients never call it.
 
-Control's own routes take `org_id` in the query and need an HMAC signature from the edge or the orchestrator. They are the same verbs, plus `enable`, `disable`, `GET /v1/schedules/{id}`, `GET /v1/schedules/{id}/runs` (the fires of a schedule) and `GET /v1/schedules/{id}/requests/{rid}` (when the request flag is on). The edge has no route for the last three yet. Operators go through the edge.
+Control's own routes take `org_id` in the query and need an HMAC signature from the edge or the orchestrator. They are the same verbs, plus `enable`, `disable` and `GET /v1/schedules/{id}`. The edge has no route for those three yet. The fires of a schedule and its request rows are on the edge too (WS15.S3a), so operators go through the edge.
 
-Refusals: control's refusals carry `error.details.reason`, and the edge keeps that field whatever the status. The edge maps the status only for 400, 401, 403 and 404. Any other control status, including 409 and 501, reaches the client as `502 DRIVER_FAILED` (Known gaps, item 1).
+Refusals: control's refusals carry `error.details.reason`, and the edge keeps that field whatever the status. The edge maps 400 to `BAD_REQUEST`, 401 and 403 to `FORBIDDEN`, 404 to `NOT_FOUND`, 409 to `CONFLICT` and 501 to `UNSUPPORTED`. Any other control status reaches the client as `502 DRIVER_FAILED`.
 
 ## Tenancy
 
@@ -103,9 +105,9 @@ The stored `overlap_policy` becomes the Temporal schedule's overlap policy:
 
 ## Trigger and backfill (WS15.S3)
 
-Off by default. With `QUARRY_CONTROL__SCHEDULE_REQUESTS` unset, control answers `501 UNSUPPORTED` and mounts no request route. Through the edge that arrives as `502 DRIVER_FAILED`.
+Off by default. With `QUARRY_CONTROL__SCHEDULE_REQUESTS` unset, control answers `501 UNSUPPORTED` and mounts no request route. Through the edge that is `501 UNSUPPORTED` too.
 
-With the flag on, trigger and backfill do not call Temporal. Control inserts a `schedule_requests` row and answers `202 {request_id, schedule_id, action, status: "pending"}`. The orchestrator then applies the row, if its own switch `QUARRY_SCHEDULE_REQUESTS` is on (default off).
+With the flag on, trigger and backfill do not call Temporal. Control inserts a `schedule_requests` row and answers `202 {request_id, schedule_id, action, status: "pending"}`. The edge passes that `202` through. The orchestrator then applies the row, if its own switch `QUARRY_SCHEDULE_REQUESTS` is on (default off).
 
 Checks, in order. The first refusal wins.
 
@@ -123,7 +125,7 @@ Checks, in order. The first refusal wins.
 | Backfill only: at most 24 windows, where windows = `ceil(span / the cron's smallest gap)` | `400`, `backfill_too_many_windows` |
 
 - A schedule has at most one open request, a pending or claimed row. The database enforces it.
-- `Idempotency-Key` (at most 128 characters) is stored. The key is unique per org, so a repeated key is refused with `409 request_pending`. It is not answered with the first `202` (Known gaps, item 6).
+- `Idempotency-Key` (at most 128 characters) is stored. The edge forwards the caller's key in place of a minted one. An empty, longer or not visible ASCII value is ignored, as if no key were sent. The key is unique per org, so a repeated key is refused with `409 request_pending`. It is not answered with the first `202` (Known gaps, item 6).
 - The orchestrator's loop claims up to 10 rows every 2 s, leases each one for 60 s, and calls Temporal with a 15 s timeout. Its outcomes:
   - Temporal accepts the call: `done`, with `{schedule_id, action, submitted_at}`. Temporal returns no workflow id for these calls.
   - The schedule is not in Temporal, or the stored params are bad or the action is unknown: `rejected`. Temporal is not called for bad params.
@@ -131,7 +133,7 @@ Checks, in order. The first refusal wins.
   - A row whose worker dies is claimed again when its lease ends.
 - Delivery is at-least-once. A worker that dies after Temporal accepted the call, but before it posted `done`, causes one more fire. Temporal's trigger has no idempotency key to stop it.
 - A fire that a request starts is the schedule's own `ScheduledJobWF`, so it has the same preflight as a cron fire.
-- The tenant reads a request at `GET /v1/schedules/{id}/requests/{rid}` (control). The view shows the status, attempts, params, result and a short error text. It hides the claiming worker and the lease.
+- The tenant reads a request at `GET /v1/schedules/{id}/requests/{rid}`, through the edge (WS15.S3a). The view shows the status, attempts, params, result and a short error text. It hides the claiming worker and the lease.
 
 ## Fire-time posture (WS15.S4a)
 
@@ -181,12 +183,12 @@ A skipped fire is not a failure, so it never trips `pause_on_failure`.
 
 ## Known gaps
 
-1. **Trigger and backfill are dark, and the edge half is not built.** With the flag off, control answers 501 (502 through the edge). With the flag on, the edge does not pass the 202 through (it answers 200 with the control body), has no request read route, and maps control's 409 and 501 to `502 DRIVER_FAILED`. The reason survives in `details.reason`; the status does not. Fix this before the control flag goes on.
+1. **Trigger and backfill are dark.** ~~With the flag on, the edge does not pass the 202 through (it answers 200 with the control body), has no request read route, and maps control's 409 and 501 to `502 DRIVER_FAILED`. The reason survives in `details.reason`; the status does not. Fix this before the control flag goes on.~~ The edge half is built (WS15.S3a): the edge passes the 202 through, serves the request read, and keeps control's 409 and 501 with their own codes and `details.reason`. The control flag stays off until its go-live.
 2. **Backfill ignores the requested overlap policy.** The orchestrator hard-codes `ALLOW_ALL`.
 3. **Backfill counts windows as an upper bound** for an irregular cron, because control has no next-fire iterator.
 4. **Three row fields are never written.** `last_run_at`, `next_run_at` and `skipped_overlap_count` read `null`, `null` and `0`. The comment on the field says the executor writes them. Nothing calls the store method that would.
 5. **A Temporal `SKIP` leaves no record.** A trigger that lands while a fire runs still reads `done`.
-6. **Retries can duplicate.** A repeated `Idempotency-Key` on trigger or backfill is refused with `request_pending`, not answered with the first `202`. A trigger retried after the first one finished makes a second fire. The edge's `Idempotency-Key` is minted per forward, so it does not dedupe a client retry. Control dedupes no create, so a retried create can make a second row.
+6. **Retries can duplicate.** A repeated `Idempotency-Key` on trigger or backfill is refused with `request_pending`, not answered with the first `202`. A trigger retried after the first one finished makes a second fire when the retry carries no key, or a different one. ~~The edge's `Idempotency-Key` is minted per forward, so it does not dedupe a client retry.~~ The edge forwards the caller's key (WS15.S3a), so a retry that repeats the key fires nothing new. Control dedupes no create, so a retried create can make a second row.
 7. **The preflight is thinner than its design.** The orchestrator sends neither `target_kind` nor `enabled`, and reads none of `zdr`, `clamped_units` or `observed_reason`. Under `enforce` it acts on `allow` and `reason` only.
 8. **No boot check for the token.** `enforce` without the org-core token denies every scheduled fire, and nothing at boot says so.
 9. **Change monitors have no fire-time preflight.** The `monitor-preflight-v1` step is not built.

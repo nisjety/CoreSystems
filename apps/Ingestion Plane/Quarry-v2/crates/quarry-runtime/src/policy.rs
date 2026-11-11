@@ -109,7 +109,7 @@ pub const MAX_FETCH_TIMEOUT_S: u64 = 600;
 impl Default for FetchPolicy {
     fn default() -> Self {
         Self {
-            user_agent: "Quarry/2.0".into(),
+            user_agent: quarry_core::identity::policy_user_agent().into(),
             driver_kind: "static".into(),
             timeout_s: DEFAULT_FETCH_TIMEOUT_S,
             headers: Vec::new(),

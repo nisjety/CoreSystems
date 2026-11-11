@@ -97,8 +97,8 @@ func TestWebPolicyCatalogueCopyIsByteIdenticalToTheQuarrySource(t *testing.T) {
 
 func TestWebPolicyCatalogueLoadsAndIsTheV1Shape(t *testing.T) {
 	catalogue := DefaultWebPolicyCatalogue()
-	if catalogue.Version != 1 || len(catalogue.Keys) != 13 {
-		t.Fatalf("catalogue version=%d keys=%d, want version 1 with 13 keys", catalogue.Version, len(catalogue.Keys))
+	if catalogue.Version != 1 || len(catalogue.Keys) != 14 {
+		t.Fatalf("catalogue version=%d keys=%d, want version 1 with 14 keys", catalogue.Version, len(catalogue.Keys))
 	}
 	for key, kind := range map[string]string{
 		"browser.act.script": "ability", "search.paid_provider": "ability",

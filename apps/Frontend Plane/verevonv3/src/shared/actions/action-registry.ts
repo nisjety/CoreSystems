@@ -2216,6 +2216,85 @@ const browserEvidenceCompileProcedureInput = z.object({
   procedureId: z.string().trim().min(1).max(64).optional(),
 })
 
+// Q4-E4.2-4b: save the session's canonical procedure as a recipe (the gateway's Q4-E4.2-4a dispatcher).
+// Strict, as the gateway is: the recipe takes a name and a description and nothing else. A name is one
+// line of text; a description may keep line breaks and tabs, as the gateway allows.
+const browserEvidenceSaveRecipeInput = z
+  .object({
+    sessionId: z.string().trim().min(1).max(128),
+    name: z
+      .string()
+      .trim()
+      .min(1)
+      .max(120)
+      .regex(/^[^\u0000-\u001f\u007f-\u009f]+$/),
+    description: z
+      .string()
+      .trim()
+      .max(500)
+      .regex(/^[^\u0000-\u0008\u000b-\u001f\u007f-\u009f]*$/)
+      .optional(),
+  })
+  .strict()
+
+// The saved recipe as the store answered it: its id, its version, the lowercase sha256 digest of its
+// canonical body, and the open inputs its replay asks for. A slot carries its name and kind, never a value.
+export const browserEvidenceSaveRecipeOutput = z.object({
+  recipeId: z.string().min(1).max(128),
+  version: z.number().int().min(1),
+  digest: z.string().regex(/^[0-9a-f]{64}$/),
+  slots: z.array(
+    z.object({
+      name: z.string().min(1).max(128),
+      kind: z.enum(['text', 'secret']),
+    }),
+  ),
+})
+
+// QF-7: the region attach and @tab mention re-resolution (E3.3-c/d) as action contracts.
+// The gateway refuses unknown keys on both, so the schemas are strict too.
+const browserTabIdSchema = z.string().trim().regex(/^[A-Za-z0-9_-]{1,64}$/)
+
+const browserRegionAttachInput = z
+  .object({
+    sessionId: z.string().trim().min(1).max(128),
+    tabId: browserTabIdSchema,
+    region: z
+      .object({
+        x: z.number().finite(),
+        y: z.number().finite(),
+        width: z.number().finite().positive(),
+        height: z.number().finite().positive(),
+      })
+      .strict(),
+    image: z
+      .object({
+        mimeType: z.enum(['image/png', 'image/jpeg']),
+        // At most 1 MiB decoded (the gateway's REGION_IMAGE_MAX_BYTES).
+        dataBase64: z.string().trim().min(1).max(1_398_104),
+      })
+      .strict(),
+    selectionText: z.string().max(4000).optional(),
+  })
+  .strict()
+
+const browserResolveTabMentionsInput = z
+  .object({
+    sessionId: z.string().trim().min(1).max(128),
+    mentions: z
+      .array(
+        z
+          .object({
+            tabId: browserTabIdSchema.nullable().optional(),
+            token: z.string().trim().max(80).optional(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(8),
+  })
+  .strict()
+
 const browserProfileScopeEnum = z.enum(['user_private', 'org_shared', 'run_scoped'])
 
 const browserCreateSessionInput = z.object({
@@ -5347,6 +5426,39 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: browserEvidenceCompileProcedureInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser_evidence.save_recipe',
+    label: 'Save browser recipe',
+    description: 'Save the compiled procedure of a browser session as a reusable recipe, once its quality check passes. The recipe keeps the steps and the names of the slots its replay asks for; a typed value is never stored. Human-only: a model cannot save a recipe. Refused for a zero-data-retention session and for a session the person does not own. No action here removes a saved recipe. Off unless BROWSER_RECIPES is on.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: browserEvidenceSaveRecipeInput,
+    outputSchema: browserEvidenceSaveRecipeOutput,
+  },
+  {
+    id: 'browser_region.attach',
+    label: 'Attach browser area',
+    description: 'Attach an area the person dragged on the streamed browser frame (and optional selected text) to the composer. The gateway re-resolves the tab and the area against the live session and checks the cropped image against it. Human-only: a model cannot call it, and an attachment grants nothing. Ephemeral: nothing is stored. The attachment is classified browser-scraped. Refused under zero data retention. Off unless BROWSER_REGION_ATTACH is on.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: browserRegionAttachInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser_context.resolve_tab_mentions',
+    label: 'Resolve browser tab mentions',
+    description: 'Re-resolve up to eight @tab mentions of a turn against the live tabs of a browser session the person owns and return tab refs. Read-only: a mention never opens, focuses or switches a tab, carries no page content, and grants nothing. Human-only: a model cannot call it. One unresolved mention fails the whole request. Refused under zero data retention. Off unless BROWSER_TAB_MENTIONS is on.',
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: browserResolveTabMentionsInput,
     outputSchema: envelopeStatusOutput,
   },
   {

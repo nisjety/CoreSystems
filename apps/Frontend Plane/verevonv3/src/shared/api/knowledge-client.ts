@@ -621,14 +621,18 @@ export function parseCrawlPatterns(text: string): string[] {
 }
 
 /** The crawl scope options the user chose. A field the user left alone is absent, so the
- * edge applies its own default; `allowSubdomains` is sent only when ticked. */
-export type CrawlScopeOptions = Pick<CrawlRequest, 'maxDepth' | 'includePaths' | 'excludePaths' | 'allowSubdomains'>
+ * edge applies its own default; `allowSubdomains` and `allowExternalLinks` are sent only when ticked. */
+export type CrawlScopeOptions = Pick<
+  CrawlRequest,
+  'maxDepth' | 'includePaths' | 'excludePaths' | 'allowSubdomains' | 'allowExternalLinks'
+>
 
 export function buildCrawlScopeOptions(input: {
   maxDepth?: number
   includeText?: string
   excludeText?: string
   allowSubdomains?: boolean
+  allowExternalLinks?: boolean
 }): CrawlScopeOptions {
   const include = parseCrawlPatterns(input.includeText ?? '')
   const exclude = parseCrawlPatterns(input.excludeText ?? '')
@@ -640,6 +644,7 @@ export function buildCrawlScopeOptions(input: {
     ...(include.length > 0 ? { includePaths: include } : {}),
     ...(exclude.length > 0 ? { excludePaths: exclude } : {}),
     ...(input.allowSubdomains === true ? { allowSubdomains: true } : {}),
+    ...(input.allowExternalLinks === true ? { allowExternalLinks: true } : {}),
   }
 }
 

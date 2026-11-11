@@ -292,11 +292,14 @@ async fn attach_run_inner(
                 ),
             ));
         }
-        validate_navigation(
+        // WS8.B: run-aware, so an open-web run's start URL stays DNS-guarded even when the
+        // engine allows private hosts.
+        validate_navigation_for_run(
             &AgentAction::Navigate {
                 url: url.to_owned(),
             },
             state.security.as_ref(),
+            &entry.nav_policy,
         )
         .await
         .map_err(|error| driver_err(&request_id, error))?;
@@ -398,10 +401,28 @@ async fn attach_run_inner(
         (target.tab_id.clone(), tabs, Some(BorrowedTab { origin, prior_egress }), opened_by)
     } else {
         // A separately opened agent tab does not replace the person's active tab.
-        let tab = state.agent_driver.open_tab(
+        let tab = match state.agent_driver.open_tab(
             &entry.session,
             OpenTabOptions { url: body.start_url.clone(), activate: false, egress_policy: Some(egress) },
-        ).await.map_err(|error| driver_err(&request_id, error))?;
+        ).await {
+            Ok(tab) => tab,
+            Err(error) => {
+                // W2-U07: a first navigation that timed out keeps its tab. The attachment has not
+                // begun, so nothing is ledgered for that tab: it is closed best effort instead, and
+                // the timeout is answered. A failed close is logged and never masks the timeout.
+                if let Some(kept) = super::tabs::kept_tab_id(&error) {
+                    if let Err(close_error) =
+                        state.agent_driver.close_tab(&entry.session, kept).await
+                    {
+                        tracing::warn!(
+                            code = ?close_error.code,
+                            "could not close the browser tab of a timed-out attach open"
+                        );
+                    }
+                }
+                return Err(driver_err(&request_id, error));
+            }
+        };
         let tabs = state.agent_driver.list_tabs(&entry.session).await
             .map_err(|error| driver_err(&request_id, error))?;
         sync_ledger_with_driver(&handle.live, &tabs);
@@ -1177,7 +1198,8 @@ pub(super) async fn delegate_step(
             observation
         }
         Err(error) => {
-            let (failed_usd, failed_source) = failed_step_cost(ran.as_ref(), &receipt_action);
+            let (failed_usd, failed_source) =
+                failed_step_cost_for_error(ran.as_ref(), &receipt_action, &error);
             lane.ctx.last_egress_sequence = egress_cursor;
             let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
                 .org_id(receipt_org)

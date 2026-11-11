@@ -117,6 +117,9 @@ fn test_state(quarry_edge_url: String) -> AppState {
         browser_live_view_only: false,
         browser_consent_api: false,
         browser_downloads: false,
+        browser_recipes: false,
+        browser_region_attach: false,
+        browser_tab_mentions: false,
         // Unroutable: the onboarding preview-token mint fails, so the
         // upstream calls go out unauthenticated — which is exactly the
         // degraded path we want covered here, and the stub does not check.

@@ -1,5 +1,7 @@
 # Quarry V2 Contracts - Fixes Applied ✅
 
+> **Verified 2026-11-11:** the adblock claims in this file (lines 84 and 92, marked below) are not true of the code. No adblock code exists in `apps/Ingestion Plane/Quarry-v2/crates`: there is no `intercept_loop` and no adblock symbol, and `blockAds` appears only in a comment at `crates/quarry-browser/src/browserless.rs:14`. The claims are kept as first written. Archive; the replacement is `docs/plans/quarry-browser-build-plan-2026-10-14.md`, E5.2 (F-t2-066).
+
 **Date:** 2026-05-03  
 **Status:** All 4 fixes implemented and verified to compile
 
@@ -81,7 +83,7 @@ Five gaps identified in `docs/SCRAPING_ENGINE_GAPS.md` resolved:
 - **Implemented:** `wait_for` and `evaluate` methods via WebSocket — previously stubs, now send CDP `Runtime.evaluate` and `Page.addScriptToEvaluateOnNewDocument` commands through the existing WS connection
 
 **File:** `crates/quarry-browser/src/chromiumoxide.rs`
-- **Stored:** adblock filter `JoinHandle` as a field; **aborted** in `release()` — prevents the background adblock task from leaking after the browser session ends
+- **Stored:** adblock filter `JoinHandle` as a field; **aborted** in `release()` — prevents the background adblock task from leaking after the browser session ends **[claimed, no such code on main; archive]**
 
 ### Result
 
@@ -89,7 +91,7 @@ Five gaps identified in `docs/SCRAPING_ENGINE_GAPS.md` resolved:
 ✅ `driver_plan_enhanced` module exposed  
 ✅ Retry escalation fires correctly on final failure  
 ✅ `browserless` `wait_for` / `evaluate` implemented via WebSocket CDP  
-✅ Adblock background task cleaned up on session release  
+✅ Adblock background task cleaned up on session release **[claimed, no such code on main; archive]**  
 ✅ `cargo check` passes across full workspace
 
 ---

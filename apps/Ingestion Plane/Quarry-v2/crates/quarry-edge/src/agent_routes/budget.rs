@@ -145,9 +145,6 @@ pub(super) fn failed_step_cost(
 /// run's domain grant, the egress guard or the target guard refused it) costs the refusal
 /// rate. A navigation that timed out or failed some other way is not a refusal and keeps the
 /// flat navigate cost. Call sites that hold the error should use this function.
-// No non-test caller yet: the failed-step call sites in step.rs and attach.rs switch to it
-// (see W23-W2-U21a-status.md). Remove this attribute when they do.
-#[allow(dead_code)]
 pub(super) fn failed_step_cost_for_error(
     ran: Option<&BrowserTelemetry>,
     action: &AgentAction,

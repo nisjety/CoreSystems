@@ -66,6 +66,10 @@ interface ImportMetaEnv {
 	readonly VITE_BROWSER_DOWNLOADS_DRAWER?: string;
 	/** "true" renders a crawl-plan fence in chat as an approval card instead of a plain code block (E4.3-055c). Default off. */
 	readonly VITE_CRAWL_PLAN_CARD?: string;
+	/** "true" shows Save as recipe under a compiled procedure that passes its quality check (Q4-E4.2-4b). Default off. */
+	readonly VITE_BROWSER_RECIPES?: string;
+	/** "true" shows the save-as-PDF toolbar action in BrowserChrome (F-t2-069 step 1, E5.1; hidden for ZDR sessions). Default off. */
+	readonly VITE_BROWSER_PDF?: string;
 }
 
 interface ImportMeta {

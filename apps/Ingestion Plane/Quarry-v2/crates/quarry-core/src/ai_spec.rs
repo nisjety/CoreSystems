@@ -756,6 +756,9 @@ pub enum AiReason {
     ModelLaneDenied,
     ModelLaneUnauthorized,
     ModelRejectedRequest,
+    /// Quarry could not mint the lane's two org-bound tokens (WS16.S3).
+    /// Nothing was sent.
+    ModelLaneUnavailable,
     UpstreamUnavailable,
     Timeout,
     Transport,

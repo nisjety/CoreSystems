@@ -366,7 +366,10 @@ impl Ctx<'_> {
         match result {
             Err(_elapsed) => Err(deadline_failure()),
             Ok(Err(error)) => {
-                if error == ModelHopError::LaneNotGranted {
+                if matches!(
+                    error,
+                    ModelHopError::LaneNotGranted | ModelHopError::LaneUnavailable
+                ) {
                     // Nothing was sent: it is not a call.
                     state.calls -= 1;
                     tally.calls -= 1;
@@ -582,6 +585,7 @@ fn failure_of(error: ModelHopError) -> Failure {
     };
     match error {
         ModelHopError::LaneNotGranted | ModelHopError::RouteDenied => unavailable(AiReason::ModelLaneDenied),
+        ModelHopError::LaneUnavailable => unavailable(AiReason::ModelLaneUnavailable),
         ModelHopError::Unauthorized => unavailable(AiReason::ModelLaneUnauthorized),
         ModelHopError::Rejected => unavailable(AiReason::ModelRejectedRequest),
         ModelHopError::ZdrRefused => Failure::Failed {

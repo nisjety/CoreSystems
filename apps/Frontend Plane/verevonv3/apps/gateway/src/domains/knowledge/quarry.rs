@@ -765,7 +765,11 @@ fn invalid_crawl(message: String) -> Response {
 
 /// Who proposed a crawl. The UI may set every scope switch the page offers. A Model
 /// proposal (the `knowledge.crawl_site` action) may not set `allowExternalLinks`, and
-/// no robots key is forwarded from either surface (WS14.S6; the robots override is WS14.S7).
+/// never carries a robots key (WS14.S6). WS14.S7: the UI surface forwards
+/// `ignore_robots_txt: true` only while `VEREVON_GATEWAY_CRAWL_ROBOTS_OVERRIDE` is on; every
+/// other robots key, and every robots key from the Model surface, is dropped. The gateway is
+/// not the authority: the edge refuses the override without the org entitlement (403
+/// `policy_denied`) and for service principals, and quarry-control audits it before the ack.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Surface {
     Ui,
@@ -783,7 +787,34 @@ pub(crate) fn normalize_crawl_body(input: &Value) -> Result<Value, String> {
     normalize_crawl_body_for(input, Surface::Ui)
 }
 
+/// `VEREVON_GATEWAY_CRAWL_ROBOTS_OVERRIDE` (WS14.S7): lets the UI crawl surface forward
+/// `ignore_robots_txt: true` to the edge. Off unless it is exactly `true`. Read per request,
+/// and only for a UI crawl, like `VEREVON_GATEWAY_AGENT_WEB_TOOLSET`.
+pub(crate) const CRAWL_ROBOTS_OVERRIDE_FLAG: &str = "VEREVON_GATEWAY_CRAWL_ROBOTS_OVERRIDE";
+
+fn crawl_robots_override_enabled() -> bool {
+    crawl_robots_override_from(std::env::var(CRAWL_ROBOTS_OVERRIDE_FLAG).ok().as_deref())
+}
+
+/// Exactly the word `true`, like the other gateway feature switches; anything else,
+/// including an unset variable, is off.
+fn crawl_robots_override_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
 pub(crate) fn normalize_crawl_body_for(input: &Value, surface: Surface) -> Result<Value, String> {
+    // The switch is only read for a UI crawl: the Model surface never forwards a robots key.
+    let robots_override = surface == Surface::Ui && crawl_robots_override_enabled();
+    normalize_crawl_body_with(input, surface, robots_override)
+}
+
+/// The normaliser with the robots-override switch passed in, so tests never touch the
+/// process environment.
+fn normalize_crawl_body_with(
+    input: &Value,
+    surface: Surface,
+    robots_override: bool,
+) -> Result<Value, String> {
     let raw_url = input
         .get("url")
         .and_then(Value::as_str)
@@ -818,6 +849,21 @@ pub(crate) fn normalize_crawl_body_for(input: &Value, surface: Surface) -> Resul
     if surface == Surface::Ui {
         if let Some(allow) = input.get("allowExternalLinks").or_else(|| input.get("allow_external_links")).and_then(Value::as_bool) {
             body["allow_external_links"] = json!(allow);
+        }
+    }
+    // WS14.S7: the robots override, UI surface only and only behind the switch. Only a
+    // boolean `true` is forwarded (in the edge's snake-case spelling); `false`, a string or
+    // any other robots key is dropped. The edge checks the entitlement and the audit runs
+    // before the ack, so this is a forwarding gate, not the authority.
+    if surface == Surface::Ui && robots_override {
+        let ignore = input
+            .get("ignoreRobotsTxt")
+            .or_else(|| input.get("ignore_robots_txt"))
+            .or_else(|| input.get("ignoreRobots"))
+            .and_then(Value::as_bool)
+            == Some(true);
+        if ignore {
+            body["ignore_robots_txt"] = json!(true);
         }
     }
     // WS14.S6: the depth bound (zero takes the default; the ceiling is 10) and the pattern
@@ -1566,6 +1612,64 @@ mod tests {
         assert!(body.get("allow_external_links").is_none());
         assert!(body.as_object().unwrap().keys().all(|key| !key.contains("robot")));
         assert_eq!(body["allow_subdomains"], json!(true));
+
+        // WS14.S7: the override switch on changes nothing for a Model proposal.
+        let flagged = normalize_crawl_body_with(
+            &json!({
+                "url": "https://example.com/",
+                "ignoreRobotsTxt": true,
+                "ignoreRobots": true,
+                "ignore_robots_txt": true,
+                "robots_mode": "ignore",
+            }),
+            Surface::Model,
+            true,
+        )
+        .unwrap();
+        assert!(flagged.as_object().unwrap().keys().all(|key| !key.contains("robot")));
+    }
+
+    /// WS14.S7: the switch is on only for exactly `true`.
+    #[test]
+    fn crawl_robots_override_switch_is_exactly_true() {
+        assert!(crawl_robots_override_from(Some("true")));
+        assert!(!crawl_robots_override_from(None));
+        assert!(!crawl_robots_override_from(Some("")));
+        assert!(!crawl_robots_override_from(Some("1")));
+        assert!(!crawl_robots_override_from(Some("TRUE")));
+        assert!(!crawl_robots_override_from(Some("false")));
+        assert_eq!(CRAWL_ROBOTS_OVERRIDE_FLAG, "VEREVON_GATEWAY_CRAWL_ROBOTS_OVERRIDE");
+    }
+
+    /// WS14.S7: with the switch on, the UI forwards a boolean `true` under any of the three
+    /// spellings as `ignore_robots_txt`; `false`, a string and other robots keys are dropped.
+    #[test]
+    fn ui_surface_forwards_robots_override_only_behind_the_switch() {
+        for key in ["ignoreRobotsTxt", "ignore_robots_txt", "ignoreRobots"] {
+            let input = json!({ "url": "https://example.com/", key: true });
+            let on = normalize_crawl_body_with(&input, Surface::Ui, true).unwrap();
+            assert_eq!(on["ignore_robots_txt"], json!(true), "{key}");
+            assert!(on.as_object().unwrap().keys().filter(|k| k.contains("robot")).count() == 1);
+
+            let off = normalize_crawl_body_with(&input, Surface::Ui, false).unwrap();
+            assert!(off.as_object().unwrap().keys().all(|k| !k.contains("robot")), "{key}");
+        }
+        for value in [json!(false), json!("true"), json!(1), Value::Null] {
+            let body = normalize_crawl_body_with(
+                &json!({ "url": "https://example.com/", "ignoreRobotsTxt": value }),
+                Surface::Ui,
+                true,
+            )
+            .unwrap();
+            assert!(body.get("ignore_robots_txt").is_none());
+        }
+        let other = normalize_crawl_body_with(
+            &json!({ "url": "https://example.com/", "robots_mode": "ignore" }),
+            Surface::Ui,
+            true,
+        )
+        .unwrap();
+        assert!(other.as_object().unwrap().keys().all(|k| !k.contains("robot")));
     }
 
     #[test]

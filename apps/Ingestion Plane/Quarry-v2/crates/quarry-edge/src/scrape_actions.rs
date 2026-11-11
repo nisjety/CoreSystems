@@ -92,15 +92,17 @@ pub fn inline_max_bytes() -> usize {
 /// as they always have.
 pub fn plan_for(resolved: &ResolvedScrapeOptions, signals: DriverSignals) -> DriverPlan {
     // WS13.5: actions run in the browser too, so they take the same plan. E4.4-a: so does a page
-    // emulation, which only a browser can set.
+    // emulation, which only a browser can set. E4.4-b: and a pinned profile, which only a browser
+    // can restore.
     if resolved.capture.is_empty()
         && resolved.actions.is_none()
         && resolved.page_emulation.is_none()
+        && resolved.profile_id.is_none()
     {
         plan_from_signals(signals)
     } else {
         DriverPlan::browser_fetch(
-            "screenshot, pdf, actions or page emulation require the browser",
+            "screenshot, pdf, actions, page emulation or a profile pin require the browser",
         )
     }
 }
@@ -130,6 +132,28 @@ pub fn page_emulation_unsupported(emulation: &PageEmulation) -> Vec<FieldError> 
             )
         })
         .collect()
+}
+
+/// E4.4-b: put the request's pinned profile on the render hints the runner takes, as the
+/// canonical `prof_<ulid>` the contract checked. Nothing is set when the request pins none, so the
+/// default path is unchanged. A value that does not parse sets nothing; the scrape route refuses
+/// such a request before it gets here, so the run is never unpinned by accident.
+pub fn apply_profile_pin(render: &mut RenderHints, resolved: &ResolvedScrapeOptions) {
+    render.profile_pin = resolved
+        .profile_id
+        .as_deref()
+        .and_then(|raw| raw.parse::<quarry_core::ids::kinds::ProfileKind>().ok());
+}
+
+/// E4.4-b: the refusal for a profile pin when no browser driver is wired: one field error at
+/// `profile_id`, `unsupported_option`, on a 400 (an option this edge does not offer). A profile is
+/// restored only into a browser, and the default driver would run the page without it.
+pub fn profile_pin_unsupported() -> Vec<FieldError> {
+    vec![FieldError::new(
+        "profile_id",
+        "unsupported_option",
+        "profile_id needs a browser, and this edge has none to restore a profile into",
+    )]
 }
 
 /// Put the request's captures on the render hints the runner takes. Nothing is

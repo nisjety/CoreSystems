@@ -20,7 +20,8 @@ use crate::fallback_driver::fetch_sub_codes_enabled;
 use crate::proxy_pool::{ProxyEntry, ProxyPool};
 
 /// Stable public discovery identity; robots parsing must use this same token.
-pub const DISCOVERY_USER_AGENT: &str = "QuarryBot";
+/// The token is defined once, in `quarry_core::identity::DISCOVERY_TOKEN` (F-t2-067).
+pub const DISCOVERY_USER_AGENT: &str = quarry_core::identity::DISCOVERY_TOKEN;
 
 const MAX_REDIRECT_URL_BYTES: usize = 4096;
 

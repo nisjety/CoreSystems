@@ -414,8 +414,10 @@ pub async fn step(
         }
         Err(error) => {
             // A failed attempt is charged the flat cost, so its receipt carries it too (WS6.B);
-            // a refused landing its driver's cost (`failed_step_cost`).
-            let (failed_usd, failed_source) = failed_step_cost(ran.as_ref(), &receipt_action);
+            // a refused landing its driver's cost, and a navigate the driver refused before
+            // a page loaded the refusal rate (`failed_step_cost_for_error`, W2-U21a).
+            let (failed_usd, failed_source) =
+                failed_step_cost_for_error(ran.as_ref(), &receipt_action, &error);
             if counts_budget {
                 budget_charge(&mut entry, false, failed_usd);
             }
@@ -629,7 +631,7 @@ pub(super) async fn execute_ws_action(
                 budget_charge(
                     &mut entry,
                     false,
-                    failed_step_cost(ran.as_ref(), &receipt_action).0,
+                    failed_step_cost_for_error(ran.as_ref(), &receipt_action, &error).0,
                 );
             }
             lane.ctx.last_egress_sequence = egress_cursor;

@@ -64,21 +64,23 @@ test('upstream proto: grant messages keep their field numbers and add kind/zdr/o
   const messages = parseProto(read(UPSTREAM_PROTO));
 
   const request = messages.get('AcquireGrantRequest');
-  assert.deepEqual(numbers(request), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ...BUDGET_NUMBERS, 50]);
+  assert.deepEqual(numbers(request), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 21, 22, ...BUDGET_NUMBERS, 50]);
   assert.deepEqual(request.get(10), { name: 'zdr', type: 'bool', repeated: false });
 
   const issued = messages.get('AcquireGrantResponse');
-  assert.deepEqual(numbers(issued), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, ...BUDGET_NUMBERS, 50, 51, 52]);
+  assert.deepEqual(numbers(issued), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 20, 21, ...BUDGET_NUMBERS, 50, 51, 52, 60]);
   assert.deepEqual(issued.get(10), { name: 'kind', type: 'string', repeated: false });
   assert.deepEqual(issued.get(11), { name: 'zdr', type: 'bool', repeated: false });
+  assert.deepEqual(issued.get(20), { name: 'web_policy', type: 'WebPolicy', repeated: false });
 
   const validated = messages.get('ValidateGrantResponse');
-  assert.deepEqual(numbers(validated), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, ...BUDGET_NUMBERS, 50, 51, 52, 53]);
+  assert.deepEqual(numbers(validated), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 20, 21, ...BUDGET_NUMBERS, 50, 51, 52, 53, 60]);
   // D1-001: the key the grant was issued under, so a consumer can bind a run grant to its run.
   assert.deepEqual(validated.get(13), { name: "session_key", type: "string", repeated: false });
   assert.deepEqual(validated.get(10), { name: 'kind', type: 'string', repeated: false });
   assert.deepEqual(validated.get(11), { name: 'owner_id', type: 'string', repeated: false });
   assert.deepEqual(validated.get(12), { name: 'zdr', type: 'bool', repeated: false });
+  assert.deepEqual(validated.get(20), { name: 'web_policy', type: 'WebPolicy', repeated: false });
 });
 
 test('upstream proto: the budget claim is fields 40-44 on every message that carries it', () => {
@@ -116,7 +118,7 @@ test('upstream proto: DeriveRunGrant request and response pin their field number
 
   const response = messages.get('DeriveRunGrantResponse');
   assert.ok(response, 'DeriveRunGrantResponse is missing');
-  assert.deepEqual(numbers(response), [1, 2, 3, 4, 5, 6, 7, ...BUDGET_NUMBERS, 50]);
+  assert.deepEqual(numbers(response), [1, 2, 3, 4, 5, 6, 7, 20, ...BUDGET_NUMBERS, 50]);
   assert.deepEqual(response.get(1), { name: 'grant_id', type: 'string', repeated: false });
   assert.deepEqual(response.get(2), { name: 'endpoint', type: 'string', repeated: false });
   assert.deepEqual(response.get(3), { name: 'expires_at', type: 'google.protobuf.Timestamp', repeated: false });
@@ -124,6 +126,7 @@ test('upstream proto: DeriveRunGrant request and response pin their field number
   assert.deepEqual(response.get(5), { name: 'parent_grant_id', type: 'string', repeated: false });
   assert.deepEqual(response.get(6), { name: 'kind', type: 'string', repeated: false });
   assert.deepEqual(response.get(7), { name: 'zdr', type: 'bool', repeated: false });
+  assert.deepEqual(response.get(20), { name: 'web_policy', type: 'WebPolicy', repeated: false });
 
   // The rpc itself: a rename or a signature change breaks every caller.
   assert.match(
@@ -213,12 +216,11 @@ test('no browser grant message carries a space_id or team_id field', () => {
   }
 });
 
-// WS7.K (R-6: field 20, the web-policy snapshot). Quarry vendors its half before the Model Plane broker
-// half lands (the ask is in .plan-work/quarry-w1w2/MP-ASKS.md, W2-Q-WS7K). Until upstream has them, these
-// are the only vendored names that may be missing upstream; once upstream has one, it must match exactly
-// like every other field (the subset test below compares it), so this list can only be emptied.
-const PENDING_UPSTREAM_MESSAGES = new Set(['WebPolicy']);
-const PENDING_UPSTREAM_FIELDS = new Set(['AcquireGrantResponse.20', 'ValidateGrantResponse.20']);
+// WS7.K (R-6: field 20, the web-policy snapshot). The upstream half has landed (WebPolicy and field 20 on the
+// grant responses in browser.proto), so every vendored name must match upstream exactly, like every other field
+// the subset test below compares. These sets stay empty: an entry here would exempt a vendored name from that check.
+const PENDING_UPSTREAM_MESSAGES = new Set();
+const PENDING_UPSTREAM_FIELDS = new Set();
 
 test('Quarry vendored proto is a subset of the upstream one (same name, number, type)', () => {
   const upstream = parseProto(read(UPSTREAM_PROTO));

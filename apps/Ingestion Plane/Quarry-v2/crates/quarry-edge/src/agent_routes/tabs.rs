@@ -143,6 +143,21 @@ pub(super) fn remember_tab_opener(
     entry.tab_origins.insert(tab_id.to_owned(), origin);
 }
 
+/// The tab a failed open kept (W2-U07): the id that a TIMEOUT names in `details.tab_id`, when
+/// that id is a non-empty string. `None` for any other error. Only the id is read here; nothing
+/// else from the error is copied anywhere.
+pub(super) fn kept_tab_id(error: &QuarryError) -> Option<&str> {
+    if error.code != ErrorCode::Timeout {
+        return None;
+    }
+    error
+        .details
+        .as_ref()?
+        .get("tab_id")?
+        .as_str()
+        .filter(|tab_id| !tab_id.is_empty())
+}
+
 /// `POST /v1/agent/runs/{run_id}/tabs` — open a new live browser tab.
 pub async fn new_tab(
     State(state): State<AppState>,
@@ -232,11 +247,14 @@ pub async fn new_tab(
         // WS7.D: the tab's URL is held to the run's web policy before it is opened.
         crate::agent_policy_gate::gate_visit(&state, &handle.live, entry.zdr.is_active(), url)
             .map_err(|error| driver_err(&request_id, error))?;
-        validate_navigation(
+        // WS8.B: run-aware, so an open-web run's new tab stays DNS-guarded even when the
+        // engine allows private hosts.
+        validate_navigation_for_run(
             &AgentAction::Navigate {
                 url: url.to_owned(),
             },
             state.security.as_ref(),
+            &entry.nav_policy,
         )
         .await
         .map_err(|error| driver_err(&request_id, error))?;
@@ -263,11 +281,63 @@ pub async fn new_tab(
         .await
         .map_err(|error| driver_err(&request_id, error))?;
 
-    let tab = state
+    let tab = match state
         .agent_driver
         .new_tab(&entry.session, body.url.as_deref())
         .await
-        .map_err(|e| driver_err(&request_id, e))?;
+    {
+        Ok(tab) => tab,
+        Err(error) => {
+            // W2-U07: a first navigation that timed out keeps its tab, and the tab is the run's.
+            // It is remembered and recorded as a success records it, so the owner sees who opened
+            // it, and the timeout is answered with its id so the caller can select or close it.
+            // This bookkeeping is best effort: a failure in it is logged and never replaces the
+            // timeout the caller gets.
+            if let Some(kept) = kept_tab_id(&error) {
+                match state.agent_driver.list_tabs(&entry.session).await {
+                    Ok(tabs) => {
+                        remember_tab_opener(
+                            &mut entry,
+                            kept,
+                            TabOrigin {
+                                initiated_by: admitted.initiator,
+                                agent: admitted.agent.clone(),
+                                unattributed: false,
+                            },
+                            &tabs,
+                        );
+                        if let Err(record_error) = record_browser_timeline_event(
+                            &state,
+                            &entry,
+                            &handle.live,
+                            BrowserTimelineEventKind::Tab {
+                                operation: BrowserTabOperation::Opened,
+                                initiated_by: Some(admitted.initiator),
+                                agent: admitted.agent.clone(),
+                                control_epoch: admitted.control_epoch,
+                                tab_id: Some(kept.to_owned()),
+                                active_tab_id: active_browser_tab_id(&tabs),
+                            },
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                code = ?record_error.code,
+                                "could not record a kept browser tab on the timeline"
+                            );
+                        }
+                    }
+                    Err(list_error) => {
+                        tracing::warn!(
+                            code = ?list_error.code,
+                            "could not list the browser tabs after a timed-out open"
+                        );
+                    }
+                }
+            }
+            return Err(driver_err(&request_id, error));
+        }
+    };
     let tabs = state
         .agent_driver
         .list_tabs(&entry.session)

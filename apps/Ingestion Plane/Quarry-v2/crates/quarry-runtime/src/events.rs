@@ -334,6 +334,7 @@ fn new_event(
         seq,
         payload,
         idempotency_key,
+        trace: None,
     }
 }
 

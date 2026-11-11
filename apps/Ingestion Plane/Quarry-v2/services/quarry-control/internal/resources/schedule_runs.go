@@ -7,6 +7,7 @@ package resources
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"time"
@@ -189,4 +190,95 @@ func writeScheduleSkipped(db store.DB, scheduleID, jobID, runID quarrycontracts.
 	if _, err := db.Events().AppendNext(evt); err != nil {
 		log.Warn().Str("schedule_id", string(scheduleID)).Msg("schedule_skipped event append failed")
 	}
+}
+
+// maxScheduleRuntimeBodyBytes caps the runtime write. The body holds three fields.
+const maxScheduleRuntimeBodyBytes = 4 << 10
+
+// minRuntimeYear and maxRuntimeYear bound the UTC year of a runtime timestamp
+// (WS15.S4b). A value outside them is a unit or clock mistake, not a run time.
+const (
+	minRuntimeYear = 2000
+	maxRuntimeYear = 2200
+)
+
+// scheduleRuntimeBody is the body of PUT /v1/internal/schedules/{id}/runtime. The
+// write replaces the three runtime fields of the row, so an absent or null
+// timestamp clears it. Org and params are not fields here: an unknown key is refused.
+type scheduleRuntimeBody struct {
+	LastRunAt           *int64 `json:"last_run_at"`
+	NextRunAt           *int64 `json:"next_run_at"`
+	SkippedOverlapCount *int64 `json:"skipped_overlap_count"`
+}
+
+// updateScheduleRuntime answers PUT /v1/internal/schedules/{id}/runtime, called by
+// the orchestrator's reconciler (WS15.S4c). The route is under /v1/internal/schedules/,
+// so the control-internal secret verifies it (D2-050). It writes the executor's
+// bookkeeping of one schedule: the latest and the next run, and the number of fires
+// Temporal skipped because a run was in flight. The timestamps arrive in unix
+// milliseconds and are stored in unix seconds, the unit of the row's created_at and
+// updated_at, which the tenant view renders. A missing or negative count, and a
+// timestamp outside the years 2000 to 2200, are a 400. A schedule that does not
+// exist is a 404. Org and params are never read from the body.
+func updateScheduleRuntime(db store.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := quarrycontracts.ID(chi.URLParam(r, "id"))
+		if err := id.MustKind(quarrycontracts.KindSchedule); err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, err.Error(), nil)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxScheduleRuntimeBodyBytes)
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		var in scheduleRuntimeBody
+		if err := dec.Decode(&in); err != nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "decode body: "+err.Error(), nil)
+			return
+		}
+		if in.SkippedOverlapCount == nil {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "skipped_overlap_count is required",
+				map[string]any{"field": "skipped_overlap_count", "reason": "count_required"})
+			return
+		}
+		if *in.SkippedOverlapCount < 0 {
+			httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, "skipped_overlap_count must be 0 or more",
+				map[string]any{"field": "skipped_overlap_count", "reason": "negative_count"})
+			return
+		}
+		lastRunAt, ok := runtimeSeconds(w, r, "last_run_at", in.LastRunAt)
+		if !ok {
+			return
+		}
+		nextRunAt, ok := runtimeSeconds(w, r, "next_run_at", in.NextRunAt)
+		if !ok {
+			return
+		}
+		if err := db.Schedules().UpdateRuntime(id, lastRunAt, nextRunAt, *in.SkippedOverlapCount); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				httpx.WriteErr(w, r, quarrycontracts.CodeNotFound, "not found", map[string]any{"id": id})
+				return
+			}
+			httpx.WriteErr(w, r, quarrycontracts.CodeInternal, err.Error(), nil)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// runtimeSeconds reads one optional runtime timestamp of the body. An absent or null
+// value is nil, which clears the stored field. Any other value must be unix
+// milliseconds in a UTC year from 2000 to 2200, and is returned in unix seconds. A
+// value that fails writes the 400 and reports false.
+func runtimeSeconds(w http.ResponseWriter, r *http.Request, field string, ms *int64) (*int64, bool) {
+	if ms == nil {
+		return nil, true
+	}
+	year := time.UnixMilli(*ms).UTC().Year()
+	if year < minRuntimeYear || year > maxRuntimeYear {
+		httpx.WriteErr(w, r, quarrycontracts.CodeBadRequest, field+" must be unix milliseconds in the years 2000 to 2200",
+			map[string]any{"field": field, "reason": "timestamp_out_of_range"})
+		return nil, false
+	}
+	secs := *ms / 1000
+	return &secs, true
 }

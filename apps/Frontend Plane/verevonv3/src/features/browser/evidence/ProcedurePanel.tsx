@@ -1,10 +1,18 @@
-import { For, Show } from 'solid-js'
+import { For, Show, createSignal } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { browserErrorMessage } from '@/shared/api/browser-client'
 import { useI18n } from '@/shared/i18n'
-import { useBrowserEvidenceScope, useBrowserProcedure, useBrowserReceipts } from './use-browser-evidence'
+import { useBrowserEvidenceScope, useBrowserProcedure, useBrowserReceipts, useSaveRecipe } from './use-browser-evidence'
 import { outcomeLabel, procedureActionSummary } from './receipts-view'
 import './browser-evidence.css'
+
+/** The longest recipe name the save accepts (the gateway's and the action contract's bound). */
+const RECIPE_NAME_MAX_CHARS = 120
+
+/** The save control is built only when the build sets VITE_BROWSER_RECIPES to the literal `true` (Q4-E4.2-4b). */
+function recipesEnabled(): boolean {
+  return import.meta.env.VITE_BROWSER_RECIPES === 'true'
+}
 
 /**
  * Evidence drawer "Procedure" section (WS9.D). "Compile procedure" asks the gateway to turn
@@ -12,6 +20,10 @@ import './browser-evidence.css'
  * steps show the redacted action (a typed text is only its length) and the quality verdict.
  * A ZDR session gets the copy and a disabled button, and no request is made. A failed
  * compile (409) shows its typed reason as text.
+ *
+ * With VITE_BROWSER_RECIPES set to `true`, a procedure that passes the check can be saved as a
+ * recipe (Q4-E4.2-4b). The panel shows the names of the slots the recipe will ask for, never a
+ * typed value, and the saved version once the save answers.
  */
 export function ProcedurePanel(props: { sessionId: string; zdr: boolean }): JSX.Element {
   const i18n = useI18n()
@@ -21,13 +33,24 @@ export function ProcedurePanel(props: { sessionId: string; zdr: boolean }): JSX.
   )
   const procedure = useBrowserProcedure(scope)
   const receipts = useBrowserReceipts(scope)
+  const saveRecipe = useSaveRecipe(scope)
+  const [recipeName, setRecipeName] = createSignal('')
   const busy = () => procedure.status() === 'running'
+  const saving = () => saveRecipe.status() === 'running'
   const failureMessage = () => {
     const failure = procedure.error()
     if (!failure) return null
     return browserErrorMessage(failure, i18n.tr, {
       no: 'Prosedyren kunne ikke kompileres.',
       en: 'The procedure could not be compiled.',
+    })
+  }
+  const saveFailureMessage = () => {
+    const failure = saveRecipe.error()
+    if (!failure) return null
+    return browserErrorMessage(failure, i18n.tr, {
+      no: 'Oppskriften kunne ikke lagres.',
+      en: 'The recipe could not be saved.',
     })
   }
 
@@ -79,17 +102,85 @@ export function ProcedurePanel(props: { sessionId: string; zdr: boolean }): JSX.
               <For each={response().procedure.steps}>
                 {(step) => {
                   const summary = procedureActionSummary(step.action, i18n.tr)
+                  const expectCount = step.expect?.all.length ?? 0
                   return (
                     <li class="browser-evidence-row">
                       <span class="browser-evidence-row__method">{step.step}</span>
                       <code class="browser-evidence-row__url">{summary.type}</code>
                       <Show when={summary.hidden}>{(hidden) => <span class="browser-evidence-row__policy">{hidden()}</span>}</Show>
                       <span class="browser-evidence-row__policy">{step.expectedOutcome}</span>
+                      <Show when={recipesEnabled() && (step.slot || step.expect)}>
+                        <span class="browser-evidence-row__badges">
+                          <Show when={step.slot}>
+                            {(slot) => (
+                              <span class="browser-evidence-badge" data-badge="slot">
+                                {i18n.tr('Felt', 'Slot')} {slot()}
+                              </span>
+                            )}
+                          </Show>
+                          <Show when={step.expect}>
+                            <span class="browser-evidence-badge" data-badge="expect">
+                              {i18n.tr('Forventer', 'Expect')} {expectCount}
+                            </span>
+                          </Show>
+                        </span>
+                      </Show>
                     </li>
                   )
                 }}
               </For>
             </ol>
+            <Show when={recipesEnabled() && response().quality.promotionAllowed}>
+              <div class="browser-evidence-recipe">
+                <Show when={(response().procedure.slots ?? []).length > 0}>
+                  <p class="browser-evidence-panel__hint">
+                    {i18n.tr('Oppskriften spør etter', 'The recipe asks for')}{' '}
+                    <For each={response().procedure.slots ?? []}>
+                      {(slot, index) => (
+                        <>
+                          {index() > 0 ? ', ' : ''}
+                          <code>{slot.name}</code> (
+                          {slot.kind === 'secret' ? i18n.tr('hemmelig', 'secret') : i18n.tr('tekst', 'text')})
+                        </>
+                      )}
+                    </For>
+                  </p>
+                </Show>
+                <label class="browser-evidence-recipe__label">
+                  <span>{i18n.tr('Navn på oppskriften', 'Recipe name')}</span>
+                  <input
+                    type="text"
+                    class="browser-evidence-recipe__input"
+                    maxlength={RECIPE_NAME_MAX_CHARS}
+                    value={recipeName()}
+                    disabled={props.zdr || saving()}
+                    onInput={(event) => setRecipeName(event.currentTarget.value)}
+                  />
+                </label>
+                <button
+                  type="button"
+                  class="browser-evidence-panel__action"
+                  disabled={props.zdr || saving() || !scope() || recipeName().trim() === ''}
+                  onClick={() => saveRecipe.save({ name: recipeName().trim() })}
+                >
+                  {saving() ? i18n.tr('Lagrer…', 'Saving…') : i18n.tr('Lagre som oppskrift', 'Save as recipe')}
+                </button>
+                <Show when={saveFailureMessage()}>
+                  {(message) => (
+                    <p class="browser-evidence-panel__hint" role="alert">
+                      {message()}
+                    </p>
+                  )}
+                </Show>
+                <Show when={saveRecipe.result()}>
+                  {(saved) => (
+                    <p class="browser-evidence-recipe__saved" role="status">
+                      {i18n.tr('Lagret', 'Saved')} · {i18n.tr('versjon', 'version')} {saved().version}
+                    </p>
+                  )}
+                </Show>
+              </div>
+            </Show>
           </div>
         )}
       </Show>

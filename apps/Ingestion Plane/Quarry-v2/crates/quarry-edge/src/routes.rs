@@ -416,6 +416,16 @@ pub fn router(state: AppState) -> Router {
             "/v1/schedules/:id/backfill",
             post(crate::schedule_routes::backfill_schedule),
         )
+        // WS15.S3a — the tenant's read of a trigger or backfill request row, and the schedule's
+        // fires. Same chain, so the same auth, service scope and API-key fence as the list.
+        .route(
+            "/v1/schedules/:id/requests/:rid",
+            get(crate::schedule_routes::get_schedule_request),
+        )
+        .route(
+            "/v1/schedules/:id/runs",
+            get(crate::schedule_routes::list_schedule_runs),
+        )
         // P7 — agentic browser loop (real chromiumoxide). No-op router when
         // the `browser-agent` feature is disabled. Inherits `require_auth`.
         .merge(crate::agent_routes::agent_router())
@@ -625,6 +635,13 @@ pub struct ScrapeRequest {
     pub no_egress: Option<serde_json::Value>,
     #[serde(default, rename = "noEgress")]
     pub no_egress_camel: Option<serde_json::Value>,
+    /// E4.4-b: the raw `profile_id`. The stream route refuses it while `QUARRY_EDGE__SCRAPE_PROFILE_PIN`
+    /// is on. On `/v1/scrape` the run reads the checked id from the resolved options, never this value.
+    #[serde(default)]
+    pub profile_id: Option<serde_json::Value>,
+    /// E4.4-b: the camelCase spelling of `profile_id`, read the same way.
+    #[serde(default, rename = "profileId")]
+    pub profile_id_camel: Option<serde_json::Value>,
 }
 
 /// Wire-level shape for [`RenderHints`]. Kept separate from the runtime
@@ -761,6 +778,16 @@ fn stream_requests_page_emulation(req: &ScrapeRequest, enabled: bool) -> bool {
             .any(|value| !value.is_null())
 }
 
+/// E4.4-b: whether a stream request asks for a profile pin while the switch is on. The stream
+/// restores no stored profile. Off, `profile_id` is an unknown key and the stream ignores it.
+fn stream_requests_profile_pin(req: &ScrapeRequest, enabled: bool) -> bool {
+    enabled
+        && [req.profile_id.as_ref(), req.profile_id_camel.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|value| !value.is_null())
+}
+
 /// `/v1/scrape` with its settings passed in, so tests can pick strictness.
 async fn scrape_with(
     state: AppState,
@@ -801,6 +828,25 @@ async fn scrape_with(
         .clone()
         .resolve(zdr.is_active(), &settings.limits())
         .map_err(|fields| contract_error(&request_id, fields))?;
+    // E4.4-b: the stored profile this scrape pins. The contract checked the id's shape, and it is
+    // `None` while the switch is off (the contract refuses the key then). A value that does not
+    // parse is refused here, never run unpinned.
+    let profile_pin = match resolved.profile_id.as_deref() {
+        None => None,
+        Some(raw) => match raw.parse::<quarry_core::ids::kinds::ProfileKind>() {
+            Ok(pid) => Some(pid),
+            Err(_) => {
+                return Err(contract_error(
+                    &request_id,
+                    vec![quarry_core::scrape::FieldError::new(
+                        "profile_id",
+                        "invalid_profile_id",
+                        "profile_id must be a profile id such as prof_<ulid>",
+                    )],
+                ))
+            }
+        },
+    };
     if !parsed.unknown_keys.is_empty() {
         // Names only: a key is part of the contract, a value is the caller's.
         tracing::warn!(
@@ -881,10 +927,43 @@ async fn scrape_with(
             ));
         }
     }
-    let privacy = effective_privacy(req.privacy.clone(), zdr);
+    let mut privacy = effective_privacy(req.privacy.clone(), zdr);
+    // E4.4-b: a pinned scrape is personalised, logged-in content, so it is classed credential-bearing.
+    // No managed browser takes it (`PrivacyPolicy::guard_third_party_processing`) and no model hop
+    // reads it (`page_extract::model_hop_allowed`, asked just below for the AI formats).
+    if profile_pin.is_some() {
+        privacy.privacy_classification =
+            quarry_core::privacy::PrivacyClassification::CredentialOrSecret;
+    }
     // INNH-1: the same rule the page-title hop uses. The AI formats are skipped
     // (no model call) when the request's privacy block forbids a model hop.
     let ai_model_hop_allowed = quarry_runtime::page_extract::model_hop_allowed(zdr, &privacy);
+    // E4.4-b: a scrape that pins a profile is never ingested and never runs under zero data
+    // retention. These are refused before the durable-write check below, so the refusal names the
+    // profile whatever the ingest configuration is.
+    if profile_pin.is_some() {
+        if req.ingest.unwrap_or(false) {
+            return Err(contract_error(
+                &request_id,
+                vec![quarry_core::scrape::FieldError::new(
+                    "ingest",
+                    "profile_ingest_forbidden",
+                    "a scrape that pins a profile is never ingested",
+                )],
+            ));
+        }
+        // The token's ZDR floor is already folded into `zdr` (`Claims::effective_zdr`).
+        if zdr.is_active() {
+            return Err(contract_error(
+                &request_id,
+                vec![quarry_core::scrape::FieldError::new(
+                    "profile_id",
+                    "profile_zdr_forbidden",
+                    "a scrape that pins a profile cannot run under zero data retention",
+                )],
+            ));
+        }
+    }
     // An explicit durable-write request must not degrade into read-only
     // capture because this local runtime has no Data Plane adapter. Check
     // before cache lookup or fetching so neither can mask a missing write.
@@ -935,6 +1014,51 @@ async fn scrape_with(
     .map_err(|error| crate::web_policy_edge::error_response(&request_id, error))?;
     crate::web_policy_edge::gate_url(&decision, &req.url)
         .map_err(|error| crate::web_policy_edge::error_response(&request_id, error))?;
+
+    // E4.4-b: a pinned profile is authorised before anything is fetched. A service principal gets
+    // the profile guard's 403, an API key is refused (`api_key_profile_refused`: a key is not a
+    // person), and a profile this organization does not hold is a 404: a scrape never creates one.
+    if let Some(pin) = profile_pin.as_ref() {
+        crate::profile_guard::precheck(
+            &state,
+            &claims,
+            crate::profile_guard::ProfileOp::Attach,
+            &request_id,
+        )
+        .map_err(|(status, body)| (status, body.into_response()))?;
+        if claims.is_api_key() {
+            return Err(crate::web_policy_edge::error_response(
+                &request_id,
+                crate::api_key::refusal_error(crate::api_key::reason::PROFILE_REFUSED),
+            ));
+        }
+        let facts = crate::profile_guard::authorize(
+            &state,
+            &claims,
+            pin,
+            crate::profile_guard::ProfileOp::Attach,
+        )
+        .await
+        .map_err(|error| crate::web_policy_edge::error_response(&request_id, error))?;
+        if !facts.exists {
+            return Err(crate::web_policy_edge::error_response(
+                &request_id,
+                QuarryError::new(ErrorCode::NotFound, "profile not found"),
+            ));
+        }
+        // The browser restores the profile. With no browser on this edge there is nothing to restore
+        // it into, and the default driver would run the page without it.
+        if !state.drivers.has(quarry_core::output::DriverKind::Browser) {
+            return Err(contract_error(
+                &request_id,
+                crate::scrape_actions::profile_pin_unsupported(),
+            ));
+        }
+        tracing::info!(
+            op = crate::profile_guard::ProfileOp::Attach.as_str(),
+            "scrape.profile_pinned"
+        );
+    }
 
     let doc_routing = quarry_runtime::DocRouting::cached();
     let doc_routing_label = format!("{doc_routing:?}").to_ascii_lowercase();
@@ -1146,12 +1270,22 @@ async fn scrape_with(
         artifacts: state.artifacts.clone(),
         event_sink: state.event_sink.clone(),
         zdr,
-        ingest: ingest_client,
+        // E4.4-b: a pinned scrape keeps no ingest, no local index and no title enricher (the hops a
+        // redacted scrape drops too). Safe mode below clears the page-image and OCR hops as well.
+        ingest: if profile_pin.is_some() {
+            None
+        } else {
+            ingest_client
+        },
         org_id: Some(org_id.clone()),
         user_id: Some(claims.actor_id().to_owned()),
         privacy: privacy.clone(),
         cancel_token: None,
-        local_index: if redact_pii { None } else { state.local_index.clone() },
+        local_index: if redact_pii || profile_pin.is_some() {
+            None
+        } else {
+            state.local_index.clone()
+        },
         policy: run_policy,
         // Q3-E3.8.8w: the per-host politeness slots pace requests to a host; a stored read
         // sends none, so a no_egress run takes none.
@@ -1173,22 +1307,30 @@ async fn scrape_with(
             );
             // E4.4-a: the page's locale, timezone and location, if the request asked for them.
             crate::scrape_actions::apply_page_emulation(&mut render, &resolved);
+            // E4.4-b: the stored profile the browser restores read-only, if the request pinned one.
+            crate::scrape_actions::apply_profile_pin(&mut render, &resolved);
             render
         },
         page_renderer: state.page_renderer.clone(),
         // Ad-hoc single-page scrape, not a crawl target — don't materialize
         // a "tracked website" row for it.
         source_registrar: None,
-        title_enricher: if redact_pii { None } else { state.page_title_enricher.clone() },
+        title_enricher: if redact_pii || profile_pin.is_some() {
+            None
+        } else {
+            state.page_title_enricher.clone()
+        },
         doc_routing,
         robots: None,
         document_lanes: state.document_lanes.clone(),
     };
     // Q3-E3.8.8w: a stored capture is not a fresh observation of its URL, so a no_egress run
     // indexes, titles, re-renders, registers or ingests nothing either (same hops as actions).
+    // E4.4-b: a pinned page is personalised content, so it takes the same safe mode: nothing that
+    // indexes, re-renders, titles or ingests it runs, and no OCR lane takes its document.
     let runner = crate::scrape_actions::safe_mode_runner(
         runner,
-        resolved.actions.is_some() || resolved.no_egress,
+        resolved.actions.is_some() || resolved.no_egress || profile_pin.is_some(),
     );
 
     let run_id: RunKind = quarry_core::ids::Id::new();
@@ -2919,6 +3061,20 @@ async fn scrape_stream(
             let error = QuarryError::new(
                 ErrorCode::BadRequest,
                 "locale, timezone and location are not served on the stream route",
+            )
+            .with_details(serde_json::json!({ "reason": "unsupported_in_stream" }));
+            yield Ok(Event::default().event("error").data(serde_json::to_string(&error).unwrap_or_default()));
+            return;
+        }
+        // E4.4-b: the stream restores no stored profile. Refused, not dropped, while the switch is
+        // on; off, `profile_id` is an unknown key and ignored, as it always was.
+        if stream_requests_profile_pin(
+            &req,
+            crate::scrape_contract::ScrapeSettings::current().profile_pin_enabled,
+        ) {
+            let error = QuarryError::new(
+                ErrorCode::BadRequest,
+                "profile_id is not served on the stream route",
             )
             .with_details(serde_json::json!({ "reason": "unsupported_in_stream" }));
             yield Ok(Event::default().event("error").data(serde_json::to_string(&error).unwrap_or_default()));

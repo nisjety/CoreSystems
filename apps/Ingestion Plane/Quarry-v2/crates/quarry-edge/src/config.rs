@@ -349,7 +349,7 @@ fn default_port() -> u16 {
     8080
 }
 fn default_ua() -> String {
-    "Quarry/2.0 (+https://triodelab.com/quarry)".into()
+    quarry_core::identity::edge_user_agent().into()
 }
 fn default_timeout() -> u64 {
     30

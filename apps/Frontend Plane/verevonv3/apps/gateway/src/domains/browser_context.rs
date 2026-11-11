@@ -23,7 +23,8 @@
 //! the trust class `browser-scraped`. The target is origin and path only.
 //!
 //! Off by default: the route is mounted only when `BROWSER_TAB_MENTIONS` is
-//! `1|true|yes|on`, read once when the router is built (never in a handler).
+//! `1|true|yes|on`, read once into `AppState` (never in a handler). The same
+//! switch gates `browser_context.resolve_tab_mentions` on the action surface (QF-7).
 
 use axum::{
     body::Bytes,
@@ -65,20 +66,18 @@ const TAB_TRUST_CLASS: &str = "browser-scraped";
 // Router and flag
 // ---------------------------------------------------------------------------
 
+/// The `BROWSER_TAB_MENTIONS` grammar; `build_state` parses the switch with the
+/// same `crate::config::human_browse_enabled`.
+#[cfg(test)]
 fn tab_mentions_flag_on(value: Option<&str>) -> bool {
-    matches!(
-        value.map(|raw| raw.trim().to_ascii_lowercase()).as_deref(),
-        Some("1" | "true" | "yes" | "on")
-    )
-}
-
-fn tab_mentions_enabled_from_env() -> bool {
-    tab_mentions_flag_on(std::env::var(TAB_MENTIONS_FLAG).ok().as_deref())
+    crate::config::human_browse_enabled(value)
 }
 
 /// The browser-context routes. Wired in `main.rs` next to `browser_evidence`.
+/// The switch is read once into `AppState::browser_tab_mentions` (QF-7).
 pub(crate) fn router(state: AppState) -> Router<AppState> {
-    router_with(state, tab_mentions_enabled_from_env())
+    let tab_mentions = state.browser_tab_mentions;
+    router_with(state, tab_mentions)
 }
 
 fn router_with(state: AppState, tab_mentions: bool) -> Router<AppState> {
@@ -407,6 +406,77 @@ async fn resolve_session_tab_mentions(
             StatusCode::OK,
             [(header::CACHE_CONTROL, "private, no-store")],
             Json(ok(json!({ "refs": refs }))),
+        )
+            .into_response(),
+        Err(response) => response,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Action surface (QF-7)
+// ---------------------------------------------------------------------------
+
+/// The action id of the re-resolution on the generic action surface.
+const TAB_MENTIONS_ACTION_ID: &str = "browser_context.resolve_tab_mentions";
+
+/// The action surface's body: the session id plus the route's body. Unknown keys
+/// are refused, so no org or user field can ride along.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct TabMentionsActionInput {
+    session_id: String,
+    mentions: Vec<TabMentionInput>,
+}
+
+/// The action surface's answer while `BROWSER_TAB_MENTIONS` is off. The route is absent then.
+fn tab_mentions_unavailable() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(error(
+            "browser_tab_mentions_unavailable",
+            "Resolving browser tab mentions is not enabled.",
+        )),
+    )
+        .into_response()
+}
+
+/// `browser_context.resolve_tab_mentions` with `{ sessionId, mentions: [{ tabId: string | null,
+/// token? }] }` (at most eight) on the generic action surface (QF-7). Human-only (the
+/// model-access map exempts it) and read-only: it calls the same `resolve_turn_tab_mentions`
+/// the route uses, so the owner gate and the ZDR refusal are identical, and a ref grants
+/// nothing. Answers 404 `browser_tab_mentions_unavailable` while `BROWSER_TAB_MENTIONS` is off.
+pub(crate) async fn dispatch_resolve_tab_mentions(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    if !state.browser_tab_mentions {
+        return tab_mentions_unavailable();
+    }
+    let input: TabMentionsActionInput = match serde_json::from_value(input.clone()) {
+        Ok(input) => input,
+        Err(_) => {
+            return bad_request(
+                "browser_context.resolve_tab_mentions input must be sessionId and mentions only.",
+            )
+        }
+    };
+    let session_id = input.session_id.trim();
+    if session_id.is_empty() {
+        return bad_request("browser_context.resolve_tab_mentions requires a 'sessionId'");
+    }
+    match resolve_turn_tab_mentions(state, user, headers, session_id, &input.mentions).await {
+        Ok(refs) => (
+            StatusCode::OK,
+            [(header::CACHE_CONTROL, "private, no-store")],
+            Json(ok(json!({
+                "actionId": TAB_MENTIONS_ACTION_ID,
+                "runId": format!("{}_{}", TAB_MENTIONS_ACTION_ID, user.user_id),
+                "status": "completed",
+                "auditId": format!("audit_{}_{}", TAB_MENTIONS_ACTION_ID, user.user_id),
+                "result": { "refs": refs },
+            }))),
         )
             .into_response(),
         Err(response) => response,

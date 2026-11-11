@@ -15,6 +15,8 @@
 //! | `POST /v1/schedules/:id/unpause`       | Resume after pause                        |
 //! | `POST /v1/schedules/:id/trigger`       | Fire once manually, immediately           |
 //! | `POST /v1/schedules/:id/backfill`      | Run for a specific time-range window      |
+//! | `GET /v1/schedules/:id/runs`           | The schedule's fires, keyset-paged        |
+//! | `GET /v1/schedules/:id/requests/:rid`  | One trigger or backfill request row       |
 //! | `DELETE /v1/schedules/:id`             | Soft-delete (Temporal stops; config kept) |
 //!
 //! Acceptance (gap-quarry §10.1 #5): "Operators never need direct
@@ -22,8 +24,8 @@
 //! that closes that gap.
 
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
     Extension, Json,
 };
 use serde::{Deserialize, Serialize};
@@ -164,6 +166,16 @@ pub struct BackfillRequest {
     pub overlap_policy: OverlapPolicy,
 }
 
+/// `GET /v1/schedules/:id/runs` query (WS15.S3a). `limit` is clamped to the edge's page bounds
+/// (default 25, at most 100). `cursor` is control's opaque `next_cursor` from the previous page.
+#[derive(Debug, Default, Deserialize)]
+pub struct ScheduleRunsQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -191,6 +203,26 @@ async fn forward_json<TReq, TResp>(
     org_id: &str,
     body: Option<&TReq>,
 ) -> Result<TResp, QuarryError>
+where
+    TReq: Serialize + ?Sized,
+    TResp: serde::de::DeserializeOwned,
+{
+    forward_json_status(state, method, path, org_id, body, None)
+        .await
+        .map(|(_, answer)| answer)
+}
+
+/// [`forward_json`] that also returns control's success status, so a queued request row answers
+/// `202` as control does. `idempotency_key` (WS15.S3a: a caller's key, already validated) is
+/// forwarded in place of a minted key, so a retry of the same request carries the same key.
+async fn forward_json_status<TReq, TResp>(
+    state: &AppState,
+    method: reqwest::Method,
+    path: &str,
+    org_id: &str,
+    body: Option<&TReq>,
+    idempotency_key: Option<&str>,
+) -> Result<(StatusCode, TResp), QuarryError>
 where
     TReq: Serialize + ?Sized,
     TResp: serde::de::DeserializeOwned,
@@ -228,8 +260,15 @@ where
     // a network retry doesn't double-execute the operation. The Go
     // control plane MUST dedupe `(org_id, idempotency_key, route)`
     // for at least 24h (see CROSS_PLANE_AUTH.md).
-    let idem_key: quarry_core::ids::kinds::RequestKind = quarry_core::ids::Id::new();
-    let idem_key = idem_key.to_string();
+    // WS15.S3a: a caller's key replaces the minted one, so a retry that repeats it reaches control
+    // with the same key.
+    let idem_key = match idempotency_key {
+        Some(key) => key.to_owned(),
+        None => {
+            let minted: quarry_core::ids::kinds::RequestKind = quarry_core::ids::Id::new();
+            minted.to_string()
+        }
+    };
     req = req.header("Idempotency-Key", &idem_key);
 
     // D2 / cluster #14 — sign the canonical (method, path?org+key, body_hash, ts, nonce).
@@ -256,6 +295,9 @@ where
             404 => ErrorCode::NotFound,
             400 => ErrorCode::BadRequest,
             401 | 403 => ErrorCode::Forbidden,
+            // WS15.S3a: control's conflict and unsupported answers keep their own codes (and reason).
+            409 => ErrorCode::Conflict,
+            501 => ErrorCode::Unsupported,
             _ => ErrorCode::DriverFailed,
         };
         let mut err = QuarryError::new(
@@ -290,12 +332,33 @@ where
         })?;
         raw.get("data").cloned().unwrap_or(raw)
     };
-    serde_json::from_value::<TResp>(inner).map_err(|e| {
+    let answer = serde_json::from_value::<TResp>(inner).map_err(|e| {
         QuarryError::new(
             ErrorCode::Internal,
             format!("control-plane {method} {path} decode: {e}"),
         )
-    })
+    })?;
+    // The success status control answered (200, or 202 for a queued request row), passed on.
+    let answered =
+        StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    Ok((answered, answer))
+}
+
+/// A tenant read of control (a GET), org from the verified claim. Inert when no control URL is
+/// configured, as the lifecycle forwards are. The control view is returned as control wrote it.
+async fn read_control(
+    state: &AppState,
+    path: &str,
+    org_id: &str,
+    query: &[(&str, String)],
+) -> Result<serde_json::Value, QuarryError> {
+    if state.control_base_url.is_empty() {
+        return Err(QuarryError::new(
+            ErrorCode::Unsupported,
+            "control plane URL not configured; schedule lifecycle routes are inert",
+        ));
+    }
+    crate::control_client::get_json(state, path, org_id, query).await
 }
 
 // =============================================================================
@@ -762,8 +825,9 @@ pub async fn unpause_schedule(
 pub async fn trigger_schedule(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
+    headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
+) -> Result<(StatusCode, Json<Envelope<serde_json::Value>>), (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
     crate::zdr_refusal::refuse_for_claims(
         &state,
@@ -773,25 +837,31 @@ pub async fn trigger_schedule(
         "schedules",
         "trigger",
     )?;
+    // WS15.S3a: a usable caller key is forwarded in place of a minted one (the public convention:
+    // an invalid value is ignored, as if no key were sent). Control refuses a repeat of a key it holds.
+    let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);
     let path = format!("/v1/schedules/{id}/trigger");
-    let summary = forward_json::<(), serde_json::Value>(
+    // Control answers 202 with the queued request row when its flag is on. That status is passed on.
+    let (status, summary) = forward_json_status::<(), serde_json::Value>(
         &state,
         reqwest::Method::POST,
         &path,
         &claims.org_id,
         None,
+        idempotency_key.as_deref(),
     )
     .await
     .map_err(|e| err_response(&request_id, e))?;
-    Ok(Json(Envelope::ok(request_id, summary)))
+    Ok((status, Json(Envelope::ok(request_id, summary))))
 }
 
 pub async fn backfill_schedule(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(req): Json<BackfillRequest>,
-) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
+) -> Result<(StatusCode, Json<Envelope<serde_json::Value>>), (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
     crate::zdr_refusal::refuse_for_claims(
         &state,
@@ -810,17 +880,67 @@ pub async fn backfill_schedule(
             ),
         ));
     }
+    // WS15.S3a: the caller's key, as on trigger (see there).
+    let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);
     let path = format!("/v1/schedules/{id}/backfill");
-    let summary = forward_json::<BackfillRequest, serde_json::Value>(
+    let (status, summary) = forward_json_status::<BackfillRequest, serde_json::Value>(
         &state,
         reqwest::Method::POST,
         &path,
         &claims.org_id,
         Some(&req),
+        idempotency_key.as_deref(),
     )
     .await
     .map_err(|e| err_response(&request_id, e))?;
-    Ok(Json(Envelope::ok(request_id, summary)))
+    Ok((status, Json(Envelope::ok(request_id, summary))))
+}
+
+/// `GET /v1/schedules/:id/requests/:rid` (WS15.S3a): the tenant's read of one trigger or backfill
+/// request row, control's view (status, attempts, params, result and a short error; never the
+/// claiming worker or the lease). Both ids are parsed before they reach the path, and the org is the
+/// verified claim. A row of another schedule or org is control's 404. No ZDR refusal: the view
+/// carries ids, status and reasons, as the schedule list does.
+pub async fn get_schedule_request(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Path((id, rid)): Path<(String, String)>,
+) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = crate::request_id::current();
+    let id = parse_schedule_id(&request_id, &id)?;
+    let rid = parse_request_id(&request_id, &rid)?;
+    let path = format!("/v1/schedules/{id}/requests/{rid}");
+    let view = read_control(&state, &path, &claims.org_id, &[])
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
+    Ok(Json(Envelope::ok(request_id, view)))
+}
+
+/// `GET /v1/schedules/:id/runs` (WS15.S3a): the fires of one schedule, newest first, as control's
+/// page of job rows (`items`, `next_cursor`). `limit` is clamped to the page bounds and `cursor`
+/// passes through. The id is parsed before it reaches the path, and the org is the verified claim.
+/// No ZDR refusal, as for the schedule list.
+pub async fn list_schedule_runs(
+    State(state): State<AppState>,
+    Extension(claims): Extension<crate::auth::Claims>,
+    Path(id): Path<String>,
+    Query(q): Query<ScheduleRunsQuery>,
+) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
+    let request_id = crate::request_id::current();
+    let id = parse_schedule_id(&request_id, &id)?;
+    let path = format!("/v1/schedules/{id}/runs");
+    let limit = q
+        .limit
+        .unwrap_or(quarry_core::pagination::DEFAULT_PAGE_LIMIT)
+        .clamp(1, quarry_core::pagination::MAX_PAGE_LIMIT);
+    let mut query = vec![("limit", limit.to_string())];
+    if let Some(cursor) = q.cursor {
+        query.push(("cursor", cursor));
+    }
+    let page = read_control(&state, &path, &claims.org_id, &query)
+        .await
+        .map_err(|e| err_response(&request_id, e))?;
+    Ok(Json(Envelope::ok(request_id, page)))
 }
 
 pub async fn delete_schedule(
@@ -842,6 +962,36 @@ pub async fn delete_schedule(
     .await
     .map_err(|e| err_response(&request_id, e))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Parses a schedule id from a path segment (`sch_` and a ULID). A value that is not one is a 400
+/// before any control call, so a path built from the parsed id's Display cannot carry a `/` or `..`.
+fn parse_schedule_id(
+    request_id: &str,
+    raw: &str,
+) -> Result<quarry_core::ids::kinds::ScheduleKind, (StatusCode, Json<Envelope<()>>)> {
+    raw.parse::<quarry_core::ids::kinds::ScheduleKind>()
+        .map_err(|_| {
+            err_response(
+                request_id,
+                QuarryError::new(ErrorCode::BadRequest, "invalid schedule id"),
+            )
+        })
+}
+
+/// Parses a request id from a path segment (`req_` and a ULID), with the same 400 shape as a
+/// schedule id.
+fn parse_request_id(
+    request_id: &str,
+    raw: &str,
+) -> Result<quarry_core::ids::kinds::RequestKind, (StatusCode, Json<Envelope<()>>)> {
+    raw.parse::<quarry_core::ids::kinds::RequestKind>()
+        .map_err(|_| {
+            err_response(
+                request_id,
+                QuarryError::new(ErrorCode::BadRequest, "invalid request id"),
+            )
+        })
 }
 
 /// `PATCH /v1/schedules/{id}` (E3.5-6): set the monitor's tag, or clear it with `""`. The id must

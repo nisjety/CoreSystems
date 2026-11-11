@@ -1,5 +1,9 @@
 use super::*;
 
+/// The run-less navigation check. Every production navigation path (steps, attach,
+/// tab open, resume recovery) now goes through `validate_navigation_for_run` (WS8.B),
+/// so this is kept for the tests that exercise the engine's own policy.
+#[cfg(test)]
 pub(super) async fn validate_navigation(
     action: &AgentAction,
     security: &dyn SecurityEngine,

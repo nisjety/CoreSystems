@@ -448,23 +448,29 @@ impl ServiceTokenProvider for CountingProvider {
 }
 
 #[tokio::test]
-async fn a_dynamic_or_unauthenticated_client_is_not_granted_and_mints_nothing() {
+async fn a_dynamic_client_that_cannot_mint_or_an_unauthenticated_client_sends_nothing() {
     let double = start(|_| chat("hi", 1, 1)).await;
     let provider = Arc::new(CountingProvider(AtomicUsize::new(0)));
     let dynamic = ModelPlaneClient::new(double.uri.clone())
         .unwrap()
         .with_token_provider(provider.clone());
+    // WS16.S3: the Dynamic path mints; a refused mint is LaneUnavailable.
     let error = dynamic
         .chat_for_org("org_1", &request("m", None, false))
         .await
         .unwrap_err();
-    assert_eq!(error, ModelHopError::LaneNotGranted);
+    assert_eq!(error, ModelHopError::LaneUnavailable);
+    // An empty verified org never reaches the provider.
+    assert_eq!(
+        dynamic.chat_for_org("  ", &request("m", None, false)).await.unwrap_err(),
+        ModelHopError::LaneUnavailable
+    );
     let bare = ModelPlaneClient::new(double.uri.clone()).unwrap();
     assert_eq!(
         bare.chat_for_org("org_1", &request("m", None, false)).await.unwrap_err(),
         ModelHopError::LaneNotGranted
     );
-    assert_eq!(provider.0.load(Ordering::SeqCst), 0, "zero mints");
+    assert_eq!(provider.0.load(Ordering::SeqCst), 1, "one refused mint, no second");
     assert_eq!(double.calls(), 0, "nothing was sent");
     assert_eq!(double.shared.rejected.load(Ordering::SeqCst), 0);
 }

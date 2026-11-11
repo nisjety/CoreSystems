@@ -26,13 +26,13 @@ const (
 	// rejected the write), so job-history consumers can tell a real ingest
 	// failure apart from a page that was never asked to ingest at all.
 	EvtStoreRecordFailed EventType = "store_record_failed"
-	EvtLeaseAcquired      EventType = "lease_acquired"
-	EvtLeaseReleased      EventType = "lease_released"
-	EvtProfileRestored    EventType = "profile_restored"
-	EvtProfileCaptured    EventType = "profile_captured"
-	EvtChangeDetected     EventType = "change_detected"
-	EvtChangeUnchanged    EventType = "change_unchanged"
-	EvtScheduleFired      EventType = "schedule_fired"
+	EvtLeaseAcquired     EventType = "lease_acquired"
+	EvtLeaseReleased     EventType = "lease_released"
+	EvtProfileRestored   EventType = "profile_restored"
+	EvtProfileCaptured   EventType = "profile_captured"
+	EvtChangeDetected    EventType = "change_detected"
+	EvtChangeUnchanged   EventType = "change_unchanged"
+	EvtScheduleFired     EventType = "schedule_fired"
 	// EvtBrandingExtracted carries the output of branding_rendered::extract
 	// (favicon, theme color, palette, logo candidate, font family, site
 	// name, og:image) for the page indicated by payload.url. Emitted by
@@ -57,6 +57,24 @@ const (
 	// EvtScheduleSkipped records a scheduled fire that did not start a job (overlap
 	// policy or posture). Mirrors quarry_core::event::EventType (WS15.S4).
 	EvtScheduleSkipped EventType = "schedule_skipped"
+	// WS10.S4 browser trace events. Mirror quarry_core::event::EventType. All are
+	// agent class: Quarry never publishes them on the Ingestion bus, and the
+	// orchestrator does not persist them; they are listed so a Go reader can name
+	// them. Payloads are allowlisted projections (no URL, path, query or typed text).
+	// EvtBrowserSessionOpened: a browser session opened for an agent run.
+	EvtBrowserSessionOpened EventType = "browser_session_opened"
+	// EvtBrowserSessionClosed: a browser session closed.
+	EvtBrowserSessionClosed EventType = "browser_session_closed"
+	// EvtBrowserControlChanged: control of a session changed hands.
+	EvtBrowserControlChanged EventType = "browser_control_changed"
+	// EvtBrowserTabChanged: a tab was opened, focused or closed.
+	EvtBrowserTabChanged EventType = "browser_tab_changed"
+	// EvtStepReceiptRecorded: a step receipt was recorded.
+	EvtStepReceiptRecorded EventType = "step_receipt_recorded"
+	// EvtEgressDecided: an egress decision summary or block for a step.
+	EvtEgressDecided EventType = "egress_decided"
+	// EvtArtifactRecorded: an artifact recorded for a step, by id.
+	EvtArtifactRecorded EventType = "artifact_recorded"
 )
 
 type Event struct {

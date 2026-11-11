@@ -43,6 +43,9 @@ func MountSchedules(r chi.Router, db store.DB) {
 	// The orchestrator's fire registration (WS15.S2). HMAC signed, like the rest
 	// of the internal surface.
 	r.Post("/v1/internal/schedules/{id}/runs", registerScheduledRun(db))
+	// The orchestrator's runtime write (WS15.S4b): the latest and the next run and
+	// the overlap skip count. HMAC signed with the control-internal secret.
+	r.Put("/v1/internal/schedules/{id}/runtime", updateScheduleRuntime(db))
 }
 
 // listSchedulesHandler answers GET /v1/schedules: a keyset page of the caller's

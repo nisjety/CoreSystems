@@ -538,23 +538,6 @@ async fn run() -> anyhow::Result<()> {
         tracing::info!("browser driver registered (browserbase)");
     }
 
-    #[cfg(feature = "browser-agent")]
-    if !drivers.has(DriverKind::Browser) {
-        let browser_driver: Arc<dyn quarry_browser::BrowserDriver> = Arc::new(
-            quarry_browser::chromiumoxide::ChromiumoxideDriver::new()
-                .with_pinned_egress_proxy(browser_egress_proxy.clone()),
-        );
-        let pool = Arc::new(RuntimeLeasePool::new(2).with_org_max_permits(pool_org_max));
-        metrics::register_pool("chromium", (*pool).clone());
-        let adapter = BrowserDriverAdapter::new(browser_driver, pool);
-        tracing::info!(
-            session_isolation = adapter.session_isolation(),
-            heavy_permits = adapter.heavy_permits_available(),
-            "browser driver registered (local chromiumoxide)"
-        );
-        drivers.register(Arc::new(adapter));
-    }
-
     let default_driver = drivers
         .default_driver()
         .ok_or_else(|| anyhow::anyhow!("no drivers available"))?;
@@ -969,6 +952,27 @@ async fn run() -> anyhow::Result<()> {
             ),
         },
     };
+
+    // E4.4-b: the local scrape browser takes the profile store, so a scrape that pins a profile can
+    // restore it (a browser without a store refuses the pin). It is registered here, once the store
+    // exists. The default driver is the static one, chosen above, so the order changes nothing else.
+    #[cfg(feature = "browser-agent")]
+    if !drivers.has(DriverKind::Browser) {
+        let browser_driver: Arc<dyn quarry_browser::BrowserDriver> = Arc::new(
+            quarry_browser::chromiumoxide::ChromiumoxideDriver::new()
+                .with_pinned_egress_proxy(browser_egress_proxy.clone())
+                .with_profile_store(profiles.clone()),
+        );
+        let pool = Arc::new(RuntimeLeasePool::new(2).with_org_max_permits(pool_org_max));
+        metrics::register_pool("chromium", (*pool).clone());
+        let adapter = BrowserDriverAdapter::new(browser_driver, pool);
+        tracing::info!(
+            session_isolation = adapter.session_isolation(),
+            heavy_permits = adapter.heavy_permits_available(),
+            "browser driver registered (local chromiumoxide)"
+        );
+        drivers.register(Arc::new(adapter));
+    }
 
     // WS17.E3: the erasure families the internal purge route walks. Profiles first;
     // the rows live in the durable table, so this needs the Postgres blob store.
@@ -1753,7 +1757,7 @@ async fn run() -> anyhow::Result<()> {
     let http3_driver: Option<std::sync::Arc<dyn quarry_runtime::Driver>> = if http3_enabled {
         match quarry_runtime::http3::Http3Driver::new(
             std::time::Duration::from_secs(30),
-            "Mozilla/5.0 (compatible; QuarryBot/1.0; +https://verevon.io/bot)",
+            quarry_core::identity::http3_user_agent(),
         ) {
             Ok(d) => {
                 tracing::info!("HTTP/3 driver enabled");

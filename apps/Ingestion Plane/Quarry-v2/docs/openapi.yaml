@@ -320,9 +320,9 @@ paths:
 
         per-step events (page_fetched, change_detected, artifact_written, etc.)
 
-        followed by the final result or error. Captures, actions and the AI formats
+        followed by the final result or error. Captures, actions, the AI formats and a
 
-        are not served here: the error event is BAD_REQUEST with details.reason
+        profile pin (profile_id) are not served here: the error event is BAD_REQUEST with details.reason
 
         unsupported_in_stream.
 
@@ -2403,6 +2403,17 @@ paths:
 
         and its `structured` harvest still comes back.
 
+
+        WS16.S6: the model arm runs on the AI scrape engine (`POST /v1/ai/chat` on the
+
+        Model Plane), one `json` run per source, sources concurrently (at most
+
+        `QUARRY_EDGE__AI_FORMATS_CONCURRENCY`), results in the order of `urls`. Each
+
+        source of a model request carries `ai`, the json `AiFormatReport`. Off unless
+
+        `QUARRY_EDGE__AI_FORMATS` is on.
+
         '
       tags:
       - extract
@@ -2420,7 +2431,15 @@ paths:
               schema:
                 $ref: '#/components/schemas/ExtractResponse'
         '400':
-          description: No valid URLs in request, or a `prompt` that is empty after trimming or over 10000 characters
+          description: 'No valid URLs in request, a `prompt` that is empty after trimming or over 10000 characters, or a `schema` the AI scrape engine cannot use (not an object, too large, or a root without `"type": "object"`)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '403':
+          description: >-
+            The web policy refused a target, or (WS16.S6) a service principal without the
+            `extract:ai` scope sent a `schema` or a `prompt`. Decided before any fetch.
           content:
             application/json:
               schema:
@@ -4728,11 +4747,10 @@ paths:
     post:
       operationId: trigger_schedule
       summary: Trigger an immediate scheduled run
-      description: 'Currently a stub — returns 202 with `status: trigger-accepted` and a note
-
-        that the Temporal SDK is not yet wired.
-
-        '
+      description: >-
+        Queues one run of the schedule as a request row (WS15.S3a). The orchestrator applies the row on its next
+        claim, so the run starts later. Read the outcome at GET /v1/schedules/{schedule_id}/requests/{request_id}.
+        With QUARRY_CONTROL__SCHEDULE_REQUESTS off the answer is 501 UNSUPPORTED.
       tags:
       - schedules
       security:
@@ -4743,22 +4761,49 @@ paths:
         required: true
         schema:
           type: string
+      - name: Idempotency-Key
+        in: header
+        required: false
+        description: >-
+          Your key for this trigger, forwarded to control in place of a minted one. At most 128 bytes after
+          trimming; an empty, longer or not visible ASCII value is ignored, as if no key were sent. Keys are unique
+          per organization: a repeat of a key that control already holds is refused with 409 request_pending, not
+          answered with the first 202 again.
+        schema:
+          type: string
+          maxLength: 128
       responses:
         '202':
-          description: Trigger accepted (stub while Temporal SDK pending)
+          description: The request row is queued (status pending)
           content:
             application/json:
               schema:
                 type: object
+                required:
+                - meta
                 properties:
-                  schedule_id:
-                    type: string
-                  status:
-                    type: string
-                  note:
-                    type: string
+                  data:
+                    $ref: '#/components/schemas/ScheduleRequestAccepted'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+                  error:
+                    $ref: '#/components/schemas/ErrorDetail'
         '404':
-          description: Unknown schedule
+          description: Unknown schedule (also the answer for a schedule of another organization)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '409':
+          description: >-
+            Refused. details.reason is needs_activation (the schedule is paused), scheduled_jobs_disabled,
+            or request_pending (a request is open, or the Idempotency-Key is already held).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: QUARRY_CONTROL__SCHEDULE_REQUESTS is off (UNSUPPORTED)
           content:
             application/json:
               schema:
@@ -4767,7 +4812,11 @@ paths:
     post:
       operationId: backfill_schedule
       summary: Backfill missed runs
-      description: Currently a stub — returns 202 with a Temporal-pending note.
+      description: >-
+        Queues a replay of a past window of a scrape schedule as a request row (WS15.S3a). Only scrape schedules
+        backfill, at most 24 windows, each entirely in the past. The rules and the answers are the trigger's, and the
+        outcome is read at GET /v1/schedules/{schedule_id}/requests/{request_id}. With
+        QUARRY_CONTROL__SCHEDULE_REQUESTS off the answer is 501 UNSUPPORTED.
       tags:
       - schedules
       security:
@@ -4778,11 +4827,196 @@ paths:
         required: true
         schema:
           type: string
+      - name: Idempotency-Key
+        in: header
+        required: false
+        description: >-
+          Same rule as on trigger: forwarded to control in place of a minted key, and an invalid value is ignored.
+        schema:
+          type: string
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - start_at
+              - end_at
+              properties:
+                start_at:
+                  type: string
+                  format: date-time
+                end_at:
+                  type: string
+                  format: date-time
+                  description: Strictly after start_at, and not more than a minute ahead of now.
+                overlap_policy:
+                  type: string
+                  enum:
+                  - skip
+                  - allow
+                  - cancel
+                  description: Stored with the request. The orchestrator does not pass it on yet (SCHEDULES.md, Known gaps 2).
       responses:
         '202':
-          description: Backfill accepted (stub while Temporal SDK pending)
+          description: The request row is queued (status pending)
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ScheduleRequestAccepted'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+                  error:
+                    $ref: '#/components/schemas/ErrorDetail'
+        '400':
+          description: >-
+            The body is malformed, end_at is not after start_at, or the window is refused. details.reason is
+            backfill_window_in_future or backfill_too_many_windows when either applies.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
         '404':
-          description: Unknown schedule
+          description: Unknown schedule (also the answer for a schedule of another organization)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '409':
+          description: >-
+            Refused. details.reason is needs_activation, scheduled_jobs_disabled, request_pending or
+            backfill_kind_refused (only a scrape schedule can be backfilled).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: QUARRY_CONTROL__SCHEDULE_REQUESTS is off (UNSUPPORTED)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/schedules/{schedule_id}/requests/{request_id}:
+    get:
+      operationId: get_schedule_request
+      summary: Read one trigger or backfill request row
+      description: >-
+        Control's view of a request row the caller queued (WS15.S3a): the status (pending, claimed, done, failed or
+        rejected), the attempt count, the params, the result and a short error text. The claiming worker and the lease
+        are never shown. A row of another schedule or organization is a 404.
+      tags:
+      - schedules
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: schedule_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: request_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: The request row
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ScheduleRequestView'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+                  error:
+                    $ref: '#/components/schemas/ErrorDetail'
+        '400':
+          description: A malformed schedule id or request id (invalid schedule id, invalid request id)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Unknown request, or a request of another schedule or organization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v1/schedules/{schedule_id}/runs:
+    get:
+      operationId: list_schedule_runs
+      summary: List the fires of a schedule
+      description: >-
+        One page of the schedule's job rows, newest first (WS15.S3a). Each item is a job as control stores it: id,
+        org_id, kind, status, policy, params, schedule_id, run_id, created_at, origin and, once finished, statistics.
+        next_cursor is empty on the last page.
+      tags:
+      - schedules
+      security:
+      - bearerAuth: []
+      parameters:
+      - name: schedule_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: limit
+        in: query
+        description: Page size, clamped to 1 to 100.
+        schema:
+          type: integer
+          default: 25
+          minimum: 1
+          maximum: 100
+      - name: cursor
+        in: query
+        description: The next_cursor of the previous page.
+        schema:
+          type: string
+      responses:
+        '200':
+          description: One page of the schedule's fires
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - meta
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: true
+                      next_cursor:
+                        type: string
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+                  error:
+                    $ref: '#/components/schemas/ErrorDetail'
+        '400':
+          description: A malformed schedule id
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Unknown schedule (also the answer for a schedule of another organization)
           content:
             application/json:
               schema:
@@ -6983,6 +7217,77 @@ components:
           type: string
           maxLength: 32
           description: The operator label that groups this monitor (E3.5-6). Absent when untagged.
+    ScheduleRequestAccepted:
+      type: object
+      description: The 202 answer of a trigger or backfill (WS15.S3a). The request is queued and not yet applied.
+      required:
+      - request_id
+      - schedule_id
+      - action
+      - status
+      properties:
+        request_id:
+          type: string
+          description: The request row id (req_ and a ULID). Read it at GET /v1/schedules/{schedule_id}/requests/{request_id}.
+        schedule_id:
+          type: string
+        action:
+          type: string
+          enum:
+          - trigger
+          - backfill
+        status:
+          type: string
+          enum:
+          - pending
+    ScheduleRequestView:
+      type: object
+      description: One trigger or backfill request row as the tenant reads it (WS15.S3a). It never shows the worker or the lease.
+      required:
+      - request_id
+      - schedule_id
+      - action
+      - status
+      - attempts
+      - created_at
+      properties:
+        request_id:
+          type: string
+        schedule_id:
+          type: string
+        action:
+          type: string
+          enum:
+          - trigger
+          - backfill
+        status:
+          type: string
+          enum:
+          - pending
+          - claimed
+          - done
+          - failed
+          - rejected
+        attempts:
+          type: integer
+        params:
+          type: object
+          additionalProperties: true
+          description: For a backfill, start_at, end_at, windows and overlap_policy (when sent).
+        result:
+          type: object
+          additionalProperties: true
+          description: On done, schedule_id, action and submitted_at.
+        error:
+          type: string
+          description: A short error text, set when the row failed or was rejected.
+        created_at:
+          type: integer
+          description: Unix milliseconds.
+        finished_at:
+          type: integer
+          nullable: true
+          description: Unix milliseconds, set once the row is done, failed or rejected.
     CreateScheduleRequest:
       type: object
       properties:
@@ -10171,6 +10476,10 @@ components:
         data:
           type: object
           nullable: true
+          description: >-
+            The model's answer, present only on status `ok`. It is always valid against
+            `schema` (or a JSON object for a prompt-only request): an answer that is still
+            invalid after one repair is not returned (WS16.S6).
         markdown:
           type: string
           nullable: true
@@ -10179,22 +10488,35 @@ components:
         error:
           type: string
           nullable: true
+          description: >-
+            Why this source failed. A model-arm failure starts with its code
+            (`ZDR_UNAVAILABLE:`, `PRIVACY_POLICY:`, `SCHEMA_INVALID:`, `BUDGET_EXHAUSTED:`,
+            `EMPTY_SOURCE:`, `MODEL_UNAVAILABLE:`), or names the request time budget.
         schema_valid:
           type: boolean
           description: >-
-            Present when a `schema` was sent and the model answered: whether `data`
-            conforms to it. `status` stays `ok` either way. Absent for a prompt-only
+            Present when a `schema` was sent and the model answered: whether its answer
+            conforms to it. `true` comes with status `ok` and `data`; `false` with status
+            `error`, no `data` and `schema_issues` (WS16.S6). Absent for a prompt-only
             request.
         schema_issues:
           type: array
           items:
             type: string
-          description: Why `data` does not conform, one line per issue. Present only when `schema_valid` is false.
+          description: 'Why the answer does not conform, one `path: code` line per issue (never a value). Present only when `schema_valid` is false.'
         truncated_input:
           type: boolean
           description: >-
             True when the page was longer than the 20000-byte input cap and `markdown`
             or the text the model read is only its start. Absent otherwise.
+        ai:
+          $ref: '#/components/schemas/AiFormatReport'
+          description: >-
+            WS16.S6: what the model arm did for this source, the `json` entry of the
+            scrape route's `data.ai` (status, code, reason, model, usage, schema verdict).
+            Present on every fetched source of a request with a `schema` or a `prompt`,
+            including a ZDR or privacy refusal (`skipped`, no model call); absent on a
+            markdown-only request.
     StructuredData:
       type: object
       description: >-
@@ -11013,7 +11335,15 @@ components:
             builds the options itself; 400 invalid_profile_id (path profile_id) for a value
             that is not a profile id; 400 conflicting_option (path profile_id) with actions
             (an authenticated action run needs its own gate) or with no_egress; 400
-            invalid_type for a value that is not a string.
+            invalid_type for a value that is not a string. The refusals that follow are
+            the scrape's own: 400 profile_ingest_forbidden (path ingest) with ingest true;
+            400 profile_zdr_forbidden (path profile_id) under zero data retention, the
+            token's ZDR floor included; 403 FORBIDDEN for a service principal (the profile
+            guard's refusal) and for an API key (details.reason api_key_profile_refused);
+            404 NOT_FOUND (profile not found) for a profile the organization does not hold,
+            and for a profile the caller does not own under enforce; 400 unsupported_option
+            (path profile_id) on an edge with no browser to restore the profile into. The
+            stream route refuses profile_id with 400 unsupported_in_stream.
       description: >-
         Fields not listed here are unknown: ignored with an unknown_field warning
         (and Deprecation and Sunset headers) unless the edge runs strict, where they
@@ -11855,7 +12185,7 @@ components:
             schema_issues lists paths and codes.
         reason:
           type: string
-          enum: [model_lane_denied, model_lane_unauthorized, model_rejected_request, upstream_unavailable, timeout, transport, bad_reply, not_json, too_large, deadline]
+          enum: [model_lane_denied, model_lane_unauthorized, model_rejected_request, model_lane_unavailable, upstream_unavailable, timeout, transport, bad_reply, not_json, too_large, deadline]
         retry_after_s:
           type: integer
           minimum: 0

@@ -282,6 +282,11 @@ export function ChatLiveRunPanel(props: {
    * sends them as ordinary messages. Without this prop the composer does not offer the queue.
    */
   onSteerHeldMessages?: (messages: readonly SteerResend[]) => void
+  /**
+   * The person sends a message the run never took as a new message (E3.3-g). The page sends it as an ordinary
+   * message, the same way it sends the held messages. Without this prop the steer strip does not offer that action.
+   */
+  onSteerResend?: (content: string) => void
 }) {
   const i18n = useI18n()
   // One name for two attributes: the button carries the same text as its
@@ -797,6 +802,7 @@ export function ChatLiveRunPanel(props: {
                   steer={steer}
                   live={live()}
                   canQueue={props.onSteerHeldMessages !== undefined}
+                  onResend={props.onSteerResend}
                 />
               </Show>
               <Show when={steps().length > 0}>

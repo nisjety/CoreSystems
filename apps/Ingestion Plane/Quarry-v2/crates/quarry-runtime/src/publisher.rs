@@ -228,6 +228,7 @@ mod tests {
             seq: 0,
             payload: serde_json::json!({}),
             idempotency_key: uuid::Uuid::new_v4().to_string(),
+            trace: None,
         }
     }
 

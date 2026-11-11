@@ -6,6 +6,7 @@ import {
   Camera,
   Code2,
   Copy,
+  Download,
   ExternalLink,
   Hand,
   Eye,
@@ -625,6 +626,8 @@ export function BrowserChrome(props: {
   let findInputRef: HTMLInputElement | undefined
   // Browser keyboard commands (F-t2-070, behind VITE_BROWSER_KEYMAP=true).
   const keymapEnabled = () => import.meta.env.VITE_BROWSER_KEYMAP === 'true'
+  // Save the page as a PDF (F-t2-069 step 1, E5.1, behind VITE_BROWSER_PDF=true).
+  const pdfEnabled = () => import.meta.env.VITE_BROWSER_PDF === 'true'
   const tabMenuTab = () => {
     const menu = tabMenu()
     return menu ? session().tabs.find((tab) => tab.tabId === menu.tabId) ?? null : null
@@ -1797,6 +1800,18 @@ export function BrowserChrome(props: {
           >
             <Camera class="size-3.5" />
           </button>
+          <Show when={pdfEnabled() && !evidenceIsEphemeral(session())}>
+            <button
+              type="button"
+              class="knowledge-browser-toolbtn"
+              aria-label="Lagre siden som PDF"
+              title="Lagre som PDF"
+              disabled={controlsDisabled()}
+              onClick={() => runAction({ type: 'pdf' })}
+            >
+              <Download class="size-3.5" />
+            </button>
+          </Show>
           <Show when={!humanOnlyBrowsing() && (!props.personalBrowsing || loopRunning())}>
           <i class="knowledge-browser-chrome__divider" aria-hidden="true" />
           <button

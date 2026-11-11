@@ -49,6 +49,23 @@ pub(crate) struct AppState {
     /// enables it; while off both answer 404 and nothing goes upstream. Quarry also needs
     /// `QUARRY_EDGE__DOWNLOADS` and `QUARRY_EDGE__DOWNLOAD_HANDOFF` on.
     pub(crate) browser_downloads: bool,
+    /// `BROWSER_RECIPES` (Q4-E4.2-4a): whether a browser session's receipts compile canonically
+    /// (version 2) and can be saved as a recipe (`POST /api/v1/browser/sessions/{id}/recipes`,
+    /// `browser_evidence.save_recipe`) and the saved recipes listed (`GET /api/v1/browser/recipes`).
+    /// Read once here, never in a handler. Off unless set to a truthy word (1/true/yes/on); while
+    /// off the routes are absent and the action answers 404. Quarry also needs
+    /// `QUARRY_EDGE__PROCEDURE_CANONICAL` on and capability-core `PROCEDURES_API` on.
+    pub(crate) browser_recipes: bool,
+    /// `BROWSER_REGION_ATTACH` (E3.3-d, QF-7): whether a dragged page region can be attached
+    /// (`POST /api/v1/browser/sessions/{id}/attachments/region`, `browser_region.attach`). Read
+    /// once here, never in a handler. Off unless set to a truthy word (1/true/yes/on); while off
+    /// the route is absent and the action answers 404.
+    pub(crate) browser_region_attach: bool,
+    /// `BROWSER_TAB_MENTIONS` (E3.3-c, QF-7): whether a turn's `@tab` mentions can be re-resolved
+    /// (`POST /api/v1/browser/sessions/{id}/context/tab-mentions`,
+    /// `browser_context.resolve_tab_mentions`). Read once here, never in a handler. Off unless set
+    /// to a truthy word (1/true/yes/on); while off the route is absent and the action answers 404.
+    pub(crate) browser_tab_mentions: bool,
     pub(crate) auth_core_url: String,
     pub(crate) verevon_public_origin: String,
     pub(crate) session_core_url: String,
@@ -664,6 +681,13 @@ pub(crate) async fn build_state() -> Result<AppState> {
             env::var("BROWSER_CONSENT_API").ok().as_deref(),
         ),
         browser_downloads: browser_downloads_enabled(env::var("BROWSER_DOWNLOADS").ok().as_deref()),
+        browser_recipes: human_browse_enabled(env::var("BROWSER_RECIPES").ok().as_deref()),
+        browser_region_attach: human_browse_enabled(
+            env::var("BROWSER_REGION_ATTACH").ok().as_deref(),
+        ),
+        browser_tab_mentions: human_browse_enabled(
+            env::var(crate::domains::browser_context::TAB_MENTIONS_FLAG).ok().as_deref(),
+        ),
         auth_core_url: env_url("AUTH_CORE_URL", "http://auth-core:3011"),
         verevon_public_origin: canonical_public_origin(
             &env::var("VEREVON_PUBLIC_ORIGIN")

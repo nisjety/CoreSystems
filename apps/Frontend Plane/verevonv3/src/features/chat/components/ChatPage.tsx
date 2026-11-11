@@ -90,6 +90,7 @@ import { BrowserDockControls } from '@/features/browser/dock/BrowserDockControls
 import { InteractiveBrowserPane } from '@/features/browser/dock/InteractiveBrowserPane'
 import { OpenBrowserButton } from '@/features/browser/dock/OpenBrowserButton'
 import { useDockBrowserSession } from '@/features/browser/dock/dock-session'
+import type { SteerResend } from '@/features/browser/dock/steer-input'
 import { createChatThreadByTab, planChatForTabSwitch } from '@/features/browser/dock/chat-per-tab'
 import {
   browserDockPageClass,
@@ -248,6 +249,8 @@ export default function ChatPage() {
     doMode: planMode(),
   })
   const [projectNotice, setProjectNotice] = createSignal('')
+  // The notice for a held browser-agent message that was not sent (E3.3-g). Any send clears it.
+  const [steerNotice, setSteerNotice] = createSignal('')
   // The first-send ask for a shared room. The send waits on the answer, and a cancel
   // is a refused send: the composer clears its draft only after a send it saw succeed.
   const [audienceAsk, setAudienceAsk] = createSignal<{
@@ -286,6 +289,7 @@ export default function ChatPage() {
     })
   }
   const submitWithWorkPeriod = async (payload: DashboardComposerSubmitPayload) => {
+    setSteerNotice('')
     const submission = {
       ...payload,
       text: withChatWorkPeriod(payload.text, workPeriod(), i18n.locale() === 'no' ? 'no' : 'en'),
@@ -323,6 +327,46 @@ export default function ChatPage() {
       return
     }
     setTemporaryChat(value)
+  }
+
+  // A held message of a browser-agent run (E3.3-g) goes out as an ordinary message once the run has ended, or when the
+  // person resends one the run did not take. Each goes through the composer's own send path, in order, and the next waits
+  // for the one before it. A foreign-origin or temporary thread sends nothing: the controller drops a foreign-origin send
+  // without a word, and a temporary send would go out without the zero-retention flag the composer sets. What is not
+  // sent, and what follows it, goes back into the composer's draft.
+  const sendHeldSteerMessages = async (messages: readonly Pick<SteerResend, 'content'>[]): Promise<void> => {
+    if (messages.length === 0) return
+    // A send clears the composer, so the text the person had is read first and put back once the held messages have gone.
+    const draftBefore = input()
+    let sentCount = 0
+    for (const held of messages) {
+      // Checked before each send: the person may switch the thread's state while the send before it was in flight.
+      if (isForeignOriginThread() || temporaryChat() || isActiveThreadTemporary()) break
+      // The thread's scopes, carried as the composer carries them. A conversation-only thread reads no page: no web search,
+      // and no retrieval scope.
+      const conversationOnly = sourceScope() === 'conversation'
+      try {
+        await submitWithWorkPeriod({
+          actions: [],
+          attachments: [],
+          text: held.content,
+          tools: browseWeb() && !conversationOnly ? ['search'] : [],
+          sourceScope: sourceScope(),
+          ...(conversationOnly || retrievalScope() === 'auto' ? {} : { retrievalScope: retrievalScope() }),
+        })
+      } catch {
+        break
+      }
+      sentCount += 1
+    }
+    const unsent = messages.slice(sentCount).map((held) => held.content)
+    // The composer's own text: what the person has typed since the sends, or else what they had before them.
+    const draftNow = input()
+    const ownDraft = draftNow.trim().length > 0 ? draftNow : draftBefore
+    setInput([...unsent, ownDraft].filter((part) => part.trim().length > 0).join('\n\n'))
+    if (unsent.length > 0) {
+      setSteerNotice(i18n.tr('Ikke sendt. Teksten ligger i utkastet ditt.', 'Not sent. The text is in your draft.'))
+    }
   }
 
   // "Planlegg dette" (chat-wave2 "schedule" spec §2.1) — the message-action
@@ -509,7 +553,7 @@ export default function ChatPage() {
 
   const composer = () => (
     <>
-      <Show when={projectRef() || projectNotice() || audienceAsk()}>
+      <Show when={projectRef() || projectNotice() || steerNotice() || audienceAsk()}>
         <div class="verevon-chat-project-strip">
           <Show when={projectRef()}>
             <p class="verevon-chat-project-chip" role="status">
@@ -536,6 +580,9 @@ export default function ChatPage() {
           </Show>
           <Show when={projectNotice()}>
             <p class="verevon-chat-project-notice" role="status">{projectNotice()}</p>
+          </Show>
+          <Show when={steerNotice()}>
+            <p class="verevon-chat-project-notice" role="status">{steerNotice()}</p>
           </Show>
           <Show when={audienceAsk()}>
             {(ask) => (
@@ -1676,6 +1723,8 @@ export default function ChatPage() {
         zdr={isActiveThreadTemporary()}
         onRefreshApprovals={(runId) => void refreshApprovalsForRun(runId)}
         onBrowserGiveBack={(runId, note) => void giveBackBrowserRun(runId, note)}
+        onSteerHeldMessages={(messages) => void sendHeldSteerMessages(messages)}
+        onSteerResend={(content) => void sendHeldSteerMessages([{ content }])}
         navigation={liveRailNavigation()}
         onCloseWork={() => setActiveTab('chat')}
         workContent={liveRailWorkContent()}

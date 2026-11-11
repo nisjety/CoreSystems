@@ -17,12 +17,14 @@
 //!   scope, and a request labelled `initiated_by: "agent"` is refused whatever the
 //!   token (a Model-relayed scrape must not spend model money outside its run
 //!   budget). Both are a 403 before the page is fetched.
-//! - **The lane.** The E1 path only: the static development credential of the
-//!   edge (`state.model_plane_token`, which `main.rs` sets only under the auth dev
-//!   bypass) plus an optional second dev token for the inference audience. With no
-//!   `MODEL_PLANE_URL` the answer is 501 `model_plane_unavailable`; with a URL but
-//!   no usable credential, 501 `model_lane_not_granted`. Both are decided before
-//!   the page is fetched. The Auth Core minted path is owner decision OD-1.
+//! - **The lane.** The minted path first (WS16.S3): when the edge holds the
+//!   Auth Core service-token provider (`state.service_token_provider`) the client
+//!   mints a Model Plane token per verified request org. Otherwise the static
+//!   development credential of the edge (`state.model_plane_token`, which
+//!   `main.rs` sets only under the auth dev bypass) plus an optional second dev
+//!   token for the inference audience. With no `MODEL_PLANE_URL` the answer is
+//!   501 `model_plane_unavailable`; with a URL but neither credential, 501
+//!   `model_lane_not_granted`. Both are decided before the page is fetched.
 //! - **Nothing here logs content.** The only log line is the boot-style warning
 //!   for `AI_FORMATS_ZDR=allow`.
 
@@ -233,7 +235,7 @@ pub fn check_principal(
 /// The 501 for an edge that cannot reach a model, decided before the page is
 /// fetched. `model_plane_unavailable`: no `MODEL_PLANE_URL`.
 /// `model_lane_not_granted`: a URL, but no credential Quarry may use on the chat
-/// lane (outside the development bypass there is none until the grant exists).
+/// lane: neither the minted service-token provider nor the development token.
 pub fn availability(state: &AppState) -> Result<(), QuarryError> {
     let has_url = state
         .model_plane_url
@@ -246,10 +248,9 @@ pub fn availability(state: &AppState) -> Result<(), QuarryError> {
         )
         .with_details(serde_json::json!({ "reason": "model_plane_unavailable" })));
     }
-    let has_credential = state
-        .model_plane_token
-        .as_deref()
-        .is_some_and(|token| !token.trim().is_empty());
+    // The minted lane (service-token provider) or the dev token: either one is a
+    // usable credential, as in `extract_routes`.
+    let has_credential = lane_credential(state).is_some();
     if !has_credential {
         return Err(QuarryError::new(
             ErrorCode::Unsupported,
@@ -267,42 +268,84 @@ fn process_limit() -> Arc<Semaphore> {
         .clone()
 }
 
+/// The credential the engine authenticates with: the minted service-token
+/// provider when the edge has one (production, WS16.S3), else the static dev
+/// token of the auth dev bypass.
+enum LaneCredential<'a> {
+    Minted(quarry_runtime::service_tokens::SharedServiceTokenProvider),
+    DevToken(&'a str),
+}
+
+fn lane_credential(state: &AppState) -> Option<LaneCredential<'_>> {
+    if let Some(provider) = state.service_token_provider.clone() {
+        return Some(LaneCredential::Minted(provider));
+    }
+    state
+        .model_plane_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(LaneCredential::DevToken)
+}
+
 /// The engine for this edge's Model Plane settings, built once per distinct
-/// (url, token, inference token) and shared. The key is held as a digest, so the
-/// credentials are not kept twice.
+/// (url, credential kind) and shared. For the dev token the key covers the token
+/// and the inference token; for the minted lane it covers the provider instance.
+/// The key is held as a digest, so the credentials are not kept twice.
 fn engine_for(state: &AppState, settings: &AiFormatsSettings) -> Option<Arc<AiScrapeEngine>> {
     static CACHE: Mutex<Option<(String, Arc<AiScrapeEngine>)>> = Mutex::new(None);
     let url = state.model_plane_url.as_deref()?.trim();
-    let token = state.model_plane_token.as_deref()?.trim();
-    if url.is_empty() || token.is_empty() {
+    if url.is_empty() {
         return None;
     }
-    let key = blake3::hash(
-        format!(
-            "{url}\n{token}\n{}\n{}",
-            settings.inference_token.as_deref().unwrap_or(""),
-            settings.model_json
-        )
-        .as_bytes(),
-    )
-    .to_hex()
-    .to_string();
+    let credential = lane_credential(state)?;
+    let credential_key = match &credential {
+        // The provider instance, not a token: tokens are minted per org and per call.
+        LaneCredential::Minted(provider) => {
+            format!("minted\n{:p}", Arc::as_ptr(provider) as *const ())
+        }
+        LaneCredential::DevToken(token) => format!(
+            "dev\n{token}\n{}",
+            settings.inference_token.as_deref().unwrap_or("")
+        ),
+    };
+    let key = blake3::hash(format!("{url}\n{credential_key}\n{}", settings.model_json).as_bytes())
+        .to_hex()
+        .to_string();
     let mut cache = CACHE.lock().ok()?;
     if let Some((held, engine)) = cache.as_ref() {
         if *held == key {
             return Some(engine.clone());
         }
     }
-    let mut client = ModelPlaneClient::new(url).ok()?.with_bearer_token(token);
-    if let Some(second) = settings.inference_token.as_deref() {
-        client = client.with_inference_bearer_token(second);
-    }
+    let base = ModelPlaneClient::new(url).ok()?;
+    let client = match credential {
+        // Minted per verified request org (`AiScrapeInput::org_id`); the dev
+        // inference token never applies to this lane.
+        LaneCredential::Minted(provider) => base.with_token_provider(provider),
+        LaneCredential::DevToken(token) => {
+            let mut client = base.with_bearer_token(token);
+            if let Some(second) = settings.inference_token.as_deref() {
+                client = client.with_inference_bearer_token(second);
+            }
+            client
+        }
+    };
     let engine = Arc::new(
         AiScrapeEngine::new(Arc::new(client), settings.engine_config())
             .with_process_limit(process_limit()),
     );
     *cache = Some((key, engine.clone()));
     Some(engine)
+}
+
+/// WS16.S6: the shared engine for another route of this edge (`/v1/extract`),
+/// built exactly as the scrape route builds it: the process settings, the same
+/// cache, the same process-wide limit on calls in flight. `None` when the edge
+/// has no Model Plane URL or no credential for the chat lane. It does not read
+/// the switch: the caller decides whether a model may be asked.
+pub(crate) fn engine_for_request(state: &AppState) -> Option<Arc<AiScrapeEngine>> {
+    engine_for(state, settings())
 }
 
 /// What every requested format answers under ZDR: skipped, no call made.

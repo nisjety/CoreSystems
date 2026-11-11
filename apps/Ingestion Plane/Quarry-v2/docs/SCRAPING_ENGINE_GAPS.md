@@ -4,6 +4,8 @@
 > **Scope:** Source-code-grounded gap analysis of the Quarry-v2 scraping pipeline.  
 > Sources: live codebase review of `crates/quarry-runtime`, `crates/quarry-browser`.
 
+> **Verified 2026-11-11:** gap 5 (row 19) and section 2.5 are not true of the code. No adblock code exists in `apps/Ingestion Plane/Quarry-v2/crates`: there is no `intercept_loop`, no adblock symbol, and no adblock task in `crates/quarry-browser/src/chromiumoxide.rs`. `blockAds` appears only in a comment at `crates/quarry-browser/src/browserless.rs:14`. Status is now **No adblock code exists**. Archive; the replacement is `docs/plans/quarry-browser-build-plan-2026-10-14.md`, E5.2 (F-t2-066).
+
 ---
 
 ## 1. Executive Summary
@@ -16,7 +18,7 @@ Five concrete gaps were identified by reading the implementation directly. Each 
 | 2 | `driver_plan_enhanced` orphaned — not exported, unreachable by callers | `quarry-runtime` | **Medium** | ✅ Resolved |
 | 3 | Retry exhaustion skips escalation — `DriverPlan::escalate()` never called | `quarry-runtime` | **High** | ✅ Resolved |
 | 4 | `wait_for` / `evaluate` missing from Browserless driver | `quarry-browser` | **High** | ✅ Resolved |
-| 5 | Adblock CDP task leaks on session release — bare `tokio::spawn`, no handle stored | `quarry-browser` | **Medium** | ✅ Resolved |
+| 5 | ~~Adblock CDP task leaks on session release — bare `tokio::spawn`, no handle stored~~ | `quarry-browser` | ~~**Medium**~~ | No adblock code exists (checked 2026-11-11) |
 | 6 | Browserbase cloud-browser driver missing — no driver implementation for Browserbase sessions | `quarry-browser` | **Medium** | 🔧 In Progress |
 
 ---
@@ -133,7 +135,9 @@ All interactions with the Browserless API are one-shot HTTP POSTs. There is no W
 
 ---
 
-### 2.5 Adblock CDP Task Leaks on Session Release
+### ~~2.5 Adblock CDP Task Leaks on Session Release~~ (No adblock code exists)
+
+> **Status (checked 2026-11-11): No adblock code exists.** The code quoted below is not in `apps/Ingestion Plane/Quarry-v2/crates`: there is no `intercept_loop`, no adblock symbol and no adblock task in `chromiumoxide.rs`. The text is kept as first written, for the record only.
 
 **File:** `crates/quarry-browser/src/chromiumoxide.rs` line 224
 
@@ -194,14 +198,14 @@ The `Browser::connect` entry-point from `chromiumoxide` can consume this URL dir
 | 2.2 `driver_plan_enhanced` orphaned | **Medium** | Low — declare module or delete file | ✅ Fixed — module declared and exported from `lib.rs` |
 | 2.3 Escalation never fires | **High** | Low-Medium — call `plan.escalate()` after retry loop | ✅ Yes — waterfall fallback non-functional |
 | 2.4 `wait_for`/`evaluate` missing | **High** | High — requires WebSocket session in `browserless.rs` | ✅ Fixed — WebSocket CDP session; `wait_for` and `evaluate` implemented |
-| 2.5 Adblock task leaks | **Medium** | Low — store `JoinHandle`, abort in `release()` | ✅ Fixed — `JoinHandle` stored, `.abort()` called in `release()` |
+| 2.5 Adblock task leaks | ~~**Medium**~~ | ~~Low — store `JoinHandle`, abort in `release()`~~ | No adblock code exists (checked 2026-11-11) |
 | 2.6 Browserbase driver missing | **Medium** | Low-Medium — new file, `BrowserDriver` impl via `Browser::connect` | 🔧 In Progress |
 
 ---
 
 ## 4. Recommended Fix Order
 
-1. **Gap 2.5** (Adblock task leak) — one-line fix, zero risk, immediate correctness improvement.
+1. ~~**Gap 2.5** (Adblock task leak) — one-line fix, zero risk, immediate correctness improvement.~~ No longer applicable: no adblock code exists (checked 2026-11-11).
 2. **Gap 2.3** (Escalation not called) — small change in `retry.rs`; unlocks the existing `DriverPlan` waterfall design.
 3. **Gap 2.2** (Orphaned enhanced plan) — decide: integrate or delete. Unblocks future driver plan work.
 4. **Gap 2.1** (Browser driver not wired) — wire `chromiumoxide::ChromiumoxideDriver` into `fetch.rs`; required before any browser job is functional end-to-end.

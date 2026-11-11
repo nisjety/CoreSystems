@@ -47,9 +47,10 @@ use crate::driver::{Driver, FetchHints};
 use crate::robots_cache::{origin_key, RobotsCache, RobotsFetch, RobotsFetcher, RobotsState};
 
 /// The user-agent tokens the gate answers for. A file may name either; the most
-/// restrictive answer wins. One constant, so the product-token decision
-/// (F-t2-067) changes one line.
-pub const ROBOTS_PRODUCT_TOKENS: [&str; 2] = ["quarrybot", "quarry"];
+/// restrictive answer wins. The set is defined once, in
+/// `quarry_core::identity::ROBOTS_TOKENS` (F-t2-067), so the product-token decision
+/// changes in one place.
+pub const ROBOTS_PRODUCT_TOKENS: [&str; 2] = quarry_core::identity::ROBOTS_TOKENS;
 
 /// The most of a robots.txt that is read (RFC 9309 asks for at least 500 KiB).
 pub const ROBOTS_BODY_CAP: usize = 512 * 1024;

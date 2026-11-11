@@ -117,6 +117,7 @@ pub mod test_site;
 pub mod tls_driver;
 #[cfg(test)]
 mod token_request_contract;
+pub mod trace_projection;
 pub mod transport_fallback_driver;
 pub mod usage;
 pub mod vector_index;
@@ -212,6 +213,9 @@ pub use step_receipts::{
 };
 pub use structured_extract::StructuredExtractClient;
 pub use tls_driver::TlsProfileDriver;
+pub use trace_projection::{
+    model_event_type, to_model_envelope, PublishCtx, MAX_PAYLOAD_BYTES as TRACE_MAX_PAYLOAD_BYTES,
+};
 pub use transport_fallback_driver::TransportFallbackDriver;
 pub use usage::{
     metrics as usage_metrics, BrowserMetricsMode, NatsUsageMeter, NoopUsageMeter, UsageEvent,

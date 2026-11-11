@@ -587,6 +587,22 @@ pub trait ActionPlanner: Send + Sync {
     ) -> Result<PlannerReply, PlannerError> {
         self.plan_next(ctx).await
     }
+
+    /// The postcondition Quarry checks once this action has run, when the planner carries one for
+    /// it (a recipe step). The loop asks right before it dispatches the action. The default carries
+    /// none, so the step is sent without an `expect`.
+    fn step_expect(&self, _action: &BrowserAction) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Hands the planner Quarry's observation of an action it proposed, once that observation has
+    /// come back. The default keeps nothing.
+    fn note_wire_observation(
+        &self,
+        _action: &BrowserAction,
+        _wire: &crate::quarry_agent::WireObservation,
+    ) {
+    }
 }
 
 /// gRPC planner backed by inference-core.

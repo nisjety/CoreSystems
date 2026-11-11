@@ -600,6 +600,15 @@ pub(super) async fn execute_action(
         "browser_evidence.compile_procedure" => {
             crate::domains::browser_evidence::dispatch_compile_procedure(&state, &user, &headers, &body.input).await
         }
+        "browser_evidence.save_recipe" => {
+            crate::domains::browser_evidence::dispatch_save_recipe(&state, &user, &headers, &body.input).await
+        }
+        "browser_region.attach" => {
+            crate::domains::browser_evidence::dispatch_region_attach(&state, &user, &headers, &body.input).await
+        }
+        "browser_context.resolve_tab_mentions" => {
+            crate::domains::browser_context::dispatch_resolve_tab_mentions(&state, &user, &headers, &body.input).await
+        }
         "browser_profile.create" => {
             dispatch_browser_create_profile(&state, &user, &headers, &body.input).await
         }

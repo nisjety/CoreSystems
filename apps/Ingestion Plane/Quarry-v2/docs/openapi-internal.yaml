@@ -8,8 +8,8 @@ info:
     This file is repository documentation only: it is never served, and no SDK is generated
     from it. Internal routes never appear in docs/openapi.yaml or in the generated SDKs
     (decision 3.13, OPENAPI-INTERNAL, 2026-10-28). Who can reach these routes is decided by
-    gateway routing, not by this file (D2-312). The last ten paths are quarry-control's (Go,
-    default port 8081, not the edge): nine are called by the orchestrator and verified with
+    gateway routing, not by this file (D2-312). The last eleven paths are quarry-control's (Go,
+    default port 8081, not the edge): ten are called by the orchestrator and verified with
     QUARRY_CONTROL_INTERNAL_SECRET, one (zdr-tombstones) is called by the edge and verified with
     QUARRY_INTERNAL_SECRET (D2-050).
   license:
@@ -1194,6 +1194,63 @@ paths:
                 $ref: '#/components/schemas/InternalErrorEnvelope'
         '409':
           description: CONFLICT when the schedule is disabled, its kind does not run as a job, or the job cannot be created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+  /v1/internal/schedules/{id}/runtime:
+    put:
+      operationId: controlInternalSchedulesRuntimeUpdate
+      summary: Write the runtime of one schedule (orchestrator -> control)
+      description: >-
+        quarry-control. Called by the orchestrator's reconciler after it reads each schedule's Temporal
+        state (WS15.S4c). The write replaces the three runtime fields of the schedule row: last_run_at
+        and next_run_at in unix milliseconds (null clears one), and skipped_overlap_count, the number of
+        fires Temporal skipped because a run was in flight. The control service stores the timestamps as
+        unix seconds, and the tenant reads of the schedule render them as RFC 3339. Org and params are
+        never read from the body, and an unknown field is refused. A timestamp must fall in the UTC years
+        2000 to 2200. Verified with the control-internal HMAC.
+      tags:
+      - internal
+      security:
+      - controlInternalHmac: []
+      parameters:
+      - $ref: '#/components/parameters/ControlSigTimestamp'
+      - $ref: '#/components/parameters/ControlSigNonce'
+      - name: id
+        in: path
+        required: true
+        description: The schedule id (a schedule-kind id).
+        schema:
+          type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalControlScheduleRuntimeRequest'
+      responses:
+        '204':
+          description: The runtime was written. No body.
+        '400':
+          description: >-
+            BAD_REQUEST when the id is not a schedule id, the body is not JSON, is over 4 KiB or holds a
+            field outside the three, skipped_overlap_count is missing or negative, or a timestamp is not
+            unix milliseconds in the years 2000 to 2200.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '401':
+          description: The request is not signed with the control-internal secret. The body is plain text.
+        '404':
+          description: NOT_FOUND when no schedule has that id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalErrorEnvelope'
+        '500':
+          description: INTERNAL when the runtime cannot be stored.
           content:
             application/json:
               schema:
@@ -2461,6 +2518,28 @@ components:
           $ref: '#/components/schemas/InternalMeta'
         error:
           description: Always null on success.
+    InternalControlScheduleRuntimeRequest:
+      description: >-
+        The runtime of one schedule, written whole. Timestamps are unix milliseconds, and the control
+        service stores them as unix seconds. Org and params are not fields of this body.
+      type: object
+      additionalProperties: false
+      required:
+      - skipped_overlap_count
+      properties:
+        last_run_at:
+          type: [integer, 'null']
+          format: int64
+          description: The start of the latest run in unix milliseconds. null clears it.
+        next_run_at:
+          type: [integer, 'null']
+          format: int64
+          description: The next scheduled fire in unix milliseconds. null clears it.
+        skipped_overlap_count:
+          type: integer
+          format: int64
+          minimum: 0
+          description: The number of fires skipped because a run was in flight. The value replaces the stored count.
     InternalControlClaimRequestsRequest:
       type: object
       required:

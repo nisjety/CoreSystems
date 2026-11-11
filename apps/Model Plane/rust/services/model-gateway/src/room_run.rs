@@ -211,6 +211,8 @@ pub const ROOM_EVENT_POLICY: &[(&str, Disposition)] = &[
     ("follow_ups", Disposition::Drop),
     ("goal_progress", Disposition::Drop),
     ("research_plan", Disposition::Drop),
+    // The owner's research run id and status: the owner-bound routes address it, the room never does.
+    ("research_run", Disposition::Drop),
     ("connector_suggestion", Disposition::Drop),
     // Lifecycle and transport frames the room does not need.
     ("retry_scheduled", Disposition::Drop),

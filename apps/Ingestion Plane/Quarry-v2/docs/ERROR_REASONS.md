@@ -209,7 +209,7 @@ These reasons come from `POST /v1/scrape` (and the stream, where noted). The sta
 | `browser_capability_unavailable` | 501 `UNSUPPORTED` | the browser the endpoint uses cannot capture or act (a provider adapter inherits the defaults), or no browser is wired | use the Local driver, or send no capture or actions |
 | `heavy_browser_busy` | 429 `RATE_LIMITED` | another action run holds the browser's heavy lane | retry shortly |
 | `scrape_interact_scope_required` | 403 `FORBIDDEN` | actions need a user request, or a service principal with `scrape:interact` in the `on` mode; a request labelled `initiated_by: "agent"` is always refused | send actions from the user's own request |
-| `unsupported_in_stream` | 400 `BAD_REQUEST` | a capture or actions on `POST /v1/scrape/stream` | use `POST /v1/scrape` |
+| `unsupported_in_stream` | 400 `BAD_REQUEST` | a capture, actions or a `profile_id` (while `QUARRY_EDGE__SCRAPE_PROFILE_PIN` is on) on `POST /v1/scrape/stream` | use `POST /v1/scrape` |
 | `actions_deadline` | 504 `TIMEOUT` | the run with actions hit its 115 s bound (`details.op` scrape, `deadline_ms` 115000) | send fewer or shorter actions |
 | `actions_cancelled` | 504 `TIMEOUT` | the run was cancelled before an action finished | retry |
 | `wait_too_long` | 504 `TIMEOUT` inside an action; under `abort` the request answers 502 `action_failed` | one wait is over its limit (30 s by default) | shorten the wait |
@@ -245,7 +245,7 @@ These come from `POST /v1/scrape` (and the stream, where noted) when a request n
 
 Field errors (400, in `details.fields[]`, not in `details.reason`; each carries a path and never a value): `feature_disabled` (at `formats[i]` while `QUARRY_EDGE__AI_FORMATS` is not on), `too_many` (two of one kind), `missing_field` (a bare `json`, `question` or `highlights`, or an absent `schema`, `question` or `query`), `empty`, `text_too_long` (a prompt or question over 10,000 characters, a query over 1,000), `out_of_range` (`max_chars`, `max_highlights`, `max_chars_each`), `invalid_value` (`language`), `invalid_type`, `unknown_field`, `schema_root_not_object`, `schema_too_large`, `schema_too_complex`, `schema_keyword_not_supported` (at the keyword's path). `reserved_format` no longer exists.
 
-Not errors: a model failure, a rate limit, a schema the output could not satisfy, a ZDR request and an empty page are `data.ai.<kind>` entries inside a 200 (`status`, `code`, `reason`): codes `MODEL_UNAVAILABLE`, `MODEL_RATE_LIMITED`, `SCHEMA_INVALID`, `ZDR_UNAVAILABLE`, `PRIVACY_POLICY` (the request's privacy classification forbids a model hop), `BUDGET_EXHAUSTED`, `EMPTY_SOURCE`; reasons `model_lane_denied`, `model_lane_unauthorized`, `model_rejected_request`, `upstream_unavailable`, `timeout`, `transport`, `bad_reply`, `not_json`, `too_large`, `deadline`.
+Not errors: a model failure, a rate limit, a schema the output could not satisfy, a ZDR request and an empty page are `data.ai.<kind>` entries inside a 200 (`status`, `code`, `reason`): codes `MODEL_UNAVAILABLE`, `MODEL_RATE_LIMITED`, `SCHEMA_INVALID`, `ZDR_UNAVAILABLE`, `PRIVACY_POLICY` (the request's privacy classification forbids a model hop), `BUDGET_EXHAUSTED`, `EMPTY_SOURCE`; reasons `model_lane_denied`, `model_lane_unauthorized`, `model_rejected_request`, `model_lane_unavailable`, `upstream_unavailable`, `timeout`, `transport`, `bad_reply`, `not_json`, `too_large`, `deadline`.
 
 ## Webhook subscriptions: 400, 403, 409 and 429 reasons (INNH-5)
 
@@ -395,6 +395,11 @@ Pins one stored browser profile to one `POST /v1/scrape`. Off unless `QUARRY_EDG
 | `feature_disabled` | `profile_id` | the option reached the contract while its switch is off (only a caller that builds the options itself; the edge strips the key) | ask the operator |
 | `invalid_type` | `profile_id` | the value is not a string | send a string |
 | `conflicting_aliases` | `profile_id` | `profile_id` and `profileId` with different values | send one spelling |
+| `profile_ingest_forbidden` | `ingest` | `ingest` is true on a scrape that pins a profile: a pinned scrape is never ingested | drop `ingest` or `profile_id` |
+| `profile_zdr_forbidden` | `profile_id` | the scrape runs under zero data retention, by its own flag or the token's floor: a pinned scrape cannot | drop `profile_id` |
+| `unsupported_option` | `profile_id` | this edge has no browser to restore a profile into | ask the operator |
+
+The refusals that are not field errors: 403 `FORBIDDEN` with no `details.reason` for a service principal (the profile guard's message); 403 `FORBIDDEN` with `details.reason` `api_key_profile_refused` for an API key, since a key is not a person; 404 `NOT_FOUND` (`profile not found`) for a profile this organization does not hold, and for a profile the caller does not own under `enforce`. A scrape never creates a profile. On `POST /v1/scrape/stream` a `profile_id` is refused with 400 `BAD_REQUEST`, `details.reason` `unsupported_in_stream`.
 
 ## `POST /v1/profiles/:id/clear-data`: removing a stored profile's browsing data (F-t2-068)
 

@@ -1,4 +1,5 @@
 import { createEffect, createMemo, createSignal, onCleanup, untrack } from 'solid-js'
+import type { z } from 'zod'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   compileBrowserProcedure,
@@ -9,6 +10,12 @@ import {
   type BrowserReceiptView,
 } from '@/shared/api/browser-client'
 import { getSessionContext } from '@/shared/api/auth-client'
+import { ApiError } from '@/shared/api/http'
+import { executeAction } from '@/shared/actions/action-client'
+import { browserEvidenceSaveRecipeOutput } from '@/shared/actions/action-registry'
+import type { ActionActor } from '@/shared/actions/types'
+import { LocalizedError } from '@/shared/i18n/errors'
+import { getSession } from '@/shared/session/session-store'
 
 /**
  * Data hooks for the evidence panels of the browser chrome (WS9.D).
@@ -20,6 +27,7 @@ import { getSessionContext } from '@/shared/api/auth-client'
  *   is visible, and the in-flight request is aborted on stop or session change.
  * - A zero-data-retention (ZDR) session sends the live egress read only. Receipts and
  *   the procedure compile are never requested for it; the server refuses them anyway.
+ * - A recipe is saved only when the person asks for it (`save`), never for a ZDR session.
  */
 
 export const EVIDENCE_POLL_INTERVAL_MS = 5000
@@ -265,6 +273,84 @@ export function useBrowserProcedure(scope: () => EvidenceSource | null): {
   }
 
   return { status, result, error, compile }
+}
+
+export type RecipeSaveStatus = 'idle' | 'running' | 'done' | 'error'
+
+/** A saved recipe as the gateway answered it: its id, version, digest and the slot names and kinds. */
+export type BrowserRecipeSaved = z.infer<typeof browserEvidenceSaveRecipeOutput>
+
+/**
+ * Saves the scoped session's compiled procedure as a recipe through the
+ * `browser_evidence.save_recipe` action (Q4-E4.2-4b). It runs only when the person asks
+ * (`save`), never for a ZDR session, and a save already running is not repeated. An answer
+ * that arrives after the scope changed is dropped. The answer is read through the action's
+ * output contract, so an answer of another shape is an error and nothing unchecked is shown.
+ */
+export function useSaveRecipe(scope: () => EvidenceSource | null): {
+  status: () => RecipeSaveStatus
+  result: () => BrowserRecipeSaved | null
+  error: () => unknown
+  save: (input: { name: string; description?: string }) => void
+} {
+  const [status, setStatus] = createSignal<RecipeSaveStatus>('idle')
+  const [result, setResult] = createSignal<BrowserRecipeSaved | null>(null)
+  const [error, setError] = createSignal<unknown>(null)
+  const key = createMemo(() => scopeKey(scope()))
+  // Bumped on every scope change, so an answer for a session the panel no longer shows is ignored.
+  let generation = 0
+
+  createEffect(
+    () => key(),
+    () => {
+      generation += 1
+      setStatus('idle')
+      setResult(null)
+      setError(null)
+    },
+  )
+
+  const save = (input: { name: string; description?: string }) => {
+    const source = scope()
+    if (!source || source.zdr) return
+    if (status() === 'running') return
+    const userId = getSession().user?.id
+    if (!userId) {
+      setError(new LocalizedError({ no: 'Logg inn på nytt for å lagre oppskriften.', en: 'Sign in again to save the recipe.' }))
+      setStatus('error')
+      return
+    }
+    const current = generation
+    setStatus('running')
+    setError(null)
+    setResult(null)
+    const actor: ActionActor = { type: 'human', userId, orgId: source.orgId }
+    const description = input.description?.trim()
+    executeAction('browser_evidence.save_recipe', actor, {
+      sessionId: source.sessionId,
+      name: input.name,
+      ...(description ? { description } : {}),
+    }).then(
+      (execution) => {
+        if (current !== generation) return
+        const parsed = browserEvidenceSaveRecipeOutput.safeParse(execution.result)
+        if (!parsed.success) {
+          setError(new ApiError('browser_recipe_response_invalid', 502, 'browser_recipe_response_invalid'))
+          setStatus('error')
+          return
+        }
+        setResult(parsed.data)
+        setStatus('done')
+      },
+      (failure: unknown) => {
+        if (current !== generation) return
+        setError(failure)
+        setStatus('error')
+      },
+    )
+  }
+
+  return { status, result, error, save }
 }
 
 /**

@@ -711,8 +711,14 @@ pub async fn start_run(
                 release_run_marks(&run_id_text);
                 return Err(driver_err(&request_id, error));
             }
-            if let Err(error) =
-                validate_navigation(&recovery_action, state.security.as_ref()).await
+            // WS8.B: run-aware, so a resumed open-web run's recovery navigation stays
+            // DNS-guarded even when the engine allows private hosts.
+            if let Err(error) = validate_navigation_for_run(
+                &recovery_action,
+                state.security.as_ref(),
+                &nav_policy,
+            )
+            .await
             {
                 let _ = state.agent_driver.release(session).await;
                 release_run_marks(&run_id_text);

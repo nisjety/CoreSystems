@@ -475,6 +475,21 @@ pub struct StepRequest {
     /// Absent unless set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initiated_by: Option<String>,
+    /// E4.2 step 1: a postcondition the page must meet once this step ran, sent as Quarry's
+    /// `expect`. Quarry refuses it unless its step-expect switch is on. Absent unless set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expect: Option<serde_json::Value>,
+}
+
+/// `POST /v1/agent/procedures/replay-check` request body (Quarry `ReplayCheckBody`). The
+/// actions stay raw JSON: this wire enum has no `*_semantic` variants and must not gain them.
+/// The actions carry bound slot text to Quarry only, so this type derives no `Debug` and is
+/// never logged.
+#[derive(Serialize)]
+struct ReplayCheckRequest<'a> {
+    procedure: &'a serde_json::Value,
+    actions: &'a [serde_json::Value],
+    prefix: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -992,6 +1007,12 @@ pub struct WireObservation {
     /// non-negative number reads as absent. Never serialised back.
     #[serde(default, deserialize_with = "lenient_settle_ms", skip_serializing)]
     pub settle_ms: Option<u32>,
+    /// E4.2 step 3: Quarry's verdict on this observation's action (`action_outcome`), `verified`
+    /// only when its deterministic postcondition held. Absent from an older Quarry; a value that
+    /// does not read as a [`WireActionOutcome`] is dropped (counts as absent). Never serialised
+    /// back.
+    #[serde(default, deserialize_with = "lenient_outcome", skip_serializing)]
+    pub action_outcome: Option<WireActionOutcome>,
 }
 
 /// The most warnings read off the wire (the observation keeps fewer).
@@ -1168,6 +1189,27 @@ where
     Ok(raw.and_then(|value| serde_json::from_value(value).ok()))
 }
 
+/// Quarry's `action_outcome` (`ActionOutcome` in quarry-core): the verdict of the action's
+/// deterministic postcondition. Only the status and the reason code are read. The free-text
+/// `detail` Quarry may send is left out on purpose. Never serialised back.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WireActionOutcome {
+    /// `verified`, `failed` or `unknown`, as Quarry names it. A string, so a value this build
+    /// does not know cannot fail the parse. Required: an outcome without a status reads as absent.
+    pub status: String,
+    /// Quarry's reason code for the status, when it sends one.
+    #[serde(default)]
+    pub reason_code: Option<String>,
+}
+
+fn lenient_outcome<'de, D>(deserializer: D) -> Result<Option<WireActionOutcome>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw.and_then(|value| serde_json::from_value(value).ok()))
+}
+
 /// The public portion of Quarry's active AX snapshot. These fields are enough
 /// for Model Plane to plan a ref-bound action, while private CDP node bindings
 /// remain solely inside Quarry.
@@ -1231,6 +1273,28 @@ pub struct WireSnapshotTarget {
     pub text: Option<String>,
     #[serde(default)]
     pub frame_id: Option<String>,
+    /// Quarry's `tag`: the element's tag name. Read for the replay runner. Never serialised
+    /// back, so the chat-facing observation output stays as it was.
+    #[serde(default, skip_serializing)]
+    pub tag: Option<String>,
+    /// Quarry's `placeholder`, which is page text. Never serialised back.
+    #[serde(default, skip_serializing)]
+    pub placeholder: Option<String>,
+    /// Quarry's `test_id`, an identifier the page author set. Never serialised back.
+    #[serde(default, skip_serializing)]
+    pub test_id: Option<String>,
+    /// Quarry's element fingerprint, read down to its id. Never serialised back.
+    #[serde(default, skip_serializing)]
+    pub fingerprint: Option<WireFingerprintId>,
+}
+
+/// The part of Quarry's `ElementFingerprint` this side reads: its id. The structural path, the
+/// attributes and the normalised text Quarry sends with it are left out on purpose. Never
+/// serialised back.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WireFingerprintId {
+    #[serde(default)]
+    pub fingerprint_id: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -2192,6 +2256,9 @@ pub struct StepParams<'a> {
     pub grant_id: &'a str,
     pub initiated_by: Option<String>,
     pub request_id: Option<&'a str>,
+    /// E4.2 step 1: the postcondition to send with this step, as [`StepRequest::expect`]
+    /// carries it. [`Self::new`] leaves it `None`.
+    pub expect: Option<serde_json::Value>,
 }
 
 impl<'a> StepParams<'a> {
@@ -2215,6 +2282,7 @@ impl<'a> StepParams<'a> {
             grant_id,
             initiated_by: None,
             request_id: None,
+            expect: None,
         }
     }
 }
@@ -2352,6 +2420,7 @@ impl QuarryAgentClient {
             constraints: params.constraints.clone(),
             zdr: params.zdr,
             initiated_by: params.initiated_by,
+            expect: params.expect,
         };
         let endpoint = self.url(&format!("/v1/agent/runs/{run_id}/step"));
         let mut retried_unauthorized = false;
@@ -2387,6 +2456,32 @@ impl QuarryAgentClient {
             return Err(AgentClientError::PolicyDenied(denial));
         }
         Self::decode_text(status, &text)
+    }
+
+    /// E4.2 step 3: compare a proposed action sequence with a stored procedure without running any
+    /// browser effect (`POST /v1/agent/procedures/replay-check`). Same service token,
+    /// `x-quarry-org` header, request id and one 401 retry as [`Self::step`]. Returns the envelope
+    /// `data`: Quarry's `ReplayDecision`, which is `"exact"` or an object with `repair_required` or
+    /// `refused`. Nothing is persisted. The body carries bound slot text to Quarry only and is never
+    /// logged.
+    pub async fn replay_check(
+        &self,
+        org_id: &str,
+        procedure: &serde_json::Value,
+        actions: &[serde_json::Value],
+        prefix: bool,
+        request_id: Option<&str>,
+    ) -> Result<serde_json::Value, AgentClientError> {
+        let body = ReplayCheckRequest {
+            procedure,
+            actions,
+            prefix,
+        };
+        let endpoint = self.url("/v1/agent/procedures/replay-check");
+        let resp = self
+            .send_with_auth_retry(org_id, request_id, || self.http.post(&endpoint).json(&body))
+            .await?;
+        Self::decode(resp).await
     }
 
     /// Release a run and its browser lease. Best-effort; non-2xx is surfaced.
@@ -3927,6 +4022,7 @@ mod tests {
             constraints: AgentConstraints::default(),
             zdr: false,
             initiated_by: None,
+            expect: None,
         };
         assert!(serde_json::to_value(&body).unwrap().get("initiated_by").is_none());
         body.initiated_by = Some("agent".into());

@@ -118,7 +118,7 @@ import {
   type ScrapeBlock,
   type ScrapePreview,
 } from './knowledge-preview'
-import { robotsBlockedText } from './knowledge-robots'
+import { linksDeniedText, robotsBlockedText } from './knowledge-robots'
 import { webAddress } from './web-address'
 
 type IngestMode = 'link' | 'crawl' | 'products' | 'monitor'
@@ -151,6 +151,8 @@ type IngestJob = {
   pages?: number
   /** Pages the crawl's robots.txt gate refused (WS14.S4), from the run_completed event. */
   pagesBlockedByRobots?: number
+  /** Links the crawl scope refused (WS14.S3), from the terminal event's `links_denied`. */
+  linksDenied?: number
   progress?: number
   status: string
 }
@@ -235,6 +237,8 @@ export function KnowledgeComposer(props: {
   const [crawlIncludeText, setCrawlIncludeText] = createSignal('')
   const [crawlExcludeText, setCrawlExcludeText] = createSignal('')
   const [crawlAllowSubdomains, setCrawlAllowSubdomains] = createSignal(false)
+  // WS14.S3: follow links to unrelated hosts. UI only; the default stays off, so an untouched crawl sends nothing.
+  const [crawlAllowExternalLinks, setCrawlAllowExternalLinks] = createSignal(false)
   // W3-E3.7.9b: a crawl over the approval threshold waits here for the person. Set when the gateway
   // answers a crawl start with a pending approval (W3-E3.7.9a, not built yet), so nothing sets it today;
   // the prompt itself also renders nothing unless VITE_KNOWLEDGE_CRAWL_APPROVAL_ENABLED is "true".
@@ -412,6 +416,7 @@ export function KnowledgeComposer(props: {
         ...(event.status ? { status: event.status } : {}),
         ...(event.pagesVisited !== undefined ? { pages: event.pagesVisited } : {}),
         ...(event.pagesBlockedByRobots !== undefined ? { pagesBlockedByRobots: event.pagesBlockedByRobots } : {}),
+        ...(event.linksDenied !== undefined ? { linksDenied: event.linksDenied } : {}),
         // Real Data Plane ingest proof/failure — independent of quarry's own
         // run status, so a crawl can't read "Indexed" off scrape completion
         // alone. Latched (never cleared) so one written page still counts
@@ -582,8 +587,11 @@ export function KnowledgeComposer(props: {
     setDiscovery(null)
     const maxPages = crawlMaxPages()
     // W2-U65-51: the scope the user typed; empty when the flag is off or nothing was chosen.
+    // WS14.S3: on the agent-run path executeAction's zod parse drops allowExternalLinks, because
+    // knowledge.crawl_site's input is Model-visible and has no such key, so that crawl never follows links to other sites.
     const scope = scrapeOptions
       ? buildCrawlScopeOptions({
+          allowExternalLinks: crawlAllowExternalLinks(),
           allowSubdomains: crawlAllowSubdomains(),
           excludeText: crawlExcludeText(),
           includeText: crawlIncludeText(),
@@ -2157,6 +2165,19 @@ export function KnowledgeComposer(props: {
                   />
                   <span>{i18n.tr('Inkluder underdomener', 'Include subdomains')}</span>
                 </label>
+                <label class="dashboard-knowledge-composer__agent-toggle">
+                  <input
+                    type="checkbox"
+                    checked={crawlAllowExternalLinks()}
+                    onChange={(event) => setCrawlAllowExternalLinks(event.currentTarget.checked)}
+                  />
+                  <span>{i18n.tr('Følg lenker til andre nettsteder', 'Follow links to other sites')}</span>
+                </label>
+                <Show when={crawlAllowExternalLinks()}>
+                  <span class="dashboard-knowledge-composer__status" style={{ 'flex-basis': '100%' }}>
+                    {i18n.tr('Kan hente sider fra andre nettsteder', 'May fetch pages from other sites')}
+                  </span>
+                </Show>
                 <label>
                   <span>{i18n.tr('Ta med stier', 'Include paths')}</span>
                   <input
@@ -2372,6 +2393,12 @@ function IngestJobRow(props: { job: IngestJob }) {
         <Show when={(props.job.pagesBlockedByRobots ?? 0) > 0}>
           <span class="dashboard-knowledge-composer__job-robots">
             {robotsBlockedText(props.job.pagesBlockedByRobots, (no, en) => i18n.tr(no, en))}
+          </span>
+        </Show>
+        {/* Reuses the muted note style of the robots line. */}
+        <Show when={(props.job.linksDenied ?? 0) > 0}>
+          <span class="dashboard-knowledge-composer__job-robots dashboard-knowledge-composer__job-links">
+            {linksDeniedText(props.job.linksDenied, (no, en) => i18n.tr(no, en))}
           </span>
         </Show>
         <Show when={progress() !== null}>

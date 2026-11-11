@@ -139,6 +139,11 @@ message AcquireGrantResponse {
   repeated string allowed_artifact_ids = 8;
   string parent_grant_id = 9;
 
+  // WS7.K (R-6: field 20 is the web-policy snapshot): the org web policy the
+  // broker stored on this grant. Unset means the grant carries no snapshot,
+  // which is no grant layer. See WebPolicy.
+  WebPolicy web_policy = 20;
+
   // "session" or "sensitive_approval" (a "run" grant is derived from a session
   // grant, not acquired). Consumers must treat an unknown value as not valid.
   string kind = 10;
@@ -195,6 +200,36 @@ message AcquireGrantResponse {
   string key_id = 60;
 }
 
+// The org web-policy snapshot a grant carries (WS7.K). The broker derives it
+// from the verified principal's `web_policy` claim, never from a request field,
+// and a derived run grant may only tighten its parent's. It has the claim's
+// content: the version, the issuer's revision, the capability modes, the robots
+// and proxy ceilings and the domain rules. Unset means the grant carries no
+// snapshot, which is no grant layer.
+message WebPolicy {
+  // Claim version (1).
+  uint32 v = 1;
+
+  // The issuer's policy revision; "0" when the org has no policy.
+  string rev = 2;
+
+  // Capability modes keyed by capability name. Only the entries the issuer
+  // states are present.
+  map<string, string> caps = 3;
+
+  // The ceiling the org sets on robots.txt handling; empty when none is stated.
+  string robots_max = 4;
+
+  // The ceiling the org sets on proxy use; empty when none is stated.
+  string proxy_max = 5;
+
+  // Hosts the org allows; empty when the policy states no allow rule.
+  repeated string domains_allow = 6;
+
+  // Hosts the org denies.
+  repeated string domains_deny = 7;
+}
+
 message RevokeGrantRequest {
   // Grant to revoke.
   string grant_id = 1;
@@ -238,6 +273,11 @@ message ValidateGrantResponse {
   repeated string allowed_dialog_ids = 7;
   repeated string allowed_artifact_ids = 8;
   string parent_grant_id = 9;
+
+  // WS7.K (R-6: field 20 is the web-policy snapshot): the grant's org web-policy
+  // snapshot as stored when the grant was issued. Unset from a broker that
+  // predates it, which a consumer reads as no grant layer. See WebPolicy.
+  WebPolicy web_policy = 20;
 
   // Same values as AcquireGrantResponse.kind.
   string kind = 10;
@@ -362,6 +402,10 @@ message DeriveRunGrantResponse {
   // Canonical hosts of the run grant.
   repeated string allowed_domains = 4;
   string parent_grant_id = 5;
+  // WS7.K (R-6: field 20 is the web-policy snapshot): the snapshot the run grant
+  // inherited from its parent, which a derive may only tighten. Unset when the
+  // parent carried none. See WebPolicy.
+  WebPolicy web_policy = 20;
   // "run" for purpose ai_run, "attach" for purpose attach.
   string kind = 6;
   // Inherited from the parent; never lower than the parent's.

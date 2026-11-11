@@ -214,6 +214,7 @@ impl EventBus for NatsEventBus {
             seq,
             payload,
             idempotency_key: idempotency_key.clone(),
+            trace: None,
         };
 
         let bytes = serde_json::to_vec(&event).map_err(|e| {
@@ -426,7 +427,14 @@ pub fn is_agent_class(t: &EventType) -> bool {
         | EventType::AgentExpired
         | EventType::AgentBudgetExhausted
         | EventType::AgentAttached
-        | EventType::AgentDetached => true,
+        | EventType::AgentDetached
+        | EventType::BrowserSessionOpened
+        | EventType::BrowserSessionClosed
+        | EventType::BrowserControlChanged
+        | EventType::BrowserTabChanged
+        | EventType::StepReceiptRecorded
+        | EventType::EgressDecided
+        | EventType::ArtifactRecorded => true,
         EventType::RunStarted
         | EventType::RunPaused
         | EventType::RunResumed
@@ -503,6 +511,13 @@ fn event_type_token(t: &EventType) -> &'static str {
         EventType::ScheduleSkipped => "schedule_skipped",
         EventType::AgentAttached => "agent_attached",
         EventType::AgentDetached => "agent_detached",
+        EventType::BrowserSessionOpened => "browser_session_opened",
+        EventType::BrowserSessionClosed => "browser_session_closed",
+        EventType::BrowserControlChanged => "browser_control_changed",
+        EventType::BrowserTabChanged => "browser_tab_changed",
+        EventType::StepReceiptRecorded => "step_receipt_recorded",
+        EventType::EgressDecided => "egress_decided",
+        EventType::ArtifactRecorded => "artifact_recorded",
     }
 }
 
@@ -531,6 +546,13 @@ mod tests {
         EventType::AgentBudgetExhausted,
         EventType::AgentAttached,
         EventType::AgentDetached,
+        EventType::BrowserSessionOpened,
+        EventType::BrowserSessionClosed,
+        EventType::BrowserControlChanged,
+        EventType::BrowserTabChanged,
+        EventType::StepReceiptRecorded,
+        EventType::EgressDecided,
+        EventType::ArtifactRecorded,
     ];
     const RUN_AND_CRAWL_CLASS: &[EventType] = &[
         EventType::RunStarted,
@@ -581,7 +603,7 @@ mod tests {
 
     #[test]
     fn the_two_lists_cover_every_event_type_without_overlap() {
-        // 11 agent-class + 30 run/crawl = the 41 variants of EventType. If a variant
+        // 18 agent-class + 30 run/crawl = the 48 variants of EventType. If a variant
         // is added, `is_agent_class` stops compiling first; this catches a list that
         // was not updated with it.
         let mut tokens: Vec<&str> = AGENT_CLASS
@@ -593,7 +615,7 @@ mod tests {
         tokens.sort_unstable();
         tokens.dedup();
         assert_eq!(tokens.len(), n, "an event type is listed twice");
-        assert_eq!(n, 41);
+        assert_eq!(n, 48);
     }
 
     #[test]

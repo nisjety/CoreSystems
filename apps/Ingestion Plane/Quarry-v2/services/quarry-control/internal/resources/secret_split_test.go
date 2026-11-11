@@ -190,8 +190,8 @@ func TestSecretSplit_RouteTableMatchesGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	sort.Strings(internal)
-	if len(internal) != 8 {
-		t.Fatalf("control mounts %d /v1/internal/ routes, want 8: %v", len(internal), internal)
+	if len(internal) != 9 {
+		t.Fatalf("control mounts %d /v1/internal/ routes, want 9: %v", len(internal), internal)
 	}
 }
 

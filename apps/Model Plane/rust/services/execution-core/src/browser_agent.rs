@@ -21,6 +21,8 @@ pub mod failure;
 pub mod metrics;
 pub mod planner_view;
 pub mod procedure;
+pub mod recipe;
+pub mod recipe_planner;
 
 use failure::{ActionFailure, BrowserFailureKind, FailureBudget, FailureVerdict, NoProgressDetector};
 
@@ -1569,11 +1571,15 @@ pub async fn run_browser_agent_loop(
                     &constraints,
                     wire_action,
                     planner.is_some(),
+                    planner.and_then(|p| p.step_expect(&action)),
                 )
                 .await
                 {
                     Ok(wire_obs) => {
                         plan.failures.record_success();
+                        if let Some(p) = planner {
+                            p.note_wire_observation(&action, &wire_obs);
+                        }
                         let obs = crate::quarry_agent::observation_from_wire(
                             &wire_obs,
                             &action.action_id,
@@ -1680,6 +1686,7 @@ pub async fn run_browser_agent_loop(
                                         constraints,
                                         crate::quarry_agent::AgentAction::GetContent,
                                         false,
+                                        None,
                                     )
                                 },
                                 || run_cancelled(state, &config.run_id),
@@ -1761,6 +1768,7 @@ pub async fn run_browser_agent_loop(
                                     &constraints,
                                     crate::quarry_agent::AgentAction::GetContent,
                                     true,
+                                    None,
                                 )
                                 .await
                                 {
@@ -2088,7 +2096,9 @@ fn run_cancelled(state: Option<&crate::state::StateStore>, run_id: &str) -> bool
 /// One Quarry step. With `recover` (an LLM planner is selected) a 502
 /// `DRIVER_FAILED` is replayed once, and a 429 that asks for at most 10 s is
 /// waited out and replayed once; everything else, including a 504, is returned
-/// as it came (a timed-out action is never replayed).
+/// as it came (a timed-out action is never replayed). `expect` is the
+/// postcondition a recipe step carries; only a leased run sends it, and a
+/// recipe never attaches, so the attached arm ignores it.
 async fn dispatch_step(
     client: &crate::quarry_agent::QuarryAgentClient,
     run: &QuarryRun,
@@ -2096,6 +2106,7 @@ async fn dispatch_step(
     constraints: &crate::quarry_agent::AgentConstraints,
     action: crate::quarry_agent::AgentAction,
     recover: bool,
+    expect: Option<serde_json::Value>,
 ) -> Result<crate::quarry_agent::WireObservation, crate::quarry_agent::AgentClientError> {
     let mut driver_retried = false;
     let mut waited = false;
@@ -2112,6 +2123,7 @@ async fn dispatch_step(
                     &config.grant_id,
                 );
                 params.request_id = config.request_id.as_deref();
+                params.expect = expect.clone();
                 client.step(params).await
             }
             // A delegate step on the person's run: the attach grant, always

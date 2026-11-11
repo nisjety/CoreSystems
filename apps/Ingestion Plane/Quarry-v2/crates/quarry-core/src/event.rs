@@ -104,6 +104,25 @@ pub enum EventType {
     /// WS8.F: an agent attachment ended (released, aborted, revoked, idle or session ended).
     /// Payload: `attach_id`, `disposition`. No URL and no title.
     AgentDetached,
+    /// WS10.S4: a browser session opened for an agent run. Agent class (never on the
+    /// Ingestion bus); SSE name `browser.session.opened`. Emitted from Q2-WS10.S4d.
+    BrowserSessionOpened,
+    /// WS10.S4: a browser session closed. Agent class; SSE `browser.session.closed`.
+    BrowserSessionClosed,
+    /// WS10.S4: control of the session changed hands (agent, user, paused). Agent
+    /// class; SSE `browser.control`.
+    BrowserControlChanged,
+    /// WS10.S4: a tab was opened, focused or closed. Agent class; SSE `browser.tab`.
+    BrowserTabChanged,
+    /// WS10.S4: a step receipt was recorded (action carried as its serde tag only).
+    /// Agent class; SSE `browser.receipt`.
+    StepReceiptRecorded,
+    /// WS10.S4: an egress decision summary or an individual block for a step. Agent
+    /// class; SSE `browser.egress`.
+    EgressDecided,
+    /// WS10.S4: an artifact (screenshot, visual observation, evidence delta) recorded
+    /// for a step, by id. Agent class; SSE `browser.artifact`.
+    ArtifactRecorded,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +138,11 @@ pub struct Event {
     pub seq: u64,
     pub payload: serde_json::Value,
     pub idempotency_key: String,
+    /// WS10.S4: run trace stamp (origin, agent, request id, causation). Labels only,
+    /// never authority. Left out of the JSON when absent, so events without a trace
+    /// keep their old shape; an event without the key reads back as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<crate::trace::EventTrace>,
 }
 
 /// Payload of an `action.started` event (`EventType::ActionStarted`). `step` and
@@ -247,7 +271,7 @@ mod action_started_payload_tests {
         started.tab_id = Some("tab-1".into());
         let event = Event { event_id: crate::ids::Id::new(), run_id: Some(session_run.clone()), job_id: None,
             event_type: EventType::ActionStarted, ts: chrono::Utc::now(), seq: 1,
-            payload: started.to_value(), idempotency_key: "event-1".into() };
+            payload: started.to_value(), idempotency_key: "event-1".into(), trace: None };
         let wire = serde_json::to_value(event).unwrap();
         assert_eq!(wire["run_id"], session_run.to_string());
         assert!(wire["ts"].as_str().is_some());

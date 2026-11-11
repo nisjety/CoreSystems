@@ -11,18 +11,22 @@
 //!
 //! Read-only (no durable writes), org-scoped for metering, ZDR-safe.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Extension, Json};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use quarry_core::ai_spec::{AiCode, AiFormatReport, AiKind, AiReason, AiSpec, JsonSpec};
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_core::privacy::PrivacyPolicy;
-use quarry_runtime::ai_formats::{AiFormatRunner, JsonRequest, ZDR_UNAVAILABLE_MESSAGE};
+use quarry_core::zdr::ZdrMode;
+use quarry_runtime::ai_formats::ZDR_UNAVAILABLE_MESSAGE;
+use quarry_runtime::ai_scrape::{AiScrapeEngine, AiScrapeInput};
 use quarry_runtime::driver::FetchHints;
 use quarry_runtime::driver_plan::{plan_from_signals, DriverSignals};
-use quarry_runtime::mp_client::ModelPlaneClient;
 use quarry_transform::structured::StructuredData;
 
 use crate::api_error::ApiError;
@@ -65,6 +69,24 @@ const UNSUPPORTED_NEXT_ACTIONS: [&str; 2] = [
 ];
 const BUDGET_EXHAUSTED_MESSAGE: &str =
     "the request time budget ran out before the model read this source; send fewer URLs per request";
+/// WS16.S6: the per-source texts of a model arm that did not produce `data`. Each starts with
+/// the `ai.code` it stands for; none echoes the page, the schema, the prompt or the output.
+const SCHEMA_INVALID_MESSAGE: &str = "SCHEMA_INVALID: the model's answer did not match `schema`, even after one repair; see `schema_issues`";
+const CALL_BUDGET_MESSAGE: &str =
+    "BUDGET_EXHAUSTED: the model call budget for this source ran out before it was read";
+const EMPTY_SOURCE_MESSAGE: &str = "EMPTY_SOURCE: the page had no readable text for the model";
+const MODEL_UNAVAILABLE_MESSAGE: &str = "MODEL_UNAVAILABLE: the model call for this source failed";
+/// A source the route never read because the gateway refused the model lane on another source
+/// after one had already been extracted.
+const LANE_REFUSED_ITEM_MESSAGE: &str =
+    "MODEL_UNAVAILABLE: the Model Plane refused this service, so this source was not read";
+/// The 403 for a service principal without `extract:ai` that asks for the model arm.
+const EXTRACT_AI_SCOPE_MESSAGE: &str =
+    "extraction with a schema or a prompt needs a user request, or a service principal with the extract:ai scope";
+/// The schema a prompt-only request is run against: one free-form JSON object.
+fn free_form_schema() -> serde_json::Value {
+    serde_json::json!({ "type": "object" })
+}
 /// Default back-off window advertised on a 429 so callers can retry without
 /// guessing. Mirrors the 60s hint the map/search/scrape paths use.
 const RATE_LIMITED_RETRY_AFTER_S: u64 = 60;
@@ -109,13 +131,21 @@ pub struct ExtractItem {
     pub structured: Option<StructuredData>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// Present when a `schema` was sent and the model answered: whether `data` conforms to it.
-    /// `status` stays `ok` either way, so the caller decides what an invalid answer is worth.
+    /// Present when a `schema` was sent and the model answered: whether its answer conforms to
+    /// it. WS16.S6: `data` is only ever schema-valid, so `false` comes with `status: "error"`,
+    /// no `data` and the issues below.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_valid: Option<bool>,
-    /// Why `data` does not conform, one line per issue; absent when it does.
+    /// Why the answer does not conform, one `path: code` line per issue (never a value);
+    /// absent when it does.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub schema_issues: Vec<String>,
+    /// WS16.S6: what the model arm did for this source, the `json` entry of the scrape route's
+    /// `data.ai` (status, code, reason, model, usage, schema verdict). Present on every source of
+    /// a request with a `schema` or a `prompt` that reached the model arm, including a ZDR or
+    /// privacy refusal (`skipped`, no call made); absent on a markdown-only request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai: Option<AiFormatReport>,
     /// True when the page was cut at the 20 000-byte input cap before it was read, so `data` or
     /// `markdown` describes only the start of the page. Absent otherwise.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -262,6 +292,282 @@ async fn fetch_page(
     }
 }
 
+/// What every source of one request shares while the sources run concurrently.
+struct TargetCtx<'a> {
+    state: &'a AppState,
+    org_id: &'a str,
+    privacy: &'a PrivacyPolicy,
+    signals: &'a DriverSignals,
+    zdr: ZdrMode,
+    /// A `schema` or a `prompt` was sent.
+    wants_model: bool,
+    /// A `schema` was sent (a prompt-only answer has no schema verdict).
+    has_schema: bool,
+    /// The shared AI scrape engine; `None` under ZDR and on a markdown-only request.
+    engine: Option<&'a AiScrapeEngine>,
+    /// The one `json` spec every source is run against.
+    spec: Option<&'a AiSpec>,
+    started: std::time::Instant,
+    budget: std::time::Duration,
+    deadline: tokio::time::Instant,
+    /// For logs only.
+    request_id: &'a str,
+    /// Set by the first 429 or lane refusal: no source schedules a new fetch or model call.
+    stop: AtomicBool,
+    /// Set when a source came back `ok`.
+    any_ok: AtomicBool,
+}
+
+/// How one source ended.
+enum TargetOutcome {
+    Item(Box<ExtractItem>),
+    /// A driver-side 429 or a Model-Plane 429: the request answers one typed 429.
+    RateLimited {
+        error: QuarryError,
+        retry_after_s: u64,
+    },
+    /// The gateway refused this service the model lane. The page was read.
+    LaneRefused {
+        url: String,
+        structured: Option<StructuredData>,
+        truncated: bool,
+        report: Box<AiFormatReport>,
+    },
+    /// Never read: another source stopped the scheduling first.
+    Stopped(String),
+}
+
+fn item(item: ExtractItem) -> TargetOutcome {
+    TargetOutcome::Item(Box::new(item))
+}
+
+/// The per-source text for a model arm that produced no `data`.
+fn model_error_message(report: &AiFormatReport) -> &'static str {
+    match report.code {
+        Some(AiCode::SchemaInvalid) => SCHEMA_INVALID_MESSAGE,
+        Some(AiCode::BudgetExhausted) => CALL_BUDGET_MESSAGE,
+        Some(AiCode::EmptySource) => EMPTY_SOURCE_MESSAGE,
+        Some(AiCode::ZdrUnavailable) => ZDR_UNAVAILABLE_MESSAGE,
+        Some(AiCode::PrivacyPolicy) => PRIVACY_POLICY_MESSAGE,
+        Some(AiCode::ModelUnavailable) if report.reason == Some(AiReason::Deadline) => {
+            BUDGET_EXHAUSTED_MESSAGE
+        }
+        _ => MODEL_UNAVAILABLE_MESSAGE,
+    }
+}
+
+/// One source: fetch the page, then (for a `schema` or a `prompt`) one `json` run of the shared
+/// engine over its markdown. Never fails: what went wrong is in the outcome.
+async fn extract_target(ctx: &TargetCtx<'_>, raw: &str) -> TargetOutcome {
+    if ctx.stop.load(Ordering::SeqCst) {
+        return TargetOutcome::Stopped(raw.to_owned());
+    }
+    let url = match Url::parse(raw) {
+        Ok(url) => url,
+        // `expand_targets` keeps only URLs that parse; answered rather than unwrapped.
+        Err(_) => {
+            return item(ExtractItem {
+                url: raw.to_owned(),
+                status: "error".into(),
+                error: Some("not a valid http(s) URL".into()),
+                ..ExtractItem::default()
+            })
+        }
+    };
+    let page = match fetch_page(
+        ctx.state,
+        &url,
+        ctx.org_id,
+        ctx.privacy.clone(),
+        ctx.signals.clone(),
+    )
+    .await
+    {
+        Ok(page) => page,
+        Err(error) if error.code == ErrorCode::RateLimited => {
+            ctx.stop.store(true, Ordering::SeqCst);
+            return TargetOutcome::RateLimited {
+                error,
+                retry_after_s: RATE_LIMITED_RETRY_AFTER_S,
+            };
+        }
+        Err(error) => {
+            return item(ExtractItem {
+                url: raw.to_owned(),
+                status: "error".into(),
+                error: Some(error.message),
+                ..ExtractItem::default()
+            })
+        }
+    };
+    // Destructured up front so the two channels move independently: the model arm hands the
+    // prose to the model and keeps the harvest for the response.
+    let ExtractedPage {
+        markdown,
+        structured,
+        truncated,
+    } = page;
+    if !ctx.wants_model {
+        return item(ExtractItem {
+            url: raw.to_owned(),
+            status: "fetched".into(),
+            markdown: Some(markdown),
+            structured,
+            truncated_input: truncated,
+            ..ExtractItem::default()
+        });
+    }
+    if ctx.zdr.is_active() {
+        // ADR-4: the model hop carries no ZDR posture, so page text must not leave for it. The
+        // page itself was read under ZDR, and its harvest needs no model, so it still comes back.
+        return item(ExtractItem {
+            url: raw.to_owned(),
+            status: "error".into(),
+            structured,
+            error: Some(ZDR_UNAVAILABLE_MESSAGE.into()),
+            truncated_input: truncated,
+            ai: Some(AiFormatReport::skipped(AiCode::ZdrUnavailable)),
+            ..ExtractItem::default()
+        });
+    }
+    if !quarry_runtime::page_extract::model_hop_allowed(ctx.zdr, ctx.privacy) {
+        // The privacy block forbids a model hop. No page text leaves; the harvest needs no
+        // model, so it still comes back.
+        return item(ExtractItem {
+            url: raw.to_owned(),
+            status: "error".into(),
+            structured,
+            error: Some(PRIVACY_POLICY_MESSAGE.into()),
+            truncated_input: truncated,
+            ai: Some(AiFormatReport::skipped(AiCode::PrivacyPolicy)),
+            ..ExtractItem::default()
+        });
+    }
+    let (Some(engine), Some(spec)) = (ctx.engine, ctx.spec) else {
+        // Unreachable past the 501 above; answered rather than unwrapped.
+        return item(ExtractItem {
+            url: raw.to_owned(),
+            status: "error".into(),
+            structured,
+            error: Some("no Model Plane is configured".into()),
+            truncated_input: truncated,
+            ..ExtractItem::default()
+        });
+    };
+    // A 429 or a lane refusal on another source while this page was fetched: spend no call.
+    if ctx.stop.load(Ordering::SeqCst) {
+        return TargetOutcome::Stopped(raw.to_owned());
+    }
+    if ctx.budget.saturating_sub(ctx.started.elapsed()).is_zero() {
+        return item(ExtractItem {
+            url: raw.to_owned(),
+            status: "error".into(),
+            structured,
+            error: Some(BUDGET_EXHAUSTED_MESSAGE.into()),
+            truncated_input: truncated,
+            ai: Some(AiFormatReport::failed(
+                AiCode::ModelUnavailable,
+                Some(AiReason::Deadline),
+            )),
+            ..ExtractItem::default()
+        });
+    }
+    let (fields, report) = engine
+        .run(
+            std::slice::from_ref(spec),
+            AiScrapeInput {
+                source: &markdown,
+                org_id: ctx.org_id,
+                zdr: ctx.zdr.is_active(),
+                request_id: ctx.request_id,
+                deadline: Some(ctx.deadline),
+            },
+        )
+        .await;
+    let mut report = report.json.unwrap_or_else(|| {
+        AiFormatReport::failed(AiCode::ModelUnavailable, Some(AiReason::BadReply))
+    });
+    if truncated {
+        // The page was cut at the route's input cap before the engine saw it.
+        report.truncated_input = Some(true);
+    }
+    // Only a schema can be violated; a prompt-only answer has no verdict.
+    let schema_valid = if ctx.has_schema {
+        report.schema_valid
+    } else {
+        None
+    };
+    let schema_issues: Vec<String> = if ctx.has_schema {
+        report
+            .schema_issues
+            .iter()
+            .map(|issue| format!("{}: {}", issue.path, issue.code))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if report.status == quarry_core::ai_spec::AiStatus::Ok {
+        ctx.any_ok.store(true, Ordering::SeqCst);
+        return item(ExtractItem {
+            url: raw.to_owned(),
+            status: "ok".into(),
+            data: fields.json,
+            structured,
+            schema_valid,
+            schema_issues,
+            truncated_input: truncated,
+            ai: Some(report),
+            ..ExtractItem::default()
+        });
+    }
+    if report.code == Some(AiCode::ModelRateLimited) {
+        // Stop scheduling new model calls after the first 429.
+        ctx.stop.store(true, Ordering::SeqCst);
+        return TargetOutcome::RateLimited {
+            error: QuarryError::new(
+                ErrorCode::RateLimited,
+                "the Model Plane rate-limited structured extraction",
+            ),
+            retry_after_s: report
+                .retry_after_s
+                .map(u64::from)
+                .unwrap_or(RATE_LIMITED_RETRY_AFTER_S),
+        };
+    }
+    if report.code == Some(AiCode::ModelUnavailable)
+        && matches!(
+            report.reason,
+            Some(
+                AiReason::ModelLaneDenied
+                    | AiReason::ModelLaneUnauthorized
+                    | AiReason::ModelLaneUnavailable
+            )
+        )
+    {
+        // Every other source would be refused the same way: stop here.
+        ctx.stop.store(true, Ordering::SeqCst);
+        return TargetOutcome::LaneRefused {
+            url: raw.to_owned(),
+            structured,
+            truncated,
+            report: Box::new(report),
+        };
+    }
+    // Other failures (timeouts, 5xx, bad or invalid output) stay per source. The page was read;
+    // the model call is what failed, so the harvest still comes back.
+    item(ExtractItem {
+        url: raw.to_owned(),
+        status: "error".into(),
+        structured,
+        error: Some(model_error_message(&report).into()),
+        schema_valid,
+        schema_issues,
+        truncated_input: truncated,
+        ai: Some(report),
+        ..ExtractItem::default()
+    })
+}
+
 /// `POST /v1/extract`. WS4.J: wraps `extract_run` so a ZDR run's metadata-only tombstone is
 /// sent once, from the response status (off unless the flag is on; fail open). A per-URL
 /// failure inside a 200 batch is not an outcome of the request.
@@ -327,37 +633,73 @@ async fn run_extract(
     // A schema or a prompt asks for the model arm; neither asks for cleaned markdown.
     let wants_model = req.schema.is_some() || prompt.is_some();
 
-    // Structured extraction needs Model Plane. Without it, fall back to
-    // returning cleaned markdown (still useful), unless a schema or a prompt was requested.
-    // QB-T17: the runner exists only when QUARRY_EDGE__AI_FORMATS is on and a model path exists.
-    let ai_formats_on = state.model_plane.ai_formats;
-    let model_plane_url = state.model_plane_url.as_deref().map(str::trim);
-    let runner: Option<AiFormatRunner> = match model_plane_url {
-        Some(url) if !url.is_empty() && ai_formats_on => match ModelPlaneClient::new(url) {
-            Ok(mut c) => {
-                if let Some(provider) = state.service_token_provider.clone() {
-                    c = c.with_token_provider(provider);
-                } else if let Some(tok) =
-                    state.model_plane_token.as_deref().filter(|t| !t.is_empty())
-                {
-                    c = c.with_bearer_token(tok);
-                }
-                Some(AiFormatRunner::new(Arc::new(c)))
+    // WS16.S6: the model arm runs one `json` spec per source on the scrape route's engine
+    // (`POST /v1/ai/chat`). The schema is checked like a scrape `json` format's, before anything
+    // is fetched; a prompt alone asks for one free-form object. The prompt is the instruction.
+    let json_spec: Option<AiSpec> = if wants_model {
+        let schema = req.schema.clone().unwrap_or_else(free_form_schema);
+        let mut body = serde_json::Map::new();
+        body.insert("schema".to_owned(), schema);
+        match quarry_core::ai_spec::parse_ai_object(AiKind::Json, &body, "") {
+            Ok(AiSpec::Json(JsonSpec { schema, .. })) => Some(AiSpec::Json(JsonSpec {
+                schema,
+                prompt: prompt.clone(),
+            })),
+            Ok(_) => None,
+            Err(errors) => {
+                let issues: Vec<String> = errors
+                    .iter()
+                    .take(5)
+                    .map(|error| {
+                        format!(
+                            "{} {}: {}",
+                            error.path.trim_start_matches('.'),
+                            error.code,
+                            error.message
+                        )
+                    })
+                    .collect();
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        bad_request(format!("`schema` is not usable: {}", issues.join("; ")))
+                            .with_hint("send a JSON Schema whose root has \"type\": \"object\""),
+                    ),
+                )
+                    .into_response();
             }
-            Err(_) => None,
-        },
-        _ => None,
+        }
+    } else {
+        None
     };
 
+    // Who may ask, decided before anything is fetched (the scrape route's rule): a user token
+    // passes, a service principal needs `extract:ai`. It only tightens.
+    if wants_model && claims.is_service() && !claims.has_scope(crate::auth::SCOPE_EXTRACT_AI) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiError::new("FORBIDDEN", EXTRACT_AI_SCOPE_MESSAGE)),
+        )
+            .into_response();
+    }
+
+    // Structured extraction needs Model Plane. Without it, fall back to
+    // returning cleaned markdown (still useful), unless a schema or a prompt was requested.
+    // QB-T17: the engine is asked for only when QUARRY_EDGE__AI_FORMATS is on.
+    let ai_formats_on = state.model_plane.ai_formats;
+    let model_plane_url = state.model_plane_url.as_deref().map(str::trim);
+    let has_url = model_plane_url.is_some_and(|url| !url.is_empty());
+
     // A ZDR request never reaches the model arm (each source answers ZDR_UNAVAILABLE below), so
-    // whether a Model Plane exists does not matter to it.
+    // whether a Model Plane exists does not matter to it, and no engine is built for it.
+    let mut engine: Option<Arc<AiScrapeEngine>> = None;
     if wants_model && !zdr.is_active() {
         // A Model Plane URL with the AI formats switch off is its own answer (QB-T17): the
         // operator needs the switch, not a URL.
-        if !ai_formats_on && model_plane_url.is_some_and(|url| !url.is_empty()) {
+        if !ai_formats_on && has_url {
             return not_implemented(AI_FORMATS_OFF_ERROR, AI_FORMATS_OFF_HINT);
         }
-        if runner.is_none() {
+        if !ai_formats_on || !has_url {
             return not_implemented(NO_MODEL_PLANE_ERROR, NO_MODEL_PLANE_HINT);
         }
         // A URL with nothing to authenticate with cannot pass the gateway: answer before any
@@ -369,6 +711,10 @@ async fn run_extract(
                 .is_some_and(|token| !token.trim().is_empty());
         if !has_credential {
             return not_implemented(NO_MODEL_CREDENTIAL_ERROR, NO_MODEL_CREDENTIAL_HINT);
+        }
+        engine = crate::scrape_contract::ai_formats::engine_for_request(&state);
+        if engine.is_none() {
+            return not_implemented(NO_MODEL_PLANE_ERROR, NO_MODEL_PLANE_HINT);
         }
     }
 
@@ -400,182 +746,100 @@ async fn run_extract(
     }
     let privacy = req.privacy.unwrap_or_default().with_zdr(zdr);
     let signals = req.signals.unwrap_or_default();
+    let request_id = crate::request_id::current();
+    // The engine's AI phase ends with the request budget, so a model call still in flight when
+    // the budget runs out is cut and reported per source, not left to the router's 60 s cut.
+    let deadline = tokio::time::Instant::from_std(started) + budget;
+    let ctx = TargetCtx {
+        state: &state,
+        org_id: &claims.org_id,
+        privacy: &privacy,
+        signals: &signals,
+        zdr,
+        wants_model,
+        has_schema: req.schema.is_some(),
+        engine: engine.as_deref(),
+        spec: json_spec.as_ref(),
+        started,
+        budget,
+        deadline,
+        request_id: &request_id,
+        stop: AtomicBool::new(false),
+        any_ok: AtomicBool::new(false),
+    };
+    // WS16.S6: sources run concurrently, at most QUARRY_EDGE__AI_FORMATS_CONCURRENCY at a time;
+    // model calls in flight are also bounded by the engine's process-wide limit.
+    let concurrency = crate::scrape_contract::ai_formats::settings()
+        .concurrency
+        .max(1);
+    let ctx_ref = &ctx;
+    let mut outcomes: Vec<(usize, TargetOutcome)> =
+        futures::stream::iter(targets.iter().cloned().enumerate())
+            .map(|(index, raw)| async move { (index, extract_target(ctx_ref, &raw).await) })
+            .buffer_unordered(concurrency)
+            .collect()
+            .await;
+    // Sources finish out of order; the response keeps the order of `urls`.
+    outcomes.sort_by_key(|(index, _)| *index);
+    let any_ok = ctx.any_ok.load(Ordering::SeqCst);
     let mut results = Vec::with_capacity(targets.len());
-    let mut rate_limited: Option<QuarryError> = None;
+    let mut rate_limited: Option<(QuarryError, u64)> = None;
     let mut lane_refused = false;
-    for raw in &targets {
-        let url = match Url::parse(raw) {
-            Ok(u) => u,
-            Err(_) => continue,
-        };
-        let item = match fetch_page(
-            &state,
-            &url,
-            &claims.org_id,
-            privacy.clone(),
-            signals.clone(),
-        )
-        .await
-        {
-            Err(e) => {
-                // A driver-side 429 short-circuits the whole batch the
-                // same way `/v1/search` and `/v1/scrape` do: return a
-                // single typed envelope and stop fanning out. Sinking
-                // it into a per-item "error" string would tell a
-                // caller their entire extract succeeded with one bad
-                // source — they would then auto-retry the rest and
-                // hammer the throttled host. The 429 surface this up
-                // unambiguously.
-                if e.code == ErrorCode::RateLimited {
-                    rate_limited.get_or_insert(e);
-                    break;
-                }
-                ExtractItem {
-                    url: raw.clone(),
-                    status: "error".into(),
-                    error: Some(e.message),
-                    ..ExtractItem::default()
-                }
+    for (_, outcome) in outcomes {
+        match outcome {
+            TargetOutcome::Item(item) => results.push(*item),
+            // A driver-side or a Model-Plane 429 short-circuits the whole batch the same way
+            // `/v1/search` and `/v1/scrape` do: one typed envelope, no per-item "error" string a
+            // caller would mistake for a one-off failure and retry against the throttled host.
+            TargetOutcome::RateLimited {
+                error,
+                retry_after_s,
+            } => {
+                rate_limited.get_or_insert((error, retry_after_s));
             }
-            // Destructured up front so the two channels move independently:
-            // the model arm hands the prose to the model and keeps the
-            // harvest for the response.
-            Ok(ExtractedPage {
-                markdown,
+            // INNH-3: the gateway refused this service (401 or 403, or no token could be
+            // minted). With nothing extracted the request is one 501; once a source was
+            // extracted it is owed to the caller, and the refusal stays per source.
+            TargetOutcome::LaneRefused {
+                url,
                 structured,
                 truncated,
-            }) => {
-                if !wants_model {
-                    ExtractItem {
-                        url: raw.clone(),
-                        status: "fetched".into(),
-                        markdown: Some(markdown),
-                        structured,
-                        truncated_input: truncated,
-                        ..ExtractItem::default()
-                    }
-                } else if zdr.is_active() {
-                    // ADR-4: the model hop carries no ZDR posture, so page text must not
-                    // leave for it. The page itself was read under ZDR, and its harvest
-                    // needs no model, so it still comes back.
-                    ExtractItem {
-                        url: raw.clone(),
+                report,
+            } => {
+                if any_ok {
+                    results.push(ExtractItem {
+                        url,
                         status: "error".into(),
                         structured,
-                        error: Some(ZDR_UNAVAILABLE_MESSAGE.into()),
+                        error: Some(LANE_REFUSED_ITEM_MESSAGE.into()),
                         truncated_input: truncated,
+                        ai: Some(*report),
                         ..ExtractItem::default()
-                    }
-                } else if !quarry_runtime::page_extract::model_hop_allowed(zdr, &privacy) {
-                    // The privacy block forbids a model hop. No page text leaves; the
-                    // harvest needs no model, so it still comes back.
-                    ExtractItem {
-                        url: raw.clone(),
-                        status: "error".into(),
-                        structured,
-                        error: Some(PRIVACY_POLICY_MESSAGE.into()),
-                        truncated_input: truncated,
-                        ..ExtractItem::default()
-                    }
-                } else if let Some(r) = &runner {
-                    let remaining = budget.saturating_sub(started.elapsed());
-                    let call = r.extract_for_org(
-                        &claims.org_id,
-                        &markdown,
-                        JsonRequest {
-                            schema: req.schema.clone(),
-                            prompt: prompt.clone(),
-                        },
-                        zdr,
-                    );
-                    let outcome = if remaining.is_zero() {
-                        None
-                    } else {
-                        tokio::time::timeout(remaining, call).await.ok()
-                    };
-                    match outcome {
-                        None => ExtractItem {
-                            url: raw.clone(),
-                            status: "error".into(),
-                            structured,
-                            error: Some(BUDGET_EXHAUSTED_MESSAGE.into()),
-                            truncated_input: truncated,
-                            ..ExtractItem::default()
-                        },
-                        Some(Ok(jr)) => ExtractItem {
-                            url: raw.clone(),
-                            status: "ok".into(),
-                            data: Some(jr.data),
-                            structured,
-                            // Only a schema can be violated; a prompt-only answer has no verdict.
-                            schema_valid: req.schema.as_ref().map(|_| jr.schema_valid),
-                            schema_issues: jr.schema_issues,
-                            truncated_input: truncated,
-                            ..ExtractItem::default()
-                        },
-                        Some(Err(e)) => {
-                            // A Model-Plane 429 hits the same fail-closed
-                            // envelope shape so the caller can act on a
-                            // single consistent signal across the route.
-                            if e.code == ErrorCode::RateLimited {
-                                rate_limited.get_or_insert(QuarryError::new(
-                                    ErrorCode::RateLimited,
-                                    e.message,
-                                ));
-                                break;
-                            }
-                            // INNH-3: the gateway refused this service (401 or 403, or no token
-                            // could be minted). Every other source would be refused the same
-                            // way, so with nothing extracted yet stop here: one fetch and one
-                            // model call spent, not N. Other failures (timeouts, 5xx, bad
-                            // output) stay per source. ZDR never gets here (refused above).
-                            if e.code == ErrorCode::Forbidden
-                                && !results.iter().any(|item: &ExtractItem| item.status == "ok")
-                            {
-                                lane_refused = true;
-                                break;
-                            }
-                            ExtractItem {
-                                url: raw.clone(),
-                                status: "error".into(),
-                                // The page was read; the model call is what
-                                // failed. The harvest is still the page's, and
-                                // dropping it would throw away the one channel
-                                // that needed no model at all.
-                                structured,
-                                error: Some(e.message),
-                                truncated_input: truncated,
-                                ..ExtractItem::default()
-                            }
-                        }
-                    }
+                    });
                 } else {
-                    // Unreachable past the 501 above; answered rather than unwrapped.
-                    ExtractItem {
-                        url: raw.clone(),
-                        status: "error".into(),
-                        structured,
-                        error: Some("no Model Plane is configured".into()),
-                        truncated_input: truncated,
-                        ..ExtractItem::default()
-                    }
+                    lane_refused = true;
                 }
             }
-        };
-        results.push(item);
+            // Not read: a 429 or a lane refusal on another source stopped the scheduling. A 429
+            // answers the whole request and a refusal with nothing extracted is the 501, so
+            // this item is only seen next to an extracted source.
+            TargetOutcome::Stopped(url) => results.push(ExtractItem {
+                url,
+                status: "error".into(),
+                error: Some(LANE_REFUSED_ITEM_MESSAGE.into()),
+                ..ExtractItem::default()
+            }),
+        }
     }
 
     if lane_refused {
         return not_implemented(LANE_REFUSED_ERROR, LANE_REFUSED_HINT);
     }
 
-    if let Some(e) = rate_limited {
+    if let Some((e, retry_after_s)) = rate_limited {
         return (
             StatusCode::TOO_MANY_REQUESTS,
-            Json(ApiError::rate_limited(
-                e.message,
-                RATE_LIMITED_RETRY_AFTER_S,
-            )),
+            Json(ApiError::rate_limited(e.message, retry_after_s)),
         )
             .into_response();
     }

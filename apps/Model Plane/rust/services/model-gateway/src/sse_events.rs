@@ -494,6 +494,18 @@ pub enum ChatEvent {
         /// The most sub-queries a run turn keeps, so the card can stop the user adding past it.
         max_sub_queries: usize,
     },
+    /// The research run a deep-research turn began, and where it stands (E4.6 062b). Sent once
+    /// when the run is begun (`running`), and once when each end of it is recorded, so a client learns the id its
+    /// read and cancel routes address. Control event, ungated: the id is the only way to reach those routes, so a
+    /// client that opted into no family still needs it. Sent only while `MODEL_GATEWAY_RESEARCH_RUNS` is on, and
+    /// never for a run that is not recorded. Ids and one closed word only, so zero retention keeps it too.
+    ResearchRun {
+        /// The run's id, `rsr_` followed by a ULID, assigned by Session Core.
+        id: String,
+        /// `running`, or the terminal status the end records: `completed`, `stopped`, `cancelled` or `failed`.
+        /// Session Core's `expired` (a run past its deadline) is never written by this stream, so it is not here.
+        status: &'static str,
+    },
     /// Deterministic "memory was used" indicator (harness-adoption §7.9,
     /// hermes-agent's `RecallStatus`, MIT): emitted once per turn, before the
     /// answer streams, when long-term memory was actually injected into the
@@ -764,7 +776,9 @@ impl ChatEvent {
             // The connected-app suggestion card (EP-10 S8): it says the answer lacked the person's data.
             | ChatEvent::ConnectorSuggestion { .. }
             // The deep-research plan card (EP-2 S5): the plan turn shows nothing else.
-            | ChatEvent::ResearchPlan { .. } => None,
+            | ChatEvent::ResearchPlan { .. }
+            // The research run's id and status (E4.6 062b): a client reaches the run's read and cancel routes by the id.
+            | ChatEvent::ResearchRun { .. } => None,
         }
     }
 
@@ -812,6 +826,7 @@ impl ChatEvent {
             ChatEvent::UserQuestion { .. } => "user_question",
             ChatEvent::ConnectorSuggestion { .. } => "connector_suggestion",
             ChatEvent::ResearchPlan { .. } => "research_plan",
+            ChatEvent::ResearchRun { .. } => "research_run",
             ChatEvent::QueuedInput { .. } | ChatEvent::QueuedInputReceipted { .. } => "queued_input",
             ChatEvent::RetrievalNotice { .. } => "retrieval_notice",
             // ---- usage progress (WS27) ----
@@ -1119,6 +1134,10 @@ impl ChatEvent {
                 "caps": { "max_sub_queries": max_sub_queries },
                 "request_id": request_id,
             }),
+            // The run's id and its closed status, and nothing else: the run record keeps no more (E4.6 062b).
+            ChatEvent::ResearchRun { id, status } => {
+                json!({ "research_run_id": id, "status": status })
+            }
             ChatEvent::QueuedInput { messages } => {
                 json!({ "messages": messages, "request_id": request_id })
             }
@@ -3621,6 +3640,7 @@ mod payload_contract {
         "UserQuestion",
         "ConnectorSuggestion",
         "ResearchPlan",
+        "ResearchRun",
         "Verification",
         "MemoryRecall",
         "QueuedInput",
@@ -3661,6 +3681,7 @@ mod payload_contract {
             ChatEvent::UserQuestion { .. } => "UserQuestion",
             ChatEvent::ConnectorSuggestion { .. } => "ConnectorSuggestion",
             ChatEvent::ResearchPlan { .. } => "ResearchPlan",
+            ChatEvent::ResearchRun { .. } => "ResearchRun",
             ChatEvent::Verification { .. } => "Verification",
             ChatEvent::MemoryRecall { .. } => "MemoryRecall",
             ChatEvent::QueuedInput { .. } => "QueuedInput",
@@ -4074,6 +4095,8 @@ mod payload_contract {
                 reason: s("Your calendar would show the meeting."),
             },
             ChatEvent::ResearchPlan { sub_queries: Vec::new(), questions: Vec::new(), max_sub_queries: 1 },
+            ChatEvent::ResearchRun { id: s("rsr_sample"), status: "running" },
+            ChatEvent::ResearchRun { id: s("rsr_sample"), status: "cancelled" },
             ChatEvent::ResearchPlan {
                 sub_queries: vec![s("norsk havbruk 2026"), s("lakselus tiltak")],
                 questions: vec![s("Hvilken region?")],

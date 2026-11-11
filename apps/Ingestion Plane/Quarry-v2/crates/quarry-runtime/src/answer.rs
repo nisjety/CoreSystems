@@ -902,7 +902,7 @@ impl SimpleHttpMarkdownFetcher {
             .expect("reqwest client");
         Self {
             http,
-            user_agent: "Quarry/2.0 (+https://triodelab.com/quarry)".into(),
+            user_agent: quarry_core::identity::edge_user_agent().into(),
             max_bytes: 5_000_000,
         }
     }
