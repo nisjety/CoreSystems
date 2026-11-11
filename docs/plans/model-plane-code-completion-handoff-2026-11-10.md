@@ -300,3 +300,25 @@ H. Docs consistency pass, then a coding-complete report per wave and per audit i
 Done means: every F-t3 audit item is coded dark or has a written reason why it is not code; the tree compiles; the
 ledger, the handoff and memory are current.
 ```
+
+## 9. Status at the end of the code phase (2026-11-12)
+
+The code phase is finished. Every unit adopted from the handoff plan, the round-2 design scopes (ws13, ws14, zdr2, r2)
+and the lead's follow-ups is built dark and compile-checked; nothing is tested or live-proven.
+
+- Batches after this handoff was written: B10 349abd38c, B11s 8c43757d4, B11t 2db962669, B11 4b0cf580a,
+  B12 5d5096414, B13 63f62cb0f, B14 1c5394660, B15 0120a8e84, B16 d5f89aab0, B17 211b2a404, B18 68e247254 (FU-02,
+  FU-11 FUGEN, R2-OD-40-c). Docs: 14d0d1f96, ec555bc79, 8b8cb1e47, 6e7d1bc83, eeb23dea8 and the closing docs commit.
+- Read next, in this order: `docs/plans/model-plane-coding-complete-2026-11-11.md` (status per wave, per audit item
+  and per depth row, switches, what is not built), `docs/plans/model-plane-open-decisions.md` (section 3.6 holds the
+  owner's answers of 2026-11-11 to all triage decisions), `docs/plans/model-plane-verification-plan-2026-11-11.md`
+  (the order of work for the verification phase).
+- Switches that must stay off until their follow-up is deployed and proven: `EXECUTION_BROWSER_HUMAN_ASSIST`
+  (FU-25, built; deploy session-core first), `MODEL_GATEWAY_ZDR_LEDGER_ROWS` (FU-30, built; the owner confirms
+  cost_basis in the ZDR spend allowlist and ZDR spend rows in the billing outbox).
+- Not built in this phase: 194 depth-register triage units (written, reviewed by the merge pass, each carrying the
+  owner's answer where one applies), W3-EP-4-S7 MCP elicitation (unblocked by the owner's DEC-F08-05), and the owner
+  answers that need new work (verification plan section 7, O-01 to O-28).
+- Usage at the end: about 88% of the weekly limit. The build loop, its tools (plan_next.py, mkbatch.py, guard.py,
+  claimcheck.py, leadcheck.sh, regcheck.py, close.py, mk_report.py, mk_decisions_doc.py) and the unit specs stay in
+  the programme plan folder `C:/dev/mp-w345-plan`.
