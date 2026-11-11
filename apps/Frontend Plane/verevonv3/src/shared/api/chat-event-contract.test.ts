@@ -58,6 +58,12 @@ const UNUSED_KEYS: Record<string, readonly string[]> = {
   queued_input: ['request_id'],
   memory_recall: ['request_id'],
   verification: ['request_id'],
+  // The pause frame is a signal to open the question card: the SPA reads the run, request and question ids
+  // and does not read the status the frame repeats (FU-11 regenerated the golden with it).
+  awaiting_input: ['status'],
+  // The latest verdict arrives on the goal record (GoalBar reads lastVerdict from it); the progress frame
+  // repeats it for the console, and the SPA does not read the repeat yet (FU-11 regenerated the golden with it).
+  goal_progress: ['last_verdict'],
   // The whole frame is handed to the grounding normaliser, which reads these (chat-normalizers.ts).
   grounding: ['factCount', 'facts', 'lowConfidence', 'mode', 'query', 'sourceCount', 'sources'],
   // The whole frame is handed to run-park.ts's runParkedFrameOf, which reads and validates these (run-park.test.ts).

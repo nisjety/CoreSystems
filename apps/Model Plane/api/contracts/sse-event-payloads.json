@@ -103,6 +103,38 @@
         }
       }
     },
+    "awaiting_input": {
+      "family": null,
+      "variants": [
+        "AwaitingInput"
+      ],
+      "keys": {
+        "question_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "request_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "run_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "status": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
     "citation": {
       "family": "citations",
       "variants": [
@@ -419,6 +451,12 @@
           "presence": "always"
         },
         "goal_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "last_verdict": {
           "types": [
             "string"
           ],

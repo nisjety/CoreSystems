@@ -509,6 +509,31 @@ fn expected() -> Vec<(&'static str, Outcome)> {
             Outcome::ResidencyUnavailable,
         ),
         ("provider_tier_unavailable", internal_hourly.clone()),
+        // Not granted to the organization (PERMISSION_DENIED): Auth, a wait for the operator.
+        (
+            "provider_model_not_entitled",
+            Outcome::Transient {
+                class: ErrorClass::Auth,
+                retry_after: Some(PENDING_RETRY_AFTER),
+            },
+        ),
+        // The entitlement could not be resolved (UNAVAILABLE): a wait, never an answer.
+        ("provider_entitlement_unavailable", provider.clone()),
+        // A hidden model and an unserved image model are NOT_FOUND: no such model, so terminal.
+        (
+            "provider_model_hidden",
+            Outcome::Permanent {
+                class: ErrorClass::Internal,
+            },
+        ),
+        (
+            "provider_image_model_unavailable",
+            Outcome::Permanent {
+                class: ErrorClass::Internal,
+            },
+        ),
+        // Every eligible provider is benched (UNAVAILABLE): a wait for the time the trailer names.
+        ("provider_providers_benched", provider_for(30_000)),
         (
             "subscription_usage_limit_with_timing",
             limited(after(52_260_000)),

@@ -25,6 +25,13 @@ export type ChatEventPayloads = {
     type: string
     url: string
   }
+  /** Rust variants: AwaitingInput. */
+  awaiting_input: {
+    question_id: string
+    request_id: string
+    run_id: string
+    status: string
+  }
   /** Rust variants: Citation. */
   citation: {
     claim_id?: string
@@ -89,6 +96,7 @@ export type ChatEventPayloads = {
     cost_budget_usd_micros: number | null
     cost_used_usd_micros: number
     goal_id: string
+    last_verdict: string
     max_turns: number
     request_id: string
     status: string

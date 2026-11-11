@@ -118,6 +118,30 @@ fn decisions() -> BTreeMap<&'static str, ContextOutcome> {
             transient(Internal, Some(SKIP_RECHECK_AFTER)),
         ),
         ("embedding_provider_http", transient(Internal, None)),
+        // A model the organization has not been granted is a refusal of its binding
+        // (PERMISSION_DENIED): the decoder reads it as Auth, a wait for the operator.
+        (
+            "provider_model_not_entitled",
+            transient(Auth, Some(PENDING_RETRY_AFTER)),
+        ),
+        // The entitlement could not be resolved (UNAVAILABLE): a wait, never an answer.
+        (
+            "provider_entitlement_unavailable",
+            transient(ProviderUnavailable, None),
+        ),
+        // A hidden model and an unserved image model are NOT_FOUND: the platform offers
+        // no such model, so the decoder reads them as Other and a retry cannot help.
+        ("provider_model_hidden", ContextOutcome::permanent(Internal)),
+        (
+            "provider_image_model_unavailable",
+            ContextOutcome::permanent(Internal),
+        ),
+        // Every eligible provider is benched (UNAVAILABLE with a retry-after of 30 s): a
+        // wait for the time the trailer names, not a refusal.
+        (
+            "provider_providers_benched",
+            transient(ProviderUnavailable, Some(MS(30_000))),
+        ),
         // The subscription route is never selected by the Data Plane. A usage limit
         // is still a throttle (and its wait is capped), the other kinds are not
         // learned and read as what their code says.

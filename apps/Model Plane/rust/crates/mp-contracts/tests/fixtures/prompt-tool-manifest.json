@@ -212,7 +212,7 @@
     },
     {
       "id": "prompt/prompt_context.rs/CONDITIONAL_TOOLS",
-      "sha256": "8865e5d1d46be7b9431ad08baeeff65cd701f7db4ac530e5fb97b1441fa21a80",
+      "sha256": "de2761c6ce82f1f0fe7dfb014d9c492698b65b6778f8c91a0fb17cd4a7e4e9a9",
       "source": "services/model-gateway/src/prompt_context.rs"
     },
     {
@@ -457,7 +457,7 @@
     },
     {
       "id": "tool/agent.rs/process_start",
-      "sha256": "0a5c4fb3a6b0a998019cfe4984365487205a94ae0fb67aa78e168773d5f4f962",
+      "sha256": "8ad793284de2eb21e176a8fd8f9f1c278491a075e54a124c2479e41ddfcd63f7",
       "source": "services/execution-core/src/runtime_loop/agent.rs"
     },
     {

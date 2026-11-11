@@ -899,6 +899,32 @@
         "route": {"provider": "azure-openai", "connection": null, "explicit_zdr": true}
       },
       "expect": {"decision": "zdr", "code": "explicit_zdr"}
+    },
+    {
+      "id": "e_zdr_token_message_versions_refused",
+      "title": "A ZDR token on a named platform provider asking for a regenerate, an edit or a branch move: ZDR, and the move is refused before any row changes.",
+      "tags": [],
+      "note": "WS17 S8/S9 (DEC-29). The resolver answers zdr; the branch move is refused by model-gateway branch_thread (require_non_zdr_durable_mutation, 412 zdr_durable_mutation_forbidden), a regenerate or edit turn by zdr_features (zdr_feature_not_supported, feature message_versions), and session-core SetActiveLeaf by authorize_operation (zdr_durable_mutation_forbidden). The named platform provider makes the row differ from the other ZDR rows.",
+      "inputs": {
+        "bearers": [
+          {"zdr": true, "org_zdr": true, "waiver": null}
+        ],
+        "route": {"provider": "anthropic", "connection": null, "explicit_zdr": false}
+      },
+      "expect": {"decision": "zdr", "code": "org_zdr"}
+    },
+    {
+      "id": "e_waived_message_versions_refused",
+      "title": "A waiver on exactly the connection it names, asking for a regenerate, an edit or a branch move: waived, and the move is refused before any row changes.",
+      "tags": [],
+      "note": "WS17 S8/S9, DEC-32. The resolver answers waived; session-core SetActiveLeaf refuses a waived caller and a thread holding a waived run with zdr_feature_not_supported (feature message_versions), and the branch route refuses the waived token with zdr_waiver_route_mismatch. The versions connection makes the row differ from the other waived rows.",
+      "inputs": {
+        "bearers": [
+          {"zdr": false, "org_zdr": true, "waiver": {"version": 1, "provider": "openai-codex-subscription", "connection": "conn-versions"}}
+        ],
+        "route": {"provider": "openai-codex-subscription", "connection": "conn-versions", "explicit_zdr": false}
+      },
+      "expect": {"decision": "waived", "code": "connection_not_zdr_capable"}
     }
   ]
 }

@@ -83,6 +83,9 @@ use super::dispatchers::{
     dispatch_studio_create_project, dispatch_studio_export_social_draft,
     dispatch_studio_save_project,
 };
+use super::dispatchers_client_routed::{
+    dispatch_agents_admitted_actions_list, dispatch_client_executed, dispatch_owner_not_wired,
+};
 use super::dispatchers_spaces::ws01::{dispatch_spaces_create_post, dispatch_spaces_reply_in_thread};
 use super::dispatchers_spaces::ws04::{
     dispatch_spaces_change_member_role, dispatch_spaces_join_room, dispatch_spaces_leave_room,
@@ -828,6 +831,632 @@ pub(super) async fn execute_action(
         }
         "social.decide_approval" => {
             dispatch_social_decide_approval(&state, &user, &body.input).await
+        }
+        // FU-02 (D-F05-5): every id in the action registry has an arm here, so the action-surface
+        // contract holds for all of them. These ids are not run through this endpoint by the
+        // browser: each one runs on its own REST route or inside the page. The arm answers a typed
+        // refusal that names that route and does nothing (`client_executed`); the two ids the
+        // browser does send here but whose owner path is not wired yet answer `owner_not_wired`.
+        // `agents.admitted_actions.list` is a real arm: it reads the same answer as its route.
+        "memory.profile.save" => {
+            dispatch_client_executed("memory.profile.save", "/api/v1/memory/profile").await
+        }
+        "memory.profile.rebuild" => {
+            dispatch_client_executed("memory.profile.rebuild", "/api/v1/memory/profile/rebuild")
+                .await
+        }
+        "spaces.agent_memory.list" => {
+            dispatch_client_executed(
+                "spaces.agent_memory.list",
+                "/api/v1/spaces/{space_ref}/memory",
+            )
+            .await
+        }
+        "spaces.agent_memory.delete" => {
+            dispatch_client_executed(
+                "spaces.agent_memory.delete",
+                "/api/v1/spaces/{space_ref}/memory/{memory_id}",
+            )
+            .await
+        }
+        "skills.save_from_message" => {
+            dispatch_client_executed("skills.save_from_message", "/api/v1/skills").await
+        }
+        "skills.versions.list" => {
+            dispatch_client_executed("skills.versions.list", "/api/v1/skills/{skill_id}/versions")
+                .await
+        }
+        "skills.draft.save" => {
+            dispatch_client_executed("skills.draft.save", "/api/v1/skills/{skill_id}/draft").await
+        }
+        "skills.publish" => {
+            dispatch_client_executed("skills.publish", "/api/v1/skills/{skill_id}/publish").await
+        }
+        "skills.draft.discard" => {
+            dispatch_client_executed("skills.draft.discard", "/api/v1/skills/{skill_id}/draft")
+                .await
+        }
+        "skills.version.restore" => {
+            dispatch_client_executed(
+                "skills.version.restore",
+                "/api/v1/skills/{skill_id}/versions/{version}/restore",
+            )
+            .await
+        }
+        "skills.import" => dispatch_client_executed("skills.import", "/api/v1/skills/import").await,
+        "templates.create" => dispatch_client_executed("templates.create", "/api/v1/skills").await,
+        "templates.update" => {
+            dispatch_client_executed("templates.update", "/api/v1/skills/{skill_id}").await
+        }
+        "presets.create" => dispatch_client_executed("presets.create", "/api/v1/skills").await,
+        "presets.update" => {
+            dispatch_client_executed("presets.update", "/api/v1/skills/{skill_id}").await
+        }
+        "mcp.probe_server" => {
+            dispatch_client_executed("mcp.probe_server", "/api/v1/mcp/servers/probe").await
+        }
+        "mcp.approve_tool" => {
+            dispatch_client_executed(
+                "mcp.approve_tool",
+                "/api/v1/mcp/servers/{server_id}/tools/{tool}/approve",
+            )
+            .await
+        }
+        "tools.set_policy" => {
+            dispatch_client_executed("tools.set_policy", "/api/v1/tool-policies/{capability_id}")
+                .await
+        }
+        "org.set_agent_policy" => {
+            dispatch_client_executed("org.set_agent_policy", "/api/v1/org/agent-policy").await
+        }
+        "org.set_web_policy" => {
+            dispatch_client_executed("org.set_web_policy", "/api/v1/org/agent-policy").await
+        }
+        "org.preview_effective_policy" => {
+            dispatch_client_executed(
+                "org.preview_effective_policy",
+                "/api/v1/org/agent-policy/effective",
+            )
+            .await
+        }
+        "policy.read_effective" => {
+            dispatch_client_executed("policy.read_effective", "/api/v1/policy/effective").await
+        }
+        "org.create_hook" => dispatch_client_executed("org.create_hook", "/api/v1/org/hooks").await,
+        "org.update_hook" => {
+            dispatch_client_executed("org.update_hook", "/api/v1/org/hooks/{hook_id}").await
+        }
+        "org.delete_hook" => {
+            dispatch_client_executed("org.delete_hook", "/api/v1/org/hooks/{hook_id}").await
+        }
+        "org.list_permission_rules" => {
+            dispatch_client_executed("org.list_permission_rules", "/api/v1/org/permission-rules")
+                .await
+        }
+        "org.create_permission_rule" => {
+            dispatch_client_executed("org.create_permission_rule", "/api/v1/org/permission-rules")
+                .await
+        }
+        "org.delete_permission_rule" => {
+            dispatch_client_executed(
+                "org.delete_permission_rule",
+                "/api/v1/org/permission-rules/{rule_id}",
+            )
+            .await
+        }
+        "integrations.browse_connection" => {
+            dispatch_client_executed(
+                "integrations.browse_connection",
+                "/api/v1/integrations/connections/{id}/browse",
+            )
+            .await
+        }
+        "integrations.fetch_connection_content" => {
+            dispatch_client_executed(
+                "integrations.fetch_connection_content",
+                "/api/v1/integrations/connections/{id}/content",
+            )
+            .await
+        }
+        "integrations.list_connector_policies" => {
+            dispatch_client_executed(
+                "integrations.list_connector_policies",
+                "/api/v1/tool-policies",
+            )
+            .await
+        }
+        "integrations.set_connector_policy" => {
+            dispatch_client_executed(
+                "integrations.set_connector_policy",
+                "/api/v1/tool-policies/{capability_id}",
+            )
+            .await
+        }
+        "org.set_retention" => {
+            dispatch_client_executed("org.set_retention", "/api/v1/orgs/{id}/retention").await
+        }
+        "org.place_legal_hold" => {
+            dispatch_client_executed("org.place_legal_hold", "/api/v1/orgs/{id}/legal-holds").await
+        }
+        "org.release_legal_hold" => {
+            dispatch_client_executed(
+                "org.release_legal_hold",
+                "/api/v1/orgs/{id}/legal-holds/{hold_id}/release",
+            )
+            .await
+        }
+        "org.add_domain" => {
+            dispatch_client_executed("org.add_domain", "/api/v1/orgs/{id}/domains").await
+        }
+        "org.verify_domain" => {
+            dispatch_client_executed(
+                "org.verify_domain",
+                "/api/v1/orgs/{id}/domains/{domain}/verify",
+            )
+            .await
+        }
+        "org.revoke_domain" => {
+            dispatch_client_executed("org.revoke_domain", "/api/v1/orgs/{id}/domains/{domain}")
+                .await
+        }
+        "org.update_sso_policy" => {
+            dispatch_client_executed("org.update_sso_policy", "/api/v1/orgs/{id}/sso/policy").await
+        }
+        "org.add_sso_provider" => {
+            dispatch_client_executed("org.add_sso_provider", "/api/v1/orgs/{id}/sso/providers")
+                .await
+        }
+        "org.remove_sso_provider" => {
+            dispatch_client_executed(
+                "org.remove_sso_provider",
+                "/api/v1/orgs/{id}/sso/providers/{provider_id}",
+            )
+            .await
+        }
+        "org.create_scim_token" => {
+            dispatch_client_executed("org.create_scim_token", "/api/v1/orgs/{id}/scim/tokens").await
+        }
+        "org.revoke_scim_token" => {
+            dispatch_client_executed(
+                "org.revoke_scim_token",
+                "/api/v1/orgs/{id}/scim/tokens/{token_id}",
+            )
+            .await
+        }
+        "chat.execute_approved_plan" => {
+            dispatch_client_executed(
+                "chat.execute_approved_plan",
+                "/api/v1/agents/runs/{run_id}/plan-approval",
+            )
+            .await
+        }
+        "chat.run.continue" => {
+            dispatch_client_executed(
+                "chat.run.continue",
+                "/api/v1/orchestration/runs/{run_id}/continue",
+            )
+            .await
+        }
+        "chat.answer_question" => {
+            dispatch_client_executed(
+                "chat.answer_question",
+                "/api/v1/orchestration/questions/{question_id}/answer",
+            )
+            .await
+        }
+        "approvals.decide" => {
+            dispatch_client_executed(
+                "approvals.decide",
+                "/api/v1/orchestration/approvals/{approval_id}/decide",
+            )
+            .await
+        }
+        "approvals.preview" => {
+            dispatch_client_executed(
+                "approvals.preview",
+                "/api/v1/orchestration/approvals/{approval_id}/preview",
+            )
+            .await
+        }
+        "approvals.list_grants" => {
+            dispatch_client_executed(
+                "approvals.list_grants",
+                "/api/v1/orchestration/threads/{thread_id}/approval-grants",
+            )
+            .await
+        }
+        "approvals.revoke_grant" => {
+            dispatch_client_executed(
+                "approvals.revoke_grant",
+                "/api/v1/orchestration/approval-grants/{grant_id}",
+            )
+            .await
+        }
+        "approvals.list_rule_proposals" => {
+            dispatch_client_executed(
+                "approvals.list_rule_proposals",
+                "/api/v1/orchestration/rule-proposals",
+            )
+            .await
+        }
+        "approvals.confirm_rule" => {
+            dispatch_client_executed(
+                "approvals.confirm_rule",
+                "/api/v1/orchestration/rule-proposals/{id}/confirm",
+            )
+            .await
+        }
+        "approvals.dismiss_rule" => {
+            dispatch_client_executed(
+                "approvals.dismiss_rule",
+                "/api/v1/orchestration/rule-proposals/{id}/dismiss",
+            )
+            .await
+        }
+        "chat.mark_thread_seen" => {
+            dispatch_client_executed("chat.mark_thread_seen", "/api/v1/attention/seen").await
+        }
+        "chat.thread.archive" => {
+            dispatch_client_executed(
+                "chat.thread.archive",
+                "/api/v1/chat/threads/{thread_id}/archive",
+            )
+            .await
+        }
+        "chat.thread.star" => {
+            dispatch_client_executed("chat.thread.star", "/api/v1/chat/threads/{thread_id}/flags")
+                .await
+        }
+        "chat.thread.mark_unread" => {
+            dispatch_client_executed(
+                "chat.thread.mark_unread",
+                "/api/v1/chat/threads/{thread_id}/flags",
+            )
+            .await
+        }
+        "thread.export" => {
+            dispatch_client_executed("thread.export", "/api/v1/chat/threads/{thread_id}/export")
+                .await
+        }
+        "thread.share_snapshot" => {
+            dispatch_client_executed(
+                "thread.share_snapshot",
+                "/api/v1/chat/threads/{thread_id}/snapshots",
+            )
+            .await
+        }
+        "thread.revoke_snapshot" => {
+            dispatch_client_executed(
+                "thread.revoke_snapshot",
+                "/api/v1/chat/snapshots/{snapshot_id}",
+            )
+            .await
+        }
+        "thread.grant_snapshot" => {
+            dispatch_client_executed(
+                "thread.grant_snapshot",
+                "/api/v1/chat/snapshots/{snapshot_id}/grants",
+            )
+            .await
+        }
+        "thread.import" => {
+            dispatch_client_executed("thread.import", "/api/v1/chat/threads/import").await
+        }
+        "chat.save_artifact_revision" => {
+            dispatch_client_executed(
+                "chat.save_artifact_revision",
+                "/api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}",
+            )
+            .await
+        }
+        "chat.restore_artifact_revision" => {
+            dispatch_client_executed(
+                "chat.restore_artifact_revision",
+                "/api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}/restore",
+            )
+            .await
+        }
+        "chat.edit_artifact_selection" => {
+            dispatch_client_executed("chat.edit_artifact_selection", "/api/v1/chat/stream").await
+        }
+        "chat.save_artifact_to_knowledge" => {
+            dispatch_client_executed("chat.save_artifact_to_knowledge", "/api/v1/chat/documents")
+                .await
+        }
+        "library.list" => dispatch_client_executed("library.list", "/api/v1/chat/library").await,
+        "library.read_text" => {
+            dispatch_client_executed("library.read_text", "/api/v1/chat/library").await
+        }
+        "library.open_origin" => {
+            dispatch_client_executed("library.open_origin", "ui:chat-library-panel").await
+        }
+        "library.share" => dispatch_client_executed("library.share", "/api/v1/chat/library").await,
+        "review.run" => dispatch_client_executed("review.run", "/api/v1/ai/review").await,
+        "connection_zdr.read" => {
+            dispatch_client_executed(
+                "connection_zdr.read",
+                "/api/v1/model-connections/{connection_id}/zdr",
+            )
+            .await
+        }
+        "connection_zdr.acknowledge" => {
+            dispatch_client_executed(
+                "connection_zdr.acknowledge",
+                "/api/v1/model-connections/{connection_id}/zdr-acknowledgement",
+            )
+            .await
+        }
+        "connection_zdr.revoke" => {
+            dispatch_client_executed(
+                "connection_zdr.revoke",
+                "/api/v1/model-connections/{connection_id}/zdr-acknowledgement",
+            )
+            .await
+        }
+        "chat.set_connector_scope" => {
+            dispatch_client_executed("chat.set_connector_scope", "/api/v1/chat/stream").await
+        }
+        "chat.set_context_refs" => {
+            dispatch_client_executed("chat.set_context_refs", "/api/v1/chat/stream").await
+        }
+        "chat.pick_context_ref" => {
+            dispatch_client_executed("chat.pick_context_ref", "ui:composer-context-picker").await
+        }
+        "chat.set_agent_mode" => {
+            dispatch_client_executed("chat.set_agent_mode", "/api/v1/chat/stream").await
+        }
+        "chat.set_transcript_density" => {
+            dispatch_client_executed("chat.set_transcript_density", "/api/v1/settings/appearance")
+                .await
+        }
+        "chat.inspect_run_request" => {
+            dispatch_client_executed(
+                "chat.inspect_run_request",
+                "/api/v1/agents/runs/{run_id}/requests/{call_seq}",
+            )
+            .await
+        }
+        "chat.open_cited_passage" => {
+            dispatch_client_executed("chat.open_cited_passage", "ui:cited-passage-viewer").await
+        }
+        "chat.list_artifact_revisions" => {
+            dispatch_client_executed(
+                "chat.list_artifact_revisions",
+                "/api/v1/chat/threads/{thread_id}/artifacts/{artifact_id}/revisions",
+            )
+            .await
+        }
+        "chat.wide_research_start" => {
+            dispatch_client_executed("chat.wide_research_start", "/api/v1/chat/stream").await
+        }
+        "chat.research_plan_start" => {
+            dispatch_client_executed("chat.research_plan_start", "/api/v1/chat/stream").await
+        }
+        "chat.research_plan_cancel" => {
+            dispatch_client_executed("chat.research_plan_cancel", "ui:research-plan-card").await
+        }
+        "chat.accept_connector_suggestion" => {
+            dispatch_client_executed(
+                "chat.accept_connector_suggestion",
+                "ui:connector-suggestion-card",
+            )
+            .await
+        }
+        "chat.wide_research_retry_item" => {
+            dispatch_client_executed("chat.wide_research_retry_item", "/api/v1/chat/stream").await
+        }
+        "chat.list_deck_templates" => {
+            dispatch_client_executed("chat.list_deck_templates", "/api/v1/deck-templates").await
+        }
+        "chat.apply_deck_template" => {
+            dispatch_client_executed("chat.apply_deck_template", "/api/v1/chat/stream").await
+        }
+        "chat.open_deck_slide" => {
+            dispatch_client_executed("chat.open_deck_slide", "ui:deck-slide-strip").await
+        }
+        "chat.present_deck" => {
+            dispatch_client_executed("chat.present_deck", "ui:deck-present-mode").await
+        }
+        "chat.set_goal" => {
+            dispatch_client_executed("chat.set_goal", "/api/v1/chat/threads/{thread_id}/goal").await
+        }
+        "chat.update_goal" => {
+            dispatch_client_executed("chat.update_goal", "/api/v1/chat/threads/{thread_id}/goal")
+                .await
+        }
+        "chat.clear_goal" => {
+            dispatch_client_executed("chat.clear_goal", "/api/v1/chat/threads/{thread_id}/goal")
+                .await
+        }
+        "chat.continue_goal" => {
+            dispatch_client_executed("chat.continue_goal", "/api/v1/chat/stream").await
+        }
+        "chat.goal_auto_toggle" => {
+            dispatch_client_executed("chat.goal_auto_toggle", "ui:goal-bar").await
+        }
+        "chat.goal_mark_done" => {
+            dispatch_client_executed(
+                "chat.goal_mark_done",
+                "/api/v1/chat/threads/{thread_id}/goal",
+            )
+            .await
+        }
+        "chat.goal_reopen" => {
+            dispatch_client_executed("chat.goal_reopen", "/api/v1/chat/threads/{thread_id}/goal")
+                .await
+        }
+        "chat.goal_away_start" => {
+            dispatch_client_executed("chat.goal_away_start", "/api/v1/cron").await
+        }
+        "chat.stage_widget_followup" => {
+            dispatch_client_executed("chat.stage_widget_followup", "ui:inline-widget-bridge").await
+        }
+        "chat.stage_widget_selection" => {
+            dispatch_client_executed("chat.stage_widget_selection", "ui:inline-widget-bridge").await
+        }
+        "chat.open_widget_link" => {
+            dispatch_client_executed("chat.open_widget_link", "ui:inline-widget-bridge").await
+        }
+        "chat.open_mcp_app" => {
+            dispatch_client_executed("chat.open_mcp_app", "/api/v1/mcp-apps/resource").await
+        }
+        "chat.stage_mcp_app_message" => {
+            dispatch_client_executed("chat.stage_mcp_app_message", "ui:mcp-app-host").await
+        }
+        "chat.mcp_app_tool_call" => {
+            dispatch_client_executed("chat.mcp_app_tool_call", "/api/v1/mcp-apps/tool-call").await
+        }
+        "chat.open_computer_viewer" => {
+            dispatch_client_executed("chat.open_computer_viewer", "ui:computer-panel").await
+        }
+        "browser_run.steer" => dispatch_owner_not_wired("browser_run.steer").await,
+        "browser_download.send_to_knowledge" => {
+            dispatch_owner_not_wired("browser_download.send_to_knowledge").await
+        }
+        "models.create_customer_gateway" => {
+            dispatch_client_executed(
+                "models.create_customer_gateway",
+                "/api/v1/model-connections/customer-gateway",
+            )
+            .await
+        }
+        "models.delete_customer_gateway" => {
+            dispatch_client_executed(
+                "models.delete_customer_gateway",
+                "/api/v1/model-connections/{connection_id}",
+            )
+            .await
+        }
+        "connectors.create_credential_binding" => {
+            dispatch_client_executed(
+                "connectors.create_credential_binding",
+                "/api/v1/credential-bindings",
+            )
+            .await
+        }
+        "connectors.revoke_credential_binding" => {
+            dispatch_client_executed(
+                "connectors.revoke_credential_binding",
+                "/api/v1/credential-bindings/{id}",
+            )
+            .await
+        }
+        "connectors.create_custom_rest" => {
+            dispatch_client_executed(
+                "connectors.create_custom_rest",
+                "/api/v1/connectors/custom-rest",
+            )
+            .await
+        }
+        "audit.verify_chain" => {
+            dispatch_client_executed("audit.verify_chain", "/api/v1/audit/compliance/verify").await
+        }
+        "audit.list_events" => dispatch_client_executed("audit.list_events", "/api/v1/audit").await,
+        "audit.export_log" => {
+            dispatch_client_executed("audit.export_log", "/api/v1/audit/compliance/events").await
+        }
+        "audit.create_siem_destination" => {
+            dispatch_client_executed(
+                "audit.create_siem_destination",
+                "/api/v1/audit/siem-destinations",
+            )
+            .await
+        }
+        "audit.update_siem_destination" => {
+            dispatch_client_executed(
+                "audit.update_siem_destination",
+                "/api/v1/audit/siem-destinations/{destination_id}",
+            )
+            .await
+        }
+        "audit.delete_siem_destination" => {
+            dispatch_client_executed(
+                "audit.delete_siem_destination",
+                "/api/v1/audit/siem-destinations/{destination_id}",
+            )
+            .await
+        }
+        "schedule.list" => dispatch_client_executed("schedule.list", "/api/v1/cron").await,
+        "schedule.pause" => {
+            dispatch_client_executed("schedule.pause", "/api/v1/cron/{cron_id}").await
+        }
+        "schedule.resume" => {
+            dispatch_client_executed("schedule.resume", "/api/v1/cron/{cron_id}").await
+        }
+        "schedule.update_time" => {
+            dispatch_client_executed("schedule.update_time", "/api/v1/cron/{cron_id}").await
+        }
+        "schedule.delete" => {
+            dispatch_client_executed("schedule.delete", "/api/v1/cron/{cron_id}").await
+        }
+        "schedule.fires.list" => {
+            dispatch_client_executed("schedule.fires.list", "/api/v1/cron/{cron_id}/fires").await
+        }
+        "schedule.run_now" => {
+            dispatch_client_executed("schedule.run_now", "/api/v1/cron/{cron_id}/run").await
+        }
+        "automations.list_event_triggers" => {
+            dispatch_client_executed("automations.list_event_triggers", "/api/v1/event-triggers")
+                .await
+        }
+        "automations.create_event_trigger" => {
+            dispatch_client_executed("automations.create_event_trigger", "/api/v1/event-triggers")
+                .await
+        }
+        "automations.update_event_trigger" => {
+            dispatch_client_executed(
+                "automations.update_event_trigger",
+                "/api/v1/event-triggers/{trigger_id}",
+            )
+            .await
+        }
+        "automations.dry_run_event_trigger" => {
+            dispatch_client_executed(
+                "automations.dry_run_event_trigger",
+                "/api/v1/event-triggers/{trigger_id}/dry-run",
+            )
+            .await
+        }
+        "agents.installations.list" => {
+            dispatch_client_executed("agents.installations.list", "/api/v1/agents/installations")
+                .await
+        }
+        "agents.draft.save" => {
+            dispatch_client_executed("agents.draft.save", "/api/v1/agents/{agent_id}/draft").await
+        }
+        "agents.publish" => {
+            dispatch_client_executed("agents.publish", "/api/v1/agents/{agent_id}/publish").await
+        }
+        "agents.versions.list" => {
+            dispatch_client_executed("agents.versions.list", "/api/v1/agents/{agent_id}/versions")
+                .await
+        }
+        "agents.preview" => dispatch_client_executed("agents.preview", "/api/v1/chat/stream").await,
+        "agents.admitted_actions.list" => {
+            dispatch_agents_admitted_actions_list(&state, &user, &headers).await
+        }
+        "plugins.list_catalog" => {
+            dispatch_client_executed("plugins.list_catalog", "/api/v1/plugin-catalog").await
+        }
+        "plugins.install" => {
+            dispatch_client_executed("plugins.install", "/api/v1/plugins/{plugin_id}/install").await
+        }
+        "plugins.uninstall" => {
+            dispatch_client_executed("plugins.uninstall", "/api/v1/plugins/{plugin_id}/uninstall")
+                .await
+        }
+        "plugins.approve_catalog" => {
+            dispatch_client_executed(
+                "plugins.approve_catalog",
+                "/api/v1/plugin-catalog/{plugin_id}/approve",
+            )
+            .await
+        }
+        "plugins.kill_digest" => {
+            dispatch_client_executed("plugins.kill_digest", "/api/v1/plugin-kill-list").await
+        }
+        "plugins.lift_kill" => {
+            dispatch_client_executed("plugins.lift_kill", "/api/v1/plugin-kill-list").await
         }
         other => (
             StatusCode::NOT_IMPLEMENTED,

@@ -31,6 +31,13 @@
       "service": "service:verevon-gateway"
     },
     {
+      "flag": null,
+      "method": "POST",
+      "path": "/internal/v1/goals/:goal_id/judge-turn",
+      "scope": "model:goal_judge",
+      "service": "service:orchestrator-core"
+    },
+    {
       "flag": "MODEL_GATEWAY_AI_LAYOUT_SERVICE",
       "method": "POST",
       "path": "/v1/ai/documents/layout",

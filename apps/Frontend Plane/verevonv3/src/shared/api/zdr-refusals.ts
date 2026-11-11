@@ -89,7 +89,7 @@ export type Translate = (noText: string, enText: string) => string
 type Copy = { readonly no: string; readonly en: string }
 
 /** The sha256 of `./contracts/zdr-refusals.json`. Changing the golden changes this too. */
-export const ZDR_REFUSALS_CONTRACT_SHA256 = '1e36a26fcdb56f0b7010caae13dd40e0a7b453e035e6424f09befec367b8b385'
+export const ZDR_REFUSALS_CONTRACT_SHA256 = 'fc18191e2e4e5dbafc7b10b246e6a18a4695a02fb6ae8391fe16994d8bdcc357'
 
 export type ZdrRefusalText = {
   /** Norwegian. A feature refusal names the feature with `{feature}`. */
@@ -229,9 +229,9 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   teach_mode: { no: 'lagring av stegene i en kjøring som ferdighet', en: "saving a run's steps as a skill" },
   reasoning_translation: { no: 'oversettelse av en resonneringstekst', en: 'translating a reasoning text' },
   // Added by ZDR-Z-05a in the Model Plane's FEATURES vocabulary (mp-contracts
-  // zdr_refusal.rs). The vendored golden does not carry it until FUGEN
-  // regenerates the catalogue. Assumed wording, owner to confirm (OD-LEGAL):
-  // it describes what is not stored, so legal signs it off.
+  // zdr_refusal.rs) and carried by the vendored golden since FU-11. Assumed
+  // wording, owner to confirm (OD-LEGAL): it describes what is not stored, so
+  // legal signs it off.
   artifact_output: { no: 'filer og dokumenter assistenten oppretter', en: 'files and documents the assistant creates' },
 }
 

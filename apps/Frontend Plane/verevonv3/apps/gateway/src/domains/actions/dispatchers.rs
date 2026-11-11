@@ -2331,7 +2331,7 @@ pub(super) fn owner_json_response_to_envelope(
 // handler (see the comment on owner_json_response_to_envelope above) instead
 // of duplicating create_document's Data Plane call or extract_products' /
 // summarize_products' Model Plane prompt-and-parse logic.
-async fn response_to_status_and_json(response: Response) -> (StatusCode, Value) {
+pub(super) async fn response_to_status_and_json(response: Response) -> (StatusCode, Value) {
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await

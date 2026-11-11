@@ -1813,7 +1813,8 @@ describe('action registry', () => {
     // +3 after W4-CC-8 registered connectors.create_credential_binding, connectors.revoke_credential_binding and connectors.create_custom_rest, the stored connector keys and the custom REST connector.
     // +1 after W5-081-d registered learning.teach_skill_from_run, the save-as-skill action after a takeover.
     // +1 after W4-PL-4 registered plugins.lift_kill, the admin's lift of an org kill-list entry.
-    expect(ids).toHaveLength(344)
+    // FU-02 recount of the static registry after the B01-B11 additions (library.*, side chat, org permission rules, plugins, wiki proposals, event triggers, audit/SIEM, connectors and the rest): 325 descriptors in action-registry.ts plus 49 Space fragment entries.
+    expect(ids).toHaveLength(374)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

@@ -72,20 +72,8 @@ describe('coverage: the SPA has an entry for every code and feature in the golde
   })
 
   it('has a Norwegian and an English label for every feature, and the golden English label', () => {
-    // Keys the Model Plane's Rust vocabulary already has but the vendored golden
-    // does not carry until FUGEN regenerates it (ZDR-Z-05a added artifact_output).
-    // Once the golden lists one, the exact-equality check below covers it and the
-    // entry here is dead weight; drop it then.
-    const awaitingGolden = ['artifact_output']
     const golden = contract.features.map((row) => row.key).sort()
-    const expected = [...new Set([...golden, ...awaitingGolden])].sort()
-    expect(Object.keys(FEATURE_LABELS).sort()).toEqual(expected)
-    for (const key of awaitingGolden) {
-      const label = FEATURE_LABELS[key as keyof typeof FEATURE_LABELS]
-      expect(label.en.trim().length, `${key} needs an English label`).toBeGreaterThan(0)
-      expect(label.no.trim().length, `${key} needs a Norwegian label`).toBeGreaterThan(0)
-      expect(label.no).not.toBe(label.en)
-    }
+    expect(Object.keys(FEATURE_LABELS).sort()).toEqual(golden)
     for (const row of contract.features) {
       const label = FEATURE_LABELS[row.key as keyof typeof FEATURE_LABELS]
       expect(label.en).toBe(row.label_en)

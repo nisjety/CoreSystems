@@ -1594,7 +1594,7 @@ async fn list_capabilities(
 /// model and capability bearers, with the org taken from the verified session and never from a header
 /// the caller sends. Only ids and a mode come back; a ZDR principal is refused upstream, and that
 /// refusal passes through unchanged.
-async fn list_admitted_owner_actions(
+pub(crate) async fn list_admitted_owner_actions(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

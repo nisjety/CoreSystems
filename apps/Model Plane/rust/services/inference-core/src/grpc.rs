@@ -3293,6 +3293,7 @@ mod tests {
     fn grpc_code_name(code: tonic::Code) -> &'static str {
         match code {
             tonic::Code::InvalidArgument => "INVALID_ARGUMENT",
+            tonic::Code::NotFound => "NOT_FOUND",
             tonic::Code::PermissionDenied => "PERMISSION_DENIED",
             tonic::Code::ResourceExhausted => "RESOURCE_EXHAUSTED",
             tonic::Code::FailedPrecondition => "FAILED_PRECONDITION",
