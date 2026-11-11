@@ -139,6 +139,16 @@
       ]
     },
     {
+      "name": "AUTH_CORE_ZDR_EFFECTIVE_POSTURE_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "ZDR-Z-03b: Auth Core reads the effective ZDR posture that org-core computes (effectiveZdr) instead of keeping its own plan-lapse rule. Off keeps the stored-intent rule. Only the literal true turns it on.",
+      "codePath": "apps/Control Plane/auth-core/src/auth/interactive-retention-policy.ts"
+    },
+    {
       "name": "AZURE_ANTHROPIC_ZDR_CONFIRMED",
       "kind": "switch",
       "owner": "model-plane",
@@ -210,6 +220,16 @@
       "values": ["off", "permissive", "strict"],
       "purpose": "Control-plane enforcement mode for the BFF. Unknown values fall back to off.",
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "CONVERSATION_ZDR_EFFECTIVE_POSTURE_ENABLED",
+      "kind": "switch",
+      "owner": "application-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "ZDR-Z-03d: conversation-core's org-core reader uses the effective posture (retention_posture.effective_zdr) instead of the raw interactiveRetention.zdr flag. Only the literal true turns it on.",
+      "codePath": "apps/Application Plane/conversation-core/conversation-core-go/internal/config/config.go"
     },
     {
       "name": "COST_CORE_IMAGE_PRICING_ENABLED",
@@ -438,6 +458,16 @@
       ]
     },
     {
+      "name": "GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "ZDR-Z-03c: the BFF's one org-posture reader answers from org-core's effective_zdr instead of parsing the stored intent. Off keeps the intent-only rule. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
       "name": "INFERENCE_BYO_GATEWAY_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -534,6 +564,16 @@
       "declarations": [
         { "service": "inference-core", "env": "INFERENCE_SPEED_TIER_SPLIT", "default": "false" }
       ]
+    },
+    {
+      "name": "INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED",
+      "kind": "switch",
+      "owner": "ingestion-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "D-ZDR-10: integration-corev2 reads the organisation's effective ZDR posture (retention_posture.effective_zdr) from org-core instead of the stored intent. Only the literal true turns it on.",
+      "codePath": "apps/Ingestion Plane/integration-corev2/internal/config/config.go"
     },
     {
       "name": "LEARNING_REVIEW_ENABLED",
@@ -1067,6 +1107,16 @@
       ]
     },
     {
+      "name": "QUARRY_EDGE__ZDR_EFFECTIVE_POSTURE_ENABLED",
+      "kind": "switch",
+      "owner": "ingestion-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "ZDR-Z-03e: quarry-edge's schedule preflight reads org-core's effectiveZdr instead of intent AND entitlement; a missing field is unknown and the fire is refused. Off keeps the old rule. Only the literal true turns it on.",
+      "codePath": "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/schedule_preflight.rs"
+    },
+    {
       "name": "ROUTING_POLICY_PROMOTION_REQUIRED",
       "kind": "switch",
       "owner": "model-plane",
@@ -1339,6 +1389,16 @@
       "codePath": "apps/Frontend Plane/verevonv3/src/shared/ui/toast/toast-store.ts"
     },
     {
+      "name": "VITE_ZDR_WAIVER_UI",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "ZDR-Z-19d: the SPA's connection ZDR acknowledgement UI and its client. Off, nothing is read from the gateway and nothing is shown. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/src/shared/api/connection-zdr-client.ts"
+    },
+    {
       "name": "WATCH_SWEEPER_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -1362,6 +1422,16 @@
       ]
     },
     {
+      "name": "ZDR_ACKNOWLEDGEMENT_ENABLED",
+      "kind": "switch",
+      "owner": "ingestion-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "ZDR-Z-13: the connection ZDR acknowledgement routes in integration-corev2. Off, the routes do not exist. Only the literal true turns it on.",
+      "codePath": "apps/Ingestion Plane/integration-corev2/internal/config/config.go"
+    },
+    {
       "name": "ZDR_TYPED_REFUSALS_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -1372,6 +1442,27 @@
       "declarations": [
         { "service": "model-gateway", "env": "ZDR_TYPED_REFUSALS_ENABLED", "default": "false" }
       ]
+    },
+    {
+      "name": "ZDR_WAIVER_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "killSwitch": true,
+      "purpose": "ZDR-Z-14: the per-connection ZDR waiver issuer. Off refuses every waiver with zdr_connection_not_supported. Only the literal true turns it on.",
+      "codePath": "apps/Control Plane/auth-core/src/auth/retention-decision.service.ts"
+    },
+    {
+      "name": "ZDR_WAIVER_UI_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "ZDR-Z-19a: the BFF asks Auth Core for a retention decision on a subscription chat turn and mounts the connection ZDR routes. Off, no decision is asked and no route is mounted. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     }
   ],
   "unregistered": [

@@ -52,6 +52,7 @@ import {
   type ReasoningTranslateLocale,
 } from '@/shared/actions/chat-reasoning-translate'
 import type { ThreadGoalStatus } from './thread-goal-client'
+import { waivedContinuationFields, type WaivedRunConnection } from './waived-continuation'
 
 // ── Wide research (EP-2 S8) ─────────────────────────────────────────────────
 
@@ -1321,6 +1322,13 @@ export type ChatQuestionAnswer = {
 }
 
 /**
+ * The run paused for its owner's answer (WS14 S5): the `awaiting_input` frame, ids only. `questionId` is absent
+ * when the server could not read the question (the frame then carries an empty id), and the card then comes from
+ * the run's own question list.
+ */
+export type ChatAwaitingInputEvent = { runId: string; requestId?: string; questionId?: string }
+
+/**
  * Read the recalled-memory list off the wire.
  *
  * Unknown `origin`/`role` values degrade rather than being dropped — the
@@ -1382,6 +1390,11 @@ export type ChatStreamHandlers = {
   onPlanProposed?: (event: ChatPlanProposedEvent) => void
   /** See `ChatUserQuestionEvent`. Ungated: the card is the only way to answer the question. */
   onUserQuestion?: (event: ChatUserQuestionEvent) => void
+  /**
+   * The run paused for its owner's answer (WS14 S5). See `ChatAwaitingInputEvent`. A frame without its run id is
+   * not read.
+   */
+  onAwaitingInput?: (event: ChatAwaitingInputEvent) => void
   /** The connected-app suggestion card (EP-10 S8). Ungated control event. */
   onConnectorSuggestion?: (event: { suggestionId?: string; provider?: string; reason?: string; requestId?: string }) => void
   /** See `ChatResearchPlanEvent`. Ungated: the plan card is the plan turn's whole answer. */
@@ -3000,6 +3013,18 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
       }
       break
     }
+    case 'awaiting_input': {
+      // The run paused for its owner's answer (WS14 S5). Ids only: a frame without its run id is not read.
+      const runId = str(payload.run_id)
+      if (runId) {
+        handlers.onAwaitingInput?.({
+          runId,
+          requestId: str(payload.request_id),
+          questionId: str(payload.question_id) || undefined,
+        })
+      }
+      break
+    }
     case 'connector_suggestion': {
       handlers.onConnectorSuggestion?.({
         suggestionId: str(payload.suggestion_id),
@@ -3321,9 +3346,29 @@ export async function resumeStream(
   }
 }
 
-export async function cancelInvocation(requestId: string): Promise<void> {
+/**
+ * The frame reader of a chat stream this module does not open itself. The question form of `chat.run.continue`
+ * (WS14 S5) streams through `continueQuestionRun`, and its frames reach a turn's handlers through this, in the
+ * order, batching and dispatch that `streamChat` and `resumeStream` use. `close` flushes the text still waiting in
+ * the batch once that stream has ended.
+ */
+export function chatStreamFrameReader(
+  handlers: ChatStreamHandlers,
+  signal?: AbortSignal,
+): { read: (event: SseEvent) => void; close: () => void } {
+  const batch = frameBatchFor(handlers, signal)
+  return {
+    read: (event) => dispatchFrame(event, handlers, batch),
+    close: () => batch?.deltas.close(),
+  }
+}
+
+export async function cancelInvocation(requestId: string, waived?: WaivedRunConnection): Promise<void> {
+  const named = waivedContinuationFields(waived)
   await requestJson(`/api/v1/chat/invocations/${encodeURIComponent(requestId)}/cancel`, {
     method: 'POST',
+    // A turn that was not waived sends no body, as it always did; a waived one names its connection (ZDR Z-19e).
+    ...(Object.keys(named).length > 0 ? { body: JSON.stringify(named) } : {}),
   })
 }
 
@@ -3392,6 +3437,7 @@ export async function approvePlan(
   justification: string,
   planId?: string,
   editedSteps?: PlanStepEdit[],
+  waived?: WaivedRunConnection,
 ): Promise<PlanApprovalResult> {
   const raw = await requestJson<Record<string, unknown>>(
     `/api/v1/agents/runs/${encodeURIComponent(runId)}/plan-approval`,
@@ -3403,6 +3449,8 @@ export async function approvePlan(
         justification,
         plan_id: planId ?? '',
         edited_steps: (editedSteps ?? []).map(planStepEditToWire),
+        // The connection of a waived run (ZDR Z-19e); no keys unless a run was waived and the switch is on.
+        ...waivedContinuationFields(waived),
       }),
     },
   )
@@ -3434,6 +3482,7 @@ export async function rejectPlan(
   runId: string,
   planId: string,
   reason: string,
+  waived?: WaivedRunConnection,
 ): Promise<{ plan?: Plan }> {
   const raw = await requestJson<Record<string, unknown>>(
     `/api/v1/agents/runs/${encodeURIComponent(runId)}/plan-approval`,
@@ -3444,6 +3493,7 @@ export async function rejectPlan(
         justification: reason,
         plan_id: planId,
         edited_steps: [],
+        ...waivedContinuationFields(waived),
       }),
     },
   )

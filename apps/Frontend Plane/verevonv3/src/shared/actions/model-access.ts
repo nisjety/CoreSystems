@@ -381,6 +381,10 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'library.read_text': exempt('no_owner_executor', 'read'),
   'library.open_origin': exempt('ui_state_only', 'read'),
   'library.share': exempt('human_identity_or_security', 'external_write'),
+  // ZDR Z-19d: a model never reads, accepts or ends a person's zero-data-retention waiver for a connection.
+  'connection_zdr.read': exempt('human_identity_or_security', 'read'),
+  'connection_zdr.acknowledge': exempt('human_identity_or_security', 'external_write'),
+  'connection_zdr.revoke': exempt('human_identity_or_security', 'external_write'),
   'chat.wide_research_start': exempt('no_owner_executor', 'external_write'),
   'chat.wide_research_retry_item': exempt('no_owner_executor', 'external_write'),
   'chat.research_plan_start': exempt('no_owner_executor', 'external_write'),

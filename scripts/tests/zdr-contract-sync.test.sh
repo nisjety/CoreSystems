@@ -367,6 +367,24 @@ VENDORED=(
   "apps/Model Plane/rust/services/execution-core/tests/fixtures/zdr-posture-matrix.json|apps/Model Plane/api/contracts/zdr-posture-matrix.json"
   "apps/Model Plane/rust/services/execution-core/tests/fixtures/zdr-posture-matrix.json.sha256|apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256"
 
+  # ZDR-Z-03a: org-core's copy of the posture matrix and its pin (internal/org/testdata).
+  "apps/Control Plane/org-core/internal/org/testdata/zdr-posture-matrix.json|apps/Model Plane/api/contracts/zdr-posture-matrix.json"
+  "apps/Control Plane/org-core/internal/org/testdata/zdr-posture-matrix.json.sha256|apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256"
+
+  # ZDR-Z-03b and Z-14: Auth Core's copies of the posture matrix and of the refusal catalogue, each with its pin
+  # (src/auth/fixtures; the decision spec and the decision service read them).
+  "apps/Control Plane/auth-core/src/auth/fixtures/zdr-posture-matrix.json|apps/Model Plane/api/contracts/zdr-posture-matrix.json"
+  "apps/Control Plane/auth-core/src/auth/fixtures/zdr-posture-matrix.json.sha256|apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256"
+  "apps/Control Plane/auth-core/src/auth/fixtures/zdr-refusals.json|apps/Model Plane/api/contracts/zdr-refusals.json"
+  "apps/Control Plane/auth-core/src/auth/fixtures/zdr-refusals.json.sha256|apps/Model Plane/api/contracts/zdr-refusals.json.sha256"
+
+  # ZDR-Z-03c: the BFF gateway's copy of the posture matrix and its pin (tests/fixtures).
+  "apps/Frontend Plane/verevonv3/apps/gateway/tests/fixtures/zdr-posture-matrix.json|apps/Model Plane/api/contracts/zdr-posture-matrix.json"
+  "apps/Frontend Plane/verevonv3/apps/gateway/tests/fixtures/zdr-posture-matrix.json.sha256|apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256"
+
+  # Not vendored yet: conversation-core (Z-03d) and integration-corev2 (Z-13) have no copy in the tree, so their
+  # CONSUMERS rows stay pending until a copy and its pin land.
+
   # Z-05b: the SPA's copy of the refusal catalogue and its pin. zdr-refusals.ts renders every
   # code from it, and zdr-refusals.test.ts reads the copy inside the Frontend tree.
   "apps/Frontend Plane/verevonv3/src/shared/api/contracts/zdr-refusals.json|apps/Model Plane/api/contracts/zdr-refusals.json"
@@ -472,6 +490,7 @@ CONSUMERS=(
   "apps/Model Plane/api/contracts/zdr-posture-matrix.json|bff-gateway|apps/Frontend Plane/verevonv3/apps/gateway/|Z-03 and Z-19 (org posture, turn retention)"
   "apps/Model Plane/api/contracts/zdr-posture-matrix.json|conversation-core|apps/Application Plane/conversation-core/|Z-03 (org posture reader)"
   "apps/Model Plane/api/contracts/zdr-posture-matrix.json|integration-corev2|apps/Ingestion Plane/integration-corev2/|Z-13 (acknowledgement states; named by design section 9, not by the Z-13 entry)"
+  "apps/Model Plane/api/contracts/zdr-posture-matrix.json|org-core|apps/Control Plane/org-core/|Z-03a (org posture answer)"
   # The capability contract: one source for what a connection can do.
   "apps/Model Plane/api/contracts/connection-zdr-capabilities.json|integration-corev2|apps/Ingestion Plane/integration-corev2/|Z-12 (assessor, go:embed)"
   "apps/Model Plane/api/contracts/connection-zdr-capabilities.json|inference-core|apps/Model Plane/rust/services/inference-core/|Z-10 (cross-check against the real provider capabilities)"
@@ -486,6 +505,7 @@ CONSUMERS=(
   # Z-05b: the SPA renders every code of the refusal catalogue in Norwegian and English, with its action.
   "apps/Model Plane/api/contracts/zdr-refusals.json|spa|apps/Frontend Plane/verevonv3/|Z-05b (every code: NO and EN text, action, feature labels)"
   "apps/Model Plane/api/contracts/zdr-refusals.json|sandbox-manager|apps/Model Plane/go/pkg/zdrrefusal/|WS06-S6 (Go refusal helper: kind and feature trailers, catalogue sentences)"
+  "apps/Model Plane/api/contracts/zdr-refusals.json|auth-core|apps/Control Plane/auth-core/|Z-14 (decision refusals)"
   # The Data Plane inference client: the wire statuses inference-core emits, and the
   # token answers Auth Core's real mint gives its two background callers.
   "apps/Model Plane/api/contracts/infer-statuses.json|inference-client|apps/Data Plane v2/services/inference-client-rs/|CR-T5 (typed status decoder)"

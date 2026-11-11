@@ -135,6 +135,8 @@ services:
       QUARRY_EDGE__SCHEDULE_POSTURE: ${QUARRY_EDGE__SCHEDULE_POSTURE:-observe}
       QUARRY_EDGE__ORG_CORE_URL: ${QUARRY_EDGE__ORG_CORE_URL:-http://org-core:8080}
       QUARRY_EDGE__ORG_CORE_SERVICE_TOKEN: ${QUARRY_ORG_CORE_SERVICE_TOKEN:-}
+      # ZDR-Z-03e: the schedule preflight reads org-core's effectiveZdr instead of intent AND entitlement. Dark; only the literal true turns it on.
+      QUARRY_EDGE__ZDR_EFFECTIVE_POSTURE_ENABLED: ${QUARRY_EDGE__ZDR_EFFECTIVE_POSTURE_ENABLED:-false}
       QUARRY_EDGE__RUNTIME_AUTH_TOKEN: ${QUARRY_RUNTIME_AUTH_TOKEN:?QUARRY_RUNTIME_AUTH_TOKEN is required}
       QUARRY_EDGE__INTERNAL_SECRET: ${QUARRY_INTERNAL_SECRET:?QUARRY_INTERNAL_SECRET must be set (no insecure default)}
       QUARRY_EDGE__NATS_URL: nats://nats:4222

@@ -471,6 +471,8 @@ services:
       # WS14-S4: offer ask_user to a Do run (max_questions on the run request). Off by default; ZDR, waived, scheduled
       # and Space-scoped runs never get it. Needs capability-core migration 0029 before TOOL_CLASS_GATE=enforce.
       AGENT_ASK_USER_ENABLED: ${AGENT_ASK_USER_ENABLED:-false}
+      # WS14-S5: accept the question form of /continue and relay awaiting_input. Only the literal true; flip with execution-core and session-core.
+      AGENT_ASK_USER_RESUME_ENABLED: ${AGENT_ASK_USER_RESUME_ENABLED:-false}
       # WS14-S6: offer ask_user to an Ask-mode turn (the chat tool loop). Off by default; only the literal true. A ZDR,
       # waived or Space-scoped turn never gets it, and a call on one is refused. The question is stored as a next_turn
       # run question (WS14-S3), so it needs session-core's run_questions; the answer arrives as the next message.

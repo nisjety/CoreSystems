@@ -11,9 +11,14 @@
 //!   * [`decide`] asks the question with that token and the user's own session cookie.
 //!   * [`turn_retention`] is the one entry a handler calls. It reads only the raw request body and
 //!     headers, so it can run before any bearer of the turn is minted.
+//!   * [`continuation_retention`] is the entry a continuation handler (approve, decide, resume,
+//!     continue, cancel, plan approval, todo status, approval preview) calls (ZDR-Z-19e, D-ZDR-15).
+//!     A continuation never inherits a waiver: only a fresh decision for the connection the SPA names
+//!     waives its bearers, and session-core checks that waiver against the run's stored receipt.
 //!
 //! Dark: with `ZDR_WAIVER_UI_ENABLED` off (`AppState::zdr_waiver_ui_enabled`) [`turn_retention`]
-//! answers [`TurnRetention::Unchanged`] and makes no call. Nothing here wires a handler (Z-19b does).
+//! answers [`TurnRetention::Unchanged`] and makes no call. The chat stream and JSON handlers call it
+//! first and mint every bearer of the turn from its answer (`chat::shared::mint_turn_bearers`, Z-19b).
 //!
 //! # ZDR
 //!
@@ -23,11 +28,6 @@
 //! stored. Logs carry ids, statuses and closed codes only, never the policy token or the decision
 //! token. The decision is never asked for speech, dictation, browser, scheduled, inbox or support AI
 //! routes, and never for a Space-scoped turn.
-
-#![allow(
-    dead_code,
-    reason = "the handlers that call turn_retention land in ZDR-Z-19b"
-)]
 
 use std::time::Duration;
 
@@ -61,7 +61,7 @@ const TOKEN_CACHE_NAMESPACE: &str = "retention-decision";
 
 /// The refusal codes Auth Core's decision endpoint can answer (a subset of the ZDR catalogue). A 412
 /// or 503 carrying any other code is not relayed.
-const DECISION_REFUSAL_CODES: [&str; 6] = [
+pub(crate) const DECISION_REFUSAL_CODES: [&str; 6] = [
     "zdr_connection_not_acknowledged",
     "zdr_connection_not_supported",
     "zdr_explicit_request_not_supported_by_connection",
@@ -340,6 +340,144 @@ fn names_a_space(body: &Value) -> bool {
         .iter()
         .any(|key| non_empty_str(body, key).is_some())
         || crate::domains::chat::shared::is_space_scoped_turn(body)
+}
+
+/// The body (or query) key that names the connection a continuation's run was waived for.
+const CONTINUATION_CONNECTION_KEY: &str = "subscription_connection_id";
+/// The body (or query) key that names the provider of that connection.
+const CONTINUATION_PROVIDER_KEY: &str = "provider";
+/// The longest connection id or provider a continuation may name; the same bound the chat turn's
+/// connection ids obey.
+const CONTINUATION_NAME_MAX_CHARS: usize = 128;
+
+/// The connection the SPA says a continuation's run was waived for (ZDR.md section 5.4, D-ZDR-15).
+///
+/// It is only a question put to Auth Core, never an authority: the run's own receipt, checked by
+/// session-core, decides whether a waiver for this connection can advance the run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ContinuationConnection {
+    /// The subscription connection id, 1 to 128 characters with no whitespace.
+    pub(crate) connection_id: String,
+    /// The connection's provider, 1 to 128 characters with no whitespace.
+    pub(crate) provider: String,
+}
+
+impl ContinuationConnection {
+    /// The connection when both values are present and valid (non-empty, at most 128 characters, no
+    /// whitespace); otherwise `None`, and the continuation is treated as naming no connection.
+    fn parse(connection_id: Option<&str>, provider: Option<&str>) -> Option<Self> {
+        let valid = |value: &str| {
+            !value.is_empty()
+                && value.chars().count() <= CONTINUATION_NAME_MAX_CHARS
+                && !value.chars().any(char::is_whitespace)
+        };
+        let connection_id = connection_id.filter(|value| valid(*value))?;
+        let provider = provider.filter(|value| valid(*value))?;
+        Some(Self {
+            connection_id: connection_id.to_owned(),
+            provider: provider.to_owned(),
+        })
+    }
+
+    /// The pair [`continuation_retention`] takes: connection id, then provider.
+    pub(crate) fn as_pair(&self) -> (&str, &str) {
+        (self.connection_id.as_str(), self.provider.as_str())
+    }
+}
+
+/// Read the connection a continuation names from its JSON body, and remove both keys so neither is
+/// ever forwarded upstream. With `ZDR_WAIVER_UI_ENABLED` off the body is left untouched and `None`
+/// is returned, so the switch-off path is byte-identical to before. A body that is not an object,
+/// or that names an incomplete or invalid pair, answers `None`.
+pub(crate) fn take_continuation_connection(
+    state: &AppState,
+    body: &mut Value,
+) -> Option<ContinuationConnection> {
+    if !state.zdr_waiver_ui_enabled {
+        return None;
+    }
+    let object = body.as_object_mut()?;
+    let connection_id = object.remove(CONTINUATION_CONNECTION_KEY);
+    let provider = object.remove(CONTINUATION_PROVIDER_KEY);
+    ContinuationConnection::parse(
+        connection_id.as_ref().and_then(Value::as_str),
+        provider.as_ref().and_then(Value::as_str),
+    )
+}
+
+/// The query string of a GET or SSE continuation route (`subscription_connection_id`, `provider`).
+/// Every other query key is ignored.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ContinuationQuery {
+    /// The connection id the SPA names.
+    #[serde(default)]
+    pub(crate) subscription_connection_id: Option<String>,
+    /// The provider of that connection.
+    #[serde(default)]
+    pub(crate) provider: Option<String>,
+}
+
+impl ContinuationQuery {
+    /// The connection the query names, under the same validation as the body form. `None` with the
+    /// switch off, or when the pair is incomplete or invalid.
+    pub(crate) fn connection(&self, state: &AppState) -> Option<ContinuationConnection> {
+        if !state.zdr_waiver_ui_enabled {
+            return None;
+        }
+        ContinuationConnection::parse(
+            self.subscription_connection_id.as_deref(),
+            self.provider.as_deref(),
+        )
+    }
+}
+
+/// The one entry a continuation handler calls to ask whether the run it would advance is waived
+/// (D-ZDR-15). A continuation (an approval or rejection, a plan approval or rejection, a todo update,
+/// a resume, a continue, a cancel) never inherits a waiver: it is waived only by a fresh decision
+/// from Auth Core for the connection `connection` names, and session-core then checks that waiver
+/// against the receipt of the run it would advance. Nothing is cached across requests.
+///
+/// `connection` is `(connection_id, provider)`.
+///
+/// In order:
+///   1. Switch off, or no connection named: `Ok(Unchanged)`, no call. The continuation keeps today's
+///      path, and model-gateway refuses a ZDR credential for durable work as it does today.
+///   2. The org posture is read: `Unknown` is 503 `zdr_decision_unavailable` with no call; `NotZdr`
+///      is `Unchanged` with no call; `Zdr` calls [`decide`] with `explicit_zdr` false. There is no
+///      Space step: the run's receipt already fixes its Space.
+///
+/// Only [`TurnRetention::Waived`] changes what the handler sends; every other answer is today's path.
+/// An Auth Core refusal (for example `zdr_connection_not_acknowledged` after a revoke) is returned
+/// as it came, and the handler sends nothing upstream.
+pub(crate) async fn continuation_retention(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    connection: Option<(&str, &str)>,
+) -> Result<TurnRetention, Refusal> {
+    if !state.zdr_waiver_ui_enabled {
+        return Ok(TurnRetention::Unchanged);
+    }
+    let Some((connection_id, provider)) = connection else {
+        return Ok(TurnRetention::Unchanged);
+    };
+    match zdr::org_posture(state, user).await {
+        OrgPosture::Unknown => Err(Refusal::unavailable()),
+        OrgPosture::NotZdr => Ok(TurnRetention::Unchanged),
+        OrgPosture::Zdr => {
+            decide(
+                state,
+                user,
+                headers,
+                DecisionInput {
+                    connection_id: Some(connection_id),
+                    provider: Some(provider),
+                    explicit_zdr: false,
+                },
+            )
+            .await
+        }
+    }
 }
 
 /// The one entry a handler calls to decide a turn's retention. Reads only the raw request body and

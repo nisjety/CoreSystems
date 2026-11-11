@@ -28,6 +28,7 @@ import { MemorySection } from '@/features/settings/components/MemorySection'
 import { LearningSection } from '@/features/settings/components/LearningSection'
 import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
 import { CustomConnectorSection } from '@/features/settings/components/CustomConnectorSection'
+import { OrgZdrAcknowledgementsSection } from '@/features/settings/components/OrgZdrAcknowledgementsSection'
 import { CustomerGatewaySection } from '@/features/settings/components/CustomerGatewaySection'
 import { ApprovalRuleProposalsSection } from '@/features/settings/components/ApprovalRuleProposalsSection'
 import { ConnectedAppsPolicy } from '@/features/settings/components/ConnectedAppsPolicy'
@@ -1913,6 +1914,7 @@ function IntegrationsSection() {
         )}
       </Show>
       <ChatGptSubscriptionPanel orgId={orgId()} onConnectionChange={() => void refresh()} />
+      <OrgZdrAcknowledgementsSection />
       <CustomerGatewaySection orgId={orgId()} />
       <CustomConnectorSection orgId={orgId()} />
       <section class="verevon-settings-social-layer" aria-labelledby="verevon-settings-social-title">

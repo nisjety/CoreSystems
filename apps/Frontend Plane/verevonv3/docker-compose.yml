@@ -242,6 +242,10 @@ services:
       # (on in front of a gateway with parking off, the park form is a 400 continue_incomplete).
       # Nothing in the SPA calls the route yet.
       VEREVON_GATEWAY_CONTINUE_PARK_ENABLED: ${VEREVON_GATEWAY_CONTINUE_PARK_ENABLED:-false}
+      # WS14 S5: the QUESTION form of the same route (a question_id with the answers or a skip, the
+      # continue of a run paused for its owner's answer). Off unless exactly "true". Flip it together
+      # with model-gateway's question-continue switch.
+      VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED: ${VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED:-false}
       # WS10-S5: the model entitlement admin routes (policy read, write and explain). Only the literal `true`
       # enables them; do not enable before the matcher and the model-gateway admission are deployed.
       MODEL_ENTITLEMENT_ADMIN_ENABLED: ${MODEL_ENTITLEMENT_ADMIN_ENABLED:-false}

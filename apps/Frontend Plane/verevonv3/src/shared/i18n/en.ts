@@ -93,4 +93,62 @@ export const en = {
       browser_site_mode: 'Browser site mode',
     },
   },
+  // Zero data retention (ZDR) acknowledgement for a model connection that cannot give ZDR (ZDR Z-20, Z-21, Z-21b).
+  // DRAFT WORDING PENDING COUNSEL (OD-LEGAL, D-ZDR-09): the owner and counsel confirm every sentence here before
+  // it ships. The acknowledgement dialog does NOT use this copy for its text: Integration Core composes and stores
+  // that text, and the dialog shows it as served. These keys are the chrome around it, the chip, the answer line
+  // and the admin list. None of them claims ZDR for a waived chat, and the ones that describe the data say that
+  // organisation knowledge and tool results used in the chat are sent to the provider.
+  zdr: {
+    waiver: {
+      chip: 'Not ZDR in this chat',
+      chip_title:
+        'This chat runs on your own connection, which cannot give zero data retention. What you send, including organisation knowledge and tool results used in the chat, is sent to the provider, and the chat is retained like a normal chat.',
+      answer_line:
+        "This answer was produced on the member's own connection and is retained like a normal chat.",
+      answer_line_title:
+        'Not zero data retention. Organisation knowledge and tool results used in this chat were sent to the provider.',
+      dialog: {
+        loading: 'Loading ...',
+        close: 'Close',
+        saving: 'Saving ...',
+        retry: 'Try again',
+        loadFailed: 'The text could not be loaded. Try again.',
+        saveFailed: 'Your confirmation could not be saved. Try again.',
+        changed: 'The text changed while it was open. Read the new text before you continue.',
+        unavailable: 'This connection has no text to confirm right now.',
+      },
+      review: 'Review zero data retention',
+      revoke: 'Withdraw confirmation',
+      revoke_confirm:
+        'Withdraw your confirmation? While your organisation has zero data retention on, this connection is not used until you confirm again.',
+      revoke_yes: 'Withdraw',
+      revoke_no: 'Keep',
+      revoked: 'Your confirmation was withdrawn.',
+      revoke_failed: 'The confirmation could not be withdrawn. Try again.',
+      confirmed: 'Confirmed.',
+      send_again: 'Confirmed. You can send the message again.',
+      chat_review: 'Review and confirm',
+      admin: {
+        title: 'Acknowledgements',
+        intro:
+          'Which members have confirmed that a connection of theirs cannot give zero data retention. The list shows who, which provider and which text version, never the text itself.',
+        loading: 'Loading ...',
+        empty: 'No acknowledgements yet.',
+        load_failed: 'The acknowledgements could not be loaded.',
+        truncated: 'Only the newest rows are shown.',
+        counts: (active: number, revoked: number) => `${active} active, ${revoked} withdrawn`,
+        member: 'Member',
+        provider: 'Provider',
+        capability: 'Capability',
+        text_version: 'Text version',
+        locale: 'Language',
+        status: 'Status',
+        acknowledged_at: 'Confirmed',
+        revoked_at: 'Withdrawn',
+        status_active: 'Active',
+        status_revoked: 'Withdrawn',
+      },
+    },
+  },
 } as const

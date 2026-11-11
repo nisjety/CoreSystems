@@ -4391,8 +4391,16 @@ type ApprovedAuthority struct {
 	// snapshot would not fit with it. A continuation recomputes the coordinator's narrowing from
 	// it; it never widens `tools`, and it is not covered by `digest`.
 	CoordinatorTools []*ApprovedTool `protobuf:"bytes,11,rep,name=coordinator_tools,json=coordinatorTools,proto3" json:"coordinator_tools,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// The connection ids the paused turn selected (RunAgentRequest.connector_scope). Empty when the
+	// turn selected none, or when the descriptor predates the field. A stage-1 continuation runs under
+	// this selection or a narrower one; it is not covered by `digest`.
+	ConnectorScope []string `protobuf:"bytes,12,rep,name=connector_scope,json=connectorScope,proto3" json:"connector_scope,omitempty"`
+	// Whether the paused turn's screening taint was marked (a connected-app read came back flagged).
+	// Absent when the descriptor predates the field; a continuation then holds the taint as marked.
+	// Not covered by `digest`.
+	ConnectorTaint *bool `protobuf:"varint,13,opt,name=connector_taint,json=connectorTaint,proto3,oneof" json:"connector_taint,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ApprovedAuthority) Reset() {
@@ -4500,6 +4508,20 @@ func (x *ApprovedAuthority) GetCoordinatorTools() []*ApprovedTool {
 		return x.CoordinatorTools
 	}
 	return nil
+}
+
+func (x *ApprovedAuthority) GetConnectorScope() []string {
+	if x != nil {
+		return x.ConnectorScope
+	}
+	return nil
+}
+
+func (x *ApprovedAuthority) GetConnectorTaint() bool {
+	if x != nil && x.ConnectorTaint != nil {
+		return *x.ConnectorTaint
+	}
+	return false
 }
 
 // One offered tool, with the definition the model was given.
@@ -11234,7 +11256,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\astep_id\x18\x06 \x01(\tR\x06stepId\x12?\n" +
 	"\tauthority\x18\a \x01(\v2!.model_plane.v1.ApprovedAuthorityR\tauthority\x12\x1a\n" +
 	"\brevision\x18\b \x01(\rR\brevision\x12>\n" +
-	"\x1boriginal_action_fingerprint\x18\t \x01(\tR\x19originalActionFingerprint\"\xa8\x03\n" +
+	"\x1boriginal_action_fingerprint\x18\t \x01(\tR\x19originalActionFingerprint\"\x93\x04\n" +
 	"\x11ApprovedAuthority\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\tR\x04mode\x12\x1b\n" +
 	"\tplan_mode\x18\x02 \x01(\bR\bplanMode\x12#\n" +
@@ -11249,7 +11271,10 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\x05tools\x18\t \x03(\v2\x1c.model_plane.v1.ApprovedToolR\x05tools\x12\x16\n" +
 	"\x06digest\x18\n" +
 	" \x01(\tR\x06digest\x12I\n" +
-	"\x11coordinator_tools\x18\v \x03(\v2\x1c.model_plane.v1.ApprovedToolR\x10coordinatorTools\"m\n" +
+	"\x11coordinator_tools\x18\v \x03(\v2\x1c.model_plane.v1.ApprovedToolR\x10coordinatorTools\x12'\n" +
+	"\x0fconnector_scope\x18\f \x03(\tR\x0econnectorScope\x12,\n" +
+	"\x0fconnector_taint\x18\r \x01(\bH\x00R\x0econnectorTaint\x88\x01\x01B\x12\n" +
+	"\x10_connector_taint\"m\n" +
 	"\fApprovedTool\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12'\n" +
@@ -12304,6 +12329,7 @@ func file_model_plane_v1_orchestration_proto_init() {
 	}
 	file_model_plane_v1_verified_outcome_proto_init()
 	file_model_plane_v1_proof_bundle_proto_init()
+	file_model_plane_v1_orchestration_proto_msgTypes[39].OneofWrappers = []any{}
 	file_model_plane_v1_orchestration_proto_msgTypes[71].OneofWrappers = []any{
 		(*OrchestrationEvent_PlanTransitioned_)(nil),
 		(*OrchestrationEvent_TodoTransitioned_)(nil),

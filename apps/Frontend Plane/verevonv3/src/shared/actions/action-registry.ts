@@ -18,6 +18,14 @@ import {
   chatLibraryShareInput,
 } from '@/shared/actions/chat-library'
 import { reviewRunInput } from '@/shared/actions/chat-review'
+import {
+  connectionZdrAcknowledgeInput,
+  connectionZdrAcknowledgeOutput,
+  connectionZdrReadInput,
+  connectionZdrReadOutput,
+  connectionZdrRevokeInput,
+  connectionZdrRevokeOutput,
+} from '@/shared/actions/connection-zdr'
 import { checkMailEditLimits } from '@/shared/approvals/approval-edit-limits'
 
 const sourceInput = z.object({
@@ -2099,29 +2107,6 @@ const chatQueueInvocationInput = z.object({
     .optional(),
 })
 
-// The granted approval named here is the gate for the continuation, so the entry
-// is not approval-gated a second time: the claim token proves the caller holds
-// the pause it resumes. Not model-executable (see model-eligibility.ts).
-//
-// approvalId is absent for the park form (WS03 S8): the continue of a run the executor
-// parked, which has no approval. A present approvalId is never blank; the empty approval
-// id on the wire is the client's to write for the park form, never a caller's input.
-//
-// skipped is the skipped-site form ("Skip this site", EP-1 S2, D3-647): the approval named is the
-// person's DENIAL of a browser help pause, which spends nothing, and the run continues with that call
-// answered as skipped. It needs an approvalId, and is never part of the park form.
-const chatRunContinueInput = z
-  .object({
-    runId: z.string().min(1),
-    approvalId: z.string().min(1).optional(),
-    claimToken: z.string().min(1),
-    skipped: z.boolean().optional(),
-  })
-  .refine((input) => input.skipped !== true || input.approvalId !== undefined, {
-    message: 'a skipped site names the denied approval',
-    path: ['approvalId'],
-  })
-
 // The person's answer to a question a run put to them (build plan WS14 S3), or a skip. A
 // question is its own store with its own owner-only answer, never an approval: an answer is
 // information and carries no authority, so the entry is low risk and shares nothing with the
@@ -2135,6 +2120,63 @@ const chatAnswerQuestionAnswer = z
     text: z.string().max(2000).optional(),
   })
   .strict()
+
+// The granted approval named here is the gate for the continuation, so the entry
+// is not approval-gated a second time: the claim token proves the caller holds
+// the pause it resumes. Not model-executable (see model-eligibility.ts).
+//
+// approvalId is absent for the park form (WS03 S8): the continue of a run the executor
+// parked, which has no approval. A present approvalId is never blank; the empty approval
+// id on the wire is the client's to write for the park form, never a caller's input.
+//
+// skipped is the skipped-site form ("Skip this site", EP-1 S2, D3-647): the approval named is the
+// person's DENIAL of a browser help pause, which spends nothing, and the run continues with that call
+// answered as skipped. It needs an approvalId, and is never part of the park form.
+//
+// questionId, answers and questionSkip are the QUESTION form (WS14 S5): the continuation of a run
+// paused for its owner's answer (awaiting_input). It names the open question, carries exactly one of
+// the answers (at least one, at most four) or questionSkip, and has no approvalId: no approval is read
+// or spent. It is never the skipped-site form. answers or questionSkip without a questionId are refused.
+const chatRunContinueInput = z
+  .object({
+    runId: z.string().min(1),
+    approvalId: z.string().min(1).optional(),
+    claimToken: z.string().min(1),
+    skipped: z.boolean().optional(),
+    questionId: z.string().min(1).max(64).optional(),
+    answers: z.array(chatAnswerQuestionAnswer).max(4).optional(),
+    questionSkip: z.boolean().optional(),
+  })
+  .refine((input) => input.skipped !== true || input.approvalId !== undefined, {
+    message: 'a skipped site names the denied approval',
+    path: ['approvalId'],
+  })
+  .superRefine((input, ctx) => {
+    const answerCount = (input.answers ?? []).length
+    if (input.questionId === undefined) {
+      if (answerCount > 0 || input.questionSkip !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'answers and questionSkip belong to the question form, which names a questionId',
+          path: ['questionId'],
+        })
+      }
+      return
+    }
+    if (input.approvalId !== undefined) {
+      ctx.addIssue({ code: 'custom', message: 'the question form names no approval', path: ['approvalId'] })
+    }
+    if (input.skipped === true) {
+      ctx.addIssue({ code: 'custom', message: 'the question form is not the skipped-site form', path: ['skipped'] })
+    }
+    if ((input.questionSkip === true) === (answerCount > 0)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'a question continue carries either answers or questionSkip, exactly one of them',
+        path: ['answers'],
+      })
+    }
+  })
 
 const chatAnswerQuestionInput = z
   .object({
@@ -5328,7 +5370,7 @@ export const actionRegistry = [
   {
     id: 'chat.run.continue',
     label: 'Continue approved run',
-    description: 'Resume a run that paused for a granted approval: the approved call runs once under the authority the pause recorded, then the same run finishes. Streams the continuation. The claim token is single use, and every consumed approval is refused with 409 continuation_already_consumed, the same token included. The closed refusals, and what each says about the spend, live in chat-run-continue-contract.ts. A connected or error frame carrying approval_spent true is final: follow the run and never retry with a new token. After an ambiguous failure (a 502 upstream_unavailable, a 504, a network error, an error frame from the closed set without approval_spent, or a not_resumable, approval_not_found or continue_disabled that a spent approval can also get) do not assume either way: follow the run by its id with the existing run read; the run read is the arbiter. A retry with the same token is answered either with the continuation or with a refusal, and only 409 continuation_already_consumed means the click was spent; not_resumable, approval_not_found and continue_disabled leave the spend unknown. Following the run does not promise that the run is live: after continue_unavailable a run may still be recovered inside the recovery window, about 15 minutes from the consume. The thread\'s approved plan and its grant are not consumed. A PARKED run (one the executor parked at a round boundary) is continued through this same action in its park form: omit approvalId and send only runId and claimToken. No approval is read and nothing is spent, so a failure frame carrying park_continue true never says approval_spent. It uses the closed refusals, including park_not_restorable, park_route_unavailable and park_not_due, and the client follows the run by its id with the existing run read. The run read is the arbiter of whether the run stays parked: not_resumable and park_not_restorable say it does not, continue_outcome_unknown, continue_in_progress and a bare agent_dispatch_unavailable on a park stream leave that unknown, and every other park refusal leaves it parked.',
+    description: 'Resume a run that paused for a granted approval: the approved call runs once under the authority the pause recorded, then the same run finishes. Streams the continuation. The claim token is single use, and every consumed approval is refused with 409 continuation_already_consumed, the same token included. The closed refusals, and what each says about the spend, live in chat-run-continue-contract.ts. A connected or error frame carrying approval_spent true is final: follow the run and never retry with a new token. After an ambiguous failure (a 502 upstream_unavailable, a 504, a network error, an error frame from the closed set without approval_spent, or a not_resumable, approval_not_found or continue_disabled that a spent approval can also get) do not assume either way: follow the run by its id with the existing run read; the run read is the arbiter. A retry with the same token is answered either with the continuation or with a refusal, and only 409 continuation_already_consumed means the click was spent; not_resumable, approval_not_found and continue_disabled leave the spend unknown. Following the run does not promise that the run is live: after continue_unavailable a run may still be recovered inside the recovery window, about 15 minutes from the consume. The thread\'s approved plan and its grant are not consumed. A PARKED run (one the executor parked at a round boundary) is continued through this same action in its park form: omit approvalId and send only runId and claimToken. No approval is read and nothing is spent, so a failure frame carrying park_continue true never says approval_spent. It uses the closed refusals, including park_not_restorable, park_route_unavailable and park_not_due, and the client follows the run by its id with the existing run read. The run read is the arbiter of whether the run stays parked: not_resumable and park_not_restorable say it does not, continue_outcome_unknown, continue_in_progress and a bare agent_dispatch_unavailable on a park stream leave that unknown, and every other park refusal leaves it parked. A run paused for its owner\'s answer (awaiting_input) is continued through this action in its question form (runId, questionId, answers or questionSkip, claimToken); the answer is recorded if still open and the same run continues with it; nothing is approved and no approval is spent. Failure frames carry question_continue true, and only question_answer_released means the client sends the answer once as the next message.',
     ownerPlane: 'model',
     risk: 'high',
     requiresApproval: false,
@@ -5655,6 +5697,39 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: reviewRunInput,
     outputSchema: reviewRunOutput,
+  },
+  {
+    id: 'connection_zdr.read',
+    label: 'Read a model connection\'s zero data retention assessment',
+    description: "Read whether a model connection can give zero data retention, the acknowledgement in force for it and the server-composed wording for a locale and variant. Read only: nothing is changed or stored in the browser. Owner only; the gateway forwards the person's own bearer and Integration Core owns the wording and the record. Off until the zero-data-retention acknowledgement switch is on. Never model-executable: a model does not read the wording a person is asked to accept.",
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: connectionZdrReadInput,
+    outputSchema: connectionZdrReadOutput,
+  },
+  {
+    id: 'connection_zdr.acknowledge',
+    label: 'Acknowledge a model connection\'s zero data retention limit',
+    description: "Writes the person's acknowledgement (an effect): the owner of a model connection that cannot give zero data retention accepts, once, the exact assessment and wording they were shown, so the connection may be used while their organisation has zero data retention on. Takes the digest and text version from the read; a stale pair is refused with zdr_assessment_changed and nothing is recorded. Needs the person's confirmation on the wording shown. Owner only. Never model-executable: a model never accepts a waiver on a person's behalf.",
+    ownerPlane: 'ingestion',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: connectionZdrAcknowledgeInput,
+    outputSchema: connectionZdrAcknowledgeOutput,
+  },
+  {
+    id: 'connection_zdr.revoke',
+    label: 'Revoke a model connection\'s zero data retention acknowledgement',
+    description: "Writes the person's revoke (an effect): ends the owner's acknowledgement of a model connection, so the connection is no longer used while their organisation has zero data retention on. Idempotent: revoking again ends nothing. Needs the person's confirmation. Owner only. Never model-executable: a model does not change the person's waivers.",
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: connectionZdrRevokeInput,
+    outputSchema: connectionZdrRevokeOutput,
   },
   {
     id: 'chat.submit_feedback',

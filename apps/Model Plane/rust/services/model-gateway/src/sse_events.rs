@@ -621,6 +621,15 @@ pub enum ChatEvent {
         /// When the run can be resumed (RFC 3339, UTC), or `None` when that time is unreadable.
         resume_after: Option<String>,
     },
+    /// The run paused for the owner's answer (WS14 S5): its `ask_user` question is waiting, the run
+    /// stays open and is resumed through the question form of `/continue`. A control event, ungated: a
+    /// client that never opted in still has to hear that its turn waits on an answer. Ids only; the
+    /// question itself rides the `user_question` frame sent just before it. `question_id` is empty when
+    /// the question could not be read.
+    AwaitingInput {
+        run_id: String,
+        question_id: String,
+    },
     /// A goal turn was settled (EP-7 S2): the goal's spend against its caps and its status after
     /// the turn. A control event, ungated: the goal bar needs it whatever the client opted into.
     /// Ids, counts and closed tokens only; the objective never rides it.
@@ -767,6 +776,8 @@ impl ChatEvent {
             | ChatEvent::Compaction { .. }
             | ChatEvent::ContextChange { .. }
             | ChatEvent::RunParked { .. }
+            // The run waits on the owner's answer (WS14 S5): the card needs it whatever the client opted into.
+            | ChatEvent::AwaitingInput { .. }
             // A goal's spend after a turn (EP-7 S2): the goal bar shows it on every client.
             | ChatEvent::GoalProgress { .. }
             // The question a run waits on (WS14 S4): the card needs it whatever the client opted into.
@@ -815,6 +826,7 @@ impl ChatEvent {
             ChatEvent::Compaction { .. } => "compaction",
             ChatEvent::ContextChange { .. } => "context_change",
             ChatEvent::RunParked { .. } => "run_parked",
+            ChatEvent::AwaitingInput { .. } => "awaiting_input",
             ChatEvent::GoalProgress { .. } => "goal_progress",
             ChatEvent::Title { .. } => "title",
             ChatEvent::FollowUps { .. } => "follow_ups",
@@ -1280,6 +1292,16 @@ impl ChatEvent {
                 "status": "parked",
                 "reason": reason.as_str(),
                 "resume_after": resume_after,
+            }),
+            // The keys are the `awaiting_approval` frame's, plus the question's id (WS14 S5).
+            ChatEvent::AwaitingInput {
+                run_id,
+                question_id,
+            } => json!({
+                "run_id": run_id,
+                "request_id": request_id,
+                "question_id": question_id,
+                "status": "awaiting_input",
             }),
             // A budget the goal does not set is `null`, so a client reads "none" without a guess.
             ChatEvent::GoalProgress {
@@ -3688,6 +3710,7 @@ mod payload_contract {
         "Compaction",
         "ContextChange",
         "RunParked",
+        "AwaitingInput",
         "GoalProgress",
         "SandboxState",
     ];
@@ -3728,6 +3751,7 @@ mod payload_contract {
             ChatEvent::Compaction { .. } => "Compaction",
             ChatEvent::ContextChange { .. } => "ContextChange",
             ChatEvent::RunParked { .. } => "RunParked",
+            ChatEvent::AwaitingInput { .. } => "AwaitingInput",
             ChatEvent::GoalProgress { .. } => "GoalProgress",
             ChatEvent::SandboxState { .. } => "SandboxState",
         }
@@ -4213,6 +4237,8 @@ mod payload_contract {
                 reason: mp_contracts::loop_fold::ParkReason::ProviderExhausted,
                 resume_after: Some(s("2026-10-20T12:00:00Z")),
             },
+            ChatEvent::AwaitingInput { run_id: s("run-1"), question_id: s("") },
+            ChatEvent::AwaitingInput { run_id: s("run-1"), question_id: s("q_1") },
             ChatEvent::GoalProgress {
                 goal_id: s("goal_1"),
                 turn_no: 1,

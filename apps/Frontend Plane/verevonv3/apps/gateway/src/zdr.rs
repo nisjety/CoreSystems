@@ -340,6 +340,13 @@ pub(crate) fn zdr_refusal_body(code: &str) -> Value {
             true,
             "retry",
         )
+    } else if code == ZDR_WAIVER_ROUTE_MISMATCH {
+        (
+            ZDR_WAIVER_ROUTE_MISMATCH,
+            "This request names a route other than the one its zero data retention decision was made for. The request was not sent to any model.",
+            false,
+            "none",
+        )
     } else {
         (
             ZDR_DURABLE_MUTATION_FORBIDDEN,
@@ -360,6 +367,9 @@ pub(crate) fn zdr_refusal_body(code: &str) -> Value {
 
 pub(crate) const ZDR_DURABLE_MUTATION_FORBIDDEN: &str = "zdr_durable_mutation_forbidden";
 pub(crate) const ZDR_DECISION_UNAVAILABLE: &str = "zdr_decision_unavailable";
+/// The catalogue code of a turn whose retention decision was made for a different route than the one it
+/// names (a waived turn that carries a Space reference).
+pub(crate) const ZDR_WAIVER_ROUTE_MISMATCH: &str = "zdr_waiver_route_mismatch";
 
 /// A durable write of stored content is refused for a Zero Data Retention org, typed, before any
 /// Control or model call: the guard behind every `DurableWrite` row of the Space surface registry

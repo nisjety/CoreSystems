@@ -139,6 +139,13 @@ pub(crate) struct AppState {
     /// model-gateway's `EXECUTION_LOOP_PARKING_ENABLED`: on in front of a gateway with parking
     /// off, the park form is answered 400 `continue_incomplete` (reported as `model_error`).
     pub(crate) continue_park_form: bool,
+    /// WS14 S5: whether `POST /api/v1/orchestration/runs/{run_id}/continue` forwards the QUESTION
+    /// form of its body (a `question_id` with the answers or a skip), which continues a run paused
+    /// for its owner's answer. Read once from `VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED` (exactly
+    /// `true`, default off) in `build_state`, never in a handler. Off, a body naming `question_id`
+    /// is the 400 `invalid_request`, and every other body is exactly what it was. Flip it together
+    /// with model-gateway's question-continue switch.
+    pub(crate) continue_question_form: bool,
     /// WS10-S5: whether the org model-entitlement admin routes (`/api/v1/orgs/{id}/model-entitlement`
     /// and its `explain`), the `org.set_model_entitlement` action's write and the ZDR switch
     /// gate's `hidden_count` read are live. Read once from `MODEL_ENTITLEMENT_ADMIN_ENABLED`
@@ -839,6 +846,7 @@ pub(crate) async fn build_state() -> Result<AppState> {
         allow_dev_actor_headers: dev_only_flag("ALLOW_DEV_ACTOR_HEADERS"),
         allow_dev_auth_bypass: dev_only_flag("ALLOW_DEV_AUTH_BYPASS"),
         continue_park_form: continue_park_form_enabled(),
+        continue_question_form: continue_question_form_enabled(),
         model_entitlement_admin_enabled: model_entitlement_admin_enabled(),
         zdr_effective_posture_read: zdr_effective_posture_read_from(
             env::var("GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED")
@@ -1034,6 +1042,22 @@ fn continue_park_form_enabled() -> bool {
 /// Exactly the word `true`: not trimmed, not case-folded, and none of the other spellings
 /// `env_bool` accepts. Anything else, including an unset variable, is off.
 fn continue_park_form_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// `VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED`, read once by `build_state` (WS14 S5). Off unless
+/// it is exactly `true`.
+fn continue_question_form_enabled() -> bool {
+    continue_question_form_from(
+        env::var("VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Exactly the word `true`, for the same reason as `continue_park_form_from`: not trimmed, not
+/// case-folded, and none of the other spellings `env_bool` accepts.
+fn continue_question_form_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
@@ -1272,8 +1296,9 @@ fn canonical_public_origin(value: &str, production_like: bool) -> Result<String>
 mod tests {
     use super::{
         canonical_public_origin, chat_artifact_promote_from, continue_park_form_from,
-        dev_flags_allowed, model_entitlement_admin_from, service_token_is_secure,
-        standard_http_client, validate_service_token_distinctness, SpaceFeatureFlags,
+        continue_question_form_from, dev_flags_allowed, model_entitlement_admin_from,
+        service_token_is_secure, standard_http_client, validate_service_token_distinctness,
+        SpaceFeatureFlags,
     };
 
     #[tokio::test]
@@ -1431,6 +1456,62 @@ mod tests {
         ] {
             assert!(!continue_park_form_from(value), "{value:?}");
         }
+    }
+
+    /// WS14 S5: the question form of `/continue` is off unless the variable is exactly `true`.
+    #[test]
+    fn the_question_form_flag_is_on_only_for_the_exact_word_true() {
+        assert!(continue_question_form_from(Some("true")));
+        for value in [
+            None,
+            Some(""),
+            Some("false"),
+            Some("TRUE"),
+            Some("True"),
+            Some(" true"),
+            Some("true "),
+            Some("1"),
+            Some("yes"),
+            Some("on"),
+            Some("truee"),
+        ] {
+            assert!(!continue_question_form_from(value), "{value:?}");
+        }
+    }
+
+    /// WS14 S5: the question flag is read once, in `build_state`, from the environment, and the
+    /// compose file declares it once, default off.
+    #[test]
+    fn the_question_form_flag_is_read_once_by_build_state_and_declared_once_in_compose() {
+        let config = include_str!("config.rs").replace("
+", "
+");
+        let production = config.split("#[cfg(test)]
+mod tests").next().unwrap_or(&config);
+        assert_eq!(
+            production
+                .matches("\"VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED\"")
+                .count(),
+            1
+        );
+        assert_eq!(
+            production
+                .matches("continue_question_form: continue_question_form_enabled(),")
+                .count(),
+            1
+        );
+        let compose = include_str!("../../../docker-compose.yml").replace("
+", "
+");
+        assert_eq!(
+            compose
+                .matches(
+                    "VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED: ${VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED:-false}
+"
+                )
+                .count(),
+            1
+        );
     }
 
     /// WS10-S5: the model-entitlement admin switch is on only for the exact word `true`, and is

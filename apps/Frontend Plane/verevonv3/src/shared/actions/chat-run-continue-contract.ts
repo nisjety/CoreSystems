@@ -9,7 +9,7 @@
 // There are two surfaces.
 //
 // HTTP. A refusal that arrives before the stream opens. The model-gateway route
-// answers `{ error: { code, message } }`; the BFF relays the nine codes below,
+// answers `{ error: { code, message } }`; the BFF relays the fourteen codes below,
 // with the upstream status and its own fixed message, and turns every other
 // upstream error into `model_error` (a 401 into `unauthorized`).
 //
@@ -60,6 +60,16 @@
 //      it carries the marker (a click spent is never forgotten, and it is never offered the
 //      retry of regime 3), and the park readers read none of it. A marked frame whose
 //      `approval_spent` is anything but exactly `true` is read by no guard.
+//   Q. A QUESTION continue (WS14 S5): the continuation of a run paused for its owner's answer
+//      (`awaiting_input`). Its request names a `questionId` with the answers or a skip, and an
+//      empty approval id: no approval is read and none is spent. A refused or failed question
+//      continue answers with an `error` frame that carries `question_continue: true` (exactly) and
+//      a code. The codes are the same closed tokens the other regimes use, plus the question's own,
+//      and MEAN something else here: a `question_continue` frame is read ONLY by
+//      [chatRunContinueQuestionRefusalOf], and every other frame reader above returns null for it,
+//      so a question code is never given an approval's guidance. Only `question_answer_released`
+//      says the run did not take the answer and the client sends it ONCE as the next message
+//      (`sendAsMessage`); nothing else ever says resend.
 //
 // What the spend flag can honestly say. `no` is claimed only for a refusal that
 // cannot be produced after a consume. Most refusals can: the gateway checks the
@@ -70,7 +80,7 @@
 // `approval_not_found` for an approval that WAS spent. Those three are `unknown`.
 //
 // Reading rule for callers. Read a thrown value with
-// [chatRunContinueHttpRefusalOf] first (the nine listed pairs), then with
+// [chatRunContinueHttpRefusalOf] first (the fourteen listed pairs), then with
 // [chatRunContinueTransportFailureOf] (everything else that failed: a 502
 // `upstream_unavailable`, a 504, a network error, an unlisted body). Between them
 // they read every failed request, and none of them says the approval was unspent
@@ -121,6 +131,12 @@ export const CHAT_RUN_CONTINUE_HTTP_REFUSALS = [
   { code: 'continuation_already_consumed', status: 409 },
   { code: 'continue_unavailable', status: 503 },
   { code: 'org_agents_paused', status: 403 },
+  // The question form (WS14 S5). `not_resumable` (409) above is shared with it.
+  { code: 'question_not_found', status: 404 },
+  { code: 'question_expired', status: 410 },
+  { code: 'question_already_answered', status: 409 },
+  { code: 'invalid_answer', status: 422 },
+  { code: 'question_not_resumable', status: 409 },
 ] as const
 
 export type ChatRunContinueHttpRefusalCode = (typeof CHAT_RUN_CONTINUE_HTTP_REFUSALS)[number]['code']
@@ -132,7 +148,9 @@ export type ChatRunContinueHttpRefusalCode = (typeof CHAT_RUN_CONTINUE_HTTP_REFU
  * `park_route_unavailable` and `park_not_due`, are its refusals of the resume of a
  * PARKED run, WS03 S8: the gateway sends them only on a park continue, which never
  * spends an approval), 2 the gateway derives from the status (a vanished approval
- * or run, a zero-retention refusal) and 3 the gateway makes itself.
+ * or run, a zero-retention refusal) and 3 the gateway makes itself: 26 tokens. After them come
+ * 6 tokens of the QUESTION form (WS14 S5), which only a frame marked `question_continue: true`
+ * carries and only [chatRunContinueQuestionRefusalOf] reads: 32 in all.
  */
 export const CHAT_RUN_CONTINUE_FRAME_REFUSALS = [
   // Message tokens carried by the executor.
@@ -164,6 +182,13 @@ export const CHAT_RUN_CONTINUE_FRAME_REFUSALS = [
   'continue_refused',
   'continue_unreachable',
   'continue_outcome_unknown',
+  // The question form's own tokens (WS14 S5), after the base ones.
+  'question_answer_released',
+  'question_resume_unavailable',
+  'question_not_answered',
+  'question_expired',
+  'question_not_found',
+  'question_not_resumable',
 ] as const
 
 export type ChatRunContinueFrameRefusalCode = (typeof CHAT_RUN_CONTINUE_FRAME_REFUSALS)[number]
@@ -309,6 +334,15 @@ export const CHAT_RUN_CONTINUE_HTTP_EFFECTS: Readonly<
   // so a retry after a spend can be refused by it too, as with a switch flipped off: the spend
   // stays unknown, and no retry is offered.
   org_agents_paused: UNKNOWN_FOLLOW,
+  // The question form (WS14 S5) reads no approval, so there was nothing to spend: `no` says only
+  // that. A question that is gone, already answered, or refused for its answer is not followed; a
+  // question that is not in a state to continue the run is, because the run read says what became
+  // of it. (`not_resumable` above is shared with the question form and keeps its own row.)
+  question_not_found: UNSPENT,
+  question_expired: UNSPENT,
+  question_already_answered: UNSPENT,
+  invalid_answer: UNSPENT,
+  question_not_resumable: { approvalSpent: 'no', retryable: false, followRun: true },
 }
 
 /** Regime 1: a frame of a continuation the gateway pre-consumed. */
@@ -434,6 +468,17 @@ function isParkMarked(record: Record<string, unknown>): boolean {
 }
 
 /**
+ * Whether a frame is marked as a frame of a QUESTION continue (regime Q, WS14 S5). Only an exact
+ * `true` is the marker. EVERY frame reader of the other regimes returns null for such a frame, and
+ * [chatRunContinueQuestionRefusalOf] is the only one that reads it: the codes it shares with the
+ * approval and park regimes (`not_resumable`, `continue_in_progress`, `continuation_already_consumed`)
+ * mean something else here, and must never be given an approval's guidance.
+ */
+function isQuestionMarked(record: Record<string, unknown>): boolean {
+  return record.question_continue === true
+}
+
+/**
  * Reads a failed continuation request (an `ApiError`, or anything with a string
  * `code` and a numeric `status`). The code AND the status must be a listed pair,
  * as the BFF relays them; anything else is null, which says nothing about the
@@ -499,7 +544,7 @@ export function chatRunContinueTransportFailureOf(input: unknown): ChatRunContin
  */
 export function chatRunContinueFrameRefusalOf(frame: unknown): ChatRunContinueFrameRefusal | null {
   const record = asRecord(frame)
-  if (!record || record.approval_spent !== true || !isFrameRefusalCode(record.code)) return null
+  if (!record || isQuestionMarked(record) || record.approval_spent !== true || !isFrameRefusalCode(record.code)) return null
   return { regime: 1, code: record.code, ...CHAT_RUN_CONTINUE_SPENT_EFFECT }
 }
 
@@ -512,7 +557,7 @@ export function chatRunContinueFrameRefusalOf(frame: unknown): ChatRunContinueFr
  */
 export function chatRunContinueSpentRunEndOf(frame: unknown): ChatRunContinueSpentRunEnd | null {
   const record = asRecord(frame)
-  if (!record || record.approval_spent !== true) return null
+  if (!record || isQuestionMarked(record) || record.approval_spent !== true) return null
   const code = (CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES as readonly unknown[]).find((candidate) => candidate === record.code)
   if (code === undefined) return null
   return { regime: 1, code: code as ChatRunContinueSpentRunEndCode, ...CHAT_RUN_CONTINUE_SPENT_EFFECT }
@@ -533,7 +578,7 @@ export function chatRunContinueSpentSubscriptionFailureOf(
   frame: unknown,
 ): ChatRunContinueSpentSubscriptionFailure | null {
   const record = asRecord(frame)
-  if (!record || record.approval_spent !== true) return null
+  if (!record || isQuestionMarked(record) || record.approval_spent !== true) return null
   const code = (CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES as readonly unknown[]).find(
     (candidate) => candidate === record.code,
   )
@@ -550,7 +595,8 @@ export function chatRunContinueSpentSubscriptionFailureOf(
  */
 export function chatRunContinueUnflaggedRefusalOf(frame: unknown): ChatRunContinueFrameRefusal | null {
   const record = asRecord(frame)
-  if (!record || record.approval_spent === true || isParkMarked(record) || !isFrameRefusalCode(record.code)) return null
+  if (!record || record.approval_spent === true || isParkMarked(record) || isQuestionMarked(record)) return null
+  if (!isFrameRefusalCode(record.code)) return null
   if ((CHAT_RUN_CONTINUE_SPENT_ONLY_FRAME_REFUSALS as readonly string[]).includes(record.code)) return null
   return { regime: 2, code: record.code, ...CHAT_RUN_CONTINUE_UNFLAGGED_EFFECT }
 }
@@ -563,7 +609,7 @@ export function chatRunContinueUnflaggedRefusalOf(frame: unknown): ChatRunContin
  */
 export function chatRunContinueSpentConnected(frame: unknown): ChatRunContinueEffect | null {
   const record = asRecord(frame)
-  if (!record || record.ok !== true || record.approval_spent !== true) return null
+  if (!record || isQuestionMarked(record) || record.ok !== true || record.approval_spent !== true) return null
   return CHAT_RUN_CONTINUE_SPENT_EFFECT
 }
 
@@ -590,7 +636,8 @@ function runStaysParkedAfter(code: string): ChatRunContinueRunStaysParked {
  */
 export function chatRunContinueParkRefusalOf(frame: unknown): ChatRunContinueParkFailure | null {
   const record = asRecord(frame)
-  if (!record || !isParkMarked(record) || 'approval_spent' in record || !isFrameRefusalCode(record.code)) return null
+  if (!record || isQuestionMarked(record)) return null
+  if (!isParkMarked(record) || 'approval_spent' in record || !isFrameRefusalCode(record.code)) return null
   return {
     regime: 'park',
     code: record.code,
@@ -613,7 +660,7 @@ export function chatRunContinueParkDispatchUnavailableOf(
 ): ChatRunContinueParkFailure | null {
   if (parkStream !== true) return null
   const record = asRecord(frame)
-  if (!record || record.code !== 'agent_dispatch_unavailable') return null
+  if (!record || isQuestionMarked(record) || record.code !== 'agent_dispatch_unavailable') return null
   if ('park_continue' in record || 'approval_spent' in record) return null
   return {
     regime: 'park',
@@ -635,4 +682,52 @@ export function chatRunContinueParkFailureOf(
   options?: { readonly parkStream?: boolean },
 ): ChatRunContinueParkFailure | null {
   return chatRunContinueParkRefusalOf(frame) ?? chatRunContinueParkDispatchUnavailableOf(frame, options?.parkStream === true)
+}
+
+/** What a client may do after a failed QUESTION continue (regime Q, WS14 S5). */
+export type ChatRunContinueQuestionFailure = {
+  readonly code: string
+  /**
+   * Whether the client sends the answer ONCE as the next message: true only for
+   * `question_answer_released`, the run's own statement that it did not take the answer.
+   */
+  readonly sendAsMessage: boolean
+  /**
+   * `released`: the answer is to be sent as a message. `gone`: the question or the run cannot
+   * take the answer any more; nothing is resent. `retry`: a continue for this question is in
+   * flight; read the run, do not resend. `unknown`: the outcome is not known; read the run.
+   */
+  readonly kind: 'released' | 'gone' | 'retry' | 'unknown'
+}
+
+const QUESTION_GONE_CODES = [
+  'continuation_already_consumed',
+  'question_expired',
+  'question_not_found',
+  'question_not_resumable',
+  'not_resumable',
+  'run_ended',
+  'durable_mutation_forbidden',
+  'resume_forbidden',
+] as const
+
+/**
+ * Regime Q, the marked frames: an `error` frame of a question continue, which carries
+ * `question_continue === true` exactly and a string `code`. It is the ONLY reader of such a frame;
+ * every other frame reader here is null for it. The code is mapped by this table alone:
+ * `question_answer_released` is `released` and the only code with `sendAsMessage: true`;
+ * `continuation_already_consumed`, `question_expired`, `question_not_found`,
+ * `question_not_resumable`, `not_resumable`, `run_ended`, `durable_mutation_forbidden` and
+ * `resume_forbidden` are `gone`; `continue_in_progress` is `retry`; anything else, a code outside
+ * the closed vocabulary included (`question_resume_unavailable`, `question_not_answered`), is
+ * `unknown` and never says resend. Pure.
+ */
+export function chatRunContinueQuestionRefusalOf(frame: unknown): ChatRunContinueQuestionFailure | null {
+  const record = asRecord(frame)
+  if (!record || !isQuestionMarked(record) || typeof record.code !== 'string') return null
+  const code = record.code
+  if (code === 'question_answer_released') return { code, sendAsMessage: true, kind: 'released' }
+  if ((QUESTION_GONE_CODES as readonly string[]).includes(code)) return { code, sendAsMessage: false, kind: 'gone' }
+  if (code === 'continue_in_progress') return { code, sendAsMessage: false, kind: 'retry' }
+  return { code, sendAsMessage: false, kind: 'unknown' }
 }

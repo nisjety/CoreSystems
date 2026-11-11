@@ -58,6 +58,10 @@ function answerState(turn: ChatTurn, displayContent: string): AnswerState {
       ...(turn.unsavedContent?.trim() ? { unsaved: turn.unsavedContent } : {}),
       ...(turn.failureAction ? { action: turn.failureAction } : {}),
       ...(turn.retryAt ? { retryAt: turn.retryAt } : {}),
+      // Only a zero-retention refusal that asks the reader to review the connection needs it.
+      ...(turn.failureAction === 'open_integrations' && turn.subscriptionConnectionId
+        ? { connectionId: turn.subscriptionConnectionId }
+        : {}),
     }
   }
   return {

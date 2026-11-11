@@ -13133,6 +13133,22 @@ async fn requested_question_for_run(
     })
 }
 
+/// The `user_question` card event of a run's question (WS14 S4, S5): the id, the delivery, when it
+/// expires, the items as the card reads them and, for a server's question, who asked.
+fn user_question_event(
+    question: &mp_contracts::model_plane::v1::RunQuestion,
+) -> crate::sse_events::ChatEvent {
+    let fields = crate::http_routes::run_question_value(question);
+    crate::sse_events::ChatEvent::UserQuestion {
+        question_id: question.id.clone(),
+        delivery: question.delivery.clone(),
+        expires_at: fields["expires_at"].as_str().map(str::to_owned),
+        items: fields["items"].clone(),
+        origin: fields["origin"].as_str().map(str::to_owned),
+        origin_label: fields["origin_label"].as_str().map(str::to_owned),
+    }
+}
+
 #[cfg(test)]
 mod ask_user_tests {
     use super::*;
@@ -13981,6 +13997,10 @@ pub(crate) enum AgenticRunOutcome {
     Completed,
     Failed,
     AwaitingApproval,
+    /// The run paused for the owner's answer to an `ask_user` question (WS14 S5): non-terminal, nothing
+    /// appended and no receipt written. The run stays open and is resumed through the question form of
+    /// `/continue`.
+    AwaitingInput,
     /// The executor parked the run (WS03 S8-A): a typed, recoverable stop saved as a durable
     /// park; the run stays open and is resumed through the park form of `/continue`.
     Parked,
@@ -14040,6 +14060,8 @@ fn classify_agentic_run_outcome(status: &str) -> AgenticRunOutcome {
         // Execution Core deliberately uses this non-terminal status after it
         // has persisted the approval record. Gateway must preserve that pause.
         "awaiting_approval" => AgenticRunOutcome::AwaitingApproval,
+        // Non-terminal too (WS14 S5): the run waits for the owner's answer to its question.
+        "awaiting_input" => AgenticRunOutcome::AwaitingInput,
         // Non-terminal too (WS03 S8-A): the run is parked, nothing was appended and no
         // receipt was written. Read only with a park reason this build knows
         // ([`run_parked_event`]); otherwise the stream treats it as an unknown status.
@@ -14510,6 +14532,10 @@ fn agentic_run_stream(
         // executor resumes it or session-core's park TTL ends it. Computed once, here, so no
         // dispatch arm is guarded by the resume itself.
         let parking = resume.as_ref().is_some_and(|r| r.mode == "park");
+        // A question continuation (WS14 S5): the resume of a run that paused for the owner's answer. It
+        // spends nothing and the gateway never terminalizes it: every failure below that happens before the
+        // executor starts it is a `question_continue` frame, and the run stays paused.
+        let question_continuing = resume.as_ref().is_some_and(|r| !r.question_id.is_empty());
 
         // A Stop reaches this run while it is followed: the cancel route, a durable cancel of the
         // run and a peer's Stop over the bus all find the entry made here. It is in place before
@@ -14735,6 +14761,19 @@ fn agentic_run_stream(
                         .await;
                     return;
                 }
+                if question_continuing {
+                    // A question continuation skips the pre-consume check (it spends nothing), so a
+                    // credential that is not valid metadata is answered here. Nothing was claimed,
+                    // started or published; the run stays paused for its answer.
+                    let _ = tx
+                        .send(Ok(question_refusal_event(
+                            &request_id,
+                            &run.run_id,
+                            "continue_refused",
+                        )))
+                        .await;
+                    return;
+                }
                 if spend.is_spent() {
                     // The click is already spent and nothing was sent. The gateway never
                     // terminalizes a pre-consumed continuation: the run's renewed recovery
@@ -14887,6 +14926,43 @@ fn agentic_run_stream(
                     .await;
                 let _ = tx
                     .send(Ok(park_refusal_event(
+                        &request_id,
+                        &run.run_id,
+                        park_frame_token(&failure),
+                    )))
+                    .await;
+                return;
+            }
+            ParkDispatch::Pass(result) => result,
+        };
+
+        // A question continuation the executor did not start (WS14 S5): intercepted HERE, as the park
+        // continue's is, so the dispatch match keeps its committed arms. The gateway never terminalizes it
+        // and consumes nothing: RUN_STARTED is already on the run subject, so the attempt is closed there
+        // by one event, and the client gets one final `question_continue` frame by closed code, never the
+        // executor's message text.
+        let dispatch_result = match park_dispatch_of(question_continuing, dispatch_result) {
+            ParkDispatch::Refused(status) => {
+                let failure = classify_question_dispatch_failure(&status);
+                tracing::warn!(
+                    code = ?status.code(),
+                    ?failure,
+                    run_id = %run.run_id,
+                    "RunAgent of a question continuation did not start; the run stays paused"
+                );
+                let question_closing = build_stream_envelope(
+                    &request_id,
+                    park_dispatch_run_event(&failure),
+                    &org_id,
+                    &user_id,
+                    &model,
+                );
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &question_closing)
+                    .await;
+                let _ = tx
+                    .send(Ok(question_refusal_event(
                         &request_id,
                         &run.run_id,
                         park_frame_token(&failure),
@@ -15344,6 +15420,44 @@ fn agentic_run_stream(
                     .await;
                 return;
             }
+            // The run paused for the owner's answer (WS14 S5): non-terminal, nothing appended, no final
+            // frame and no receipt. The run subject is told RUN_AWAITING_INPUT; the owner's stream gets the
+            // question's card (whatever `max_questions` says, since a continuation offers none) and then
+            // `awaiting_input`. A question that cannot be read still gets the frame, with an empty id.
+            AgenticRunOutcome::AwaitingInput => {
+                let paused = build_stream_envelope(
+                    &request_id,
+                    "RUN_AWAITING_INPUT",
+                    &org_id,
+                    &user_id,
+                    &model,
+                );
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &paused)
+                    .await;
+                // A zero-retention or waived run stores no question, so none is looked up.
+                let question = if zdr || retention_class.is_some() {
+                    None
+                } else {
+                    requested_question_for_run(&state, &run.run_id, &org_id, &model_bearer).await
+                };
+                let question_id = match question.as_ref() {
+                    Some(question) => {
+                        let _ = tx
+                            .send(Ok(user_question_event(question).to_sse(&request_id)))
+                            .await;
+                        question.id.clone()
+                    }
+                    None => String::new(),
+                };
+                let event = crate::sse_events::ChatEvent::AwaitingInput {
+                    run_id: run.run_id.clone(),
+                    question_id,
+                };
+                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
+                return;
+            }
             AgenticRunOutcome::Failed => {
                 let failed =
                     build_stream_envelope(&request_id, "RUN_FAILED", &org_id, &user_id, &model);
@@ -15494,15 +15608,7 @@ fn agentic_run_stream(
             if let Some(question) =
                 requested_question_for_run(&state, &run.run_id, &org_id, &model_bearer).await
             {
-                let fields = crate::http_routes::run_question_value(&question);
-                let event = crate::sse_events::ChatEvent::UserQuestion {
-                    question_id: question.id,
-                    delivery: question.delivery,
-                    expires_at: fields["expires_at"].as_str().map(str::to_owned),
-                    items: fields["items"].clone(),
-                    origin: fields["origin"].as_str().map(str::to_owned),
-                    origin_label: fields["origin_label"].as_str().map(str::to_owned),
-                };
+                let event = user_question_event(&question);
                 let _ = tx.send(Ok(event.to_sse(&request_id))).await;
             }
         }
@@ -20996,7 +21102,23 @@ pub(crate) struct ContinueRunRequest {
     /// ([`continue_skipped_site`]). Absent is `false`, and every other body is the committed one.
     #[serde(default)]
     pub skipped: bool,
+    /// The question form (WS14 S5): the `resume` question this continuation answers (its `q_` id). Absent
+    /// is empty, and every other body is the committed one. `approval_id` stays a required key; the
+    /// question form sends it present and exactly empty, as the park form does.
+    #[serde(default)]
+    pub question_id: String,
+    /// The answers to the question's items (question form only): at most
+    /// [`mp_contracts::user_question::MAX_ITEMS`], and exactly one of this list or `question_skip`.
+    #[serde(default)]
+    pub answers: Vec<ContinueAnswerItem>,
+    /// The owner skipped the question (question form only). Named apart from the skipped-site `skipped`
+    /// flag on purpose.
+    #[serde(default)]
+    pub question_skip: bool,
 }
+
+/// One answer item of the question form of `/continue`: the answer route's own item type.
+pub(crate) type ContinueAnswerItem = crate::http_routes::AnswerQuestionItemBody;
 
 /// The two checks that need nothing but the switch and the caller's credential, so
 /// they can run before the run, the approval or any upstream is read: the route is
@@ -22163,6 +22285,481 @@ async fn continue_skipped_site(
     ))
 }
 
+// ---- The question form (WS14 S5): the answer to an `ask_user` question that paused its run, through the
+// one `/continue` route. The question is session-core's: this gateway reads it, records the answer only
+// while it is still requested, and launches the resume. Nothing is spent here (`NotSpent`), and the
+// gateway never consumes a question: execution-core claims it and applies or releases the stored row.
+
+/// Whether the deployment accepts the question form of `/continue` and relays `awaiting_input`
+/// (`AGENT_ASK_USER_RESUME_ENABLED`, read once per process so a run cannot see it change). Only the
+/// literal `true` enables it, the default is off, and it takes effect only with the loop resume switch
+/// ([`mp_contracts::loop_fold::loop_resume_enabled`]), which the executor needs to resume in place.
+fn ask_resume_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        ask_resume_switch(std::env::var("AGENT_ASK_USER_RESUME_ENABLED").ok().as_deref())
+    }) && mp_contracts::loop_fold::loop_resume_enabled()
+}
+
+/// The strict reading of `AGENT_ASK_USER_RESUME_ENABLED`: only the literal `true` enables it.
+fn ask_resume_switch(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// The HTTP refusals of the question form, each with the status it is sent with. The first four are the
+/// route's own closed vocabulary ([`CONTINUE_HTTP_REFUSALS`]); the last three are the question's. A
+/// refusal Session Core makes of the answer itself (`invalid_answer` 422) keeps its typed body from
+/// `http_routes::record_question_answer`.
+pub(crate) const CONTINUE_QUESTION_HTTP_REFUSALS: &[(&str, StatusCode)] = &[
+    ("continue_disabled", StatusCode::CONFLICT),
+    ("continue_incomplete", StatusCode::BAD_REQUEST),
+    ("not_resumable", StatusCode::CONFLICT),
+    ("missing_bearer", StatusCode::UNAUTHORIZED),
+    ("question_not_found", StatusCode::NOT_FOUND),
+    ("question_not_resumable", StatusCode::CONFLICT),
+    ("question_expired", StatusCode::GONE),
+];
+
+/// The typed HTTP refusal of the question form: the closed code and its plain words, in the route's
+/// `{ error: { code, message } }` shape.
+fn question_continue_error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
+    debug_assert!(
+        CONTINUE_QUESTION_HTTP_REFUSALS.contains(&(code, status)),
+        "{code} with {status} is not in the closed question-continue HTTP vocabulary"
+    );
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": code.replace('_', " ") } })),
+    )
+}
+
+/// The messages the executor refuses a question continuation with, exactly. A status whose message is
+/// in this list is a typed refusal the gateway can name; any other message is never echoed and becomes
+/// `continue_refused`.
+pub(crate) const CONTINUE_QUESTION_EXECUTOR_TOKENS: &[&str] = &[
+    "question_answer_released",
+    "question_resume_unavailable",
+    "question_not_answered",
+    "question_expired",
+    "question_not_found",
+    "question_not_resumable",
+    "continuation_already_consumed",
+    "continue_in_progress",
+    "not_resumable",
+    "resume_forbidden",
+    "run_ended",
+    "continue_disabled",
+    "resume_incomplete",
+    "resume_checkpoint_unavailable",
+];
+
+/// The `code` of an `error` frame of a question continuation that did not start: the executor's tokens
+/// above, `durable_mutation_forbidden` (the zero-retention trailer) and the three the gateway makes
+/// (`continue_refused`, `continue_unreachable`, `continue_outcome_unknown`). Closed.
+pub(crate) const CONTINUE_QUESTION_FRAME_REFUSALS: &[&str] = &[
+    "question_answer_released",
+    "question_resume_unavailable",
+    "question_not_answered",
+    "question_expired",
+    "question_not_found",
+    "question_not_resumable",
+    "continuation_already_consumed",
+    "continue_in_progress",
+    "not_resumable",
+    "resume_forbidden",
+    "run_ended",
+    "continue_disabled",
+    "resume_incomplete",
+    "resume_checkpoint_unavailable",
+    "durable_mutation_forbidden",
+    "continue_refused",
+    "continue_unreachable",
+    "continue_outcome_unknown",
+];
+
+/// The checks the question form makes of its body before anything is read, as a pure function so each
+/// refusal is testable: the switch is on (409 `continue_disabled`), and the body is the question form
+/// and nothing else (400 `continue_incomplete`): the approval id present and exactly empty, the
+/// skipped-site flag false, a question id and a claim token that are not blank, and exactly one of a
+/// skip or a non-empty list of at most [`mp_contracts::user_question::MAX_ITEMS`] answers.
+fn question_form_preflight(
+    resume_on: bool,
+    approval_id: &str,
+    skipped: bool,
+    question_id: &str,
+    claim_token: &str,
+    question_skip: bool,
+    answer_count: usize,
+) -> Result<(), (StatusCode, &'static str)> {
+    if !resume_on {
+        return Err((StatusCode::CONFLICT, "continue_disabled"));
+    }
+    if !approval_id.is_empty()
+        || skipped
+        || question_id.trim().is_empty()
+        || claim_token.trim().is_empty()
+        || question_skip == (answer_count > 0)
+        || answer_count > mp_contracts::user_question::MAX_ITEMS
+    {
+        return Err((StatusCode::BAD_REQUEST, "continue_incomplete"));
+    }
+    Ok(())
+}
+
+/// What the gateway does about the question a question continuation names, once it has read it.
+enum QuestionDisposition {
+    /// Still requested: record the body's answer, then resume.
+    Record,
+    /// Already answered or skipped: write nothing and resume with the stored answer.
+    AlreadyRecorded,
+}
+
+/// The read-before-write judgement of a question continuation, as a pure function over the question as
+/// session-core lists it for the path's run. No answer is written before it passes: a missing question
+/// is 404 `question_not_found`; one that is not a `resume` question of this run is 409
+/// `question_not_resumable`; an expired or cancelled one is 410 `question_expired`; a requested one is
+/// [`QuestionDisposition::Record`]; an answered or skipped one is [`QuestionDisposition::AlreadyRecorded`].
+fn question_disposition(
+    question: Option<&mp_contracts::model_plane::v1::RunQuestion>,
+    run_id: &str,
+) -> Result<QuestionDisposition, (StatusCode, &'static str)> {
+    use mp_contracts::model_plane::v1::QuestionState;
+    let Some(question) = question else {
+        return Err((StatusCode::NOT_FOUND, "question_not_found"));
+    };
+    if question.delivery != mp_contracts::user_question::DELIVERY_RESUME || question.run_id != run_id
+    {
+        return Err((StatusCode::CONFLICT, "question_not_resumable"));
+    }
+    match QuestionState::try_from(question.state).unwrap_or(QuestionState::Unspecified) {
+        QuestionState::Expired | QuestionState::Cancelled => {
+            Err((StatusCode::GONE, "question_expired"))
+        }
+        QuestionState::Requested => Ok(QuestionDisposition::Record),
+        QuestionState::Answered | QuestionState::Skipped => Ok(QuestionDisposition::AlreadyRecorded),
+        QuestionState::Unspecified => Err((StatusCode::CONFLICT, "question_not_resumable")),
+    }
+}
+
+/// The resume echo of a question session-core already holds an answer for: the stored answers, or a
+/// skip. A shape echo for the executor, which applies session-core's row and never this text.
+fn stored_resume_answer(question: &mp_contracts::model_plane::v1::RunQuestion) -> String {
+    let skipped = question.state == mp_contracts::model_plane::v1::QuestionState::Skipped as i32;
+    let answers: Vec<mp_contracts::user_question::Answer> = if skipped {
+        Vec::new()
+    } else {
+        question
+            .answers
+            .iter()
+            .map(|answer| mp_contracts::user_question::Answer {
+                item_id: answer.item_id.clone(),
+                option_ids: answer.option_ids.clone(),
+                text: answer.text.clone(),
+            })
+            .collect()
+    };
+    mp_contracts::user_question::encode_resume_answer(&answers, skipped)
+}
+
+/// The resume a question continuation carries: the in-place stage (`loop`), the question, the echo of its
+/// answer and the claim. It names no approval, step, tool or brief.
+fn question_resume(
+    question_id: &str,
+    answer_json: String,
+    claim_token: &str,
+) -> mp_contracts::model_plane::v1::AgentResume {
+    mp_contracts::model_plane::v1::AgentResume {
+        mode: "loop".to_owned(),
+        claim_token: claim_token.to_owned(),
+        question_id: question_id.to_owned(),
+        answer_json,
+        ..Default::default()
+    }
+}
+
+/// The run's questions as session-core lists them for the verified org.
+async fn list_questions_of_run(
+    state: &AppState,
+    run_id: &str,
+    org_id: &str,
+    bearer: &VerifiedModelBearer,
+) -> Result<Vec<mp_contracts::model_plane::v1::RunQuestion>, tonic::Status> {
+    let request = authenticated_session_request(
+        mp_contracts::model_plane::v1::ListRunQuestionsRequest {
+            run_id: run_id.to_owned(),
+            org_id: org_id.to_owned(),
+        },
+        bearer,
+    )?;
+    Ok(state
+        .orchestration_client
+        .clone()
+        .list_run_questions(request)
+        .await?
+        .into_inner()
+        .questions)
+}
+
+/// What a failed `RunAgent` of a question continuation is, in the terms of its frame. The executor's
+/// question tokens are named exactly; everything else takes [`classify_continue_dispatch_failure`], except
+/// that a `NotFound` the executor did not word as a question token is `continue_refused`, never the
+/// approval's `approval_not_found`.
+fn classify_question_dispatch_failure(status: &tonic::Status) -> ContinueDispatchFailure {
+    if mp_contracts::zdr_refusal::Refusal::from_status(status).is_none() {
+        match status.code() {
+            tonic::Code::FailedPrecondition
+            | tonic::Code::Aborted
+            | tonic::Code::NotFound
+            | tonic::Code::InvalidArgument
+            | tonic::Code::PermissionDenied
+            | tonic::Code::Unauthenticated => {
+                return ContinueDispatchFailure::Refused(
+                    CONTINUE_QUESTION_EXECUTOR_TOKENS
+                        .iter()
+                        .copied()
+                        .find(|token| *token == status.message())
+                        .unwrap_or("continue_refused"),
+                );
+            }
+            _ => {}
+        }
+    }
+    classify_continue_dispatch_failure(status)
+}
+
+/// The `error` frame of a question continuation that did not start: the closed token as code and as a
+/// plain message, never retryable, naming the run, and the closed additive marker
+/// `question_continue: true`. It NEVER says `approval_spent`: a question continuation spends nothing.
+/// `token` is in [`CONTINUE_QUESTION_FRAME_REFUSALS`]; the executor's message text is never relayed.
+fn question_refusal_event(request_id: &str, run_id: &str, token: &'static str) -> Event {
+    debug_assert!(
+        CONTINUE_QUESTION_FRAME_REFUSALS.contains(&token),
+        "{token} is not in the closed question-continue frame vocabulary"
+    );
+    let event = crate::sse_events::ChatEvent::Error {
+        code: token.to_owned(),
+        message: token.replace('_', " "),
+        retryable: false,
+    };
+    let mut payload = event.payload(request_id);
+    payload["run_id"] = json!(run_id);
+    payload["question_continue"] = json!(true);
+    Event::default()
+        .event(event.name())
+        .data(payload.to_string())
+}
+
+/// The `/continue` of a question (WS14 S5), called by [`continue_run`] for a body that names a
+/// `question_id`. The run paused for the owner's answer to an `ask_user` question; the answer arrives
+/// here, is recorded through session-core only while the question is still requested, and the run is
+/// resumed in place. Nothing is spent: the executor claims the question and applies session-core's
+/// stored row, never the body (DEC-WS14-7), or releases it.
+///
+/// Order: the switch and the body's shape; a persistent (not ZDR, not waived) credential; the owner;
+/// the org's agent-run pause; the run; the question is READ and judged ([`question_disposition`]);
+/// only then is the answer written. The answers are never logged: log lines carry the run, the
+/// question and a closed code.
+#[allow(clippy::too_many_arguments)]
+async fn continue_question_form(
+    state: AppState,
+    claims: Claims,
+    model_bearer: VerifiedModelBearer,
+    inference_bearer: VerifiedInferenceBearer,
+    execution_bearer: Option<Extension<VerifiedExecutionBearer>>,
+    data_plane_bearer: Option<Extension<VerifiedBearer>>,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    run_id: String,
+    req: ContinueRunRequest,
+) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
+    let ContinueRunRequest {
+        approval_id,
+        claim_token,
+        skipped,
+        question_id,
+        answers,
+        question_skip,
+    } = req;
+    question_form_preflight(
+        ask_resume_on(),
+        &approval_id,
+        skipped,
+        &question_id,
+        &claim_token,
+        question_skip,
+        answers.len(),
+    )
+    .map_err(|(status, code)| question_continue_error(status, code))?;
+    // A waived or ZDR turn keeps no state to continue and stores no answer: refused again here, whatever
+    // the approval switch says, before the owner, the run or the question is read.
+    continue_turn_gate(true, continue_turn_is_persistent(&claims))
+        .map_err(|(status, code)| question_continue_error(status, code))?;
+    let (Some(Extension(execution_bearer)), Some(Extension(data_plane_bearer))) =
+        (execution_bearer, data_plane_bearer)
+    else {
+        return Err(question_continue_error(
+            StatusCode::UNAUTHORIZED,
+            "missing_bearer",
+        ));
+    };
+    crate::session_flow::require_durable_run_owner_with_token(
+        &state,
+        &run_id,
+        &claims.org_id,
+        &claims.user_id,
+        model_bearer.as_str(),
+    )
+    .await
+    .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?;
+    // The org's agent-run pause, read after the owner check and before the run or the question is read,
+    // so a paused org records no answer. A lockdown mode cap refuses it too, and a read-only cap states
+    // `plan_mode` on the continuation it starts.
+    let org_plan_mode = crate::org_agent_policy::admit_continuation(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        &claims.org_id,
+        capability_bearer
+            .as_deref()
+            .map_or("", VerifiedCapabilityBearer::as_str),
+    )
+    .await
+    .map_err(continue_policy_error)?;
+
+    let detail = state
+        .run_client
+        .clone()
+        .get_run(
+            authenticated_session_request(
+                mp_contracts::model_plane::v1::GetRunRequest {
+                    run_id: run_id.clone(),
+                },
+                &model_bearer,
+            )
+            .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?,
+        )
+        .await
+        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?
+        .into_inner();
+    if matches!(detail.status.as_str(), "completed" | "failed" | "cancelled") {
+        return Err(question_continue_error(StatusCode::CONFLICT, "not_resumable"));
+    }
+
+    // READ BEFORE WRITE: the question is found among the path run's own questions and judged before any
+    // answer is written.
+    let questions = list_questions_of_run(&state, &run_id, &claims.org_id, &model_bearer)
+        .await
+        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?;
+    let found = questions.iter().find(|question| question.id == question_id);
+    let disposition = question_disposition(found, &run_id)
+        .map_err(|(status, code)| question_continue_error(status, code))?;
+
+    // The echo is a shape for the executor, which applies session-core's row. The body's answers for a
+    // question this request records; the stored ones for a question already answered.
+    let echoed: Vec<mp_contracts::user_question::Answer> = answers
+        .iter()
+        .map(|answer| mp_contracts::user_question::Answer {
+            item_id: answer.item_id.clone(),
+            option_ids: answer.option_ids.clone(),
+            text: answer.text.clone(),
+        })
+        .collect();
+    let mut answer_json = mp_contracts::user_question::encode_resume_answer(&echoed, question_skip);
+    match disposition {
+        QuestionDisposition::AlreadyRecorded => {
+            if let Some(stored) = found {
+                answer_json = stored_resume_answer(stored);
+            }
+        }
+        QuestionDisposition::Record => {
+            match crate::http_routes::record_question_answer(
+                &state,
+                &claims,
+                &model_bearer,
+                question_id.clone(),
+                answers,
+                question_skip,
+            )
+            .await
+            {
+                Ok(_) => {}
+                // A race with another answer: the question is answered, which is what this request
+                // wanted. The stored answer is read back for the echo; the resume goes ahead either way.
+                Err(error)
+                    if error.1 .0["error"]["code"].as_str() == Some("question_already_answered") =>
+                {
+                    if let Ok(relisted) =
+                        list_questions_of_run(&state, &run_id, &claims.org_id, &model_bearer).await
+                    {
+                        if let Some(stored) =
+                            relisted.iter().find(|question| question.id == question_id)
+                        {
+                            answer_json = stored_resume_answer(stored);
+                        }
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    tracing::info!(run_id = %run_id, question_id = %question_id, "the owner answered the question; continuing the run");
+
+    let run = crate::session_flow::SessionRun {
+        thread_id: detail.thread_id.clone(),
+        run_id: run_id.clone(),
+        org_id: claims.org_id.clone(),
+        already_started: true,
+        terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+    };
+    let resume = question_resume(&question_id, answer_json, &claim_token);
+    Ok(agentic_run_stream(
+        state,
+        run,
+        new_ulid(),
+        claims.org_id.clone(),
+        claims.user_id.clone(),
+        String::new(),
+        detail.goal,
+        Vec::new(),
+        Vec::new(),
+        false,
+        None,
+        0,
+        CONTINUE_PERMISSION_MODE.to_owned(),
+        // The org's read-only cap holds the resumed run to plan mode; false when the cap states none.
+        org_plan_mode,
+        // Never an execute turn: its authority is the run's own.
+        false,
+        // Nor an approve-then-execute turn: it names no plan.
+        None,
+        execution_bearer,
+        data_plane_bearer,
+        model_bearer,
+        inference_bearer,
+        String::new(),
+        // Never Space-scoped here: the pause's authority is the run's own.
+        None,
+        None,
+        // A question continuation never forwards a browser bearer.
+        None,
+        AgentRoute::default(),
+        None,
+        Some(resume),
+        // A question continuation spends nothing in the gateway.
+        approval_spend_for(false),
+        None,
+        Vec::new(),
+        Vec::new(),
+        0,
+        Vec::new(),
+        None,
+        String::new(),
+        None,
+        None,
+        false,
+    ))
+}
+
 /// `POST /v1/orchestration/runs/{run_id}/continue` (build plan WS03 S3): continue a
 /// run that paused for a granted approval, as a fresh segment of the SAME run.
 ///
@@ -22203,6 +22800,23 @@ pub(crate) async fn continue_run(
         &claims,
     )
     .map_err(|(status, code)| continue_error(status, code))?;
+    // The question form (WS14 S5): a body that names a question is answered by its own function, which
+    // reads the question before it writes the answer and spends nothing.
+    let question_form = !req.question_id.is_empty();
+    if question_form {
+        return continue_question_form(
+            state,
+            claims,
+            model_bearer,
+            inference_bearer,
+            execution_bearer,
+            data_plane_bearer,
+            capability_bearer,
+            run_id,
+            req,
+        )
+        .await;
+    }
     // The park form (WS03 S8-A): an EXACTLY empty approval id, accepted only with this
     // service's parking switch on, resumes the run's current parked fold. With the switch off
     // it is the committed 400, and so is a blank id that is not empty.

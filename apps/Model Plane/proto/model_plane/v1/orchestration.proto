@@ -1224,6 +1224,14 @@ message ApprovedAuthority {
   // snapshot would not fit with it. A continuation recomputes the coordinator's narrowing from
   // it; it never widens `tools`, and it is not covered by `digest`.
   repeated ApprovedTool coordinator_tools = 11;
+  // The connection ids the paused turn selected (RunAgentRequest.connector_scope). Empty when the
+  // turn selected none, or when the descriptor predates the field. A stage-1 continuation runs under
+  // this selection or a narrower one; it is not covered by `digest`.
+  repeated string connector_scope = 12;
+  // Whether the paused turn's screening taint was marked (a connected-app read came back flagged).
+  // Absent when the descriptor predates the field; a continuation then holds the taint as marked.
+  // Not covered by `digest`.
+  optional bool connector_taint = 13;
 }
 
 // One offered tool, with the definition the model was given.

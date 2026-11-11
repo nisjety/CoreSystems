@@ -1,4 +1,5 @@
 use axum::{
+    body::Bytes,
     extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -9,6 +10,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::{
+    audience_tokens::ModelServiceAudience,
     config::AppState,
     domains::chat::{
         history::{bad_request, thread_messages_url, ThreadMessagesPageQuery},
@@ -76,24 +78,35 @@ async fn invoke_chat_json(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    let token = shared::model_token(&state, &user, &headers).await;
-    let data_plane_token = shared::data_plane_token(&state, &user, &headers).await;
-    let inference_token = match shared::required_inference_token(&state, &user, &headers).await {
-        Ok(token) => token,
-        Err(error) => return shared::delegated_auth_unavailable(error),
+    // ZDR-Z-19b: the turn's retention is decided FIRST, from the raw body, so one answer serves every
+    // bearer below (model-gateway refuses delegated bearers that differ in `zdr` or `zdr_waiver`).
+    // A refusal is answered as the JSON envelope and nothing is sent upstream.
+    let retention =
+        match crate::retention_decision::turn_retention(&state, &user, &headers, &body).await {
+            Ok(retention) => retention,
+            Err(refusal) => return shared::retention_refusal_response(refusal),
+        };
+    let bearers = match shared::mint_turn_bearers(
+        &state,
+        &user,
+        &headers,
+        &retention,
+        shared::TurnSurface::Json,
+    )
+    .await
+    {
+        Ok(bearers) => bearers,
+        Err(refusal) => return refusal,
     };
-    let execution_token = match shared::required_execution_token(&state, &user, &headers).await {
-        Ok(token) => token,
-        Err(error) => return shared::delegated_auth_unavailable(error),
-    };
-    let cost_token = match shared::required_cost_token(&state, &user, &headers).await {
-        Ok(token) => token,
-        Err(error) => return shared::delegated_auth_unavailable(error),
-    };
-    let session_token = match shared::required_session_token(&state, &user, &headers).await {
-        Ok(token) => token,
-        Err(error) => return shared::delegated_auth_unavailable(error),
-    };
+    let shared::TurnBearers {
+        model: token,
+        data_plane: data_plane_token,
+        inference: inference_token,
+        execution: execution_token,
+        cost: cost_token,
+        session: session_token,
+        ..
+    } = bearers;
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     let org_name = crate::domains::auth::resolve_org_name(&state, &user, &org_id).await;
     let url = format!("{}/v1/invoke", state.model_gateway_url);
@@ -136,6 +149,11 @@ async fn invoke_chat_json(
     {
         return (status, body);
     }
+    // ZDR-Z-19b invariant: `turn_retention` resolved the thread's Space before any mint, so a waived
+    // turn never names one here. If it does, refuse before anything goes upstream.
+    if let Some(refusal) = shared::waived_space_refusal(&retention, &outbound_body) {
+        return refusal;
+    }
     if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context(
         &state,
         &user,
@@ -151,11 +169,28 @@ async fn invoke_chat_json(
     let outbound_body = shared::with_locale_context(outbound_body);
     let mut outbound_body =
         shared::with_viewer_locale(outbound_body, state.space_features.chat_locale_hint);
-    shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;
+    // ZDR-Z-19b: a waived turn skips the org raise, and only a waived turn does. This is the one
+    // lowering the BFF ever does, and only because Auth Core signed the decision every bearer of the
+    // turn already carries. It inserts no `zdr: true` and never a `zdr: false`; the body keeps what
+    // the client sent (Auth Core has already refused an explicit ZDR request).
+    let waived = shared::is_waived(&retention);
+    if !waived {
+        shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;
+    }
+    // Invariant again, on the body as it will be sent (after the Space context was injected).
+    if let Some(refusal) = shared::waived_space_refusal(&retention, &outbound_body) {
+        return refusal;
+    }
     let request_timeout = chat_invoke_timeout(&outbound_body);
     // After `inject_personal_thread_context`, not with the other bearers above:
     // it is only minted once Control has actually scoped this turn to a Space.
-    let sandbox_token = shared::sandbox_token(&state, &user, &headers, &outbound_body).await;
+    // A waived turn never mints a sandbox bearer (ZDR rule 5; Auth Core also refuses the decision on
+    // that audience).
+    let sandbox_token = if waived {
+        None
+    } else {
+        shared::sandbox_token(&state, &user, &headers, &outbound_body).await
+    };
     // Same rule as the streaming path: mark before dispatch, so a ZDR turn that
     // fails still leaves the thread non-persistable.
     shared::proxy_model_json_with_data_plane_request_timeout(
@@ -181,14 +216,74 @@ pub(crate) async fn cancel_invocation(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(request_id): Path<String>,
+    body: Bytes,
 ) -> impl IntoResponse {
-    let token = shared::model_token(&state, &user, &headers).await;
+    // ZDR-Z-19e (D-ZDR-15): a cancel never inherits a waiver. The browser may name the connection of
+    // the run it cancels in an optional JSON body (`subscription_connection_id`, `provider`); only
+    // that, and a fresh decision from Auth Core for it, waives the bearers below. An empty,
+    // unreadable or connection-less body is `Unchanged`, no call, and the cancel is what it was. The
+    // body is never forwarded.
+    let mut named = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+    let connection = crate::retention_decision::take_continuation_connection(&state, &mut named);
+    let retention = match crate::retention_decision::continuation_retention(
+        &state,
+        &user,
+        &headers,
+        connection
+            .as_ref()
+            .map(crate::retention_decision::ContinuationConnection::as_pair),
+    )
+    .await
+    {
+        Ok(retention) => retention,
+        Err(refusal) => return shared::retention_refusal_response(refusal).into_response(),
+    };
     let url = format!(
         "{}/v1/invoke/{}/cancel",
         state.model_gateway_url,
         urlencoding::encode(&request_id),
     );
-    shared::proxy_model_json(&state, Method::POST, &url, None, token.as_deref(), &user).await
+    if let Some(decision) = shared::waived_decision(&retention) {
+        let token = match shared::waived_service_token(
+            &state,
+            &user,
+            &headers,
+            decision,
+            ModelServiceAudience::ModelGateway,
+        )
+        .await
+        {
+            Ok(token) => token,
+            Err(refusal) => return refusal.into_response(),
+        };
+        let session_token = match shared::waived_service_token(
+            &state,
+            &user,
+            &headers,
+            decision,
+            ModelServiceAudience::SessionCore,
+        )
+        .await
+        {
+            Ok(token) => token,
+            Err(refusal) => return refusal.into_response(),
+        };
+        return shared::proxy_model_json_with_session(
+            &state,
+            Method::POST,
+            &url,
+            None,
+            Some(&token),
+            Some(&session_token),
+            &user,
+        )
+        .await
+        .into_response();
+    }
+    let token = shared::model_token(&state, &user, &headers).await;
+    shared::proxy_model_json(&state, Method::POST, &url, None, token.as_deref(), &user)
+        .await
+        .into_response()
 }
 
 /// Deliver a message the user typed mid-stream to the running agent.

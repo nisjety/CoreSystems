@@ -5384,6 +5384,8 @@ pub(super) async fn dispatch_chat_cancel_invocation(
         ExtensionExtractor(user.clone()),
         headers.clone(),
         PathExtractor(request_id.to_owned()),
+        // An agent action names no connection, so a continuation it makes is never waived (ZDR-Z-19e).
+        axum::body::Bytes::new(),
     )
     .await
     .into_response();
@@ -5712,6 +5714,8 @@ pub(super) async fn dispatch_orchestration_resume_run(
         ExtensionExtractor(user.clone()),
         headers.clone(),
         PathExtractor(run_id.to_owned()),
+        // An agent action names no connection, so a continuation it makes is never waived (ZDR-Z-19e).
+        axum::body::Bytes::new(),
     )
     .await
     .into_response();
@@ -5734,6 +5738,8 @@ pub(super) async fn dispatch_orchestration_cancel_run(
         ExtensionExtractor(user.clone()),
         headers.clone(),
         PathExtractor(run_id.to_owned()),
+        // An agent action names no connection, so a continuation it makes is never waived (ZDR-Z-19e).
+        axum::body::Bytes::new(),
     )
     .await
     .into_response();

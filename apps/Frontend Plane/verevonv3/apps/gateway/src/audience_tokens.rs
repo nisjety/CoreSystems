@@ -4,6 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use axum::http::StatusCode;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
@@ -138,6 +139,114 @@ pub(crate) async fn get_model_service_token(
     audience: ModelServiceAudience,
 ) -> Option<String> {
     get_audience_token(state, user_id, cookie_header, audience.issuance_slug()).await
+}
+
+/// The request header that carries Auth Core's signed retention decision on a token mint
+/// (ZDR.md section 5.3). The BFF only carries it; Auth Core verifies it and writes the waiver onto
+/// the minted bearer.
+const RETENTION_DECISION_HEADER: &str = "x-retention-decision";
+
+/// Auth Core's typed refusal of a mint that carried a retention decision: the HTTP status (412 or
+/// 503) and the ZDR catalogue body, exactly as Auth Core sent them. The caller answers it as is.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TokenRefusal {
+    pub(crate) status: StatusCode,
+    pub(crate) body: serde_json::Value,
+}
+
+impl TokenRefusal {
+    /// The refusal for every answer that is not a catalogue refusal or a usable token.
+    fn unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: crate::zdr::zdr_refusal_body(crate::zdr::ZDR_DECISION_UNAVAILABLE),
+        }
+    }
+}
+
+/// Mint a plane token as [`get_audience_token`] does, carrying the turn's signed retention decision
+/// in `x-retention-decision` so Auth Core writes the matching waiver onto the bearer.
+///
+/// Never cached: a bearer minted with a decision belongs to one turn. A 412 or 503 whose body is a
+/// ZDR catalogue envelope (`error.code` from the decision refusal codes) is returned as a
+/// [`TokenRefusal`] with its status and body unchanged. Every other failure (unreachable Auth Core,
+/// another status, an unreadable body, an empty token) is a 503 `zdr_decision_unavailable`. The
+/// decision and the token are never logged.
+pub(crate) async fn get_audience_token_with_decision(
+    state: &AppState,
+    user_id: &str,
+    cookie_header: &str,
+    audience: &str,
+    decision: &str,
+) -> Result<String, TokenRefusal> {
+    // Same rule as `get_audience_token`: no cache, so the user id selects nothing here.
+    let _ = user_id;
+
+    let resp = state
+        .client
+        .get(format!("{}/api/{}/token", state.auth_core_url, audience))
+        .header("cookie", cookie_header)
+        .header("x-internal-api-key", &state.internal_api_key)
+        .header(RETENTION_DECISION_HEADER, decision)
+        .send()
+        .await
+        .map_err(|_| {
+            tracing::warn!(audience, "decision token mint: auth-core unreachable");
+            TokenRefusal::unavailable()
+        })?;
+
+    let status = resp.status();
+    if status.is_success() {
+        let minted = resp.json::<TokenResponse>().await.map_err(|_| {
+            tracing::warn!(audience, "decision token mint: unreadable response");
+            TokenRefusal::unavailable()
+        })?;
+        let token = minted.token.trim().to_owned();
+        if token.is_empty() {
+            tracing::warn!(audience, "decision token mint: empty token");
+            return Err(TokenRefusal::unavailable());
+        }
+        return Ok(token);
+    }
+
+    if matches!(
+        status,
+        StatusCode::PRECONDITION_FAILED | StatusCode::SERVICE_UNAVAILABLE
+    ) {
+        if let Ok(body) = resp.json::<serde_json::Value>().await {
+            let code = body
+                .get("error")
+                .and_then(|error| error.get("code"))
+                .and_then(serde_json::Value::as_str);
+            if let Some(code) =
+                code.filter(|code| crate::retention_decision::DECISION_REFUSAL_CODES.contains(code))
+            {
+                tracing::info!(audience, %status, code, "decision token mint refused");
+                return Err(TokenRefusal { status, body });
+            }
+        }
+    }
+    tracing::warn!(audience, %status, "decision token mint: unexpected answer");
+    Err(TokenRefusal::unavailable())
+}
+
+/// [`get_model_service_token`] with the turn's signed retention decision; see
+/// [`get_audience_token_with_decision`].
+pub(crate) async fn get_model_service_token_with_decision(
+    state: &AppState,
+    user_id: &str,
+    cookie_header: &str,
+    audience: ModelServiceAudience,
+    decision: &str,
+) -> Result<String, TokenRefusal> {
+    get_audience_token_with_decision(
+        state,
+        user_id,
+        cookie_header,
+        audience.issuance_slug(),
+        decision,
+    )
+    .await
 }
 
 pub(crate) async fn require_model_service_token(

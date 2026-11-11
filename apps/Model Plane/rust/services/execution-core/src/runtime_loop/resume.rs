@@ -557,6 +557,26 @@ pub(crate) fn with_coordinator_offer(
     );
 }
 
+/// Adds the state a stage-1 continuation cannot fold back to a pause's snapshot: the screening
+/// taint (`connector_taint`, always written) and the turn's connector selection (`connector_scope`,
+/// omitted when empty). Neither is covered by the authority digest, so descriptors written without
+/// them stay valid; a continuation reads an absent taint as marked and an absent selection as none.
+pub(crate) fn with_carried_state(
+    snapshot: &mut serde_json::Value,
+    connector_taint: bool,
+    connector_scope: &[String],
+) {
+    snapshot["connector_taint"] = serde_json::Value::Bool(connector_taint);
+    if !connector_scope.is_empty() {
+        snapshot["connector_scope"] = serde_json::Value::Array(
+            connector_scope
+                .iter()
+                .map(|id| serde_json::Value::String(id.clone()))
+                .collect(),
+        );
+    }
+}
+
 /// The authority a consume handed back, as the loop's own type, so its digest
 /// can be recomputed and compared with the one the snapshot carried.
 pub(crate) fn authority_from_proto(snapshot: &pb::ApprovedAuthority) -> Authority {
@@ -607,6 +627,20 @@ pub(crate) enum Refusal {
     ParkRouteUnavailable,
     /// The park is not yet due: its earliest resume time has not passed. The run stays parked.
     ParkNotDue,
+    /// A question continuation could not be applied: nothing was applied and nothing was
+    /// released. The answer stays recorded and unspent.
+    QuestionResumeUnavailable,
+    /// A question continuation won the single spend and the answer will never be applied in the
+    /// run, so the client may send it once as the next message.
+    QuestionAnswerReleased,
+    /// The question has not been answered yet, so there is nothing to continue with.
+    QuestionNotAnswered,
+    /// The question expired or was cancelled before it was answered.
+    QuestionExpired,
+    /// The question does not exist, or it belongs to another run.
+    QuestionNotFound,
+    /// The question is not one that resumes its run (it is delivered as the next turn).
+    QuestionNotResumable,
 }
 
 impl Refusal {
@@ -628,6 +662,12 @@ impl Refusal {
             Self::ParkNotRestorable => "park_not_restorable",
             Self::ParkRouteUnavailable => "park_route_unavailable",
             Self::ParkNotDue => "park_not_due",
+            Self::QuestionResumeUnavailable => "question_resume_unavailable",
+            Self::QuestionAnswerReleased => "question_answer_released",
+            Self::QuestionNotAnswered => "question_not_answered",
+            Self::QuestionExpired => "question_expired",
+            Self::QuestionNotFound => "question_not_found",
+            Self::QuestionNotResumable => "question_not_resumable",
         }
     }
 
@@ -642,6 +682,7 @@ impl Refusal {
             }
             Self::ContinueInProgress => tonic::Status::aborted(self.as_str()),
             Self::Forbidden => tonic::Status::permission_denied(self.as_str()),
+            Self::QuestionNotFound => tonic::Status::not_found(self.as_str()),
             _ => tonic::Status::failed_precondition(self.as_str()),
         }
     }
@@ -1285,6 +1326,13 @@ pub(crate) struct Consumed {
     /// The fingerprint of the call as the model drafted it, set only with `revision > 0`. A
     /// digest: the fold's pending pause names this one, not the edited call's.
     pub original_action_fingerprint: String,
+    /// Whether the paused turn's screening taint was marked, from the retained descriptor
+    /// (`None` when the descriptor predates the key: an absent value is held as marked,
+    /// DEC-WS14-5).
+    pub connector_taint: Option<bool>,
+    /// The connection ids the paused turn selected, from the retained descriptor (empty when it
+    /// selected none or the descriptor predates the key).
+    pub connector_scope: Vec<String>,
 }
 
 impl Consumed {
@@ -1314,6 +1362,8 @@ impl std::fmt::Debug for Consumed {
             .field("mode", &self.mode)
             .field("snapshot_digest", &self.snapshot_digest)
             .field("tools", &self.tools.len())
+            .field("connector_taint", &self.connector_taint)
+            .field("connector_scope", &self.connector_scope.len())
             .field("tool_input_bytes", &self.tool_input_json.len())
             .finish_non_exhaustive()
     }
@@ -1491,16 +1541,40 @@ pub(crate) fn ledger_action_ids(
     release_step_id: &str,
     segment: u32,
 ) -> Vec<String> {
+    let mut ids: Vec<String> = vec![effect::action_id_for(release_step_id)];
+    extend_round_action_ids(&mut ids, fold, paused_step_id, segment);
+    ids
+}
+
+/// The ledger's action ids a question continuation asks about (build plan WS14 S5): the approval
+/// read of [`ledger_action_ids`] without a release, because a question continuation reserves
+/// none. The paused call's own step, every other call of the open round that has a step id, and
+/// the new step id of every dangling one, in that order, with no repeat.
+pub(crate) fn input_ledger_action_ids(
+    fold: &LoopFoldV1,
+    paused_step_id: &str,
+    segment: u32,
+) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
+    extend_round_action_ids(&mut ids, fold, paused_step_id, segment);
+    ids
+}
+
+/// Add the ids 2 to 4 of [`ledger_action_ids`] to `ids`, skipping any already in it.
+fn extend_round_action_ids(
+    ids: &mut Vec<String>,
+    fold: &LoopFoldV1,
+    paused_step_id: &str,
+    segment: u32,
+) {
     let mut push = |id: String| {
         if !ids.contains(&id) {
             ids.push(id);
         }
     };
-    push(effect::action_id_for(release_step_id));
     push(effect::action_id_for(paused_step_id));
     let Some(round) = &fold.round_in_flight else {
-        return ids;
+        return;
     };
     let others = || {
         round
@@ -1516,7 +1590,6 @@ pub(crate) fn ledger_action_ids(
             push(effect::action_id_for(&resumed_step_id(segment, &call.step_id)));
         }
     }
-    ids
 }
 
 fn fallback<T>(failure: RestoreFailure) -> Result<T, RestoreOrRefuse> {
@@ -1540,6 +1613,103 @@ struct Checked {
     completed: Vec<Option<usize>>,
     /// The person's edit of the pending call, named against the fold's draft (EP-10-S5).
     edit: Option<EditNote>,
+}
+
+/// Whether the segment the claimed row says wrote the fold is the segment the fold itself
+/// carries. Both sides come from the claim's response; the client's segment is never read. Shared
+/// by [`check_fold`] and [`check_input_fold`].
+fn row_segment_is_the_folds(claimed: &ClaimedFold) -> bool {
+    let fold = &claimed.fold;
+    claimed.segment == fold.segment_no
+}
+
+/// The open round of a claimed fold and the index of the one call in it at `step_id`: the
+/// round must have 1 to [`MAX_ROUND_CALLS`] calls ([`RestoreFailure::RoundInvalid`] otherwise)
+/// and exactly one call at the step ([`RestoreFailure::PendingMismatch`] otherwise). Shared by
+/// the approval fold check ([`check_fold`]) and the question fold check ([`check_input_fold`]).
+fn open_round_call<'a>(
+    fold: &'a LoopFoldV1,
+    step_id: &str,
+) -> Result<(&'a mp_contracts::loop_fold::RoundInFlight, usize), RestoreFailure> {
+    use RestoreFailure as F;
+    let Some(round) = &fold.round_in_flight else {
+        return Err(F::RoundInvalid);
+    };
+    if round.calls.is_empty() || round.calls.len() > MAX_ROUND_CALLS {
+        return Err(F::RoundInvalid);
+    }
+    let mut at_step = round
+        .calls
+        .iter()
+        .enumerate()
+        .filter(|(_, call)| call.step_id == step_id);
+    let (Some((index, _)), None) = (at_step.next(), at_step.next()) else {
+        return Err(F::PendingMismatch);
+    };
+    Ok((round, index))
+}
+
+/// Which call each completed entry of the open round belongs to (`result[call]` is the index of
+/// that call's entry), given the index of the paused call. Every entry belongs to exactly one
+/// call, found by step id or, for a call refused before dispatch, by its unique provider id;
+/// none belongs to the paused call; a call with no step id has its outcome; and at least one
+/// round was started and one step taken. All failures are [`RestoreFailure::RoundInvalid`].
+fn round_outcomes(
+    fold: &LoopFoldV1,
+    round: &mp_contracts::loop_fold::RoundInFlight,
+    pending_index: usize,
+) -> Result<Vec<Option<usize>>, RestoreFailure> {
+    use RestoreFailure as F;
+    let mut completed: Vec<Option<usize>> = vec![None; round.calls.len()];
+    for (entry_index, entry) in round.completed.iter().enumerate() {
+        let owners: Vec<usize> = round
+            .calls
+            .iter()
+            .enumerate()
+            .filter(|(_, call)| {
+                if entry.step_id.is_empty() {
+                    // A call refused before dispatch has no step id: its provider id is the
+                    // only thing that finds its outcome, so an entry without one, or a call
+                    // without one, cannot be matched.
+                    call.step_id.is_empty() && !entry.call_id.is_empty() && call.id == entry.call_id
+                } else {
+                    call.step_id == entry.step_id
+                }
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let [owner] = owners.as_slice() else {
+            return Err(F::RoundInvalid);
+        };
+        let owner = *owner;
+        if owner == pending_index
+            || completed[owner].replace(entry_index).is_some()
+            || (!entry.call_id.is_empty() && entry.call_id != round.calls[owner].id)
+        {
+            return Err(F::RoundInvalid);
+        }
+    }
+
+    // A call refused before dispatch is never dispatched, so it must have its outcome.
+    if round
+        .calls
+        .iter()
+        .zip(&completed)
+        .any(|(call, done)| call.step_id.is_empty() && done.is_none())
+    {
+        return Err(F::RoundInvalid);
+    }
+
+    if fold.rounds_executed < 1 || fold.step_seq < 1 {
+        return Err(F::RoundInvalid);
+    }
+    Ok(completed)
+}
+
+/// Whether the round budget is already spent: the rounds that ran before the open one, plus the
+/// delegated rounds, reach `budget` (already resolved).
+fn round_budget_spent(fold: &LoopFoldV1, budget: u32) -> bool {
+    fold.rounds_executed.saturating_sub(1).saturating_add(fold.delegated_rounds) >= budget
 }
 
 /// The pure checks of a claimed fold against the consumed approval, before the ledger is
@@ -1583,7 +1753,7 @@ fn check_fold(
     if fold.run_id != run_id {
         return fallback(F::FoldRunMismatch);
     }
-    if claimed.segment != fold.segment_no {
+    if !row_segment_is_the_folds(claimed) {
         return fallback(F::SegmentMismatch);
     }
     if !fold.is_resumable() {
@@ -1625,20 +1795,11 @@ fn check_fold(
     }
 
     // 11: the open round, and the one call in it that the approval gated.
-    let Some(round) = &fold.round_in_flight else {
-        return fallback(F::RoundInvalid);
+    let (round, pending_index) = match open_round_call(fold, &consumed.step_id) {
+        Ok(found) => found,
+        Err(failure) => return fallback(failure),
     };
-    if round.calls.is_empty() || round.calls.len() > MAX_ROUND_CALLS {
-        return fallback(F::RoundInvalid);
-    }
-    let mut at_step = round
-        .calls
-        .iter()
-        .enumerate()
-        .filter(|(_, call)| call.step_id == consumed.step_id);
-    let (Some((pending_index, call)), None) = (at_step.next(), at_step.next()) else {
-        return fallback(F::PendingMismatch);
-    };
+    let call = &round.calls[pending_index];
     let fold_digest = effect::args_digest_of(&call.arguments_json);
     let consumed_digest = effect::args_digest_of(&consumed.tool_input_json);
     if call.name != consumed.tool_name || call.arguments_json.is_empty() || fold_digest.is_none() {
@@ -1660,56 +1821,18 @@ fn check_fold(
         None
     };
 
-    // 12: every outcome belongs to one call.
-    let mut completed: Vec<Option<usize>> = vec![None; round.calls.len()];
-    for (entry_index, entry) in round.completed.iter().enumerate() {
-        let owners: Vec<usize> = round
-            .calls
-            .iter()
-            .enumerate()
-            .filter(|(_, call)| {
-                if entry.step_id.is_empty() {
-                    // A call refused before dispatch has no step id: its provider id is the
-                    // only thing that finds its outcome, so an entry without one, or a call
-                    // without one, cannot be matched.
-                    call.step_id.is_empty() && !entry.call_id.is_empty() && call.id == entry.call_id
-                } else {
-                    call.step_id == entry.step_id
-                }
-            })
-            .map(|(index, _)| index)
-            .collect();
-        let [owner] = owners.as_slice() else {
-            return fallback(F::RoundInvalid);
-        };
-        let owner = *owner;
-        if owner == pending_index
-            || completed[owner].replace(entry_index).is_some()
-            || (!entry.call_id.is_empty() && entry.call_id != round.calls[owner].id)
-        {
-            return fallback(F::RoundInvalid);
-        }
-    }
+    // 12, 13, 14: every outcome belongs to one call, a call refused before dispatch has its
+    // outcome, and a round and a step were taken.
+    let completed = match round_outcomes(fold, round, pending_index) {
+        Ok(completed) => completed,
+        Err(failure) => return fallback(failure),
+    };
 
-    // 13: a call refused before dispatch is never dispatched, so it must have its outcome.
-    if round
-        .calls
-        .iter()
-        .zip(&completed)
-        .any(|(call, done)| call.step_id.is_empty() && done.is_none())
-    {
-        return fallback(F::RoundInvalid);
-    }
-
-    // 14, 15, 16.
-    if fold.rounds_executed < 1 || fold.step_seq < 1 {
-        return fallback(F::RoundInvalid);
-    }
+    // 15, 16.
     if consumed.segment != fold.segment_no.saturating_add(1) {
         return fallback(F::SegmentMismatch);
     }
-    let budget = resolved_max_rounds(consumed.effective.max_rounds);
-    if (fold.rounds_executed - 1).saturating_add(fold.delegated_rounds) >= budget {
+    if round_budget_spent(fold, resolved_max_rounds(consumed.effective.max_rounds)) {
         return fallback(F::BudgetSpent);
     }
     Ok(Checked {
@@ -1717,6 +1840,475 @@ fn check_fold(
         completed,
         edit,
     })
+}
+
+/// The question a question continuation answers, as the stored row identifies it (build plan
+/// WS14 S5): the step that asked, who authored it (it names the pause reference) and where it
+/// stands. Built by [`question_resume_target`] only.
+// `state` is read by the tests and by no production path: the spend, not this copy of the row,
+// decides whether the answer is used.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QuestionTarget {
+    /// The step that asked the question (the paused `ask_user` call's step).
+    pub step_id: String,
+    /// Who authored the question (`model` or `mcp_elicitation`; empty reads as `model`).
+    pub origin: String,
+    /// The question's lifecycle state: answered or skipped, for a target this function returns.
+    pub state: pb::QuestionState,
+}
+
+/// The stored question a question continuation names, if it can be continued with. Pure.
+///
+/// * Missing from the list, or another run's: [`Refusal::QuestionNotFound`] (a question of another
+///   run is never told apart from an absent one).
+/// * Not delivered as `resume`: [`Refusal::QuestionNotResumable`] (a `next_turn` question has no
+///   paused run behind it).
+/// * Still `requested`: [`Refusal::QuestionNotAnswered`].
+/// * `expired` or `cancelled`, or a state nobody can read: [`Refusal::QuestionExpired`].
+/// * `answered` or `skipped`: the target.
+///
+/// # Errors
+///
+/// The [`Refusal`] named above.
+pub(crate) fn question_resume_target(
+    questions: &[pb::RunQuestion],
+    question_id: &str,
+    run_id: &str,
+) -> Result<QuestionTarget, Refusal> {
+    let Some(question) = questions.iter().find(|question| {
+        !question_id.is_empty() && question.id == question_id && question.run_id == run_id
+    }) else {
+        return Err(Refusal::QuestionNotFound);
+    };
+    if question.delivery != mp_contracts::user_question::DELIVERY_RESUME {
+        return Err(Refusal::QuestionNotResumable);
+    }
+    let state = match pb::QuestionState::try_from(question.state) {
+        Ok(state @ (pb::QuestionState::Answered | pb::QuestionState::Skipped)) => state,
+        Ok(pb::QuestionState::Requested) => return Err(Refusal::QuestionNotAnswered),
+        // Expired, cancelled, unspecified or a value outside the enum: the answer cannot be used.
+        _ => return Err(Refusal::QuestionExpired),
+    };
+    Ok(QuestionTarget {
+        step_id: question.step_id.clone(),
+        origin: question.origin.clone(),
+        state,
+    })
+}
+
+/// What a question continuation does once its stage is known (see [`question_stage_decision`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StageDecision {
+    /// Re-enter the paused loop in place: claim the fold and apply the answer.
+    Proceed,
+    /// The run cannot be resumed in place by this continuation: release the answer (after the
+    /// single spend is won) so the client may send it as the next message.
+    Release,
+    /// End the request with this refusal. Nothing is applied and nothing is released.
+    Refuse(Refusal),
+}
+
+/// The decision for a question continuation from the stage [`select_stage`] picked and the writer
+/// the resume would seed ([`in_place_writer_off`]'s reason, as a [`Downgrade`]). Pure.
+///
+/// A waived route or a zero-retention run is REFUSED ([`Refusal::DurableMutationForbidden`]), from
+/// either input, and never released: a release asks the client to send the answer again, and a
+/// non-persistent run must not have content resent for it. Otherwise only an in-place stage whose
+/// writer would be active proceeds; a stage-1 segment (a question has none), a switch that is off
+/// and a writer that would be off all release.
+pub(crate) fn question_stage_decision(stage: Stage, writer_off: Option<Downgrade>) -> StageDecision {
+    let non_persistent = |downgrade: Downgrade| matches!(downgrade, Downgrade::Zdr | Downgrade::Waived);
+    if let Stage::Segment(Some(downgrade)) = stage {
+        if non_persistent(downgrade) {
+            return StageDecision::Refuse(Refusal::DurableMutationForbidden);
+        }
+    }
+    if writer_off.is_some_and(non_persistent) {
+        return StageDecision::Refuse(Refusal::DurableMutationForbidden);
+    }
+    match (stage, writer_off) {
+        (Stage::InPlace, None) => StageDecision::Proceed,
+        _ => StageDecision::Release,
+    }
+}
+
+/// What a refused claim of a question's fold means for the answer (see
+/// [`classify_question_claim`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuestionClaim {
+    /// This continuation cannot resume the pause. The caller then tries to win the single spend
+    /// before telling the client anything.
+    Release,
+    /// End the request with this refusal. Another continuation may be applying the answer, or the
+    /// caller may not resume the run, so the answer is not released.
+    Refuse(Refusal),
+}
+
+/// Classify a refused `ClaimLoopCheckpoint` for a question continuation. TOTAL: every status has
+/// an arm. Unlike [`classify_claim`], where an unknown code falls back to a stage that needs no
+/// claim, a question has no such stage, and "nothing applied" must not be read from a status that
+/// only says the claim failed: another continuation may be applying the answer right now.
+///
+/// * The ZDR catalogue trailer, whatever the code: [`Refusal::DurableMutationForbidden`].
+/// * `aborted` `loop_checkpoint_claim_held`, `loop_checkpoint_claimed_elsewhere` or
+///   `loop_checkpoint_thread_busy`: [`Refusal::ContinueInProgress`] (the fold is held, or the
+///   thread is busy; the answer is not released).
+/// * `failed_precondition` `loop_checkpoint_run_ended`: [`Refusal::RunEnded`].
+/// * `permission_denied` or `unauthenticated`: [`Refusal::Forbidden`].
+/// * Everything else (the fold is not claimable, the thread moved, the store is off, the fold did
+///   not authenticate, an invalid argument, a transport failure, any other code): `Release`.
+pub(crate) fn classify_question_claim(status: &tonic::Status) -> QuestionClaim {
+    use tonic::Code;
+    if mp_contracts::zdr_refusal::Refusal::from_status(status).is_some() {
+        return QuestionClaim::Refuse(Refusal::DurableMutationForbidden);
+    }
+    match (status.code(), status.message()) {
+        (
+            Code::Aborted,
+            "loop_checkpoint_claim_held"
+            | "loop_checkpoint_claimed_elsewhere"
+            | "loop_checkpoint_thread_busy",
+        ) => QuestionClaim::Refuse(Refusal::ContinueInProgress),
+        (Code::FailedPrecondition, "loop_checkpoint_run_ended") => {
+            QuestionClaim::Refuse(Refusal::RunEnded)
+        }
+        (Code::PermissionDenied | Code::Unauthenticated, _) => {
+            QuestionClaim::Refuse(Refusal::Forbidden)
+        }
+        _ => QuestionClaim::Release,
+    }
+}
+
+/// What the pure checks of a claimed question fold established, for the rest of the restore.
+#[derive(Debug)]
+pub(crate) struct CheckedInput {
+    /// The index of the open round's `ask_user` call (the paused call).
+    pub pending: usize,
+    /// For each call, the index of its completed entry.
+    pub completed: Vec<Option<usize>>,
+    /// The tool definitions the fold recorded as offered, which the continuation runs with.
+    pub tools: Vec<pb::ToolDefinition>,
+}
+
+/// The pure checks of a claimed fold against the question it must have paused on, before the
+/// ledger is read. The question counterpart of [`check_fold`]; any failure is
+/// [`Refusal::QuestionResumeUnavailable`] (nothing applied, nothing released), which the
+/// continuation turns into a release. In order:
+///
+/// 1. the row is a pause, this run's, and the row's segment is the fold's;
+/// 2. the fold is resumable (not a tombstone) and was written with the effect ledger on;
+/// 3. the history starts with the system prompt;
+/// 4. the pending pause is an input pause named by the question's pause reference
+///    (`user_question::input_pause_ref` of the run, step and origin) at the question's step;
+/// 5. the fold recorded the tools it offered, and the code-owned system prompt over the fold's
+///    allowlist and those tools digests to the fold's `prompt_digest` (the recomputation the
+///    approval restore makes; an empty digest proves nothing);
+/// 6. the claimed authority digest is the fold authority's;
+/// 7. the open round has 1 to 64 calls, exactly one at the paused step, named by the pause and
+///    with no outcome, and every other completed entry belongs to exactly one call;
+/// 8. the round budget (`requested_budget`, resolved like every budget) is not spent.
+///
+/// The prompt digest is recomputed here, from the fold's own recorded tools, because the tools
+/// the digest covers are only known once the fold is read.
+///
+/// # Errors
+///
+/// [`Refusal::QuestionResumeUnavailable`] for any failure above.
+pub(crate) fn check_input_fold(
+    claimed: &ClaimedFold,
+    run_id: &str,
+    target: &QuestionTarget,
+    requested_budget: u32,
+) -> Result<CheckedInput, Refusal> {
+    check_input_fold_with(claimed, run_id, target, requested_budget)
+        .map_err(|_failure| Refusal::QuestionResumeUnavailable)
+}
+
+fn check_input_fold_with(
+    claimed: &ClaimedFold,
+    run_id: &str,
+    target: &QuestionTarget,
+    requested_budget: u32,
+) -> Result<CheckedInput, RestoreFailure> {
+    use RestoreFailure as F;
+    let fold = &claimed.fold;
+    if claimed.kind != "pause" {
+        return Err(F::FoldKindMismatch);
+    }
+    if fold.run_id != run_id {
+        return Err(F::FoldRunMismatch);
+    }
+    if !row_segment_is_the_folds(claimed) {
+        return Err(F::SegmentMismatch);
+    }
+    if !fold.is_resumable() {
+        return Err(F::NotResumable);
+    }
+    if fold.extensions.get(EXT_EFFECT_LEDGER) != Some(&serde_json::Value::Bool(true)) {
+        return Err(F::LedgerOffInFold);
+    }
+    if fold.messages.first().map(|message| message.role.as_str()) != Some("system") {
+        return Err(F::HistoryInvalid);
+    }
+    let Some(pending) = &fold.pending else {
+        return Err(F::PendingMismatch);
+    };
+    if pending.kind != PauseKind::Input
+        || target.step_id.is_empty()
+        || pending.step_id != target.step_id
+        || pending.pause_ref
+            != mp_contracts::user_question::input_pause_ref(run_id, &target.step_id, &target.origin)
+        || pending.call.is_empty()
+    {
+        return Err(F::PendingMismatch);
+    }
+
+    // The tools the fold offered, and the prompt digest the writer computed over them: the
+    // allowlist is the authority's tool names, the same set the writer composed the prompt from.
+    let Some(offered) = mp_contracts::loop_fold::offered_tools_in(fold) else {
+        return Err(F::PromptDrift);
+    };
+    let tools: Vec<pb::ToolDefinition> = offered
+        .into_iter()
+        .map(|tool| pb::ToolDefinition {
+            name: tool.name,
+            description: tool.description,
+            parameters_json: tool.parameters_json,
+        })
+        .collect();
+    let allowlist: BTreeSet<String> = fold.authority.tool_names.iter().cloned().collect();
+    let current = fold::prompt_digest_of(&super::agent::compose_system_prompt(&allowlist), &tools);
+    if fold.prompt_digest.is_empty() || fold.prompt_digest != current {
+        return Err(F::PromptDrift);
+    }
+    if claimed.authority_digest != fold.authority.digest() {
+        return Err(F::AuthorityDigestMismatch);
+    }
+
+    // The open round: the one `ask_user` call the pause names, with no outcome.
+    let (round, pending_index) = open_round_call(fold, &target.step_id)?;
+    if round.calls[pending_index].name != pending.call {
+        return Err(F::PendingMismatch);
+    }
+    let completed = round_outcomes(fold, round, pending_index)?;
+    if round_budget_spent(fold, resolved_max_rounds(requested_budget)) {
+        return Err(F::BudgetSpent);
+    }
+    Ok(CheckedInput {
+        pending: pending_index,
+        completed,
+        tools,
+    })
+}
+
+/// Whether a continuation names a run question rather than an approval or a park (build plan WS14
+/// S5): it carries a question id or an answer. `grpc.rs` judges the shape of such a continuation
+/// before it gets here.
+pub(crate) fn names_question(resume: &pb::AgentResume) -> bool {
+    !resume.question_id.is_empty() || !resume.answer_json.is_empty()
+}
+
+/// Whether `req` is a question continuation: decided first by `agent::run_agent`, beside the park
+/// resume, because it reads no tool and consumes no approval.
+pub(crate) fn is_question_resume(req: &pb::RunAgentRequest) -> bool {
+    req.resume.as_ref().is_some_and(names_question)
+}
+
+/// The reason a question continuation gives for a writer that would be off ([`in_place_writer_off`]),
+/// in the terms of [`question_stage_decision`]. Pure.
+///
+/// A zero-retention or waived run, or a session-core that refused the run as not persistent, maps
+/// to the reasons that REFUSE; every other reason (a switch, the ledger, a Space, a delegated loop,
+/// a missing credential, a disabled store) maps to one that releases the answer.
+pub(crate) const fn writer_off_downgrade(reason: fold::OffReason) -> Downgrade {
+    match reason {
+        fold::OffReason::Zdr | fold::OffReason::RunNotPersistent => Downgrade::Zdr,
+        fold::OffReason::Waived => Downgrade::Waived,
+        fold::OffReason::LedgerOff => Downgrade::LedgerOff,
+        fold::OffReason::SwitchOff
+        | fold::OffReason::Space
+        | fold::OffReason::Delegated
+        | fold::OffReason::ResumedSegment
+        | fold::OffReason::NoBearer
+        | fold::OffReason::StoreDisabled => Downgrade::CheckpointOff,
+    }
+}
+
+/// The refusal a failed read of the run's questions ends a question continuation with. Pure.
+///
+/// The ZDR catalogue trailer, whatever the code, is [`Refusal::DurableMutationForbidden`]; a denial
+/// is [`Refusal::Forbidden`]; everything else (a transport failure, a store error) is
+/// [`Refusal::QuestionResumeUnavailable`]. Nothing was spent and nothing is released.
+pub(crate) fn question_read_refusal(status: &tonic::Status) -> Refusal {
+    if mp_contracts::zdr_refusal::Refusal::from_status(status).is_some() {
+        return Refusal::DurableMutationForbidden;
+    }
+    match status.code() {
+        tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => Refusal::Forbidden,
+        _ => Refusal::QuestionResumeUnavailable,
+    }
+}
+
+/// What the single spend of a question's answer (`ConsumeRunQuestion`) decided (see
+/// [`classify_question_spend`]).
+#[derive(Clone, PartialEq)]
+pub(crate) enum QuestionSpend {
+    /// This claim spent the answer now: nobody else has applied it and nobody else can.
+    Won(pb::RunQuestion),
+    /// The same claim token spent it earlier (a retried continuation): the stored question again.
+    Replayed(pb::RunQuestion),
+    /// A claim spent it earlier and it was not this one, or the replay did not hand the answer
+    /// back: it is used or released already.
+    Spent,
+    /// The spend was refused, or its answer cannot be read. Nothing was spent.
+    Refused(Refusal),
+}
+
+impl std::fmt::Debug for QuestionSpend {
+    /// Content-free: the variant, the question's id and its refusal. Never the answers.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Won(question) => f.debug_tuple("Won").field(&question.id).finish(),
+            Self::Replayed(question) => f.debug_tuple("Replayed").field(&question.id).finish(),
+            Self::Spent => f.write_str("Spent"),
+            Self::Refused(refusal) => f.debug_tuple("Refused").field(refusal).finish(),
+        }
+    }
+}
+
+/// Classify the answer of `ConsumeRunQuestion`. TOTAL: every response and every status has an arm.
+///
+/// * `consumed` with the question: [`QuestionSpend::Won`].
+/// * `already_consumed` by the same claim, with the question: [`QuestionSpend::Replayed`].
+/// * `already_consumed` by another claim: [`QuestionSpend::Spent`] (nothing is handed back).
+/// * The ZDR catalogue trailer, whatever the code: [`Refusal::DurableMutationForbidden`].
+/// * `question_not_answered`, `question_expired`, `question_run_ended` and `question_not_resumable`
+///   (failed precondition) and not found: the refusals of those names.
+/// * `permission_denied` or `unauthenticated`: [`Refusal::Forbidden`].
+/// * Anything else, including a response that is neither consumed nor already consumed, or that
+///   lacks the question it must carry: [`Refusal::QuestionResumeUnavailable`].
+pub(crate) fn classify_question_spend(
+    outcome: Result<pb::ConsumeRunQuestionResponse, tonic::Status>,
+) -> QuestionSpend {
+    use tonic::Code;
+    let unavailable = QuestionSpend::Refused(Refusal::QuestionResumeUnavailable);
+    let response = match outcome {
+        Ok(response) => response,
+        Err(status) => {
+            if mp_contracts::zdr_refusal::Refusal::from_status(&status).is_some() {
+                return QuestionSpend::Refused(Refusal::DurableMutationForbidden);
+            }
+            return match (status.code(), status.message()) {
+                (Code::FailedPrecondition, "question_not_answered") => {
+                    QuestionSpend::Refused(Refusal::QuestionNotAnswered)
+                }
+                (Code::FailedPrecondition, "question_expired") => {
+                    QuestionSpend::Refused(Refusal::QuestionExpired)
+                }
+                (Code::FailedPrecondition, "question_run_ended") => {
+                    QuestionSpend::Refused(Refusal::RunEnded)
+                }
+                (Code::FailedPrecondition, "question_not_resumable") => {
+                    QuestionSpend::Refused(Refusal::QuestionNotResumable)
+                }
+                (Code::NotFound, _) => QuestionSpend::Refused(Refusal::QuestionNotFound),
+                (Code::PermissionDenied | Code::Unauthenticated, _) => {
+                    QuestionSpend::Refused(Refusal::Forbidden)
+                }
+                _ => unavailable,
+            };
+        }
+    };
+    match (response.consumed, response.already_consumed, response.same_claim, response.question) {
+        (true, false, _, Some(question)) => QuestionSpend::Won(question),
+        (false, true, true, Some(question)) => QuestionSpend::Replayed(question),
+        (false, true, _, _) => QuestionSpend::Spent,
+        _ => unavailable,
+    }
+}
+
+/// What the placeholder slot of a restored question round says, so a seed that was never given its
+/// answer ([`Restored::seed_answer`]) reads to the model as a failed call and never as an empty
+/// answer.
+const ANSWER_NOT_APPLIED: &str =
+    "ask_user failed: the person's answer could not be applied. Do not assume what they chose.";
+
+/// Rebuild the paused loop from a claimed question fold and the ledger rows read for it, before the
+/// answer is spent. Pure: the ledger rules for the siblings of the paused `ask_user` call
+/// ([`sibling_slots`], L3 and L4, exactly as [`reconcile`] applies them), then the round rebuild.
+/// `checked` is [`check_input_fold`]'s proof about the same fold.
+///
+/// The paused call's own slot is a placeholder, `Resolved` with a failed result that names no
+/// answer; the caller replaces it with the answer after it has won the spend
+/// ([`Restored::seed_answer`]). Building the rest first means a fold or a ledger that cannot be
+/// restored is found while the answer is still unspent. A question call is not dispatched, so there
+/// is no release to find a row for and no paused-step row to reconcile.
+///
+/// The resumed loop writes under segment `fold.segment_no + 1`.
+///
+/// # Errors
+///
+/// [`RestoreOrRefuse::Fallback`] for a fold or a ledger that cannot be restored.
+pub(crate) fn restore_input(
+    claimed: &ClaimedFold,
+    checked: &CheckedInput,
+    ledger: &BTreeMap<String, effect::LedgerRow>,
+) -> Result<Restored, RestoreOrRefuse> {
+    use RestoreFailure as F;
+    let fold = &claimed.fold;
+    let (Some(round), Some(pending)) = (&fold.round_in_flight, &fold.pending) else {
+        return fallback(F::RoundInvalid);
+    };
+    if round.calls.get(checked.pending).is_none() {
+        return fallback(F::RoundInvalid);
+    }
+    let segment = fold.segment_no.saturating_add(1);
+    let slots = sibling_slots(
+        round,
+        checked.pending,
+        &checked.completed,
+        segment,
+        SeedSlot::Resolved {
+            step_id: pending.step_id.clone(),
+            name: pending.call.clone(),
+            output: String::new(),
+            error: Some(ANSWER_NOT_APPLIED.to_owned()),
+            passed_prepass: true,
+        },
+        ledger,
+    )?;
+    // The paused call keeps the arguments the fold recorded for it; it is not run again.
+    let tool_calls = round
+        .calls
+        .iter()
+        .map(|call| pb::ToolCall {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments_json: call.arguments_json.clone(),
+        })
+        .collect();
+    Ok(rebuild_round(claimed, round, tool_calls, slots, segment, None))
+}
+
+impl Restored {
+    /// Seed the answered `ask_user` call: its slot at `pending` becomes `Resolved` with the
+    /// question's answer as the call's result ([`super::ask::answer_result`]) and no error. The
+    /// answer is information the model reads as the tool result, never an instruction and never a
+    /// grant. `false`, with nothing changed, when the slot at `pending` is not the placeholder
+    /// [`restore_input`] made.
+    pub(crate) fn seed_answer(&mut self, pending: usize, question: &pb::RunQuestion) -> bool {
+        match self.slots.get_mut(pending) {
+            Some(SeedSlot::Resolved { output, error, .. })
+                if error.as_deref() == Some(ANSWER_NOT_APPLIED) =>
+            {
+                *output = super::ask::answer_result(question);
+                *error = None;
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 /// How effectful a class is, for taking the more effectful of two.
@@ -1790,43 +2382,18 @@ fn reconcile(
             return fallback(F::PausedStepUnsettled);
         }
     }
-    // L3.
-    for (index, call) in round.calls.iter().enumerate() {
-        if index == checked.pending || call.step_id.is_empty() {
-            continue;
-        }
-        let Some(recorded) = ledger.get(&effect::action_id_for(&call.step_id)) else {
-            continue;
-        };
-        let digests_differ = matches!(
-            (&recorded.args_digest, effect::args_digest_of(&call.arguments_json)),
-            (Some(row), Some(call)) if *row != call
-        );
-        if recorded.tool != call.name || digests_differ {
-            return fallback(F::LedgerIdentityMismatch);
-        }
-    }
-
-    // The open round, call by call.
-    let mut slots = Vec::with_capacity(round.calls.len());
-    for (index, call) in round.calls.iter().enumerate() {
-        let slot = if index == checked.pending {
-            SeedSlot::Release {
-                step_id: release_step_id.to_owned(),
-            }
-        } else if let Some(entry) = checked.completed[index].map(|entry| &round.completed[entry]) {
-            SeedSlot::Resolved {
-                step_id: call.step_id.clone(),
-                name: call.name.clone(),
-                output: entry.output.clone(),
-                error: (!entry.error.is_empty()).then(|| entry.error.clone()),
-                passed_prepass: !call.step_id.is_empty(),
-            }
-        } else {
-            dangling_slot(call, consumed, ledger)?
-        };
-        slots.push(slot);
-    }
+    // L3, and the open round call by call (L4): the siblings of the released call, shared with
+    // the question continuation.
+    let slots = sibling_slots(
+        round,
+        checked.pending,
+        &checked.completed,
+        consumed.segment,
+        SeedSlot::Release {
+            step_id: release_step_id.to_owned(),
+        },
+        ledger,
+    )?;
 
     let tool_calls = round
         .calls
@@ -1843,7 +2410,30 @@ fn reconcile(
             },
         })
         .collect();
-    Ok(Restored {
+    Ok(rebuild_round(
+        claimed,
+        round,
+        tool_calls,
+        slots,
+        consumed.segment,
+        checked.edit.clone(),
+    ))
+}
+
+/// The paused loop as a [`Restored`] seed: the fold's history and counters, the open round as the
+/// model's own response (`tool_calls` as the caller states them), the slots, and the segment the
+/// resumed loop writes under. `check_fold` and `check_input_fold` proved `rounds_executed >= 1`.
+/// Shared by [`reconcile`] and [`restore_input`].
+fn rebuild_round(
+    claimed: &ClaimedFold,
+    round: &mp_contracts::loop_fold::RoundInFlight,
+    tool_calls: Vec<pb::ToolCall>,
+    slots: Vec<SeedSlot>,
+    segment: u32,
+    edit: Option<EditNote>,
+) -> Restored {
+    let fold = &claimed.fold;
+    Restored {
         messages: fold
             .messages
             .iter()
@@ -1861,7 +2451,6 @@ fn reconcile(
             ..Default::default()
         },
         slots,
-        // `check_fold` proved `rounds_executed >= 1`.
         rounds_executed: fold.rounds_executed.saturating_sub(1),
         delegated_rounds: fold.delegated_rounds,
         step_seq: fold.step_seq,
@@ -1870,17 +2459,84 @@ fn reconcile(
         compaction_triggered: fold.compaction_triggered,
         attempted_retrievals: fold.attempted_retrievals.iter().cloned().collect(),
         claimed_seq: claimed.seq,
-        segment: consumed.segment,
-        edit: checked.edit.clone(),
+        segment,
+        edit,
         taint: mp_contracts::loop_fold::connector_taint_in(fold),
         connector_scope: mp_contracts::loop_fold::connector_scope_in(fold),
-    })
+    }
+}
+
+/// The slots of the open round, one per call, with the paused call's slot given (L3 and L4 of
+/// [`reconcile`]). Shared by the approval continuation (`pending_slot` is the release) and the
+/// question continuation (`pending_slot` is the answered `ask_user` call).
+///
+/// * L3. A row under another call's action id that names another tool, or another digest when
+///   both sides have one, falls back.
+/// * L4. Every other call takes its outcome from the fold, or, with none, the slot of
+///   [`dangling_slot`]. `segment` is the segment the resumed loop writes under.
+fn sibling_slots(
+    round: &mp_contracts::loop_fold::RoundInFlight,
+    pending: usize,
+    completed: &[Option<usize>],
+    segment: u32,
+    pending_slot: SeedSlot,
+    ledger: &BTreeMap<String, effect::LedgerRow>,
+) -> Result<Vec<SeedSlot>, RestoreOrRefuse> {
+    use RestoreFailure as F;
+    // L3.
+    for (index, call) in round.calls.iter().enumerate() {
+        if index == pending || call.step_id.is_empty() {
+            continue;
+        }
+        let Some(recorded) = ledger.get(&effect::action_id_for(&call.step_id)) else {
+            continue;
+        };
+        let digests_differ = matches!(
+            (&recorded.args_digest, effect::args_digest_of(&call.arguments_json)),
+            (Some(row), Some(call)) if *row != call
+        );
+        if recorded.tool != call.name || digests_differ {
+            return fallback(F::LedgerIdentityMismatch);
+        }
+    }
+
+    // The open round, call by call.
+    let mut pending_slot = Some(pending_slot);
+    let mut slots = Vec::with_capacity(round.calls.len());
+    for (index, call) in round.calls.iter().enumerate() {
+        let slot = if index == pending {
+            match pending_slot.take() {
+                Some(slot) => slot,
+                // `pending` names one index, so this is the second time round: not a round
+                // this restore understands.
+                None => return fallback(F::RoundInvalid),
+            }
+        } else if let Some(entry) = completed
+            .get(index)
+            .copied()
+            .flatten()
+            .and_then(|entry| round.completed.get(entry))
+        {
+            SeedSlot::Resolved {
+                step_id: call.step_id.clone(),
+                name: call.name.clone(),
+                output: entry.output.clone(),
+                error: (!entry.error.is_empty()).then(|| entry.error.clone()),
+                passed_prepass: !call.step_id.is_empty(),
+            }
+        } else {
+            dangling_slot(call, segment, ledger)?
+        };
+        slots.push(slot);
+    }
+    Ok(slots)
 }
 
 /// The slot of a dangling call: it has a step id and no outcome in the fold (L4, G1-G3).
+/// `segment` is the segment the resumed loop writes under, which names the call's new step id.
 fn dangling_slot(
     call: &mp_contracts::loop_fold::FoldCall,
-    consumed: &Consumed,
+    segment: u32,
     ledger: &BTreeMap<String, effect::LedgerRow>,
 ) -> Result<SeedSlot, RestoreOrRefuse> {
     // `check_fold` (13) already refuses a call with no step id and no outcome. This is the
@@ -1901,7 +2557,7 @@ fn dangling_slot(
         return Ok(closed(CloserKind::UnknownOutcome));
     }
     let original = ledger.get(&effect::action_id_for(&call.step_id));
-    let resumed_id = resumed_step_id(consumed.segment, &call.step_id);
+    let resumed_id = resumed_step_id(segment, &call.step_id);
     let reached = ledger.get(&effect::action_id_for(&resumed_id));
     let class = more_effectful(
         more_effectful(
@@ -2811,6 +3467,8 @@ mod tests {
             segment: 2,
             revision: 0,
             original_action_fingerprint: String::new(),
+            connector_taint: None,
+            connector_scope: Vec::new(),
         }
     }
 
@@ -3108,6 +3766,12 @@ mod tests {
             (Refusal::ParkNotRestorable, "park_not_restorable", Code::FailedPrecondition),
             (Refusal::ParkRouteUnavailable, "park_route_unavailable", Code::FailedPrecondition),
             (Refusal::ParkNotDue, "park_not_due", Code::FailedPrecondition),
+            (Refusal::QuestionResumeUnavailable, "question_resume_unavailable", Code::FailedPrecondition),
+            (Refusal::QuestionAnswerReleased, "question_answer_released", Code::FailedPrecondition),
+            (Refusal::QuestionNotAnswered, "question_not_answered", Code::FailedPrecondition),
+            (Refusal::QuestionExpired, "question_expired", Code::FailedPrecondition),
+            (Refusal::QuestionNotFound, "question_not_found", Code::NotFound),
+            (Refusal::QuestionNotResumable, "question_not_resumable", Code::FailedPrecondition),
         ] {
             assert_eq!(refusal.as_str(), token);
             let status = refusal.status();
@@ -3141,6 +3805,312 @@ mod tests {
                 "{token}"
             );
         }
+    }
+
+    // -- the question continuation's pure checks (WS14 S5) --
+
+    fn run_question(id: &str, run: &str, delivery: &str, state: pb::QuestionState) -> pb::RunQuestion {
+        pb::RunQuestion {
+            id: id.to_owned(),
+            run_id: run.to_owned(),
+            step_id: PAUSED_STEP.to_owned(),
+            delivery: delivery.to_owned(),
+            state: state as i32,
+            origin: "model".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_question_refusals_are_closed_tokens_with_their_status() {
+        for (refusal, token, code) in [
+            (Refusal::QuestionResumeUnavailable, "question_resume_unavailable", Code::FailedPrecondition),
+            (Refusal::QuestionAnswerReleased, "question_answer_released", Code::FailedPrecondition),
+            (Refusal::QuestionNotAnswered, "question_not_answered", Code::FailedPrecondition),
+            (Refusal::QuestionExpired, "question_expired", Code::FailedPrecondition),
+            (Refusal::QuestionNotFound, "question_not_found", Code::NotFound),
+            (Refusal::QuestionNotResumable, "question_not_resumable", Code::FailedPrecondition),
+        ] {
+            assert_eq!(refusal.as_str(), token);
+            assert_eq!(refusal.status().code(), code, "{token}");
+            assert_eq!(refusal.status().message(), token, "{token}");
+        }
+    }
+
+    #[test]
+    fn question_resume_target_reads_the_state_of_the_named_question_of_this_run() {
+        let resume = mp_contracts::user_question::DELIVERY_RESUME;
+        let next_turn = mp_contracts::user_question::DELIVERY_NEXT_TURN;
+        let questions = vec![
+            run_question("q_answered", RUN, resume, pb::QuestionState::Answered),
+            run_question("q_skipped", RUN, resume, pb::QuestionState::Skipped),
+            run_question("q_requested", RUN, resume, pb::QuestionState::Requested),
+            run_question("q_expired", RUN, resume, pb::QuestionState::Expired),
+            run_question("q_cancelled", RUN, resume, pb::QuestionState::Cancelled),
+            run_question("q_unspecified", RUN, resume, pb::QuestionState::Unspecified),
+            run_question("q_next_turn", RUN, next_turn, pb::QuestionState::Answered),
+            run_question("q_other_run", "run-2", resume, pb::QuestionState::Answered),
+        ];
+        let target = |id: &str| question_resume_target(&questions, id, RUN);
+        let answered = target("q_answered").expect("an answered resume question");
+        assert_eq!(answered.step_id, PAUSED_STEP);
+        assert_eq!(answered.origin, "model");
+        assert_eq!(answered.state, pb::QuestionState::Answered);
+        assert_eq!(target("q_skipped").expect("skipped").state, pb::QuestionState::Skipped);
+        assert_eq!(target("q_requested"), Err(Refusal::QuestionNotAnswered));
+        assert_eq!(target("q_expired"), Err(Refusal::QuestionExpired));
+        assert_eq!(target("q_cancelled"), Err(Refusal::QuestionExpired));
+        assert_eq!(target("q_unspecified"), Err(Refusal::QuestionExpired));
+        assert_eq!(target("q_next_turn"), Err(Refusal::QuestionNotResumable));
+        assert_eq!(target("q_other_run"), Err(Refusal::QuestionNotFound), "another run's question");
+        assert_eq!(target("q_missing"), Err(Refusal::QuestionNotFound));
+        assert_eq!(target(""), Err(Refusal::QuestionNotFound), "an empty id names nothing");
+        assert_eq!(question_resume_target(&[], "q_answered", RUN), Err(Refusal::QuestionNotFound));
+    }
+
+    #[test]
+    fn question_stage_decision_refuses_a_non_persistent_run_and_releases_what_cannot_resume_in_place() {
+        let refuse = StageDecision::Refuse(Refusal::DurableMutationForbidden);
+        // A waived route or a ZDR run is refused, never released, from either input.
+        assert_eq!(question_stage_decision(Stage::Segment(Some(Downgrade::Waived)), None), refuse);
+        assert_eq!(question_stage_decision(Stage::Segment(Some(Downgrade::Zdr)), None), refuse);
+        assert_eq!(question_stage_decision(Stage::InPlace, Some(Downgrade::Waived)), refuse);
+        assert_eq!(question_stage_decision(Stage::InPlace, Some(Downgrade::Zdr)), refuse);
+        assert_eq!(
+            question_stage_decision(Stage::Segment(Some(Downgrade::ResumeSwitchOff)), Some(Downgrade::Zdr)),
+            refuse
+        );
+        // In place with an active writer proceeds.
+        assert_eq!(question_stage_decision(Stage::InPlace, None), StageDecision::Proceed);
+        // A writer that would be off, a switch that is off and a stage-1 segment all release.
+        for writer_off in [Downgrade::ResumeSwitchOff, Downgrade::CheckpointOff, Downgrade::LedgerOff] {
+            assert_eq!(
+                question_stage_decision(Stage::InPlace, Some(writer_off)),
+                StageDecision::Release,
+                "{writer_off:?}"
+            );
+        }
+        for downgrade in [Downgrade::ResumeSwitchOff, Downgrade::CheckpointOff, Downgrade::LedgerOff] {
+            assert_eq!(
+                question_stage_decision(Stage::Segment(Some(downgrade)), None),
+                StageDecision::Release,
+                "{downgrade:?}"
+            );
+        }
+        assert_eq!(question_stage_decision(Stage::Segment(None), None), StageDecision::Release);
+    }
+
+    #[test]
+    fn classify_question_claim_releases_only_what_proves_nothing_is_applying_the_answer() {
+        use tonic::Status;
+        let refuse = QuestionClaim::Refuse;
+        let cases = [
+            // Another continuation holds the fold, or the thread is busy: not released.
+            (Status::aborted("loop_checkpoint_claim_held"), refuse(Refusal::ContinueInProgress), "claim held"),
+            (Status::aborted("loop_checkpoint_claimed_elsewhere"), refuse(Refusal::ContinueInProgress), "claimed elsewhere"),
+            (Status::aborted("loop_checkpoint_thread_busy"), refuse(Refusal::ContinueInProgress), "thread busy"),
+            (Status::failed_precondition("loop_checkpoint_run_ended"), refuse(Refusal::RunEnded), "run ended"),
+            (Status::permission_denied("no"), refuse(Refusal::Forbidden), "denied"),
+            (Status::unauthenticated("no"), refuse(Refusal::Forbidden), "unauthenticated"),
+            // The ZDR catalogue refusal, whatever the code.
+            (
+                mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(Code::FailedPrecondition),
+                refuse(Refusal::DurableMutationForbidden),
+                "zdr",
+            ),
+            // This continuation cannot resume the pause: released.
+            (Status::failed_precondition("loop_checkpoint_not_claimable"), QuestionClaim::Release, "not claimable"),
+            (Status::failed_precondition("loop_checkpoint_thread_moved"), QuestionClaim::Release, "thread moved"),
+            (Status::failed_precondition("loop_checkpoint_disabled"), QuestionClaim::Release, "disabled"),
+            (Status::failed_precondition("loop checkpoint did not authenticate"), QuestionClaim::Release, "did not authenticate"),
+            (Status::invalid_argument("bad claim"), QuestionClaim::Release, "invalid argument"),
+            (Status::unavailable("down"), QuestionClaim::Release, "transport"),
+            (Status::deadline_exceeded("slow"), QuestionClaim::Release, "deadline"),
+            (Status::internal("boom"), QuestionClaim::Release, "internal"),
+            (Status::not_found("gone"), QuestionClaim::Release, "not found"),
+            // The same words under another code are not the closed tokens.
+            (Status::internal("loop_checkpoint_run_ended"), QuestionClaim::Release, "run_ended on another code"),
+            (Status::failed_precondition("loop_checkpoint_claim_held"), QuestionClaim::Release, "claim_held on another code"),
+        ];
+        for (status, expected, label) in &cases {
+            assert_eq!(classify_question_claim(status), *expected, "{label}");
+        }
+        // Total: every gRPC code has an answer, and only a denial refuses on the code alone.
+        for raw in 0..=16 {
+            let code = Code::from_i32(raw);
+            let answer = classify_question_claim(&tonic::Status::new(code, "x"));
+            let refuses = matches!(code, Code::PermissionDenied | Code::Unauthenticated);
+            assert_eq!(matches!(answer, QuestionClaim::Refuse(_)), refuses, "{code:?}");
+        }
+    }
+
+    const INPUT_STEP_CALL: &str = "ask_user";
+
+    fn input_target() -> QuestionTarget {
+        QuestionTarget {
+            step_id: PAUSED_STEP.to_owned(),
+            origin: mp_contracts::user_question::ORIGIN_MODEL.to_owned(),
+            state: pb::QuestionState::Answered,
+        }
+    }
+
+    /// The pause fold of a run that stopped on an `ask_user` call: the approval fold's round with
+    /// the paused call renamed, an input pause named by the question's reference, the offered tools
+    /// recorded, and the prompt digest the writer computes over them.
+    fn input_fold() -> LoopFoldV1 {
+        let mut fold = pause_fold();
+        let tools = tool_defs();
+        fold.extensions.insert(
+            mp_contracts::loop_fold::EXT_OFFERED_TOOLS.to_owned(),
+            serde_json::Value::Array(
+                tools
+                    .iter()
+                    .map(|tool| {
+                        serde_json::json!({
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters_json": tool.parameters_json,
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+        if let Some(round) = fold.round_in_flight.as_mut() {
+            round.calls[1] = fold_call("call-b", INPUT_STEP_CALL, r#"{"questions":[]}"#, PAUSED_STEP);
+        }
+        fold.pending = Some(PendingPause {
+            kind: PauseKind::Input,
+            pause_ref: mp_contracts::user_question::input_pause_ref(
+                RUN,
+                PAUSED_STEP,
+                mp_contracts::user_question::ORIGIN_MODEL,
+            ),
+            step_id: PAUSED_STEP.to_owned(),
+            call: INPUT_STEP_CALL.to_owned(),
+            action_fingerprint: "fp-1".to_owned(),
+        });
+        let names: BTreeSet<String> = fold.authority.tool_names.iter().cloned().collect();
+        fold.prompt_digest = fold::prompt_digest_of(
+            &crate::runtime_loop::agent::compose_system_prompt(&names),
+            &tools,
+        );
+        fold
+    }
+
+    fn checked_input_after(edit: impl FnOnce(&mut LoopFoldV1)) -> Result<CheckedInput, Refusal> {
+        let mut fold = input_fold();
+        edit(&mut fold);
+        check_input_fold(&claimed_of(fold), RUN, &input_target(), 6)
+    }
+
+    #[test]
+    fn check_input_fold_accepts_a_well_formed_input_fold() {
+        let checked = checked_input_after(|_| {}).expect("a well-formed input fold");
+        assert_eq!(checked.pending, 1, "the ask_user call is the second call of the round");
+        assert_eq!(checked.completed, vec![Some(0), None, Some(1)]);
+        assert_eq!(checked.tools, tool_defs());
+        // An MCP elicitation names its pause by the elicitation reference.
+        let mut fold = input_fold();
+        fold.pending.as_mut().expect("pending").pause_ref = mp_contracts::user_question::input_pause_ref(
+            RUN,
+            PAUSED_STEP,
+            mp_contracts::user_question::ORIGIN_MCP_ELICITATION,
+        );
+        let target = QuestionTarget {
+            origin: mp_contracts::user_question::ORIGIN_MCP_ELICITATION.to_owned(),
+            ..input_target()
+        };
+        assert!(check_input_fold(&claimed_of(fold), RUN, &target, 6).is_ok());
+    }
+
+    #[test]
+    fn check_input_fold_refuses_every_fold_that_is_not_this_questions() {
+        let unavailable = Err(Refusal::QuestionResumeUnavailable);
+        let refused = |result: Result<CheckedInput, Refusal>| result.map(|_| ());
+        // An approval fold is not a question's.
+        assert_eq!(
+            refused(check_input_fold(&claimed_of(pause_fold()), RUN, &input_target(), 6)),
+            unavailable
+        );
+        // An input pause named by an approval-shaped reference.
+        assert_eq!(
+            refused(checked_input_after(|f| {
+                f.pending.as_mut().expect("pending").pause_ref = format!("{RUN}:{PAUSED_STEP}");
+            })),
+            unavailable
+        );
+        // Another step, another run, another kind of row.
+        assert_eq!(
+            refused(checked_input_after(|f| f.pending.as_mut().expect("pending").step_id = "tool_9".to_owned())),
+            unavailable
+        );
+        assert_eq!(refused(checked_input_after(|f| f.run_id = "run-2".to_owned())), unavailable);
+        let mut parked = claimed_of(input_fold());
+        parked.kind = "park".to_owned();
+        assert_eq!(refused(check_input_fold(&parked, RUN, &input_target(), 6)), unavailable);
+        // A fold with no recorded offer cannot rebuild the run's tools.
+        assert_eq!(
+            refused(checked_input_after(|f| {
+                f.extensions.remove(mp_contracts::loop_fold::EXT_OFFERED_TOOLS);
+            })),
+            unavailable
+        );
+        // The prompt or a tool definition moved since the pause (or was never recorded).
+        assert_eq!(
+            refused(checked_input_after(|f| f.prompt_digest = "digest-2".to_owned())),
+            unavailable
+        );
+        assert_eq!(refused(checked_input_after(|f| f.prompt_digest = String::new())), unavailable);
+        // The claimed authority digest is not the fold authority's.
+        let mut mismatched = claimed_of(input_fold());
+        mismatched.authority_digest = "other".to_owned();
+        assert_eq!(refused(check_input_fold(&mismatched, RUN, &input_target(), 6)), unavailable);
+        // The ledger was off when the fold was written, or the history lacks its system prompt.
+        assert_eq!(
+            refused(checked_input_after(|f| {
+                f.extensions.remove(EXT_EFFECT_LEDGER);
+            })),
+            unavailable
+        );
+        assert_eq!(refused(checked_input_after(|f| f.messages[0].role = "user".to_owned())), unavailable);
+    }
+
+    #[test]
+    fn check_input_fold_refuses_a_round_that_is_not_one_open_question() {
+        let unavailable = Err(Refusal::QuestionResumeUnavailable);
+        let refused = |result: Result<CheckedInput, Refusal>| result.map(|_| ());
+        // The paused call already has an outcome.
+        assert_eq!(
+            refused(checked_input_after(|f| {
+                if let Some(round) = f.round_in_flight.as_mut() {
+                    round.completed.push(fold_done(PAUSED_STEP, "call-b", "answered", ""));
+                }
+            })),
+            unavailable
+        );
+        // The call at the paused step is not the paused tool.
+        assert_eq!(
+            refused(checked_input_after(|f| {
+                if let Some(round) = f.round_in_flight.as_mut() {
+                    round.calls[1].name = "delete_records".to_owned();
+                }
+            })),
+            unavailable
+        );
+        // No open round, or no call at the step.
+        assert_eq!(refused(checked_input_after(|f| f.round_in_flight = None)), unavailable);
+        assert_eq!(
+            refused(checked_input_after(|f| {
+                if let Some(round) = f.round_in_flight.as_mut() {
+                    round.calls[1].step_id = "tool_other".to_owned();
+                }
+            })),
+            unavailable
+        );
+        // The round budget is spent.
+        let spent = check_input_fold(&claimed_of(input_fold()), RUN, &input_target(), 1);
+        assert_eq!(spent.map(|_| ()), unavailable, "the open round is the second, so a budget of one is spent");
     }
 
     // -- the fold checks --
@@ -4092,13 +5062,13 @@ mod tests {
     fn a_call_with_no_step_id_is_never_a_dangling_slot() {
         let call = fold_call("call-x", "knowledge_search", r#"{"query":"x"}"#, "");
         assert_eq!(
-            fallback_of(dangling_slot(&call, &consumed(), &Ledger::new())),
+            fallback_of(dangling_slot(&call, consumed().segment, &Ledger::new())),
             RestoreFailure::RoundInvalid
         );
         // The control: the same call with a step id is a redispatchable read.
         let call = fold_call("call-x", "knowledge_search", r#"{"query":"x"}"#, "tool_5_call-x");
         assert!(matches!(
-            dangling_slot(&call, &consumed(), &Ledger::new()),
+            dangling_slot(&call, consumed().segment, &Ledger::new()),
             Ok(SeedSlot::Redispatch { .. })
         ));
     }

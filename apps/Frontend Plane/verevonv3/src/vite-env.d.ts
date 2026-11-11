@@ -56,6 +56,8 @@ interface ImportMetaEnv {
 	readonly VITE_CHAT_SIDE_CHAT?: string;
 	/** "true" shows thumbs and reasons on agent run answers and scheduled results (F-t3-078). Default off. */
 	readonly VITE_AGENT_RESULT_FEEDBACK?: string;
+	/** "true" shows the zero-data-retention acknowledgement for a model connection that cannot give ZDR (ZDR Z-19d). Read only through isZdrWaiverUiEnabled(). Default off. */
+	readonly VITE_ZDR_WAIVER_UI?: string;
 	readonly VITE_QUOTA_READOUT?: string;
 	readonly VITE_QUOTA_READOUT_METRIC?: string;
 	/** "1"/"0" forces the Space command palette on/off; unset is on in dev only (WS13-S6). */

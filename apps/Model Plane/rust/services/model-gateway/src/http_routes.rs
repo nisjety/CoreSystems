@@ -1937,13 +1937,15 @@ async fn list_run_questions(
     })))
 }
 
+/// One item of an answer to a question, as the answer route and the question form of `/continue`
+/// (WS14 S5) both read it.
 #[derive(Debug, Deserialize)]
-struct AnswerQuestionItemBody {
-    item_id: String,
+pub(crate) struct AnswerQuestionItemBody {
+    pub(crate) item_id: String,
     #[serde(default)]
-    option_ids: Vec<String>,
+    pub(crate) option_ids: Vec<String>,
     #[serde(default)]
-    text: String,
+    pub(crate) text: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1965,6 +1967,27 @@ async fn answer_run_question(
     Json(body): Json<AnswerQuestionBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
     require_non_zdr_durable_mutation(&claims)?;
+    let question =
+        record_question_answer(&state, &claims, &bearer, question_id, body.answers, body.skip)
+            .await?;
+    Ok(Json(json!({ "question": run_question_value(&question) })))
+}
+
+/// Record the owner's answer to, or skip of, one question through Session Core's `AnswerRunQuestion`
+/// (build plan WS14 S3, S5), and return the question as it now stands. The one writer of an answer:
+/// the answer route and the question form of `/continue` both call it, so the org is always the
+/// verified credential's, the answer is never attributed to a message from here, and every
+/// Session Core refusal takes the same typed map (`question_not_found` 404, `question_expired` 410,
+/// `question_already_answered` 409, `invalid_answer` 422). The caller has already refused a ZDR or
+/// waived credential. The answers are never logged.
+pub(crate) async fn record_question_answer(
+    state: &AppState,
+    claims: &Claims,
+    bearer: &VerifiedModelBearer,
+    question_id: String,
+    answers: Vec<AnswerQuestionItemBody>,
+    skip: bool,
+) -> Result<RunQuestion, HttpJsonError> {
     let response = state
         .orchestration_client
         .clone()
@@ -1972,8 +1995,7 @@ async fn answer_run_question(
             AnswerRunQuestionRequest {
                 question_id,
                 org_id: claims.org_id.clone(),
-                answers: body
-                    .answers
+                answers: answers
                     .into_iter()
                     .map(|answer| QuestionAnswerItem {
                         item_id: answer.item_id,
@@ -1981,20 +2003,19 @@ async fn answer_run_question(
                         text: answer.text,
                     })
                     .collect(),
-                skip: body.skip,
+                skip,
                 // The message that carries an answer is recorded by the server when the answer
                 // arrives on a turn; this route never takes it from the caller.
                 answered_message_id: String::new(),
             },
-            &bearer,
+            bearer,
         )?)
         .await
         .map_err(|e| question_status_to_http(&e))?
         .into_inner();
-    let question = response
+    response
         .question
-        .ok_or_else(|| question_error(StatusCode::NOT_FOUND, "question_not_found", json!({})))?;
-    Ok(Json(json!({ "question": run_question_value(&question) })))
+        .ok_or_else(|| question_error(StatusCode::NOT_FOUND, "question_not_found", json!({})))
 }
 
 /// A typed question error body: `{ "error": { "code", "message", "details" } }`.

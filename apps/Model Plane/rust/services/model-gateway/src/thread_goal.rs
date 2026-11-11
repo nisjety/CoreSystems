@@ -164,6 +164,8 @@ pub(crate) fn settle_outcome(outcome: AgenticRunOutcome) -> &'static str {
         AgenticRunOutcome::Completed => "completed",
         AgenticRunOutcome::Failed => "failed",
         AgenticRunOutcome::AwaitingApproval => "awaiting_approval",
+        // The run paused for the owner's answer (WS14 S5); `thread_goal_turns` admits the token (migration 0092).
+        AgenticRunOutcome::AwaitingInput => "awaiting_input",
         AgenticRunOutcome::Parked => "parked",
         AgenticRunOutcome::Unknown => "unknown",
     }
@@ -1099,6 +1101,10 @@ mod tests {
         assert_eq!(
             settle_outcome(AgenticRunOutcome::AwaitingApproval),
             "awaiting_approval"
+        );
+        assert_eq!(
+            settle_outcome(AgenticRunOutcome::AwaitingInput),
+            "awaiting_input"
         );
         assert_eq!(settle_outcome(AgenticRunOutcome::Parked), "parked");
         assert_eq!(settle_outcome(AgenticRunOutcome::Unknown), "unknown");

@@ -108,7 +108,11 @@ import {
   reasoningTranslateLocaleOf,
   type ReasoningTranslateLocale,
 } from '@/shared/actions/chat-reasoning-translate'
-import { answerProcessingNote } from '@/shared/api/privacy-tier'
+import { answerProcessingNote, answerRetentionLine } from '@/shared/api/privacy-tier'
+import { isZdrWaiverUiEnabled } from '@/shared/api/connection-zdr-client'
+import { ConnectionZdrAcknowledgement } from '@/features/integrations/components/ConnectionZdrAcknowledgement'
+import { en as enStrings } from '@/shared/i18n/en'
+import { no as noStrings } from '@/shared/i18n/no'
 import { correctMemory, deleteMemory, listMemories, rememberMemory } from '@/shared/api/memory-client'
 import { memberSkillAuthoring } from '@/shared/api/skills-client'
 import { SaveAsSkillDialog } from '@/features/skills/components/SaveAsSkillDialog'
@@ -581,6 +585,7 @@ export function AnswerRegion(props: {
             unsaved={failed().unsaved}
             action={failed().action}
             retryAt={failed().retryAt}
+            connectionId={failed().connectionId}
             onRetry={props.onRegenerate}
           />
         )}
@@ -686,6 +691,11 @@ export function AssistantMessage(props: {
   // Undefined (nothing rendered) unless the server asserted a residency or a
   // retention claim; never worked out from the model name.
   const processingNote = createMemo(() => answerProcessingNote(i18n, props.message.servedBy))
+  // The visible record of a waiver (ZDR Z-21): an answer produced on the member's own connection, which is not zero data
+  // retention, says so under the answer. From the gateway's `retention_class` stamp alone, and only with the switch on.
+  const retentionLine = createMemo(() =>
+    isZdrWaiverUiEnabled() ? answerRetentionLine(i18n, props.message.servedBy?.retentionClass) : undefined,
+  )
   // The longest single provider call's retry-after wait. Calls can run in
   // parallel, so summing them would overstate the time the person sat through.
   const providerWaitNote = createMemo(() => {
@@ -1318,6 +1328,13 @@ export function AssistantMessage(props: {
             {(note) => (
               <p class="verevon-chat-processing-line" role="note" title={note().title}>
                 {note().text}
+              </p>
+            )}
+          </Show>
+          <Show when={retentionLine()}>
+            {(line) => (
+              <p class="verevon-chat-processing-line" role="note" title={line().title}>
+                {line().text}
               </p>
             )}
           </Show>
@@ -4955,9 +4972,18 @@ export function ErrorNotice(props: {
   action?: StreamFailureAction
   /** With `action: 'wait'`: the instant (ISO) the retry control is enabled again. */
   retryAt?: string
+  /**
+   * With `action: 'open_integrations'`: the ChatGPT-subscription connection the refused turn ran on. With
+   * VITE_ZDR_WAIVER_UI on, the reader can review and confirm it here (ZDR Z-20) and then send the turn again.
+   */
+  connectionId?: string
   onRetry: () => void
 }) {
   const i18n = useI18n()
+  const [reviewOpen, setReviewOpen] = createSignal(false)
+  const [reviewDone, setReviewDone] = createSignal(false)
+  const waiverCopy = () => (i18n.locale() === 'no' ? noStrings : enStrings).zdr.waiver
+  const canReview = () => isZdrWaiverUiEnabled() && action() === 'open_integrations' && Boolean(props.connectionId)
   // The wall clock, read at mount and again only when a wait ends or the
   // local day turns over during it. The notice is rebuilt on every derivation
   // (see `ThinkingDots`), so the wait runs from the instant it ends at, never
@@ -5025,6 +5051,13 @@ export function ErrorNotice(props: {
               {i18n.tr('Åpne ChatGPT-tilkoblingen', 'Open the ChatGPT connection')}
             </a>
           </Show>
+          {/* The same refusal, with the acknowledgement switch on: the reader confirms the connection right here, on the
+              text Integration Core serves for a first use, and the retry control below sends the turn again. */}
+          <Show when={canReview() && !reviewDone()}>
+            <button type="button" aria-haspopup="dialog" onClick={() => setReviewOpen(true)}>
+              {waiverCopy().chat_review}
+            </button>
+          </Show>
           <button
             type="button"
             disabled={waiting()}
@@ -5036,6 +5069,20 @@ export function ErrorNotice(props: {
             {retryLabel()}
           </button>
         </div>
+      </Show>
+      <Show when={canReview() && reviewDone()}>
+        <p role="status">{waiverCopy().send_again}</p>
+      </Show>
+      <Show when={canReview() && reviewOpen() ? props.connectionId : undefined}>
+        {(connectionId) => (
+          <ConnectionZdrAcknowledgement
+            connectionId={connectionId()}
+            variant="first_use"
+            acknowledgedVia="first_use"
+            onAcknowledged={() => setReviewDone(true)}
+            onClose={() => setReviewOpen(false)}
+          />
+        )}
       </Show>
     </div>
   )

@@ -12,6 +12,7 @@ import { causeCodeOf, type ApprovalCause, type CauseCode } from '../approvals/ap
 import { APPROVAL_EDIT_CODES, type MailSendPatch } from '../approvals/approval-edit-limits'
 import { ApiError, requestJson } from './http'
 import { readSseStream, type SseEvent } from './sse'
+import { waivedContinuationFields, type WaivedRunConnection } from './waived-continuation'
 
 export type { ApprovalCause, CauseCode } from '../approvals/approval-copy'
 
@@ -236,6 +237,7 @@ export async function decideApproval(
   scope: ApprovalScope = 'once',
   promote = false,
   edit?: ApprovalEdit,
+  waived?: WaivedRunConnection,
 ): Promise<Approval | null> {
   const checked = orchestrationDecideApprovalInput.safeParse({
     approvalId,
@@ -268,6 +270,8 @@ export async function decideApproval(
         ...(checked.data.edit
           ? { edit: { patch: checked.data.edit.patch, baseFingerprint: checked.data.edit.baseFingerprint } }
           : {}),
+        // The connection of a waived run (ZDR Z-19e); no keys unless a run was waived and the switch is on.
+        ...waivedContinuationFields(waived),
       }),
       signal,
     },
@@ -675,10 +679,11 @@ export async function revokeApprovalGrant(
 }
 
 /** Resume a run that paused for approval, after the decision is recorded. */
-export async function resumeRun(runId: string, signal?: AbortSignal): Promise<void> {
+export async function resumeRun(runId: string, signal?: AbortSignal, waived?: WaivedRunConnection): Promise<void> {
   await requestJson<unknown>(`/api/v1/orchestration/runs/${encodeURIComponent(runId)}/resume`, {
     method: 'POST',
-    body: '{}',
+    // A run that was not waived sends the empty body it always did; a waived one names its connection (ZDR Z-19e).
+    body: JSON.stringify(waivedContinuationFields(waived)),
     signal,
   })
 }
@@ -713,6 +718,7 @@ export async function continueRun(
   claimToken: string,
   onEvent: (event: SseEvent) => void,
   signal?: AbortSignal,
+  waived?: WaivedRunConnection,
 ): Promise<void> {
   let connError: unknown
 
@@ -720,8 +726,9 @@ export async function continueRun(
     `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/continue`,
     {
       method: 'POST',
-      // Snake_case on the wire: the BFF body rejects unknown fields outright.
-      body: JSON.stringify({ approval_id: approvalId, claim_token: claimToken }),
+      // Snake_case on the wire: the BFF body rejects unknown fields outright. A waived run also names its
+      // connection (ZDR Z-19e); the gateway removes both keys before anything goes upstream.
+      body: JSON.stringify({ approval_id: approvalId, claim_token: claimToken, ...waivedContinuationFields(waived) }),
       signal,
     },
     onEvent,
@@ -752,6 +759,7 @@ export async function continueParkedRun(
   claimToken: string,
   onEvent: (event: SseEvent) => void,
   signal?: AbortSignal,
+  waived?: WaivedRunConnection,
 ): Promise<void> {
   let connError: unknown
 
@@ -761,7 +769,7 @@ export async function continueParkedRun(
       method: 'POST',
       // Snake_case on the wire, and the approval id is present and exactly empty: the BFF body
       // has no absent-key form.
-      body: JSON.stringify({ approval_id: '', claim_token: claimToken }),
+      body: JSON.stringify({ approval_id: '', claim_token: claimToken, ...waivedContinuationFields(waived) }),
       signal,
     },
     onEvent,
@@ -793,6 +801,7 @@ export async function continueSkippedRun(
   claimToken: string,
   onEvent: (event: SseEvent) => void,
   signal?: AbortSignal,
+  waived?: WaivedRunConnection,
 ): Promise<void> {
   const checked = getActionDescriptor('chat.run.continue')?.inputSchema.safeParse({
     runId,
@@ -810,7 +819,66 @@ export async function continueSkippedRun(
     {
       method: 'POST',
       // Snake_case on the wire: the BFF body rejects unknown fields outright.
-      body: JSON.stringify({ approval_id: approvalId, claim_token: claimToken, skipped: true }),
+      body: JSON.stringify({
+        approval_id: approvalId,
+        claim_token: claimToken,
+        skipped: true,
+        ...waivedContinuationFields(waived),
+      }),
+      signal,
+    },
+    onEvent,
+    (err) => {
+      connError = err
+    },
+  )
+
+  if (connError) throw connError
+}
+
+/**
+ * Continue a run that paused for its owner's answer (WS14 S5): the question form of `chat.run.continue`. The
+ * answer, or the skip, is recorded if the question is still open, and the same run continues with it. No
+ * approval is read or spent: the body carries the empty approval id the park form carries, and names the
+ * question instead. An answer is information, never a grant.
+ *
+ * The gateway relays the continuation as SSE. A refusal or failure of the question is an `error` frame marked
+ * `question_continue: true`, read by `chatRunContinueQuestionRefusalOf` and by no other reader. Only
+ * `question_answer_released` means the client sends the answer once, as the next message. Rejects as
+ * `continueRun` does when the gateway refuses before a stream opens (for example 409
+ * `question_already_answered`, 410 `question_expired`, 422 `invalid_answer`). Nothing here retries: the caller
+ * sends one continue, and after an ambiguous outcome it follows the run by its id.
+ */
+export async function continueQuestionRun(
+  runId: string,
+  questionId: string,
+  response: RunQuestionResponse,
+  claimToken: string,
+  onEvent: (event: SseEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const body =
+    'skip' in response
+      ? { approval_id: '', claim_token: claimToken, question_id: questionId, answers: [], question_skip: true }
+      : {
+          approval_id: '',
+          claim_token: claimToken,
+          question_id: questionId,
+          answers: response.answers.map((answer) => ({
+            item_id: answer.itemId,
+            option_ids: answer.optionIds,
+            text: answer.text,
+          })),
+          question_skip: false,
+        }
+  let connError: unknown
+
+  await readSseStream(
+    `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/continue`,
+    {
+      method: 'POST',
+      // Snake_case on the wire: the BFF body rejects unknown fields outright.
+      body: JSON.stringify(body),
       signal,
     },
     onEvent,
@@ -832,12 +900,17 @@ export type RunCancellation = {
 }
 
 /** Cancel a run (e.g. the user rejects and wants to stop the whole run). */
-export async function cancelRun(runId: string, signal?: AbortSignal): Promise<RunCancellation> {
+export async function cancelRun(
+  runId: string,
+  signal?: AbortSignal,
+  waived?: WaivedRunConnection,
+): Promise<RunCancellation> {
   const payload = await requestJson<Record<string, unknown>>(
     `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/cancel`,
     {
       method: 'POST',
-      body: '{}',
+      // A run that was not waived sends the empty body it always did; a waived one names its connection (ZDR Z-19e).
+      body: JSON.stringify(waivedContinuationFields(waived)),
       signal,
     },
   )

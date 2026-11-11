@@ -1166,6 +1166,11 @@ fn approved_authority(offered_json: &str) -> Option<proto::ApprovedAuthority> {
     let tools = tools_of("tools");
     // A coordinator run's complete offer, when its pause kept one (absent for every other run).
     let coordinator_tools = tools_of("coordinator_tools");
+    let connector_scope = connector_scope_of_offered(&value);
+    // Absent stays absent; a present value that is not a bool reads as marked (the stricter).
+    let connector_taint = value
+        .get("connector_taint")
+        .map(|taint| taint.as_bool().unwrap_or(true));
     Some(proto::ApprovedAuthority {
         mode: text(authority, "mode"),
         plan_mode: authority
@@ -1189,7 +1194,40 @@ fn approved_authority(offered_json: &str) -> Option<proto::ApprovedAuthority> {
         tools,
         digest: text(authority, "digest"),
         coordinator_tools,
+        connector_scope,
+        connector_taint,
     })
+}
+
+/// The most connection ids a retained selection may name.
+const MAX_RETAINED_CONNECTOR_SCOPE: usize = 8;
+
+/// The connection ids the paused turn selected, from the descriptor's `offered.connector_scope`.
+/// Empty when the key is absent, not an array, longer than 8, or when ANY entry is not 1..=128
+/// ASCII letters, digits, `_` or `-`: a malformed selection is dropped whole, and a continuation
+/// reads an empty selection as the strictest.
+fn connector_scope_of_offered(offered: &JsonValue) -> Vec<String> {
+    let Some(items) = offered.get("connector_scope").and_then(JsonValue::as_array) else {
+        return Vec::new();
+    };
+    if items.len() > MAX_RETAINED_CONNECTOR_SCOPE {
+        return Vec::new();
+    }
+    let mut ids = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(id) = item.as_str() else {
+            return Vec::new();
+        };
+        let well_formed = (1..=128).contains(&id.len())
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        if !well_formed {
+            return Vec::new();
+        }
+        ids.push(id.to_owned());
+    }
+    ids
 }
 
 /// The wire answer to a consume. A spend-only consume (`omit_call`) carries the

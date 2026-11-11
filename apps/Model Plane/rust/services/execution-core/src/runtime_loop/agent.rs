@@ -734,6 +734,40 @@ enum CallSlot<'r> {
         call: &'r pb::ToolCall,
         step_id: String,
     },
+    /// An `ask_user` call whose question waits in the run for its answer (WS14 S5, unit e2). It
+    /// has taken its step id, but dispatch never runs it: the round's input pause (an
+    /// [`InputPause`]) decides what becomes of it after the other calls are recorded.
+    AwaitingInput {
+        name: String,
+        step_id: String,
+    },
+}
+
+/// The one `ask_user` call of a round that waits in the run for its answer, captured in the
+/// pre-pass so the round can finish recording every OTHER call's outcome before it pauses on this
+/// one (WS14 S5). Holds the checked questions and a digest, never a credential.
+struct InputPause {
+    /// The call's position among the round's calls.
+    index: usize,
+    step_id: String,
+    /// The questions, already checked by `ask::parse`.
+    items: Vec<mp_contracts::user_question::Item>,
+    /// The digest of the exact call, recorded in the pause fold so a resume refuses a swapped
+    /// call. Empty only if it could not be computed, which sends the question to the next turn.
+    arguments_digest: String,
+}
+
+/// What an `ask_user` call that could wait in the run came to.
+enum InputPauseResult {
+    /// The question waits in the run and the run is paused: nothing is appended and no receipt
+    /// is written.
+    Paused(pb::RunAgentResponse),
+    /// The question could not wait. It was put to the person as a `next_turn` question (or
+    /// failed to be), exactly as a run that cannot wait does, and the call reads this result.
+    NextTurn {
+        output: String,
+        error: Option<String>,
+    },
 }
 
 /// The first (by array order) approval-needing call in a batch, captured so
@@ -1007,7 +1041,8 @@ enum RoundsOutcome {
     /// of the run met first). `None` for every other run, which keeps the generic
     /// graceful reply.
     InferFailed(Option<crate::subscription_refusal::Refusal>),
-    /// A gated tool minted a durable approval and the run is paused. Root only:
+    /// A gated tool minted a durable approval and the run is paused, or an `ask_user` question
+    /// waits in the run for its answer (`awaiting_input`, WS14 S5). Root only:
     /// a delegated loop cannot own the run's HITL pause.
     Paused(pb::RunAgentResponse),
     /// The run was parked at a round boundary (WS03 S8-A): a durable park fold was accepted by
@@ -1180,6 +1215,30 @@ pub(crate) async fn run_agent(
         )
         .await;
     }
+    // A question continuation (WS14 S5) is decided next, for the same reason: it lists no tool and
+    // consumes no approval. The fold's own offered tools are the run's tools.
+    if super::resume::is_question_resume(&req) {
+        return resume_questioned_run(
+            state,
+            session_channel,
+            inference_channel,
+            caller,
+            req,
+            data_plane_bearer,
+            session_bearer,
+            inference_bearer,
+            capability_policy,
+            terminal_tokens,
+            sandbox_bearer,
+            capability_client,
+            sandbox_manager_client,
+            backend_id,
+            cas_client,
+            sandbox_tokens,
+            process_host,
+        )
+        .await;
+    }
     let waived = offer_is_waived(&req, caller);
     let held = browser_bearer.is_some();
     let tools = offered_tools(&req, waived, held, capability_policy, governance_from_env()).await;
@@ -1204,6 +1263,7 @@ pub(crate) async fn run_agent(
         sandbox_tokens,
         process_host,
         space_retrieval,
+        None,
         None,
         None,
     )
@@ -1314,8 +1374,517 @@ async fn resume_parked_run(
         crate::knowledge_tools::SpaceRetrieval::Organisation,
         Some(super::park::ParkClaimed { claimed }),
         None,
+        None,
     )
     .await
+}
+
+/// The question continuation (build plan WS14 S5): continue a run that paused on an `ask_user`
+/// question, with the person's answer as that call's result.
+///
+/// Decided first by [`run_agent`], beside the park resume: it lists no tool, reads no MCP server and
+/// consumes no approval. The fold's offered tools are the run's tools. The order is what keeps an
+/// answer from being lost, applied twice or applied and also resent:
+///
+/// 1. [`begin_question_continuation`]: decide the stage, read the question, claim the pause's fold,
+///    check it and the ledger, spend the answer exactly once, and rebuild the paused round with the
+///    answer as the `ask_user` call's result. Where the run cannot be continued it wins the spend
+///    first and only then releases the answer to the next message ([`release_question_answer`]);
+/// 2. run the loop through [`run_agent_with_offered`] from that round, as the in-place approval
+///    resume does, so `run_rounds` writes its fence before anything is dispatched.
+///
+/// # Errors
+///
+/// Closed tokens: the refusals of [`begin_question_continuation`] and the loop's own.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the authenticated execution boundary keeps each audience-specific bearer explicit"
+)]
+async fn resume_questioned_run(
+    state: &crate::state::StateStore,
+    session_channel: Channel,
+    inference_channel: Channel,
+    caller: &crate::auth::AuthenticatedUser,
+    req: pb::RunAgentRequest,
+    data_plane_bearer: Option<String>,
+    session_bearer: Option<String>,
+    inference_bearer: String,
+    capability_policy: &dyn crate::capability_policy::CapabilityPolicy,
+    terminal_tokens: &dyn ManagedRunTokenProvider,
+    sandbox_bearer: Option<String>,
+    capability_client: Option<&crate::capability_client::CapabilityClient>,
+    sandbox_manager_client: &crate::sandbox_manager_client::SandboxManagerClient,
+    backend_id: &str,
+    cas_client: Option<&crate::workspace_cas::CasClient>,
+    sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
+    process_host: Option<&crate::process_host::ProcessHost>,
+) -> Result<pb::RunAgentResponse, tonic::Status> {
+    let route = crate::agent_route::ModelRoute::resolve(
+        &req,
+        subscription_switches(),
+        std::env::var("EXECUTION_AGENT_MODEL").ok().as_deref(),
+        caller,
+    )?;
+    let Some(resume) = req.resume.as_ref() else {
+        return Err(super::resume::Refusal::QuestionResumeUnavailable.status());
+    };
+    let continuation = begin_question_continuation(
+        state,
+        &session_channel,
+        session_bearer.as_deref(),
+        &req,
+        resume,
+        &route,
+        terminal_tokens,
+    )
+    .await?;
+    let defs = continuation.tools.clone();
+    run_agent_with_offered(
+        state,
+        session_channel,
+        inference_channel,
+        caller,
+        req,
+        OfferedTools {
+            defs,
+            // The fold's tools are the snapshot the pause retained, so the run never parks.
+            derivable: false,
+            deferred: runtime_loop::tool_index::DeferredIndex::default(),
+        },
+        data_plane_bearer,
+        session_bearer,
+        inference_bearer,
+        capability_policy,
+        terminal_tokens,
+        sandbox_bearer,
+        // A question pause is never offered a browser tool, so it holds no browser bearer.
+        None,
+        capability_client,
+        sandbox_manager_client,
+        backend_id,
+        cas_client,
+        sandbox_tokens,
+        process_host,
+        // A question pause is never taken in a Space run, so there is no Space retrieval to
+        // authorise.
+        crate::knowledge_tools::SpaceRetrieval::Organisation,
+        None,
+        None,
+        Some(continuation),
+    )
+    .await
+}
+
+/// The closed reasons a question continuation gives when it closes the fold it claimed.
+const QUESTION_FOLD_UNRESTORABLE: &str = "question_not_restorable";
+const QUESTION_FOLD_SPENT: &str = "question_already_spent";
+
+/// Everything a question continuation does before the loop starts (build plan WS14 S5). Each step
+/// runs only when the one before it passed, and nothing is dispatched before the loop's own fence:
+///
+/// 1. stage: [`super::resume::question_stage_decision`]; a refusal ends the request, a release goes
+///    to [`release_question_answer`];
+/// 2. read: the run's questions, and the one this continuation names
+///    ([`super::resume::question_resume_target`]); a refusal ends the request, nothing spent;
+/// 3. claim: the question's input pause fold under this continuation's claim token; a refusal is
+///    classified by [`super::resume::classify_question_claim`] (refuse, or release);
+/// 4. check: the authority (a widening is refused), the fold
+///    ([`super::resume::check_input_fold`]), the ledger for the fold's calls, and the round rebuilt
+///    with the closers its siblings take ([`super::resume::restore_input`]); a fold that cannot be
+///    restored is closed and the answer released. All of it happens BEFORE the spend, so the answer
+///    is never spent on a continuation that then cannot run;
+/// 5. spend: the answer, once ([`consume_question`]); the winner (or the same claim again) goes on, a
+///    spend that another claim made closes the claimed fold and ends the request;
+/// 6. seed: the answer as the paused `ask_user` call's result, and the run's continuation under the
+///    fold's own authority and tools.
+///
+/// The answer is applied in the run or released to the next message, never both, because both go
+/// through the single-use spend. Logs carry ids and closed tokens only, never an answer, an item or
+/// the fold.
+///
+/// # Errors
+///
+/// Closed tokens of [`super::resume::Refusal`].
+#[allow(clippy::too_many_lines)]
+async fn begin_question_continuation(
+    state: &crate::state::StateStore,
+    session_channel: &Channel,
+    session_bearer: Option<&str>,
+    req: &pb::RunAgentRequest,
+    resume: &pb::AgentResume,
+    route: &crate::agent_route::ModelRoute,
+    terminal_tokens: &dyn ManagedRunTokenProvider,
+) -> Result<Continuation, tonic::Status> {
+    use super::resume::{
+        QuestionClaim, QuestionSpend, Refusal, RestoreOrRefuse, StageDecision,
+    };
+    let run_id = req.run_id.as_str();
+    let bearer = session_bearer.filter(|bearer| !bearer.trim().is_empty());
+
+    // 1. The stage. A question has no stage 1: a run that cannot be resumed in place releases the
+    // answer, and a run that keeps no content refuses.
+    let stage = super::resume::select_stage(
+        "loop",
+        super::resume::loop_resume_enabled(),
+        runtime_loop::fold::checkpoint_enabled(),
+        runtime_loop::effect::ledger_enabled(),
+        req.zdr,
+        route.is_waived(),
+    );
+    // The gate of the writer this resume will seed, built as `restore_continuation` builds it: the
+    // root run (depth 0), resumed in place, so the gate's `resumed` flag is false.
+    let gate = writer_gate(req, route, runtime_loop::effect::ledger_enabled(), 0, true, true);
+    let writer_off = super::resume::in_place_writer_off(gate, bearer.is_some())
+        .map(super::resume::writer_off_downgrade);
+    match super::resume::question_stage_decision(stage, writer_off) {
+        StageDecision::Refuse(refusal) => return Err(refusal.status()),
+        StageDecision::Release => {
+            info!(run_id = %run_id, "question_resume_released_before_claim");
+            return Err(release_question_answer(
+                state,
+                session_channel,
+                bearer,
+                req,
+                resume,
+                terminal_tokens,
+            )
+            .await);
+        }
+        StageDecision::Proceed => {}
+    }
+    let Some(bearer) = bearer else {
+        return Err(Refusal::QuestionResumeUnavailable.status());
+    };
+
+    // 2. The question this continuation names, as the owner's list holds it.
+    let listed = match authenticated_session_request(
+        pb::ListRunQuestionsRequest {
+            run_id: req.run_id.clone(),
+            org_id: req.org_id.clone(),
+        },
+        Some(bearer),
+    ) {
+        Ok(request) => {
+            tokio::time::timeout(
+                runtime_loop::fold::GATED_SAVE_TIMEOUT,
+                OrchestrationCoreServiceClient::new(session_channel.clone())
+                    .list_run_questions(request),
+            )
+            .await
+        }
+        Err(_unforwardable) => return Err(Refusal::QuestionResumeUnavailable.status()),
+    };
+    let questions = match listed {
+        Err(_elapsed) => return Err(Refusal::QuestionResumeUnavailable.status()),
+        Ok(Err(status)) => {
+            warn!(
+                run_id = %run_id,
+                code = ?status.code(),
+                "run_agent: the run's questions could not be read; nothing was spent"
+            );
+            return Err(super::resume::question_read_refusal(&status).status());
+        }
+        Ok(Ok(response)) => response.into_inner().questions,
+    };
+    let target = super::resume::question_resume_target(&questions, &resume.question_id, run_id)
+        .map_err(Refusal::status)?;
+
+    // 3. The claim of the fold the question paused. The claim token is this continuation's own.
+    let pause_ref = mp_contracts::user_question::input_pause_ref(run_id, &target.step_id, &target.origin);
+    let request = authenticated_session_request(
+        pb::ClaimLoopCheckpointRequest {
+            run_id: req.run_id.clone(),
+            pause_ref,
+            claim_token: resume.claim_token.clone(),
+        },
+        Some(bearer),
+    )
+    .map_err(|_unforwardable| Refusal::QuestionResumeUnavailable.status())?;
+    // A claim that timed out may have committed: the row is then claimed under this token for its
+    // lease and nothing closes it. It is read as a failure of the transport, which releases.
+    let claim = match tokio::time::timeout(
+        runtime_loop::fold::GATED_SAVE_TIMEOUT,
+        SessionCoreClient::new(session_channel.clone()).claim_loop_checkpoint(request),
+    )
+    .await
+    {
+        Err(_elapsed) => Err(tonic::Status::deadline_exceeded("claim_timeout")),
+        Ok(result) => result,
+    };
+    let response = match claim {
+        Ok(response) => response.into_inner(),
+        Err(status) => match super::resume::classify_question_claim(&status) {
+            QuestionClaim::Refuse(refusal) => {
+                info!(
+                    run_id = %run_id,
+                    refusal = refusal.as_str(),
+                    "run_agent: the question's fold could not be claimed; nothing was spent"
+                );
+                return Err(refusal.status());
+            }
+            QuestionClaim::Release => {
+                info!(run_id = %run_id, code = ?status.code(), "question_resume_released_after_claim_refused");
+                return Err(release_question_answer(
+                    state,
+                    session_channel,
+                    Some(bearer),
+                    req,
+                    resume,
+                    terminal_tokens,
+                )
+                .await);
+            }
+        },
+    };
+    let claimed_seq = response.seq;
+    // From here this continuation holds the claim. A fold it cannot use is closed (best effort),
+    // and the answer goes to the next message instead.
+    let close_fold = move |reason: &'static str| {
+        runtime_loop::fold::close_rpc(
+            session_channel,
+            bearer,
+            run_id,
+            claimed_seq,
+            reason,
+            runtime_loop::fold::GATED_SAVE_TIMEOUT,
+        )
+    };
+    let Ok(fold) = mp_contracts::loop_fold::LoopFoldV1::from_bytes(&response.fold) else {
+        close_fold(QUESTION_FOLD_UNRESTORABLE).await;
+        return Err(release_question_answer(
+            state,
+            session_channel,
+            Some(bearer),
+            req,
+            resume,
+            terminal_tokens,
+        )
+        .await);
+    };
+    let claimed = super::resume::ClaimedFold {
+        seq: response.seq,
+        authority_digest: response.authority_digest,
+        kind: response.kind,
+        segment: response.segment_no,
+        fold,
+    };
+
+    // 4. The authority first: a request that widens the paused run's is refused, with the answer
+    // still unspent. Then the fold, the ledger and the rebuilt round.
+    let effective = super::resume::effective_authority(&claimed.fold.authority, req)
+        .map_err(Refusal::status)?;
+    let checked = match super::resume::check_input_fold(&claimed, run_id, &target, effective.max_rounds) {
+        Ok(checked) => checked,
+        Err(refusal) => {
+            warn!(
+                run_id = %run_id,
+                refusal = refusal.as_str(),
+                "run_agent: the question's fold cannot be restored; closing it"
+            );
+            close_fold(QUESTION_FOLD_UNRESTORABLE).await;
+            return Err(release_question_answer(
+                state,
+                session_channel,
+                Some(bearer),
+                req,
+                resume,
+                terminal_tokens,
+            )
+            .await);
+        }
+    };
+    let ids = super::resume::input_ledger_action_ids(
+        &claimed.fold,
+        &target.step_id,
+        claimed.fold.segment_no.saturating_add(1),
+    );
+    let read = tokio::time::timeout(
+        runtime_loop::fold::GATED_SAVE_TIMEOUT,
+        runtime_loop::effect::list_actions_with(Some(bearer), run_id, &ids, |request| {
+            let mut client = SessionCoreClient::new(session_channel.clone());
+            async move { client.list_tool_actions(request).await }
+        }),
+    )
+    .await;
+    let rows = match read {
+        Ok(Ok(rows)) => Some(rows),
+        // A denial, or a run that keeps no durable state, is never released: the answer is left
+        // unspent and the claim lapses with its lease.
+        Ok(Err(error)) if error.kind == runtime_loop::effect::LedgerReadFailure::Denied => {
+            return Err(Refusal::Forbidden.status());
+        }
+        Ok(Err(error)) if error.kind == runtime_loop::effect::LedgerReadFailure::NotPersistent => {
+            return Err(Refusal::DurableMutationForbidden.status());
+        }
+        Ok(Err(_)) | Err(_) => None,
+    };
+    let restored = match rows {
+        Some(rows) => match super::resume::restore_input(&claimed, &checked, &rows) {
+            Ok(restored) => Some(restored),
+            Err(RestoreOrRefuse::Refuse(refusal)) => return Err(refusal.status()),
+            Err(RestoreOrRefuse::Fallback(failure)) => {
+                info!(run_id = %run_id, reason = failure.as_str(), "question_resume_fallback");
+                None
+            }
+        },
+        None => None,
+    };
+    let Some(mut restored) = restored else {
+        close_fold(QUESTION_FOLD_UNRESTORABLE).await;
+        return Err(release_question_answer(
+            state,
+            session_channel,
+            Some(bearer),
+            req,
+            resume,
+            terminal_tokens,
+        )
+        .await);
+    };
+
+    // 5. The single spend. Only the claim that wins it (or replays its own win) applies the answer.
+    let question = match consume_question(session_channel, bearer, req, resume).await {
+        QuestionSpend::Won(question) | QuestionSpend::Replayed(question) => question,
+        // Another claim used or released the answer: this fold is stale.
+        QuestionSpend::Spent => {
+            close_fold(QUESTION_FOLD_SPENT).await;
+            return Err(Refusal::ContinuationAlreadyConsumed.status());
+        }
+        // Nothing was spent: the claim lapses with its lease and nothing is released.
+        QuestionSpend::Refused(refusal) => return Err(refusal.status()),
+    };
+
+    // 6. The answer is the paused call's result, and the run goes on under the fold's own authority
+    // and tools. The loop writes its fence before it dispatches anything.
+    if !restored.seed_answer(checked.pending, &question) {
+        return Err(Refusal::QuestionResumeUnavailable.status());
+    }
+    info!(
+        run_id = %run_id,
+        question_id = %question.id,
+        resume_stage = "in_place",
+        "question_resume_applied"
+    );
+    Ok(Continuation {
+        release: None,
+        step_prefix: format!("s{}.", restored.segment),
+        goal: req.goal.clone(),
+        carried: CarriedRunState::from_fold(&claimed.fold, req),
+        seed: RoundSeed::InPlace(Box::new(restored)),
+        tools: checked.tools,
+        // A coordinator run asks no question, so a question pause holds no complete offer.
+        coordinator_tools: Vec::new(),
+        mode: claimed.fold.authority.mode.clone(),
+        effective,
+    })
+}
+
+/// Spend a `resume` question's answer once (`ConsumeRunQuestion`) under this continuation's claim
+/// token, and classify what the spend decided ([`super::resume::classify_question_spend`]). A spend
+/// whose answer was lost in transit may have committed: the same claim token again replays it.
+async fn consume_question(
+    session_channel: &Channel,
+    bearer: &str,
+    req: &pb::RunAgentRequest,
+    resume: &pb::AgentResume,
+) -> super::resume::QuestionSpend {
+    use mp_contracts::model_plane::v1::run_question_consume_service_client::RunQuestionConsumeServiceClient;
+    let outcome = match authenticated_session_request(
+        pb::ConsumeRunQuestionRequest {
+            question_id: resume.question_id.clone(),
+            org_id: req.org_id.clone(),
+            run_id: req.run_id.clone(),
+            claim_token: resume.claim_token.clone(),
+        },
+        Some(bearer),
+    ) {
+        Ok(request) => match tokio::time::timeout(
+            runtime_loop::fold::GATED_SAVE_TIMEOUT,
+            RunQuestionConsumeServiceClient::new(session_channel.clone())
+                .consume_run_question(request),
+        )
+        .await
+        {
+            Ok(result) => result.map(tonic::Response::into_inner),
+            Err(_elapsed) => Err(tonic::Status::deadline_exceeded("consume_timeout")),
+        },
+        Err(status) => Err(status),
+    };
+    super::resume::classify_question_spend(outcome)
+}
+
+/// The release of a question's answer (build plan WS14 S5): this continuation cannot apply it in the
+/// run, so it asks for the single spend FIRST, and only a fresh win tells the client to send the
+/// answer as the next message. Always returns the status the request ends with.
+///
+/// * A fresh win (`Consumed`): nobody applied the answer and nobody can any more. The run's turn
+///   ends as a `next_turn` turn does: its terminal outcome is recorded as completed (best effort;
+///   if that fails, recovery ends the run), and the request ends `question_answer_released`, the
+///   only token that tells a client to resend. A question an MCP server asked
+///   (`mcp_elicitation`) is never released as a chat message: it ends
+///   `question_resume_unavailable` instead.
+/// * The same claim's replay, or a spend another claim made: `continuation_already_consumed` (the
+///   answer was used or released already; never released twice).
+/// * Any refusal of the spend: its own token (the answer is not released).
+///
+/// Every caller that holds the fold's claim has closed the fold before it gets here. The run id, the
+/// question id and the closed tokens are logged, never an answer.
+async fn release_question_answer(
+    state: &crate::state::StateStore,
+    session_channel: &Channel,
+    session_bearer: Option<&str>,
+    req: &pb::RunAgentRequest,
+    resume: &pb::AgentResume,
+    terminal_tokens: &dyn ManagedRunTokenProvider,
+) -> tonic::Status {
+    use super::resume::{QuestionSpend, Refusal};
+    let Some(bearer) = session_bearer.filter(|bearer| !bearer.trim().is_empty()) else {
+        return Refusal::QuestionResumeUnavailable.status();
+    };
+    match consume_question(session_channel, bearer, req, resume).await {
+        QuestionSpend::Won(question) => {
+            if question.origin == mp_contracts::user_question::ORIGIN_MCP_ELICITATION {
+                warn!(
+                    run_id = %req.run_id,
+                    question_id = %question.id,
+                    "run_agent: a server's question is never released as a message"
+                );
+                return Refusal::QuestionResumeUnavailable.status();
+            }
+            info!(
+                run_id = %req.run_id,
+                question_id = %question.id,
+                "question_answer_released"
+            );
+            match record_managed_agent_terminal_outcome(session_channel, req, true, "", terminal_tokens)
+                .await
+            {
+                Ok(()) => {
+                    let mut snapshot = state.get_or_create(&req.run_id);
+                    snapshot.status = crate::state::RunStatus::Completed;
+                    snapshot.last_error = None;
+                    state.update(snapshot);
+                    publish_plan_transition(
+                        session_channel,
+                        &format!("plan_{}", req.run_id),
+                        &req.run_id,
+                        pb::PlanState::Executing,
+                        pb::PlanState::Completed,
+                        Some(bearer),
+                    )
+                    .await;
+                }
+                Err(status) => warn!(
+                    run_id = %req.run_id,
+                    code = ?status.code(),
+                    "run_agent: the released question's turn could not be ended; recovery ends it"
+                ),
+            }
+            Refusal::QuestionAnswerReleased.status()
+        }
+        QuestionSpend::Replayed(_) | QuestionSpend::Spent => Refusal::ContinuationAlreadyConsumed.status(),
+        QuestionSpend::Refused(refusal) => refusal.status(),
+    }
 }
 
 /// The tools a run is offered, and whether a park resume could derive the same set again.
@@ -1909,6 +2478,7 @@ async fn run_agent_with_tools(
         crate::knowledge_tools::SpaceRetrieval::Organisation,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1963,6 +2533,9 @@ pub(crate) async fn run_agent_with_offered(
     space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
     park: Option<super::park::ParkClaimed>,
     scheduled: Option<super::scheduled_agent::LoopScope>,
+    // The continuation of an answered question (WS14 S5), already built from the claimed input
+    // fold and the spent answer by `resume_questioned_run`; `None` for every other run.
+    question: Option<Continuation>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let route = crate::agent_route::ModelRoute::resolve(
         &req,
@@ -2030,6 +2603,7 @@ pub(crate) async fn run_agent_with_offered(
         tools.deferred,
         park,
         scheduled,
+        question,
     )
     .await
 }
@@ -2086,6 +2660,7 @@ async fn run_agent_with_route(
         deadline,
         false,
         runtime_loop::tool_index::DeferredIndex::default(),
+        None,
         None,
         None,
     )
@@ -2204,6 +2779,10 @@ async fn run_agent_with_route_parkable(
     deferred: runtime_loop::tool_index::DeferredIndex,
     park: Option<super::park::ParkClaimed>,
     scheduled: Option<super::scheduled_agent::LoopScope>,
+    // The continuation of an answered question (WS14 S5): already built, with its answer spent,
+    // by `resume_questioned_run`. It replaces the approval consume below, which a question
+    // continuation never reaches.
+    question: Option<Continuation>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
     let plan_id = format!("plan_{}", req.run_id);
 
@@ -2223,12 +2802,20 @@ async fn run_agent_with_route_parkable(
     // returns before the run's first heartbeat, so the run is left as it was. A park resume
     // (WS03 S8-6) arrives with its fold already claimed and consumes nothing; a park request
     // that reaches this driver without one is refused, never treated as an approval stage.
-    let resumed = match (park, req.resume.as_ref()) {
-        (Some(claimed), _) => Some(park_continuation(&req, claimed, tools.clone())?),
-        (None, Some(_)) if super::park::is_park_resume(&req) => {
+    let resumed = match (park, question, req.resume.as_ref()) {
+        (Some(claimed), _, _) => Some(park_continuation(&req, claimed, tools.clone())?),
+        // A question continuation (WS14 S5) arrives with its fold claimed, its answer spent and its
+        // round rebuilt: it consumes no approval here.
+        (None, Some(continuation), _) => Some(continuation),
+        (None, None, Some(_)) if super::park::is_park_resume(&req) => {
             return Err(tonic::Status::invalid_argument("resume_incomplete"));
         }
-        (None, Some(resume)) => {
+        // A question continuation that reaches this driver without one is refused, never read as
+        // an approval: its answer is spent only by `resume_questioned_run`.
+        (None, None, Some(resume)) if super::resume::names_question(resume) => {
+            return Err(super::resume::Refusal::QuestionResumeUnavailable.status());
+        }
+        (None, None, Some(resume)) => {
             // EP-1 S2 (D3-647): a denied help pause ("Skip this site") releases the held page, and the
             // run continues with the paused call answered by the skipped-site closer, so the model
             // reads `browser_site_skipped` and looks elsewhere. A denied approval is never consumed.
@@ -2263,7 +2850,7 @@ async fn run_agent_with_route_parkable(
                 ),
             }
         }
-        (None, None) => None,
+        (None, None, None) => None,
     };
     // The loop reads the floor, the rung, plan mode and the round budget off the
     // request on every round. A continuation's request states placeholders, so it
@@ -3714,6 +4301,17 @@ async fn run_rounds(
     } else {
         String::new()
     };
+    // Whether an `ask_user` question waits in this run for its answer (WS14 S5) rather than ending
+    // the turn: decided once here from facts that do not change while the loop runs. Off (and the
+    // `next_turn` question of every earlier build) unless the resume switch, its continuation
+    // switches and an active fold writer all allow it, and the run is a persistent root Do run.
+    let ask_resume = runtime_loop::ask::resume_delivery_when(
+        super::resume::ask_resume_enabled(),
+        folds.is_active(),
+        req,
+        ctx.route.is_waived(),
+        ctx.depth,
+    );
     // Whether this run may park at all, decided ONCE here from facts that never change while
     // it runs (WS03 S8-A). With parking off this is false and every park site below is a
     // no-op: the run takes the committed return it always did.
@@ -4289,6 +4887,9 @@ async fn run_rounds(
         // writer that is on.
         let retrievals_at_round_start = folds.engaged().then(|| attempted_retrievals.clone());
         let mut slots = Vec::with_capacity(response.tool_calls.len());
+        // The round's `ask_user` call that waits in the run for its answer, if any (WS14 S5). At most
+        // one: a second is refused in the pre-pass.
+        let mut input_pause: Option<InputPause> = None;
         // WS11.S7: every tool name of this batch, for the `save_memory` guard (a round's calls
         // start before any of their results is seen).
         let batch_tools: Vec<&str> = response
@@ -4691,6 +5292,51 @@ async fn run_rounds(
                     }));
                     continue;
                 }
+                // A run that can wait (WS14 S5) does not dispatch the call: its question waits in the
+                // run, and the round pauses on it once the other calls are recorded. With the rule
+                // off nothing here changes, and the call is dispatched and asked as the next turn.
+                if ask_resume {
+                    let items = match runtime_loop::ask::parse(&call.arguments_json) {
+                        Ok(items) => items,
+                        Err(problem) => {
+                            slots.push(CallSlot::Rejected(ToolStepResult {
+                                name: call.name.clone(),
+                                output: String::new(),
+                                error: Some(problem),
+                            }));
+                            continue;
+                        }
+                    };
+                    if input_pause.is_some() {
+                        slots.push(CallSlot::Rejected(ToolStepResult {
+                            name: call.name.clone(),
+                            output: String::new(),
+                            error: Some(format!(
+                                "{}: only one question can wait per turn; ask again after the person answers.",
+                                runtime_loop::ask::ASK_TOOL
+                            )),
+                        }));
+                        continue;
+                    }
+                    let step_id = match seeded_step.take() {
+                        Some(step_id) => step_id,
+                        None => {
+                            step_seq += 1;
+                            tool_step_id(&ctx.step_prefix, step_seq, call)
+                        }
+                    };
+                    input_pause = Some(InputPause {
+                        index: call_index,
+                        arguments_digest: ask_arguments_digest(req, &step_id, &call.arguments_json),
+                        step_id: step_id.clone(),
+                        items,
+                    });
+                    slots.push(CallSlot::AwaitingInput {
+                        name: call.name.clone(),
+                        step_id,
+                    });
+                    continue;
+                }
             }
 
             // Server-side plan-mode enforcement (harness-adoption pass,
@@ -4783,7 +5429,8 @@ async fn run_rounds(
             runtime_loop::fold::fold_calls(
                 &response.tool_calls,
                 slots.iter().enumerate().map(|(index, slot)| match slot {
-                    CallSlot::ToDispatch { step_id, .. } => step_id.as_str(),
+                    CallSlot::ToDispatch { step_id, .. }
+                    | CallSlot::AwaitingInput { step_id, .. } => step_id.as_str(),
                     // Empty for a call refused before dispatch; a restored round's resolved
                     // call keeps the step it ran under.
                     CallSlot::Rejected(_) => {
@@ -4855,7 +5502,7 @@ async fn run_rounds(
                                 result.output.as_str(),
                                 result.error.as_deref().unwrap_or(""),
                             )),
-                            CallSlot::ToDispatch { .. } => None,
+                            CallSlot::ToDispatch { .. } | CallSlot::AwaitingInput { .. } => None,
                         }),
                     ),
                 }),
@@ -5017,7 +5664,7 @@ async fn run_rounds(
                         std::sync::Arc::clone(&batch_budget),
                         std::sync::Arc::clone(&children_started),
                     )),
-                    CallSlot::Rejected(_) => None,
+                    CallSlot::Rejected(_) | CallSlot::AwaitingInput { .. } => None,
                 })
                 .collect();
 
@@ -5539,11 +6186,23 @@ async fn run_rounds(
         // Which call of the round the pause is on: the one call that pushes no outcome,
         // so the fold can tell which outcome belongs to which call.
         let mut paused_index: Option<usize> = None;
+        // Where the waiting `ask_user` call's placeholder sits in `outcomes` (WS14 S5). It stands in
+        // for the call until the round's pause is decided below, then is replaced or removed.
+        let mut input_outcome_at: Option<usize> = None;
 
         for (index, (slot, outcome)) in slots.into_iter().zip(outcomes_by_slot).enumerate() {
             let (call, step_id, outcome) = match (slot, outcome) {
                 (CallSlot::Rejected(result), _) => {
                     outcomes.push(result);
+                    continue;
+                }
+                (CallSlot::AwaitingInput { name, .. }, _) => {
+                    input_outcome_at = Some(outcomes.len());
+                    outcomes.push(ToolStepResult {
+                        name,
+                        output: String::new(),
+                        error: None,
+                    });
                     continue;
                 }
                 (CallSlot::ToDispatch { call, step_id }, Some(outcome)) => (call, step_id, outcome),
@@ -5804,6 +6463,20 @@ async fn run_rounds(
             });
         }
 
+        // An approval pause wins the round (WS14 S5): the question did not wait, and the call reads
+        // that, so it asks again after the run resumes. The approval path below runs unchanged.
+        if pending_pause.is_some() {
+            if let Some(at) = input_outcome_at.take() {
+                if let Some(outcome) = outcomes.get_mut(at) {
+                    outcome.error = Some(format!(
+                        "{}: the run is waiting for an approval; ask again after it resumes.",
+                        runtime_loop::ask::ASK_TOOL
+                    ));
+                }
+            }
+            input_pause = None;
+        }
+
         // A run stopped on a route violation (a delegated child in this very
         // batch may have just tripped it) never mints an approval: the pause
         // would leave a durable request for a run that is over, and approving
@@ -5844,6 +6517,13 @@ async fn run_rounds(
                 if let Some(coordinator) = ctx.coordinator.as_ref() {
                     super::resume::with_coordinator_offer(&mut snapshot, &coordinator.tools);
                 }
+                // The screening taint and the turn's connector selection, so a stage-1
+                // continuation (which has no fold) runs under the paused turn's state.
+                super::resume::with_carried_state(
+                    &mut snapshot,
+                    ctx.taint.is_marked(),
+                    connector_scope_of(req),
+                );
                 Some(snapshot)
             } else {
                 None
@@ -5948,6 +6628,123 @@ async fn run_rounds(
                 delegated_rounds,
                 grounded,
             });
+        }
+
+        // `ask_user` that waits in the run (WS14 S5): the run pauses on the call, with its fold saved
+        // first and the resume question created second. The other calls of the round are recorded;
+        // only the ask has no outcome. A question that cannot wait is asked as the next turn
+        // instead, and the check below ends the turn with its prose, exactly as before.
+        if let (Some(pause), Some(at)) = (input_pause.take(), input_outcome_at.take()) {
+            if ctx.route.is_stopped() || ctx.refusal.latched().is_some() {
+                // The run is over, so it leaves no question behind; the loop top ends it.
+                if let Some(outcome) = outcomes.get_mut(at) {
+                    outcome.error = Some(format!(
+                        "{}: the run is ending; no question was put.",
+                        runtime_loop::ask::ASK_TOOL
+                    ));
+                }
+            } else {
+                let pause_fold = match fold_authority.as_ref() {
+                    Some(authority) if folds.is_active() => {
+                        // Every outcome except the ask call's, which has none.
+                        let completed = runtime_loop::fold::fold_completed(
+                            &round_calls,
+                            Some(pause.index),
+                            outcomes
+                                .iter()
+                                .enumerate()
+                                .filter(|(position, _)| *position != at)
+                                .map(|(_, o)| {
+                                    (o.output.as_str(), o.error.as_deref().unwrap_or(""))
+                                }),
+                        );
+                        let fold = runtime_loop::fold::build_fold(
+                            &runtime_loop::fold::Snapshot {
+                                run_id: &req.run_id,
+                                segment_no: folds.segment(),
+                                rounds_executed,
+                                delegated_rounds,
+                                step_seq,
+                                children_started: children_started
+                                    .load(std::sync::atomic::Ordering::Relaxed),
+                                grounded,
+                                compaction_triggered,
+                                // The round's own searches are in the open round, not yet in the
+                                // set: see `retrievals_at_round_start`.
+                                attempted_retrievals: retrievals_at_round_start
+                                    .as_ref()
+                                    .unwrap_or(&attempted_retrievals),
+                                messages: &messages,
+                                authority: authority.clone(),
+                                prompt_digest: &fold_prompt_digest,
+                                effect_ledger: ctx.effect_ledger,
+                                connector_taint: ctx.taint.is_marked(),
+                                connector_scope: connector_scope_of(req),
+                                // The answer resumes a run with no descriptor, so the fold keeps
+                                // the tool definitions the run was offered.
+                                offered_tools: Some(&ctx.tools),
+                            },
+                            Some(mp_contracts::loop_fold::RoundInFlight {
+                                assistant_content: response.content.clone(),
+                                calls: round_calls.clone(),
+                                completed,
+                            }),
+                            None,
+                        );
+                        folds.pause_fold(fold)
+                    }
+                    _ => None,
+                };
+                let ask_arguments = response
+                    .tool_calls
+                    .get(pause.index)
+                    .map_or("", |call| call.arguments_json.as_str());
+                match pause_for_input(
+                    ctx,
+                    &pause,
+                    ask_arguments,
+                    rounds_executed.saturating_add(delegated_rounds),
+                    pause_fold,
+                )
+                .await
+                {
+                    InputPauseResult::Paused(mut paused) => {
+                        // Built outside the loop, which alone holds the tally: a pause is an
+                        // invocation that spent rounds, and the continuation starts its own tally.
+                        paused.usage = Some(ctx.usage.snapshot());
+                        return Ok(RoundsResult {
+                            compaction_triggered,
+                            outcome: RoundsOutcome::Paused(paused),
+                            rounds_executed,
+                            delegated_rounds,
+                            grounded,
+                        });
+                    }
+                    InputPauseResult::NextTurn { output, error } => {
+                        // The call ran after all, as a `next_turn` question: record its step as a
+                        // dispatched call is recorded, and let it read its own result.
+                        let step = match error.as_deref() {
+                            Some(error) => StepOutcome::failed(error),
+                            None => StepOutcome::completed(output.clone()),
+                        };
+                        record_tool_step(
+                            ctx.session_channel,
+                            &req.run_id,
+                            &pause.step_id,
+                            runtime_loop::ask::ASK_TOOL,
+                            ask_arguments,
+                            &step,
+                            zdr,
+                            ctx.session_bearer,
+                        )
+                        .await;
+                        if let Some(outcome) = outcomes.get_mut(at) {
+                            outcome.output = output;
+                            outcome.error = error;
+                        }
+                    }
+                }
+            }
         }
 
         // `ask_user` (WS14 S4): a question a call put to the owner ends the turn, and the turn answers
@@ -9952,6 +10749,228 @@ async fn pause_for_approval(
     })
 }
 
+/// The digest of one `ask_user` call, recorded in the input pause fold (WS14 S5): the same
+/// fingerprint of the call's scope an approval pause records, over the run, org, user, step, tool
+/// and arguments, so a resume refuses a swapped call. Empty if the arguments are not JSON (the
+/// call was checked by `ask::parse` already, so that does not happen); an empty digest sends the
+/// question to the next turn.
+fn ask_arguments_digest(req: &pb::RunAgentRequest, step_id: &str, arguments_json: &str) -> String {
+    let Ok(input) = serde_json::from_str::<JsonValue>(arguments_json) else {
+        return String::new();
+    };
+    let scope = mp_contracts::approval_descriptor::descriptor_scope(
+        &req.run_id,
+        &req.org_id,
+        &req.user_id,
+        step_id,
+        runtime_loop::ask::ASK_TOOL,
+        &input,
+        "ask",
+    );
+    mp_contracts::approval_descriptor::action_fingerprint(&scope).unwrap_or_default()
+}
+
+/// Whether a failed create of the resume question may be tried once more under the same key: a
+/// failure of the transport or of the service, not a refusal. The store replays a create that
+/// committed, so a retry cannot ask twice.
+fn is_transport_failure(code: tonic::Code) -> bool {
+    matches!(
+        code,
+        tonic::Code::Unavailable
+            | tonic::Code::DeadlineExceeded
+            | tonic::Code::Cancelled
+            | tonic::Code::Unknown
+            | tonic::Code::Internal
+    )
+}
+
+/// Whether the question the store returned is the resume question this pause asked for. The create
+/// is keyed by the pause reference, so a replay returns the row stored under that key; the row must
+/// still be a `resume` question of this run and step. `RunQuestion` carries no idempotency key on
+/// the wire, so the key itself cannot be compared here: session-core enforces it (a resume question
+/// is stored only under its input pause reference).
+fn is_resume_question_of(question: &pb::RunQuestion, run_id: &str, step_id: &str) -> bool {
+    !question.id.is_empty()
+        && question.delivery == mp_contracts::user_question::DELIVERY_RESUME
+        && question.run_id == run_id
+        && question.step_id == step_id
+}
+
+/// Put an `ask_user` question to the person as the next turn's question, the delivery of a run that
+/// cannot wait: the same call, key (`{run_id}:{step_id}`) and results as a dispatched `ask_user`.
+/// `reason` is a closed token for the log.
+async fn ask_next_turn(
+    ctx: &LoopContext<'_>,
+    step_id: &str,
+    arguments_json: &str,
+    reason: &'static str,
+) -> InputPauseResult {
+    let req = ctx.req;
+    info!(
+        run_id = %req.run_id,
+        reason,
+        "run_agent: the question is asked as the next turn, not as a pause"
+    );
+    let asked = runtime_loop::execute_ask_user(
+        arguments_json,
+        &req.org_id,
+        &req.run_id,
+        step_id,
+        &req.thread_id,
+        req.zdr || ctx.route.is_waived(),
+        Some(ctx.session_channel),
+        ctx.session_bearer,
+    )
+    .await;
+    InputPauseResult::NextTurn {
+        output: asked.output,
+        error: asked.error,
+    }
+}
+
+/// Input pause (WS14 S5): park the run on an `ask_user` call so the person's answer continues the
+/// same run. The order is the approval pause's: the fold is durable BEFORE the question exists, so
+/// a fast answer-and-continue can always claim it. The fold is saved under the input pause
+/// reference (`user_question::input_pause_ref`), which is also the resume question's idempotency
+/// key; only on a saved fold is the question created, with `resume` delivery. Deliberately NO
+/// terminal `CompleteStep`, NO assistant message and NO receipt: the run is paused, not finished.
+///
+/// A transport-class failure of the create is tried once more under the same key. Anything else
+/// that stops the pause (no writer, a fold that was refused or not saved, a definitive refusal of
+/// the create, a question that is not the resume row asked for) closes the fold if one was saved
+/// and puts the question as the next turn's instead, under a different key
+/// (`{run_id}:{step_id}`), so it can never replay into the resume row. A pause is never refused for
+/// the fold's sake.
+///
+/// Logs carry ids and closed tokens only, never the questions.
+async fn pause_for_input(
+    ctx: &LoopContext<'_>,
+    pause: &InputPause,
+    arguments_json: &str,
+    rounds_executed: u32,
+    mut pause_fold: Option<runtime_loop::fold::PauseFold<'_, '_>>,
+) -> InputPauseResult {
+    let req = ctx.req;
+    // The pre-pass admits this only for a persistent run; the rule is checked again here so nothing
+    // of a zero-retention or waived run is ever saved.
+    if req.zdr || ctx.route.is_waived() {
+        return ask_next_turn(ctx, &pause.step_id, arguments_json, "retention").await;
+    }
+    let Some(bearer) = ctx
+        .session_bearer
+        .filter(|bearer| !bearer.trim().is_empty())
+    else {
+        return ask_next_turn(ctx, &pause.step_id, arguments_json, "no_credential").await;
+    };
+    let Some(fold) = pause_fold.as_mut() else {
+        return ask_next_turn(ctx, &pause.step_id, arguments_json, "no_fold_writer").await;
+    };
+    if pause.arguments_digest.is_empty() {
+        return ask_next_turn(ctx, &pause.step_id, arguments_json, "no_digest").await;
+    }
+    let pause_ref = mp_contracts::user_question::input_pause_ref(
+        &req.run_id,
+        &pause.step_id,
+        mp_contracts::user_question::ORIGIN_MODEL,
+    );
+    match fold
+        .save_input(
+            &pause_ref,
+            &pause.step_id,
+            runtime_loop::ask::ASK_TOOL,
+            &pause.arguments_digest,
+        )
+        .await
+    {
+        runtime_loop::fold::PauseSaved::Saved { .. } => {}
+        // A tombstone is never resumable, and a fold that was not saved cannot be resumed: neither
+        // may sit behind a question that waits. A saved tombstone is closed like any pause fold.
+        runtime_loop::fold::PauseSaved::Tombstoned { .. } => {
+            fold.close_after_failed_pause().await;
+            return ask_next_turn(ctx, &pause.step_id, arguments_json, "fold_tombstoned").await;
+        }
+        runtime_loop::fold::PauseSaved::NotSaved => {
+            fold.close_after_failed_pause().await;
+            return ask_next_turn(ctx, &pause.step_id, arguments_json, "fold_not_saved").await;
+        }
+    }
+    // The fold is durable: now the question. A lost response is retried once under the same key;
+    // the store replays a create that committed, and the replayed row is checked like any other.
+    let mut retried = false;
+    let created: Result<pb::RunQuestion, &'static str> = loop {
+        match runtime_loop::create_run_question_with(
+            ctx.session_channel,
+            bearer,
+            &req.run_id,
+            &pause.step_id,
+            &req.org_id,
+            mp_contracts::user_question::DELIVERY_RESUME,
+            &pause_ref,
+            &pause.items,
+        )
+        .await
+        {
+            Ok(question) if is_resume_question_of(&question, &req.run_id, &pause.step_id) => {
+                break Ok(question);
+            }
+            Ok(_) => break Err("question_not_resume"),
+            Err(status) if !retried && is_transport_failure(status.code()) => {
+                retried = true;
+                warn!(
+                    run_id = %req.run_id,
+                    code = ?status.code(),
+                    "run_agent: the resume question was not created; trying once more under the same key"
+                );
+            }
+            Err(status) => {
+                warn!(
+                    run_id = %req.run_id,
+                    code = ?status.code(),
+                    "run_agent: the resume question was refused or could not be created"
+                );
+                break Err("question_refused");
+            }
+        }
+    };
+    let question = match created {
+        Ok(question) => question,
+        Err(reason) => {
+            // No orphan paused row stays behind a question that will not wait.
+            fold.close_after_failed_pause().await;
+            return ask_next_turn(ctx, &pause.step_id, arguments_json, reason).await;
+        }
+    };
+
+    let mut snapshot = ctx.state.get_or_create(&req.run_id);
+    snapshot.status = crate::state::RunStatus::AwaitingInput;
+    ctx.state.update(snapshot);
+
+    info!(
+        run_id = %req.run_id,
+        question_id = %question.id,
+        "run_agent: run paused for input"
+    );
+
+    InputPauseResult::Paused(pb::RunAgentResponse {
+        status: "awaiting_input".to_owned(),
+        final_output: String::new(),
+        rounds_executed,
+        grounded: false,
+        // A pause is not a finish; the resumed run reports its own compaction state.
+        compaction_triggered: false,
+        // Not a failure, so no failure reason.
+        failure_code: String::new(),
+        retry_after_ms: None,
+        resets_at: String::new(),
+        park_reason: String::new(),
+        loop_stop_code: String::new(),
+        // The caller that holds the loop's tally sets it.
+        usage: None,
+        // The caller that holds the loop's round log sets it.
+        round_timing: Vec::new(),
+    })
+}
+
 /// Build the immutable, credential-free description of the exact tool call
 /// that was paused. This is action data, never reusable authority: a later
 /// delivery worker must still obtain its own narrowly scoped one-time
@@ -10336,9 +11355,12 @@ async fn finalize(
 /// What a continuation starts from (build plan WS03 S3, S7b): the segment of stage 1, or the
 /// paused loop restored in place. Both hold the one release and run under the snapshot's tools,
 /// mode and authority. A park resume (WS03 S8-6) is a continuation with NO release: it
-/// consumed no approval, and runs under the derived tools and the fold's authority.
-struct Continuation {
-    /// The one approved call an approval continuation may release; `None` for a park resume.
+/// consumed no approval, and runs under the derived tools and the fold's authority. A question
+/// continuation (WS14 S5) is a continuation with no release either: its answer is the paused
+/// call's result, and it runs under the fold's own tools and authority.
+pub(crate) struct Continuation {
+    /// The one approved call an approval continuation may release; `None` for a park resume and a
+    /// question continuation (an answer releases no call).
     release: Option<super::resume::ApprovedRelease>,
     step_prefix: String,
     /// The goal with the framed brief of recorded results appended. Not read by an in-place
@@ -10376,8 +11398,8 @@ struct CarriedRunState {
 }
 
 impl CarriedRunState {
-    /// A continuation with no fold to read (the stage-1 segment, a skipped site): taint marked
-    /// and no selection, the strictest state, until the stage-1 values are carried.
+    /// A continuation with no fold and no descriptor to read (a skipped site): taint marked and
+    /// no selection, the strictest state.
     fn strictest() -> Self {
         Self {
             taint: true,
@@ -10393,6 +11415,45 @@ impl CarriedRunState {
             mp_contracts::loop_fold::connector_scope_in(fold),
             connector_scope_of(req),
         )
+    }
+
+    /// The state a stage-1 segment carries, from the retained descriptor (it has no fold). An
+    /// absent taint is held as marked (DEC-WS14-5); an empty selection selects none; the
+    /// request's own selection only ever narrows the descriptor's.
+    fn from_descriptor(
+        connector_taint: Option<bool>,
+        connector_scope: &[String],
+        requested: &[String],
+    ) -> Self {
+        Self {
+            taint: connector_taint.unwrap_or(true),
+            connector_scope: super::resumed_connector_scope(
+                (!connector_scope.is_empty()).then(|| connector_scope.to_vec()),
+                requested,
+            ),
+        }
+    }
+
+    /// The fold's state combined with the descriptor's, strictly: the taint is marked when
+    /// either is, and the selection is the intersection when both name one, else the one that
+    /// does (an empty selection is "none recorded", never "everything").
+    fn combined(self, descriptor: Self) -> Self {
+        let connector_scope = match (
+            self.connector_scope.is_empty(),
+            descriptor.connector_scope.is_empty(),
+        ) {
+            (false, false) => self
+                .connector_scope
+                .into_iter()
+                .filter(|id| descriptor.connector_scope.contains(id))
+                .collect(),
+            (false, true) => self.connector_scope,
+            (true, _) => descriptor.connector_scope,
+        };
+        Self {
+            taint: self.taint || descriptor.taint,
+            connector_scope,
+        }
     }
 
     /// [`Self::from_fold`] over the two reads, for a restore that already holds them.
@@ -10537,6 +11598,10 @@ async fn consume_for_resume(
         segment,
         revision: consumed.revision,
         original_action_fingerprint: consumed.original_action_fingerprint,
+        // The paused turn's state, from the retained descriptor. The scope is read as given by
+        // session-core, which has already dropped a malformed selection to empty.
+        connector_taint: snapshot.connector_taint,
+        connector_scope: snapshot.connector_scope.clone(),
     })
 }
 
@@ -10581,6 +11646,12 @@ fn build_segment(
         &consumed,
     )?;
     let step_prefix = format!("s{}.", consumed.segment);
+    // Stage 1 has no fold: the paused turn's taint and selection come from the retained descriptor.
+    let carried = CarriedRunState::from_descriptor(
+        consumed.connector_taint,
+        &consumed.connector_scope,
+        connector_scope_of(req),
+    );
     let goal = if resume.brief.trim().is_empty() {
         req.goal.clone()
     } else {
@@ -10600,8 +11671,7 @@ fn build_segment(
         coordinator_tools: consumed.coordinator_tools,
         mode: consumed.mode,
         effective: consumed.effective,
-        // No fold is read at stage 1: the strictest state until the stage-1 values are carried.
-        carried: CarriedRunState::strictest(),
+        carried,
     })
 }
 
@@ -10655,11 +11725,17 @@ async fn restore_continuation(
     .await
     {
         Ok(restored) => Ok(Ok(Continuation {
+            // The fold's state and the descriptor's, combined strictly.
             carried: CarriedRunState::from_reads(
                 restored.taint,
                 restored.connector_scope.clone(),
                 connector_scope_of(req),
-            ),
+            )
+            .combined(CarriedRunState::from_descriptor(
+                consumed.connector_taint,
+                &consumed.connector_scope,
+                connector_scope_of(req),
+            )),
             release: Some(release.with_edit(restored.edit.clone())),
             step_prefix: format!("s{}.", consumed.segment),
             goal: req.goal.clone(),
@@ -11430,6 +12506,8 @@ mod browser_hand_back {
                 segment: runtime_loop::resume::next_segment_no(&paused_step),
                 revision: 0,
                 original_action_fingerprint: String::new(),
+                connector_taint: None,
+                connector_scope: Vec::new(),
             };
             let (_call, released_step, _release) = released_call(
                 crate::permission::RunGate::for_run("org-repause", "run-repause"),
@@ -18531,6 +19609,8 @@ mod tests {
             }],
             digest: authority.digest(),
             coordinator_tools: Vec::new(),
+            connector_scope: Vec::new(),
+            connector_taint: None,
         }
     }
 
@@ -19281,6 +20361,8 @@ mod tests {
             }],
             digest: authority.digest(),
             coordinator_tools: Vec::new(),
+            connector_scope: Vec::new(),
+            connector_taint: None,
         }
     }
 
@@ -28099,6 +29181,8 @@ mod tests {
             effective: snapshot,
             revision: 0,
             original_action_fingerprint: String::new(),
+            connector_taint: None,
+            connector_scope: Vec::new(),
         };
         let (_, release_step_id, _) = released_call(
             crate::permission::RunGate::for_run("org-release", "run-release"),
@@ -28285,6 +29369,8 @@ mod tests {
                     .collect(),
                 digest: authority.digest(),
                 coordinator_tools: Vec::new(),
+                connector_scope: Vec::new(),
+                connector_taint: None,
             }),
             ..Default::default()
         }
@@ -30880,6 +31966,7 @@ mod tests {
             runtime_loop::tool_index::DeferredIndex::default(),
             None,
             None,
+            None,
         )
         .await;
         ParkRun {
@@ -32027,6 +33114,7 @@ mod tests {
             runtime_loop::tool_index::DeferredIndex::default(),
             None,
             None,
+            None,
         )
         .await;
         // The stop is the credential deadline at the first loop top: the very stop that parks
@@ -33150,6 +34238,7 @@ mod tests {
             None,
             crate::knowledge_tools::SpaceRetrieval::Organisation,
             Some(runtime_loop::park::ParkClaimed { claimed }),
+            None,
             None,
         )
         .await

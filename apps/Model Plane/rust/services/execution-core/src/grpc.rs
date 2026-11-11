@@ -622,6 +622,7 @@ impl ExecutionService {
                 crate::knowledge_tools::SpaceRetrieval::Withheld,
                 None,
                 Some(runtime_loop::scheduled_agent::loop_scope(&contract)),
+                None,
             ),
         )
         .await;
@@ -1044,12 +1045,17 @@ fn enforce_resume(req: &pb::RunAgentRequest, enabled: bool) -> Result<(), Status
 /// Whether a continuation names a run question rather than an approval (build plan WS14 S5). Such a
 /// continuation carries a question id or an answer, and nothing an approval stage reads.
 fn resume_names_question(resume: &pb::AgentResume) -> bool {
-    !resume.question_id.is_empty() || !resume.answer_json.is_empty()
+    runtime_loop::resume::names_question(resume)
 }
 
 /// A question continuation (build plan WS14 S5), judged after the continue switch: refused while
 /// `AGENT_ASK_USER_RESUME_ENABLED` and its prerequisites are not all on, and refused unless it names
 /// one question with its answer and a claim. It never names an approval, a step, a tool or a brief.
+///
+/// Only mode `loop` is accepted: a question has no stage 1 (a fresh segment seeded by an approved
+/// call), so `segment` is refused `question_resume_unavailable`. The answer is checked for shape
+/// only (`parse_resume_answer`); the answer applied on resume is session-core's consumed row, never
+/// this echo.
 fn enforce_question_resume(resume: &pb::AgentResume, question_resume_on: bool) -> Result<(), Status> {
     if !question_resume_on {
         return Err(Status::failed_precondition("continue_disabled"));
@@ -1067,6 +1073,11 @@ fn enforce_question_resume(resume: &pb::AgentResume, question_resume_on: bool) -
     {
         return Err(Status::invalid_argument("resume_incomplete"));
     }
+    if resume.mode != "loop" {
+        return Err(Status::failed_precondition("question_resume_unavailable"));
+    }
+    mp_contracts::user_question::parse_resume_answer(&resume.answer_json)
+        .map_err(|_problem| Status::invalid_argument("resume_incomplete"))?;
     Ok(())
 }
 
@@ -2022,13 +2033,11 @@ impl ExecutionCore for ExecutionService {
         // context that breaks its bounds, or that carries conversation content
         // on a zero-retention run, is refused with the closed token only.
         enforce_run_context(&req)?;
+        // A question continuation (build plan WS14 S5) is judged here for its shape and its switch
+        // (`continue_disabled` while `AGENT_ASK_USER_RESUME_ENABLED` and its prerequisites are not
+        // all on, before anything is read). `run_agent` then decides it first, beside the park
+        // resume, and claims the fold and spends the answer once (`resume_questioned_run`).
         enforce_resume(&req, mp_contracts::loop_fold::continue_after_approval_enabled())?;
-        // A question continuation is judged above, but its apply on resume is not built yet (the
-        // executor's input pause and its answer step). It is refused here, before anything is
-        // consumed, rather than read as an approval.
-        if req.resume.as_ref().is_some_and(resume_names_question) {
-            return Err(Status::failed_precondition("question_resume_unavailable"));
-        }
         // The inference route the request names (`provider_hint` and
         // `subscription_connection_id`) is judged here, at the boundary and
         // before any of the run's work: a route this process may not honour is
@@ -3113,35 +3122,52 @@ mod run_context_boundary_tests {
         pb::AgentResume {
             mode: mode.to_owned(),
             question_id: "q_1".to_owned(),
-            answer_json: "{}".to_owned(),
+            answer_json: r#"{"answers":[{"item_id":"i1","option_ids":["a"],"text":""}]}"#.to_owned(),
             claim_token: "claim".to_owned(),
             ..Default::default()
         }
     }
 
-    /// A question continuation is refused while its switch is off, and it names exactly one question,
-    /// its answer and its claim. It never names an approval, a step, a tool or a brief.
+    /// A question continuation is refused while its switch is off (for both modes, before anything
+    /// else), accepts only mode `loop` (a question has no stage 1), and names exactly one question,
+    /// a well-shaped answer and its claim. It never names an approval, a step, a tool or a brief.
     #[test]
     fn enforce_question_resume_needs_the_switch_and_exactly_the_question_shape() {
         for mode in ["segment", "loop"] {
-            assert!(enforce_question_resume(&question_resume(mode), true).is_ok(), "{mode}");
             let off = enforce_question_resume(&question_resume(mode), false).expect_err("switch off");
-            assert_eq!(off.message(), "continue_disabled");
+            assert_eq!(off.code(), tonic::Code::FailedPrecondition, "{mode}");
+            assert_eq!(off.message(), "continue_disabled", "{mode}");
         }
+        assert!(enforce_question_resume(&question_resume("loop"), true).is_ok());
+        let segment = enforce_question_resume(&question_resume("segment"), true).expect_err("no stage 1");
+        assert_eq!(segment.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(segment.message(), "question_resume_unavailable");
         let incomplete = [
-            pb::AgentResume { mode: "park".to_owned(), ..question_resume("segment") },
-            pb::AgentResume { approval_id: "appr_1".to_owned(), ..question_resume("segment") },
-            pb::AgentResume { tool_name: "delete_records".to_owned(), ..question_resume("segment") },
-            pb::AgentResume { brief: "recorded results".to_owned(), ..question_resume("segment") },
-            pb::AgentResume { question_id: String::new(), ..question_resume("segment") },
-            pb::AgentResume { answer_json: String::new(), ..question_resume("segment") },
-            pb::AgentResume { claim_token: String::new(), ..question_resume("segment") },
-            pb::AgentResume { mode: "PARK".to_owned(), ..question_resume("segment") },
+            pb::AgentResume { mode: "park".to_owned(), ..question_resume("loop") },
+            pb::AgentResume { approval_id: "appr_1".to_owned(), ..question_resume("loop") },
+            pb::AgentResume { tool_name: "delete_records".to_owned(), ..question_resume("loop") },
+            pb::AgentResume { brief: "recorded results".to_owned(), ..question_resume("loop") },
+            pb::AgentResume { question_id: String::new(), ..question_resume("loop") },
+            pb::AgentResume { answer_json: String::new(), ..question_resume("loop") },
+            pb::AgentResume { claim_token: String::new(), ..question_resume("loop") },
+            pb::AgentResume { mode: "PARK".to_owned(), ..question_resume("loop") },
+            // An answer that is not the resume answer's shape: unreadable, empty, or a skip that
+            // also carries answers.
+            pb::AgentResume { answer_json: "not json".to_owned(), ..question_resume("loop") },
+            pb::AgentResume { answer_json: r#"{"answers":[]}"#.to_owned(), ..question_resume("loop") },
+            pb::AgentResume {
+                answer_json: r#"{"answers":[{"item_id":"i1","option_ids":["a"],"text":""}],"skip":true}"#
+                    .to_owned(),
+                ..question_resume("loop")
+            },
         ];
         for shape in incomplete {
             let e = enforce_question_resume(&shape, true).expect_err("an incomplete question shape");
+            assert_eq!(e.code(), tonic::Code::InvalidArgument);
             assert_eq!(e.message(), "resume_incomplete");
         }
+        let skip = pb::AgentResume { answer_json: r#"{"answers":[],"skip":true}"#.to_owned(), ..question_resume("loop") };
+        assert!(enforce_question_resume(&skip, true).is_ok(), "a skip is a well-shaped answer");
     }
 
     /// Only a continuation that carries a question or an answer takes the question check, so an

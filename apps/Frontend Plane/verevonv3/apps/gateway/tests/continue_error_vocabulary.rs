@@ -2,8 +2,8 @@
 //! the SPA, and pins that only the continue handler relays upstream error codes.
 //!
 //! The vocabulary has three homes that must agree: model-gateway (which says the
-//! codes), the BFF's `CONTINUE_RELAYED_ERRORS` (which relays eight of them with
-//! their upstream status), and the SPA's `chat-run-continue-contract.ts` (which
+//! codes), the BFF's `CONTINUE_RELAYED_ERRORS` (which relays fourteen of them with
+//! their upstream status: the approval and park forms' nine and the question form's five), and the SPA's `chat-run-continue-contract.ts` (which
 //! reads them). A code added in one place and not the others fails silently: the
 //! BFF turns an unlisted code into `model_error` and the SPA's guard returns null.
 //!
@@ -18,7 +18,8 @@
 //!   status for every code, and the difference is exactly `continue_incomplete` (the BFF's
 //!   own blank check answers first) and `missing_bearer` (a 401, which stays
 //!   `unauthorized`);
-//! * the SPA's stream-frame tuple = model-gateway's `CONTINUE_FRAME_REFUSALS`, in order;
+//! * the SPA's stream-frame tuple = model-gateway's `CONTINUE_FRAME_REFUSALS`, in order, then
+//!   the tokens only the question form's `CONTINUE_QUESTION_FRAME_REFUSALS` adds (WS14 S5);
 //! * the SPA's run-end list (`CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES`, the three frames that
 //!   follow the executor's answer and are final after a pre-consume) = model-gateway's
 //!   `CONTINUE_SPENT_RUN_END_FRAMES`, and neither refusal list holds them;
@@ -173,8 +174,8 @@ fn the_bff_relay_list_is_the_spa_http_list() {
     let spa = spa_http_refusals();
     assert_eq!(
         bff.len(),
-        8,
-        "the BFF relays exactly eight closed codes; parsed {bff:?}"
+        14,
+        "the BFF relays exactly fourteen closed codes; parsed {bff:?}"
     );
     assert_eq!(
         bff, spa,
@@ -245,6 +246,39 @@ fn gateway_http_refusals() -> Vec<(String, u16)> {
     pairs
 }
 
+/// The gateway's (code, status) pairs from `CONTINUE_QUESTION_HTTP_REFUSALS` (WS14 S5), the
+/// question form's own list.
+fn gateway_question_http_refusals() -> Vec<(String, u16)> {
+    let list = gateway_const_list(&model_gateway_sse_source(), "CONTINUE_QUESTION_HTTP_REFUSALS");
+    let mut pairs = Vec::new();
+    let mut rest = list.as_str();
+    while let Some(open) = rest.find('(') {
+        let entry = delimited(&rest[open..], "(", '(', ')');
+        let code = string_literals(entry, '"')
+            .into_iter()
+            .next()
+            .expect("an entry names its code first");
+        let name = entry
+            .split("StatusCode::")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no StatusCode on `{entry}`"))
+            .trim();
+        let status = match name {
+            "BAD_REQUEST" => 400,
+            "UNAUTHORIZED" => 401,
+            "NOT_FOUND" => 404,
+            "CONFLICT" => 409,
+            "GONE" => 410,
+            other => panic!(
+                "StatusCode::{other} is not in this test's table: add its number, do not skip the entry"
+            ),
+        };
+        pairs.push((code, status));
+        rest = &rest[open + 1 + entry.len() + 1..];
+    }
+    pairs
+}
+
 /// The SPA's stream-frame refusal codes, from `CHAT_RUN_CONTINUE_FRAME_REFUSALS`.
 fn spa_frame_refusals() -> Vec<String> {
     let source = spa_contract_source();
@@ -286,11 +320,37 @@ fn the_bff_relay_list_is_the_gateways_http_list_less_the_two_codes_it_never_rela
         &gateway.iter().map(|(code, _)| code.clone()).collect::<Vec<_>>(),
     );
     let bff = bff_relayed();
+    // The codes the gateway sends outside CONTINUE_HTTP_REFUSALS, each pinned to the source that
+    // writes it: the question form's own list (WS14 S5), the answer route's two typed refusals
+    // (the question form relays them from the same Session Core statuses), and the org pause.
+    let mut sent = gateway.clone();
+    sent.extend(gateway_question_http_refusals());
+    let routes = read(&gateway_file(
+        "../../../../Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    ));
+    assert!(
+        routes.contains("StatusCode::CONFLICT, \"question_already_answered\""),
+        "http_routes.rs no longer sends question_already_answered with 409"
+    );
+    assert!(
+        routes.contains("StatusCode::UNPROCESSABLE_ENTITY,\n                \"invalid_answer\""),
+        "http_routes.rs no longer sends invalid_answer with 422"
+    );
+    sent.push(("question_already_answered".to_owned(), 409));
+    sent.push(("invalid_answer".to_owned(), 422));
+    let policy = read(&gateway_file(
+        "../../../../Model Plane/rust/services/model-gateway/src/org_agent_policy.rs",
+    ));
+    assert!(
+        policy.contains("pub const AGENTS_PAUSED_CODE: &str = \"org_agents_paused\";"),
+        "org_agent_policy.rs no longer names org_agents_paused"
+    );
+    sent.push(("org_agents_paused".to_owned(), 403));
     for (code, status) in &bff {
-        match gateway.iter().find(|(known, _)| known == code) {
+        match sent.iter().find(|(known, _)| known == code) {
             None => panic!(
-                "the BFF relays `{code}`, which model-gateway's CONTINUE_HTTP_REFUSALS does not \
-                 list: the gateway never sends it, so the entry is dead or the gateway lost a code"
+                "the BFF relays `{code}`, which model-gateway's refusal lists do not list: the \
+                 gateway never sends it, so the entry is dead or the gateway lost a code"
             ),
             Some((_, upstream)) => assert_eq!(
                 upstream, status,
@@ -327,11 +387,48 @@ fn the_spa_frame_tuple_is_the_gateways_frame_list() {
     );
     no_duplicates("model-gateway's CONTINUE_FRAME_REFUSALS", &gateway);
     no_duplicates("the SPA's CHAT_RUN_CONTINUE_FRAME_REFUSALS", &spa);
+    // The question form (WS14 S5) writes frames from its own list; the tokens it adds to the base
+    // list are the SPA's too, after the base tokens and in the question list's order.
+    let question = string_literals(
+        &gateway_const_list(&model_gateway_sse_source(), "CONTINUE_QUESTION_FRAME_REFUSALS"),
+        '"',
+    );
+    no_duplicates("model-gateway's CONTINUE_QUESTION_FRAME_REFUSALS", &question);
+    let question_only: Vec<String> = question
+        .iter()
+        .filter(|token| !gateway.contains(token))
+        .cloned()
+        .collect();
     assert_eq!(
-        spa, gateway,
-        "the SPA's CHAT_RUN_CONTINUE_FRAME_REFUSALS and model-gateway's CONTINUE_FRAME_REFUSALS \
-         must list the same tokens in the same order. A token only the gateway knows is a frame \
-         the SPA's guards read as null."
+        question_only,
+        [
+            "question_answer_released",
+            "question_resume_unavailable",
+            "question_not_answered",
+            "question_expired",
+            "question_not_found",
+            "question_not_resumable",
+            "run_ended",
+        ],
+        "the question form adds exactly seven frame tokens to the base list; parsed {question_only:?}"
+    );
+    // `run_ended` is the one the SPA's tuple does not carry: the question reader
+    // (`chatRunContinueQuestionRefusalOf`) maps it by code, so it must name it.
+    assert!(
+        spa_contract_source().contains("'run_ended'"),
+        "the SPA's question reader no longer names run_ended"
+    );
+    let expected: Vec<String> = gateway
+        .iter()
+        .cloned()
+        .chain(question_only.into_iter().filter(|token| token != "run_ended"))
+        .collect();
+    assert_eq!(
+        spa, expected,
+        "the SPA's CHAT_RUN_CONTINUE_FRAME_REFUSALS must be model-gateway's \
+         CONTINUE_FRAME_REFUSALS, in order, followed by the tokens only \
+         CONTINUE_QUESTION_FRAME_REFUSALS adds. A token only the gateway knows is a frame the \
+         SPA's guards read as null."
     );
 }
 

@@ -69,17 +69,23 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
+    audience_tokens::ModelServiceAudience,
     config::AppState,
     domains::chat::shared::{
         data_plane_token, delegated_auth_unavailable, invalid_chat_request, model_token,
         proxy_model_json_with_data_plane, proxy_model_json_with_session,
         proxy_model_json_with_session_and_capability, required_capability_token,
         required_execution_token, required_inference_token, required_session_token,
-        skipped_site_browser_token,
+        retention_refusal_response, skipped_site_browser_token, waived_data_plane_token,
+        waived_decision, waived_service_token,
     },
     envelope::error,
     middleware::{require_session, AuthenticatedUser},
     rate_limit::rate_limit_middleware,
+    retention_decision::{
+        continuation_retention, take_continuation_connection, ContinuationConnection,
+        ContinuationQuery, TurnRetention,
+    },
     upstream::{authorized_org_id, proxy_sse_stream_with_browser, proxy_sse_stream_with_data_plane},
 };
 
@@ -229,17 +235,94 @@ async fn mg_proxy(
     body: Option<Value>,
     require_execution: bool,
 ) -> (StatusCode, Json<Value>) {
-    let token = model_token(state, user, headers).await;
-    let session = match required_session_token(state, user, headers).await {
-        Ok(token) => token,
-        Err(error) => return delegated_auth_unavailable(error),
-    };
-    let url = format!("{}{}", state.model_gateway_url, path);
-    if require_execution {
-        let execution = match required_execution_token(state, user, headers).await {
+    mg_proxy_with(
+        state,
+        user,
+        headers,
+        method,
+        path,
+        body,
+        require_execution,
+        &TurnRetention::Unchanged,
+    )
+    .await
+}
+
+/// [`mg_proxy`] for a continuation whose retention was asked of Auth Core (ZDR-Z-19e, D-ZDR-15).
+/// `Unchanged` (and `Zdr` and `Persistent`) is today's path exactly. `Waived` mints the model and
+/// session bearers (and the execution bearer where the route needs one) with the fresh decision, each
+/// required, and answers an Auth Core refusal as it came with nothing sent upstream.
+#[allow(clippy::too_many_arguments)]
+async fn mg_proxy_with(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+    require_execution: bool,
+    retention: &TurnRetention,
+) -> (StatusCode, Json<Value>) {
+    let (token, session, execution) = if let Some(decision) = waived_decision(retention) {
+        let model = match waived_service_token(
+            state,
+            user,
+            headers,
+            decision,
+            ModelServiceAudience::ModelGateway,
+        )
+        .await
+        {
+            Ok(token) => token,
+            Err(refusal) => return refusal,
+        };
+        let session = match waived_service_token(
+            state,
+            user,
+            headers,
+            decision,
+            ModelServiceAudience::SessionCore,
+        )
+        .await
+        {
+            Ok(token) => token,
+            Err(refusal) => return refusal,
+        };
+        let execution = if require_execution {
+            match waived_service_token(
+                state,
+                user,
+                headers,
+                decision,
+                ModelServiceAudience::ExecutionCore,
+            )
+            .await
+            {
+                Ok(token) => Some(token),
+                Err(refusal) => return refusal,
+            }
+        } else {
+            None
+        };
+        (Some(model), session, execution)
+    } else {
+        let token = model_token(state, user, headers).await;
+        let session = match required_session_token(state, user, headers).await {
             Ok(token) => token,
             Err(error) => return delegated_auth_unavailable(error),
         };
+        let execution = if require_execution {
+            match required_execution_token(state, user, headers).await {
+                Ok(token) => Some(token),
+                Err(error) => return delegated_auth_unavailable(error),
+            }
+        } else {
+            None
+        };
+        (token, session, execution)
+    };
+    let url = format!("{}{}", state.model_gateway_url, path);
+    if let Some(execution) = execution {
         return proxy_model_json_with_data_plane(
             state,
             method,
@@ -275,7 +358,19 @@ async fn mg_post(
     path: &str,
     body: Value,
 ) -> (StatusCode, Json<Value>) {
-    mg_proxy(
+    mg_post_with(state, user, headers, path, body, &TurnRetention::Unchanged).await
+}
+
+/// [`mg_post`] under the retention a continuation asked of Auth Core (ZDR-Z-19e).
+async fn mg_post_with(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    path: &str,
+    body: Value,
+    retention: &TurnRetention,
+) -> (StatusCode, Json<Value>) {
+    mg_proxy_with(
         state,
         user,
         headers,
@@ -283,6 +378,7 @@ async fn mg_post(
         path,
         Some(body),
         requires_execution_delegation(path),
+        retention,
     )
     .await
 }
@@ -324,7 +420,30 @@ async fn mg_post_decide_with_retry_bounded(
     body: Value,
     retry_timeout: Duration,
 ) -> (StatusCode, Json<Value>) {
-    let first = mg_post(state, user, headers, path, body.clone()).await;
+    mg_post_decide_with_retry_under(
+        state,
+        user,
+        headers,
+        path,
+        body,
+        retry_timeout,
+        &TurnRetention::Unchanged,
+    )
+    .await
+}
+
+/// [`mg_post_decide_with_retry_bounded`] under the retention a continuation asked of Auth Core
+/// (ZDR-Z-19e). The same decision serves both attempts; each attempt mints its own bearers.
+async fn mg_post_decide_with_retry_under(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    path: &str,
+    body: Value,
+    retry_timeout: Duration,
+    retention: &TurnRetention,
+) -> (StatusCode, Json<Value>) {
+    let first = mg_post_with(state, user, headers, path, body.clone(), retention).await;
     if !is_retryable_decide_status(first.0) {
         return first;
     }
@@ -334,7 +453,12 @@ async fn mg_post_decide_with_retry_bounded(
         "decide_approval: retrying after a transient/quarantine response"
     );
     tokio::time::sleep(DECIDE_RETRY_BACKOFF).await;
-    match tokio::time::timeout(retry_timeout, mg_post(state, user, headers, path, body)).await {
+    match tokio::time::timeout(
+        retry_timeout,
+        mg_post_with(state, user, headers, path, body, retention),
+    )
+    .await
+    {
         Ok(second) => second,
         Err(_elapsed) => {
             tracing::warn!(
@@ -355,7 +479,18 @@ async fn mg_post_empty(
     headers: &HeaderMap,
     path: &str,
 ) -> (StatusCode, Json<Value>) {
-    mg_proxy(
+    mg_post_empty_with(state, user, headers, path, &TurnRetention::Unchanged).await
+}
+
+/// [`mg_post_empty`] under the retention a continuation asked of Auth Core (ZDR-Z-19e).
+async fn mg_post_empty_with(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    path: &str,
+    retention: &TurnRetention,
+) -> (StatusCode, Json<Value>) {
+    mg_proxy_with(
         state,
         user,
         headers,
@@ -363,12 +498,33 @@ async fn mg_post_empty(
         path,
         None,
         requires_execution_delegation(path),
+        retention,
     )
     .await
 }
 
 fn enc(value: &str) -> String {
     urlencoding::encode(value).into_owned()
+}
+
+/// Ask Auth Core whether the run a continuation would advance is waived (ZDR-Z-19e, D-ZDR-15), for
+/// the connection the SPA named. A continuation never inherits a waiver: with the switch off or no
+/// connection named this is `Unchanged` with no call, and every handler below is exactly what it
+/// was. A refusal is answered as Auth Core sent it, and the handler sends nothing upstream.
+async fn continuation_retention_of(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    connection: Option<&ContinuationConnection>,
+) -> Result<TurnRetention, (StatusCode, Json<Value>)> {
+    continuation_retention(
+        state,
+        user,
+        headers,
+        connection.map(ContinuationConnection::as_pair),
+    )
+    .await
+    .map_err(retention_refusal_response)
 }
 
 // ── read handlers ────────────────────────────────────────────────────────────
@@ -553,12 +709,25 @@ async fn get_approval_preview(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(approval_id): Path<String>,
+    Query(connection_query): Query<ContinuationQuery>,
 ) -> impl IntoResponse {
-    mg_get(
+    // ZDR-Z-19e: the preview of a waived run's approval is read under a fresh decision for the
+    // connection named in the query string; with none named this is today's pass-through.
+    let connection = connection_query.connection(&state);
+    let retention =
+        match continuation_retention_of(&state, &user, &headers, connection.as_ref()).await {
+            Ok(retention) => retention,
+            Err(refusal) => return refusal,
+        };
+    mg_proxy_with(
         &state,
         &user,
         &headers,
+        Method::GET,
         &format!("/v1/orchestration/approvals/{}/preview", enc(&approval_id)),
+        None,
+        false,
+        &retention,
     )
     .await
 }
@@ -775,18 +944,28 @@ pub(crate) async fn decide_approval(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(approval_id): Path<String>,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
+    // ZDR-Z-19e: the connection of a waived run is read off the body (and removed, so the closed
+    // decision body below never sees it) and asked of Auth Core afresh; none named is today's path.
+    let connection = take_continuation_connection(&state, &mut body);
     let upstream_body = match decide_upstream_body(body) {
         Ok(upstream_body) => upstream_body,
         Err(refusal) => return refusal,
     };
-    mg_post_decide_with_retry(
+    let retention =
+        match continuation_retention_of(&state, &user, &headers, connection.as_ref()).await {
+            Ok(retention) => retention,
+            Err(refusal) => return refusal,
+        };
+    mg_post_decide_with_retry_under(
         &state,
         &user,
         &headers,
         &format!("/v1/orchestration/approvals/{}/decide", enc(&approval_id)),
         upstream_body,
+        DECIDE_RETRY_TIMEOUT,
+        &retention,
     )
     .await
 }
@@ -926,14 +1105,22 @@ async fn approve_plan(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(plan_id): Path<String>,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
-    mg_post(
+    // ZDR-Z-19e: see `decide_approval`; the connection keys are never forwarded.
+    let connection = take_continuation_connection(&state, &mut body);
+    let retention =
+        match continuation_retention_of(&state, &user, &headers, connection.as_ref()).await {
+            Ok(retention) => retention,
+            Err(refusal) => return refusal,
+        };
+    mg_post_with(
         &state,
         &user,
         &headers,
         &format!("/v1/orchestration/plans/{}/approve", enc(&plan_id)),
         body,
+        &retention,
     )
     .await
 }
@@ -943,14 +1130,22 @@ async fn reject_plan(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(plan_id): Path<String>,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
-    mg_post(
+    // ZDR-Z-19e: see `decide_approval`; the connection keys are never forwarded.
+    let connection = take_continuation_connection(&state, &mut body);
+    let retention =
+        match continuation_retention_of(&state, &user, &headers, connection.as_ref()).await {
+            Ok(retention) => retention,
+            Err(refusal) => return refusal,
+        };
+    mg_post_with(
         &state,
         &user,
         &headers,
         &format!("/v1/orchestration/plans/{}/reject", enc(&plan_id)),
         body,
+        &retention,
     )
     .await
 }
@@ -1015,14 +1210,22 @@ async fn update_todo_status(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(todo_id): Path<String>,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
-    mg_post(
+    // ZDR-Z-19e: see `decide_approval`; the connection keys are never forwarded.
+    let connection = take_continuation_connection(&state, &mut body);
+    let retention =
+        match continuation_retention_of(&state, &user, &headers, connection.as_ref()).await {
+            Ok(retention) => retention,
+            Err(refusal) => return refusal,
+        };
+    mg_post_with(
         &state,
         &user,
         &headers,
         &format!("/v1/orchestration/todos/{}/status", enc(&todo_id)),
         body,
+        &retention,
     )
     .await
 }
@@ -1032,12 +1235,23 @@ pub(crate) async fn resume_run(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(run_id): Path<String>,
+    body: Bytes,
 ) -> impl IntoResponse {
-    mg_post_empty(
+    // ZDR-Z-19e: the SPA may name the connection of a waived run in an optional JSON body. An empty,
+    // unreadable or connection-less body is today's path; the body is never forwarded.
+    let mut named = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+    let connection = take_continuation_connection(&state, &mut named);
+    let retention =
+        match continuation_retention_of(&state, &user, &headers, connection.as_ref()).await {
+            Ok(retention) => retention,
+            Err(refusal) => return refusal,
+        };
+    mg_post_empty_with(
         &state,
         &user,
         &headers,
         &format!("/v1/orchestration/runs/{}/resume", enc(&run_id)),
+        &retention,
     )
     .await
 }
@@ -1055,7 +1269,35 @@ pub(crate) struct ContinueRunBody {
     /// body is then exactly the one it always was.
     #[serde(default)]
     skipped: bool,
+    /// The QUESTION form (WS14 S5): the run is paused for its owner's answer (`awaiting_input`), and
+    /// this names the open question the answer belongs to. Absent is empty, and the body is then
+    /// exactly the one it always was.
+    #[serde(default)]
+    question_id: String,
+    /// The per-item answers of the question form. Empty unless `question_id` is set.
+    #[serde(default)]
+    answers: Vec<ContinueAnswerItem>,
+    /// The question form's skip: no answers, the run continues with the question skipped.
+    #[serde(default)]
+    question_skip: bool,
 }
+
+/// One answered item of the question form of a continuation. Only the item and what was chosen
+/// or written; anything else a client sends is refused, not ignored.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContinueAnswerItem {
+    item_id: String,
+    #[serde(default)]
+    option_ids: Vec<String>,
+    #[serde(default)]
+    text: String,
+}
+
+/// The longest question id the question form forwards, in bytes (the SPA bounds it at 64).
+const CONTINUE_QUESTION_ID_MAX_BYTES: usize = 64;
+/// The most answers the question form forwards (a question holds at most four items).
+const CONTINUE_QUESTION_ANSWERS_MAX: usize = 4;
 
 /// `None` when either identifier is blank. Otherwise the upstream body is rebuilt
 /// from the two fields alone (and the skipped-site marker, only when it is set), so nothing
@@ -1068,7 +1310,27 @@ pub(crate) struct ContinueRunBody {
 /// a non-blank token. Everything else, a whitespace-only id included, and every input
 /// with the flag off, is exactly as it was. An absent `approval_id` key is not a park
 /// form: the extractor refuses it (422) before this runs.
-fn continue_upstream_body(body: &ContinueRunBody, park_form: bool) -> Option<Value> {
+///
+/// The QUESTION form (WS14 S5) is a body that names a `question_id`. It is forwarded only with
+/// `question_form` on (`AppState::continue_question_form`), `skipped` false, an `approval_id` that
+/// is EXACTLY empty (no approval is read or spent), a non-blank question id of at most 64 bytes, a
+/// non-blank claim token, at most four answers, and exactly one of `question_skip` or a non-empty
+/// answer list. The upstream body is then rebuilt from `{approval_id: "", claim_token,
+/// question_id, answers, question_skip}` alone. Any other body naming a `question_id`, and every
+/// question body with the flag off, is `None`. A body without a `question_id` (or with answers or
+/// `question_skip` but no `question_id`) never reaches the question form: it is exactly what it was
+/// above, and a stray answers or skip field is refused rather than forwarded.
+fn continue_upstream_body(
+    body: &ContinueRunBody,
+    park_form: bool,
+    question_form: bool,
+) -> Option<Value> {
+    if !body.question_id.is_empty() {
+        return continue_question_upstream_body(body, question_form);
+    }
+    if !body.answers.is_empty() || body.question_skip {
+        return None;
+    }
     let park = park_form && body.approval_id.is_empty();
     if (!park && body.approval_id.trim().is_empty()) || body.claim_token.trim().is_empty() {
         return None;
@@ -1083,6 +1345,32 @@ fn continue_upstream_body(body: &ContinueRunBody, park_form: bool) -> Option<Val
         upstream["skipped"] = serde_json::json!(true);
     }
     Some(upstream)
+}
+
+/// The question form of [`continue_upstream_body`]; see there for the rules.
+fn continue_question_upstream_body(body: &ContinueRunBody, question_form: bool) -> Option<Value> {
+    if !question_form
+        || body.skipped
+        || !body.approval_id.is_empty()
+        || body.question_id.trim().is_empty()
+        || body.question_id.len() > CONTINUE_QUESTION_ID_MAX_BYTES
+        || body.claim_token.trim().is_empty()
+        || body.answers.len() > CONTINUE_QUESTION_ANSWERS_MAX
+        || body.question_skip == !body.answers.is_empty()
+    {
+        return None;
+    }
+    Some(serde_json::json!({
+        "approval_id": "",
+        "claim_token": body.claim_token,
+        "question_id": body.question_id,
+        "answers": body.answers.iter().map(|answer| serde_json::json!({
+            "item_id": answer.item_id,
+            "option_ids": answer.option_ids,
+            "text": answer.text,
+        })).collect::<Vec<_>>(),
+        "question_skip": body.question_skip,
+    }))
 }
 
 /// The refusals model-gateway's continue route answers before any stream opens,
@@ -1147,6 +1435,20 @@ pub(crate) const CONTINUE_RELAYED_ERRORS: &[(&str, u16, &str)] = &[
         403,
         "Agent runs are paused for this organization.",
     ),
+    // The question form (WS14 S5). `not_resumable` (409) above is shared with it.
+    ("question_not_found", 404, "The question was not found for this run."),
+    ("question_expired", 410, "The question has expired and can no longer be answered."),
+    (
+        "question_already_answered",
+        409,
+        "The question has already been answered.",
+    ),
+    ("invalid_answer", 422, "The answer does not fit the question."),
+    (
+        "question_not_resumable",
+        409,
+        "The question is not in a state that can continue the run.",
+    ),
 ];
 
 /// `POST /api/v1/orchestration/runs/{run_id}/continue` (build plan WS03 S3): resumes
@@ -1170,29 +1472,111 @@ pub(crate) async fn continue_run(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(run_id): Path<String>,
+    Query(connection_query): Query<ContinuationQuery>,
     Json(body): Json<ContinueRunBody>,
 ) -> Response {
-    let Some(upstream_body) = continue_upstream_body(&body, state.continue_park_form) else {
+    let Some(upstream_body) = continue_upstream_body(
+        &body,
+        state.continue_park_form,
+        state.continue_question_form,
+    ) else {
         return invalid_chat_request("continue needs an approval id and a claim token")
             .into_response();
     };
-    let model = model_token(&state, &user, &headers).await;
-    let data_plane = data_plane_token(&state, &user, &headers).await;
-    let inference = match required_inference_token(&state, &user, &headers).await {
-        Ok(token) => token,
-        Err(error) => return delegated_auth_unavailable(error).into_response(),
-    };
-    let execution = match required_execution_token(&state, &user, &headers).await {
-        Ok(token) => token,
-        Err(error) => return delegated_auth_unavailable(error).into_response(),
-    };
-    let session = match required_session_token(&state, &user, &headers).await {
-        Ok(token) => token,
-        Err(error) => return delegated_auth_unavailable(error).into_response(),
-    };
+    // ZDR-Z-19e (D-ZDR-15): a continuation never inherits a waiver. The SPA may name the connection
+    // of a waived run in the query string of this SSE route; only that, and a fresh decision from
+    // Auth Core for it, waives the bearers below. With the switch off or no connection named this is
+    // `Unchanged`, no call, and the bearers are minted exactly as they were.
+    let connection = connection_query.connection(&state);
+    let retention =
+        match continuation_retention_of(&state, &user, &headers, connection.as_ref()).await {
+            Ok(retention) => retention,
+            Err(refusal) => return refusal.into_response(),
+        };
+    let (model, data_plane, inference, execution, session) =
+        if let Some(decision) = waived_decision(&retention) {
+            // Waived: model, data plane, inference, execution and session (the set model-gateway's
+            // continue route verifies), each with the decision and each required.
+            let model = match waived_service_token(
+                &state,
+                &user,
+                &headers,
+                decision,
+                ModelServiceAudience::ModelGateway,
+            )
+            .await
+            {
+                Ok(token) => token,
+                Err(refusal) => return refusal.into_response(),
+            };
+            let data_plane = match waived_data_plane_token(&state, &user, &headers, decision).await
+            {
+                Ok(token) => token,
+                Err(refusal) => return refusal.into_response(),
+            };
+            let inference = match waived_service_token(
+                &state,
+                &user,
+                &headers,
+                decision,
+                ModelServiceAudience::InferenceCore,
+            )
+            .await
+            {
+                Ok(token) => token,
+                Err(refusal) => return refusal.into_response(),
+            };
+            let execution = match waived_service_token(
+                &state,
+                &user,
+                &headers,
+                decision,
+                ModelServiceAudience::ExecutionCore,
+            )
+            .await
+            {
+                Ok(token) => token,
+                Err(refusal) => return refusal.into_response(),
+            };
+            let session = match waived_service_token(
+                &state,
+                &user,
+                &headers,
+                decision,
+                ModelServiceAudience::SessionCore,
+            )
+            .await
+            {
+                Ok(token) => token,
+                Err(refusal) => return refusal.into_response(),
+            };
+            (Some(model), Some(data_plane), inference, execution, session)
+        } else {
+            let model = model_token(&state, &user, &headers).await;
+            let data_plane = data_plane_token(&state, &user, &headers).await;
+            let inference = match required_inference_token(&state, &user, &headers).await {
+                Ok(token) => token,
+                Err(error) => return delegated_auth_unavailable(error).into_response(),
+            };
+            let execution = match required_execution_token(&state, &user, &headers).await {
+                Ok(token) => token,
+                Err(error) => return delegated_auth_unavailable(error).into_response(),
+            };
+            let session = match required_session_token(&state, &user, &headers).await {
+                Ok(token) => token,
+                Err(error) => return delegated_auth_unavailable(error).into_response(),
+            };
+            (model, data_plane, inference, execution, session)
+        };
+    let waived = waived_decision(&retention).is_some();
     // The org's standing posture, so the `x-zdr` header reaches model-gateway. The
-    // gateway refuses a continuation under ZDR on its own verified claims as well.
-    let zdr = crate::zdr::org_zdr_enabled(&state, &user).await;
+    // gateway refuses a continuation under ZDR on its own verified claims as well. A waived
+    // continuation is not a ZDR run, so it never sends `x-zdr: true`; its bearers carry the waiver.
+    let zdr = if waived {
+        false
+    } else {
+        crate::zdr::org_zdr_enabled(&state, &user).await
+    };
     let org_id = authorized_org_id(&state, &user).await;
     let url = format!(
         "{}/v1/orchestration/runs/{}/continue",
@@ -1203,7 +1587,8 @@ pub(crate) async fn continue_run(
     // executor needs it to release the page the run held for the person. It is minted for that body
     // alone, under the conditions the turn that opened the page was, and forwarded as the browser
     // bearer; every other continuation is relayed exactly as before.
-    if body.skipped && upstream_body.get("skipped").is_some() {
+    // A waived continuation never mints a browser bearer (ZDR rule 5), so it takes the plain path.
+    if body.skipped && upstream_body.get("skipped").is_some() && !waived {
         let browser = skipped_site_browser_token(&state, &user, &headers, zdr).await;
         return proxy_sse_stream_with_browser(
             &state,
@@ -1254,12 +1639,23 @@ pub(crate) async fn cancel_run(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(run_id): Path<String>,
+    body: Bytes,
 ) -> impl IntoResponse {
-    mg_post_empty(
+    // ZDR-Z-19e: the SPA may name the connection of a waived run in an optional JSON body. An empty,
+    // unreadable or connection-less body is today's path; the body is never forwarded.
+    let mut named = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+    let connection = take_continuation_connection(&state, &mut named);
+    let retention =
+        match continuation_retention_of(&state, &user, &headers, connection.as_ref()).await {
+            Ok(retention) => retention,
+            Err(refusal) => return refusal,
+        };
+    mg_post_empty_with(
         &state,
         &user,
         &headers,
         &format!("/v1/orchestration/runs/{}/cancel", enc(&run_id)),
+        &retention,
     )
     .await
 }
@@ -1572,6 +1968,7 @@ mod tests {
             mail_task_nats_user: String::new(),
             mail_task_nats_password: String::new(),
             continue_park_form: false,
+            continue_question_form: false,
             model_entitlement_admin_enabled: false,
             zdr_effective_posture_read: false,
             zdr_waiver_ui_enabled: false,
@@ -1784,9 +2181,12 @@ mod tests {
             approval_id: "apr-1".to_owned(),
             claim_token: "claim-1".to_owned(),
             skipped: false,
+            question_id: String::new(),
+            answers: Vec::new(),
+            question_skip: false,
         };
         assert_eq!(
-            continue_upstream_body(&body, false),
+            continue_upstream_body(&body, false, false),
             Some(json!({"approval_id": "apr-1", "claim_token": "claim-1"}))
         );
     }
@@ -1803,9 +2203,12 @@ mod tests {
                 approval_id: approval_id.to_owned(),
                 claim_token: claim_token.to_owned(),
                 skipped: false,
+                question_id: String::new(),
+                answers: Vec::new(),
+                question_skip: false,
             };
             assert_eq!(
-                continue_upstream_body(&body, false),
+                continue_upstream_body(&body, false, false),
                 None,
                 "approval {approval_id:?}, claim {claim_token:?}"
             );
@@ -1829,6 +2232,9 @@ mod tests {
             approval_id: approval_id.to_owned(),
             claim_token: claim_token.to_owned(),
             skipped: false,
+            question_id: String::new(),
+            answers: Vec::new(),
+            question_skip: false,
         }
     }
 
@@ -1848,21 +2254,21 @@ mod tests {
     fn continue_forwards_the_park_form_only_with_the_flag_and_an_exact_empty_approval() {
         // On, an exactly empty approval id and a non-blank token: the park form, id present.
         assert_eq!(
-            continue_upstream_body(&continue_body("", "claim-1"), true),
+            continue_upstream_body(&continue_body("", "claim-1"), true, false),
             Some(json!({"approval_id": "", "claim_token": "claim-1"}))
         );
         // The token is forwarded as sent (trimming it would change the credential).
         assert_eq!(
-            continue_upstream_body(&continue_body("", " claim-1 "), true),
+            continue_upstream_body(&continue_body("", " claim-1 "), true, false),
             Some(json!({"approval_id": "", "claim_token": " claim-1 "}))
         );
         // Off: the same body is refused.
-        assert_eq!(continue_upstream_body(&continue_body("", "claim-1"), false), None);
+        assert_eq!(continue_upstream_body(&continue_body("", "claim-1"), false, false), None);
         // On, but not exactly empty: a whitespace-only id is still refused, never read as the
         // park form.
         for approval_id in [" ", "   ", "\t", "\n", "\u{a0}"] {
             assert_eq!(
-                continue_upstream_body(&continue_body(approval_id, "claim-1"), true),
+                continue_upstream_body(&continue_body(approval_id, "claim-1"), true, false),
                 None,
                 "approval {approval_id:?}"
             );
@@ -1870,7 +2276,7 @@ mod tests {
         // On, an empty id and a blank token: refused.
         for claim_token in ["", " ", " \t"] {
             assert_eq!(
-                continue_upstream_body(&continue_body("", claim_token), true),
+                continue_upstream_body(&continue_body("", claim_token), true, false),
                 None,
                 "claim {claim_token:?}"
             );
@@ -1892,19 +2298,120 @@ mod tests {
             let body = continue_body(approval_id, claim_token);
             // Flag off: byte for byte the committed body, for every input.
             assert_eq!(
-                continue_upstream_body(&body, false),
+                continue_upstream_body(&body, false, false),
                 committed_upstream_body(&body),
                 "off: approval {approval_id:?}, claim {claim_token:?}"
             );
             // Flag on: only the exactly-empty id with a token differs.
             if !approval_id.is_empty() {
                 assert_eq!(
-                    continue_upstream_body(&body, true),
+                    continue_upstream_body(&body, true, false),
                     committed_upstream_body(&body),
                     "on: approval {approval_id:?}, claim {claim_token:?}"
                 );
             }
         }
+    }
+
+    // ── the question form of /continue (build plan WS14 S5) ──────────────────
+
+    fn question_body(answers: usize, question_skip: bool) -> ContinueRunBody {
+        serde_json::from_value(json!({
+            "approval_id": "",
+            "claim_token": "claim-1",
+            "question_id": "q-1",
+            "answers": (0..answers)
+                .map(|n| json!({"item_id": format!("item-{n}"), "option_ids": ["a"], "text": "t"}))
+                .collect::<Vec<_>>(),
+            "question_skip": question_skip,
+        }))
+        .expect("a question body")
+    }
+
+    #[test]
+    fn continue_question_form_is_forwarded_only_with_the_flag_and_exactly_one_of_answers_or_skip() {
+        // Valid, answers: the upstream body is rebuilt from the five accepted fields alone.
+        assert_eq!(
+            continue_upstream_body(&question_body(1, false), false, true),
+            Some(json!({
+                "approval_id": "",
+                "claim_token": "claim-1",
+                "question_id": "q-1",
+                "answers": [{"item_id": "item-0", "option_ids": ["a"], "text": "t"}],
+                "question_skip": false,
+            }))
+        );
+        // Valid, skip.
+        assert_eq!(
+            continue_upstream_body(&question_body(0, true), false, true),
+            Some(json!({
+                "approval_id": "",
+                "claim_token": "claim-1",
+                "question_id": "q-1",
+                "answers": [],
+                "question_skip": true,
+            }))
+        );
+        // Four answers is the most.
+        assert!(continue_upstream_body(&question_body(4, false), true, true).is_some());
+        // Flag off: every question body is refused, the park flag changes nothing.
+        for park_form in [false, true] {
+            assert_eq!(continue_upstream_body(&question_body(1, false), park_form, false), None);
+            assert_eq!(continue_upstream_body(&question_body(0, true), park_form, false), None);
+        }
+        // Five answers.
+        assert_eq!(continue_upstream_body(&question_body(5, false), false, true), None);
+        // Both a skip and answers, and neither.
+        assert_eq!(continue_upstream_body(&question_body(1, true), false, true), None);
+        assert_eq!(continue_upstream_body(&question_body(0, false), false, true), None);
+    }
+
+    #[test]
+    fn continue_question_form_refuses_an_approval_a_skipped_site_and_blank_or_long_ids() {
+        // An approval id present (the approval form never carries a question).
+        let mut body = question_body(1, false);
+        body.approval_id = "apr-1".to_owned();
+        assert_eq!(continue_upstream_body(&body, false, true), None);
+        // A whitespace-only approval id is not the exact empty one.
+        let mut body = question_body(1, false);
+        body.approval_id = " ".to_owned();
+        assert_eq!(continue_upstream_body(&body, false, true), None);
+        // The skipped-site form, with or without an approval id.
+        let mut body = question_body(1, false);
+        body.skipped = true;
+        assert_eq!(continue_upstream_body(&body, false, true), None);
+        // A blank question id is not the question form: it is the park or approval form, and
+        // an answers list without a question id is refused.
+        let mut body = question_body(1, false);
+        body.question_id = String::new();
+        assert_eq!(continue_upstream_body(&body, true, true), None);
+        let mut body = question_body(0, true);
+        body.question_id = String::new();
+        assert_eq!(continue_upstream_body(&body, true, true), None);
+        let mut body = question_body(1, false);
+        body.question_id = "   ".to_owned();
+        assert_eq!(continue_upstream_body(&body, false, true), None);
+        // A question id of 65 bytes; 64 is accepted.
+        let mut body = question_body(1, false);
+        body.question_id = "q".repeat(65);
+        assert_eq!(continue_upstream_body(&body, false, true), None);
+        body.question_id = "q".repeat(64);
+        assert!(continue_upstream_body(&body, false, true).is_some());
+        // A blank claim token.
+        let mut body = question_body(1, false);
+        body.claim_token = " ".to_owned();
+        assert_eq!(continue_upstream_body(&body, false, true), None);
+    }
+
+    #[test]
+    fn continue_question_answers_refuse_a_field_the_client_does_not_own() {
+        let with_extra = json!({
+            "approval_id": "",
+            "claim_token": "claim-1",
+            "question_id": "q-1",
+            "answers": [{"item_id": "item-0", "user_id": "user-forged"}],
+        });
+        assert!(serde_json::from_value::<ContinueRunBody>(with_extra).is_err());
     }
 
     /// Drives the real route through axum's extractors, as a browser's request would reach it.
@@ -2083,10 +2590,13 @@ mod tests {
             .and_then(|rest| rest.split("pub(crate) async fn cancel_run(").next())
             .expect("the continue handler");
         assert!(
-            handler.contains("continue_upstream_body(&body, state.continue_park_form)"),
+            handler.contains(
+                "continue_upstream_body(\n        &body,\n        state.continue_park_form,\n        state.continue_question_form,\n    )"
+            ),
             "{handler}"
         );
         assert_eq!(handler.matches("continue_park_form").count(), 1);
+        assert_eq!(handler.matches("continue_question_form").count(), 1);
     }
 
     const UPSTREAM_TEXT: &str = "UPSTREAM-ONLY-TEXT-must-never-reach-the-client";
@@ -2122,8 +2632,9 @@ mod tests {
         upstream_status: u16,
         upstream_body: serde_json::Value,
     ) -> (StatusCode, serde_json::Value, String) {
+        use crate::retention_decision::ContinuationQuery;
         use axum::{
-            extract::{Path, State},
+            extract::{Path, Query, State},
             response::IntoResponse,
             Extension,
         };
@@ -2156,10 +2667,14 @@ mod tests {
             Extension(test_user()),
             HeaderMap::new(),
             Path("run-1".to_owned()),
+            Query(ContinuationQuery::default()),
             Json(ContinueRunBody {
                 approval_id: "apr-1".to_owned(),
                 claim_token: "claim-1".to_owned(),
                 skipped: false,
+                question_id: String::new(),
+                answers: Vec::new(),
+                question_skip: false,
             }),
         )
         .await
@@ -2194,6 +2709,11 @@ mod tests {
                 ("continuation_already_consumed", 409),
                 ("continue_unavailable", 503),
                 ("org_agents_paused", 403),
+                ("question_not_found", 404),
+                ("question_expired", 410),
+                ("question_already_answered", 409),
+                ("invalid_answer", 422),
+                ("question_not_resumable", 409),
             ]
         );
         // The two the gateway sends that the BFF does not relay: its own guard
@@ -2511,8 +3031,9 @@ mod tests {
     /// (the preview, or the typed 404 with the switch off) reaches the browser unchanged.
     #[tokio::test]
     async fn orchestration_approval_preview_passes_the_answer_through_unchanged() {
+        use crate::retention_decision::ContinuationQuery;
         use axum::{
-            extract::{Path, State},
+            extract::{Path, Query, State},
             response::IntoResponse,
             Extension,
         };
@@ -2550,6 +3071,7 @@ mod tests {
                 Extension(test_user()),
                 HeaderMap::new(),
                 Path("apr-1".to_owned()),
+                Query(ContinuationQuery::default()),
             )
             .await
             .into_response();

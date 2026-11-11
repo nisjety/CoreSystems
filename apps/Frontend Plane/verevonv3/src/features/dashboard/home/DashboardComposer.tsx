@@ -204,6 +204,9 @@ import { ApiError } from "@/shared/api/http";
 import { cn } from "@/shared/lib/cn";
 import { getSession } from "@/shared/session/session-store";
 import { getOrganizationZdr } from "@/shared/api/organization-client";
+import { getConnectionZdr, isZdrWaiverUiEnabled } from "@/shared/api/connection-zdr-client";
+import { en as enStrings } from "@/shared/i18n/en";
+import { no as noStrings } from "@/shared/i18n/no";
 import {
 	lastKnownAiModelPrivacyTier,
 	readAiModelSelection,
@@ -1554,6 +1557,34 @@ export function DashboardComposer(props: {
 			? { provider: OPENAI_CODEX_SUBSCRIPTION_PROVIDER, connectionId: connection.id }
 			: undefined;
 	});
+	// "Not ZDR in this chat" (ZDR Z-20): the selected model runs on a subscription connection that cannot give zero data
+	// retention, the organisation has it on, and the member's acknowledgement of the connection is in force. Then the
+	// chat is not ZDR, and the chip is the visible record of that. The assessment is read from Integration Core and kept
+	// only in memory; with VITE_ZDR_WAIVER_UI off nothing is read and nothing is shown.
+	const [waiverAssessment] = createResource(
+		() =>
+			isZdrWaiverUiEnabled() && orgZeroRetention() === true
+				? (selectedSubscriptionRoute()?.connectionId ?? false)
+				: false,
+		async (connectionId) => {
+			try {
+				return await getConnectionZdr(connectionId, i18n.locale(), "org_zdr_on");
+			} catch {
+				return null;
+			}
+		},
+	);
+	const waiverChipShown = createMemo(() => {
+		const assessment = waiverAssessment();
+		return (
+			isZdrWaiverUiEnabled() &&
+			orgZeroRetention() === true &&
+			Boolean(selectedSubscriptionRoute()) &&
+			assessment?.requiresAcknowledgement === true &&
+			assessment.acknowledgement?.state === "active"
+		);
+	});
+	const waiverCopy = () => (i18n.locale() === "no" ? noStrings : enStrings).zdr.waiver;
 	// W4-BYO-6: a customer gateway the person picked under "Your gateway". The gateway is text-only and never zero
 	// retention, so its group is offered only outside a Temporary chat and for an organisation without zero retention.
 	const customerGatewayEnabled = import.meta.env.VITE_BYO_GATEWAY === "true";
@@ -3690,6 +3721,13 @@ export function DashboardComposer(props: {
 								<Show when={selectedPrivacyTier() === "sovereign"}>
 									<p class="dashboard-composer-model-tier-note" role="note">
 										{sovereignCatalogNotice(i18n)}
+									</p>
+								</Show>
+								<Show when={waiverChipShown()}>
+									<p class="dashboard-composer-model-tier-note" role="note" title={waiverCopy().chip_title}>
+										<span class="dashboard-composer-model-badge" data-tone="plain">
+											{waiverCopy().chip}
+										</span>
 									</p>
 								</Show>
 							</div>

@@ -81,6 +81,7 @@ import {
 } from '@/features/dashboard/home/DashboardComposer'
 import {
   cancelRun,
+  continueQuestionRun,
   continueRun,
   continueSkippedRun,
   decideApproval,
@@ -94,14 +95,17 @@ import {
   type ApprovalEdit,
   type ApprovalScope,
   type PlanStepEdit,
+  type RunQuestionResponse,
 } from '@/shared/api/orchestration-client'
 import { runBrowserGiveBack, type BrowserGiveBackOutcome } from '@/features/chat/lib/browser-give-back'
+import { answerResumeQuestion, type QuestionResumeOutcome } from '@/features/chat/lib/question-resume'
 import { isSkippableHelpPause, runBrowserSkip } from '@/features/chat/lib/browser-skip'
 import { getRun, listRuns } from '@/shared/api/runs-client'
 import { getRunProofBundle } from '@/shared/api/run-console-client'
 import {
   cancelInvocation,
   cheapDefaultModelId,
+  chatStreamFrameReader,
   describeFeedbackFailure,
   getChatThreadTranscript,
   listChatThreadEvents,
@@ -133,6 +137,9 @@ import {
   type ChatThreadMessagesPage,
 } from '@/shared/api/chat-client'
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
+import { isZdrWaiverUiEnabled } from '@/shared/api/connection-zdr-client'
+import type { WaivedRunConnection } from '@/shared/api/waived-continuation'
+import { isZdrCode } from '@/shared/api/zdr-refusals'
 import { readAiModelSelection, resolveReplaySubscriptionConnectionId } from '@/shared/ai/model-selection'
 import { getSession } from '@/shared/session/session-store'
 import { blobToDataUrl } from '@/shared/lib/blob-data'
@@ -352,6 +359,12 @@ export function frameSequence(id: string | undefined): number | undefined {
 
 /** The server id of the turn a regenerate or an edit replaces, sent only on a versioned thread (WS17 S9). */
 type ServerVersionTarget = Pick<ChatInvokeRequest, 'regenerateOfMessageId' | 'editOfMessageId'>
+
+/**
+ * The question on the card, with the run that asked it when this build knows it (WS14 S5). A resume question
+ * continues that run when it is answered; a next-turn question has no run to continue.
+ */
+type PendingQuestion = ChatUserQuestionEvent & { runId?: string }
 
 /**
  * What the person's answer reads as in the transcript: the chosen labels and their own words, one line per
@@ -1116,6 +1129,7 @@ export function useChatController() {
             delivery: waiting.delivery,
             expiresAt: waiting.expiresAt,
             items: waiting.items,
+            runId,
           })
         }
       })
@@ -2717,7 +2731,7 @@ export function useChatController() {
    */
   // The question a run put to its owner (WS14 S4), waiting for the person's answer in the composer tray.
   // Session-only: a reload restores it from the run's questions (`hydrateRunQuestions`).
-  const [pendingQuestion, setPendingQuestion] = createSignal<ChatUserQuestionEvent | null>(null)
+  const [pendingQuestion, setPendingQuestion] = createSignal<PendingQuestion | null>(null)
   const [questionPending, setQuestionPending] = createSignal(false)
   const [questionError, setQuestionError] = createSignal<string | null>(null)
   // A deep-research plan waiting for Start (EP-2 S5), with the question and model of the send that asked for
@@ -3198,6 +3212,208 @@ export function useChatController() {
   }
 
   /**
+   * Continues the run a question paused (WS14 S5). The answer, or the skip, goes ONCE to the question form of
+   * `chat.run.continue`, and the run's frames render in the waiting turn as a live turn's do. The outcome then sets
+   * the card: a released answer is sent as the next message (a skip sends nothing), a refused or ambiguous continue
+   * is reported, and the run is followed by its id. Nothing here sends the continue again.
+   */
+  const continueWaitingQuestion = async (
+    question: PendingQuestion,
+    runId: string,
+    response: RunQuestionResponse,
+    answer?: ChatQuestionAnswer,
+  ): Promise<void> => {
+    const threadId = state.threadId ?? ''
+    if (!threadId) return
+    // The newest assistant turn of the run is the one the paused run writes into.
+    let assistantIndex = -1
+    state.turns.forEach((turn, index) => {
+      if (turn.role === 'assistant' && turn.runId === runId) assistantIndex = index
+    })
+    const assistantId = assistantIndex >= 0 ? state.turns[assistantIndex]?.id : undefined
+    const precedingUser = assistantIndex > 0 ? state.turns[assistantIndex - 1] : undefined
+    const turnTitle = createPreview(precedingUser?.role === 'user' ? precedingUser.content : '', 58)
+    const generation = streamGeneration
+    const isActive = () => state.threadId === threadId && streamGeneration === generation
+    const continuation = new AbortController()
+    // A durable wait on this run ends silently (an aborted wait settles nothing): the continuation owns the turn now.
+    abortController?.abort()
+    abortController = continuation
+    let settled = false
+    const unknownDetail = i18n.tr(
+      'Vi vet ikke om kjøringen fortsatte.',
+      'We could not confirm that the run continued.',
+    )
+    const unknownNotice = i18n.tr(
+      'Vi vet ikke om kjøringen fortsatte. Følg kjøringen i tråden.',
+      'We could not confirm that the run continued. Follow the run in the thread.',
+    )
+    const goneNotice = (code: string): string => {
+      if (code === 'continuation_already_consumed') {
+        return i18n.tr('Svaret ditt er allerede brukt.', 'Your answer was already used.')
+      }
+      if (code === 'continue_disabled') {
+        return i18n.tr(
+          'Kjøringen kan ikke fortsette nå. Skriv svaret som en ny melding hvis det fortsatt trengs.',
+          'The run cannot continue right now. Write your answer as a new message if it is still needed.',
+        )
+      }
+      return answer
+        ? i18n.tr('Svaret ble ikke lagret. Prøv igjen.', 'The answer was not saved. Try again.')
+        : i18n.tr('Spørsmålet kunne ikke hoppes over. Prøv igjen.', 'The question could not be skipped. Try again.')
+    }
+    const endTurnStream = (status?: ChatTurn['status']) => {
+      if (!assistantId) return
+      setState((s) => {
+        const turn = s.turns.find((candidate) => candidate.id === assistantId)
+        if (turn) {
+          turn.streaming = false
+          turn.status = status
+        }
+      })
+    }
+    // The frames of the continued run go to the waiting turn, through the handlers a live turn uses.
+    const handlersFor = (turnId: string): ChatStreamHandlers => ({
+      ...createEvidenceHandlers({ assistantId: turnId, turnTitle, threadId }),
+      onUiEvent: (event) => {
+        if (isActive()) appendUiEvent(event, turnId)
+      },
+      onConnected: () => {
+        if (isActive()) noteChatStreamOk()
+      },
+      onMessage: ({ content: delta }) => {
+        if (!isActive()) return
+        upsertTaskStep(createTurnStep(turnId, turnTitle, 'answer', 'Compose response', 'Streaming answer text.', 'active'))
+        setState((s) => {
+          const turn = s.turns.find((candidate) => candidate.id === turnId)
+          if (turn) turn.content = turn.content + delta
+        })
+      },
+      onUserQuestion: (next) => {
+        // A question the continued run asks next is this thread's card, with the same run.
+        if (isActive()) setPendingQuestion({ ...next, runId })
+      },
+      onDone: ({ modelUsed, outputTokens }) => {
+        settled = true
+        if (!isActive()) return
+        setState((s) => {
+          const turn = s.turns.find((candidate) => candidate.id === turnId)
+          if (turn) {
+            if (modelUsed) turn.modelUsed = modelUsed
+            if (outputTokens != null) turn.outputTokens = outputTokens
+            turn.streaming = false
+            turn.status = undefined
+            turn.settledAt ??= new Date().toISOString()
+          }
+        })
+        markOpenSteps('done', 'Completed.', turnId)
+        updateLocalRunHint(threadId, 'completed', runId)
+        setState((s) => { s.status = 'idle' })
+        writeThreadSnapshot(threadId, state.turns)
+      },
+      onStopped: ({ reason }) => {
+        settled = true
+        if (!isActive()) return
+        setState((s) => {
+          const turn = s.turns.find((candidate) => candidate.id === turnId)
+          if (turn) {
+            turn.streaming = false
+            turn.status = 'stopped'
+            turn.settledAt ??= new Date().toISOString()
+          }
+        })
+        markOpenSteps('stopped', reason || 'The run stopped before completion.', turnId)
+        updateLocalRunHint(threadId, 'cancelled', runId)
+        setState((s) => { s.status = 'idle' })
+        writeThreadSnapshot(threadId, state.turns)
+      },
+      onError: (failure) => {
+        settled = true
+        if (!isActive()) return
+        settleServerFailure({ assistantId: turnId, turnTitle, threadId }, failure)
+        writeThreadSnapshot(threadId, state.turns)
+      },
+    })
+    const frames = assistantId ? chatStreamFrameReader(handlersFor(assistantId), continuation.signal) : undefined
+    if (assistantId) {
+      setState((s) => {
+        s.status = 'streaming'
+        const turn = s.turns.find((candidate) => candidate.id === assistantId)
+        if (turn) {
+          turn.streaming = true
+          turn.status = 'waiting'
+        }
+      })
+    }
+    setQuestionPending(true)
+    setQuestionError(null)
+    let outcome: QuestionResumeOutcome = { kind: 'unknown' }
+    try {
+      outcome = await answerResumeQuestion(
+        { runId, questionId: question.questionId, response },
+        {
+          continueQuestionRun: (continuedRunId, questionId, body, claimToken, onEvent) =>
+            continueQuestionRun(continuedRunId, questionId, body, claimToken, onEvent, continuation.signal),
+          // One fresh claim token per press: a press is one continue, and nothing resends it.
+          newClaimToken: () => createId('claim'),
+          onEvent: (event) => frames?.read(event),
+        },
+      )
+    } catch {
+      outcome = { kind: 'unknown' }
+    } finally {
+      frames?.close()
+      setQuestionPending(false)
+    }
+    if (abortController === continuation) abortController = undefined
+    // A thread switch took the conversation: nothing here may write to the thread now on screen.
+    if (!isActive()) return
+
+    const clearAnswered = () => {
+      if (pendingQuestion()?.questionId === question.questionId) setPendingQuestion(null)
+    }
+    switch (outcome.kind) {
+      case 'continued':
+        clearAnswered()
+        break
+      case 'released':
+        clearAnswered()
+        if (answer) {
+          // The run did not take the answer, so it goes out once, as the next message. The run is not followed.
+          showFeedbackNotice(i18n.tr(
+            'Kjøringen kunne ikke fortsette med svaret, så det ble sendt som en ny melding.',
+            'The run could not continue with your answer, so it was sent as a new message.',
+          ))
+          endTurnStream(undefined)
+          setState((s) => { s.status = 'idle' })
+          await sendContent(questionAnswerSummary(question, answer))
+          return
+        }
+        // A skip sends nothing, and the run's state is not known from here: it is followed below.
+        showFeedbackNotice(unknownNotice)
+        break
+      case 'gone':
+        clearAnswered()
+        showFeedbackNotice(goneNotice(outcome.code))
+        break
+      case 'retry':
+        // The card stays so the person can try again. Nothing is sent by this path.
+        setQuestionError(outcome.code === 'invalid_answer'
+          ? i18n.tr('Svaret ble ikke lagret. Prøv igjen.', 'The answer was not saved. Try again.')
+          : i18n.tr('Kjøringen er opptatt. Prøv igjen om litt.', 'The run is busy. Try again in a moment.'))
+        break
+      case 'unknown':
+        clearAnswered()
+        showFeedbackNotice(unknownNotice)
+        break
+    }
+    // What the frames did not settle is read from the run by its id: the run read is the arbiter.
+    if (assistantId && !settled) {
+      void followUnresumableRun(threadId, assistantId, runId, { detail: unknownDetail, markFailed: false }, isActive)
+    }
+  }
+
+  /**
    * Answers the waiting question. The answer is recorded first and then sent as the person's next message, so
    * the run that follows works from an answered question. A refused answer sends nothing: a question that can
    * no longer be answered leaves the tray with the refusal, and any other refusal keeps the card for another try.
@@ -3205,6 +3421,11 @@ export function useChatController() {
   const answerPendingQuestion = async (answer: ChatQuestionAnswer) => {
     const question = pendingQuestion()
     if (!question || questionPending()) return
+    // A question that paused its run continues that run (WS14 S5). Any other question is answered as it always was.
+    if (question.delivery === 'resume' && question.runId) {
+      await continueWaitingQuestion(question, question.runId, { answers: answer.answers }, answer)
+      return
+    }
     setQuestionPending(true)
     setQuestionError(null)
     try {
@@ -3227,6 +3448,10 @@ export function useChatController() {
   const skipPendingQuestion = async () => {
     const question = pendingQuestion()
     if (!question || questionPending()) return
+    if (question.delivery === 'resume' && question.runId) {
+      await continueWaitingQuestion(question, question.runId, { skip: true })
+      return
+    }
     setQuestionPending(true)
     setQuestionError(null)
     try {
@@ -3276,6 +3501,42 @@ export function useChatController() {
     }
   }
 
+  /**
+   * The subscription connection a continuation of a waived run names (ZDR Z-19e, D-ZDR-15). A continuation (an approval
+   * decision, a plan approval or rejection, a resume, a continue, a cancel) never inherits a waiver: the gateway asks
+   * Auth Core afresh for the connection named here, and the run's own receipt decides whether the waiver can advance
+   * it. This only says which connection the thread's last run named: the turn asked for, or the turn that owns `runId`,
+   * or else the newest assistant turn with a run. `undefined` (nothing is named, no field is sent) when the switch is
+   * off or that run was not on the ChatGPT subscription. A refusal comes back typed and renders through the ZDR
+   * refusal copy, never as a raw error.
+   */
+  const waivedRunConnection = (match?: { turnId?: string; runId?: string }): WaivedRunConnection | undefined => {
+    if (!isZdrWaiverUiEnabled()) return undefined
+    const named = (turn: ChatTurn | undefined): WaivedRunConnection | undefined =>
+      turn && turn.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && turn.subscriptionConnectionId
+        ? { subscriptionConnectionId: turn.subscriptionConnectionId, provider: turn.provider }
+        : undefined
+    const byTurn = match?.turnId ? state.turns.find((turn) => turn.id === match.turnId) : undefined
+    if (byTurn) return named(byTurn)
+    const byRun = match?.runId ? state.turns.find((turn) => turn.runId === match.runId) : undefined
+    if (byRun) return named(byRun)
+    for (let index = state.turns.length - 1; index >= 0; index -= 1) {
+      const turn = state.turns[index]
+      if (turn?.role === 'assistant' && turn.runId) return named(turn)
+    }
+    return undefined
+  }
+
+  /**
+   * The words under a plan card for a refused approval or rejection. A zero-retention refusal (for example
+   * `zdr_durable_mutation_forbidden` on a waived run's continuation) reads from the refusal copy in the reader's
+   * language, never as the gateway's raw text; any other failure reads as it always did.
+   */
+  const planDecisionErrorText = (error: unknown, fallback: string): string => {
+    if (error instanceof ApiError && isZdrCode(error.code)) return translateApiError(error, i18n.tr)
+    return error instanceof Error ? error.message : fallback
+  }
+
   const approveTurnPlan = async (
     turnId: string,
     rung: AutonomyRung,
@@ -3312,6 +3573,7 @@ export function useChatController() {
         justification,
         turnBefore?.proposedPlan?.planId,
         steps,
+        waivedRunConnection({ turnId }),
       )
       setState((s) => {
         const turn = s.turns.find((turn) => turn.id === turnId)
@@ -3369,7 +3631,7 @@ export function useChatController() {
     } catch (error) {
       setPlanApprovalError((prev) => ({
         ...prev,
-        [turnId]: error instanceof Error ? error.message : 'Godkjenningen gikk ikke gjennom.',
+        [turnId]: planDecisionErrorText(error, 'Godkjenningen gikk ikke gjennom.'),
       }))
     } finally {
       setPlanApprovalPending(null)
@@ -3408,7 +3670,7 @@ export function useChatController() {
       return next
     })
     try {
-      await rejectPlan(runId, planId, reason)
+      await rejectPlan(runId, planId, reason, waivedRunConnection({ turnId }))
       setState((s) => {
         const turn = s.turns.find((turn) => turn.id === turnId)
         if (turn) turn.planRejected = true
@@ -3417,7 +3679,7 @@ export function useChatController() {
     } catch (error) {
       setPlanApprovalError((prev) => ({
         ...prev,
-        [turnId]: error instanceof Error ? error.message : 'Avvisningen gikk ikke gjennom.',
+        [turnId]: planDecisionErrorText(error, 'Avvisningen gikk ikke gjennom.'),
       }))
     } finally {
       setPlanApprovalPending(null)
@@ -3444,21 +3706,22 @@ export function useChatController() {
       if (turn) turn.pendingApprovals = (turn.pendingApprovals ?? []).filter((approval) => approval.id !== approvalId)
     })
     try {
-      await decideApproval(approvalId, decision, undefined, undefined, scope, promote)
+      const waived = waivedRunConnection({ turnId })
+      await decideApproval(approvalId, decision, undefined, undefined, scope, promote, undefined, waived)
       // A skipped site continues the run under chat.run.continue, so the held page is released and
       // the agent reads that the site was skipped. A denial is never consumed, so a refused continue
       // spends nothing and falls through to the plain resume below.
       if (runId && skipsSite) {
         const continued = await runBrowserSkip(runId, approvalId, {
           continueSkippedRun: (skippedRunId, skippedApprovalId, claimToken, onEvent) =>
-            continueSkippedRun(skippedRunId, skippedApprovalId, claimToken, onEvent),
+            continueSkippedRun(skippedRunId, skippedApprovalId, claimToken, onEvent, undefined, waived),
           newClaimToken: () => createId('claim'),
         })
         if (continued) return
       }
       // Recording the decision unblocks execution-core; resume advances the run
       // (the denial, if any, is recorded so the agent routes around the tool).
-      if (runId) await resumeRun(runId)
+      if (runId) await resumeRun(runId, undefined, waived)
     } catch {
       // Re-sync from the source of truth if the decision/resume call failed.
       void refreshTurnApprovals(turnId)
@@ -3479,13 +3742,14 @@ export function useChatController() {
     if (isForeignOriginThread(state.threadId)) return
     const runId = state.turns.find((turn) => turn.id === turnId)?.runId
     invalidateApprovalRefresh(turnId)
-    await decideApproval(approvalId, 'approve', undefined, undefined, 'once', false, edit)
+    const waived = waivedRunConnection({ turnId })
+    await decideApproval(approvalId, 'approve', undefined, undefined, 'once', false, edit, waived)
     setState((s) => {
       const turn = s.turns.find((t) => t.id === turnId)
       if (turn) turn.pendingApprovals = (turn.pendingApprovals ?? []).filter((approval) => approval.id !== approvalId)
     })
     try {
-      if (runId) await resumeRun(runId)
+      if (runId) await resumeRun(runId, undefined, waived)
     } catch {
       void refreshTurnApprovals(turnId)
     }
@@ -3498,11 +3762,13 @@ export function useChatController() {
    */
   const giveBackBrowserRun = async (runId: string, note: string): Promise<void> => {
     if (isForeignOriginThread(state.threadId)) return
+    const waived = waivedRunConnection({ runId })
     const outcome: BrowserGiveBackOutcome = await runBrowserGiveBack(runId, note, {
       listApprovals,
-      decideApproval: (approvalId, decision, reason) => decideApproval(approvalId, decision, reason),
+      decideApproval: (approvalId, decision, reason) =>
+        decideApproval(approvalId, decision, reason, undefined, 'once', false, undefined, waived),
       continueRun: (continuedRunId, approvalId, claimToken, onEvent) =>
-        continueRun(continuedRunId, approvalId, claimToken, onEvent),
+        continueRun(continuedRunId, approvalId, claimToken, onEvent, undefined, waived),
       newClaimToken: () => createId('claim'),
     }).catch((): BrowserGiveBackOutcome => ({ kind: 'decision_failed' }))
     if (outcome.kind === 'decision_failed') {
@@ -4003,14 +4269,15 @@ export function useChatController() {
       // reconciliation below both reach the thread the server created.
       if (serverThreadId && projection.accepts()) adoptServerThread(serverThreadId)
       if (requestId) {
-        void cancelInvocation(requestId).catch((error: unknown) => recordCancelFailure(assistantId, 'invocation', error))
+        const waivedStop = waivedRunConnection({ turnId: assistantId })
+        void cancelInvocation(requestId, waivedStop).catch((error: unknown) => recordCancelFailure(assistantId, 'invocation', error))
       }
       // Every turn with a durable run, not only Work turns: the run cancel is
       // what the gateway honours across its own paths (it now also stops the
       // live stream), so it is sent whatever surface the turn is shown on.
       if (runId && !isTemporaryThread(activeThreadId)) {
         updateLocalRunHint(activeThreadId, 'cancelled', runId)
-        void cancelRun(runId).catch((error: unknown) => recordCancelFailure(assistantId, 'run', error))
+        void cancelRun(runId, undefined, waivedRunConnection({ turnId: assistantId })).catch((error: unknown) => recordCancelFailure(assistantId, 'run', error))
       }
       controller.abort()
       if (projection.accepts()) void reconcileStoppedTurn(activeThreadId, assistantId, runId)
@@ -4222,7 +4489,8 @@ export function useChatController() {
           onUserQuestion: (question) => {
             // WS14 S4. A temporary chat keeps no question, as it keeps no follow-up chips.
             if (isTemporaryThread(state.threadId ?? activeThreadId)) return
-            setPendingQuestion(question)
+            // WS14 S5. The run that asked it: a resume question continues this turn's run once it is answered.
+            setPendingQuestion({ ...question, runId: state.turns.find((turn) => turn.id === assistantId)?.runId })
           },
           onConnectorSuggestion: (event) => {
             // EP-10 S8: one card per turn. A temporary chat never shows one (the gateway never offers the tool there).
@@ -4558,7 +4826,7 @@ export function useChatController() {
     deferStopUntilConnected = undefined
     if (!deferred) abortController?.abort()
     if (requestId) {
-      void cancelInvocation(requestId).catch((error: unknown) => recordCancelFailure(stoppedTurnId, 'invocation', error))
+      void cancelInvocation(requestId, waivedRunConnection({ turnId: stoppedTurnId, runId: durableRunId ?? undefined })).catch((error: unknown) => recordCancelFailure(stoppedTurnId, 'invocation', error))
     }
     setState((s) => {
       for (const turn of s.turns) {
@@ -4581,7 +4849,7 @@ export function useChatController() {
     if (state.threadId) writeThreadSnapshot(state.threadId, state.turns)
     if (canCancelDurableRun && durableRunId) {
       updateLocalRunHint(durableThreadId ?? '', 'cancelled', durableRunId)
-      void cancelRun(durableRunId)
+      void cancelRun(durableRunId, undefined, waivedRunConnection({ turnId: stoppedTurnId, runId: durableRunId }))
         .then((result) => {
           if (state.threadId !== durableThreadId || isTemporaryThread(state.threadId)) return
           appendUiEvent({
@@ -4745,6 +5013,14 @@ export function useChatController() {
           const turn = s.turns.find((t) => t.id === assistantId)
           if (turn) turn.reasoning = (turn.reasoning ?? '') + delta
         })
+      },
+      // WS14 S5. The run paused for its owner's answer: the turn learns its run, the thread's hint reads the pause
+      // as active (as an approval pause does), and a card that arrived without its run id takes this one.
+      onAwaitingInput: ({ runId }: Parameters<NonNullable<ChatStreamHandlers['onAwaitingInput']>>[0]) => {
+        setTurnRunId(assistantId, runId)
+        updateLocalRunHint(threadId, 'awaiting_input', runId)
+        const waiting = pendingQuestion()
+        if (waiting && !waiting.runId) setPendingQuestion({ ...waiting, runId })
       },
       onStep: (event: Parameters<NonNullable<ChatStreamHandlers['onStep']>>[0]) => {
         const step = normalizeStep(event, assistantId, turnTitle)

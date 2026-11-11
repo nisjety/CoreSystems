@@ -148,7 +148,7 @@ export function cancelledRunTurn(threadId: string, latestRunId: string, message:
 }
 
 /** Run states Session Core still owns: the run has not terminalised yet. */
-export const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set(['queued', 'running', 'awaiting_approval'])
+export const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set(['queued', 'running', 'awaiting_approval', 'awaiting_input'])
 
 /**
  * What a failed run's recorded `error` means for the reader.
