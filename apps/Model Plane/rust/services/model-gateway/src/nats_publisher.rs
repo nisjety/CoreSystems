@@ -55,7 +55,9 @@ impl EventPublisher for NatsPublisher {
         // transient socket publish. Other event contracts keep their existing
         // compatibility routing. Usage is canonical and content-free.
         if subject.starts_with("mp.v1.usage.") {
-            if envelope.zdr {
+            // A ZDR envelope never reaches the ledger, except the content-free spend row of
+            // `mp_contracts::zdr_spend` (FU-30), which the usage subject carries by name.
+            if envelope.zdr && !crate::state::zdr_spend_admitted(subject, envelope) {
                 return Ok(());
             }
             if envelope.idempotency_key.is_empty() {

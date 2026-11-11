@@ -13,6 +13,7 @@ import (
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/pkg/authctx"
+	"github.com/triodelab/model-plane/services/capability-core/internal/api"
 	"github.com/triodelab/model-plane/services/capability-core/internal/domain"
 	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
@@ -60,6 +61,18 @@ type Server struct {
 
 	// permissionRulesEnabled is CAPABILITY_PERMISSION_RULES_ENABLED, parsed by the caller.
 	permissionRulesEnabled bool
+
+	// ruleUses records the use of a stored allow that relaxed a call. It is read only while ruleAudit is true.
+	ruleUses RuleUseRecorder
+
+	// ruleAudit is TOOL_POLICY_RULE_AUDIT_ENABLED, parsed by the caller (policy.ToolPolicyRuleAuditFromLookup).
+	ruleAudit bool
+}
+
+// RuleUseRecorder writes the content-free audit row of a call a stored allow relaxed. *api.ToolPoliciesHandler
+// satisfies it. A failed write fails the decision closed (WS13 S7, K3-2).
+type RuleUseRecorder interface {
+	RecordRuleUse(ctx context.Context, use api.RuleUse) error
 }
 
 // modelCapabilitySource is the narrow slice of the models registry the
@@ -232,6 +245,16 @@ func (s *Server) WithDeckTemplates(enabled bool) *Server {
 func (s *Server) WithPermissionRules(rules permissionRuleMatcher, enabled bool) *Server {
 	s.permissionRules = rules
 	s.permissionRulesEnabled = enabled && rules != nil
+	return s
+}
+
+// WithRuleAudit attaches the recorder of rule-relaxed calls and the switch that turns the audit on. The switch arrives
+// already parsed (policy.ToolPolicyRuleAuditFromLookup), so only the literal "true" enables it. Off, EvaluatePolicy
+// writes no row and treats an unstated run posture as it did before; an explicit retention_bound run is still never
+// relaxed by a person's allow.
+func (s *Server) WithRuleAudit(recorder RuleUseRecorder, enabled bool) *Server {
+	s.ruleUses = recorder
+	s.ruleAudit = enabled
 	return s
 }
 
@@ -613,14 +636,74 @@ func (s *Server) EvaluatePolicy(ctx context.Context, req *mpv1.EvaluatePolicyReq
 	// EvaluateTool is the capability decision tightened by the binding, and by the
 	// stored policies when TOOL_POLICY_ENFORCED is on. With the switch off the
 	// decision and its signed evidence are the ones this path produced before.
-	result, err := s.policy.EvaluateTool(ctx, capability, binding, req.GetUserId(), req.RunId, req.AgentId, orgID, req.Scope)
+	// A run that stores no content never has a person's allow applied to it (D-WS13-1); the run's posture is the one
+	// execution-core stated, and an unstated one counts as bound while the rule audit is on.
+	retentionBound := policy.RetentionBoundFor(req.GetRunRetention(), s.ruleAudit)
+	result, err := s.policy.EvaluateToolFor(ctx, capability, binding, policy.ToolCall{
+		UserID:         req.GetUserId(),
+		RunID:          req.RunId,
+		AgentID:        req.AgentId,
+		OrgID:          orgID,
+		Scope:          req.Scope,
+		RetentionBound: retentionBound,
+	})
 	if err != nil {
 		return nil, mapErr(err)
 	}
 	if s.permissionRulesEnabled {
 		result = s.applyPermissionRules(ctx, orgID, req, capability, binding, result)
 	}
+	result = s.auditRuleUse(ctx, principal, orgID, req, capability, binding, retentionBound, result)
 	return s.policyResponse(req, orgID, capability, result, binding), nil
+}
+
+// auditRuleUse writes the tool_policy_rule_used row for a call a stored allow relaxed (WS13 S7). It writes nothing
+// while the audit is off, for a call that no allow relaxed, for a retention-bound run (an org allow still applied; a
+// ZDR or waived run gets no row, DEC-32) and for a caller that is not a service (a preview). When the write fails it
+// logs the capability id and the error only, and demotes the decision to an ask: a rule is never used without its row.
+func (s *Server) auditRuleUse(
+	ctx context.Context,
+	principal authctx.Principal,
+	orgID string,
+	req *mpv1.EvaluatePolicyRequest,
+	capability *models.Capability,
+	binding *policy.ToolBinding,
+	retentionBound bool,
+	result *policy.Result,
+) *policy.Result {
+	if !s.ruleAudit || result == nil || result.PolicySource != policy.PolicySourceToolPolicyAllow || result.RulePolicyID == "" {
+		return result
+	}
+	if retentionBound || principal.PrincipalType != "service" || req.GetRunId() == "" {
+		return result
+	}
+	use := api.RuleUse{
+		OrgID:        orgID,
+		PolicyID:     result.RulePolicyID,
+		CapabilityID: capability.ID,
+		ScopeKind:    result.RuleScope,
+		RunID:        req.GetRunId(),
+		Actor:        principal.ActorID,
+	}
+	if binding != nil {
+		use.ToolDigest = binding.ToolDigest
+	}
+	var err error
+	if s.ruleUses == nil {
+		err = errors.New("rule use recorder unavailable")
+	} else {
+		err = s.ruleUses.RecordRuleUse(ctx, use)
+	}
+	if err != nil {
+		slog.Error("tool policy rule use not recorded", "capability_id", capability.ID, "error", err)
+		return &policy.Result{
+			Decision:          policy.DecisionAsk,
+			Reason:            "tool_policy_rule_unaudited",
+			PolicySource:      policy.PolicySourceRiskLevel,
+			ToolPolicyChecked: result.ToolPolicyChecked,
+		}
+	}
+	return result
 }
 
 // orgPermissionRuleReasonPrefix starts the reason of a decision an org permission rule made. The reason names the rule

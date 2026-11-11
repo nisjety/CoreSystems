@@ -1410,6 +1410,9 @@ mod tests {
             authority: authority(),
             prompt_digest: "digest",
             effect_ledger: true,
+            connector_taint: false,
+            connector_scope: &[],
+            offered_tools: None,
         }
     }
 

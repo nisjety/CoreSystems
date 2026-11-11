@@ -58,6 +58,7 @@ pub mod user_content;
 pub mod user_question;
 pub mod write_preview;
 pub mod zdr_refusal;
+pub mod zdr_spend;
 
 /// Generated protobuf and gRPC types for the Model Plane.
 ///

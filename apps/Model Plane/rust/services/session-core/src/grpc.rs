@@ -14,6 +14,7 @@ use mp_contracts::dataplane::retrieval_v2::{
 };
 use mp_contracts::model_plane::v1::{
     self as pb,
+    approval_rule_proposal_service_server::ApprovalRuleProposalServiceServer,
     approval_scope_grant_service_server::ApprovalScopeGrantServiceServer,
     artifact_revision_service_server::ArtifactRevisionServiceServer,
     attention_service_server::AttentionServiceServer,
@@ -12633,6 +12634,9 @@ pub async fn serve(
     // gets its own instance.
     let approval_scope_grants =
         crate::orchestration_grpc::OrchestrationGrpc::new(pool.clone(), events_tx.clone());
+    // The owner's "Always" rule proposals (build plan WS13 S7) likewise share the store only.
+    let approval_rule_proposals =
+        crate::orchestration_grpc::OrchestrationGrpc::new(pool.clone(), events_tx.clone());
     // The resume-answer spend (build plan WS14 S5) likewise shares the store and not the replay.
     let run_question_consume =
         crate::orchestration_grpc::OrchestrationGrpc::new(pool.clone(), events_tx.clone());
@@ -12746,6 +12750,10 @@ pub async fn serve(
         ))
         .add_service(ApprovalScopeGrantServiceServer::with_interceptor(
             approval_scope_grants,
+            auth.clone(),
+        ))
+        .add_service(ApprovalRuleProposalServiceServer::with_interceptor(
+            approval_rule_proposals,
             auth.clone(),
         ))
         .add_service(FinetuneJobsServer::with_interceptor(finetune, auth.clone()))

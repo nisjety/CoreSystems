@@ -77,6 +77,14 @@ services:
       # retention_posture.effective_zdr instead of the stored intent. Only the literal `true`
       # enables it; enable after org-core serves the field (ZDR-Z-03a), or every read is Unknown.
       GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED: ${GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED:-false}
+      # ZDR Z-19a: the BFF asks Auth Core for a per-connection retention decision on a subscription
+      # turn (retention_decision::turn_retention). Only the literal `true` turns it on; off makes no
+      # Auth Core call. A rollout control only: Auth Core decides and signs.
+      ZDR_WAIVER_UI_ENABLED: ${ZDR_WAIVER_UI_ENABLED:-false}
+      # The gateway's own credential for the Auth Core `verevon-gateway-retention-decision` principal
+      # (policy token, scope retention:zdr-decide). Empty = every decision refuses with
+      # zdr_decision_unavailable. Never a browser value.
+      GATEWAY_RETENTION_DECISION_SERVICE_API_KEY: ${GATEWAY_RETENTION_DECISION_SERVICE_API_KEY:-}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
       ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}

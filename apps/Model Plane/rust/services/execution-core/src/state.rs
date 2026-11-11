@@ -24,6 +24,10 @@ pub enum RunStatus {
     /// loop) between steps; never aborts a step already in flight.
     Paused,
     AwaitingApproval,
+    /// The run waits for its owner's answer to a `resume` question (build plan WS14 S5):
+    /// non-terminal, and distinct from `AwaitingApproval` because an answer is information the
+    /// person owes the run, never an authority grant.
+    AwaitingInput,
     Completed,
     Failed,
     Cancelled,
@@ -36,6 +40,7 @@ impl RunStatus {
             Self::Running => "running",
             Self::Paused => "paused",
             Self::AwaitingApproval => "awaiting_approval",
+            Self::AwaitingInput => "awaiting_input",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",

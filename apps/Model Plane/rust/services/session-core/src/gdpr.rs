@@ -1305,6 +1305,11 @@ pub struct UserErasureSummary {
     pub thread_memory: u64,
     /// Space-thread memory rows kept but narrowed to the other members' sources (OD-59, switch on).
     pub thread_memory_narrowed: u64,
+    /// The person's standing approval grants (`approval_scope_grants`) deleted, so no standing authority
+    /// outlives them (D-WS13-7).
+    pub approval_scope_grants: u64,
+    /// The person's approval rule proposals (`approval_rule_proposals`) deleted (D-WS13-7).
+    pub approval_rule_proposals: u64,
     /// Semantic-tier outcome for the copies of those rows, and of any copy the listing found that no
     /// durable row still holds.
     pub semantic_memory: crate::memory_erasure::SemanticErasure,
@@ -1532,6 +1537,23 @@ pub async fn erase_user_personal_data_for(
     .execute(&mut *tx)
     .await?;
     let user_profiles = crate::user_profile::delete_in_tx(&mut tx, org_id, user_id).await?;
+    // Standing approval authority (D-WS13-7): the person's grants first, then their rule proposals (the
+    // grants reference proposals with ON DELETE SET NULL). Both erasure kinds remove it; removing
+    // authority only narrows. Rows only; no content is stored or logged here (ZDR holds).
+    let approval_scope_grants =
+        sqlx::query("DELETE FROM approval_scope_grants WHERE org_id = $1 AND user_id = $2")
+            .bind(org_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    let approval_rule_proposals =
+        sqlx::query("DELETE FROM approval_rule_proposals WHERE org_id = $1 AND user_id = $2")
+            .bind(org_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
     // Request snapshots (ZDR Q-ERASE, D-ZDR-06): the person's snapshot rows, then the blobs no remaining
     // snapshot references. Same transaction as the profile and memory rows, after the hold gate above.
     let snapshot_erasure =
@@ -1668,6 +1690,8 @@ pub async fn erase_user_personal_data_for(
         promote_use_counts,
         thread_memory: thread_memory_deleted,
         thread_memory_narrowed,
+        approval_scope_grants,
+        approval_rule_proposals,
         semantic_memory: semantic,
         listing_degradation,
     };

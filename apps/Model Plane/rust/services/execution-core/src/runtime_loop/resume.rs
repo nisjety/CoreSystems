@@ -1432,6 +1432,11 @@ pub(crate) struct Restored {
     /// The person's edit of the approved call, named against the fold's draft (EP-10-S5).
     /// `None` for a call the model drafted.
     pub edit: Option<EditNote>,
+    /// What the claimed fold says about the screening taint of the paused turn (DEC-WS14-5).
+    /// The consumer decides what an absent key means; the loop reads it as marked.
+    pub taint: mp_contracts::loop_fold::TaintRead,
+    /// The connector selection the claimed fold recorded; `None` when it recorded none.
+    pub connector_scope: Option<Vec<String>>,
 }
 
 impl Restored {
@@ -1462,6 +1467,8 @@ impl std::fmt::Debug for Restored {
             .field("claimed_seq", &self.claimed_seq)
             .field("segment", &self.segment)
             .field("edit", &self.edit)
+            .field("taint", &self.taint)
+            .field("connector_scope", &self.connector_scope.as_ref().map(Vec::len))
             .finish()
     }
 }
@@ -1865,6 +1872,8 @@ fn reconcile(
         claimed_seq: claimed.seq,
         segment: consumed.segment,
         edit: checked.edit.clone(),
+        taint: mp_contracts::loop_fold::connector_taint_in(fold),
+        connector_scope: mp_contracts::loop_fold::connector_scope_in(fold),
     })
 }
 

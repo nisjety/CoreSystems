@@ -65,6 +65,21 @@ pub(crate) struct CachedToken {
     expires_at: Instant,
 }
 
+impl CachedToken {
+    /// A cache entry that is served until `ttl` from now (ZDR Z-19a policy token cache).
+    pub(crate) fn expiring_in(token: String, ttl: Duration) -> Self {
+        Self {
+            token,
+            expires_at: Instant::now() + ttl,
+        }
+    }
+
+    /// The token, only while it has not expired.
+    pub(crate) fn live_token(&self) -> Option<&str> {
+        (self.expires_at > Instant::now()).then_some(self.token.as_str())
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TokenResponse {

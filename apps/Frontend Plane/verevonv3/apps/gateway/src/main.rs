@@ -37,6 +37,7 @@ mod onboarding;
 mod public_url;
 mod rate_limit;
 mod request_id;
+mod retention_decision;
 mod upstream;
 mod utils;
 mod zdr;
@@ -439,6 +440,8 @@ mod tests {
             continue_park_form: false,
             model_entitlement_admin_enabled: false,
             zdr_effective_posture_read: false,
+            zdr_waiver_ui_enabled: false,
+            retention_decision_service_api_key: None,
             agent_definition_versions: false,
             chat_process_output_enabled: false,
             chat_snapshots_enabled: false,

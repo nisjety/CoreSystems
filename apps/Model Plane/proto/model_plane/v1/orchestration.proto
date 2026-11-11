@@ -2444,3 +2444,122 @@ message RevokeApprovalScopeGrantResponse {
   // The grant as it stands after the revocation.
   ApprovalScopeGrant grant = 1;
 }
+
+// --- Approval "Always" rule proposals (build plan WS13 S7) ---
+
+// Where an "Always" rule proposal stands.
+enum ApprovalRuleProposalState {
+  // Not set. Never stored.
+  APPROVAL_RULE_PROPOSAL_STATE_UNSPECIFIED = 0;
+  // Offered to the owner and not yet acted on.
+  APPROVAL_RULE_PROPOSAL_STATE_PROPOSED = 1;
+  // Claimed by a confirm in flight: the rule is being written in capability-core.
+  APPROVAL_RULE_PROPOSAL_STATE_CONFIRMING = 2;
+  // The owner confirmed it and the rule was written; the proposal records the policy id.
+  APPROVAL_RULE_PROPOSAL_STATE_CONFIRMED = 3;
+  // The owner dismissed it.
+  APPROVAL_RULE_PROPOSAL_STATE_DISMISSED = 4;
+}
+
+// The owner's "Always allow this tool" proposals. Served by session-core, which owns the
+// proposals. It is its own service rather than a method of OrchestrationCoreService, as
+// ApprovalScopeGrantService is, so the implementations of that service, and their test doubles,
+// need no change. The RPCs act for the verified owner only and are not model-executable. A confirm
+// is orchestrated by model-gateway, which writes the rule in capability-core and hands back the
+// policy id.
+service ApprovalRuleProposalService {
+  // The verified caller's own open proposals (proposed, or held by a confirm), oldest first.
+  rpc ListApprovalRuleProposals(ListApprovalRuleProposalsRequest)
+      returns (ListApprovalRuleProposalsResponse);
+
+  // One of the verified caller's own proposals, in any state.
+  rpc GetApprovalRuleProposal(GetApprovalRuleProposalRequest)
+      returns (GetApprovalRuleProposalResponse);
+
+  // Moves one of the verified caller's proposals to CONFIRMING, CONFIRMED or DISMISSED. CONFIRMING
+  // and CONFIRMED need APPROVAL_RULE_PROPOSALS_ENABLED; DISMISSED always works, so a person can
+  // still remove a proposal made while the switch was on. A ZDR or waived caller is refused.
+  rpc ResolveApprovalRuleProposal(ResolveApprovalRuleProposalRequest)
+      returns (ResolveApprovalRuleProposalResponse);
+}
+
+// An "Always" rule proposal as its owner sees it. It carries ids, a digest and closed words,
+// never an argument value.
+message ApprovalRuleProposal {
+  // Proposal identifier.
+  string id = 1;
+
+  // The tool the proposed rule would allow.
+  string tool_name = 2;
+
+  // The pinned definition digest of an MCP tool, or empty for a built-in tool.
+  string tool_digest = 3;
+
+  // The capability-core id a confirm writes the rule under. Empty for a proposal that predates
+  // the capability field; it cannot be confirmed.
+  string capability_id = 4;
+
+  // Where the proposal stands.
+  ApprovalRuleProposalState state = 5;
+
+  // The approval whose decision raised the proposal.
+  string created_from_approval_id = 6;
+
+  // When the proposal was made.
+  google.protobuf.Timestamp created_at = 7;
+
+  // When it was confirmed or dismissed. Unset while it is open.
+  google.protobuf.Timestamp resolved_at = 8;
+
+  // The capability-core policy a confirm wrote. Empty until the proposal is confirmed.
+  string policy_id = 9;
+}
+
+// Request to list the caller's open rule proposals.
+message ListApprovalRuleProposalsRequest {
+  // Must equal the caller's verified org.
+  string org_id = 1;
+}
+
+// Result of ListApprovalRuleProposalsRequest.
+message ListApprovalRuleProposalsResponse {
+  // The caller's open proposals, oldest first.
+  repeated ApprovalRuleProposal proposals = 1;
+}
+
+// Request to read one rule proposal.
+message GetApprovalRuleProposalRequest {
+  // Must equal the caller's verified org.
+  string org_id = 1;
+
+  // The proposal to read.
+  string proposal_id = 2;
+}
+
+// Result of GetApprovalRuleProposalRequest.
+message GetApprovalRuleProposalResponse {
+  // The proposal.
+  ApprovalRuleProposal proposal = 1;
+}
+
+// Request to resolve one rule proposal.
+message ResolveApprovalRuleProposalRequest {
+  // Must equal the caller's verified org.
+  string org_id = 1;
+
+  // The proposal to resolve.
+  string proposal_id = 2;
+
+  // CONFIRMING (a confirm claims the proposal), CONFIRMED (the rule was written) or DISMISSED.
+  ApprovalRuleProposalState resolution = 3;
+
+  // The capability-core policy the confirm wrote. Required with CONFIRMED and empty otherwise.
+  string policy_id = 4;
+}
+
+// Result of ResolveApprovalRuleProposalRequest.
+message ResolveApprovalRuleProposalResponse {
+  // The proposal as it stands after the resolution. A replay of a resolution that already
+  // happened returns it unchanged.
+  ApprovalRuleProposal proposal = 1;
+}

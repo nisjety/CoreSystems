@@ -354,6 +354,16 @@ services:
             ZDR_DECISION_PUBLIC_KEY_FILE: ${ZDR_DECISION_PUBLIC_KEY_FILE:-}
             ZDR_DECISION_PREVIOUS_KEY_ID: ${ZDR_DECISION_PREVIOUS_KEY_ID:-}
             ZDR_DECISION_PREVIOUS_PUBLIC_KEY_FILE: ${ZDR_DECISION_PREVIOUS_PUBLIC_KEY_FILE:-}
+            # ZDR-Z-14: kill switch for POST /api/retention/zdr-decision signing a
+            # per-connection "waived" decision. Strict literal "true" turns it on; anything
+            # else is off, and off means the endpoint still answers but never signs (the
+            # BFF gets zdr_connection_not_supported). Dark until D-ZDR-08 governs the flip:
+            # the enforcing planes ship first, and integration-corev2's
+            # ZDR_ACKNOWLEDGEMENT_ENABLED must be on for an acknowledgement to exist.
+            ZDR_WAIVER_ENABLED: ${ZDR_WAIVER_ENABLED:-false}
+            # Edge E2: Auth Core reads one model connection's ZDR posture from
+            # integration-corev2 as the session user (a user-bound ingestion token).
+            INTEGRATION_CORE_URL: ${INTEGRATION_CORE_URL:-http://integration-api:3026}
         volumes:
             - ./config/security/disposable-email-domains.txt:/app/config/security/disposable-email-domains.txt:ro
             - ./auth-core/keys:/app/keys:ro

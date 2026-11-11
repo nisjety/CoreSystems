@@ -71,6 +71,10 @@ const (
 	auditActionToolPolicyRuleCreated   = "tool_policy_rule_created"
 	auditActionToolPolicyRuleConfirmed = "tool_policy_rule_confirmed"
 
+	// auditActionToolPolicyRuleUsed is the row written when a stored allow relaxes a call on a persistent
+	// run (WS13 S7, K3-10).
+	auditActionToolPolicyRuleUsed = "tool_policy_rule_used"
+
 	// pgUniqueViolation is the SQLSTATE of the active-key index refusing a second
 	// concurrent first write.
 	pgUniqueViolation = "23505"
@@ -139,7 +143,7 @@ func (h *ToolPoliciesHandler) Register(mux *http.ServeMux) {
 // policies on a capability and, when userID is set, that person's own.
 func (h *ToolPoliciesHandler) ActiveToolPolicies(ctx context.Context, orgID, userID, capabilityID string) ([]policy.ToolPolicy, error) {
 	rows, err := h.pool.Query(ctx, `
-		SELECT scope_kind, decision, COALESCE(pinned_digest, ''), expires_at
+		SELECT id, scope_kind, decision, COALESCE(pinned_digest, ''), expires_at
 		FROM tool_policies
 		WHERE org_id = $1 AND capability_id = $2 AND revoked_at IS NULL
 		  AND (scope_kind = 'org' OR (scope_kind = 'user' AND $3::text <> '' AND scope_value = $3::text))
@@ -152,7 +156,7 @@ func (h *ToolPoliciesHandler) ActiveToolPolicies(ctx context.Context, orgID, use
 	for rows.Next() {
 		var p policy.ToolPolicy
 		var expiresAt *time.Time
-		if err := rows.Scan(&p.ScopeKind, &p.Decision, &p.PinnedDigest, &expiresAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.ScopeKind, &p.Decision, &p.PinnedDigest, &expiresAt); err != nil {
 			return nil, fmt.Errorf("scan tool policy: %w", err)
 		}
 		if expiresAt != nil {
@@ -164,6 +168,46 @@ func (h *ToolPoliciesHandler) ActiveToolPolicies(ctx context.Context, orgID, use
 		return nil, fmt.Errorf("read tool policies: %w", err)
 	}
 	return policies, nil
+}
+
+// RuleUse is one use of a stored allow that relaxed a call. It holds ids, closed words and a definition
+// digest only: never tool input, a reason or any person's text.
+type RuleUse struct {
+	// OrgID is the org the rule and the run belong to.
+	OrgID string
+	// PolicyID is the id of the stored allow that relaxed the call.
+	PolicyID string
+	// CapabilityID is the capability the call was made on.
+	CapabilityID string
+	// ScopeKind is the allow's scope: org or user.
+	ScopeKind string
+	// RunID is the persistent run the call belongs to.
+	RunID string
+	// ToolDigest is the pinned definition digest of the tool; empty without a binding.
+	ToolDigest string
+	// Actor is the service principal that asked for the evaluation.
+	Actor string
+}
+
+// RecordRuleUse appends one tool_policy_rule_used row to registry_audit_log. The caller fails the decision
+// closed when it returns an error, so a rule is never used without its row.
+func (h *ToolPoliciesHandler) RecordRuleUse(ctx context.Context, use RuleUse) error {
+	diff, err := json.Marshal(map[string]any{
+		"capability_id": use.CapabilityID,
+		"scope_kind":    use.ScopeKind,
+		"run_id":        use.RunID,
+		"tool_digest":   use.ToolDigest,
+	})
+	if err != nil {
+		return fmt.Errorf("encode rule use: %w", err)
+	}
+	if _, err := h.pool.Exec(ctx, `
+		INSERT INTO registry_audit_log (id, entity_kind, entity_id, action, actor, org_id, diff_json)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+	`, "ral_"+uuid.NewString(), auditEntityToolPolicy, use.PolicyID, auditActionToolPolicyRuleUsed, use.Actor, use.OrgID, string(diff)); err != nil {
+		return fmt.Errorf("record rule use: %w", err)
+	}
+	return nil
 }
 
 type toolPolicyView struct {
@@ -487,7 +531,7 @@ func (h *ToolPoliciesHandler) checkRelaxable(ctx context.Context, orgID, capabil
 const setToolPolicySQL = `
 WITH upd AS (
     UPDATE tool_policies
-    SET decision = $5, pinned_digest = $6, reason = $7, set_by = $8, expires_at = $13::timestamptz, updated_at = now()
+    SET decision = $5, pinned_digest = $6, reason = $7, set_by = $8, expires_at = $13::timestamptz, expiry_audited_at = NULL, updated_at = now()
     WHERE org_id = $1 AND scope_kind = $2 AND scope_value = $3 AND capability_id = $4 AND revoked_at IS NULL
     RETURNING id
 ), ins AS (

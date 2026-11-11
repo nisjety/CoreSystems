@@ -1563,10 +1563,13 @@ func (x *AgentToolAllowlist) GetCapabilityIds() []string {
 // RunAgentResponse — terminal outcome of a driven agent run.
 type RunAgentResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Outcome status: "completed" or "failed" (terminal), "awaiting_approval" or
-	// "parked" (the run stays open). "parked" means the loop saved a durable park
-	// fold at a round boundary and returned without finalizing: no assistant
-	// message was appended, no receipt written; `park_reason` says why.
+	// Outcome status: "completed" or "failed" (terminal), "awaiting_approval",
+	// "awaiting_input" or "parked" (the run stays open). "parked" means the loop
+	// saved a durable park fold at a round boundary and returned without
+	// finalizing: no assistant message was appended, no receipt written;
+	// `park_reason` says why. "awaiting_input" means the run waits for its
+	// owner's answer to a resume question: non-terminal, nothing appended, no
+	// receipt.
 	Status string `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
 	// The persisted assistant answer (or graceful error sentence on failure).
 	FinalOutput string `protobuf:"bytes,2,opt,name=final_output,json=finalOutput,proto3" json:"final_output,omitempty"`

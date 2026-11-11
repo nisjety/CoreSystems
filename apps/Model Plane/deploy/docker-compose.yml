@@ -1271,6 +1271,8 @@ services:
       SESSION_CORE_SPACE_HISTORY_FLOOR: ${SESSION_CORE_SPACE_HISTORY_FLOOR:-0}
       SPACE_WAKE_CORE: ${SPACE_WAKE_CORE:-0}
       SESSION_CORE_LOOP_CHECKPOINT_ENABLED: ${SESSION_CORE_LOOP_CHECKPOINT_ENABLED:-false}
+      # WS14-S5: store resume questions (ask_user waits for its answer in the same run). Only the literal true; needs the executor's AGENT_ASK_USER_RESUME_ENABLED and the loop checkpoint flip.
+      AGENT_ASK_USER_RESUME_ENABLED: ${AGENT_ASK_USER_RESUME_ENABLED:-false}
       # Sweep that closes a tool reservation still open long after its run ended or
       # parked, as `unknown_outcome` (WS03 S5). Off by default: turning it on changes
       # what audit sees for such rows, so it is a deliberate rollout step.
@@ -2167,8 +2169,8 @@ services:
       # delegation tools only, and its delegates keep the full catalogue. Off by default; only the literal true. A ZDR,
       # waived or continued run is never a coordinator, and a run the switch is off for keeps its usual tools.
       EXECUTION_COORDINATOR_MODE_ENABLED: ${EXECUTION_COORDINATOR_MODE_ENABLED:-false}
-      # WS14-S5: an answer continues the same run. Off by default; also needs AGENT_CONTINUE_AFTER_APPROVAL_ENABLED and
-      # EXECUTION_LOOP_RESUME_ENABLED, and the executor's input pause is not built yet, so it must stay off.
+      # WS14-S5: ask_user may pause the run for its owner's answer. Only the literal true; needs EXECUTION_LOOP_RESUME_ENABLED,
+      # the fold writer flip, and the same switch in session-core and model-gateway.
       AGENT_ASK_USER_RESUME_ENABLED: ${AGENT_ASK_USER_RESUME_ENABLED:-false}
       # WS15-S3: the Do loop announces tool retries (ToolRetryScheduled) on the run stream. Off by default.
       MODEL_GATEWAY_LIFECYCLE_EVENTS: ${MODEL_GATEWAY_LIFECYCLE_EVENTS:-false}

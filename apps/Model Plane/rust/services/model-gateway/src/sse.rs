@@ -12099,16 +12099,14 @@ async fn zdr_budget_refusal(
     ))
 }
 
-/// The ledger row of a ZDR answer (DEF-Z-06b): the ordinary usage envelope, so cost-core
-/// reads it as it reads any chat row. It carries ids (org, user, request), the served model
-/// and provider, the four token counts, the amount when the answer was priced, and the
-/// retention class. It carries no prompt, no answer, no thread or message id and no tool
-/// argument, and a direct answer has no run, so it names none.
-///
-/// The envelope's own `zdr` flag stays false on purpose: the publisher drops every
-/// envelope that sets it, and cost-core refuses one. What keeps the row ZDR-safe is its
-/// shape, not that flag.
-#[allow(clippy::too_many_arguments)]
+/// The ledger row of a ZDR answer (DEF-Z-06b, FU-30): an explicit `ZDR_SPEND` envelope that
+/// keeps `zdr: true`. Its payload is exactly the allowlist of `mp_contracts::zdr_spend`: ids
+/// (org, user, request), the served model and provider, the four token counts, the amount and
+/// its currency when the answer was priced, the cost basis and the retention class. It carries
+/// no prompt, no answer, no thread or message id, no tool argument and no run, and the envelope
+/// attaches no agent, origin or cause. The publisher admits a `zdr: true` envelope only by this
+/// kind and only with nothing outside the list, and cost-core enforces the same list, so a field
+/// added to the ordinary usage envelope later cannot reach the ledger through a ZDR turn.
 fn build_zdr_usage_envelope(
     request_id: &str,
     org_id: &str,
@@ -12116,29 +12114,40 @@ fn build_zdr_usage_envelope(
     answer: &DirectAnswer,
     basis: crate::pricing::CostBasis,
     cost_usd: Option<f64>,
-    latency_ms: u64,
-    min_privacy_tier: i32,
 ) -> Envelope {
-    let mut envelope = build_usage_envelope(
-        request_id,
-        org_id,
-        user_id,
-        &answer.model_used,
-        answer.input_tokens,
-        answer.output_tokens,
-        latency_ms,
-        zdr_enforced_floor(min_privacy_tier),
-        answer.provider_used.clone(),
-        answer.residency.clone(),
-        answer.cache_read_tokens,
-        answer.cache_write_tokens,
-        basis,
-    );
-    envelope.payload["retention_class"] = json!(crate::sse_events::RetentionClass::Zdr.as_str());
+    let mut payload = json!({
+        "request_id": request_id,
+        "org_id": org_id,
+        "user_id": user_id,
+        "model": answer.model_used,
+        "provider_used": answer.provider_used,
+        "input_tokens": answer.input_tokens,
+        "output_tokens": answer.output_tokens,
+        "cache_read_input_tokens": answer.cache_read_tokens,
+        "cache_creation_input_tokens": answer.cache_write_tokens,
+        "currency": mp_contracts::zdr_spend::CURRENCY,
+        "cost_basis": basis.as_str(),
+        "retention_class": crate::sse_events::RetentionClass::Zdr.as_str(),
+    });
     if let Some(usd) = cost_usd {
-        envelope.payload["cost_usd"] = json!(usd);
+        payload["cost_usd"] = json!(usd);
     }
-    envelope
+    Envelope {
+        event_id: new_ulid(),
+        event_type: mp_contracts::zdr_spend::EVENT_TYPE.to_owned(),
+        schema_version: 1,
+        ts: Utc::now(),
+        producer: "model-gateway".to_owned(),
+        correlation_id: request_id.to_owned(),
+        causation_id: String::new(),
+        idempotency_key: format!("{request_id}-{}", mp_contracts::zdr_spend::EVENT_TYPE),
+        org_id: org_id.to_owned(),
+        user_id: user_id.to_owned(),
+        resource_ref: format!("request/{request_id}"),
+        payload,
+        zdr: true,
+        ..Default::default()
+    }
 }
 
 /// Puts a completed ZDR answer's spend on the usage ledger (DEF-Z-06b), under the ZDR
@@ -12148,7 +12157,6 @@ fn build_zdr_usage_envelope(
 /// written. Best effort, like the persistent path's row: a failed publish is logged with
 /// ids only and changes nothing the client sees. The publish is spawned so the answer's
 /// first byte does not wait on it.
-#[allow(clippy::too_many_arguments)]
 async fn record_zdr_spend(
     state: &AppState,
     request_id: &str,
@@ -12157,8 +12165,6 @@ async fn record_zdr_spend(
     route: &crate::zdr_precheck::ConnectionRoute,
     answer: &DirectAnswer,
     stated: Option<StatedCost>,
-    latency_ms: u64,
-    min_privacy_tier: i32,
 ) {
     if !zdr_ledger_rows_switch() {
         return;
@@ -12174,8 +12180,6 @@ async fn record_zdr_spend(
         answer,
         stated.basis,
         stated.usd,
-        latency_ms,
-        min_privacy_tier,
     );
     let publisher = state.publisher.clone();
     let subject = subjects::usage_subject(org_id);
@@ -12352,8 +12356,6 @@ async fn zdr_direct_stream(
         &route,
         &answer,
         stated_cost,
-        latency_ms,
-        min_privacy_tier,
     )
     .await;
     zdr_answer_stream(

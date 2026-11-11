@@ -3828,6 +3828,9 @@ pub struct NewRunQuestion<'a> {
     pub origin: &'a str,
     /// Empty for a `model` origin; the server's name otherwise.
     pub origin_label: &'a str,
+    /// Store the question only while the run is live and holds a paused input fold whose
+    /// `pause_ref` is this question's idempotency key (a `resume` question, WS14 S5).
+    pub require_paused_fold: bool,
 }
 
 /// What [`create_run_question`] did.
@@ -3841,6 +3844,9 @@ pub enum CreatedRunQuestion {
     BudgetExhausted,
     /// The idempotency key belongs to another run's question.
     KeyInUse,
+    /// The question needs a paused input fold and the run has none: the run is over, or its
+    /// checkpoint is not a paused fold with this question's reference.
+    PauseMissing,
 }
 
 /// Store a question, once per idempotency key, within the run's question budget.
@@ -3848,6 +3854,12 @@ pub enum CreatedRunQuestion {
 /// The run row is locked for the duration so two concurrent asks cannot both fit under the
 /// budget. A retry that names an existing key is answered with the stored row before the
 /// budget is looked at, so a retry never fails for a question it already made.
+///
+/// With `require_paused_fold` set, the question is stored only while the run has not ended and
+/// holds a paused fold whose `pause_ref` equals the idempotency key. The key is the namespaced
+/// input reference, which an approval fold's `pause_ref` never equals, so only an input pause
+/// matches; the fold itself is never opened. The check follows the replay read, so a retry of a
+/// question already stored returns it as before.
 ///
 /// # Errors
 ///
@@ -3879,6 +3891,30 @@ pub async fn create_run_question(
             } else {
                 CreatedRunQuestion::KeyInUse
             });
+        }
+    }
+
+    if new.require_paused_fold {
+        let live: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM runs WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')",
+        )
+        .bind(new.run_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let paused: Option<i32> = if live.is_some() && !new.idempotency_key.is_empty() {
+            sqlx::query_scalar(
+                "SELECT 1 FROM run_loop_checkpoints                  WHERE run_id = $1 AND kind = 'pause' AND state = 'paused' AND pause_ref = $2",
+            )
+            .bind(new.run_id)
+            .bind(new.idempotency_key)
+            .fetch_optional(&mut *transaction)
+            .await?
+        } else {
+            None
+        };
+        if paused.is_none() {
+            transaction.commit().await?;
+            return Ok(CreatedRunQuestion::PauseMissing);
         }
     }
 
@@ -4096,24 +4132,36 @@ pub enum ConsumedRunQuestion {
     NotAnswered,
     /// The question is not a `resume` question of this run.
     NotResumable,
-    /// The question lapsed before it was answered.
+    /// The question lapsed before it was answered, or its answer was not spent inside the resume window.
     Expired,
     /// No such question for this owner and run.
     NotFound,
+    /// The run is gone or already ended (completed, failed or cancelled): there is no continuation to
+    /// hand the answer to, and the question is left untouched.
+    RunEnded,
 }
 
 /// Spend the answer of a `resume` question once, for the continuation of the run that asked it
-/// (build plan WS14 S5).
+/// (build plan WS14 S5; D2-1162, D2-1168).
 ///
-/// The spend is one compare-and-set on `consumed_at IS NULL`, with the owner, org, run and delivery as
-/// predicates, so two continuations race and exactly one wins. The winner stores the hash of its claim
-/// token: a retry with that token replays the answer, and any other claim is refused. The spend does
-/// not read `expires_at`, because the answer was accepted while the question was still open.
+/// The spend is one transaction. It first takes the run row `FOR SHARE`, the row that terminalization
+/// locks `FOR UPDATE`, so the two serialise (lock order: runs, then run_questions, as terminalization).
+/// A missing run, or one that is completed, failed or cancelled, is [`ConsumedRunQuestion::RunEnded`]
+/// and the question is not touched. Then comes one compare-and-set on `consumed_at IS NULL`, with the
+/// owner, org, run and delivery as predicates, so two continuations race and exactly one wins. Both an
+/// answered question and a skipped one are spendable (a skip continues the run too). The spend reads
+/// `answered_at` against the resume window
+/// ([`mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS`]), the same window the recovery hold and the
+/// recovery lapse read; it does not read `expires_at`, because the answer was accepted while the question
+/// was still open. The winner stores the hash of its claim token: a retry with that token replays the
+/// answer, and any other claim is refused. A winning spend also renews the run's recovery deadline in the
+/// same transaction (as the approval spend does), because the answer no longer holds the run back and
+/// recovery must not end the continuation before its first heartbeat; a replay renews nothing.
 ///
 /// # Errors
 ///
-/// Returns an error if a statement fails, or if the question is still answered and unspent after two
-/// attempts (a state these statements cannot reach).
+/// Returns an error if a statement fails, or if the question is still answered and unspent inside its
+/// window after two attempts (a state these statements cannot reach).
 pub async fn consume_run_question(
     pool: &Pool,
     question_id: &str,
@@ -4122,6 +4170,22 @@ pub async fn consume_run_question(
     run_id: &str,
     claim_hash: &str,
 ) -> Result<ConsumedRunQuestion> {
+    let window_secs = f64::from(mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS);
+    let mut transaction = pool.begin().await?;
+    let run_status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM runs WHERE id = $1 AND org_id = $2 FOR SHARE")
+            .bind(run_id)
+            .bind(org_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    let run_is_live = run_status
+        .as_deref()
+        .is_some_and(|status| !matches!(status, "completed" | "failed" | "cancelled"));
+    if !run_is_live {
+        transaction.commit().await?;
+        return Ok(ConsumedRunQuestion::RunEnded);
+    }
+
     // An answer recorded between a missed spend and its read is spent by the second attempt. An
     // answered question is never answered again, so one retry is enough.
     for _ in 0..2 {
@@ -4129,7 +4193,8 @@ pub async fn consume_run_question(
             "UPDATE run_questions \
                 SET consumed_at = now(), consumed_claim_hash = $5 \
               WHERE id = $1 AND org_id = $2 AND user_id = $3 AND run_id = $4 \
-                AND delivery = 'resume' AND state = 'answered' AND consumed_at IS NULL \
+                AND delivery = 'resume' AND state IN ('answered', 'skipped') AND consumed_at IS NULL \
+                AND answered_at > now() - make_interval(secs => $6) \
           RETURNING {RUN_QUESTION_COLUMNS}"
         ))
         .bind(question_id)
@@ -4137,9 +4202,12 @@ pub async fn consume_run_question(
         .bind(user_id)
         .bind(run_id)
         .bind(claim_hash)
-        .fetch_optional(pool)
+        .bind(window_secs)
+        .fetch_optional(&mut *transaction)
         .await?;
         if let Some(row) = won {
+            renew_recovery_deadline(&mut transaction, org_id, run_id).await?;
+            transaction.commit().await?;
             info!(question_id = %row.id, run_id = %row.run_id, "run question answer consumed");
             return Ok(ConsumedRunQuestion::Consumed(row));
         }
@@ -4153,37 +4221,57 @@ pub async fn consume_run_question(
         .bind(question_id)
         .bind(org_id)
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await?;
-        let Some(row) = get_run_question(pool, question_id, org_id, user_id).await? else {
+        let row = sqlx::query_as::<_, RunQuestionRow>(&format!(
+            "SELECT {RUN_QUESTION_COLUMNS} FROM run_questions \
+             WHERE id = $1 AND org_id = $2 AND user_id = $3"
+        ))
+        .bind(question_id)
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
             return Ok(ConsumedRunQuestion::NotFound);
         };
         if row.run_id != run_id {
+            transaction.commit().await?;
             return Ok(ConsumedRunQuestion::NotFound);
         }
         if row.delivery != "resume" {
+            transaction.commit().await?;
             return Ok(ConsumedRunQuestion::NotResumable);
         }
-        match row.state.as_str() {
-            "expired" => return Ok(ConsumedRunQuestion::Expired),
-            "requested" | "skipped" | "cancelled" => return Ok(ConsumedRunQuestion::NotAnswered),
-            "answered" => {
-                let stored: Option<String> =
-                    sqlx::query_scalar("SELECT consumed_claim_hash FROM run_questions WHERE id = $1")
-                        .bind(question_id)
-                        .fetch_one(pool)
-                        .await?;
+        let outcome = match row.state.as_str() {
+            "expired" => ConsumedRunQuestion::Expired,
+            "requested" | "cancelled" => ConsumedRunQuestion::NotAnswered,
+            "answered" | "skipped" => {
+                let (stored, lapsed): (Option<String>, bool) = sqlx::query_as(
+                    "SELECT consumed_claim_hash, \
+                            COALESCE(answered_at <= now() - make_interval(secs => $2), false) AS lapsed \
+                     FROM run_questions WHERE id = $1",
+                )
+                .bind(question_id)
+                .bind(window_secs)
+                .fetch_one(&mut *transaction)
+                .await?;
                 match stored {
-                    Some(stored) if stored == claim_hash => {
-                        return Ok(ConsumedRunQuestion::Replay(row));
-                    }
-                    Some(_) => return Ok(ConsumedRunQuestion::AlreadyConsumed),
-                    // Answered after the spend missed and still unspent: the next attempt spends it.
-                    None => {}
+                    Some(stored) if stored == claim_hash => ConsumedRunQuestion::Replay(row),
+                    Some(_) => ConsumedRunQuestion::AlreadyConsumed,
+                    // The answer lapsed unspent. This check comes before the retry arm, so a lapsed row
+                    // never loops into the final bail.
+                    None if lapsed => ConsumedRunQuestion::Expired,
+                    // Answered after the spend missed and still unspent inside its window: the next
+                    // attempt spends it.
+                    None => continue,
                 }
             }
             other => bail!("run question {question_id} has an unknown state {other}"),
-        }
+        };
+        transaction.commit().await?;
+        return Ok(outcome);
     }
     bail!("run question {question_id} could not be spent after two attempts")
 }
@@ -4248,9 +4336,44 @@ mod run_question_tests {
             .expect("the spend function is present")..];
         let body = &body[..body.find("\n}\n").expect("end of the function")];
         assert!(body.contains("WHERE id = $1 AND org_id = $2 AND user_id = $3 AND run_id = $4"));
-        assert!(body.contains("AND delivery = 'resume' AND state = 'answered' AND consumed_at IS NULL"));
+        assert!(body.contains(
+            "AND delivery = 'resume' AND state IN ('answered', 'skipped') AND consumed_at IS NULL"
+        ));
+        assert!(body.contains("AND answered_at > now() - make_interval(secs => $6)"));
         assert!(body.contains("SET consumed_at = now(), consumed_claim_hash = $5"));
         assert!(!body.contains("claim_token"), "the raw claim token is never bound");
+    }
+
+    /// The spend serialises with terminalization on the runs row, refuses an ended run before it touches
+    /// the question, reads the one shared answer window, and renews the recovery deadline once, behind the
+    /// winning branch and before the commit.
+    #[test]
+    fn run_question_the_spend_locks_the_run_reads_the_window_and_renews_once_behind_a_win() {
+        let source = include_str!("orchestration_store.rs").replace("\r\n", "\n");
+        let body = &source[source
+            .find("pub async fn consume_run_question(")
+            .expect("the spend function is present")..];
+        let body = &body[..body.find("\n}\n").expect("end of the function")];
+        let lock = body
+            .find("SELECT status FROM runs WHERE id = $1 AND org_id = $2 FOR SHARE")
+            .expect("the run row is locked first");
+        let cas = body.find("SET consumed_at = now()").expect("the compare-and-set");
+        let ended = body.find("ConsumedRunQuestion::RunEnded").expect("an ended run is refused");
+        assert!(lock < ended && ended < cas, "the run is read and refused before the question is touched");
+        assert!(body.contains("f64::from(mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS)"));
+        assert!(!body.contains("interval '1 hour'"), "the window is the shared constant, never a literal");
+        assert!(body.contains("answered_at <= now() - make_interval(secs => $2)"));
+        assert_eq!(body.matches("renew_recovery_deadline(").count(), 1);
+        let renew = body.find("renew_recovery_deadline(").unwrap();
+        let won = body.find("if let Some(row) = won").expect("the winning branch");
+        let commit = renew + body[renew..].find("transaction.commit()").expect("the win commits");
+        let consumed = body.find("ConsumedRunQuestion::Consumed(row)").expect("the win returns Consumed");
+        assert!(won < renew && renew < commit && commit < consumed, "the renewal is inside the winning transaction");
+        // The lapse check precedes the retry arm, so a lapsed row never loops into the final bail.
+        let lapsed_arm = body.find("None if lapsed => ConsumedRunQuestion::Expired").expect("the lapsed arm");
+        let retry_arm = body.find("None => continue").expect("the retry arm");
+        assert!(lapsed_arm < retry_arm);
+        assert!(!body.contains("claim_token"));
     }
 }
 
@@ -6216,6 +6339,7 @@ mod run_question_db_tests {
                 expires_at: Utc::now() + expires_in,
                 origin: "model",
                 origin_label: "",
+                require_paused_fold: false,
             },
             3,
         )
@@ -6319,6 +6443,7 @@ mod run_question_db_tests {
                         expires_at: Utc::now() + chrono::Duration::hours(1),
                         origin: "model",
                         origin_label: "",
+                        require_paused_fold: false,
                     },
                     3,
                 )
@@ -6546,6 +6671,7 @@ mod run_question_db_tests {
                 expires_at: Utc::now() + expires_in,
                 origin: "model",
                 origin_label: "",
+                require_paused_fold: false,
             },
             3,
         )
@@ -6640,9 +6766,8 @@ mod run_question_db_tests {
 
         let waiting = resume_question(&pool, &seed, "refuse-2", chrono::Duration::hours(1)).await;
         assert!(matches!(spend(&pool, &seed, &waiting.id, "x").await, ConsumedRunQuestion::NotAnswered));
-        let skipped = resume_question(&pool, &seed, "refuse-3", chrono::Duration::hours(1)).await;
-        answer(&pool, &seed, &skipped.id, "a", true).await;
-        assert!(matches!(spend(&pool, &seed, &skipped.id, "x").await, ConsumedRunQuestion::NotAnswered));
+        // A skipped resume question is spendable (b1): see
+        // run_question_a_skip_is_spendable_once_and_the_same_claim_replays_it.
         // A run asks at most three questions, so the next-turn question lives on its own run.
         let turn = created(&pool, &other_run, "refuse-4").await;
         answer(&pool, &other_run, &turn.id, "a", false).await;
@@ -6656,6 +6781,167 @@ mod run_question_db_tests {
         let seed = seed_run(&pool, "lapsed").await;
         let question = resume_question(&pool, &seed, "lapsed-1", -chrono::Duration::hours(1)).await;
         assert!(matches!(spend(&pool, &seed, &question.id, "x").await, ConsumedRunQuestion::Expired));
+    }
+
+    /// Build plan WS14 S5 b1 (D2-1162, D2-1168). WRITTEN, NOT RUN by the author: the tests below need the
+    /// disposable-Postgres harness, which the lead runs.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_a_skip_is_spendable_once_and_the_same_claim_replays_it() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "skip-spend").await;
+        let question = resume_question(&pool, &seed, "skip-1", chrono::Duration::hours(1)).await;
+        answer(&pool, &seed, &question.id, "a", true).await;
+        match spend(&pool, &seed, &question.id, "claim-a").await {
+            ConsumedRunQuestion::Consumed(row) => assert_eq!(row.state, "skipped"),
+            other => panic!("the first claim spends the skip, got {other:?}"),
+        }
+        assert!(
+            matches!(spend(&pool, &seed, &question.id, "claim-a").await, ConsumedRunQuestion::Replay(_)),
+            "a retried skip continuation replays"
+        );
+        assert!(
+            matches!(spend(&pool, &seed, &question.id, "claim-b").await, ConsumedRunQuestion::AlreadyConsumed),
+            "a different claim after a skip spend is refused"
+        );
+    }
+
+    /// Age the answer of a question by `secs` seconds.
+    async fn age_answer(pool: &Pool, question: &str, secs: f64) {
+        sqlx::query("UPDATE run_questions SET answered_at = now() - make_interval(secs => $2) WHERE id = $1")
+            .bind(question)
+            .bind(secs)
+            .execute(pool)
+            .await
+            .expect("age the answer");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_a_spend_past_the_answer_window_is_expired_and_spends_nothing() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "window").await;
+        let window = f64::from(mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS);
+        for (key, skip) in [("window-1", false), ("window-2", true)] {
+            let question = resume_question(&pool, &seed, key, chrono::Duration::hours(2)).await;
+            answer(&pool, &seed, &question.id, "a", skip).await;
+            age_answer(&pool, &question.id, window + 60.0).await;
+            assert!(
+                matches!(spend(&pool, &seed, &question.id, "late").await, ConsumedRunQuestion::Expired),
+                "an answer past its window is not spendable (skip: {skip})"
+            );
+            let stored: Option<String> =
+                sqlx::query_scalar("SELECT consumed_claim_hash FROM run_questions WHERE id = $1")
+                    .bind(&question.id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("hash");
+            assert!(stored.is_none(), "a lapsed answer stores no claim");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_a_spend_on_an_ended_run_is_run_ended_and_leaves_the_question_untouched() {
+        let Some(pool) = scratch_pool().await else { return };
+        for status in ["completed", "failed", "cancelled"] {
+            let seed = seed_run(&pool, &format!("ended-{status}")).await;
+            let question = resume_question(&pool, &seed, "ended-1", chrono::Duration::hours(1)).await;
+            answer(&pool, &seed, &question.id, "a", false).await;
+            sqlx::query("UPDATE runs SET status = $2, ended_at = now() WHERE id = $1")
+                .bind(&seed.run_id)
+                .bind(status)
+                .execute(&pool)
+                .await
+                .expect("end the run");
+            assert!(
+                matches!(spend(&pool, &seed, &question.id, "x").await, ConsumedRunQuestion::RunEnded),
+                "{status}"
+            );
+            let stored: Option<String> =
+                sqlx::query_scalar("SELECT consumed_claim_hash FROM run_questions WHERE id = $1")
+                    .bind(&question.id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("hash");
+            assert!(stored.is_none(), "{status}: the answer stays unspent");
+            let after = get_run_question(&pool, &question.id, &seed.org, &seed.user)
+                .await
+                .expect("get")
+                .expect("owner reads it");
+            assert_eq!(after.state, "answered", "{status}: the question is untouched");
+        }
+        // A run that does not exist is an ended run too.
+        let seed = seed_run(&pool, "ended-missing").await;
+        let question = resume_question(&pool, &seed, "ended-2", chrono::Duration::hours(1)).await;
+        let ghost = Seed {
+            run_id: "no-such-run".to_owned(),
+            thread_id: seed.thread_id.clone(),
+            org: seed.org.clone(),
+            user: seed.user.clone(),
+        };
+        assert!(matches!(spend(&pool, &ghost, &question.id, "x").await, ConsumedRunQuestion::RunEnded));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_a_winning_spend_renews_the_recovery_deadline_and_a_replay_does_not() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "renew").await;
+        sqlx::query(
+            "INSERT INTO managed_run_terminalization_outbox \
+             (run_id, org_id, user_id, start_key, configured_source, \
+              configured_terminal_step_id, zdr, state, deadline_at, next_attempt_at) \
+             VALUES ($1, $2, $3, $4, 'execution_agent', 'execution-core-agent-final', false, 'open', \
+                     now() - interval '1 hour', now() - interval '1 hour')",
+        )
+        .bind(&seed.run_id)
+        .bind(&seed.org)
+        .bind(&seed.user)
+        .bind(format!("sk-{}", mp_ids::new_ulid()))
+        .execute(&pool)
+        .await
+        .expect("seed the obligation");
+        let deadline = |pool: Pool, run: String| async move {
+            sqlx::query_scalar::<_, DateTime<Utc>>(
+                "SELECT deadline_at FROM managed_run_terminalization_outbox WHERE run_id = $1",
+            )
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .expect("deadline")
+        };
+        let question = resume_question(&pool, &seed, "renew-1", chrono::Duration::hours(1)).await;
+        answer(&pool, &seed, &question.id, "a", false).await;
+        let before = deadline(pool.clone(), seed.run_id.clone()).await;
+        assert!(before < Utc::now() - chrono::Duration::minutes(30));
+
+        assert!(matches!(
+            spend(&pool, &seed, &question.id, "claim-a").await,
+            ConsumedRunQuestion::Consumed(_)
+        ));
+        let renewed = deadline(pool.clone(), seed.run_id.clone()).await;
+        assert!(renewed > Utc::now(), "the winning spend moved the deadline into the future");
+
+        // Put the obligation back to a stale shape: a replay and a lost claim must not renew it.
+        sqlx::query(
+            "UPDATE managed_run_terminalization_outbox \
+             SET deadline_at = now() - interval '1 hour' WHERE run_id = $1",
+        )
+        .bind(&seed.run_id)
+        .execute(&pool)
+        .await
+        .expect("stale again");
+        let stale = deadline(pool.clone(), seed.run_id.clone()).await;
+        assert!(matches!(
+            spend(&pool, &seed, &question.id, "claim-a").await,
+            ConsumedRunQuestion::Replay(_)
+        ));
+        assert!(matches!(
+            spend(&pool, &seed, &question.id, "claim-b").await,
+            ConsumedRunQuestion::AlreadyConsumed
+        ));
+        assert_eq!(deadline(pool, seed.run_id.clone()).await, stale, "only a won spend renews");
     }
 
     /// A `next_turn` question with the given origin, straight to the store: the schema's own
@@ -6684,6 +6970,7 @@ mod run_question_db_tests {
                 expires_at: Utc::now() + chrono::Duration::hours(1),
                 origin,
                 origin_label,
+                require_paused_fold: false,
             },
             3,
         )

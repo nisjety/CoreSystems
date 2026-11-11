@@ -583,11 +583,22 @@ func decodeUsageMessage(subject string, data []byte, createdAt time.Time) (ledge
 	if err := json.Unmarshal(data, &env); err != nil {
 		return ledger.Entry{}, fmt.Errorf("decode envelope: %w", err)
 	}
-	if env.EventType != "USAGE_ENVELOPE" {
-		return ledger.Entry{}, fmt.Errorf("unexpected event type")
-	}
-	if env.ZDR {
-		return ledger.Entry{}, fmt.Errorf("ZDR usage must not be persisted")
+	// A ZDR spend row is the one zdr=true kind this service stores (FU-30): it is
+	// admitted by its event type, with only the allowlisted payload fields, and is
+	// stored as a content-free row marked zdr. Every other zdr=true usage envelope
+	// is refused, and a spend row that does not declare zdr is refused too.
+	zdrSpend := env.EventType == zdrSpendEventType
+	if zdrSpend {
+		if !env.ZDR {
+			return ledger.Entry{}, fmt.Errorf("zdr spend must declare zdr")
+		}
+	} else {
+		if env.EventType != "USAGE_ENVELOPE" {
+			return ledger.Entry{}, fmt.Errorf("unexpected event type")
+		}
+		if env.ZDR {
+			return ledger.Entry{}, fmt.Errorf("ZDR usage must not be persisted")
+		}
 	}
 	if !env.Timestamp.IsZero() {
 		if env.Timestamp.After(time.Now().UTC().Add(5 * time.Minute)) {
@@ -609,7 +620,13 @@ func decodeUsageMessage(subject string, data []byte, createdAt time.Time) (ledge
 	}
 
 	var p usagePayload
-	if len(env.Payload) > 0 {
+	if zdrSpend {
+		spend, err := decodeZDRSpendPayload(env.Payload)
+		if err != nil {
+			return ledger.Entry{}, err
+		}
+		p = spend
+	} else if len(env.Payload) > 0 {
 		if err := json.Unmarshal(env.Payload, &p); err != nil {
 			return ledger.Entry{}, fmt.Errorf("decode payload: %w", err)
 		}
@@ -642,6 +659,7 @@ func decodeUsageMessage(subject string, data []byte, createdAt time.Time) (ledge
 		CacheMissReason:          cacheMissReasonOf(subjectOrgID, p),
 		CostBasis:                costBasisOf(subjectOrgID, p),
 		PriorityTier:             p.ServiceTierUsed == servedPriorityTier,
+		ZDR:                      zdrSpend,
 	}
 	if err := ledger.ValidateEntry(entry); err != nil {
 		return ledger.Entry{}, err

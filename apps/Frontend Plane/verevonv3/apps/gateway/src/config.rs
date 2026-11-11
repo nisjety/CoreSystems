@@ -155,6 +155,18 @@ pub(crate) struct AppState {
     /// than ZDR-Z-03a) is `Unknown`, which every caller already treats as fail closed. A rollout
     /// control, never an authorization input: org-core computes the posture.
     pub(crate) zdr_effective_posture_read: bool,
+    /// `ZDR_WAIVER_UI_ENABLED` (ZDR Z-19a): whether the BFF asks Auth Core for a retention decision
+    /// (`retention_decision::turn_retention`) on a subscription chat turn. Read once from the
+    /// environment in `build_state` (trimmed, exactly `true` turns it on), never in a handler. Off,
+    /// `turn_retention` answers `Unchanged` and no call is made. A rollout control, never an
+    /// authorization input: Auth Core decides and signs; the BFF only asks.
+    pub(crate) zdr_waiver_ui_enabled: bool,
+    /// `GATEWAY_RETENTION_DECISION_SERVICE_API_KEY` (ZDR Z-19a): the gateway's own service credential
+    /// for the Auth Core retention-decision policy token (`verevon-gateway-retention-decision`).
+    /// Trimmed; `None` when unset or blank, which makes every decision refuse with
+    /// `zdr_decision_unavailable`. A secret: never logged, never sent to a browser. `AppState` has no
+    /// `Debug` impl, so it cannot be printed through the state either.
+    pub(crate) retention_decision_service_api_key: Option<String>,
     /// `AGENT_DEFINITION_VERSIONS` (EP-6 S7/S8): the agent builder routes (draft, publish, versions)
     /// and the draft preview of a chat body (`agent_preview`). Read once from the environment in
     /// `build_state`, exactly `true` turns it on, never by default in development. Off, the builder
@@ -833,6 +845,13 @@ pub(crate) async fn build_state() -> Result<AppState> {
                 .ok()
                 .as_deref(),
         ),
+        zdr_waiver_ui_enabled: zdr_waiver_ui_enabled_from(
+            env::var("ZDR_WAIVER_UI_ENABLED").ok().as_deref(),
+        ),
+        retention_decision_service_api_key: Some(optional_env(
+            "GATEWAY_RETENTION_DECISION_SERVICE_API_KEY",
+        ))
+        .filter(|value| !value.is_empty()),
         agent_definition_versions: agent_definition_versions_enabled(),
         chat_process_output_enabled: chat_process_output_enabled(),
         chat_snapshots_enabled: chat_snapshots_enabled(),
@@ -1035,6 +1054,12 @@ fn model_entitlement_admin_from(value: Option<&str>) -> bool {
 /// trimmed value is exactly `true`: a stray `1` or `TRUE` must not move the org-posture reader onto
 /// a field an older org-core does not serve.
 fn zdr_effective_posture_read_from(value: Option<&str>) -> bool {
+    value.map(str::trim) == Some("true")
+}
+
+/// `ZDR_WAIVER_UI_ENABLED`, read once by `build_state` (ZDR Z-19a). Off unless the trimmed value is
+/// exactly the literal `true`.
+fn zdr_waiver_ui_enabled_from(value: Option<&str>) -> bool {
     value.map(str::trim) == Some("true")
 }
 

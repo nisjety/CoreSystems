@@ -945,6 +945,9 @@ pub(crate) mod tests {
             ("http_routes.rs", "reject_plan"),
             ("http_routes.rs", "update_todo_status"),
             ("http_routes.rs", "decide_approval"),
+            // WS13-S7: a confirm writes a standing allow, a dismiss resolves a durable proposal.
+            ("http_routes.rs", "confirm_rule_proposal"),
+            ("http_routes.rs", "dismiss_rule_proposal"),
             ("http_routes.rs", "resume_run"),
             // `/continue` consumes a granted approval and starts a segment of a stored
             // run (build plan WS03 S3): the same continuation gate, then a stricter

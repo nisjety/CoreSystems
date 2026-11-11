@@ -420,6 +420,41 @@ pub(crate) fn tainted_egress_held(tainted: bool, released: bool, tool_name: &str
     tainted && !released && matches!(tool_name, WEB_FETCH_TOOL | EXECUTE_PROVIDER_ACTION_TOOL)
 }
 
+/// Whether a resumed run starts with its screening taint marked, from what the claimed fold
+/// recorded (D2-354, DEC-WS14-5). A marked fold stays marked and a clear one stays clear. A fold
+/// with no taint key (written before the key existed, or by a writer that skipped it) is an
+/// UNKNOWN taint and is held as marked: the cost is one person release per held egress call. It
+/// is never derived from tool names or transcript tags, which content can forge.
+#[must_use]
+pub(crate) fn connector_taint_on_resume(read: mp_contracts::loop_fold::TaintRead) -> bool {
+    use mp_contracts::loop_fold::TaintRead;
+    match read {
+        TaintRead::Marked | TaintRead::Absent => true,
+        TaintRead::Clear => false,
+    }
+}
+
+/// The connector selection a resumed run runs under (D2-540): never wider than the paused one.
+/// `carried` is the selection the fold recorded: `None` means none was recorded and the resumed
+/// run selects nothing (the strictest). A request that states none keeps the carried selection;
+/// one that states some narrows it to the ids both name, in the carried order.
+#[must_use]
+pub(crate) fn resumed_connector_scope(
+    carried: Option<Vec<String>>,
+    requested: &[String],
+) -> Vec<String> {
+    let Some(carried) = carried else {
+        return Vec::new();
+    };
+    if requested.is_empty() {
+        return carried;
+    }
+    carried
+        .into_iter()
+        .filter(|id| requested.contains(id))
+        .collect()
+}
+
 #[cfg(test)]
 mod connector_taint_tests {
     use super::{tainted_egress_held, ConnectorTaint};
@@ -4563,12 +4598,59 @@ async fn execute_propose_plan(
     }
 }
 
+/// Put a question to the run's owner and return the question session-core stored.
+///
+/// The one place a run's question is created, shared by the `next_turn` delivery
+/// ([`execute_ask_user`]) and the resume pause (WS14 S5, unit e2). `delivery` is
+/// `user_question::DELIVERY_NEXT_TURN` or `DELIVERY_RESUME`. `idempotency_key` makes a retry of the
+/// same call return the stored question: `{run_id}:{step_id}` for `next_turn`, and
+/// `user_question::input_pause_ref` for a `resume` pause, which the pause fold also carries. The
+/// returned question is the stored one, so a caller can compare its `delivery` with the one it
+/// asked for. Questions are the run's own model's: the origin is left empty.
+///
+/// # Errors
+/// The status the credential check or session-core's `CreateRunQuestion` reports.
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
+async fn create_run_question_with(
+    channel: &Channel,
+    bearer: &str,
+    run_id: &str,
+    step_id: &str,
+    org_id: &str,
+    delivery: &str,
+    idempotency_key: &str,
+    items: &[mp_contracts::user_question::Item],
+) -> Result<pb::RunQuestion, tonic::Status> {
+    let request = pb::CreateRunQuestionRequest {
+        run_id: run_id.to_owned(),
+        step_id: step_id.to_owned(),
+        org_id: org_id.to_owned(),
+        delivery: delivery.to_owned(),
+        items: items.iter().map(ask::to_wire_item).collect(),
+        expires_in_seconds: 0,
+        idempotency_key: idempotency_key.to_owned(),
+        // The run's own model asks here; an MCP elicitation sets these (EP-4 S5).
+        origin: String::new(),
+        origin_label: String::new(),
+    };
+    let request = authenticated_session_request(request, bearer).map_err(tonic::Status::internal)?;
+    let response = OrchestrationCoreServiceClient::new(channel.clone())
+        .create_run_question(request)
+        .await?;
+    Ok(response.into_inner().question.unwrap_or_default())
+}
+
 /// `ask_user` — input JSON `{"questions": [...]}` (WS14 S4). The contract is in `crate::ask`.
 ///
 /// Puts the questions to the run's owner as one `next_turn` question in session-core's
 /// `run_questions`. An answer is information, never a grant, so nothing here reads as one. A call
 /// under zero retention is refused before anything is written. A call that succeeds ends the turn
 /// in `run_rounds`, which answers with the questions as prose.
+///
+/// This is the `next_turn` delivery: the key is `{run_id}:{step_id}` and the answer is the person's
+/// next message. The other delivery is the resume pause (WS14 S5, unit e2), which creates its
+/// question with `resume` delivery and the input pause reference through the same
+/// [`create_run_question_with`] and keeps the run waiting for the answer.
 async fn execute_ask_user(
     tool_input: &str,
     org_id: &str,
@@ -4601,43 +4683,32 @@ async fn execute_ask_user(
         Ok(ok) => ok,
         Err(refusal) => return refusal,
     };
+    // The credential must be forwardable before anything is sent; the helper checks it again.
+    if let Err(error) = authenticated_session_request((), &bearer) {
+        return tool_error(format!("{} unavailable: {error}", ask::ASK_TOOL));
+    }
     // A retry of the same call (same run and step) returns the question it stored.
-    let request = pb::CreateRunQuestionRequest {
-        run_id: run_id.to_owned(),
-        step_id: step_id.to_owned(),
-        org_id: org_id.to_owned(),
-        delivery: mp_contracts::user_question::DELIVERY_NEXT_TURN.to_owned(),
-        items: items.iter().map(ask::to_wire_item).collect(),
-        expires_in_seconds: 0,
-        idempotency_key: format!("{run_id}:{step_id}"),
-        // The run's own model asks here; an MCP elicitation sets these (EP-4 S5).
-        origin: String::new(),
-        origin_label: String::new(),
-    };
-    let request = match authenticated_session_request(request, &bearer) {
-        Ok(request) => request,
-        Err(error) => return tool_error(format!("{} unavailable: {error}", ask::ASK_TOOL)),
-    };
-    match OrchestrationCoreServiceClient::new(channel.clone())
-        .create_run_question(request)
-        .await
+    match create_run_question_with(
+        channel,
+        &bearer,
+        run_id,
+        step_id,
+        org_id,
+        mp_contracts::user_question::DELIVERY_NEXT_TURN,
+        &format!("{run_id}:{step_id}"),
+        &items,
+    )
+    .await
     {
-        Ok(response) => {
-            let question_id = response
-                .into_inner()
-                .question
-                .map(|question| question.id)
-                .unwrap_or_default();
-            tool_bridge::ToolExecution {
-                output: serde_json::json!({
-                    "question_id": question_id,
-                    "state": "requested",
-                    "delivery": mp_contracts::user_question::DELIVERY_NEXT_TURN,
-                })
-                .to_string(),
-                error: None,
-            }
-        }
+        Ok(question) => tool_bridge::ToolExecution {
+            output: serde_json::json!({
+                "question_id": question.id,
+                "state": "requested",
+                "delivery": mp_contracts::user_question::DELIVERY_NEXT_TURN,
+            })
+            .to_string(),
+            error: None,
+        },
         Err(status) => tool_error(format!("{} failed: {}", ask::ASK_TOOL, status.message())),
     }
 }

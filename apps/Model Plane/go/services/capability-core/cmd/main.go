@@ -180,7 +180,10 @@ func main() {
 	toolPolicyEnforced := policy.ToolPolicyEnforcedFromLookup(os.Getenv)
 	toolPolicies := api.NewToolPoliciesHandler(pool).WithEnforced(toolPolicyEnforced)
 	browserAgentPolicyEnforced := policy.BrowserAgentPolicyEnforcedFromLookup(os.Getenv)
-	slog.Info("tool policies", "enforced", toolPolicyEnforced, "browser_agent_enforced", browserAgentPolicyEnforced)
+	// WS13 S7: audit every use of a stored allow on a persistent run, and keep a run that did not state its
+	// posture off a person's allow. Inert unless TOOL_POLICY_RULE_AUDIT_ENABLED is the literal true.
+	ruleAuditOn := policy.ToolPolicyRuleAuditFromLookup(os.Getenv)
+	slog.Info("tool policies", "enforced", toolPolicyEnforced, "browser_agent_enforced", browserAgentPolicyEnforced, "rule_audit", ruleAuditOn)
 	// WS25-S9: the org's extension allow-list, read from the same agent policy the policy API serves. Inert unless
 	// ORG_EXTENSION_ALLOWLIST is the literal true.
 	orgExtensionsEnforced := policy.OrgExtensionAllowListFromLookup(os.Getenv)
@@ -413,6 +416,13 @@ func main() {
 		}
 	}
 
+	// WS13 S7 (K3-10): one content-free tool_policy_rule_expired audit row per lapsed allow. Runs only while
+	// TOOL_POLICY_RULE_AUDIT_ENABLED is the literal true (ruleAuditOn); off, no sweeper exists.
+	if ruleAuditOn {
+		go api.NewToolPolicyExpirySweeper(pool).Start(ctx)
+		slog.Info("tool policy expiry sweeper started")
+	}
+
 	// EP-7 W4-F T2: the event trigger fire path (the webhook_received consumer and the fire sweeper). Strict
 	// literal true; off by default. It needs the same fresh Control authorizer as the cron sweeper.
 	if os.Getenv("EVENT_TRIGGER_FIRE_ENABLED") == "true" {
@@ -541,7 +551,8 @@ func main() {
 		WithSkillBundles(skillbundle.NewStore(pool), api.SkillBundlesAPIFromLookup(os.Getenv)).
 		WithDeckTemplates(skillbundle.DeckTemplatesFromLookup(os.Getenv)).
 		WithSkillBundleRetention(skillbundle.RetentionFromLookup(os.Getenv)).
-		WithPermissionRules(api.NewPermissionRuleStore(pool), permissionRulesOn)
+		WithPermissionRules(api.NewPermissionRuleStore(pool), permissionRulesOn).
+		WithRuleAudit(toolPolicies, ruleAuditOn)
 	if lettaToolSearcher != nil {
 		capSrv.WithLettaToolSearcher(lettaToolSearcher)
 	}

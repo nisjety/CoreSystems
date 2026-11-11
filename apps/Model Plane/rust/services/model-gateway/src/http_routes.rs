@@ -614,6 +614,18 @@ fn orchestration_routes() -> Router<AppState> {
             "/v1/orchestration/approval-grants/:grant_id",
             delete(revoke_approval_grant),
         )
+        // The "Always allow this tool" proposals of the caller (build plan WS13 S7). The list and
+        // the dismiss are served whatever APPROVAL_RULE_PROPOSALS_ENABLED says, so a proposal made
+        // while it was on can still be seen and removed; only the confirm needs it.
+        .route("/v1/orchestration/rule-proposals", get(list_rule_proposals))
+        .route(
+            "/v1/orchestration/rule-proposals/:proposal_id/confirm",
+            post(confirm_rule_proposal),
+        )
+        .route(
+            "/v1/orchestration/rule-proposals/:proposal_id/dismiss",
+            post(dismiss_rule_proposal),
+        )
         .route(
             "/v1/orchestration/questions/:question_id/answer",
             post(answer_run_question),
@@ -3494,18 +3506,6 @@ fn approval_scope_code(scope: &str) -> i32 {
     }
 }
 
-/// The environment switch for "Always" as a reviewed rule (build plan WS13 S7). Default off; only
-/// the literal `true` enables it, read through the one strict parser the other switches share.
-const RULE_PROPOSALS_ENV: &str = "APPROVAL_RULE_PROPOSALS_ENABLED";
-
-fn rule_proposals_from(value: Option<&str>) -> bool {
-    mp_contracts::loop_fold::switch_from(value)
-}
-
-fn rule_proposals_enabled() -> bool {
-    rule_proposals_from(env::var(RULE_PROPOSALS_ENV).ok().as_deref())
-}
-
 /// Whether a decision is "Always" (build plan WS13 S7): a standing rule proposed from this grant,
 /// for the person to confirm in settings. Returns `true` only for a valid ask under the switch; with
 /// the switch off `promote` is ignored. A rule is proposed from a grant of this thread on an MCP
@@ -3707,7 +3707,7 @@ async fn decide_approval(
         prior_approval
             .as_ref()
             .and_then(|approval| approval.cause.as_ref()),
-        rule_proposals_enabled(),
+        approval_cause::rule_proposals_enabled(),
     )?;
     let step_up_claim = step_up.and_then(|Extension(VerifiedStepUp(claim))| claim);
     if step_up_missing(
@@ -3926,6 +3926,355 @@ async fn revoke_approval_grant(
         .ok_or_else(|| not_found("approval grant not found"))?;
     Ok(Json(
         json!({ "data": { "grant": approval_grant_value(&grant) } }),
+    ))
+}
+
+/// The longest rule proposal id the proposal routes accept.
+const RULE_PROPOSAL_ID_MAX_LEN: usize = 128;
+
+/// The 400 answer for a rule proposal id that is not one of ours.
+fn invalid_proposal_id() -> HttpJsonError {
+    scope_refusal(
+        StatusCode::BAD_REQUEST,
+        "invalid_proposal_id",
+        "proposal_id must start with arp_ and be at most 128 characters",
+    )
+}
+
+/// A proposal id in a route path starts with `arp_` and is at most 128 characters.
+fn checked_rule_proposal_id(proposal_id: &str) -> Result<(), HttpJsonError> {
+    if proposal_id.starts_with("arp_") && proposal_id.chars().count() <= RULE_PROPOSAL_ID_MAX_LEN {
+        Ok(())
+    } else {
+        Err(invalid_proposal_id())
+    }
+}
+
+/// Whether a request body is the body a proposal action takes: empty, or a JSON object with no
+/// keys. Nothing else is read, so a client can never name the capability, the digest, the scope or
+/// the expiry of the rule a confirm writes (build plan WS13 S7, D-WS13-2).
+fn empty_action_body(body: &[u8]) -> bool {
+    body.is_empty()
+        || matches!(
+            serde_json::from_slice::<Value>(body),
+            Ok(Value::Object(fields)) if fields.is_empty()
+        )
+}
+
+/// The 400 answer for a proposal action whose body is not empty.
+fn require_empty_action_body(body: &[u8]) -> Result<(), HttpJsonError> {
+    if empty_action_body(body) {
+        Ok(())
+    } else {
+        Err(scope_refusal(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "The request body must be empty.",
+        ))
+    }
+}
+
+/// The body of the rule a confirm writes in capability-core: a user-scope allow pinned to the
+/// definition digest the person reviewed. It names nothing else, so the lapse is capability-core's
+/// own default (build plan K3-10).
+fn rule_confirm_body(digest: &str) -> Value {
+    json!({
+        "scope": "user",
+        "decision": "allow",
+        "pinned_digest": digest,
+        "reason": "",
+    })
+}
+
+/// The part of a rule proposal its owner may read: ids, a digest and a closed state word, never an
+/// argument value. A proposal a confirm holds (CONFIRMING) reads as proposed, the claim being
+/// server-internal.
+fn approval_rule_proposal_value(
+    proposal: &mp_contracts::model_plane::v1::ApprovalRuleProposal,
+) -> Value {
+    use mp_contracts::model_plane::v1::ApprovalRuleProposalState as ProposalState;
+    let state = match ProposalState::try_from(proposal.state) {
+        Ok(ProposalState::Confirmed) => "confirmed",
+        Ok(ProposalState::Dismissed) => "dismissed",
+        _ => "proposed",
+    };
+    json!({
+        "id": proposal.id,
+        "tool_name": proposal.tool_name,
+        "tool_digest": proposal.tool_digest,
+        "capability_id": empty_to_null(&proposal.capability_id),
+        "state": state,
+        "created_at": optional_timestamp_value(proposal.created_at.as_ref()),
+        "resolved_at": optional_timestamp_value(proposal.resolved_at.as_ref()),
+    })
+}
+
+/// A rule-proposal gRPC refusal as the HTTP answer: Session Core's closed failed-precondition
+/// messages keep their code (409, or 404 for a disabled switch), a missing proposal is a 404
+/// `rule_proposal_not_found`, and anything else goes through [`grpc_status_to_http`] (a waiver
+/// refusal keeps its typed body).
+fn rule_proposal_status_to_http(error: &tonic::Status) -> HttpJsonError {
+    match (error.code(), error.message()) {
+        (tonic::Code::FailedPrecondition, "rule_proposal_resolved") => scope_refusal(
+            StatusCode::CONFLICT,
+            "rule_proposal_resolved",
+            "The proposal is already resolved.",
+        ),
+        (tonic::Code::FailedPrecondition, "rule_proposal_stale") => scope_refusal(
+            StatusCode::CONFLICT,
+            "rule_proposal_stale",
+            "The proposal names no capability and cannot be confirmed.",
+        ),
+        (tonic::Code::FailedPrecondition, "rule_proposal_busy") => scope_refusal(
+            StatusCode::CONFLICT,
+            "rule_proposal_busy",
+            "A confirm holds the proposal; try again shortly.",
+        ),
+        (tonic::Code::FailedPrecondition, "rule_proposal_not_claimed") => scope_refusal(
+            StatusCode::CONFLICT,
+            "rule_proposal_not_claimed",
+            "The proposal was not claimed by a confirm.",
+        ),
+        (tonic::Code::FailedPrecondition, "rule_proposals_disabled") => rule_proposals_disabled(),
+        (tonic::Code::NotFound, _) => scope_refusal(
+            StatusCode::NOT_FOUND,
+            "rule_proposal_not_found",
+            "Rule proposal not found.",
+        ),
+        _ => grpc_status_to_http(error),
+    }
+}
+
+/// The 404 answer of a confirm while rule proposals are off.
+fn rule_proposals_disabled() -> HttpJsonError {
+    scope_refusal(
+        StatusCode::NOT_FOUND,
+        "rule_proposals_disabled",
+        "Rule proposals are not enabled.",
+    )
+}
+
+/// The 503 answer of a confirm whose rule is written but whose proposal is not yet marked
+/// confirmed. A retry is safe: the claim is re-taken by its owner, the rule is updated in place,
+/// and the resolve then succeeds.
+fn rule_confirm_incomplete(status: StatusCode) -> HttpJsonError {
+    scope_refusal(
+        status,
+        "rule_confirm_incomplete",
+        "The rule was written but the proposal was not marked confirmed; retry the confirm.",
+    )
+}
+
+/// Moves one of the caller's rule proposals to `resolution` in Session Core, with the caller's own
+/// session bearer. `policy_id` is set with a CONFIRMED resolution only.
+async fn resolve_rule_proposal_upstream(
+    state: &AppState,
+    claims: &Claims,
+    session_bearer: &VerifiedModelBearer,
+    proposal_id: &str,
+    resolution: mp_contracts::model_plane::v1::ApprovalRuleProposalState,
+    policy_id: &str,
+) -> Result<mp_contracts::model_plane::v1::ApprovalRuleProposal, HttpJsonError> {
+    let response = state
+        .approval_rule_proposal_client
+        .clone()
+        .resolve_approval_rule_proposal(authenticated_session_request(
+            mp_contracts::model_plane::v1::ResolveApprovalRuleProposalRequest {
+                org_id: claims.org_id.clone(),
+                proposal_id: proposal_id.to_owned(),
+                resolution: resolution as i32,
+                policy_id: policy_id.to_owned(),
+            },
+            session_bearer,
+        )?)
+        .await
+        .map_err(|error| rule_proposal_status_to_http(&error))?
+        .into_inner();
+    response.proposal.ok_or_else(|| {
+        scope_refusal(
+            StatusCode::NOT_FOUND,
+            "rule_proposal_not_found",
+            "Rule proposal not found.",
+        )
+    })
+}
+
+/// `GET /v1/orchestration/rule-proposals`: the caller's own open "Always allow this tool"
+/// proposals (build plan WS13 S7). Served whatever APPROVAL_RULE_PROPOSALS_ENABLED says, so a
+/// proposal made while it was on can still be seen and removed. A ZDR credential holds none and
+/// gets an empty list with no upstream call. The org comes from the claims; Session Core owns the
+/// owner binding.
+async fn list_rule_proposals(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    session_bearer: VerifiedModelBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    match grants_list_posture(&claims) {
+        ListPosture::Empty => return Ok(Json(json!({ "data": { "proposals": [] } }))),
+        ListPosture::Refused(refusal) => return Err(refusal),
+        ListPosture::Upstream => {}
+    }
+    let response = state
+        .approval_rule_proposal_client
+        .clone()
+        .list_approval_rule_proposals(authenticated_session_request(
+            mp_contracts::model_plane::v1::ListApprovalRuleProposalsRequest {
+                org_id: claims.org_id.clone(),
+            },
+            &session_bearer,
+        )?)
+        .await
+        .map_err(|error| rule_proposal_status_to_http(&error))?
+        .into_inner();
+    let proposals: Vec<Value> = response
+        .proposals
+        .iter()
+        .map(approval_rule_proposal_value)
+        .collect();
+    Ok(Json(json!({ "data": { "proposals": proposals } })))
+}
+
+/// `POST /v1/orchestration/rule-proposals/:proposal_id/confirm`: turns a proposal into a standing
+/// allow rule (build plan WS13 S7, D-WS13-2). The gateway runs the confirm because the capability
+/// id and the digest come from the proposal Session Core holds, never from the client: the body
+/// must be empty. A claimed three-step saga, every step idempotent: (a) Session Core claims the
+/// proposal (CONFIRMING) and returns it, a CONFIRMED one being a replay; (b) the rule is written
+/// through Capability Core's tool-policy PUT, which stays the enforcing owner (it refuses unless
+/// the capability still carries the digest the person reviewed); (c) Session Core records the
+/// policy id (CONFIRMED). A ZDR or waived credential is refused first; with the switch off the
+/// route answers 404 before any upstream call.
+async fn confirm_rule_proposal(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    session_bearer: VerifiedModelBearer,
+    capability_bearer: VerifiedCapabilityBearer,
+    Path(proposal_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ApprovalRuleProposalState as ProposalState;
+    require_non_zdr_durable_mutation(&claims)?;
+    checked_rule_proposal_id(&proposal_id)?;
+    require_empty_action_body(&body)?;
+    if !approval_cause::rule_proposals_enabled() {
+        return Err(rule_proposals_disabled());
+    }
+
+    // (a) Claim the proposal and read the capability id and digest from the server's own record.
+    let proposal = resolve_rule_proposal_upstream(
+        &state,
+        &claims,
+        &session_bearer,
+        &proposal_id,
+        ProposalState::Confirming,
+        "",
+    )
+    .await?;
+    if matches!(
+        ProposalState::try_from(proposal.state),
+        Ok(ProposalState::Confirmed)
+    ) {
+        // A replay: the rule was written and recorded by an earlier confirm.
+        return Ok(Json(json!({ "data": {
+            "proposal": approval_rule_proposal_value(&proposal),
+            "rule": {
+                "policy_id": proposal.policy_id,
+                "capability_id": proposal.capability_id,
+                "expires_at": Value::Null,
+            },
+        } })));
+    }
+    if !is_registry_identifier(&proposal.capability_id) {
+        // Session Core refuses a proposal that names no capability; a malformed one is never put
+        // into a path.
+        return Err(scope_refusal(
+            StatusCode::CONFLICT,
+            "rule_proposal_stale",
+            "The proposal names no capability and cannot be confirmed.",
+        ));
+    }
+
+    // (b) Write the rule. Capability Core's refusals (409 the pinned definition changed, 422 class
+    // not relaxable, 403 ZDR writer) are returned unchanged and the claim stays, so a retry
+    // reclaims it.
+    let written = proxy_to_capability_core(
+        &state,
+        &claims,
+        &capability_bearer,
+        &format!("tool-policies/{}", proposal.capability_id),
+        "PUT",
+        Some(&rule_confirm_body(&proposal.tool_digest)),
+    )
+    .await?;
+    let policy_id = written
+        .0
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| id.starts_with("tpol_"))
+        .map(str::to_owned)
+        .ok_or_else(|| rule_confirm_incomplete(StatusCode::BAD_GATEWAY))?;
+    let expires_at = written
+        .0
+        .get("expires_at")
+        .and_then(Value::as_str)
+        .map_or(Value::Null, |at| Value::String(at.to_owned()));
+
+    // (c) Record the policy id. A failure here leaves a written rule behind a claimed proposal; a
+    // retry is safe and a dismiss cannot land first (Session Core holds it for 60 s).
+    let confirmed = match resolve_rule_proposal_upstream(
+        &state,
+        &claims,
+        &session_bearer,
+        &proposal_id,
+        ProposalState::Confirmed,
+        &policy_id,
+    )
+    .await
+    {
+        Ok(confirmed) => confirmed,
+        Err(refusal) => {
+            warn!(
+                proposal_id = %proposal_id,
+                status = %refusal.0,
+                "rule written but the proposal was not marked confirmed"
+            );
+            return Err(rule_confirm_incomplete(StatusCode::SERVICE_UNAVAILABLE));
+        }
+    };
+    Ok(Json(json!({ "data": {
+        "proposal": approval_rule_proposal_value(&confirmed),
+        "rule": {
+            "policy_id": policy_id,
+            "capability_id": proposal.capability_id,
+            "expires_at": expires_at,
+        },
+    } })))
+}
+
+/// `POST /v1/orchestration/rule-proposals/:proposal_id/dismiss`: removes one of the caller's
+/// proposals (build plan WS13 S7). It narrows authority, so it works with the switch off; Session
+/// Core refuses it while a confirm holds the proposal. A ZDR or waived credential is refused
+/// first, and the body must be empty.
+async fn dismiss_rule_proposal(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    session_bearer: VerifiedModelBearer,
+    Path(proposal_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&claims)?;
+    checked_rule_proposal_id(&proposal_id)?;
+    require_empty_action_body(&body)?;
+    let proposal = resolve_rule_proposal_upstream(
+        &state,
+        &claims,
+        &session_bearer,
+        &proposal_id,
+        mp_contracts::model_plane::v1::ApprovalRuleProposalState::Dismissed,
+        "",
+    )
+    .await?;
+    Ok(Json(
+        json!({ "data": { "proposal": approval_rule_proposal_value(&proposal) } }),
     ))
 }
 
@@ -10502,6 +10851,11 @@ fn approval_cause_value(cause: &ApprovalCause) -> Value {
         "host": empty_to_null(&cause.host),
         "scope_options": offered_scope_options(cause),
         "step_up_required": step_up_projected(cause, ApprovalStepUpGate::from_env()),
+        // Always is offered exactly when the decide route would accept `promote` (build plan WS13
+        // S7): both switches on and a pinned MCP pause that a confirmed rule lifts.
+        "rule_offered": approval_cause::rule_proposals_enabled()
+            && approval_cause::scope_grants_enabled()
+            && approval_cause::rule_offered(cause),
     })
 }
 
@@ -10872,10 +11226,10 @@ mod approval_rule_tests {
 
     #[test]
     fn promote_is_ignored_while_the_switch_is_off_and_only_the_literal_true_asks() {
-        assert!(!rule_proposals_from(None));
-        assert!(!rule_proposals_from(Some("1")));
-        assert!(!rule_proposals_from(Some("yes")));
-        assert!(rule_proposals_from(Some(" TRUE ")));
+        assert!(!approval_cause::rule_proposals_from(None));
+        assert!(!approval_cause::rule_proposals_from(Some("1")));
+        assert!(!approval_cause::rule_proposals_from(Some("yes")));
+        assert!(approval_cause::rule_proposals_from(Some(" TRUE ")));
         let literal: DecideApprovalBody = serde_json::from_value(json!({
             "decision": "approve",
             "promote": true,

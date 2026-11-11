@@ -151,6 +151,11 @@ type Entry struct {
 	// priority-tier multiplier, and the entry is stored with the resulting
 	// cost. It is not a ledger column and carries no content.
 	PriorityTier bool
+	// ZDR marks the content-free spend row of a zero-data-retention turn (FU-30):
+	// ids, token counts and an amount, admitted by cost-core by its ZDR_SPEND kind
+	// and stored with this mark so a reader can tell it from an ordinary row. It is
+	// false for every other entry.
+	ZDR bool
 }
 
 // ValidateEntry rejects values that can poison aggregates, overflow durable

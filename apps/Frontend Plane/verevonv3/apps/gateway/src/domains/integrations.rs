@@ -20,7 +20,8 @@ use axum::{
 use crate::{config::AppState, middleware::require_session};
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
-    Router::new()
+    let zdr_waiver_ui_enabled = state.zdr_waiver_ui_enabled;
+    let router = Router::new()
         // Model subscriptions. These are separate from source integrations:
         // they establish a credential-free browser device flow for Model Plane.
         .route(
@@ -149,6 +150,32 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/integrations/profile",
             get(profile::integration_profile),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(state, require_session))
+        );
+    // ZDR assessment and acknowledgement (Z-19c): Integration Core owns the record, so these forward the caller's
+    // own bearer and answer with its envelope. Mounted only while `ZDR_WAIVER_UI_ENABLED` is the literal `true`
+    // (read once into `AppState`); off, they are not mounted and answer 404. The static `zdr-acknowledgements`
+    // path comes before the `{connection_id}` routes.
+    let router = if zdr_waiver_ui_enabled {
+        router
+            .route(
+                "/api/v1/model-connections/zdr-acknowledgements",
+                get(model_connections::list_zdr_acknowledgements),
+            )
+            .route(
+                "/api/v1/model-connections/{connection_id}/zdr",
+                get(model_connections::get_zdr_assessment),
+            )
+            .route(
+                "/api/v1/model-connections/{connection_id}/zdr-acknowledgement",
+                post(model_connections::acknowledge_zdr)
+                    .layer(axum::extract::DefaultBodyLimit::max(8 * 1024)),
+            )
+            .route(
+                "/api/v1/model-connections/{connection_id}/zdr-acknowledgement",
+                delete(model_connections::withdraw_zdr_acknowledgement),
+            )
+    } else {
+        router
+    };
+    router.route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }

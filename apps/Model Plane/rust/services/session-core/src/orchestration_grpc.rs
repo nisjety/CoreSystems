@@ -19,6 +19,7 @@ use futures::{Stream, StreamExt};
 use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
     self as proto,
+    approval_rule_proposal_service_server::ApprovalRuleProposalService,
     approval_scope_grant_service_server::ApprovalScopeGrantService,
     run_question_consume_service_server::RunQuestionConsumeService,
     orchestration_core_service_server::{OrchestrationCoreService, OrchestrationCoreServiceServer},
@@ -526,6 +527,110 @@ fn approval_scope_grant_proto(row: &store::ApprovalScopeGrantRow) -> proto::Appr
         revoked_at: row.revoked_at.map(ts),
         use_count: row.use_count,
         last_used_at: row.last_used_at.map(ts),
+    }
+}
+
+/// The enum value of a stored rule-proposal state word. An unknown word reads as UNSPECIFIED.
+fn approval_rule_proposal_state_from_str(name: &str) -> i32 {
+    let state = match name {
+        "proposed" => proto::ApprovalRuleProposalState::Proposed,
+        "confirming" => proto::ApprovalRuleProposalState::Confirming,
+        "confirmed" => proto::ApprovalRuleProposalState::Confirmed,
+        "dismissed" => proto::ApprovalRuleProposalState::Dismissed,
+        _ => proto::ApprovalRuleProposalState::Unspecified,
+    };
+    state as i32
+}
+
+/// The owner's view of one "Always" rule proposal (build plan WS13 S7). Ids, a digest and closed
+/// words, never an argument.
+fn approval_rule_proposal_proto(
+    row: &store::ApprovalRuleProposalRow,
+) -> proto::ApprovalRuleProposal {
+    proto::ApprovalRuleProposal {
+        id: row.id.clone(),
+        tool_name: row.tool_name.clone(),
+        tool_digest: row.tool_digest.clone(),
+        capability_id: row.capability_id.clone(),
+        state: approval_rule_proposal_state_from_str(&row.state),
+        created_from_approval_id: row.created_from_approval_id.clone(),
+        created_at: Some(ts(row.created_at)),
+        resolved_at: row.resolved_at.map(ts),
+        policy_id: row.policy_id.clone(),
+    }
+}
+
+/// Whether `policy_id` is a capability-core tool-policy id: `tpol_` and 1 to 100 characters of
+/// letters, digits and `-`.
+fn is_tool_policy_id(policy_id: &str) -> bool {
+    policy_id.strip_prefix("tpol_").is_some_and(|rest| {
+        (1..=100).contains(&rest.len())
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
+}
+
+/// The store resolution a `ResolveApprovalRuleProposal` asks for. Only CONFIRMING, CONFIRMED and
+/// DISMISSED are resolutions. CONFIRMING and DISMISSED carry no policy id, and CONFIRMED carries a
+/// capability-core one.
+#[allow(clippy::result_large_err)]
+fn rule_proposal_resolution(
+    resolution: i32,
+    policy_id: &str,
+) -> Result<store::RuleProposalResolution<'_>, Status> {
+    let state = proto::ApprovalRuleProposalState::try_from(resolution)
+        .map_err(|_| Status::invalid_argument("resolution is not a known state"))?;
+    match state {
+        proto::ApprovalRuleProposalState::Confirming
+        | proto::ApprovalRuleProposalState::Dismissed => {
+            if !policy_id.is_empty() {
+                return Err(Status::invalid_argument(
+                    "policy_id is only allowed with a CONFIRMED resolution",
+                ));
+            }
+            Ok(if state == proto::ApprovalRuleProposalState::Confirming {
+                store::RuleProposalResolution::Claim
+            } else {
+                store::RuleProposalResolution::Dismissed
+            })
+        }
+        proto::ApprovalRuleProposalState::Confirmed => {
+            if !is_tool_policy_id(policy_id) {
+                return Err(Status::invalid_argument(
+                    "policy_id must be a capability-core tool policy id",
+                ));
+            }
+            Ok(store::RuleProposalResolution::Confirmed { policy_id })
+        }
+        proto::ApprovalRuleProposalState::Unspecified
+        | proto::ApprovalRuleProposalState::Proposed => Err(Status::invalid_argument(
+            "resolution must be CONFIRMING, CONFIRMED or DISMISSED",
+        )),
+    }
+}
+
+/// The switch gate of a rule-proposal resolution. A confirm writes a standing allow, so CONFIRMING
+/// and CONFIRMED need the switch; DISMISSED narrows authority and works with it off, so a person
+/// can still remove a proposal made while it was on.
+#[allow(clippy::result_large_err)]
+fn rule_proposal_switch_gate(
+    resolution: store::RuleProposalResolution<'_>,
+    switch_on: bool,
+) -> Result<(), Status> {
+    if !switch_on && !matches!(resolution, store::RuleProposalResolution::Dismissed) {
+        return Err(Status::failed_precondition("rule_proposals_disabled"));
+    }
+    Ok(())
+}
+
+/// A rule-proposal store error as the status it reaches the caller as: a
+/// [`store::RuleProposalRefusal`] is a failed precondition carrying its closed code, anything else
+/// is internal.
+fn rule_proposal_status(error: &anyhow::Error) -> Status {
+    match error.downcast_ref::<store::RuleProposalRefusal>() {
+        Some(refusal) => Status::failed_precondition(refusal.code()),
+        None => Status::internal(error.to_string()),
     }
 }
 
@@ -2797,15 +2902,85 @@ struct PreparedQuestion {
     spec: JsonValue,
 }
 
+/// The environment switch for storing a question that pauses its run for an answer in that same
+/// run (build plan WS14 S5). The same name execution-core reads. Read strictly: only the literal
+/// `true` enables it.
+const ASK_RESUME_ENV: &str = "AGENT_ASK_USER_RESUME_ENABLED";
+
+#[cfg(test)]
+thread_local! {
+    /// A test's override of the resume question switch (see [`AskResumeSwitch`]).
+    static TEST_ASK_RESUME: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Holds the resume question switch at a fixed value for the current test thread, then restores it.
+#[cfg(test)]
+pub(crate) struct AskResumeSwitch;
+
+#[cfg(test)]
+impl AskResumeSwitch {
+    pub(crate) fn set(on: bool) -> Self {
+        TEST_ASK_RESUME.with(|cell| cell.set(Some(on)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for AskResumeSwitch {
+    fn drop(&mut self) {
+        TEST_ASK_RESUME.with(|cell| cell.set(None));
+    }
+}
+
+/// Whether `value` of [`ASK_RESUME_ENV`] turns the switch on: only the literal `true`; `1`, `yes`,
+/// `TRUE`, an empty value and an unset one are all off.
+fn ask_resume_switch(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// Whether `CreateRunQuestion` stores a `resume` question. Read once per process from
+/// [`ASK_RESUME_ENV`]; off, a resume question is refused `question_delivery_unavailable` as before.
+fn ask_resume_store_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = TEST_ASK_RESUME.with(std::cell::Cell::get) {
+        return forced;
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| ask_resume_switch(std::env::var(ASK_RESUME_ENV).ok().as_deref()))
+}
+
+/// Check that a resume question names its input pause: the step is set and the idempotency key is
+/// the namespaced input reference of this run and step. An approval pause's reference
+/// (`{run_id}:{step_id}`) and a `next_turn` key never match, so a resume question can be tied only to
+/// an input pause fold. Pure.
+#[allow(clippy::result_large_err)]
+fn require_input_pause_ref(
+    req: &proto::CreateRunQuestionRequest,
+    origin: &str,
+) -> Result<(), Status> {
+    let expected = user_question::input_pause_ref(&req.run_id, &req.step_id, origin);
+    if req.step_id.is_empty()
+        || req.idempotency_key != expected
+        || !user_question::is_input_pause_ref(&req.idempotency_key)
+    {
+        return Err(Status::invalid_argument("question_pause_ref_mismatch"));
+    }
+    Ok(())
+}
+
 /// Validate a create request's own fields and shape them for the store. Pure, so every refusal is
 /// tested without a database.
 ///
-/// `resume` is a delivery the schema holds but nothing serves yet, so it is refused here rather
-/// than stored as a question that no later step would pick up.
+/// `resume` is accepted only while `AGENT_ASK_USER_RESUME_ENABLED` is on (`ask_resume_store_enabled`);
+/// with it off it is refused here rather than stored as a question that no later step would pick up.
+/// The handler then ties an accepted resume question to its paused input fold.
 #[allow(clippy::result_large_err)]
 fn prepare_question(req: &proto::CreateRunQuestionRequest) -> Result<PreparedQuestion, Status> {
     let delivery = match req.delivery.as_str() {
         "" | user_question::DELIVERY_NEXT_TURN => user_question::DELIVERY_NEXT_TURN,
+        user_question::DELIVERY_RESUME if ask_resume_store_enabled() => {
+            user_question::DELIVERY_RESUME
+        }
         user_question::DELIVERY_RESUME => {
             return Err(Status::invalid_argument("question_delivery_unavailable"));
         }
@@ -2927,6 +3102,9 @@ fn consume_question_response(
         }
         store::ConsumedRunQuestion::Expired => {
             return Err(Status::failed_precondition("question_expired"));
+        }
+        store::ConsumedRunQuestion::RunEnded => {
+            return Err(Status::failed_precondition("question_run_ended"));
         }
         store::ConsumedRunQuestion::NotFound => {
             return Err(Status::not_found("question_not_found"));
@@ -3117,6 +3295,99 @@ impl ApprovalScopeGrantService for OrchestrationGrpc {
         }
         .await;
         record_metrics("revoke_approval_scope_grant", started, result.is_ok());
+        result
+    }
+}
+
+/// The owner's "Always" rule proposals (build plan WS13 S7). Session-core owns the proposals;
+/// model-gateway orchestrates a confirm and hands back the capability-core policy id. Every call
+/// acts for the verified owner and the org, and none is model-executable.
+#[tonic::async_trait]
+impl ApprovalRuleProposalService for OrchestrationGrpc {
+    async fn list_approval_rule_proposals(
+        &self,
+        request: Request<proto::ListApprovalRuleProposalsRequest>,
+    ) -> Result<Response<proto::ListApprovalRuleProposalsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ListApprovalRuleProposalsResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "approval:grant_manage")?;
+            let req = request.into_inner();
+            let owner = grant_owner(&caller, &req.org_id)?;
+            let rows = store::list_open_rule_proposals(&self.pool, &req.org_id, &owner)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            Ok(Response::new(proto::ListApprovalRuleProposalsResponse {
+                proposals: rows.iter().map(approval_rule_proposal_proto).collect(),
+            }))
+        }
+        .await;
+        record_metrics("list_approval_rule_proposals", started, result.is_ok());
+        result
+    }
+
+    async fn get_approval_rule_proposal(
+        &self,
+        request: Request<proto::GetApprovalRuleProposalRequest>,
+    ) -> Result<Response<proto::GetApprovalRuleProposalResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::GetApprovalRuleProposalResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "approval:grant_manage")?;
+            let req = request.into_inner();
+            let owner = grant_owner(&caller, &req.org_id)?;
+            if req.proposal_id.is_empty() {
+                return Err(Status::invalid_argument("proposal_id is required"));
+            }
+            let row = store::get_rule_proposal(&self.pool, &req.org_id, &owner, &req.proposal_id)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?
+                .ok_or_else(|| Status::not_found("rule_proposal_not_found"))?;
+            Ok(Response::new(proto::GetApprovalRuleProposalResponse {
+                proposal: Some(approval_rule_proposal_proto(&row)),
+            }))
+        }
+        .await;
+        record_metrics("get_approval_rule_proposal", started, result.is_ok());
+        result
+    }
+
+    async fn resolve_approval_rule_proposal(
+        &self,
+        request: Request<proto::ResolveApprovalRuleProposalRequest>,
+    ) -> Result<Response<proto::ResolveApprovalRuleProposalResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ResolveApprovalRuleProposalResponse>, Status> = async {
+            let caller = identity(&request)?;
+            // A resolution is a durable write, so a ZDR credential never reaches it and a waived
+            // one does not either (DEC-32). Decided before anything is read.
+            refuse_zdr_or_waived_question_caller(&caller)?;
+            authorize_operation(&caller, "approval:grant_manage")?;
+            let req = request.into_inner();
+            let owner = grant_owner(&caller, &req.org_id)?;
+            if req.proposal_id.is_empty() {
+                return Err(Status::invalid_argument("proposal_id is required"));
+            }
+            let resolution = rule_proposal_resolution(req.resolution, &req.policy_id)?;
+            rule_proposal_switch_gate(resolution, approval_cause::rule_proposals_enabled())?;
+            let row = store::resolve_rule_proposal(
+                &self.pool,
+                &req.org_id,
+                &owner,
+                &req.proposal_id,
+                resolution,
+            )
+            .await
+            .map_err(|error| rule_proposal_status(&error))?
+            .ok_or_else(|| Status::not_found("rule_proposal_not_found"))?;
+            Ok(Response::new(proto::ResolveApprovalRuleProposalResponse {
+                proposal: Some(approval_rule_proposal_proto(&row)),
+            }))
+        }
+        .await;
+        record_metrics("resolve_approval_rule_proposal", started, result.is_ok());
         result
     }
 }
@@ -4259,6 +4530,12 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &retention_receipt::stored_run_retention(&self.pool, &req.run_id).await?,
             )?;
             let prepared = prepare_question(&req)?;
+            // A resume question is stored only behind its paused input fold, named by the
+            // namespaced input reference, which an approval fold's reference never equals.
+            let require_paused_fold = prepared.delivery == user_question::DELIVERY_RESUME;
+            if require_paused_fold {
+                require_input_pause_ref(&req, origin)?;
+            }
 
             let id = format!("q_{}", mp_ids::new_ulid());
             let created = store::create_run_question(
@@ -4278,6 +4555,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     // `question_origin` refused a label on a model question, so this is empty
                     // there and the server's checked name otherwise.
                     origin_label: &req.origin_label,
+                    require_paused_fold,
                 },
                 user_question::MAX_QUESTIONS_PER_RUN,
             )
@@ -4296,6 +4574,9 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 }
                 store::CreatedRunQuestion::KeyInUse => {
                     return Err(Status::already_exists("question_key_in_use"));
+                }
+                store::CreatedRunQuestion::PauseMissing => {
+                    return Err(Status::failed_precondition("question_pause_missing"));
                 }
             };
             Ok(Response::new(proto::CreateRunQuestionResponse {
@@ -7875,6 +8156,7 @@ mod tests {
             (store::ConsumedRunQuestion::NotAnswered, "question_not_answered"),
             (store::ConsumedRunQuestion::NotResumable, "question_not_resumable"),
             (store::ConsumedRunQuestion::Expired, "question_expired"),
+            (store::ConsumedRunQuestion::RunEnded, "question_run_ended"),
         ] {
             let refused = consume_question_response(outcome).expect_err("refused");
             assert_eq!(refused.message(), code);

@@ -2114,9 +2114,11 @@ async fn has_pending_approval(
 }
 
 /// Whether a `resume` question holds the run (build plan WS14 S5): one the owner may still answer, or one
-/// answered whose answer is not yet spent. Like a live approval, it keeps recovery off the run until its
-/// window closes. An unspent answer holds for the resume window of one hour from the answer (DEC-05),
-/// because the spend does not read `expires_at`.
+/// answered or skipped whose answer is not yet spent. Like a live approval, it keeps recovery off the run
+/// until its window closes. An unspent answer (a skip is spendable too) holds for the resume window from
+/// the answer ([`mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS`], DEC-05), because the spend does
+/// not read `expires_at`. The spend reads the same window under the same run row lock, so the hold and
+/// the spend agree on when an answer lapses.
 async fn has_pending_resume_question(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &str,
@@ -2126,19 +2128,21 @@ async fn has_pending_resume_question(
              SELECT 1 FROM run_questions AS q
              WHERE q.run_id = $1 AND q.delivery = 'resume'
                AND ((q.state = 'requested' AND q.expires_at > now())
-                    OR (q.state = 'answered' AND q.consumed_at IS NULL
-                        AND q.answered_at > now() - interval '1 hour'))
+                    OR (q.state IN ('answered', 'skipped') AND q.consumed_at IS NULL
+                        AND q.answered_at > now() - make_interval(secs => $2)))
          )",
     )
     .bind(run_id)
+    .bind(f64::from(mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS))
     .fetch_one(&mut **transaction)
     .await
     .map_err(database_error)
 }
 
-/// Whether a `resume` question of the run lapsed unanswered: its window closed while it was still
-/// requested, or a read has already marked it expired. Such a run ends as question_expired, because
-/// the cause is known, rather than as an unknown outcome.
+/// Whether a `resume` question of the run lapsed: its window closed while it was still requested, a read
+/// has already marked it expired, or it was answered (or skipped) and the answer was never spent within the
+/// resume window. Such a run ends as question_expired, because the cause is known, rather than as an
+/// unknown outcome (D2-1168).
 async fn expired_resume_question(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &str,
@@ -2147,10 +2151,14 @@ async fn expired_resume_question(
         "SELECT EXISTS(
              SELECT 1 FROM run_questions AS q
              WHERE q.run_id = $1 AND q.delivery = 'resume'
-               AND (q.state = 'expired' OR (q.state = 'requested' AND q.expires_at <= now()))
+               AND (q.state = 'expired'
+                    OR (q.state = 'requested' AND q.expires_at <= now())
+                    OR (q.state IN ('answered', 'skipped') AND q.consumed_at IS NULL
+                        AND q.answered_at <= now() - make_interval(secs => $2)))
          )",
     )
     .bind(run_id)
+    .bind(f64::from(mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS))
     .fetch_one(&mut **transaction)
     .await
     .map_err(database_error)
@@ -3426,6 +3434,43 @@ mod resume_question_db_tests {
         let (state, failure) = obligation(&pool, &run_id).await;
         assert_eq!(state, "applied", "a known cause is applied, not left for reconciliation");
         assert_eq!(failure.as_deref(), Some(QUESTION_EXPIRED_FAILURE_CODE));
+    }
+
+    /// D2-1168, extended (build plan WS14 S5 b1): an answer or a skip that was never spent inside the
+    /// resume window ends its run as question_expired, with a known cause, not as outcome_unknown.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn an_answered_resume_question_never_spent_in_its_window_ends_its_run_as_question_expired() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        for (tag, state) in [("lapsedans", "answered"), ("lapsedskip", "skipped")] {
+            let run_id = run_with_resume_question(&pool, tag, chrono::Duration::hours(1)).await;
+            sqlx::query(
+                "UPDATE run_questions
+                    SET state = $4, answers = $2, answers_digest = $3,
+                        answered_at = now() - make_interval(secs => $5)
+                  WHERE run_id = $1",
+            )
+            .bind(&run_id)
+            .bind(serde_json::json!([]))
+            .bind(format!("{:0>64}", "answer"))
+            .bind(state)
+            .bind(f64::from(mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS) + 60.0)
+            .execute(&pool)
+            .await
+            .expect("answered past the window");
+            isolate(&pool, &run_id).await;
+            assert_eq!(
+                recover_due_terminalizations(&pool).await.expect("pass"),
+                1,
+                "{state}: exactly this run is recovered"
+            );
+            assert_eq!(run_status(&pool, &run_id).await, "failed", "{state}");
+            let (obligation_state, failure) = obligation(&pool, &run_id).await;
+            assert_eq!(obligation_state, "applied", "{state}: a known cause is applied");
+            assert_eq!(failure.as_deref(), Some(QUESTION_EXPIRED_FAILURE_CODE), "{state}");
+        }
     }
 }
 

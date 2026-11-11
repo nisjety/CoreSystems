@@ -9,6 +9,7 @@ use mp_contracts::dataplane::{
     wiki_v1::wiki_service_client::WikiServiceClient,
 };
 use mp_contracts::model_plane::v1::{
+    approval_rule_proposal_service_client::ApprovalRuleProposalServiceClient,
     approval_scope_grant_service_client::ApprovalScopeGrantServiceClient,
     artifact_revision_service_client::ArtifactRevisionServiceClient,
     browser_broker_client::BrowserBrokerClient, capability_core_client::CapabilityCoreClient,
@@ -57,7 +58,7 @@ pub enum DynPublisher {
 
 impl EventPublisher for DynPublisher {
     async fn publish(&self, subject: &str, envelope: &Envelope) -> Result<(), PublishError> {
-        if envelope.zdr {
+        if envelope.zdr && !zdr_spend_admitted(subject, envelope) {
             tracing::debug!(subject = %subject, "ZDR envelope suppressed before publisher backend");
             return Ok(());
         }
@@ -66,6 +67,38 @@ impl EventPublisher for DynPublisher {
             Self::InMemory(p) => p.publish(subject, envelope).await,
         }
     }
+}
+
+/// Whether a `zdr: true` envelope is a ZDR spend row the publisher may let through (FU-30): the
+/// content-free kind of `mp_contracts::zdr_spend`, on the usage subject of its own org, with
+/// nothing outside the allowlisted payload and no run, agent, origin or cause attached. Every
+/// other `zdr: true` envelope is still dropped. The backends call this too, so no backend drops
+/// a row this admits.
+#[must_use]
+pub(crate) fn zdr_spend_admitted(subject: &str, envelope: &Envelope) -> bool {
+    let request_id = envelope
+        .payload
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    mp_contracts::zdr_spend::admits(&envelope.event_type, &envelope.payload)
+        && subject == mp_events::subjects::usage_subject(&envelope.org_id)
+        && envelope
+            .payload
+            .get("org_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(envelope.org_id.as_str())
+        && envelope
+            .payload
+            .get("user_id")
+            .and_then(serde_json::Value::as_str)
+            == Some(envelope.user_id.as_str())
+        && envelope.correlation_id == request_id
+        && envelope.resource_ref == format!("request/{request_id}")
+        && envelope.causation_id.is_empty()
+        && envelope.agent.is_none()
+        && envelope.origin.is_none()
+        && envelope.run_id.is_none()
 }
 
 impl DynPublisher {
@@ -218,6 +251,10 @@ pub struct AppState {
     /// revokes a person's standing approval grants (build plan WS13 S6); orchestrator-core, behind
     /// `orchestration_client`, does not serve it.
     pub approval_grant_client: ApprovalScopeGrantServiceClient<Channel>,
+    /// The `ApprovalRuleProposalService` hosted by session-core, on the session endpoint. Lists,
+    /// claims, confirms and dismisses a person's "Always allow this tool" proposals (build plan
+    /// WS13 S7); orchestrator-core, behind `orchestration_client`, does not serve it.
+    pub approval_rule_proposal_client: ApprovalRuleProposalServiceClient<Channel>,
     /// execution-core (:9093). Used to resume a run after an approval is
     /// granted — the gateway is the approval decision point but does not drive
     /// the execution loop, so it signals execution-core directly.
@@ -496,6 +533,7 @@ impl AppState {
         let managed_run_channel = session_channel.clone();
         let consume_channel = session_channel.clone();
         let approval_grant_channel = session_channel.clone();
+        let approval_rule_proposal_channel = session_channel.clone();
         let orchestration_channel = lazy_static_channel("http://localhost:9080");
         let execution_channel = lazy_static_channel("http://localhost:9093");
         let sandbox_channel = lazy_static_channel("http://localhost:9094");
@@ -546,6 +584,9 @@ impl AppState {
             orchestration_client: OrchestrationCoreServiceClient::new(orchestration_channel),
             consume_client: OrchestrationCoreServiceClient::new(consume_channel),
             approval_grant_client: ApprovalScopeGrantServiceClient::new(approval_grant_channel),
+            approval_rule_proposal_client: ApprovalRuleProposalServiceClient::new(
+                approval_rule_proposal_channel,
+            ),
             execution_client: ExecutionCoreClient::new(execution_channel)
                 .max_decoding_message_size(EXECUTE_STEP_DECODE_LIMIT_BYTES),
             sandbox_client: SandboxManagerClient::new(sandbox_channel),
@@ -817,6 +858,12 @@ impl AppState {
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
         )?);
+        let approval_rule_proposal_client =
+            ApprovalRuleProposalServiceClient::new(Self::lazy_channel(
+                "SESSION_CORE_URL",
+                "SESSION_CORE_ADDR",
+                "http://localhost:9091",
+            )?);
         let orchestration_client = OrchestrationCoreServiceClient::new(Self::lazy_channel(
             "ORCHESTRATOR_CORE_URL",
             "ORCHESTRATOR_CORE_ADDR",
@@ -1050,6 +1097,7 @@ impl AppState {
             state.orchestration_client = orchestration_client;
             state.consume_client = consume_client.clone();
             state.approval_grant_client = approval_grant_client.clone();
+            state.approval_rule_proposal_client = approval_rule_proposal_client.clone();
             state.execution_client = execution_client.clone();
             state.sandbox_client = sandbox_client;
             state.browser_client = browser_client;
@@ -1129,6 +1177,7 @@ impl AppState {
             state.orchestration_client = orchestration_client;
             state.consume_client = consume_client.clone();
             state.approval_grant_client = approval_grant_client;
+            state.approval_rule_proposal_client = approval_rule_proposal_client;
             state.execution_client = execution_client;
             state.sandbox_client = sandbox_client;
             state.browser_client = browser_client;

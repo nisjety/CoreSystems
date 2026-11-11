@@ -2270,6 +2270,20 @@ async fn run_agent_with_route_parkable(
     // runs under the authority the pause retained instead (narrowed, never widened).
     if let Some(segment) = resumed.as_ref() {
         super::resume::apply_authority(&mut req, &segment.effective);
+        // The paused turn's connector selection (D2-540): a `/continue` request carries none, so
+        // the read tool the snapshot offered would be refused after the resume. Set only from the
+        // carried selection, which is never wider than the paused one. Ids are not logged.
+        if !segment.carried.connector_scope.is_empty() {
+            req.connector_scope = Some(pb::ConnectorScope {
+                connection_ids: segment.carried.connector_scope.clone(),
+            });
+        }
+        debug!(
+            run_id = %req.run_id,
+            taint_restored = segment.carried.taint,
+            connector_scope_count = segment.carried.connector_scope.len(),
+            "run_agent: resumed run restores its screening taint and connector selection"
+        );
         // A stage 1 segment makes no fold call of any kind: it writes none (its gate says
         // `resumed`) and it does not close the fold the pause saved. That fold (state
         // `paused`, its approval now consumed) is not resumable in practice, because the
@@ -2579,6 +2593,11 @@ async fn run_agent_with_route_parkable(
             pb::InferPurpose::AgentRound as i32
         },
     };
+    // A resumed run keeps the screening taint of the turn that paused (D2-354): a flagged
+    // connector read before the pause still holds egress after it.
+    if resumed.as_ref().is_some_and(|r| r.carried.taint) {
+        context.taint.mark();
+    }
     if context.browser_bearer.is_some() {
         debug!(run_id = %req.run_id, "browser bearer present");
     }
@@ -3051,6 +3070,9 @@ async fn park_at_boundary(
         authority: authority.clone(),
         prompt_digest,
         effect_ledger: ctx.effect_ledger,
+        connector_taint: ctx.taint.is_marked(),
+        connector_scope: connector_scope_of(ctx.req),
+        offered_tools: None,
     };
     let facts = super::park::ParkFacts {
         run_parkable: gate.run_parkable,
@@ -3737,6 +3759,9 @@ async fn run_rounds(
             authority: authority.clone(),
             prompt_digest: &fold_prompt_digest,
             effect_ledger: ctx.effect_ledger,
+            connector_taint: ctx.taint.is_marked(),
+            connector_scope: connector_scope_of(req),
+            offered_tools: None,
         };
         if let Err(error) = super::park::fence_parked(&mut folds, &snapshot).await {
             let refusal = runtime_loop::resume::fence_refusal(error);
@@ -4810,6 +4835,9 @@ async fn run_rounds(
                     authority: authority.clone(),
                     prompt_digest: &fold_prompt_digest,
                     effect_ledger: ctx.effect_ledger,
+                    connector_taint: ctx.taint.is_marked(),
+                    connector_scope: connector_scope_of(req),
+                    offered_tools: None,
                 },
                 Some(mp_contracts::loop_fold::RoundInFlight {
                     assistant_content: response.content.clone(),
@@ -5855,6 +5883,9 @@ async fn run_rounds(
                             authority: authority.clone(),
                             prompt_digest: &fold_prompt_digest,
                             effect_ledger: ctx.effect_ledger,
+                            connector_taint: ctx.taint.is_marked(),
+                            connector_scope: connector_scope_of(req),
+                            offered_tools: None,
                         },
                         Some(mp_contracts::loop_fold::RoundInFlight {
                             assistant_content: response.content.clone(),
@@ -6031,6 +6062,9 @@ async fn run_rounds(
                 authority: authority.clone(),
                 prompt_digest: &fold_prompt_digest,
                 effect_ledger: ctx.effect_ledger,
+                connector_taint: ctx.taint.is_marked(),
+                connector_scope: connector_scope_of(req),
+                offered_tools: None,
             };
             // A parkable run's round fold carries the route keys a crash park is refused without
             // (WS03 S8-B): the keys its park fold carries, with the parks taken so far. Any other
@@ -9880,7 +9914,7 @@ async fn pause_for_approval(
         );
         // A saved pause fold with no approval would be an orphan paused row.
         if let Some(fold) = pause_fold.as_mut() {
-            fold.close_after_failed_approval().await;
+            fold.close_after_failed_pause().await;
         }
         return Err(tonic::Status::unavailable("approval persistence unavailable"));
     }
@@ -10324,6 +10358,54 @@ struct Continuation {
     /// The authority the segment runs under: the pause's, narrowed by what the
     /// request stated. Applied to the request before the loop reads it.
     effective: mp_contracts::loop_fold::Authority,
+    /// What the paused turn knew that the request does not carry: its screening taint and its
+    /// connector selection (D2-354, D2-540). Never looser than the paused run's.
+    carried: CarriedRunState,
+}
+
+/// The run state a continuation carries over from the turn that paused or parked (D2-354,
+/// D2-540). Read from the run's own claimed fold, never from the request and never derived from
+/// tool names or transcript tags, which content can forge.
+struct CarriedRunState {
+    /// Whether the resumed run starts with its screening taint marked. An unknown taint is
+    /// marked ([`super::connector_taint_on_resume`]).
+    taint: bool,
+    /// The connection ids the resumed run is selected to: the paused turn's, never wider.
+    /// Empty selects none.
+    connector_scope: Vec<String>,
+}
+
+impl CarriedRunState {
+    /// A continuation with no fold to read (the stage-1 segment, a skipped site): taint marked
+    /// and no selection, the strictest state, until the stage-1 values are carried.
+    fn strictest() -> Self {
+        Self {
+            taint: true,
+            connector_scope: Vec::new(),
+        }
+    }
+
+    /// The state a claimed fold recorded, with the request's own selection only ever narrowing
+    /// the fold's.
+    fn from_fold(fold: &mp_contracts::loop_fold::LoopFoldV1, req: &pb::RunAgentRequest) -> Self {
+        Self::from_reads(
+            mp_contracts::loop_fold::connector_taint_in(fold),
+            mp_contracts::loop_fold::connector_scope_in(fold),
+            connector_scope_of(req),
+        )
+    }
+
+    /// [`Self::from_fold`] over the two reads, for a restore that already holds them.
+    fn from_reads(
+        taint: mp_contracts::loop_fold::TaintRead,
+        carried_scope: Option<Vec<String>>,
+        requested: &[String],
+    ) -> Self {
+        Self {
+            taint: super::connector_taint_on_resume(taint),
+            connector_scope: super::resumed_connector_scope(carried_scope, requested),
+        }
+    }
 }
 
 /// Consume the granted approval and check what it handed back.
@@ -10518,6 +10600,8 @@ fn build_segment(
         coordinator_tools: consumed.coordinator_tools,
         mode: consumed.mode,
         effective: consumed.effective,
+        // No fold is read at stage 1: the strictest state until the stage-1 values are carried.
+        carried: CarriedRunState::strictest(),
     })
 }
 
@@ -10571,6 +10655,11 @@ async fn restore_continuation(
     .await
     {
         Ok(restored) => Ok(Ok(Continuation {
+            carried: CarriedRunState::from_reads(
+                restored.taint,
+                restored.connector_scope.clone(),
+                connector_scope_of(req),
+            ),
             release: Some(release.with_edit(restored.edit.clone())),
             step_prefix: format!("s{}.", consumed.segment),
             goal: req.goal.clone(),
@@ -10698,6 +10787,7 @@ fn park_continuation(
         coordinator_tools: Vec::new(),
         mode: fold.authority.mode.clone(),
         effective,
+        carried: CarriedRunState::from_fold(fold, req),
     })
 }
 
@@ -11118,6 +11208,8 @@ fn skipped_continuation(req: &pb::RunAgentRequest, skipped: SkippedSite) -> Cont
         coordinator_tools: Vec::new(),
         mode,
         effective,
+        // A skipped site restores no fold: the strictest state.
+        carried: CarriedRunState::strictest(),
     }
 }
 
@@ -19464,6 +19556,8 @@ mod tests {
             claimed_seq: 0,
             segment: 2,
             edit: None,
+            taint: mp_contracts::loop_fold::TaintRead::Absent,
+            connector_scope: None,
         };
         let in_place = RoundSeed::InPlace(Box::new(restored));
         assert!(matches!(&in_place, RoundSeed::InPlace(restored) if restored.segment == 2));
@@ -32111,6 +32205,9 @@ mod tests {
             authority,
             prompt_digest: "digest",
             effect_ledger: true,
+            connector_taint: false,
+            connector_scope: &[],
+            offered_tools: None,
         };
         let site = runtime_loop::park::ParkSite {
             run_id: "run_test",

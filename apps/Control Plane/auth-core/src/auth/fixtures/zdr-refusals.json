@@ -1,0 +1,289 @@
+{
+  "codes": [
+    {
+      "action": "choose_another_model",
+      "code": "zdr_unavailable",
+      "message_en": "Zero data retention applies to this request, but no model deployment is attested to provide it. The request was not sent to a model.",
+      "retryable": false,
+      "takes_feature": false
+    },
+    {
+      "action": "turn_off_feature",
+      "code": "zdr_feature_not_supported",
+      "message_en": "This is not supported with zero data retention yet: {feature}. The request was refused before any model call.",
+      "retryable": false,
+      "takes_feature": true
+    },
+    {
+      "action": "choose_another_model",
+      "code": "zdr_connection_not_supported",
+      "message_en": "Zero data retention is on for this organisation, and the ChatGPT connection selected for this chat cannot provide it. The request was not sent to any model. No other model was used.",
+      "retryable": false,
+      "takes_feature": false
+    },
+    {
+      "action": "open_integrations",
+      "code": "zdr_connection_not_acknowledged",
+      "message_en": "Zero data retention is on for this organisation, and the connection selected for this chat has not been confirmed for it. The request was not sent to any model.",
+      "retryable": false,
+      "takes_feature": false
+    },
+    {
+      "action": "choose_another_model",
+      "code": "zdr_explicit_request_not_supported_by_connection",
+      "message_en": "Temporary chat requires zero data retention, and the connection selected for this chat cannot provide it. The request was not sent to any model.",
+      "retryable": false,
+      "takes_feature": false
+    },
+    {
+      "action": "retry",
+      "code": "zdr_decision_unavailable",
+      "message_en": "The zero data retention settings cannot be confirmed right now. The request was not sent to any model. Try again shortly.",
+      "retryable": true,
+      "takes_feature": false
+    },
+    {
+      "action": "none",
+      "code": "zdr_waiver_route_mismatch",
+      "message_en": "This request names a route other than the one its zero data retention decision was made for. The request was not sent to any model.",
+      "retryable": false,
+      "takes_feature": false
+    },
+    {
+      "action": "none",
+      "code": "zdr_posture_mismatch",
+      "message_en": "The zero data retention setting on the credentials for this request does not match. The request was not sent to any model.",
+      "retryable": false,
+      "takes_feature": false
+    },
+    {
+      "action": "none",
+      "code": "zdr_durable_mutation_forbidden",
+      "message_en": "Zero Data Retention credentials cannot create, change, or delete durable state.",
+      "retryable": false,
+      "takes_feature": false
+    },
+    {
+      "action": "retry",
+      "code": "zdr_inference_failed",
+      "message_en": "The zero data retention request could not be completed. Nothing was stored.",
+      "retryable": true,
+      "takes_feature": false
+    }
+  ],
+  "contract": "model-plane.zdr-refusals",
+  "features": [
+    {
+      "key": "attachments",
+      "label_en": "file and image attachments"
+    },
+    {
+      "key": "image_generation",
+      "label_en": "image generation"
+    },
+    {
+      "key": "deep_research",
+      "label_en": "deep research"
+    },
+    {
+      "key": "agentic",
+      "label_en": "Do mode"
+    },
+    {
+      "key": "plan_mode",
+      "label_en": "plan mode"
+    },
+    {
+      "key": "web_search",
+      "label_en": "web search and browsing"
+    },
+    {
+      "key": "client_tools",
+      "label_en": "tools the client declares"
+    },
+    {
+      "key": "structured_output",
+      "label_en": "structured output"
+    },
+    {
+      "key": "skills",
+      "label_en": "picked skills"
+    },
+    {
+      "key": "pinned_messages",
+      "label_en": "pinned messages"
+    },
+    {
+      "key": "spend_cap",
+      "label_en": "a per-turn spend limit"
+    },
+    {
+      "key": "deployed_agent",
+      "label_en": "deployed agents"
+    },
+    {
+      "key": "tool_execution",
+      "label_en": "tool execution"
+    },
+    {
+      "key": "agent_run",
+      "label_en": "agent runs"
+    },
+    {
+      "key": "run_control",
+      "label_en": "run controls"
+    },
+    {
+      "key": "scheduled_step",
+      "label_en": "scheduled runs"
+    },
+    {
+      "key": "approval_continuation",
+      "label_en": "approval continuations"
+    },
+    {
+      "key": "send_message",
+      "label_en": "sending messages"
+    },
+    {
+      "key": "lsp_query",
+      "label_en": "code intelligence queries"
+    },
+    {
+      "key": "mcp_execution",
+      "label_en": "MCP tool execution"
+    },
+    {
+      "key": "command_execution",
+      "label_en": "command execution"
+    },
+    {
+      "key": "speech_synthesis",
+      "label_en": "speech synthesis"
+    },
+    {
+      "key": "speech_transcription",
+      "label_en": "speech transcription"
+    },
+    {
+      "key": "browser_run",
+      "label_en": "browser runs"
+    },
+    {
+      "key": "browser_run_control",
+      "label_en": "browser run controls"
+    },
+    {
+      "key": "browser_tool",
+      "label_en": "browser tools"
+    },
+    {
+      "key": "browser_human_assist",
+      "label_en": "browser help requests"
+    },
+    {
+      "key": "translation",
+      "label_en": "translation"
+    },
+    {
+      "key": "document_analysis",
+      "label_en": "document analysis"
+    },
+    {
+      "key": "language_analysis",
+      "label_en": "language analysis"
+    },
+    {
+      "key": "realtime_voice",
+      "label_en": "realtime voice sessions"
+    },
+    {
+      "key": "video_generation",
+      "label_en": "video generation"
+    },
+    {
+      "key": "connector_read",
+      "label_en": "connected-app reads"
+    },
+    {
+      "key": "message_versions",
+      "label_en": "message versions"
+    },
+    {
+      "key": "sandbox_workspace",
+      "label_en": "files kept between calls in a thread workspace"
+    },
+    {
+      "key": "user_profile",
+      "label_en": "the standing profile"
+    },
+    {
+      "key": "agent_api",
+      "label_en": "the Agent API"
+    },
+    {
+      "key": "conversation_export",
+      "label_en": "conversation export and replay"
+    },
+    {
+      "key": "conversation_share",
+      "label_en": "conversation sharing"
+    },
+    {
+      "key": "conversation_import",
+      "label_en": "conversation import"
+    },
+    {
+      "key": "run_inspection",
+      "label_en": "run timing and request inspection"
+    },
+    {
+      "key": "context_references",
+      "label_en": "references to documents, threads or selections"
+    },
+    {
+      "key": "thread_goal",
+      "label_en": "persistent goals"
+    },
+    {
+      "key": "legal_hold",
+      "label_en": "a legal hold on a thread"
+    },
+    {
+      "key": "learn_command",
+      "label_en": "learning from this conversation"
+    },
+    {
+      "key": "skill_authoring",
+      "label_en": "saving or editing skills"
+    },
+    {
+      "key": "named_agent",
+      "label_en": "named agent memory"
+    }
+  ],
+  "generated_by": "mp-contracts zdr_refusal tests (MP_UPDATE_GOLDEN=1)",
+  "version": 1,
+  "wire": {
+    "feature_field_when": "takes_feature",
+    "grpc_feature_trailer": "x-mp-zdr-feature",
+    "grpc_kind_trailer": "x-mp-provider-error",
+    "json_body": {
+      "error": [
+        "code",
+        "message",
+        "retryable",
+        "action",
+        "feature"
+      ]
+    },
+    "sse_event": "error",
+    "sse_fields": [
+      "code",
+      "message",
+      "retryable",
+      "action",
+      "feature"
+    ]
+  }
+}
