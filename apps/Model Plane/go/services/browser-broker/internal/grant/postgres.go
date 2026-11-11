@@ -2,6 +2,7 @@ package grant
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -158,20 +159,21 @@ const grantColumns = `id, kind, org_id, owner_id, session_key, scope_url, allowe
 	COALESCE(budget_micro_usd, 0), COALESCE(budget_max_steps, 0), COALESCE(budget_max_runtime_s, 0),
 	COALESCE(budget_source, ''), COALESCE(budget_minted_at_unix, 0),
 	policy_mode, denied_domains, COALESCE(resource_id, ''), absolute_expires_at, COALESCE(key_id, ''),
-	COALESCE(consent_scope, '')`
+	COALESCE(consent_scope, ''), web_policy, COALESCE(mail_connection_id, ''), COALESCE(grant_origin, '')`
 
 // fetch reads one grant; lock is "", " FOR SHARE" or " FOR UPDATE". A
 // missing row is ErrGrantNotFound.
 func (s *PgStore) fetch(ctx context.Context, q querier, op, id, lock string) (*Grant, error) {
 	var g Grant
 	var kind string
+	var webPolicy []byte
 	err := q.QueryRow(ctx, `SELECT `+grantColumns+` FROM browser_grants WHERE id = $1`+lock, id).Scan(
 		&g.ID, &kind, &g.OrgID, &g.OwnerID, &g.SessionKey, &g.ScopeURL, &g.AllowedDomains,
 		&g.AllowedActions, &g.AllowedFrameIDs, &g.AllowedDialogIDs, &g.AllowedArtifactIDs,
 		&g.ParentGrantID, &g.ExpiresAt, &g.Revoked, &g.RevokedReason,
 		&g.Budget.MicroUSD, &g.Budget.MaxSteps, &g.Budget.MaxRuntimeS, &g.Budget.Source, &g.Budget.MintedAtUnix,
 		&g.PolicyMode, &g.DeniedDomains, &g.ResourceID, &g.AbsoluteExpiresAt, &g.KeyID,
-		&g.ConsentScope,
+		&g.ConsentScope, &webPolicy, &g.MailConnectionID, &g.GrantOrigin,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrGrantNotFound
@@ -180,6 +182,13 @@ func (s *PgStore) fetch(ctx context.Context, q querier, op, id, lock string) (*G
 		return nil, s.dbErr(ctx, op, err)
 	}
 	g.Kind = Kind(kind)
+	// A NULL column is no snapshot. A stored snapshot that cannot be decoded is a
+	// store failure: the grant is never read back without its org policy.
+	if len(webPolicy) > 0 {
+		if err := json.Unmarshal(webPolicy, &g.WebPolicy); err != nil {
+			return nil, s.dbErr(ctx, op, err)
+		}
+	}
 	return &g, nil
 }
 
@@ -253,12 +262,17 @@ const insertGrant = `INSERT INTO browser_grants (id, kind, org_id, owner_id, ses
 	allowed_domains, allowed_actions, allowed_frame_ids, allowed_dialog_ids, allowed_artifact_ids,
 	parent_grant_id, expires_at, absolute_expires_at,
 	budget_micro_usd, budget_max_steps, budget_max_runtime_s, budget_source, budget_minted_at_unix,
-	policy_mode, denied_domains, resource_id, key_id, consent_scope)
+	policy_mode, denied_domains, resource_id, key_id, consent_scope, web_policy,
+	mail_connection_id, grant_origin)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULLIF($12, ''), $13, $19,
 	NULLIF($14::bigint, 0), NULLIF($15::int, 0), NULLIF($16::int, 0), NULLIF($17::text, ''), NULLIF($18::bigint, 0),
-	$20, $21, NULLIF($22::text, ''), NULLIF($23::text, ''), NULLIF($24::text, ''))`
+	$20, $21, NULLIF($22::text, ''), NULLIF($23::text, ''), NULLIF($24::text, ''), $25::jsonb, NULLIF($26::text, ''), NULLIF($27::text, ''))`
 
-func insertArgs(g *Grant) []any {
+// insertArgs returns the insertGrant arguments for g. The web_policy argument is
+// the JSON of the snapshot, or nil (SQL NULL) when there is none. The last two
+// are the fill_otp binding (migration 0007); an empty one is stored as NULL. An
+// encoding error is returned rather than stored as NULL.
+func insertArgs(g *Grant) ([]any, error) {
 	absolute := g.AbsoluteExpiresAt
 	if absolute.IsZero() {
 		absolute = g.ExpiresAt
@@ -267,13 +281,31 @@ func insertArgs(g *Grant) []any {
 	if mode == "" {
 		mode = PolicyModeAllowlist
 	}
+	webPolicy, err := webPolicyArg(g.WebPolicy)
+	if err != nil {
+		return nil, err
+	}
 	return []any{
 		g.ID, string(g.Kind), g.OrgID, g.OwnerID, g.SessionKey, g.ScopeURL,
 		nonNil(g.AllowedDomains), nonNil(g.AllowedActions), nonNil(g.AllowedFrameIDs),
 		nonNil(g.AllowedDialogIDs), nonNil(g.AllowedArtifactIDs), g.ParentGrantID, g.ExpiresAt,
 		g.Budget.MicroUSD, g.Budget.MaxSteps, g.Budget.MaxRuntimeS, g.Budget.Source, g.Budget.MintedAtUnix,
-		absolute, mode, nonNil(g.DeniedDomains), g.ResourceID, g.KeyID, g.ConsentScope,
+		absolute, mode, nonNil(g.DeniedDomains), g.ResourceID, g.KeyID, g.ConsentScope, webPolicy,
+		g.MailConnectionID, g.GrantOrigin,
+	}, nil
+}
+
+// webPolicyArg encodes a snapshot for the web_policy column. It is nil (SQL
+// NULL) when there is no snapshot.
+func webPolicyArg(s *WebPolicySnapshot) (any, error) {
+	if s == nil {
+		return nil, nil
 	}
+	raw, err := json.Marshal(s)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
 
 // CreateSession persists a non-ZDR session grant. With MaxActivePerOwner set,
@@ -309,6 +341,7 @@ func (s *PgStore) CreateSession(ctx context.Context, p CreateSessionParams) (*Gr
 		ID: id, Kind: KindSession, OrgID: p.OrgID, OwnerID: p.OwnerID, SessionKey: p.SessionKey,
 		ScopeURL: p.ScopeURL, AllowedDomains: domains, Budget: budget, ExpiresAt: now.Add(p.TTL),
 		PolicyMode: PolicyModeAllowlist, KeyID: p.KeyID,
+		WebPolicy: p.WebPolicy.Clone(),
 	}
 	g.AbsoluteExpiresAt = g.ExpiresAt
 	err = s.inTx(ctx, "create_session", func(tx pgx.Tx) error {
@@ -344,7 +377,11 @@ func (s *PgStore) CreateSession(ctx context.Context, p CreateSessionParams) (*Gr
 				return ErrTooManyGrants
 			}
 		}
-		if _, err := tx.Exec(ctx, insertGrant, insertArgs(g)...); err != nil {
+		args, err := insertArgs(g)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, insertGrant, args...); err != nil {
 			return s.dbErr(ctx, "create_session", err)
 		}
 		return nil
@@ -364,7 +401,9 @@ func (s *PgStore) CreateSession(ctx context.Context, p CreateSessionParams) (*Gr
 //
 // A ZDR approval is refused (ErrZdrPostureChanged): this store has no ZDR
 // column, and an in-memory approval under a persistent parent would escape the
-// revoke cascade. A ZDR caller's approvals live under its ZDR session.
+// revoke cascade. A ZDR caller's approvals live under its ZDR session. A fill_otp
+// approval keeps its binding in mail_connection_id and grant_origin (migration
+// 0007), checked as MemoryRepository checks it.
 func (s *PgStore) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalParams) (*Grant, error) {
 	if strings.HasPrefix(p.ParentGrantID, zdrIDPrefix) {
 		return nil, ErrGrantNotFound
@@ -372,14 +411,8 @@ func (s *PgStore) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalP
 	if p.Zdr {
 		return nil, ErrZdrPostureChanged
 	}
-	// Q3-E3.1-b1-c: this store has no columns for a fill_otp binding, so a
-	// validated grant would come back without its origin and mail connection.
-	if IsFillOtp(p.AllowedActions) {
-		return nil, ErrFillOtpNotDurable
-	}
-	if p.GrantOrigin != "" || p.MailConnectionID != "" {
-		return nil, ErrFillOtpBindingUnexpected
-	}
+	// The fill_otp binding is persisted (migration 0007). checkFillOtpBinding, run
+	// below once the parent is known, refuses a binding on any other action.
 	if !validText(p.OrgID, p.OwnerID, p.SessionKey, p.ScopeURL, p.ParentGrantID) {
 		return nil, ErrInvalidGrantText
 	}
@@ -431,6 +464,11 @@ func (s *PgStore) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalP
 		if len(scopes.actions) == 0 {
 			return errors.New("sensitive grant requires an action")
 		}
+		// The binding rules of MemoryRepository: both fields for fill_otp only, and
+		// the origin within the parent's hosts (checkFillOtpBinding, fill_otp.go).
+		if err := checkFillOtpBinding(scopes.actions, p.GrantOrigin, p.MailConnectionID, parent); err != nil {
+			return err
+		}
 		id, err := newID(false)
 		if err != nil {
 			return err
@@ -445,9 +483,16 @@ func (s *PgStore) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalP
 			AllowedActions: scopes.actions, AllowedFrameIDs: scopes.frames,
 			AllowedDialogIDs: scopes.dialogs, AllowedArtifactIDs: scopes.artifacts,
 			ParentGrantID: p.ParentGrantID, ExpiresAt: expires, AbsoluteExpiresAt: expires,
-			PolicyMode: PolicyModeAllowlist,
+			PolicyMode:       PolicyModeAllowlist,
+			WebPolicy:        parent.WebPolicy.Clone(),
+			MailConnectionID: p.MailConnectionID,
+			GrantOrigin:      p.GrantOrigin,
 		}
-		if _, err := tx.Exec(ctx, insertGrant, insertArgs(g)...); err != nil {
+		args, err := insertArgs(g)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, insertGrant, args...); err != nil {
 			return s.dbErr(ctx, "create_approval", err)
 		}
 		out = g
@@ -558,12 +603,18 @@ func (s *PgStore) Derive(ctx context.Context, p DeriveParams) (*Grant, error) {
 			SessionKey: p.SessionKey, ScopeURL: parent.ScopeURL, AllowedDomains: plan.domains,
 			Budget: budget, ParentGrantID: parent.ID, ExpiresAt: expires, AbsoluteExpiresAt: expires,
 			PolicyMode: PolicyModeAllowlist, ResourceID: plan.resourceID,
+			// The parent's snapshot, unchanged: a derived grant never loosens it.
+			WebPolicy: parent.WebPolicy.Clone(),
+		}
+		args, err := insertArgs(g)
+		if err != nil {
+			return err
 		}
 		var inserted string
 		// The idempotency index is partial per kind: 'run' (0001) and 'attach' (0004).
 		err = tx.QueryRow(ctx, insertGrant+`
 				ON CONFLICT (parent_grant_id, session_key) WHERE kind = '`+string(plan.kind)+`' DO NOTHING
-				RETURNING id`, insertArgs(g)...).Scan(&inserted)
+				RETURNING id`, args...).Scan(&inserted)
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Another derive with the same key won; the advisory lock makes
 			// this unreachable, but the replay rules still hold if it is not.

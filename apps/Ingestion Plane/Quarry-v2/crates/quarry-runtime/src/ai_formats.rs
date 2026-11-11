@@ -1,8 +1,8 @@
-//! AI output formats: `summary`, `json`, `query`.
+//! AI output formats: `summary`, `query`, and extraction (`extract_for_org`).
 //!
 //! Quarry doesn't synthesize content — it owns the source artifact. These
-//! transforms call Model Plane (via the structured-extract path or `/v1/invoke`)
-//! and return validated artifacts. Each transform:
+//! transforms call Model Plane (via `/v1/invoke`) and return validated
+//! artifacts. Each transform:
 //!
 //! 1. Loads the markdown artifact (or accepts inline markdown)
 //! 2. Calls Model Plane with a deterministic prompt template
@@ -143,30 +143,6 @@ impl AiFormatRunner {
         })
     }
 
-    /// Extract structured JSON from the markdown using `schema` as a JSON
-    /// Schema. The schema is sent to Model Plane via the invoke prompt.
-    /// Stronger schema enforcement happens at [`crate::structured_extract::StructuredExtractClient`].
-    pub async fn json(
-        &self,
-        markdown: &str,
-        schema: serde_json::Value,
-        zdr: ZdrMode,
-    ) -> QuarryResult<JsonResult> {
-        self.json_inner(markdown, JsonRequest::schema(schema), zdr, None)
-            .await
-    }
-
-    pub async fn json_for_org(
-        &self,
-        org_id: &str,
-        markdown: &str,
-        schema: serde_json::Value,
-        zdr: ZdrMode,
-    ) -> QuarryResult<JsonResult> {
-        self.json_inner(markdown, JsonRequest::schema(schema), zdr, Some(org_id))
-            .await
-    }
-
     /// Extraction with the caller's own instructions (`/v1/extract`, INNH-2).
     /// `request` carries a schema, a prompt, or both; with neither there is
     /// nothing to extract and the call is a `BadRequest`. The prompt is trusted
@@ -181,8 +157,7 @@ impl AiFormatRunner {
         zdr: ZdrMode,
     ) -> QuarryResult<JsonResult> {
         // The refusal sits in the engine so no caller reaches the model with ZDR on
-        // by forgetting a check. The plain `json` wrappers predate it and keep
-        // their behaviour.
+        // by forgetting a check.
         if zdr.is_active() {
             return Err(QuarryError::new(
                 ErrorCode::Forbidden,
@@ -513,7 +488,12 @@ mod tests {
             }
         });
         let r = runner
-            .json("Alice is 30", schema, ZdrMode::Off)
+            .extract_for_org(
+                "org_a",
+                "Alice is 30",
+                JsonRequest::schema(schema),
+                ZdrMode::Off,
+            )
             .await
             .unwrap();
         assert_eq!(r.data["name"], "Alice");
@@ -534,7 +514,10 @@ mod tests {
 
         let runner = make_runner(&server.uri()).await;
         let schema = json!({"type": "object", "required": ["name", "age"]});
-        let r = runner.json("A", schema, ZdrMode::Off).await.unwrap();
+        let r = runner
+            .extract_for_org("org_a", "A", JsonRequest::schema(schema), ZdrMode::Off)
+            .await
+            .unwrap();
         assert!(!r.schema_valid);
     }
 
@@ -549,7 +532,7 @@ mod tests {
 
         let runner = make_runner(&server.uri()).await;
         let err = runner
-            .json("md", json!({}), ZdrMode::Off)
+            .extract_for_org("org_a", "md", JsonRequest::schema(json!({})), ZdrMode::Off)
             .await
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::DriverFailed);
@@ -735,12 +718,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_schema_only_wrapper_keeps_its_old_behaviour() {
+    async fn a_schema_only_request_adds_no_requester_instructions() {
         let server = mounted("{\"name\": \"A\"}").await;
         let runner = make_runner(&server.uri()).await;
         let schema = json!({"type": "object", "required": ["name", "age"]});
         let r = runner
-            .json_for_org("org_a", "A", schema, ZdrMode::Off)
+            .extract_for_org("org_a", "A", JsonRequest::schema(schema), ZdrMode::Off)
             .await
             .unwrap();
         assert!(!r.schema_valid);

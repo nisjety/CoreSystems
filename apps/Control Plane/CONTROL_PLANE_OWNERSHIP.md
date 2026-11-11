@@ -346,7 +346,7 @@ const usersTable = defineTable({
 | Connection ZDR capability and acknowledgement ledger (designed, not built) | integration-corev2 (Ingestion Plane); auth-core only reads | Not synced | integration-corev2 |
 | Per-run ZDR waiver claim (designed, not built) | auth-core (the only issuer) | Not synced | Control Plane |
 | Org web policy and its `web_policy` claim (built, dark) | org-core stores; auth-core is the only issuer of the claim | Not synced | Control Plane |
-| Org encryption keys: per-org KEK and the wrapped per-profile data keys (built, dark) | org-core (`internal/orgkeys`); quarry-edge calls wrap and unwrap only | Not synced | Control Plane |
+| Org encryption keys: per-org KEK and the wrapped per-profile data keys (built, dark) | org-core (`internal/orgkeys`); quarry-edge calls wrap and unwrap, and destroy for the org erasure saga only | Not synced | Control Plane |
 | **Conversations**          | **Convex**         | **Read-write**    | **Convex**       |
 | **Messages**               | **Convex**         | **Read-write**    | **Convex**       |
 | **Jobs (RAG, etc.)**       | **Convex**         | **Read-write**    | **Convex**       |
@@ -393,10 +393,10 @@ An organisation's web policy (its capability switches, its robots and proxy ceil
 
 ## Organisation Key Custody
 
-org-core owns each organisation's encryption keys. It creates a key-encryption key (KEK) for each organisation on first use and stores it wrapped under a master key. It wraps, unwraps, rewraps and destroys the per-profile data keys (DEKs) that quarry-edge uses for encrypted browser profile material. A plaintext DEK goes back only to quarry-edge, on generate and on unwrap; a rewrap never returns one. quarry-edge is the only caller allowed to wrap or unwrap (scopes `org:keys:wrap:any` and `org:keys:unwrap:any`, pinned to that principal). Destruction is a crypto-shred: the organisation's KEK rows are removed, and no new KEK can be created for it afterwards.
+org-core owns each organisation's encryption keys. It creates a key-encryption key (KEK) for each organisation on first use and stores it wrapped under a master key. It wraps, unwraps, rewraps and destroys the per-profile data keys (DEKs) that quarry-edge uses for encrypted browser profile material. A plaintext DEK goes back only to quarry-edge, on generate and on unwrap; a rewrap never returns one. quarry-edge is the only caller allowed to wrap or unwrap (scopes `org:keys:wrap:any` and `org:keys:unwrap:any`, pinned to that principal). Destruction is a crypto-shred: the organisation's KEK rows are removed, and no new KEK can be created for it afterwards. The destroy scope `org:keys:destroy:any` is also held by quarry-edge alone, pinned to that principal, and is used only by the org erasure saga's shred hop (`QUARRY_EDGE__ERASE_SHRED_KEYS`, default off; build plan Q2-WS17.E2a).
 
 - **Built, dark (build plan WS17.E2a; code only, not deployed).** The routes exist only when `ORG_CORE_KEYS_ENABLED` is set. The master keys come from the environment for now (`ORG_CORE_KEY_MASTER_KEYS`, `ORG_CORE_KEY_MASTER_ACTIVE`), behind a provider interface so that a KMS can replace them. A boot check refuses master keys that do not parse, and a canary per master key is checked before the service answers. Outside the two responses that return a DEK to quarry-edge, no key material appears in logs, metadata reads or audit payloads.
-- **Not done.** The admin scopes (rotate and metadata) and the destroy scope are not granted to any principal, so those routes answer 403 to everyone. The master-key escrow runbook, master-key minting and the restore drill are not done; all three are required before any production use.
+- **Not done.** The admin scope (rotate and metadata) is not granted to any principal, so those routes answer 403 to everyone. The destroy scope is granted to quarry-edge only (Q2-WS17.E2a), for the org erasure saga. The master-key escrow runbook is written (`ORG_KEY_CUSTODY_RUNBOOK.md`, build plan Q2-WS17.E2b). Master-key minting and the restore drill remain person steps; both are required before any production use.
 - **Decision.** X-8 in the browser build plan: org-core behind an interface, with the environment master key as a logged interim.
 
 ---

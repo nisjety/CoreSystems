@@ -408,6 +408,24 @@ pub const FEATURES: &[Feature] = &[
         key: "skill_authoring",
         label: "saving or editing skills",
     },
+    // Quarry WS4.I: Quarry refuses a ZDR caller before it persists a durable crawl or batch, a
+    // saved browser profile, a resumable browser session or a page screenshot.
+    Feature {
+        key: "durable_crawl",
+        label: "durable crawls and batches",
+    },
+    Feature {
+        key: "browser_profile",
+        label: "saved browser profiles",
+    },
+    Feature {
+        key: "session_resume",
+        label: "resuming a saved browser session",
+    },
+    Feature {
+        key: "page_screenshot",
+        label: "page screenshots",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

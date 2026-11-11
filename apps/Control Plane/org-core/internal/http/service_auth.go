@@ -92,6 +92,12 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	// static credential (R-13 PR 2) and the org-core image can ship together.
 	"org:keys:wrap:any":   {},
 	"org:keys:unwrap:any": {},
+	// Crypto-shred of one org's keys, through DELETE /internal/orgs/:orgId/keys and
+	// nothing else (WS17.E2, Q2-WS17.E2a). Irreversible, so it is held by
+	// quarry-edge alone, for the org erasure saga's shred hop
+	// (QUARRY_EDGE__ERASE_SHRED_KEYS, default off). The admin scope
+	// (org:keys:admin:any: rotate, metadata) stays out of this list.
+	"org:keys:destroy:any": {},
 	// Read-only access to one org's web policy, through
 	// GET /internal/orgs/:orgId/web-policy and nothing else (WS7.H). Held by
 	// auth-core alone, which folds it into the web_policy token claim (WS7.I,
@@ -222,8 +228,10 @@ func validateServiceCredential(credential serviceCredential, principals map[stri
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
 		// The key scopes hand out plaintext data keys of ANY org, so they are
-		// pinned to the one principal that seals Quarry profiles (WS17.E2).
-		if (scope == "org:keys:wrap:any" || scope == "org:keys:unwrap:any") && credential.Principal != quarryEdgePrincipal {
+		// pinned to the one principal that seals Quarry profiles (WS17.E2). The
+		// destroy scope crypto-shreds an org irreversibly, so it is pinned to the
+		// same principal, whose org erasure saga is its only caller.
+		if (scope == "org:keys:wrap:any" || scope == "org:keys:unwrap:any" || scope == "org:keys:destroy:any") && credential.Principal != quarryEdgePrincipal {
 			return fmt.Errorf("scope %s is not valid for principal %s", scope, credential.Principal)
 		}
 		scopes[scope] = struct{}{}
@@ -542,9 +550,10 @@ func internalOrganizationScopes(method string, rest []string) []string {
 		return []string{"org:web-policy:read:any"}
 	case len(rest) == 3 && rest[1] == "retention" && rest[2] == "check" && method == http.MethodPost:
 		return []string{"org:retention-policy:read:any"}
-	// Key custody (WS17.E2). The admin and destroy scopes are deliberately not in
-	// orgServiceScopeAllowlist yet, so no credential holds them and rotate,
-	// metadata and crypto-shred answer 403 until a reviewed registry change.
+	// Key custody (WS17.E2). The admin scope is deliberately not in
+	// orgServiceScopeAllowlist yet, so no credential holds it and rotate and
+	// metadata answer 403 until a reviewed registry change. The destroy scope is
+	// allowlisted and pinned to quarry-edge (org erasure saga, Q2-WS17.E2a).
 	case len(rest) == 3 && rest[1] == "keys" && rest[2] == "data-keys" && method == http.MethodPost:
 		return []string{"org:keys:wrap:any"}
 	case len(rest) == 4 && rest[1] == "keys" && rest[2] == "data-keys" && rest[3] == "unwrap" && method == http.MethodPost:

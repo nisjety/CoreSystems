@@ -266,7 +266,7 @@ impl ResearchExecutor {
     ) -> QuarryResult<ResearchArtifacts> {
         Err(QuarryError::new(
             ErrorCode::Unsupported,
-            "research extract executor delegates to AiFormatRunner.json; \
+            "research extract executor delegates to AiFormatRunner.extract_for_org; \
              pass an AiFormatRunner reference into the executor before invoking",
         ))
     }

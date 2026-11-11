@@ -769,6 +769,7 @@ pub(super) async fn admit_origin_extension_with(
             &entry.constraints.allowed_domains,
             &extension,
         ),
+        handle.live.policy(),
     );
     state
         .agent_driver

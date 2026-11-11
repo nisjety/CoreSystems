@@ -356,6 +356,292 @@ pub(super) async fn run_events_replay(
     (status, body).into_response()
 }
 
+// ---------------------------------------------------------------------------
+// WS10.S6 (GW-2): `GET /api/v1/runs/{run_id}/trace`, a run's durable trace.
+// ---------------------------------------------------------------------------
+
+/// A run id as Model Gateway and Session Core's trace store accept it: `[A-Za-z0-9_-]{1,64}`.
+const RUN_TRACE_MAX_RUN_ID_LEN: usize = 64;
+/// Longest cursor the gateway forwards. Model Gateway's own cap is wider; this one is ours.
+const RUN_TRACE_MAX_CURSOR_LEN: usize = 256;
+/// Bounds of one trace page, the same as Model Gateway's clamp.
+const RUN_TRACE_MAX_LIMIT: u32 = 500;
+/// The seven event types the browser trace carries (`EventType` names without `EVENT_TYPE_`).
+/// The only names the gateway forwards as a `types` filter.
+const RUN_TRACE_TYPES: [&str; 7] = [
+    "BROWSER_SESSION_OPENED",
+    "BROWSER_SESSION_CLOSED",
+    "BROWSER_CONTROL_CHANGED",
+    "BROWSER_TAB_CHANGED",
+    "BROWSER_STEP_RECEIPT_RECORDED",
+    "BROWSER_EGRESS_DECIDED",
+    "BROWSER_ARTIFACT_RECORDED",
+];
+/// The 17 keys of one run-trace envelope (`api/contracts/run-trace-envelope.golden.json`). An event
+/// reaches the SPA with exactly these keys; anything else Model Gateway might add is dropped.
+const RUN_TRACE_EVENT_KEYS: [&str; 17] = [
+    "event_id",
+    "event_type",
+    "schema_version",
+    "ts",
+    "producer",
+    "correlation_id",
+    "causation_id",
+    "org_id",
+    "user_id",
+    "resource_ref",
+    "payload",
+    "zdr",
+    "producer_seq",
+    "agent",
+    "origin",
+    "run_id",
+    "request_id",
+];
+
+/// The allow-listed query of a trace read. Every other parameter is ignored, never forwarded.
+/// `limit` is read as text so a bad value is this route's typed 400, not the extractor's.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct RunTraceQuery {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default)]
+    limit: Option<String>,
+    #[serde(default)]
+    types: Option<String>,
+}
+
+/// The validated form of [`RunTraceQuery`].
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RunTraceParams {
+    cursor: Option<String>,
+    limit: Option<u32>,
+    types: Vec<&'static str>,
+}
+
+fn run_trace_refusal(
+    status: axum::http::StatusCode,
+    code: &'static str,
+    message: &str,
+) -> Response {
+    (status, Json(crate::envelope::error(code, message))).into_response()
+}
+
+fn valid_run_trace_id(run_id: &str) -> bool {
+    (1..=RUN_TRACE_MAX_RUN_ID_LEN).contains(&run_id.len())
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn parse_run_trace_query(
+    query: &RunTraceQuery,
+) -> Result<RunTraceParams, (&'static str, &'static str)> {
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(str::trim)
+        .filter(|cursor| !cursor.is_empty());
+    if let Some(cursor) = cursor {
+        // Printable ASCII only: a cursor is an opaque token, never text with spaces or controls.
+        if cursor.len() > RUN_TRACE_MAX_CURSOR_LEN || !cursor.bytes().all(|b| b.is_ascii_graphic())
+        {
+            return Err(("invalid_cursor", "The cursor is not valid."));
+        }
+    }
+    let limit = match query
+        .limit
+        .as_deref()
+        .map(str::trim)
+        .filter(|limit| !limit.is_empty())
+    {
+        None => None,
+        Some(raw) => match raw.parse::<u32>() {
+            Ok(limit) if (1..=RUN_TRACE_MAX_LIMIT).contains(&limit) => Some(limit),
+            _ => return Err(("invalid_limit", "The limit must be a number from 1 to 500.")),
+        },
+    };
+    let mut types = Vec::new();
+    if let Some(raw) = query.types.as_deref() {
+        for name in raw
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            let Some(known) = RUN_TRACE_TYPES.iter().find(|known| **known == name) else {
+                return Err((
+                    "invalid_trace_types",
+                    "The event types must be browser trace event names.",
+                ));
+            };
+            if !types.contains(known) {
+                types.push(*known);
+            }
+        }
+    }
+    Ok(RunTraceParams {
+        cursor: cursor.map(str::to_owned),
+        limit,
+        types,
+    })
+}
+
+/// The query string of a trace read: the cursor `cursor` (or none), then the limit and types.
+fn run_trace_query_string(params: &RunTraceParams, cursor: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if let Some(cursor) = cursor {
+        parts.push(format!("cursor={}", urlencoding::encode(cursor)));
+    }
+    if let Some(limit) = params.limit {
+        parts.push(format!("limit={limit}"));
+    }
+    if !params.types.is_empty() {
+        parts.push(format!("types={}", params.types.join(",")));
+    }
+    parts.join("&")
+}
+
+/// One trace event with only its 17 envelope keys. The payload is the JSON object Model Gateway
+/// gave (the Quarry object, or `{type_url}` for any other payload); anything else reads as null.
+fn run_trace_event(raw: &Value) -> Option<Value> {
+    let item = raw.as_object()?;
+    let mut event = serde_json::Map::with_capacity(RUN_TRACE_EVENT_KEYS.len());
+    for key in RUN_TRACE_EVENT_KEYS {
+        let value = item.get(key).cloned().unwrap_or(Value::Null);
+        let value = match key {
+            "payload" | "agent" if !value.is_object() => Value::Null,
+            "origin" if !value.is_string() => Value::Null,
+            _ => value,
+        };
+        event.insert(key.to_owned(), value);
+    }
+    Some(Value::Object(event))
+}
+
+/// Model Gateway's page as the SPA's typed envelope:
+/// `{data:{runId, events, hasMore}, meta:{cursor}, links:{next?}}`. Accepts the page both as
+/// `{data:{events}, meta:{next_cursor, has_more}}` and as a flat `{run_id, events, next_cursor,
+/// has_more}`.
+fn normalize_run_trace_page(run_id: &str, params: &RunTraceParams, body: &Value) -> Value {
+    let data = body
+        .get("data")
+        .filter(|data| data.is_object())
+        .unwrap_or(body);
+    let meta = body.get("meta").filter(|meta| meta.is_object());
+    let events: Vec<Value> = data
+        .get("events")
+        .and_then(Value::as_array)
+        .map(|events| events.iter().filter_map(run_trace_event).collect())
+        .unwrap_or_default();
+    let next_cursor = meta
+        .and_then(|meta| meta.get("next_cursor"))
+        .or_else(|| data.get("next_cursor"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|cursor| !cursor.is_empty())
+        .map(str::to_owned);
+    let has_more = meta
+        .and_then(|meta| meta.get("has_more"))
+        .or_else(|| data.get("has_more"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut links = serde_json::Map::new();
+    if let (true, Some(cursor)) = (has_more, next_cursor.as_deref()) {
+        links.insert(
+            "next".to_owned(),
+            Value::String(format!(
+                "/api/v1/runs/{}/trace?{}",
+                urlencoding::encode(run_id),
+                run_trace_query_string(params, Some(cursor)),
+            )),
+        );
+    }
+    serde_json::json!({
+        "data": { "runId": run_id, "events": events, "hasMore": has_more },
+        "meta": { "cursor": next_cursor },
+        "links": Value::Object(links),
+    })
+}
+
+/// Read one page of a run's durable trace (WS10.S6, GW-2). Read-only: identity is the verified
+/// session's, owner enforcement stays in Model Plane (a non-owner and an unknown run are the same
+/// 404), and only the allow-listed query is forwarded. A ZDR run has no rows, so its page is empty.
+/// Nothing is cached.
+pub(super) async fn run_trace(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+    Query(query): Query<RunTraceQuery>,
+) -> Response {
+    use axum::http::{header, StatusCode};
+
+    let run_id = run_id.trim().to_owned();
+    if !valid_run_trace_id(&run_id) {
+        return run_trace_refusal(
+            StatusCode::BAD_REQUEST,
+            "invalid_run_id",
+            "The run id is not valid.",
+        );
+    }
+    let params = match parse_run_trace_query(&query) {
+        Ok(params) => params,
+        Err((code, message)) => return run_trace_refusal(StatusCode::BAD_REQUEST, code, message),
+    };
+    let token = shared::model_token(&state, &user, &headers).await;
+    let session_token = match shared::required_session_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    // F-14: the same capability audience as `run_events_replay`, best effort.
+    let capability_token = shared::best_effort_capability_token(&state, &user, &headers).await;
+    let mut url = format!(
+        "{}/v1/runs/{}/trace",
+        state.model_gateway_url,
+        urlencoding::encode(&run_id),
+    );
+    let query_string = run_trace_query_string(&params, params.cursor.as_deref());
+    if !query_string.is_empty() {
+        url.push('?');
+        url.push_str(&query_string);
+    }
+    // The helper applies the request id and sends the org the session resolved as `x-org-id`;
+    // no client-supplied org header is ever forwarded.
+    let (status, Json(body)) = shared::proxy_model_json_with_session_and_capability(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&session_token),
+        capability_token.as_deref(),
+        &user,
+    )
+    .await;
+    let no_store = [(header::CACHE_CONTROL, "no-store")];
+    if status.is_success() {
+        return (
+            status,
+            no_store,
+            Json(normalize_run_trace_page(&run_id, &params, &body)),
+        )
+            .into_response();
+    }
+    match status {
+        StatusCode::NOT_FOUND => run_trace_refusal(
+            StatusCode::NOT_FOUND,
+            "run_not_found",
+            "The run was not found.",
+        ),
+        StatusCode::NOT_IMPLEMENTED => run_trace_refusal(
+            StatusCode::NOT_IMPLEMENTED,
+            "run_trace_unavailable",
+            "The run trace is not available.",
+        ),
+        _ => (status, no_store, Json(body)).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{

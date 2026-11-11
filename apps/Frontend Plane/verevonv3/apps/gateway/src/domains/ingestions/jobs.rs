@@ -40,7 +40,7 @@ const MAX_TEXT_ARTIFACT_BYTES: usize = 1024 * 1024;
 const MAX_JOB_WAIT_S: u64 = 30;
 /// The seconds a job read may run past its `wait`, so the edge's answer (a status or its 408)
 /// arrives before the gateway gives up on the upstream.
-const JOB_WAIT_MARGIN_S: u64 = 5;
+pub(crate) const JOB_WAIT_MARGIN_S: u64 = 5;
 /// The longest `resume` token a job read forwards. The edge's token for a large crawl runs to
 /// about 260 characters, so the cap sits above that.
 const MAX_RESUME_TOKEN_LEN: usize = 512;
@@ -60,7 +60,7 @@ pub(super) async fn get_job(
     let Some(job_id) = valid_job_id(&id) else {
         return validation("A job id is required.");
     };
-    let (path, wait) = match job_status_path(&job_id, &params) {
+    let (path, wait) = match job_status_path(&format!("/v1/jobs/{job_id}"), &params) {
         Ok(read) => read,
         Err(refusal) => return refusal,
     };
@@ -615,12 +615,14 @@ pub(crate) async fn control_job(
     (code, Json(crate::envelope::ok(accepted))).into_response()
 }
 
-/// The Quarry path of a job status read, and its `wait` in seconds (`None` for a plain read).
+/// The Quarry path of a job status read under `base`, and its `wait` in seconds (`None` for a
+/// plain read). `base` is the job's status route: `/v1/jobs/{id}` for `get_job`, and
+/// `/v1/crawl/{id}` for the crawl status read, which shares this check.
 /// Only `wait` and `resume` are forwarded, each once it passes its limit; every other key is
 /// dropped. A `wait` outside 1 to 30, or a malformed `resume`, is a 400. A `resume` without a
 /// `wait` is forwarded as sent, and Quarry answers it.
-fn job_status_path(
-    job_id: &str,
+pub(crate) fn job_status_path(
+    base: &str,
     params: &HashMap<String, String>,
 ) -> Result<(String, Option<u64>), Response> {
     let wait = match params.get("wait") {
@@ -641,9 +643,9 @@ fn job_status_path(
         query.push(format!("resume={}", urlencoding::encode(token)));
     }
     let path = if query.is_empty() {
-        format!("/v1/jobs/{job_id}")
+        base.to_owned()
     } else {
-        format!("/v1/jobs/{job_id}?{}", query.join("&"))
+        format!("{base}?{}", query.join("&"))
     };
     Ok((path, wait))
 }

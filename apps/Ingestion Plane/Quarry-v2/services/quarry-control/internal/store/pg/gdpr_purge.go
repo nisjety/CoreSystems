@@ -30,8 +30,8 @@ import (
 // and the table CHECK); only such an id gets an erasure marker.
 var zdrOrgIDShape = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
-// PurgeOrg hard-deletes every row for orgID across jobs, schedules,
-// quarry_sources, quarry_benchmarks, quarry_idempotency_keys,
+// PurgeOrg hard-deletes every row for orgID across jobs, schedule_requests
+// (WS15.S3b), schedules, quarry_sources, quarry_benchmarks, quarry_idempotency_keys,
 // zdr_run_tombstones (WS4.J), webhook_deliveries and webhooks (INNH-5).
 func (d *postgresDB) PurgeOrg(orgID string) (store.PurgeResult, error) {
 	orgID = strings.TrimSpace(orgID)
@@ -64,6 +64,11 @@ func (d *postgresDB) PurgeOrg(orgID string) (store.PurgeResult, error) {
 	var derr error
 	if res.JobsDeleted, derr = del(`DELETE FROM jobs WHERE org_id = $1`); derr != nil {
 		return store.PurgeResult{}, fmt.Errorf("pg: PurgeOrg jobs: %w", derr)
+	}
+	// WS15.S3b: trigger/backfill request rows (migration 026) carry their own org_id and
+	// no FK to schedules, so they are purged by org directly, before the schedules.
+	if res.ScheduleRequestsDeleted, derr = del(`DELETE FROM schedule_requests WHERE org_id = $1`); derr != nil {
+		return store.PurgeResult{}, fmt.Errorf("pg: PurgeOrg schedule_requests: %w", derr)
 	}
 	if res.SchedulesDeleted, derr = del(`DELETE FROM schedules WHERE org_id = $1`); derr != nil {
 		return store.PurgeResult{}, fmt.Errorf("pg: PurgeOrg schedules: %w", derr)

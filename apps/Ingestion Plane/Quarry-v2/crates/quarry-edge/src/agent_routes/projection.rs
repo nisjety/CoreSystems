@@ -125,6 +125,7 @@ pub(super) fn live_browser_session_projection(
         tab_control: attach_switch,
         attach_available,
         attach,
+        run_origin: Some(entry.origin.as_str()),
     }
 }
 
@@ -160,6 +161,7 @@ pub(super) fn checkpoint_browser_session_projection(
         tab_control: false,
         attach_available: false,
         attach: None,
+        run_origin: None,
     }
 }
 

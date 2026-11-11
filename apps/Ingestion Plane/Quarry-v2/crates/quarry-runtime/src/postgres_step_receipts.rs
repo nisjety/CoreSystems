@@ -779,6 +779,8 @@ mod tests {
                 disable: vec!["browser.act.upload".into()],
                 ..Default::default()
             }),
+            origin: Some("agent".into()),
+            model_run_id: Some("mprun_1".into()),
         };
         store.save_run_checkpoint(checkpoint).await.unwrap();
 
@@ -1109,6 +1111,8 @@ mod tests {
             next_step: 3,
             trace_seq: 0,
             policy_ask: None,
+            origin: None,
+            model_run_id: None,
         };
         store.save_run_checkpoint(checkpoint).await.unwrap();
         let load = |org: &'static str| {

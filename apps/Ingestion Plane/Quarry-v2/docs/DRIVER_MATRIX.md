@@ -13,13 +13,13 @@ Quarry's `DriverPlan` selects between four driver families per request, based on
 
 ## Selection rules
 
-The default `DriverPlan::from_signals(&signals, &registry)` chain:
+The default chain from `plan_from_signals(signals)` (`crates/quarry-runtime/src/driver_plan.rs`), built into a driver by `DriverRegistry::build_driver`:
 
 ```
 1. Try Static (skipped if signals.requires_js or robots fingerprint blocked static)
 2. Try TLS (skipped if Static would be blocked; preferred when blocked by UA/JA3)
 3. Try Browser local (skipped if no chromiumoxide feature compiled)
-4. Try Browser cloud (Browserbase preferred; Kernel/Browserless fallback)
+4. Try Browser cloud: Browserbase only (Kernel and Browserless are not registered; see ADR 10 memo)
 ```
 
 Signals that influence selection:
@@ -50,6 +50,8 @@ Browserless (REST fallback)
   └── one-shot REST POST per page; cheapest cloud option
 ```
 
+Verified 2026-11-11: only the Browserbase branch can run in `quarry-edge`. The Kernel and Browserless branches describe the provider, not a route Quarry serves (see the note under the capabilities matrix).
+
 ## Capabilities matrix
 
 | Capability | Static | TLS | Local | Browserless | Browserbase | Kernel |
@@ -68,12 +70,13 @@ Browserless (REST fallback)
 
 Scrape captures and actions (`POST /v1/scrape`, WS13.4b to WS13.6) run only on the Local driver (`chromiumoxide`). The other browser adapters inherit the trait defaults, so a capture or an action sent to them is refused with 501 `browser_capability_unavailable`. The table above describes what each provider offers in general, not what `/v1/scrape` uses today. The switches are `QUARRY_EDGE__SCRAPE_CAPTURE`, `QUARRY_EDGE__SCRAPE_ACTIONS` and `QUARRY_EDGE__SCRAPE_STITCH`, all off by default (CONTRACTS.md section 10).
 
+**Verified 2026-11-11:** Only Browserbase is registered as a remote browser driver in `quarry-edge`, and only when its API key and project ID are set. Kernel (behind the `kernel` cargo feature, on by default in `quarry-browser`) and Browserless are REST-only drivers compiled into `quarry-browser`. They are exercised by unit tests only, and no other crate constructs either one. Since F-t2-074 (commit `f90ed49a3`), their errors carry the status, not the upstream body. The Kernel and Browserless columns above describe what those providers offer, not what Quarry serves. Every other Kernel or Browserless mention in this file, such as the signal table and the profile table, describes the provider rather than a served route. Registering them is blocked until the owner decides [ADR 10](../../../../docs/architecture/adr-quarry-browser-execution-substrate-adr10.md), a proposal that accepts nothing yet.
+
 ## Cost guards
 
 When `max_cost_usd` is set on a request:
 - Routes prefer cheaper drivers
 - AgentLoop tracks accumulated cost via `record_cost()` and aborts with `MaxCostExceeded` when exceeded
-- StructuredExtractClient enforces ceilings via `Forbidden` typed error post-hoc
 
 ## Failover behavior
 

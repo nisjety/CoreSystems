@@ -442,6 +442,165 @@ pub(crate) struct StartAiRunBody {
     pub(crate) require_approval: Option<bool>,
     #[serde(default)]
     pub(crate) max_cost_usd: Option<f64>,
+    /// A saved recipe the run replays (Q4-E4.2-4c). Accepted only with
+    /// `BROWSER_RECIPES` on (`AppState::browser_recipes`), else 400
+    /// `browser_recipes_unavailable`. Recipe runs are unattached in v1, so it is
+    /// refused together with `planMode`, `continueInTab` or `requireAttached`.
+    /// Absent, the start body sent to Model Gateway is unchanged.
+    #[serde(default)]
+    pub(crate) recipe: Option<RecipeAsk>,
+}
+
+/// Most slots one recipe start may fill (Model Gateway's bound).
+const MAX_RECIPE_SLOTS: usize = 32;
+/// Longest saved procedure id (Model Gateway's bound): `proc_` plus up to 59.
+const MAX_RECIPE_ID_BYTES: usize = 64;
+/// Longest recipe tag.
+const MAX_RECIPE_TAG_BYTES: usize = 32;
+/// Longest slot name.
+const MAX_RECIPE_SLOT_KEY_BYTES: usize = 40;
+/// Longest slot value, in characters.
+const MAX_RECIPE_SLOT_VALUE_CHARS: usize = 2000;
+
+/// The saved recipe a browser AI-run start names (Q4-E4.2-4c), read strictly:
+/// an unknown key fails the body. Forwarded to Model Gateway's
+/// `POST /v1/browser/runs` as `recipe {id, version?, tag?, slots}`; the person it
+/// runs for is Model Gateway's verified claim, never a field here.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecipeAsk {
+    /// The saved procedure id: `proc_` then 1 to 59 of `A-Z a-z 0-9 _ -`.
+    pub(crate) id: String,
+    /// The version to replay. Exclusive with `tag`.
+    #[serde(default)]
+    pub(crate) version: Option<u32>,
+    /// The tag to replay, `^[a-z0-9._-]{1,32}$`. Exclusive with `version`.
+    #[serde(default)]
+    pub(crate) tag: Option<String>,
+    /// Values for the recipe's typed steps, by slot name. User data: never
+    /// logged and never echoed in a refusal.
+    #[serde(default)]
+    pub(crate) slots: std::collections::BTreeMap<String, String>,
+}
+
+/// Slot values are user data, so a debug print names the slot count only.
+impl std::fmt::Debug for RecipeAsk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecipeAsk")
+            .field("id", &self.id)
+            .field("version", &self.version)
+            .field("tag", &self.tag)
+            .field("slots", &self.slots.len())
+            .finish()
+    }
+}
+
+impl RecipeAsk {
+    /// The closed refusal code for a malformed recipe, `None` when it is well
+    /// formed. The same codes Model Gateway answers, so the SPA keys on one set.
+    fn invalid_code(&self) -> Option<&'static str> {
+        let id_ok = self.id.len() <= MAX_RECIPE_ID_BYTES
+            && self.id.strip_prefix("proc_").is_some_and(|rest| {
+                !rest.is_empty()
+                    && rest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+            });
+        if !id_ok {
+            return Some("recipe_id_invalid");
+        }
+        if self.version.is_some() && self.tag.is_some() {
+            return Some("recipe_version_and_tag");
+        }
+        if self.tag.as_deref().is_some_and(|tag| {
+            !(1..=MAX_RECIPE_TAG_BYTES).contains(&tag.len())
+                || !tag.bytes().all(|byte| {
+                    byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+                })
+        }) {
+            return Some("recipe_tag_invalid");
+        }
+        if self.slots.len() > MAX_RECIPE_SLOTS
+            || self.slots.iter().any(|(key, value)| {
+                !(1..=MAX_RECIPE_SLOT_KEY_BYTES).contains(&key.len())
+                    || !key
+                        .bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+                    || value.chars().count() > MAX_RECIPE_SLOT_VALUE_CHARS
+            })
+        {
+            return Some("recipe_slots_invalid");
+        }
+        None
+    }
+
+    /// The wire object for Model Gateway: `version` and `tag` only when set.
+    fn to_wire(&self) -> Value {
+        let mut object = serde_json::Map::new();
+        object.insert("id".to_owned(), json!(self.id));
+        if let Some(version) = self.version {
+            object.insert("version".to_owned(), json!(version));
+        }
+        if let Some(tag) = &self.tag {
+            object.insert("tag".to_owned(), json!(tag));
+        }
+        object.insert("slots".to_owned(), json!(self.slots));
+        Value::Object(object)
+    }
+}
+
+/// The gateway's own message for a closed recipe-start refusal code. Never
+/// carries a slot value or an upstream message.
+fn recipe_refusal_message(code: &str) -> &'static str {
+    match code {
+        "browser_recipes_unavailable" => "Saved browser recipes are not enabled.",
+        "recipe_attach_unsupported" => {
+            "A saved recipe runs on its own browser run; it cannot attach to this tab."
+        }
+        "recipe_plan_mode_unsupported" => "A saved recipe cannot run in plan mode.",
+        "recipe_id_invalid" => "The recipe id is invalid.",
+        "recipe_version_and_tag" => "Name a recipe version or a tag, not both.",
+        "recipe_tag_invalid" => "The recipe tag is invalid.",
+        "recipe_slots_invalid" => "The recipe's slot values are invalid.",
+        _ => "This saved recipe cannot be started.",
+    }
+}
+
+fn recipe_refusal(status: StatusCode, code: &'static str) -> Response {
+    (status, Json(error(code, recipe_refusal_message(code)))).into_response()
+}
+
+/// Model Gateway's refusals of a recipe start (Q4-E4.2-3i), in the gateway's
+/// own typed envelope. `None` for anything else. Model Gateway answers
+/// `{ "error": "<code>" }`; only its closed codes map, never a message.
+fn recipe_start_refusal(status: StatusCode, body: &Value) -> Option<Response> {
+    if status != StatusCode::BAD_REQUEST {
+        return None;
+    }
+    let code = body.get("error").and_then(Value::as_str)?;
+    let mapped: &'static str = match code {
+        "browser_recipe_unavailable" => "browser_recipes_unavailable",
+        "recipe_attach_unsupported" => "recipe_attach_unsupported",
+        "recipe_plan_mode_unsupported" => "recipe_plan_mode_unsupported",
+        "recipe_id_invalid" => "recipe_id_invalid",
+        "recipe_version_and_tag" => "recipe_version_and_tag",
+        "recipe_tag_invalid" => "recipe_tag_invalid",
+        "recipe_slots_invalid" => "recipe_slots_invalid",
+        "recipe_requires_user" => {
+            return Some(
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(error(
+                        "browser_recipe_forbidden",
+                        "You may not use saved recipes here.",
+                    )),
+                )
+                    .into_response(),
+            )
+        }
+        _ => return None,
+    };
+    Some(recipe_refusal(StatusCode::BAD_REQUEST, mapped))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2310,6 +2469,11 @@ fn build_ai_run_request<S: BrowserSessionRunState>(
     if body.assistant_interactive {
         request["policy"] = json!({ "disable": ["browser.act.upload", "browser.act.download"] });
     }
+    // Q4-E4.2-4c: written only when the start names a recipe, so a plain start
+    // is byte-identical to before. Slot values are forwarded, never logged.
+    if let Some(recipe) = &body.recipe {
+        request["recipe"] = recipe.to_wire();
+    }
     request
 }
 
@@ -2435,6 +2599,25 @@ async fn start_ai_run_with_switches(
         )
             .into_response();
     }
+    // Q4-E4.2-4c: a saved recipe needs `BROWSER_RECIPES`, and runs unattached
+    // in v1 (Model Gateway refuses an attached or plan-mode recipe run too).
+    // Refused before any Quarry or Model Gateway call; no slot value is echoed.
+    if let Some(recipe) = &body.recipe {
+        if !state.browser_recipes {
+            return recipe_refusal(StatusCode::BAD_REQUEST, "browser_recipes_unavailable");
+        }
+        if body.continue_in_tab.is_some() || body.require_attached || body.assistant_interactive {
+            return recipe_refusal(StatusCode::BAD_REQUEST, "recipe_attach_unsupported");
+        }
+        if body.plan_mode == Some(true) {
+            return recipe_refusal(StatusCode::BAD_REQUEST, "recipe_plan_mode_unsupported");
+        }
+        if let Some(code) = recipe.invalid_code() {
+            return recipe_refusal(StatusCode::BAD_REQUEST, code);
+        }
+    }
+    // Recipe runs are unattached: the attach switch never binds one to the session.
+    let attach_switch = attach_switch && body.recipe.is_none();
     if body.continue_in_tab.is_some()
         && (!body.require_attached || !body.assistant_interactive || body.allowed_domains.is_some())
     {
@@ -2678,6 +2861,9 @@ async fn start_ai_run_with_switches(
     .await;
     if !status.is_success() {
         if let Some(response) = idempotency_refusal(status, &response_body) {
+            return response;
+        }
+        if let Some(response) = recipe_start_refusal(status, &response_body) {
             return response;
         }
         if session_grant_inactive(status, &response_body, names_hosts) {
@@ -8611,7 +8797,7 @@ pub(crate) mod tests {
                     assistant_interactive: false,
                     plan_mode: None,
                     require_approval: None,
-                    max_cost_usd: None,
+                    max_cost_usd: None, recipe: None,
                 }),
             )
             .await,
@@ -9291,7 +9477,7 @@ pub(crate) mod tests {
                 assistant_interactive: false,
                 plan_mode: None,
                 require_approval: None,
-                max_cost_usd: None,
+                max_cost_usd: None, recipe: None,
             }
         }
 
@@ -10628,7 +10814,7 @@ pub(crate) mod tests {
             assistant_interactive: false,
             plan_mode: None,
             require_approval: Some(true),
-            max_cost_usd: None,
+            max_cost_usd: None, recipe: None,
         };
 
         let request = build_ai_run_request(
@@ -10676,7 +10862,7 @@ pub(crate) mod tests {
             assistant_interactive: false,
             plan_mode: None,
             require_approval: None,
-            max_cost_usd: None,
+            max_cost_usd: None, recipe: None,
         };
 
         let request = build_ai_run_request(
@@ -10727,7 +10913,7 @@ pub(crate) mod tests {
             assistant_interactive: false,
             plan_mode: None,
             require_approval: None,
-            max_cost_usd: None,
+            max_cost_usd: None, recipe: None,
         };
 
         let request = build_ai_run_request(
@@ -10774,7 +10960,7 @@ pub(crate) mod tests {
                 assistant_interactive: false,
                 plan_mode: None,
                 require_approval: None,
-                max_cost_usd: None,
+                max_cost_usd: None, recipe: None,
             };
 
             let request = build_ai_run_request(
@@ -10806,7 +10992,7 @@ pub(crate) mod tests {
             assistant_interactive: false,
             plan_mode: None,
             require_approval: None,
-            max_cost_usd: None,
+            max_cost_usd: None, recipe: None,
         }
     }
 

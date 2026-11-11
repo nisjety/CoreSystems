@@ -327,7 +327,10 @@ fn evaluate_maps_to_script_and_script_is_never_unlockable() {
         .filter(|spec| !spec.unlockable)
         .map(|spec| spec.key)
         .collect();
-    assert_eq!(unlockable_false, vec![CapKey::ActScript]);
+    assert_eq!(
+        unlockable_false,
+        vec![CapKey::ActScript, CapKey::ReputationBlock]
+    );
 
     let mut input = inputs(Principal::Autonomous);
     input.org = OrgInput::Present {

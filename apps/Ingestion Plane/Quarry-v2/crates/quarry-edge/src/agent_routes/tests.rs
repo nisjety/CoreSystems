@@ -357,6 +357,9 @@ fn step_budget_is_fail_closed_once_limit_is_reached() {
         nav_policy: super::human_browse::RunNavPolicy::Allowlist,
         origin_extension: None,
         origin_extension_lane_stale: false,
+        origin: quarry_core::trace::RunOrigin::User,
+        model_run_id: None,
+        agent: None,
     };
     assert!(enforce_step_budget(&entry).is_err());
     entry.constraints.max_steps = 0;
@@ -421,6 +424,9 @@ fn entry_with_budget(budget: Option<crate::budget::RunBudget>) -> RunEntry {
         nav_policy: super::human_browse::RunNavPolicy::Allowlist,
         origin_extension: None,
         origin_extension_lane_stale: false,
+        origin: quarry_core::trace::RunOrigin::User,
+        model_run_id: None,
+        agent: None,
     }
 }
 
@@ -2030,7 +2036,7 @@ async fn sweep_releases_an_idle_run_once_and_leaves_the_checkpoint_active() {
     assert_eq!(state.agent_runs.stats().live, 1);
     // Past the idle limit.
     let report = sweep_once(&state, T0 + 901_000).await;
-    assert_eq!(report, SweepReport { expired: 1, would_expire: 0 });
+    assert_eq!(report, SweepReport { expired: 1, would_expire: 0, ..SweepReport::default() });
     assert_eq!(state.agent_runs.stats().live, 0);
     assert!(handle.entry.lock().await.closed);
     assert!(lookup_run(&state, &run_id).is_none());
@@ -2065,7 +2071,7 @@ async fn dry_run_logs_and_releases_nothing() {
     });
     let (run_id, _handle) = register(&state, "org", Interactive, T0).await;
     let report = sweep_once(&state, T0 + 5_000_000).await;
-    assert_eq!(report, SweepReport { expired: 0, would_expire: 1 });
+    assert_eq!(report, SweepReport { expired: 0, would_expire: 1, ..SweepReport::default() });
     assert!(lookup_run(&state, &run_id).is_some());
 }
 
@@ -2178,6 +2184,8 @@ fn gone_checkpoint(run_id: &RunKind, actor: &str, zdr: ZdrMode, status: AgentRun
         next_step: 2,
         trace_seq: 0,
         policy_ask: None,
+        origin: None,
+        model_run_id: None,
     }
 }
 

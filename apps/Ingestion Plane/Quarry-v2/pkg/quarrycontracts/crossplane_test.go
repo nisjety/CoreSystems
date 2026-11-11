@@ -127,48 +127,6 @@ func TestDataPlaneIngestResponse_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestStructuredExtractRequest_ZdrField(t *testing.T) {
-	canonical := []byte(`{
-		"run_id": "run_x",
-		"org_id": "org_x",
-		"markdown": "# Hi",
-		"structured_output_schema": {"type":"object","required":["x"]},
-		"max_cost_usd": 0.10,
-		"zdr": "on"
-	}`)
-
-	var parsed StructuredExtractRequest
-	if err := json.Unmarshal(canonical, &parsed); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if parsed.Zdr != ZdrOn {
-		t.Errorf("zdr = %q, want %q", parsed.Zdr, ZdrOn)
-	}
-	if parsed.MaxCostUSD == nil || *parsed.MaxCostUSD != 0.10 {
-		t.Errorf("max_cost_usd unexpected: %v", parsed.MaxCostUSD)
-	}
-}
-
-func TestStructuredExtractResponse_UsageShape(t *testing.T) {
-	canonical := []byte(`{
-		"data": {"name": "Alice"},
-		"schema_valid": true,
-		"usage": {"input_tokens": 100, "output_tokens": 200, "cost_usd": 0.001},
-		"model": "claude-sonnet-4-6",
-		"provider": "anthropic"
-	}`)
-	var parsed StructuredExtractResponse
-	if err := json.Unmarshal(canonical, &parsed); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if parsed.Usage.CostUSD != 0.001 {
-		t.Errorf("cost_usd = %v", parsed.Usage.CostUSD)
-	}
-	if !parsed.SchemaValid {
-		t.Error("schema_valid should be true")
-	}
-}
-
 func TestSourceTrace_PreservesFieldSelectors(t *testing.T) {
 	now := time.Now().UTC()
 	trace := SourceTrace{

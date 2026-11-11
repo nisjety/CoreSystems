@@ -181,5 +181,8 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/runs/{run_id}/events/replay",
             get(streams::run_events_replay),
         )
+        // WS10.S6 (GW-2): the run's durable trace, one page at a time. Read-only; Model Plane
+        // decides that the run is the caller's own (a non-owner reads the same 404 as no run).
+        .route("/api/v1/runs/{run_id}/trace", get(streams::run_trace))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }

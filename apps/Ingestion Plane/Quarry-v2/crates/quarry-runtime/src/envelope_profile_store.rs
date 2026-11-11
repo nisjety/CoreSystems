@@ -122,7 +122,10 @@ impl EnvelopeProfileStore {
             Some((rev, env_bytes)) if rev % DEK_ROTATE_EVERY_REVS != 0 => {
                 let env: EnvelopeV1 =
                     serde_json::from_slice(env_bytes).map_err(|_| decode_err("envelope"))?;
-                if env.key_id == self.keys.current_key_id() {
+                // Per-org current key (org-core provider): comparing with the
+                // provider-wide current_key_id() would never match, so every save
+                // would mint a fresh DEK.
+                if self.keys.is_current_key(org_id, &env.key_id) {
                     let wrapped = env.wrapped_dek_bytes().map_err(crypto_err)?;
                     let dek = self
                         .keys
@@ -246,7 +249,7 @@ impl ProfileStore for EnvelopeProfileStore {
             let plain = profile_crypto::open(&dek, org_id, &profile, &env).map_err(crypto_err)?;
             let snap: SessionSnapshot =
                 serde_json::from_slice(&plain).map_err(|_| decode_err("snapshot"))?;
-            if self.mode == EncryptionMode::On && env.key_id != self.keys.current_key_id() {
+            if self.mode == EncryptionMode::On && !self.keys.is_current_key(org_id, &env.key_id) {
                 self.spawn_reseal(org_id, profile_id, row.rev, snap.clone());
             }
             return Ok(Some(snap));

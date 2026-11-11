@@ -79,6 +79,17 @@
     },
     {
       "applies_to": "all",
+      "baseline": "allowed",
+      "key": "browser.reputation.block",
+      "kind": "protection",
+      "reserved": false,
+      "since": "W3-E3.8.7",
+      "site": "quarry-edge agent egress: forces host reputation to block for the org's runs (tighten-only over QUARRY_EDGE__REPUTATION_MODE)",
+      "unlockable": false,
+      "zdr_implies_disabled": false
+    },
+    {
+      "applies_to": "all",
       "baseline": "disabled",
       "key": "browser.recording",
       "kind": "ability",

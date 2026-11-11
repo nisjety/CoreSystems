@@ -164,6 +164,9 @@ func main() {
 
 	// The schedule reconciler resolves a crawl schedule's bounds with the same
 	// limits the dispatcher uses (WS15.S2), so it starts after they are loaded.
+	// The runtime sync (WS15.S4c) pushes each schedule's run times and overlap
+	// skips to control. Off by default; the flag is read once here.
+	runtimeSync := schedules.RuntimeSyncEnabled()
 	schedMgr := schedules.New(c, schedules.Config{
 		ControlBaseURL:    controlURL,
 		ControlAuthToken:  controlToken,
@@ -171,7 +174,11 @@ func main() {
 		TaskQueue:         TaskQueue,
 		Interval:          30 * time.Second,
 		CrawlLimits:       crawlLimits,
+		RuntimeSync:       runtimeSync,
 	})
+	if runtimeSync {
+		log.Info().Msg("schedule runtime sync is ON (QUARRY_SCHEDULE_RUNTIME_SYNC)")
+	}
 	go schedMgr.Run(rootCtx)
 	// Schedule request loop (WS15.S3): applies the trigger and backfill rows
 	// control records, every 2 s. Off by default; it finds rows only when

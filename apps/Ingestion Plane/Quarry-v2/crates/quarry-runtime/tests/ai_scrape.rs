@@ -25,8 +25,8 @@ use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 use quarry_core::ai_spec::{
-    AiCode, AiFormatReport, AiKind, AiReason, AiRepair, AiReport, AiSpec, AiStatus, HighlightsSpec, JsonSpec,
-    QuestionSpec, SummarySpec,
+    AiCode, AiFormatReport, AiKind, AiReason, AiRepair, AiReport, AiSpec, AiStatus, ComplexityClass, HighlightsSpec,
+    JsonSpec, QuestionSpec, SummarySpec,
 };
 use quarry_core::error::{ErrorCode, QuarryError, QuarryResult};
 use quarry_runtime::ai_scrape::{AiFields, AiScrapeConfig, AiScrapeEngine, AiScrapeInput};
@@ -285,6 +285,7 @@ fn json_spec() -> AiSpec {
     AiSpec::Json(JsonSpec {
         schema: schema(),
         prompt: None,
+        complexity: ComplexityClass::Simple,
     })
 }
 
@@ -355,6 +356,7 @@ fn input(source: &str) -> AiScrapeInput<'_> {
         zdr: false,
         request_id: "req_test",
         deadline: None,
+        harvest: None,
     }
 }
 
@@ -706,6 +708,7 @@ async fn json_happy_path() {
     let spec = AiSpec::Json(JsonSpec {
         schema: schema(),
         prompt: Some("Bruk kun tall fra siden.".into()),
+        complexity: ComplexityClass::Simple,
     });
     let (fields, report) = run(&engine(&double), &[spec], PAGE).await;
     double.assert_clean();
@@ -1289,6 +1292,7 @@ async fn logs_hold_counts_and_codes_never_content() {
         AiSpec::Json(JsonSpec {
             schema: json!({ "type": "object", "properties": { "title": { "type": "string", "description": "SCHEMA-SECRET-WORD" } } }),
             prompt: Some("PROMPT-SECRET-WORD".into()),
+            complexity: ComplexityClass::Simple,
         }),
         summary_spec(300),
         AiSpec::Question(QuestionSpec {

@@ -242,6 +242,13 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   browser_recipe_limit_reached: { no: 'Oppskriftslageret har nådd en grense for denne oppskriften.', en: 'The recipe store has reached a limit for this recipe.' },
   browser_recipe_forbidden: { no: 'Du kan ikke bruke lagrede oppskrifter her.', en: 'You may not use saved recipes here.' },
   browser_recipe_timeout: { no: 'Oppskriftslageret svarte ikke i tide. Prøv igjen.', en: 'The recipe store did not answer in time. Try again.' },
+  // Starting a browser AI run from a saved recipe (Q4-E4.2-4c gateway, start_ai_run in browser.rs).
+  recipe_attach_unsupported: { no: 'En lagret oppskrift kjører i sin egen nettleserkjøring og kan ikke knyttes til denne fanen.', en: 'A saved recipe runs on its own browser run; it cannot attach to this tab.' },
+  recipe_plan_mode_unsupported: { no: 'En lagret oppskrift kan ikke kjøres i planmodus.', en: 'A saved recipe cannot run in plan mode.' },
+  recipe_id_invalid: { no: 'Oppskrifts-ID-en er ugyldig.', en: 'The recipe id is invalid.' },
+  recipe_version_and_tag: { no: 'Oppgi en oppskriftsversjon eller en tagg, ikke begge.', en: 'Name a recipe version or a tag, not both.' },
+  recipe_tag_invalid: { no: 'Oppskriftstaggen er ugyldig.', en: 'The recipe tag is invalid.' },
+  recipe_slots_invalid: { no: 'Verdiene for oppskriften er ugyldige.', en: "The recipe's slot values are invalid." },
   browser_receipts_unavailable_zdr: { no: 'Handlingsloggen er ikke tilgjengelig for økter uten lagring.', en: 'The action log is not available for sessions without retention.' },
   invalid_browser_evidence_query: { no: 'Filteret for nettleserloggen er ugyldig.', en: 'The browser log filter is not valid.' },
   invalid_devtools_query: { no: 'Filteret for konsoll og nettverk er ugyldig.', en: 'The console and network filter is not valid.' },
@@ -298,6 +305,24 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   browser_attach_unavailable: {
     no: 'En tilkoblet agentnettleser er ikke tilgjengelig for denne økten.',
     en: 'An attached agent browser is not available for this session.',
+  },
+  // Q2-WS8.I: the attach and per-tab control refusals of the gateway (browser.rs `browser_attach_refusal`, `control_tab`).
+  browser_attach_exists: {
+    no: 'En agent er allerede koblet til denne nettleserøkten. Stopp den agenten først, og prøv igjen.',
+    en: 'An agent is already attached to this browser session. Stop that agent first, then try again.',
+  },
+  browser_attach_zdr_unsupported: {
+    no: 'En agent kan ikke kobles til en nettleserøkt med Zero Data Retention. Ta over nettleseren selv i stedet.',
+    en: 'An agent cannot be attached to a browser session with Zero Data Retention. Take over the browser yourself instead.',
+  },
+  browser_tab_control_forbidden: {
+    no: 'Bare personen som eier denne nettleserøkten kan endre hvem som holder en fane.',
+    en: 'Only the person who owns this browser session can change who holds a tab.',
+  },
+  // Q2-WS8.I: a paused browser agent takes no step until the person resumes it. No gateway file emits this code yet.
+  browser_agent_paused: {
+    no: 'Nettleseragenten er satt på pause, så den kan ikke handle før du fortsetter den.',
+    en: 'The browser agent is paused, so it cannot act until you resume it.',
   },
   browser_grant_not_derivable: {
     no: 'Tilgangen til denne nettleserøkten har utløpt eller er trukket tilbake, så AI-kjøringen kunne ikke starte. Åpne økten på nytt og prøv igjen.',
@@ -1317,6 +1342,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   room_pins_unavailable: { no: 'Festingen kunne ikke endres. Ingenting er endret.', en: 'The pin could not be changed. Nothing was changed.', retryable: true },
   run_control_unavailable: { no: 'Kontrollen av kjøringen er midlertidig utilgjengelig.', en: 'Run control is temporarily unavailable.', retryable: true },
   run_not_found: { no: 'Fant ikke kjøringen, eller du har ikke tilgang til den.', en: 'The run was not found, or you do not have access to it.' },
+  run_trace_unavailable: { no: 'Sporingen av kjøringen er ikke tilgjengelig.', en: 'The run trace is not available.' },
   sidebar_too_large: { no: 'Sidepanelets oppsett er for stort til å lagres.', en: 'The sidebar layout is too large to save.' },
   space_reminders_disabled: { no: 'Påminnelser i rom er ikke slått på.', en: 'Space reminders are not turned on.' },
   space_run_control_not_authorized: { no: 'Du kan ikke stoppe denne kjøringen.', en: 'Stopping this run is not authorized.' },

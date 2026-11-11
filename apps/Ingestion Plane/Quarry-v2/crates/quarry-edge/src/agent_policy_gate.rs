@@ -152,11 +152,15 @@ pub fn egress_policy(decision: &Decision, allowed_domains: &[String]) -> Browser
         allowed_domains,
         &denied,
     );
-    if decision.policy().has_host_allowlist() {
+    let egress = if decision.policy().has_host_allowlist() {
         egress
     } else {
         egress.with_public_assets()
-    }
+    };
+    // WS7.G (D2-U34-5): under ZDR an egress receipt stores the host only. The decision is
+    // resolved with the run's ZDR posture (`resolve_for_start(.., zdr, ..)`), so this is
+    // the run's ZDR.
+    egress.with_host_only_receipts(decision.policy().zdr())
 }
 
 /// The browser boundary for one narrowing result. `from_allowed_domains(&[])` is the
@@ -205,10 +209,16 @@ pub fn live_egress_policy(
     zdr: bool,
     allowed_domains: &[String],
 ) -> BrowserEgressPolicy {
+    // WS7.G (D2-U34-5): a ZDR run's receipts keep the host only, whichever of the run's
+    // posture and its stored decision says ZDR.
     match live.policy() {
-        Some(decision) => egress_policy(decision, allowed_domains),
+        Some(decision) => {
+            let host_only = zdr || decision.policy().zdr();
+            egress_policy(decision, allowed_domains).with_host_only_receipts(host_only)
+        }
         None => BrowserEgressPolicy::from_allowed_domains(allowed_domains)
-            .with_denied_domains(&egress_denied(state, live, zdr)),
+            .with_denied_domains(&egress_denied(state, live, zdr))
+            .with_host_only_receipts(zdr),
     }
 }
 
@@ -246,11 +256,16 @@ pub fn effective_reputation_mode(
     }
 }
 
-/// The org's reputation cap from the web-policy claim (key `browser.reputation`, tighten-only,
-/// E3.8.7). The web-policy catalogue has no such key yet, so no org can set one and the
-/// deployment mode applies alone. When the key exists this is the one place that reads it.
-fn org_reputation_cap() -> Option<ReputationMode> {
-    None
+/// The org's reputation cap from the run's resolved web-policy decision (catalogue key
+/// `browser.reputation.block`, tighten-only, E3.8.7). The key is a protection: when its effective
+/// mode is `Forced`, from whichever layer forced it (the org's claim included), the cap is `Block`.
+/// Any other mode, and a run with no stored decision (it carries no org layer, as the other gates
+/// hold it), is no cap, so the deployment mode applies alone.
+fn org_reputation_cap(decision: Option<&Decision>) -> Option<ReputationMode> {
+    match decision?.policy().mode(CapKey::ReputationBlock) {
+        Some((Mode::Forced, _)) => Some(ReputationMode::Block),
+        _ => None,
+    }
 }
 
 /// The host reputation source and mode a run's egress boundary is built with, or `None` when
@@ -274,9 +289,14 @@ pub fn reputation_for(
 /// hook is consulted by the browser boundary after the grant and before the DNS guard, for
 /// every navigation, redirect hop, click, frame and sub-resource. With the mode `Off` the
 /// policy is returned unchanged. There is no second enforcement path: the D7 preflight stays
-/// the scrape path's check and this is the browser path's.
-pub fn attach_reputation(state: &AppState, policy: BrowserEgressPolicy) -> BrowserEgressPolicy {
-    match reputation_for(state, org_reputation_cap()) {
+/// the scrape path's check and this is the browser path's. `decision` is the run's stored
+/// web-policy decision; its org cap (when forced) raises the hook's mode.
+pub fn attach_reputation(
+    state: &AppState,
+    policy: BrowserEgressPolicy,
+    decision: Option<&Decision>,
+) -> BrowserEgressPolicy {
+    match reputation_for(state, org_reputation_cap(decision)) {
         Some((source, mode)) => policy.with_reputation(source, mode),
         None => policy,
     }
@@ -368,7 +388,7 @@ pub(crate) fn attachment_egress_policy(
     });
     candidates.sort();
     candidates.dedup();
-    if candidates.is_empty() {
+    let egress = if candidates.is_empty() {
         BrowserEgressPolicy::deny_all()
     } else {
         let egress = BrowserEgressPolicy::from_allowed_domains(&candidates)
@@ -378,7 +398,10 @@ pub(crate) fn attachment_egress_policy(
         } else {
             egress.with_public_assets()
         }
-    }
+    };
+    // WS7.G (D2-U34-5): ZDR attachments are refused before this, so this is `false` today;
+    // it follows the rule should that ever change.
+    egress.with_host_only_receipts(policy.zdr())
 }
 
 fn gate_live(

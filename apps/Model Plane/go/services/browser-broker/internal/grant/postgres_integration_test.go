@@ -87,7 +87,7 @@ func applyMigration(t *testing.T, pool *pgxpool.Pool, name string) {
 	}
 }
 
-// newTestDB creates a fresh database with 0001, 0003, 0004, 0005 and 0006 applied and returns a pool on it.
+// newTestDB creates a fresh database with 0001, 0003, 0004, 0005, 0006 and 0008 applied and returns a pool on it.
 func newTestDB(t *testing.T) (*pgxpool.Pool, *pgxpool.Config) {
 	t.Helper()
 	bg := context.Background()
@@ -125,6 +125,7 @@ func newTestDB(t *testing.T) (*pgxpool.Pool, *pgxpool.Config) {
 	applyMigration(t, pool, "0004_browser_grants_policy.up.sql")
 	applyMigration(t, pool, "0005_browser_grants_key.up.sql")
 	applyMigration(t, pool, "0006_browser_grants_extension.up.sql")
+	applyMigration(t, pool, "0008_browser_grants_web_policy.up.sql")
 	return pool, cfg
 }
 
@@ -824,6 +825,8 @@ func TestPg_MigrationIsRerunnable(t *testing.T) {
 	applyMigration(t, pool, "0006_browser_grants_extension.up.sql")
 	applyMigration(t, pool, "0005_browser_grants_key.up.sql")
 	applyMigration(t, pool, "0006_browser_grants_extension.up.sql")
+	applyMigration(t, pool, "0008_browser_grants_web_policy.up.sql")
+	applyMigration(t, pool, "0008_browser_grants_web_policy.up.sql")
 	if _, err := store.GetScoped(ctx, before.ID, before.OrgID, before.OwnerID); err != nil {
 		t.Fatalf("a re-applied migration lost a row: %v", err)
 	}
@@ -869,6 +872,7 @@ func TestPg_MigrationIsRerunnable(t *testing.T) {
 	applyMigration(t, pool, "0004_browser_grants_policy.up.sql")
 	applyMigration(t, pool, "0005_browser_grants_key.up.sql")
 	applyMigration(t, pool, "0006_browser_grants_extension.up.sql")
+	applyMigration(t, pool, "0008_browser_grants_web_policy.up.sql")
 	// The table was re-created: drop connections holding cached statements.
 	pool.Reset()
 	after := session(t, store, CreateSessionParams{TTL: 10 * time.Minute})

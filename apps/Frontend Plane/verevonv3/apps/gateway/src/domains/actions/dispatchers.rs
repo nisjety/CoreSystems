@@ -56,7 +56,8 @@ use crate::domains::integrations::model_subscriptions::{
 use crate::domains::integrations::providers::start_connect_session as start_integration_connect_session;
 use crate::domains::knowledge::documents::create_document;
 use crate::domains::knowledge::quarry::{
-    crawl_cancel, crawl_pause, crawl_resume, crawl_status,
+    crawl_cancel, crawl_pause, crawl_resume, crawl_status, scrape_needs_browser_budget,
+    SCRAPE_BROWSER_TIMEOUT,
 };
 use crate::domains::knowledge::products::{extract_products, summarize_products};
 use crate::domains::knowledge::sync::register_sharepoint;
@@ -113,9 +114,10 @@ use crate::{
     contracts::ActionActor,
     envelope::{error, ok},
     middleware::AuthenticatedUser,
+    public_url::normalize_public_http_url,
     upstream::{
-        proxy_bearer_json, proxy_bearer_json_with_headers, proxy_conversation_json, proxy_json,
-        proxy_notification_json,
+        proxy_bearer_json, proxy_bearer_json_with_headers, proxy_bearer_json_with_timeout,
+        proxy_conversation_json, proxy_json, proxy_notification_json,
     },
 };
 
@@ -281,47 +283,132 @@ pub(super) async fn dispatch_recrawl(
     (StatusCode::OK, Json(execution)).into_response()
 }
 
+/// WS13.7: the quarry-edge `formats` for a `knowledge.scrape_url` `capture`. `capture` is
+/// the value of the `capture` key, `null` when the key is absent. Absent gives `None`, so
+/// the edge body carries no `formats` key, as it did before captures. Present gives
+/// `"markdown"` first, then `"screenshot"` (the string for `true`, the object form for an
+/// options object, nothing for `false`) and `"pdf"` when `pdf` is `true`. The screenshot
+/// object forwards only `fullPage` and `quality`: the action contract exposes no clip or
+/// viewport. A wrong shape, or a JPEG quality outside 1 to 100, gives the message of a 400
+/// `invalid_capture`.
+fn scrape_formats_from_capture(capture: &Value) -> Result<Option<Value>, String> {
+    if capture.is_null() {
+        return Ok(None);
+    }
+    let Some(capture) = capture.as_object() else {
+        return Err("The capture must be an object.".to_owned());
+    };
+
+    let mut formats = vec![json!("markdown")];
+    match capture.get("screenshot") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => {}
+        Some(Value::Bool(true)) => formats.push(json!("screenshot")),
+        Some(Value::Object(options)) => {
+            let full_page = match options.get("fullPage") {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(full_page)) => *full_page,
+                Some(_) => return Err("The screenshot fullPage must be a boolean.".to_owned()),
+            };
+            let mut screenshot = json!({ "type": "screenshot", "fullPage": full_page });
+            match options.get("quality") {
+                None | Some(Value::Null) => {}
+                Some(quality) => match quality.as_u64() {
+                    Some(quality @ 1..=100) => screenshot["quality"] = json!(quality),
+                    _ => return Err("The screenshot quality must be 1 to 100.".to_owned()),
+                },
+            }
+            formats.push(screenshot);
+        }
+        Some(_) => return Err("The screenshot must be a boolean or an object.".to_owned()),
+    }
+    match capture.get("pdf") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => {}
+        Some(Value::Bool(true)) => formats.push(json!("pdf")),
+        Some(_) => return Err("The pdf must be a boolean.".to_owned()),
+    }
+    Ok(Some(Value::Array(formats)))
+}
+
 /// `knowledge.scrape_url` → quarry-edge `POST /v1/scrape` with `ingest: true` so
 /// the fetched page is persisted into the knowledge base (the action's stated
 /// purpose). Synchronous: scrape returns page content directly, so the execution
 /// is reported `completed` with no run-event stream.
+///
+/// WS13.7: the URL gets the same SSRF pre-filter as the direct scrape route and is
+/// forwarded to the edge as content, never fetched here. A `capture` becomes `formats`,
+/// and a capture drives the browser, so it takes the long ceiling. The edge refuses a
+/// capture while `QUARRY_EDGE__SCRAPE_CAPTURE` is off, so this path stays dark until
+/// that switch is on. `actions` is never forwarded, and nothing from the edge's answer
+/// is stored here (under ZDR the edge writes nothing either).
 pub(super) async fn dispatch_scrape_url(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,
     input: &Value,
 ) -> Response {
-    let target = input.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let target = match input
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "A non-empty URL is required.".to_owned())
+        .and_then(normalize_public_http_url)
+    {
+        Ok(value) => value,
+        Err(message) => {
+            return (StatusCode::BAD_REQUEST, Json(error("invalid_url", message))).into_response();
+        }
+    };
+    let capture = input.get("capture").unwrap_or(&Value::Null);
+    let formats = match scrape_formats_from_capture(capture) {
+        Ok(formats) => formats,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error("invalid_capture", message)),
+            )
+                .into_response();
+        }
+    };
     let cookie = cookie_header(headers);
     let token = quarry_token(state, user, &cookie).await;
 
     let url = format!("{}/v1/scrape", state.quarry_edge_url);
-    let body = json!({ "url": target, "ingest": true });
+    let mut body = json!({ "url": target, "ingest": true });
+    if let Some(formats) = formats {
+        body["formats"] = formats;
+    }
 
-    let (status, Json(resp)) = proxy_bearer_json(
-        state,
-        Method::POST,
-        &url,
-        Some(body),
-        token.as_deref(),
-        &user.user_id,
-    )
-    .await;
+    let (status, Json(resp)) = if scrape_needs_browser_budget(&body) {
+        proxy_bearer_json_with_timeout(
+            state,
+            Method::POST,
+            &url,
+            Some(body),
+            token.as_deref(),
+            &user.user_id,
+            SCRAPE_BROWSER_TIMEOUT,
+        )
+        .await
+    } else {
+        proxy_bearer_json(
+            state,
+            Method::POST,
+            &url,
+            Some(body),
+            token.as_deref(),
+            &user.user_id,
+        )
+        .await
+    };
 
     if !status.is_success() {
         return (status, Json(resp)).into_response();
     }
 
-    let run_id = if target.is_empty() {
-        format!("scrape_{}", user.user_id)
-    } else {
-        target.to_owned()
-    };
     let execution = ok(json!({
         "actionId": "knowledge.scrape_url",
-        "runId": run_id,
+        "runId": target,
         "status": "completed",
-        "auditId": format!("audit_{}_{}", run_id, user.user_id),
+        "auditId": format!("audit_{}_{}", target, user.user_id),
     }));
 
     (StatusCode::OK, Json(execution)).into_response()
@@ -4580,7 +4667,11 @@ async fn dispatch_ingestions_run_control(
         PathExtractor(run_id),
     );
     let response = match verb {
-        IngestionRunVerb::Status => crawl_status(state_arg, user_arg, headers.clone(), path_arg).await,
+        IngestionRunVerb::Status => {
+            // The action takes no `wait` or `resume`, so its status read carries no query.
+            let no_query = axum::http::Uri::from_static("/");
+            crawl_status(state_arg, user_arg, headers.clone(), path_arg, no_query).await
+        }
         IngestionRunVerb::Pause => crawl_pause(state_arg, user_arg, headers.clone(), path_arg).await,
         IngestionRunVerb::Resume => crawl_resume(state_arg, user_arg, headers.clone(), path_arg).await,
         IngestionRunVerb::Cancel => crawl_cancel(state_arg, user_arg, headers.clone(), path_arg).await,
@@ -5765,7 +5856,17 @@ pub(super) async fn dispatch_browser_run_start(
                 .filter_map(|v| v.as_str().map(str::to_owned))
                 .collect()
         });
+    // Q4-E4.2-4c: an optional saved recipe, read strictly. The owner checks the
+    // `BROWSER_RECIPES` switch and the shape; slot values are never logged.
+    let recipe = match input.get("recipe") {
+        None | Some(Value::Null) => None,
+        Some(value) => match serde_json::from_value::<crate::domains::browser::RecipeAsk>(value.clone()) {
+            Ok(recipe) => Some(recipe),
+            Err(_) => return ticket_bad_request("browser_run.start 'recipe' must be {id, version?, tag?, slots?}"),
+        },
+    };
     let body = StartAiRunBody {
+        recipe,
         continue_in_tab: None,
         goal: goal.to_owned(),
         require_attached,

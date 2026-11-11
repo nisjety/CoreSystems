@@ -6,11 +6,13 @@ import type {
   BrowserOwnerTimelineResponse,
   BrowserReplayEvent,
   BrowserSession,
+  BrowserSessionAttach,
   BrowserTab,
   BrowserTabsResponse,
   BrowserTimelineEntry,
   BrowserSessionResponse,
 } from '@/shared/api/browser-client'
+import { browserSessionAttachFromWire, isBrowserWireId } from '@/shared/api/browser-client'
 import type {
   BrowserActionApprovalRequiredEvent,
   BrowserActionDecidedEvent,
@@ -92,6 +94,8 @@ export type BrowserSessionViewModel = {
   status: BrowserSession['status']
   tabs: BrowserTab[]
   tabsUrl?: string | null
+  /** The agent attached to this session (Q2-WS8.I), allow-listed; null when none is attached. */
+  attach?: BrowserSessionAttach | null
   timeline: BrowserTimelineViewEntry[]
   title: string
   url: string
@@ -165,6 +169,7 @@ export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessio
     status: session?.status ?? 'degraded',
     tabs,
     tabsUrl: resolveBrowserArtifactUrl(session?.tabsUrl),
+    attach: browserSessionAttachFromWire(session?.attach),
     timeline,
     title: observation?.title || session?.title || preview.title,
     // A tab selection can arrive without a new page observation. Its active
@@ -489,6 +494,9 @@ function normalizeBrowserTabs(
         ...(tab.openedBy === 'agent' || tab.openedBy === 'human' ? { openedBy: tab.openedBy } : {}),
         ...(typeof tab.tabEpoch === 'number' && Number.isSafeInteger(tab.tabEpoch) && tab.tabEpoch >= 0 ? { tabEpoch: tab.tabEpoch } : {}),
         ...(tab.holder === 'agent' || tab.holder === 'human' ? { holder: tab.holder } : {}),
+        // Q2-WS8.I: the attachment's mark (only the two closed words) and id (only in its wire shape).
+        ...(tab.mark === 'deliverable' || tab.mark === 'handoff' ? { mark: tab.mark } : {}),
+        ...(isBrowserWireId(tab.attachId) ? { attachId: tab.attachId } : {}),
       },
     ]
   }, [])

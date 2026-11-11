@@ -115,6 +115,15 @@ pub struct AgentRunCheckpoint {
     /// start carried no ask, and on a checkpoint written before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_ask: Option<quarry_core::web_policy::RequestAsk>,
+    /// WS10.S4: the run's origin trace label (`quarry_core::trace::RunOrigin::as_str`,
+    /// lowercase), so a resume keeps the origin the run was started with. A label, never
+    /// authority. Absent on a checkpoint written before it existed (JSONB state, no migration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// WS10.S4: the caller's (Model Plane) run id from a service token's trace context, a
+    /// correlation label only. A resume restores it. Absent when none was sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_run_id: Option<String>,
 }
 
 /// serde skip rule: a trace that has minted nothing is the default and is not written.
@@ -1423,6 +1432,8 @@ mod tests {
             next_step: 3,
             trace_seq: 0,
             policy_ask: None,
+            origin: None,
+            model_run_id: None,
         };
         store.save_run_checkpoint(checkpoint).await.unwrap();
         assert!(store
@@ -1839,6 +1850,8 @@ mod tests {
             next_step: 2,
             trace_seq: 0,
             policy_ask: None,
+            origin: None,
+            model_run_id: None,
             budget: Some(BudgetCheckpoint {
                 class: "agent".into(),
                 steps: 2,
@@ -2468,6 +2481,8 @@ mod checkpoint_status_tests {
             next_step: 2,
             trace_seq: 0,
             policy_ask: None,
+            origin: None,
+            model_run_id: None,
         }
     }
 

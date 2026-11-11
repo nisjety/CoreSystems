@@ -1279,7 +1279,21 @@ impl ChromiumoxideDriver {
         }
         drop(cursors);
 
+        // WS7.G (D2-U34-5): the proxy already keeps the host only for a ZDR policy;
+        // re-apply it here so a ZDR session's stream never names a path whatever
+        // the transport sent.
+        let host_only_receipt = self
+            .egress_policies
+            .lock()
+            .await
+            .get(session_key)
+            .is_some_and(BrowserEgressPolicy::host_only_receipts);
         for receipt in transport_receipts {
+            let url = if host_only_receipt {
+                redact_egress_url_with(&receipt.url, true)
+            } else {
+                receipt.url
+            };
             push_egress_receipt(
                 &self.egress_receipts,
                 &self.egress_sequence,
@@ -1290,7 +1304,7 @@ impl ChromiumoxideDriver {
                     // do not fabricate a tab attribution.
                     tab_id: None,
                     method: receipt.method,
-                    url: receipt.url,
+                    url,
                     decision: receipt.decision,
                     policy: receipt.policy,
                     timestamp_ms: receipt.timestamp_ms,
@@ -2420,6 +2434,8 @@ async fn install_network_guard(
                 .cloned();
             let session_policy = policies.lock().await.get(&session_key).cloned();
             let policy = resolve_tab_egress_policy(tab_policy.as_ref(), session_policy.as_ref());
+            // WS7.G (D2-U34-5): a ZDR run's receipt keeps the host only.
+            let host_only_receipt = policy.host_only_receipts();
             let policy_allows_url = policy.allows_url(&request_url);
             let public_asset = !policy_allows_url
                 && is_public_asset_request(&event.resource_type, &method, event.request.has_post_data)
@@ -2498,7 +2514,7 @@ async fn install_network_guard(
                                 sequence: 0,
                                 tab_id: Some(tab_id),
                                 method,
-                                url: redact_egress_url(&request_url),
+                                url: redact_egress_url_with(&request_url, host_only_receipt),
                                 decision: if loaded { BrowserEgressDecision::Allow } else { BrowserEgressDecision::Block },
                                 policy: if loaded { "credentialless_public_asset" } else { "public_asset_unavailable" }.to_owned(),
                                 timestamp_ms: now_ms(),
@@ -2578,7 +2594,7 @@ async fn install_network_guard(
                     sequence: 0,
                     tab_id: Some(tab_id.clone()),
                     method,
-                    url: redact_egress_url(&request_url),
+                    url: redact_egress_url_with(&request_url, host_only_receipt),
                     decision,
                     policy: policy.to_owned(),
                     timestamp_ms: now_ms(),
@@ -3511,6 +3527,12 @@ async fn push_egress_receipt(
 /// URL can carry credentials or other page-controlled secrets in its query;
 /// neither belongs in a browser timeline, observation, or durable receipt.
 fn redact_egress_url(raw: &str) -> String {
+    redact_egress_url_with(raw, false)
+}
+
+/// [`redact_egress_url`], or under ZDR (`host_only`, WS7.G, D2-U34-5) the
+/// `scheme://host[:port]` alone: a ZDR run's receipt never names a path.
+pub(crate) fn redact_egress_url_with(raw: &str, host_only: bool) -> String {
     url::Url::parse(raw)
         .ok()
         .and_then(|url| {
@@ -3519,7 +3541,8 @@ fn redact_egress_url(raw: &str) -> String {
                 .port()
                 .map(|port| format!(":{port}"))
                 .unwrap_or_default();
-            Some(format!("{}://{}{}{}", url.scheme(), host, port, url.path()))
+            let path = if host_only { "" } else { url.path() };
+            Some(format!("{}://{}{}{}", url.scheme(), host, port, path))
         })
         .unwrap_or_else(|| "unparseable_url".to_owned())
 }
@@ -5986,10 +6009,17 @@ impl BrowserDriver for ChromiumoxideDriver {
             if governed && tokio::fs::remove_file(&file).await.is_err() {
                 tracing::debug!("governed download: removing the quarantine copy failed");
             }
+            // WS7.G (D2-U34-5): a ZDR session's download receipt keeps the host only.
+            let host_only_receipt = self
+                .egress_policies
+                .lock()
+                .await
+                .get(&session_key)
+                .map_or(true, BrowserEgressPolicy::host_only_receipts);
             Ok::<_, QuarryError>(BrowserDownloadedFile {
                 bytes: Bytes::from(bytes),
                 suggested_filename: sanitize_download_filename(&began.suggested_filename),
-                source_url: redact_egress_url(&began.url),
+                source_url: redact_egress_url_with(&began.url, host_only_receipt),
             })
         }
         .await;

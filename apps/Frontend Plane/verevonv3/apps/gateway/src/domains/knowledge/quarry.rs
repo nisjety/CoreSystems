@@ -1,12 +1,13 @@
 use axum::{
     body::Body,
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::{header, HeaderMap, StatusCode, Uri},
     response::{IntoResponse, Response},
     Json,
 };
 use reqwest::Method;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::{
@@ -16,6 +17,7 @@ use crate::{
         is_valid_artifact_id, scrape_artifact_content_type, BrowserArtifactAbsence, CallerClass,
         MAX_BROWSER_ARTIFACT_BYTES,
     },
+    domains::ingestions::jobs::{job_status_path, JOB_WAIT_MARGIN_S},
     domains::knowledge::shared,
     envelope::{error, ok},
     middleware::AuthenticatedUser,
@@ -30,12 +32,13 @@ const PREVIEW_MARKDOWN_CHAR_LIMIT: usize = 80_000;
 /// route allows 125 s for both, so this client waits a little longer and the edge
 /// answers with its own typed timeout first. Every other scrape keeps the standard
 /// client's 25 s.
-const SCRAPE_BROWSER_TIMEOUT: Duration = Duration::from_secs(135);
+pub(crate) const SCRAPE_BROWSER_TIMEOUT: Duration = Duration::from_secs(135);
 
 /// Whether a scrape body asks for work that outlasts the standard 25 s: a non-empty
 /// `actions` list, an object-form format (a capture or an AI format), or a
-/// `screenshot`, `pdf` or `summary` string format.
-fn scrape_needs_browser_budget(body: &Value) -> bool {
+/// `screenshot`, `pdf` or `summary` string format. The `knowledge.scrape_url` action
+/// dispatcher (WS13.7) asks the same question of the body it builds.
+pub(crate) fn scrape_needs_browser_budget(body: &Value) -> bool {
     let has_actions = body
         .get("actions")
         .and_then(Value::as_array)
@@ -2873,18 +2876,59 @@ async fn crawl_edge_call(
     (status, Json(body)).into_response()
 }
 
-/// `GET /api/v1/knowledge/crawl/{id}`: the status of one crawl.
+/// `GET /api/v1/knowledge/crawl/{id}`: the status of one crawl. `?wait=N` (whole seconds, 1 to
+/// 30) holds the read until the crawl ends or N seconds pass, and `?resume=` takes the
+/// `resume_token` of an earlier 408 to keep waiting. Both are checked and forwarded as the job
+/// status read forwards them; the edge's answer, its 408 included, comes back unchanged.
 pub(crate) async fn crawl_status(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    uri: Uri,
 ) -> Response {
     if !job_id_is_valid(&id) {
         return invalid_job_id();
     }
-    let path = format!("/v1/crawl/{}", urlencoding::encode(&id));
-    crawl_edge_call(&state, &user, &headers, Method::GET, path).await
+    let params = Query::<HashMap<String, String>>::try_from_uri(&uri)
+        .map(|Query(params)| params)
+        .unwrap_or_default();
+    let base = format!("/v1/crawl/{}", urlencoding::encode(&id));
+    let (path, wait) = match job_status_path(&base, &params) {
+        Ok(read) => read,
+        Err(refusal) => return refusal,
+    };
+    let cookie = shared::cookie_header(&headers);
+    let token = shared::quarry_token(&state, &user, &cookie).await;
+    let url = format!("{}{}", state.quarry_edge_url, path);
+    let (status, Json(body)) = match wait {
+        // A wait holds the edge for up to its length, so this read gets that plus the margin
+        // in place of the standard client's 25 s.
+        Some(seconds) => {
+            proxy_bearer_json_with_timeout(
+                &state,
+                Method::GET,
+                &url,
+                None,
+                token.as_deref(),
+                &user.user_id,
+                Duration::from_secs(seconds + JOB_WAIT_MARGIN_S),
+            )
+            .await
+        }
+        None => {
+            proxy_bearer_json(
+                &state,
+                Method::GET,
+                &url,
+                None,
+                token.as_deref(),
+                &user.user_id,
+            )
+            .await
+        }
+    };
+    (status, Json(body)).into_response()
 }
 
 /// `GET /api/v1/knowledge/crawl/{id}/errors`: the pages of the crawl that failed.
@@ -3309,7 +3353,9 @@ mod scrape_artifact_tests {
 #[cfg(test)]
 mod job_control_tests {
     use super::*;
-    use wiremock::matchers::{header as wm_header, method as wm_method, path as wm_path};
+    use wiremock::matchers::{
+        header as wm_header, method as wm_method, path as wm_path, query_param,
+    };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const JOB: &str = "job_01J9SSSSSSSSSSSSSSSSSSSSSS";
@@ -3384,6 +3430,7 @@ mod job_control_tests {
             Extension(user()),
             HeaderMap::new(),
             Path(JOB.to_owned()),
+            "/x".parse().unwrap(),
         )
         .await;
         let (status, body) = body_json(response).await;
@@ -3529,6 +3576,7 @@ mod job_control_tests {
                     Extension(user()),
                     HeaderMap::new(),
                     Path(bad.to_owned()),
+                    "/x".parse().unwrap(),
                 )
                 .await,
                 crawl_errors(
@@ -3566,6 +3614,113 @@ mod job_control_tests {
                 assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}");
                 assert_eq!(body["error"]["code"], "invalid_job_id");
             }
+        }
+        assert!(quarry.received_requests().await.unwrap().is_empty());
+    }
+
+    /// E3.7.3: `?wait=N` and `?resume=` reach the edge's crawl read as the job read sends them,
+    /// the other keys of the query are dropped, and the edge's 408 comes back unchanged.
+    #[tokio::test]
+    async fn status_forwards_a_wait_and_a_resume_and_passes_the_408_on() {
+        let quarry = MockServer::start().await;
+        let processing = json!({
+            "error": {
+                "code": "TIMEOUT",
+                "message": "the job is still processing; send resume_token back with resume to keep waiting",
+                "details": { "reason": "processing_continues", "resume_token": "tok_1" },
+            }
+        });
+        Mock::given(wm_method("GET"))
+            .and(wm_path(format!("/v1/crawl/{JOB}")))
+            .and(query_param("wait", "5"))
+            .and(query_param("resume", "tok_1"))
+            .respond_with(ResponseTemplate::new(408).set_body_json(processing.clone()))
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        let uri: Uri = format!("/api/v1/knowledge/crawl/{JOB}?wait=5&resume=tok_1&org_id=org-2")
+            .parse()
+            .unwrap();
+
+        let response = crawl_status(
+            State(state_for(&quarry)),
+            Extension(user()),
+            HeaderMap::new(),
+            Path(JOB.to_owned()),
+            uri,
+        )
+        .await;
+        let (status, body) = body_json(response).await;
+        assert_eq!(status, StatusCode::REQUEST_TIMEOUT);
+        assert_eq!(body, processing);
+
+        let seen = quarry.received_requests().await.unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].url.query(), Some("wait=5&resume=tok_1"));
+    }
+
+    /// E3.7.3: a plain status read forwards no query, so nothing the browser put in one reaches
+    /// the edge.
+    #[tokio::test]
+    async fn a_plain_status_read_forwards_no_query() {
+        let quarry = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path(format!("/v1/crawl/{JOB}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "data": { "status": "running" } })),
+            )
+            .expect(1)
+            .mount(&quarry)
+            .await;
+        let uri: Uri = format!("/api/v1/knowledge/crawl/{JOB}?org_id=org-2")
+            .parse()
+            .unwrap();
+
+        let response = crawl_status(
+            State(state_for(&quarry)),
+            Extension(user()),
+            HeaderMap::new(),
+            Path(JOB.to_owned()),
+            uri,
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let seen = quarry.received_requests().await.unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].url.query(), None);
+    }
+
+    /// E3.7.3: a `wait` outside 1 to 30, or a `resume` the gateway does not forward, is a 400
+    /// before any upstream call.
+    #[tokio::test]
+    async fn status_refuses_a_bad_wait_or_resume_before_any_upstream_call() {
+        let quarry = MockServer::start().await;
+        let state = state_for(&quarry);
+        let too_long = format!("resume={}", "a".repeat(513));
+        for (query, code) in [
+            ("wait=0", "invalid_wait"),
+            ("wait=31", "invalid_wait"),
+            ("wait=soon", "invalid_wait"),
+            ("resume=bad%20token", "invalid_resume"),
+            ("resume=", "invalid_resume"),
+            (too_long.as_str(), "invalid_resume"),
+        ] {
+            let uri: Uri = format!("/api/v1/knowledge/crawl/{JOB}?{query}")
+                .parse()
+                .unwrap();
+            let response = crawl_status(
+                State(state.clone()),
+                Extension(user()),
+                HeaderMap::new(),
+                Path(JOB.to_owned()),
+                uri,
+            )
+            .await;
+            let (status, body) = body_json(response).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+            assert_eq!(body["error"]["code"], code, "{query}");
         }
         assert!(quarry.received_requests().await.unwrap().is_empty());
     }

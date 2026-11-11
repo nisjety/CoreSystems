@@ -178,6 +178,19 @@ pub const CATALOGUE: &[CapSpec] = &[
         ),
     },
     CapSpec {
+        key: CapKey::ReputationBlock,
+        kind: Kind::Protection,
+        applies_to: AppliesTo::All,
+        baseline: Baseline::Mode(Mode::Allowed),
+        unlockable: false,
+        zdr_implies_disabled: false,
+        reserved: false,
+        since: "W3-E3.8.7",
+        site: Some(
+            "quarry-edge agent egress: forces host reputation to block for the org's runs (tighten-only over QUARRY_EDGE__REPUTATION_MODE)",
+        ),
+    },
+    CapSpec {
         key: CapKey::Recording,
         kind: Kind::Ability,
         applies_to: AppliesTo::All,

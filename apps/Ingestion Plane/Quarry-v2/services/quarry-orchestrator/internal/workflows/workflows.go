@@ -65,6 +65,11 @@ type ChangeMonitorInput struct {
 	// in RUNBOOKS: an org that turns ZDR on later keeps its stamp, and this
 	// workflow still emits run_started/change_detected events with the URL.
 	Zdr *bool `json:"zdr,omitempty"`
+	// ScheduleID is the schedule that fired this probe (WS15.S4a). From
+	// monitor-preflight-v1 a non-empty id makes the workflow ask the edge's
+	// fire-time preflight before the probe; empty (ad-hoc triggers, schedules
+	// reconciled before the field) skips the preflight.
+	ScheduleID string `json:"schedule_id,omitempty"`
 }
 
 // BatchJobInput drives a fan-out over a bounded URL list.
@@ -439,6 +444,10 @@ func ScrapeJobWF(ctx workflow.Context, in ScrapeJobInput, a *activities.Activiti
 // asks for the text fingerprint.
 const changeTextFPVersion = "change-text-fp-v1"
 
+// monitorPreflightVersion guards the WS15.S4a fire-time preflight of ChangeMonitorWF:
+// executions recorded before it never ran PreflightFire and replay unchanged.
+const monitorPreflightVersion = "monitor-preflight-v1"
+
 // ChangeMonitorWF fetches a URL, compares it to the org's stored baseline,
 // and emits change_detected / change_unchanged. It is the workflow a
 // change_monitor schedule fires on each cron tick.
@@ -458,6 +467,33 @@ func ChangeMonitorWF(ctx workflow.Context, in ChangeMonitorInput, a *activities.
 		runID = "run_" + strings.ReplaceAll(execRunID, "-", "")
 	}
 	ids := runIDs{RunID: runID, JobID: in.JobID}
+
+	// WS15.S4a: from monitor-preflight-v1 a scheduled probe asks the edge's
+	// fire-time preflight (posture and entitlement, QUARRY_EDGE__SCHEDULE_POSTURE;
+	// observe, the default, always allows) before it starts. A denied fire writes
+	// schedule_skipped with the schedule id and the closed reason only (never the
+	// URL) and ends cleanly without probing. Histories recorded before the marker
+	// replay unchanged.
+	if workflow.GetVersion(ctx, monitorPreflightVersion, workflow.DefaultVersion, 1) >= 1 && in.ScheduleID != "" {
+		var pre activities.PreflightResult
+		if err := workflow.ExecuteActivity(ctx, a.PreflightFire, activities.PreflightInput{
+			ScheduleID: in.ScheduleID,
+			OrgID:      in.OrgID,
+			TargetKind: "change_monitor",
+		}).Get(ctx, &pre); err != nil {
+			return err
+		}
+		if !pre.Allow {
+			reason := pre.Reason
+			if reason == "" {
+				reason = ScheduledReasonPreflightDenied
+			}
+			return emitEvent(ctx, a, ids, quarrycontracts.EvtScheduleSkipped, map[string]any{
+				"schedule_id": in.ScheduleID,
+				"reason":      reason,
+			}, runID, string(quarrycontracts.EvtScheduleSkipped))
+		}
+	}
 
 	if err := emitEvent(ctx, a, ids, quarrycontracts.EvtRunStarted, map[string]any{
 		"kind": "change_monitor",
@@ -1058,14 +1094,24 @@ func CrawlJobWF(ctx workflow.Context, in CrawlJobInput, a *activities.Activities
 	}
 
 	// If we exited because of cancellation, emit run_cancelled. Otherwise
-	// emit run_completed as usual.
+	// emit run_completed as usual. A cancelled crawl carries the same scope and
+	// sitemap summary as a completed one (WS14.S3), so it reports what was refused.
 	if ctrl.state == stateCancelled {
-		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCancelled, map[string]any{
+		cancelPayload := map[string]any{
 			"pages_visited": pagesVisited,
 			"pages_failed":  pagesFailed,
 			"pending":       uint32(len(frontier)),
 			"statistics":    stats.payload(pagesVisited, pagesFailed, workflow.Now(ctx)),
-		}, in.RunID, string(quarrycontracts.EvtRunCancelled))
+		}
+		if scope != nil {
+			for k, v := range scope.terminal(pagesBlocked, pagesBlockedRobots) {
+				cancelPayload[k] = v
+			}
+		}
+		if sm != nil {
+			cancelPayload["sitemap"] = sm.payload()
+		}
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCancelled, cancelPayload, in.RunID, string(quarrycontracts.EvtRunCancelled))
 	}
 
 	completed := map[string]any{
@@ -1265,10 +1311,21 @@ func crawlJobDurableFrontier(
 	}
 
 	if ctrl.state == stateCancelled {
-		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCancelled, map[string]any{
+		// A cancelled durable crawl carries the scope and sitemap summary of a completed one
+		// (WS14.S3), as the in-workflow crawl does.
+		cancelPayload := map[string]any{
 			"pages_visited": pagesVisited, "pages_failed": pagesFailed,
 			"statistics": stats.payload(pagesVisited, pagesFailed, workflow.Now(ctx)),
-		}, in.RunID, string(quarrycontracts.EvtRunCancelled))
+		}
+		if scope != nil {
+			for k, v := range scope.terminal(pagesBlocked, pagesBlockedRobots) {
+				cancelPayload[k] = v
+			}
+		}
+		if sm != nil {
+			cancelPayload["sitemap"] = sm.payload()
+		}
+		return emitEvent(ctx, a, ids, quarrycontracts.EvtRunCancelled, cancelPayload, in.RunID, string(quarrycontracts.EvtRunCancelled))
 	}
 	completed := map[string]any{
 		"pages_visited": pagesVisited, "pages_failed": pagesFailed,

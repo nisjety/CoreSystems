@@ -89,6 +89,8 @@ Old names in `docs/CONTRACTS.md` (before this document) are superseded by the ta
 | `QUARRY_EDGE__ROBOTS_UNREACHABLE` | `disallow`, `allow` | `disallow` | Recommended default. |
 | `QUARRY_EDGE__CRAWL_REQUEST_VALIDATION` | `lenient`, `strict` | `lenient` (WS14.G, I) | `strict` is the 400 behaviour for `max_pages: 0`. |
 | `QUARRY_EDGE__CRAWL_BATCH_MAX_URLS` | integer | `500` at the edge; the gateway keeps 200 | WS14.S5. |
+| `QUARRY_EDGE__BATCH_PARALLEL` | `1`, `true`, `yes`, `on` | off | Lets a batch body's `max_parallel` take effect (W3-E3.7.2w). Read on each batch request from the process environment, so a change needs an edge restart; off, the key is ignored. The orchestrator also needs `QUARRY_BATCH_PARALLEL` on. |
+| `QUARRY_EDGE__BATCH_MAX_PARALLEL` | integer, 1 to 16 | `4` | The edge ceiling on one batch's parallel pages. Checked at boot (an unparsable value stops the edge) and read once per process, so a change needs an edge restart. No organization term sets or bounds it. |
 
 Rollback: set `QUARRY_EDGE__CRAWL_SCOPE_MODE=off` and restart the edge, or redeploy the previous orchestrator (the legacy branch stays in place behind `GetVersion`). Version skew fails closed: an orchestrator ahead of the edge ends the run with `run_failed` and code `edge_scope_unsupported`, and fetches no child page.
 
@@ -147,7 +149,7 @@ Accepted options and their spellings (canonical first):
 | `scrape_options` | both spellings | with `QUARRY_EDGE__CRAWL_SCRAPE_OPTIONS` on (INNH-6b): the per-page extraction subset of `/v1/scrape`; otherwise any value 400 `unsupported_option` until WS5 slice 4 |
 | `ignore_robots_txt` | `ignore_robots_txt`, `ignoreRobotsTxt`, `ignoreRobots` | `true` is 403 `policy_denied` (WS14.S7 owns the entitlement); `false` accepted |
 
-Refused in both modes (400 `reserved_field`): `headers`, `proxy`, `proxy_url`, `skip_tls_verification`, `stealth`, `mobile`, `webhook`, `delay`, `max_concurrency` (and their camel forms). Two spellings of one option: 400 `invalid_option`.
+Refused in both modes (400 `reserved_field`): `headers`, `proxy`, `proxy_url`, `skip_tls_verification`, `stealth`, `mobile`, `delay`, `max_concurrency` (and their camel forms). `webhook` is refused the same way while `QUARRY_EDGE__JOB_WEBHOOK` is off; on, it is the per-job webhook (CONTRACTS, "Batch request options"). Two spellings of one option: 400 `invalid_option`.
 
 Errors are the canonical envelope: 400 `BAD_REQUEST` with `details.fields[] {path, code, message}`, or 403 `FORBIDDEN` with `details.reason = policy_denied`. The `path` is the spelling the caller sent. A message never echoes a caller's value.
 

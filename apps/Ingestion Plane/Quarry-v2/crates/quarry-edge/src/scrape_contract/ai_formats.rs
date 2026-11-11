@@ -33,12 +33,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use quarry_core::ai_spec::{AiCode, AiFormatReport, AiReason, AiReport, AiSpec};
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_runtime::ai_scrape::{
-    AiFields, AiScrapeConfig, AiScrapeEngine, AiScrapeInput, DEFAULT_INPUT_CHARS,
+    AiFields, AiScrapeConfig, AiScrapeEngine, AiScrapeInput, HarvestMode, DEFAULT_INPUT_CHARS,
     DEFAULT_MAX_CALLS, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TOTAL_TOKENS, DEFAULT_MODEL_JSON,
     DEFAULT_MODEL_TEXT, MAX_INPUT_CHARS, MAX_OUTPUT_TOKENS_CEILING, MIN_INPUT_CHARS,
     MIN_OUTPUT_TOKENS,
 };
 use quarry_runtime::mp_client::ModelPlaneClient;
+use quarry_transform::json_ld::JsonLdSummary;
+use quarry_transform::structured::StructuredData;
 use serde_json::Value;
 use tokio::sync::Semaphore;
 
@@ -48,6 +50,8 @@ use crate::state::AppState;
 pub const ENV_AI_FORMATS: &str = "QUARRY_EDGE__AI_FORMATS";
 pub const ENV_AI_FORMATS_ZDR: &str = "QUARRY_EDGE__AI_FORMATS_ZDR";
 pub const ENV_MODEL_JSON: &str = "QUARRY_EDGE__AI_FORMATS_MODEL_JSON";
+/// WS16.S6: the `json` alias for a `Complex` schema (default: the `json` alias).
+pub const ENV_MODEL_JSON_COMPLEX: &str = "QUARRY_EDGE__AI_FORMATS_MODEL_JSON_COMPLEX";
 pub const ENV_MODEL_TEXT: &str = "QUARRY_EDGE__AI_FORMATS_MODEL_TEXT";
 pub const ENV_MAX_INPUT_CHARS: &str = "QUARRY_EDGE__AI_FORMATS_MAX_INPUT_CHARS";
 pub const ENV_MAX_TOTAL_TOKENS: &str = "QUARRY_EDGE__AI_FORMATS_MAX_TOTAL_TOKENS";
@@ -62,13 +66,18 @@ pub const ENV_REPAIR: &str = "QUARRY_EDGE__AI_FORMATS_REPAIR";
 /// WS16.S6: the per-request ceiling on the model cost the gateway reports
 /// (`cost_usd`), in USD. Unset: no cost ceiling.
 pub const ENV_MAX_COST_USD: &str = "QUARRY_EDGE__AI_FORMATS_MAX_COST_USD";
+/// WS16.S5: how the page's own markup (JSON-LD, microdata, hydration payloads, tables)
+/// reaches the model: `off`, `context` (the default) or `prefill`. A value that is none
+/// of these is off.
+pub const ENV_AI_FORMATS_HARVEST: &str = "QUARRY_EDGE__AI_FORMATS_HARVEST";
 
 /// Every name this module reads; a test pins that the code reads exactly these.
 #[cfg(test)]
-const ENV_NAMES: [&str; 12] = [
+const ENV_NAMES: [&str; 14] = [
     ENV_AI_FORMATS,
     ENV_AI_FORMATS_ZDR,
     ENV_MODEL_JSON,
+    ENV_MODEL_JSON_COMPLEX,
     ENV_MODEL_TEXT,
     ENV_MAX_INPUT_CHARS,
     ENV_MAX_TOTAL_TOKENS,
@@ -78,6 +87,7 @@ const ENV_NAMES: [&str; 12] = [
     ENV_MAX_OUTPUT_TOKENS,
     ENV_REPAIR,
     ENV_MAX_COST_USD,
+    ENV_AI_FORMATS_HARVEST,
 ];
 
 /// The process-wide cap on model calls in flight, across requests.
@@ -93,6 +103,8 @@ pub struct AiFormatsSettings {
     /// amendment first), so ZDR always refuses.
     pub zdr_allow_requested: bool,
     pub model_json: String,
+    /// WS16.S6: the `json` alias for a `Complex` schema.
+    pub model_json_complex: String,
     pub model_text: String,
     pub max_input_chars: usize,
     pub max_total_tokens: u64,
@@ -106,6 +118,8 @@ pub struct AiFormatsSettings {
     pub model_repair: bool,
     /// WS16.S6: the per-request model cost ceiling in USD; `None` is none.
     pub max_cost_usd: Option<f64>,
+    /// WS16.S5: how the page's markup harvest reaches the model (`QUARRY_EDGE__AI_FORMATS_HARVEST`).
+    pub harvest: HarvestMode,
 }
 
 // The token is a credential: it never reaches a log or a debug dump.
@@ -115,6 +129,7 @@ impl std::fmt::Debug for AiFormatsSettings {
             .field("enabled", &self.enabled)
             .field("zdr_allow_requested", &self.zdr_allow_requested)
             .field("model_json", &self.model_json)
+            .field("model_json_complex", &self.model_json_complex)
             .field("model_text", &self.model_text)
             .field("max_input_chars", &self.max_input_chars)
             .field("max_total_tokens", &self.max_total_tokens)
@@ -127,6 +142,7 @@ impl std::fmt::Debug for AiFormatsSettings {
             .field("max_output_tokens", &self.max_output_tokens)
             .field("model_repair", &self.model_repair)
             .field("max_cost_usd", &self.max_cost_usd)
+            .field("harvest", &self.harvest)
             .finish()
     }
 }
@@ -139,6 +155,28 @@ fn non_empty(value: Option<String>) -> Option<String> {
     value
         .map(|raw| raw.trim().to_owned())
         .filter(|raw| !raw.is_empty())
+}
+
+/// WS16.S5: `QUARRY_EDGE__AI_FORMATS_HARVEST`. Unset or blank is the default, `context`.
+/// `off`, `context` and `prefill` are read as named, ignoring case and spaces. Any other
+/// value is off, and one log line with a fixed label says so. The value is never logged.
+fn harvest_mode(raw: Option<String>) -> HarvestMode {
+    let Some(raw) = non_empty(raw) else {
+        return HarvestMode::default();
+    };
+    match raw.to_ascii_lowercase().as_str() {
+        "off" => HarvestMode::Off,
+        "context" => HarvestMode::Context,
+        "prefill" => HarvestMode::Prefill,
+        _ => {
+            tracing::warn!(
+                switch = ENV_AI_FORMATS_HARVEST,
+                reason = "unreadable",
+                "the harvest switch is not off, context or prefill: the harvest is off"
+            );
+            HarvestMode::Off
+        }
+    }
 }
 
 impl AiFormatsSettings {
@@ -157,6 +195,8 @@ impl AiFormatsSettings {
             enabled,
             zdr_allow_requested,
             model_json: non_empty(lookup(ENV_MODEL_JSON))
+                .unwrap_or_else(|| DEFAULT_MODEL_JSON.to_owned()),
+            model_json_complex: non_empty(lookup(ENV_MODEL_JSON_COMPLEX))
                 .unwrap_or_else(|| DEFAULT_MODEL_JSON.to_owned()),
             model_text: non_empty(lookup(ENV_MODEL_TEXT))
                 .unwrap_or_else(|| DEFAULT_MODEL_TEXT.to_owned()),
@@ -188,6 +228,7 @@ impl AiFormatsSettings {
             // A negative, non-finite or unreadable value is no ceiling.
             max_cost_usd: number::<f64>(lookup(ENV_MAX_COST_USD))
                 .filter(|value| value.is_finite() && *value >= 0.0),
+            harvest: harvest_mode(lookup(ENV_AI_FORMATS_HARVEST)),
         }
     }
 
@@ -195,6 +236,7 @@ impl AiFormatsSettings {
     pub fn engine_config(&self) -> AiScrapeConfig {
         AiScrapeConfig {
             model_json: self.model_json.clone(),
+            model_json_complex: self.model_json_complex.clone(),
             model_text: self.model_text.clone(),
             max_input_chars: self.max_input_chars,
             max_total_tokens: self.max_total_tokens,
@@ -203,6 +245,7 @@ impl AiFormatsSettings {
             max_output_tokens: self.max_output_tokens,
             model_repair: self.model_repair,
             max_cost_usd: self.max_cost_usd,
+            harvest: self.harvest,
             ..AiScrapeConfig::default()
         }
         .clamped()
@@ -226,6 +269,12 @@ pub fn settings() -> &'static AiFormatsSettings {
 /// Whether the switch is on.
 pub fn enabled() -> bool {
     settings().enabled
+}
+
+/// WS16.S5: whether the page's own markup is harvested for the AI formats (the harvest
+/// switch is not off). The caller still decides whether a model may be asked.
+pub fn harvest_enabled() -> bool {
+    settings().harvest != HarvestMode::Off
 }
 
 /// Whether `formats` (the raw request value) names an AI format: an object whose
@@ -348,7 +397,8 @@ fn engine_for(state: &AppState, settings: &AiFormatsSettings) -> Option<Arc<AiSc
             settings.inference_token.as_deref().unwrap_or("")
         ),
     };
-    let key = blake3::hash(format!("{url}\n{credential_key}\n{}", settings.model_json).as_bytes())
+    let models = format!("{}\n{}", settings.model_json, settings.model_json_complex);
+    let key = blake3::hash(format!("{url}\n{credential_key}\n{models}").as_bytes())
         .to_hex()
         .to_string();
     let mut cache = CACHE.lock().ok()?;
@@ -411,6 +461,10 @@ pub fn privacy_report(specs: &[AiSpec]) -> AiReport {
 /// hop (`model_hop_allowed` false), it answers without building a client, so no
 /// call can be made.
 ///
+/// WS16.S5: `harvest` is the page's own markup, harvested for this request when the
+/// harvest switch is on (`harvest_enabled`), and `None` otherwise. The engine decides
+/// what of it the model sees (`AiScrapeConfig::harvest`).
+///
 /// WS16.S6: each format that finished `ok` is metered as one `quarry.extract.llm`
 /// (`QUARRY_EDGE__USAGE_LLM_METRICS`, default off), keyed by the server-minted
 /// `usage_id` and a hash of `url`. Failures, skips and ZDR emit nothing.
@@ -420,6 +474,7 @@ pub async fn run_ai_formats(
     org_id: &str,
     specs: &[AiSpec],
     source: &str,
+    harvest: Option<(&StructuredData, Option<&JsonLdSummary>)>,
     zdr: bool,
     model_hop_allowed: bool,
     request_id: &str,
@@ -452,6 +507,7 @@ pub async fn run_ai_formats(
                 zdr,
                 request_id,
                 deadline: None,
+                harvest,
             },
         )
         .await;

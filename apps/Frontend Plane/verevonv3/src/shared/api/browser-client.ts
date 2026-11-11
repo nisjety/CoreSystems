@@ -276,6 +276,25 @@ export type BrowserTab = {
   openedBy?: 'human' | 'agent' | null
   tabEpoch?: number
   holder?: 'human' | 'agent'
+  /**
+   * What the attached agent marked the tab for (Q2-WS8.I): `deliverable` (a result the person keeps)
+   * or `handoff` (for the person to carry on). A marked tab stays open when its attachment ends; an
+   * unmarked one is closed. Absent for a tab without a mark.
+   */
+  mark?: 'deliverable' | 'handoff'
+  /** The attachment this agent tab belongs to (Q2-WS8.I), in its wire shape. Absent for a tab outside an attachment. */
+  attachId?: string
+}
+
+/**
+ * The agent attached to a browser session (Q2-WS8.I) as the gateway allow-lists it: the attachment's
+ * `state` (`attached`, or the word it ended in: `released`, `aborted`, `revoked`, `idle_released` or
+ * `session_ended`) and the tab it works in. The attach grant id is never part of it.
+ */
+export type BrowserSessionAttach = {
+  state: string
+  tabId?: string
+  tabEpoch?: number
 }
 
 export type BrowserSession = {
@@ -302,6 +321,8 @@ export type BrowserSession = {
   status: BrowserSessionStatus
   tabs?: BrowserTab[]
   tabsUrl?: string | null
+  /** The agent attached to this session (Q2-WS8.I); null when none is attached. */
+  attach?: BrowserSessionAttach | null
   /** Client-hydrated compact activity from the actor-scoped Quarry timeline.
    * This is intentionally not supplied by the browser-session projection,
    * because it is a separately paginated owner resource. */
@@ -624,6 +645,7 @@ export function browserSessionFromOwnerProjection(value: unknown, expectedSessio
       // a normalized mutation response supplies the authoritative capabilities.
       capabilities: [],
       zdr: raw.zdr,
+      attach: browserSessionAttachFromWire(raw.attach),
     },
     observation: raw.lastObservation && typeof raw.lastObservation === 'object' ? raw.lastObservation as BrowserObservation : null,
   }
@@ -703,6 +725,97 @@ export async function closeBrowserTab(
     `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}`,
     {
       method: 'DELETE',
+      headers: orgHeaders(orgId),
+      signal,
+    },
+  )
+}
+
+/** The wire shape of a tab or attachment id: 3 to 128 letters, digits, `_` or `-` (the gateway's own rule). */
+const BROWSER_WIRE_ID_RE = /^[A-Za-z0-9_-]{3,128}$/
+
+/** Whether a value has the wire shape of a tab or attachment id (Q2-WS8.I). */
+export function isBrowserWireId(value: unknown): value is string {
+  return typeof value === 'string' && BROWSER_WIRE_ID_RE.test(value)
+}
+
+/** The attach states the gateway passes through (Q2-WS8.I). Any other word means no attachment. */
+const BROWSER_ATTACH_STATES: readonly string[] = [
+  'attached',
+  'released',
+  'aborted',
+  'revoked',
+  'idle_released',
+  'session_ended',
+]
+
+/**
+ * The session's attachment rebuilt field by field (Q2-WS8.I). A state outside the closed set means no
+ * attachment; `tabId` and `tabEpoch` are kept only in their wire shape. Every other key is dropped, so
+ * the attach grant id is never copied.
+ */
+export function browserSessionAttachFromWire(value: unknown): BrowserSessionAttach | null {
+  const wire = recordOf(value)
+  const state = wire?.state
+  if (typeof state !== 'string' || !BROWSER_ATTACH_STATES.includes(state)) return null
+  const tabId = wire?.tabId
+  const tabEpoch = wire?.tabEpoch
+  return {
+    state,
+    ...(isBrowserWireId(tabId) ? { tabId } : {}),
+    ...(typeof tabEpoch === 'number' && Number.isSafeInteger(tabEpoch) && tabEpoch >= 0 ? { tabEpoch } : {}),
+  }
+}
+
+/** The answer to one tab's control change (Q2-WS8.I): the tab, who holds it now, and its new epoch. */
+export type BrowserTabControlResult = {
+  tabId: string
+  holder: 'human' | 'agent'
+  tabEpoch: number | null
+}
+
+/**
+ * Hands one tab of a browser session to the attached agent (`holder: 'agent'`, Give back) or takes it
+ * back (`holder: 'human'`, Take over): `POST /api/v1/browser/sessions/{id}/tabs/{tabId}/control`
+ * (Q2-WS8.I). With `expectedEpoch` the change is a compare-and-set on the tab's epoch: a tab that changed
+ * hands since is refused and nothing moves. Only the person's own token may change who holds a tab (403
+ * `browser_tab_control_forbidden`).
+ */
+export async function controlBrowserTab(
+  orgId: string,
+  sessionId: string,
+  tabId: string,
+  holder: 'human' | 'agent',
+  expectedEpoch?: number,
+  signal?: AbortSignal,
+): Promise<BrowserTabControlResult> {
+  const body: { holder: 'human' | 'agent'; expectedEpoch?: number } = { holder }
+  if (typeof expectedEpoch === 'number') body.expectedEpoch = expectedEpoch
+  return requestJson<BrowserTabControlResult>(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/tabs/${encodeURIComponent(tabId)}/control`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+      headers: orgHeaders(orgId),
+      signal,
+    },
+  )
+}
+
+/**
+ * Stops the browser agent attached to a session (Stop agent, Q2-WS8.I):
+ * `POST /api/v1/browser/sessions/{id}/attach/stop`. The gateway revokes the agent's access and ends its
+ * attachment; the answer says only that the stop went through.
+ */
+export async function stopBrowserAttach(
+  orgId: string,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<{ stopped: boolean }> {
+  return requestJson<{ stopped: boolean }>(
+    `/api/v1/browser/sessions/${encodeURIComponent(sessionId)}/attach/stop`,
+    {
+      method: 'POST',
       headers: orgHeaders(orgId),
       signal,
     },

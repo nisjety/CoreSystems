@@ -9,6 +9,7 @@ use quarry_core::redaction::action::navigate_without_query;
 use quarry_runtime::GrantValidation;
 
 use super::StepInitiator;
+use crate::policy_baseline::Decision;
 use crate::run_limits::HumanReceiptMode;
 use crate::state::AppState;
 
@@ -129,7 +130,10 @@ pub(super) fn open_web_egress(
     match run {
         RunNavPolicy::OpenWeb { denied } if web_egress.is_unconstrained() => {
             // The web policy's own deny list (WS7.G) rides along with the grant's.
-            BrowserEgressPolicy::open_web(denied).with_denied_domains(web_egress.denied_domains())
+            // WS7.G (D2-U34-5): so does a ZDR run's host-only receipt rule.
+            BrowserEgressPolicy::open_web(denied)
+                .with_denied_domains(web_egress.denied_domains())
+                .with_host_only_receipts(web_egress.host_only_receipts())
         }
         _ => web_egress,
     }
@@ -138,13 +142,16 @@ pub(super) fn open_web_egress(
 /// The egress boundary a run is configured with: [`open_web_egress`], then the host reputation
 /// hook when `QUARRY_EDGE__REPUTATION_MODE` is on (E3.8.7). The hook is attached last because
 /// `open_web_egress` may replace an unconstrained policy with the open-web one, which would drop
-/// a hook attached earlier. With the mode `Off` this is `open_web_egress` exactly.
+/// a hook attached earlier. With the mode `Off` this is `open_web_egress` exactly. `decision` is
+/// the run's stored web-policy decision (`None` for a run with none), which the hook reads its
+/// org cap from.
 pub(super) fn run_egress(
     state: &AppState,
     run: &RunNavPolicy,
     web_egress: BrowserEgressPolicy,
+    decision: Option<&Decision>,
 ) -> BrowserEgressPolicy {
-    crate::agent_policy_gate::attach_reputation(state, open_web_egress(run, web_egress))
+    crate::agent_policy_gate::attach_reputation(state, open_web_egress(run, web_egress), decision)
 }
 
 /// Whether a step counts against the run's step budget. The budget subject is the run's

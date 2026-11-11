@@ -171,8 +171,8 @@ type Grant struct {
 	// verified principal's web_policy claim at mint, nil when there was none or
 	// BROWSER_BROKER_WEB_POLICY_SNAPSHOT is off. A derived or approval grant
 	// copies its parent's unchanged, so a child never carries a looser one.
-	// The durable store does not hold it yet (Q2-WS7.K-c); a ZDR grant keeps it
-	// in memory only.
+	// The durable store keeps it in the web_policy column (migration 0008); a
+	// ZDR grant is never persisted, so it keeps it in memory only.
 	WebPolicy *WebPolicySnapshot
 	// AllowedDomains is the broker-owned, canonical navigation policy. It is
 	// copied at every storage boundary so no caller can mutate a persisted grant.

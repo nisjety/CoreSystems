@@ -36,6 +36,9 @@ pub(super) fn checkpoint_for_entry(entry: &RunEntry, live: &RunLive) -> AgentRun
         next_step: live.next_step(),
         trace_seq: live.trace_seq(),
         policy_ask: live.policy_ask().cloned(),
+        // WS10.S4: trace labels a resume restores; never authority.
+        origin: Some(entry.origin.as_str().to_owned()),
+        model_run_id: entry.model_run_id.clone(),
     }
 }
 

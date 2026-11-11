@@ -38,6 +38,9 @@ type Config struct {
 	// The reconciler resolves them into the schedule args, so a fire uses the
 	// same bounds the dispatcher would apply. Zero means the built-in defaults.
 	CrawlLimits jobs.CrawlLimits
+	// RuntimeSync turns on the schedule runtime sync (WS15.S4c, runtime.go). It is
+	// read once from QUARRY_SCHEDULE_RUNTIME_SYNC by cmd/orchestrator, off by default.
+	RuntimeSync bool
 }
 
 // Manager reconciles schedules from Control Plane into Temporal.
@@ -45,6 +48,9 @@ type Manager struct {
 	cfg Config
 	tc  client.Client
 	log zerolog.Logger
+	// runtime is the runtime sync's state per schedule (WS15.S4c). Only reconcile
+	// passes touch it.
+	runtime map[string]*runtimeTrack
 }
 
 // ScheduleSpec is the wire payload from Control Plane. OrgID carries the
@@ -75,6 +81,10 @@ type ScheduleSpec struct {
 // we can't prove which tenant they belong to (fail-closed).
 type existingSchedule struct {
 	OrgID string
+	// LastRunAt and NextRunAt are the schedule's latest and next action times in
+	// Temporal (WS15.S4c); zero when Temporal holds none.
+	LastRunAt time.Time
+	NextRunAt time.Time
 }
 
 // New builds a Manager.
@@ -220,6 +230,11 @@ func (m *Manager) reconcileWith(ctx context.Context, sc client.ScheduleClient, d
 		}
 	}
 
+	// Runtime sync (WS15.S4c): off unless QUARRY_SCHEDULE_RUNTIME_SYNC is on. It never
+	// fails the pass; see runtime.go.
+	if m.cfg.RuntimeSync {
+		m.syncRuntime(ctx, sc, existing, desiredSet, desiredOrgs)
+	}
 	return nil
 }
 
@@ -295,7 +310,11 @@ func (m *Manager) listExisting(ctx context.Context, sc client.ScheduleClient) (m
 		if err != nil {
 			return nil, err
 		}
-		out[entry.ID] = existingSchedule{OrgID: orgFromMemo(entry.Memo)}
+		out[entry.ID] = existingSchedule{
+			OrgID:     orgFromMemo(entry.Memo),
+			LastRunAt: latestScheduleTime(entry.RecentActions),
+			NextRunAt: nextScheduleTime(entry.NextActionTimes),
+		}
 	}
 	return out, nil
 }
@@ -415,13 +434,34 @@ func (m *Manager) triggerWith(ctx context.Context, sc client.ScheduleClient, sch
 
 // Backfill replays a schedule's actions across [start, end] via the real
 // Temporal schedule client — the materialization of control's
-// `/v1/schedules/{id}/backfill`. Overlap defaults to ALLOW_ALL so the
-// historical fires can run concurrently and the window fills quickly.
-func (m *Manager) Backfill(ctx context.Context, scheduleID string, start, end time.Time) error {
-	return m.backfillWith(ctx, m.tc.ScheduleClient(), scheduleID, start, end)
+// `/v1/schedules/{id}/backfill`. overlap is the policy the caller requested
+// (WS15.S3b, stored by control in the request row's params.overlap_policy);
+// empty keeps the old default ALLOW_ALL so the historical fires can run
+// concurrently and the window fills quickly.
+func (m *Manager) Backfill(ctx context.Context, scheduleID string, start, end time.Time, overlap string) error {
+	return m.backfillWith(ctx, m.tc.ScheduleClient(), scheduleID, start, end, overlap)
 }
 
-func (m *Manager) backfillWith(ctx context.Context, sc client.ScheduleClient, scheduleID string, start, end time.Time) error {
+// backfillOverlapPolicy maps a requested backfill overlap policy to Temporal.
+// Empty is ALLOW_ALL (the backfill default); skip, allow and cancel use the same
+// mapping as create/update (overlapPolicy), and the Temporal-style spellings
+// buffer_one and cancel_other are accepted too. Anything else falls through to
+// overlapPolicy, i.e. skip. The caller passes the value already trimmed and
+// lower-cased (requests.go backfillOverlap).
+func backfillOverlapPolicy(s string) enumspb.ScheduleOverlapPolicy {
+	switch s {
+	case "":
+		return enumspb.SCHEDULE_OVERLAP_POLICY_ALLOW_ALL
+	case "buffer_one":
+		return enumspb.SCHEDULE_OVERLAP_POLICY_BUFFER_ONE
+	case "cancel_other":
+		return enumspb.SCHEDULE_OVERLAP_POLICY_CANCEL_OTHER
+	default:
+		return overlapPolicy(s)
+	}
+}
+
+func (m *Manager) backfillWith(ctx context.Context, sc client.ScheduleClient, scheduleID string, start, end time.Time, overlap string) error {
 	if !end.After(start) {
 		return fmt.Errorf("backfill %s: end (%s) must be after start (%s)", scheduleID, end, start)
 	}
@@ -430,7 +470,7 @@ func (m *Manager) backfillWith(ctx context.Context, sc client.ScheduleClient, sc
 		Backfill: []client.ScheduleBackfill{{
 			Start:   start,
 			End:     end,
-			Overlap: enumspb.SCHEDULE_OVERLAP_POLICY_ALLOW_ALL,
+			Overlap: backfillOverlapPolicy(overlap),
 		}},
 	}); err != nil {
 		return fmt.Errorf("backfill %s: %w", scheduleID, err)

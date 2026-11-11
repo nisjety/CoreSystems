@@ -1133,6 +1133,13 @@ async fn scrape_with(
                 .max_input_chars
                 .saturating_add(1)
         }),
+        // WS16.S5: the page's own markup, read for the AI formats when a model hop can
+        // happen and the harvest switch is on. Not for a request that redacts PII: the
+        // redaction reaches the AI source, not the values read from the markup.
+        want_harvest: !ai_specs.is_empty()
+            && ai_model_hop_allowed
+            && resolved.redact_pii != PiiRedaction::On
+            && crate::scrape_contract::ai_formats::harvest_enabled(),
     };
     let mut result_key: Option<String> = None;
     if settings.max_age_enabled {
@@ -1444,6 +1451,11 @@ async fn scrape_with(
                     &org_id,
                     &ai_specs,
                     inline.ai_source.as_deref().unwrap_or(""),
+                    // WS16.S5: the page's own markup, when it was harvested for this request.
+                    inline
+                        .ai_structured
+                        .as_ref()
+                        .map(|data| (data, inline.ai_json_ld.as_ref())),
                     zdr.is_active(),
                     ai_model_hop_allowed,
                     &request_id,

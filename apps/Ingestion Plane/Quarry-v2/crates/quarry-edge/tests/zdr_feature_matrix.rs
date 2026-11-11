@@ -401,12 +401,12 @@ fn in_catalogue(list: &[String], name: &str) -> bool {
 /// `Treatment::Refused { code, feature }` records Quarry's own envelope: the
 /// `ErrorCode` wire name the refusal answers with, and a Quarry-local feature
 /// key. Quarry refusals do not yet carry `details.zdr_refusal` with a catalogue
-/// code (WS4.H adds it behind ADR-4), and the catalogue has no key for these
-/// features until the Model Plane initiative takes the PR that adds
-/// `durable_crawl`, `browser_profile`, `session_resume` and `page_screenshot`
-/// (X-16: existing codes only, so WS4.I does not add them). Quarry uses its own
-/// names for them, and they are listed here so a new one is a visible decision,
-/// not drift.
+/// code (WS4.H adds it behind ADR-4). The catalogue (mp-contracts
+/// `zdr_refusal::FEATURES`) now holds the Quarry keys `durable_crawl`,
+/// `browser_profile`, `session_resume` and `page_screenshot` (X-16, WS4.I), but
+/// Quarry's durable refusals answer `zdr_durable_mutation_forbidden`, which takes
+/// no feature, so the matrix keeps Quarry's own names below. They are listed
+/// here so a new one is a visible decision, not drift.
 const PENDING_CODES: &[&str] = &["BAD_REQUEST", "FORBIDDEN"];
 const PENDING_FEATURES: &[&str] = &[
     "durable_job",

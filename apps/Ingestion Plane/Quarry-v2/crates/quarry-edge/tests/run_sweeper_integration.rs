@@ -266,7 +266,8 @@ async fn an_idle_run_is_released_exactly_once_and_its_checkpoint_stays_resumable
         report,
         SweepReport {
             expired: 1,
-            would_expire: 0
+            would_expire: 0,
+            ..SweepReport::default()
         }
     );
     // A second pass finds nothing left to do.
@@ -509,7 +510,8 @@ async fn a_dry_run_sweep_reports_would_expire_and_releases_nothing() {
         report,
         SweepReport {
             expired: 0,
-            would_expire: 1
+            would_expire: 1,
+            ..SweepReport::default()
         }
     );
     assert!(edge.driver.released().is_empty());
@@ -747,7 +749,8 @@ async fn a_run_held_in_a_takeover_expires_on_the_takeover_idle_limit() {
         released,
         SweepReport {
             expired: 1,
-            would_expire: 0
+            would_expire: 0,
+            ..SweepReport::default()
         }
     );
     assert_eq!(edge.driver.released(), vec![run]);
@@ -790,7 +793,8 @@ async fn an_agent_run_lives_the_runtime_it_asked_for_plus_the_grace() {
         released,
         SweepReport {
             expired: 1,
-            would_expire: 0
+            would_expire: 0,
+            ..SweepReport::default()
         }
     );
     assert_eq!(edge.driver.released(), vec![run]);

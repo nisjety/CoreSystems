@@ -93,7 +93,6 @@ ZDR (zero data retention) flows down every contract:
 | Quarry edge route | `request.zdr: true` | Skip Redis cache write |
 | `PageRunner` | `pipeline.zdr` | Skip artifact persistence |
 | `IngestClient` | `DataPlaneIngestRequest.zdr` | Reject with `Forbidden` when payload present |
-| `StructuredExtractClient` | `StructuredExtractRequest.zdr` | Validate inline-only mode |
 | `AgentActionRequest` | `request.zdr` | AgentLoop skips persistent profile snapshots |
 
 Bottom line: a single `zdr: true` at the boundary propagates through every cross-plane call so no plane accidentally persists.
@@ -194,26 +193,6 @@ Response (`DataPlaneIngestResponse`):
 ```
 
 When ZDR=on, the request must omit `markdown`, `html_ref`, `raw_ref`. Data Plane returns `index_status: "skipped"`, `embedding_status: "skipped"`.
-
-## Model Plane structured extract contract
-
-Request (`StructuredExtractRequest`):
-
-```json
-{
-  "run_id": "run_01HX...",
-  "org_id": "org_acme",
-  "source_artifact_ref": "artifact_01HX...",
-  "markdown": "# Hello...",
-  "structured_output_schema": {"type": "object", ...},
-  "source_trace_required": true,
-  "max_cost_usd": 0.10,
-  "max_tokens": 2000,
-  "zdr": false
-}
-```
-
-Response includes `data` (validated JSON), `schema_valid`, `usage.cost_usd`. If `usage.cost_usd > max_cost_usd`, Quarry rejects with `Forbidden` and surfaces the budget violation in events.
 
 ## Operational checks
 

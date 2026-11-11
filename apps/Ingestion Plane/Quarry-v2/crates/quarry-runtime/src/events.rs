@@ -20,9 +20,12 @@ use tokio::sync::{broadcast, mpsc};
 
 use quarry_core::event::{Event, EventType};
 use quarry_core::ids::kinds::{EventKind, RunKind};
+use quarry_core::trace::{valid_token, AgentRef, EventTrace, RunOrigin, TRACE_TOKEN_MAX};
 use quarry_core::zdr::ZdrMode;
 
 use crate::event_bus::EventBus;
+use crate::model_trace_publisher::ModelTracePublisher;
+use crate::trace_projection::PublishCtx;
 
 const BROADCAST_CAPACITY: usize = 256;
 
@@ -73,11 +76,39 @@ struct RetainedEvent {
     bytes: usize,
 }
 
+/// WS10.S4: the run-level trace labels of an open run, given to
+/// [`EventSink::open_run_with`]. `origin`, `model_run_id` and `agent` are stamped on every
+/// event the run mints (`Event::trace`); org, actor, browser run id and ZDR posture are kept
+/// for the trace publisher (`trace_projection::PublishCtx`, WS10.S5). Every field is a label
+/// or comes from the verified token; none of it is authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunTraceMeta {
+    /// The first `seq` the run's trace mints (1 for a new run, past the checkpoint on a resume).
+    pub start_seq: u64,
+    /// Who started the run (`quarry_core::trace::derive_origin`).
+    pub origin: RunOrigin,
+    /// The caller's (Model Plane) run id, from a service token's trace context only.
+    pub model_run_id: Option<String>,
+    /// The agent named in a service token's trace context.
+    pub agent: Option<AgentRef>,
+    /// The run's org, from the verified token.
+    pub org_id: String,
+    /// The acting principal, from the verified token.
+    pub actor_id: String,
+    /// The Quarry browser (agent) run id.
+    pub browser_run_id: String,
+    /// The run's Zero Data Retention posture.
+    pub zdr: ZdrMode,
+}
+
 /// The trace of one open run: the next `seq` to mint and the replay ring.
 struct RunTrace {
     next_seq: u64,
     ring: VecDeque<RetainedEvent>,
     ring_bytes: usize,
+    /// WS10.S4: the labels stamped on every event; `None` for a run opened with
+    /// [`EventSink::open_run`] (its events carry no trace stamp, as before).
+    meta: Option<RunTraceMeta>,
 }
 
 #[derive(Clone)]
@@ -94,6 +125,10 @@ pub struct EventSink {
     /// Failures are warn-logged and swallowed — events are best-effort
     /// on the cross-plane bus; the HTTP path remains authoritative.
     nats: Option<Arc<dyn EventBus>>,
+    /// WS10.S5: the Model Plane run-trace publisher, present only when
+    /// `QUARRY_EDGE__MODEL_TRACE_NATS_URL` is set. `emit` enqueues each event of a
+    /// labelled, non-ZDR run with a Model run id; it never waits on the broker.
+    model_trace: Option<Arc<ModelTracePublisher>>,
 }
 
 impl EventSink {
@@ -105,7 +140,17 @@ impl EventSink {
             runs: Arc::new(DashMap::new()),
             ring: RingLimits::default(),
             nats: None,
+            model_trace: None,
         }
+    }
+
+    /// Plug in the Model Plane run-trace publisher (WS10.S5). After this, `emit` (and
+    /// `emit_for_zdr` for a non-ZDR posture) enqueues each event of a run opened with
+    /// [`EventSink::open_run_with`] whose `model_run_id` is set and whose ZDR posture is
+    /// off. `emit_ephemeral` and a ZDR `emit_for_zdr` never do.
+    pub fn with_model_trace(mut self, publisher: Arc<ModelTracePublisher>) -> Self {
+        self.model_trace = Some(publisher);
+        self
     }
 
     /// Plug in a NATS-backed [`EventBus`] for cross-plane fan-out. After
@@ -155,6 +200,18 @@ impl EventSink {
     /// `start_seq`, and the newest events within the ring limits are kept for
     /// replay until [`EventSink::close_run`].
     pub fn open_run(&self, run_id: &RunKind, start_seq: u64) {
+        self.open_trace(run_id, start_seq, None);
+    }
+
+    /// Open a run's trace with its trace labels (WS10.S4). As [`EventSink::open_run`] from
+    /// `meta.start_seq`, and every event the run mints carries `Event::trace` with the
+    /// run's origin, agent and Model run id plus the request id of the call that caused it.
+    pub fn open_run_with(&self, run_id: &RunKind, meta: RunTraceMeta) {
+        let start_seq = meta.start_seq;
+        self.open_trace(run_id, start_seq, Some(meta));
+    }
+
+    fn open_trace(&self, run_id: &RunKind, start_seq: u64, meta: Option<RunTraceMeta>) {
         self.subscribers
             .entry(run_id.clone())
             .or_insert_with(|| broadcast::channel(BROADCAST_CAPACITY).0);
@@ -164,8 +221,18 @@ impl EventSink {
                 next_seq: start_seq,
                 ring: VecDeque::new(),
                 ring_bytes: 0,
+                meta,
             })),
         );
+    }
+
+    /// The trace labels an open run was opened with (WS10.S4), or `None` when the run has
+    /// no open trace or was opened without labels. The trace publisher (WS10.S5) builds its
+    /// `PublishCtx` from it.
+    pub fn trace_meta(&self, run_id: &RunKind) -> Option<RunTraceMeta> {
+        let trace = self.runs.get(run_id).map(|entry| entry.value().clone())?;
+        let run = trace.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        run.meta.clone()
     }
 
     /// The `seq` the run's trace mints next (WS10.S4, D2-061), or `None` when the run has
@@ -220,12 +287,23 @@ impl EventSink {
 
     /// Number the event and record it. For an open run this is one critical section:
     /// the seq, the ring and the broadcast all happen under the run's lock.
+    ///
+    /// WS10.S4: a run opened with [`EventSink::open_run_with`] stamps `Event::trace` with its
+    /// labels, the current request id (when the call runs inside the edge's request scope)
+    /// and `causation`, the event this one follows from.
+    ///
+    /// WS10.S5: with `publish_trace` (the durable `emit` path only), an event of a labelled
+    /// run with a Model run id and ZDR off is handed to the run-trace publisher under the same
+    /// lock, so the publisher's queue order is the run's `seq` order. The hand-off is a
+    /// non-blocking `try_send`; a full queue drops and counts.
     fn mint(
         &self,
         run_id: RunKind,
         event_type: EventType,
         payload: serde_json::Value,
         idempotency_key: String,
+        causation: Option<&EventKind>,
+        publish_trace: bool,
     ) -> Event {
         let trace = self.runs.get(&run_id).map(|entry| entry.value().clone());
         let Some(trace) = trace else {
@@ -237,11 +315,23 @@ impl EventSink {
         let mut run = trace.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let seq = run.next_seq;
         run.next_seq = seq.saturating_add(1);
-        let evt = new_event(run_id.clone(), event_type, payload, idempotency_key, seq);
+        let mut evt = new_event(run_id.clone(), event_type, payload, idempotency_key, seq);
+        if let Some(meta) = run.meta.as_ref() {
+            evt.trace = Some(event_trace(meta, causation));
+        }
         if self.ring.max_events > 0 {
             retain(&mut run, evt.clone(), self.ring);
         }
         self.broadcast(&run_id, &evt);
+        if publish_trace {
+            if let (Some(publisher), Some(meta)) = (self.model_trace.as_ref(), run.meta.as_ref()) {
+                if let Some(ctx) = publish_ctx(meta) {
+                    // Refusals (unmapped type, full queue) are the publisher's to count;
+                    // the event stream never depends on the trace.
+                    let _ = publisher.try_enqueue(&evt, &ctx);
+                }
+            }
+        }
         evt
     }
 
@@ -255,14 +345,44 @@ impl EventSink {
         }
     }
 
+    /// Emit an event to live subscribers, the durable HTTP publisher and (when configured)
+    /// NATS. Returns the minted event id, so a later event can name it as its cause
+    /// ([`EventSink::emit_caused`]).
     pub async fn emit(
         &self,
         run_id: RunKind,
         event_type: EventType,
         payload: serde_json::Value,
         idempotency_key: String,
-    ) {
-        let evt = self.mint(run_id, event_type, payload, idempotency_key);
+    ) -> EventKind {
+        self.emit_inner(run_id, event_type, payload, idempotency_key, None)
+            .await
+    }
+
+    /// [`EventSink::emit`] for an event that follows from `causation` (WS10.S4): an open
+    /// run stamped with trace labels records it as `Event::trace.causation_event_id`.
+    pub async fn emit_caused(
+        &self,
+        run_id: RunKind,
+        event_type: EventType,
+        payload: serde_json::Value,
+        idempotency_key: String,
+        causation: EventKind,
+    ) -> EventKind {
+        self.emit_inner(run_id, event_type, payload, idempotency_key, Some(&causation))
+            .await
+    }
+
+    async fn emit_inner(
+        &self,
+        run_id: RunKind,
+        event_type: EventType,
+        payload: serde_json::Value,
+        idempotency_key: String,
+        causation: Option<&EventKind>,
+    ) -> EventKind {
+        let evt = self.mint(run_id, event_type, payload, idempotency_key, causation, true);
+        let event_id = evt.event_id.clone();
         // Cross-plane fan-out via NATS (fire-and-forget). Spawned so the
         // handler returns immediately — broker latency / outage never
         // bottlenecks the local request path. The local mpsc → HTTP
@@ -280,26 +400,29 @@ impl EventSink {
             });
         }
         let _ = self.tx.send(evt).await;
+        event_id
     }
 
     /// Emit only to in-process live subscribers. ZDR callers use this path so
     /// page content and provenance never enter the durable HTTP publisher or
     /// NATS JetStream while connected SSE/WebSocket clients still see progress.
     /// An open run keeps the event in its in-memory replay ring for the run's
-    /// lifetime; the ring is never persisted.
+    /// lifetime; the ring is never persisted. Returns the minted event id.
     pub async fn emit_ephemeral(
         &self,
         run_id: RunKind,
         event_type: EventType,
         payload: serde_json::Value,
         idempotency_key: String,
-    ) {
-        let _ = self.mint(run_id, event_type, payload, idempotency_key);
+    ) -> EventKind {
+        self.mint(run_id, event_type, payload, idempotency_key, None, false)
+            .event_id
     }
 
     /// Route an event according to the request's effective ZDR posture.
     /// Restrictive events remain available to already-connected live clients,
     /// but never enter the durable HTTP publisher or NATS JetStream.
+    /// Returns the minted event id.
     pub async fn emit_for_zdr(
         &self,
         zdr: ZdrMode,
@@ -307,15 +430,81 @@ impl EventSink {
         event_type: EventType,
         payload: serde_json::Value,
         idempotency_key: String,
-    ) {
+    ) -> EventKind {
+        self.emit_for_zdr_inner(zdr, run_id, event_type, payload, idempotency_key, None)
+            .await
+    }
+
+    /// [`EventSink::emit_for_zdr`] for an event that follows from `causation` (WS10.S4).
+    pub async fn emit_for_zdr_caused(
+        &self,
+        zdr: ZdrMode,
+        run_id: RunKind,
+        event_type: EventType,
+        payload: serde_json::Value,
+        idempotency_key: String,
+        causation: EventKind,
+    ) -> EventKind {
+        self.emit_for_zdr_inner(
+            zdr,
+            run_id,
+            event_type,
+            payload,
+            idempotency_key,
+            Some(&causation),
+        )
+        .await
+    }
+
+    async fn emit_for_zdr_inner(
+        &self,
+        zdr: ZdrMode,
+        run_id: RunKind,
+        event_type: EventType,
+        payload: serde_json::Value,
+        idempotency_key: String,
+        causation: Option<&EventKind>,
+    ) -> EventKind {
         if zdr.is_active() {
-            self.emit_ephemeral(run_id, event_type, payload, idempotency_key)
-                .await;
+            // A ZDR run never reaches the run-trace publisher.
+            self.mint(run_id, event_type, payload, idempotency_key, causation, false)
+                .event_id
         } else {
-            self.emit(run_id, event_type, payload, idempotency_key)
-                .await;
+            self.emit_inner(run_id, event_type, payload, idempotency_key, causation)
+                .await
         }
     }
+}
+
+/// WS10.S4: the trace stamp of one event of a labelled run. The request id is the edge's
+/// current one (absent in a spawned task, see `request_context`) and is kept only when it
+/// is a valid trace token, so an odd inbound id never rides on an event.
+fn event_trace(meta: &RunTraceMeta, causation: Option<&EventKind>) -> EventTrace {
+    EventTrace {
+        origin: Some(meta.origin),
+        agent: meta.agent.clone(),
+        request_id: crate::request_context::current_opt()
+            .filter(|id| valid_token(id, TRACE_TOKEN_MAX)),
+        run_id: meta.model_run_id.clone(),
+        causation_event_id: causation.map(ToString::to_string),
+    }
+}
+
+/// WS10.S5: the publisher context of a labelled run, or `None` when the run has no Model
+/// run id or is ZDR (nothing is enqueued then). Org and actor come from the verified token
+/// the run was opened with.
+fn publish_ctx(meta: &RunTraceMeta) -> Option<PublishCtx> {
+    if meta.zdr.is_active() {
+        return None;
+    }
+    let model_run_id = meta.model_run_id.as_ref()?;
+    Some(PublishCtx {
+        model_run_id: model_run_id.clone(),
+        org_id: meta.org_id.clone(),
+        actor_id: meta.actor_id.clone(),
+        browser_run_id: meta.browser_run_id.clone(),
+        zdr: false,
+    })
 }
 
 fn new_event(

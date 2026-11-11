@@ -11,6 +11,42 @@ pub struct SweepReport {
     pub expired: usize,
     /// Runs it would have released (dry run).
     pub would_expire: usize,
+    /// Q2-WS8.J: live attachments it ended on runs that stay live (idle or lapsed grant).
+    pub attaches_released: usize,
+    /// Q2-WS8.J: live attachments it would have ended (dry run).
+    pub attaches_would_release: usize,
+}
+
+/// Q2-WS8.J: one run's attachment pass ([`super::attach::sweep_attach`]) at the attach idle
+/// limit (`QUARRY_EDGE__ATTACH_IDLE_TTL_S`), counted on `report`. A dry run only counts and
+/// logs `would_release`. Logs carry the run id and the disposition only, never a URL.
+async fn sweep_run_attach(
+    state: &AppState,
+    run_id: &str,
+    handle: &RunHandle,
+    now_ms: u64,
+    limits: &crate::run_limits::RunLimits,
+    report: &mut SweepReport,
+) {
+    let dry_run = limits.sweeper_dry_run;
+    let Some(phase) =
+        super::attach::sweep_attach(state, handle, now_ms, limits.attach_idle_ttl_s, dry_run).await
+    else {
+        return;
+    };
+    let reason = match phase {
+        BrowserAttachState::IdleReleased => "idle",
+        BrowserAttachState::Revoked => "revoked",
+        _ => "other",
+    };
+    if dry_run {
+        report.attaches_would_release += 1;
+        tracing::warn!(run_id, reason, "would_release: an attachment, run sweeper is in dry run");
+        return;
+    }
+    report.attaches_released += 1;
+    crate::metrics::record_attach_released(reason);
+    tracing::info!(run_id, reason, "attachment released by the run sweeper");
 }
 
 /// Start the periodic sweep. It does nothing when the sweeper is switched off
@@ -396,6 +432,11 @@ pub async fn sweep_once_ttl(
         let verdict = match verdict {
             Some(verdict) => verdict,
             None => {
+                // Q2-WS8.J: a run that is not expiring this pass may still hold an attachment
+                // its delegate abandoned (an execution-core crash) or whose grant lapsed.
+                if handle.live.attaches().live().is_some() {
+                    sweep_run_attach(state, &run_id, &handle, now_ms, &limits, &mut report).await;
+                }
                 let (Some(grants), Some((org_id, Some(grant_id)))) = (grants, human.as_ref()) else {
                     continue;
                 };

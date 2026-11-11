@@ -393,12 +393,18 @@ async fn serve_connection_until_cancelled(
                 )
             })??;
     let request = parse_proxy_request(&head)?;
-    if !policy.lock().await.allows_url(request.url.as_str()) {
+    // WS7.G (D2-U34-5): under ZDR the policy in force keeps the host only.
+    let (allowed, host_only) = {
+        let policy = policy.lock().await;
+        (policy.allows_url(request.url.as_str()), policy.host_only_receipts())
+    };
+    if !allowed {
         record_receipt(
             &receipts,
             &sequence,
             &request.method,
             &request.url,
+            host_only,
             BrowserEgressDecision::Block,
             "domain_grant_blocked",
         )
@@ -423,6 +429,7 @@ async fn serve_connection_until_cancelled(
                 &sequence,
                 &request.method,
                 &request.url,
+                host_only,
                 BrowserEgressDecision::Block,
                 "dns_or_ssrf_blocked",
             )
@@ -439,6 +446,7 @@ async fn serve_connection_until_cancelled(
                 &sequence,
                 &request.method,
                 &request.url,
+                host_only,
                 BrowserEgressDecision::Block,
                 "pinned_connect_failed",
             )
@@ -452,6 +460,7 @@ async fn serve_connection_until_cancelled(
         &sequence,
         &request.method,
         &request.url,
+        host_only,
         BrowserEgressDecision::Allow,
         "dns_pinned_proxy",
     )
@@ -652,6 +661,7 @@ async fn record_receipt(
     sequence: &Arc<Mutex<u64>>,
     method: &str,
     url: &url::Url,
+    host_only: bool,
     decision: BrowserEgressDecision,
     policy: &str,
 ) {
@@ -661,7 +671,7 @@ async fn record_receipt(
         sequence: *sequence_guard,
         tab_id: None,
         method: method.to_owned(),
-        url: redacted_url(url),
+        url: redacted_url(url, host_only),
         decision,
         policy: policy.to_owned(),
         timestamp_ms: now_ms(),
@@ -675,13 +685,16 @@ async fn record_receipt(
     }
 }
 
-fn redacted_url(url: &url::Url) -> String {
+/// `scheme://host[:port]/path`, or under ZDR (`host_only`, WS7.G, D2-U34-5)
+/// `scheme://host[:port]` alone: a ZDR run's receipt never names a path.
+fn redacted_url(url: &url::Url, host_only: bool) -> String {
     let host = url.host_str().unwrap_or("unparseable");
     let port = url
         .port()
         .map(|port| format!(":{port}"))
         .unwrap_or_default();
-    format!("{}://{host}{port}{}", url.scheme(), url.path())
+    let path = if host_only { "" } else { url.path() };
+    format!("{}://{host}{port}{path}", url.scheme())
 }
 
 fn now_ms() -> u64 {

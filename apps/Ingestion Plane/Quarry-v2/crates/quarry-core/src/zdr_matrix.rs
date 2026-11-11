@@ -634,6 +634,40 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "browser_trace_publish",
+        routes: &[],
+        treatment: Treatment::Refused {
+            code: "FORBIDDEN",
+            feature: "browser_trace_publish",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "no route of its own: every agent run route emits through EventSink. The Model Plane run-trace publisher (WS10.S5, quarry-runtime model_trace_publisher, present only when QUARRY_EDGE__MODEL_TRACE_NATS_URL is set) is reached only from the durable emit path for a run opened with trace labels whose model_run_id is set and whose ZDR posture is off; emit_ephemeral and a ZDR emit_for_zdr never reach it, ModelTracePublisher::try_enqueue refuses a ZDR context again, and trace_projection::to_model_envelope returns nothing for a ZDR run, so a ZDR run sends no NATS message on mp.v1.trace.run.*. session-core refuses an envelope with zdr true as well. Nothing is returned to the caller: the refusal is silent, the run itself proceeds",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "browser_trace_replay",
+        routes: &[],
+        treatment: Treatment::Inert {
+            reason: "an in-memory replay ring per open run, dropped when the run closes; nothing durable is written",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "same routes as agent_run_surface (events/stream): EventSink keeps the newest events of an open run in a bounded in-process ring (RingLimits) for a resuming subscriber of the same live run; close_run drops it and it is never persisted or forwarded, so a ZDR run's events live only as long as the run",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "browser_egress_receipts",
+        routes: &[],
+        treatment: Treatment::Degraded {
+            warning: "a ZDR run's browser egress receipts keep the host only (scheme://host[:port]), never the path",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "same route as agent_run_surface (egress-receipts): agent_policy_gate::egress_policy, live_egress_policy and attachment_egress_policy set BrowserEgressPolicy::with_host_only_receipts from the run's ZDR posture (WS7.G, D2-U34-5); the chromiumoxide request guard (the session and tab policies in force), the proxy receipt sync and the governed download receipt, and the runtime's pinned egress proxy (browser_egress_proxy::record_receipt) then write scheme://host[:port] with no path. A non-ZDR run keeps scheme://host[:port]/path; the query is never kept in either posture",
+        log: Log::Unverified,
+    },
+    Row {
         id: "agent_hit_test",
         routes: &["/v1/agent/runs/{run_id}/hit-test"],
         treatment: Treatment::Inert {

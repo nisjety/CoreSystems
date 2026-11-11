@@ -145,36 +145,6 @@ type AgentActionRequest struct {
 	Zdr         ZdrMode           `json:"zdr"`
 }
 
-// StructuredExtractRequest mirrors the Rust contract.
-type StructuredExtractRequest struct {
-	RunID                  ID              `json:"run_id"`
-	OrgID                  string          `json:"org_id"`
-	SourceArtifactRef      *string         `json:"source_artifact_ref,omitempty"`
-	Markdown               *string         `json:"markdown,omitempty"`
-	StructuredOutputSchema json.RawMessage `json:"structured_output_schema"`
-	SourceTraceRequired    bool            `json:"source_trace_required,omitempty"`
-	MaxCostUSD             *float64        `json:"max_cost_usd,omitempty"`
-	MaxTokens              *uint32         `json:"max_tokens,omitempty"`
-	Zdr                    ZdrMode         `json:"zdr"`
-}
-
-// ExtractionUsage mirrors the Rust contract.
-type ExtractionUsage struct {
-	InputTokens  uint32  `json:"input_tokens"`
-	OutputTokens uint32  `json:"output_tokens"`
-	CostUSD      float64 `json:"cost_usd"`
-}
-
-// StructuredExtractResponse mirrors the Rust contract.
-type StructuredExtractResponse struct {
-	Data        json.RawMessage `json:"data"`
-	SchemaValid bool            `json:"schema_valid"`
-	Usage       ExtractionUsage `json:"usage"`
-	SourceTrace *SourceTrace    `json:"source_trace,omitempty"`
-	Model       string          `json:"model"`
-	Provider    string          `json:"provider"`
-}
-
 // IsZeroRetention returns true when the request opts into ZDR enforcement.
 func (r *DataPlaneIngestRequest) IsZeroRetention() bool {
 	return r != nil && r.Zdr == ZdrOn

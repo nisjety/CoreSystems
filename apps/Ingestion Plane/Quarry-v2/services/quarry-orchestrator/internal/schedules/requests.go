@@ -70,7 +70,8 @@ const (
 // requestTemporal is the part of the Manager the loop drives; tests replace it.
 type requestTemporal interface {
 	Trigger(ctx context.Context, scheduleID string) error
-	Backfill(ctx context.Context, scheduleID string, start, end time.Time) error
+	// Backfill takes the requested overlap policy (params.overlap_policy; "" = ALLOW_ALL).
+	Backfill(ctx context.Context, scheduleID string, start, end time.Time, overlap string) error
 }
 
 // claimedRequest mirrors control's claimedRequestView.
@@ -188,7 +189,7 @@ func (r *requestRunner) apply(ctx context.Context, req claimedRequest) requestOu
 			out.Status, out.Error = "rejected", perr.Error()
 			return out
 		}
-		err = r.temporal.Backfill(callCtx, req.ScheduleID, start, end)
+		err = r.temporal.Backfill(callCtx, req.ScheduleID, start, end, backfillOverlap(req.Params))
 	default:
 		out.Status, out.Error = "rejected", fmt.Sprintf("unknown action %q", req.Action)
 		return out
@@ -244,6 +245,14 @@ func backfillWindow(params map[string]any) (time.Time, time.Time, error) {
 		return time.Time{}, time.Time{}, errors.New("backfill: end_at must be after start_at")
 	}
 	return start, end, nil
+}
+
+// backfillOverlap reads the overlap policy control stored with a backfill request
+// (params.overlap_policy, WS15.S3b), trimmed and lower-cased. Missing or not a
+// string is "", which Backfill treats as ALLOW_ALL, the previous behaviour.
+func backfillOverlap(params map[string]any) string {
+	s, _ := params["overlap_policy"].(string)
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 // signingSecret is the control-internal secret (D2-050): control verifies every

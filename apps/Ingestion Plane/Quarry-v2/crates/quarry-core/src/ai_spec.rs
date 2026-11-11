@@ -22,12 +22,21 @@ use crate::scrape::FieldError;
 
 // ---- limits ---------------------------------------------------------------
 
-/// Serialized size of a `json` schema, as sent.
+/// Serialized size of a `json` schema once its `$ref`s are inlined: the schema
+/// the model is asked for. Each inlined definition also counts its own size
+/// while it is inlined, so a schema that fans out through references stops early.
 pub const MAX_SCHEMA_BYTES: usize = 65_536;
-/// Nesting of schema nodes (`properties` and `items` each add one); the root is 1.
+/// Nesting of schema nodes (`properties`, `items`, and each `anyOf` or `oneOf`
+/// branch add one); the root is 1. Counted once the `$ref`s are inlined.
 pub const MAX_SCHEMA_DEPTH: usize = 10;
-/// `properties` entries in the whole schema.
+/// `properties` entries in the whole schema, once the `$ref`s are inlined.
 pub const MAX_SCHEMA_PROPERTIES: usize = 200;
+/// A `json` schema deeper than this (the root is 1), or with more `properties`
+/// entries than [`COMPLEX_SCHEMA_PROPERTIES`], or with any `anyOf` or `oneOf`,
+/// is `Complex`.
+pub const COMPLEX_SCHEMA_DEPTH: usize = 3;
+/// See [`COMPLEX_SCHEMA_DEPTH`].
+pub const COMPLEX_SCHEMA_PROPERTIES: usize = 30;
 /// Field errors reported for one schema (the walk stops there).
 const MAX_SCHEMA_ERRORS: usize = 20;
 /// A `json.prompt` or `question.question`, in characters.
@@ -54,13 +63,17 @@ pub const MAX_SCHEMA_ISSUES: usize = 20;
 
 /// Schema keywords the validator in [`crate::json_schema`] checks. Anything
 /// else it would ignore silently, which would make `schema_valid: true` a lie,
-/// so a schema that uses one is refused.
-const ALLOWED_KEYWORDS: [&str; 14] = [
+/// so a schema that uses one is refused. `$ref` is not listed: a local one is
+/// inlined before this check (see `SchemaWalk::reference_node`).
+const ALLOWED_KEYWORDS: [&str; 17] = [
     "type",
     "properties",
     "required",
     "items",
     "enum",
+    "const",
+    "anyOf",
+    "oneOf",
     "minItems",
     "maxItems",
     "minLength",
@@ -73,6 +86,9 @@ const ALLOWED_KEYWORDS: [&str; 14] = [
 ];
 /// Keywords dropped without complaint: they name or annotate the schema, not the data.
 const STRIPPED_KEYWORDS: [&str; 3] = ["$schema", "$id", "$comment"];
+/// The root's keywords that hold the definitions a local `$ref` names. They are
+/// dropped from the normalised schema, which has the definitions inlined.
+const DEFINITION_KEYWORDS: [&str; 2] = ["$defs", "definitions"];
 const SCHEMA_TYPES: [&str; 7] = [
     "object", "array", "string", "integer", "number", "boolean", "null",
 ];
@@ -123,12 +139,24 @@ impl AiKind {
     }
 }
 
+/// How hard a `json` schema is for a model. `Complex` picks the complex `json`
+/// alias (`AiScrapeConfig::model_json_complex`). Decided on the inlined schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComplexityClass {
+    Simple,
+    Complex,
+}
+
 /// `{"type":"json","schema":{...},"prompt":"..."}`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JsonSpec {
-    /// The schema as the caller wrote it, minus `$schema`, `$id` and `$comment`.
+    /// The schema as the caller wrote it, normalised: `$schema`, `$id` and
+    /// `$comment` are removed at every node, and every local `$ref` is inlined,
+    /// so no `$defs`, `definitions` or `$ref` remain.
     pub schema: Value,
     pub prompt: Option<String>,
+    /// Of the inlined schema (see [`COMPLEX_SCHEMA_DEPTH`] and [`COMPLEX_SCHEMA_PROPERTIES`]).
+    pub complexity: ComplexityClass,
 }
 
 /// `{"type":"summary","max_chars":2000,"language":"nb"}`.
@@ -194,6 +222,7 @@ impl AiSpec {
             AiKind::Json => Self::Json(JsonSpec {
                 schema: serde_json::json!({ "type": "object" }),
                 prompt: None,
+                complexity: ComplexityClass::Simple,
             }),
             AiKind::Summary => Self::default_summary(),
             AiKind::Question => Self::Question(QuestionSpec {
@@ -318,7 +347,13 @@ pub fn parse_ai_object(
                 MAX_PROMPT_CHARS,
                 &mut errors,
             );
-            schema.map(|schema| AiSpec::Json(JsonSpec { schema, prompt }))
+            schema.map(|(schema, complexity)| {
+                AiSpec::Json(JsonSpec {
+                    schema,
+                    prompt,
+                    complexity,
+                })
+            })
         }
         AiKind::Summary => {
             let max_chars = optional_range(
@@ -509,10 +544,16 @@ fn parse_language(value: Option<&Value>, path: &str, errors: &mut Vec<FieldError
 
 // ---- the json schema ------------------------------------------------------
 
-/// Check a `json.schema` and return it normalised (`$schema`, `$id` and
-/// `$comment` removed at every schema node). Errors have paths like
+/// Check a `json.schema` and return it normalised, with its complexity class.
+/// `$schema`, `$id` and `$comment` are removed at every schema node, and each
+/// local `$ref` is inlined, so the limits, the root check and the size check all
+/// apply to the schema the model is asked for. Errors have paths like
 /// `formats[1].schema.properties.title.pattern`; a value is never echoed.
-fn parse_schema(value: Option<&Value>, path: &str, errors: &mut Vec<FieldError>) -> Option<Value> {
+fn parse_schema(
+    value: Option<&Value>,
+    path: &str,
+    errors: &mut Vec<FieldError>,
+) -> Option<(Value, ComplexityClass)> {
     let schema = match value {
         None | Some(Value::Null) => {
             errors.push(FieldError::new(path, "missing_field", "this field is required"));
@@ -524,7 +565,14 @@ fn parse_schema(value: Option<&Value>, path: &str, errors: &mut Vec<FieldError>)
         errors.push(FieldError::new(path, "invalid_type", "expected a JSON Schema object"));
         return None;
     }
-    let size = serde_json::to_vec(schema).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
+    let mut walk = SchemaWalk::new(schema);
+    let normalised = walk.node(schema, path, 1);
+    if !walk.errors.is_empty() {
+        errors.append(&mut walk.errors);
+        return None;
+    }
+    let normalised = normalised?;
+    let size = serde_json::to_vec(&normalised).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
     if size > MAX_SCHEMA_BYTES {
         errors.push(FieldError::new(
             path,
@@ -533,7 +581,7 @@ fn parse_schema(value: Option<&Value>, path: &str, errors: &mut Vec<FieldError>)
         ));
         return None;
     }
-    if schema.get("type").and_then(Value::as_str) != Some("object") {
+    if normalised.get("type").and_then(Value::as_str) != Some("object") {
         errors.push(FieldError::new(
             path,
             "schema_root_not_object",
@@ -541,24 +589,55 @@ fn parse_schema(value: Option<&Value>, path: &str, errors: &mut Vec<FieldError>)
         ));
         return None;
     }
-    let mut walk = SchemaWalk {
-        errors: Vec::new(),
-        properties: 0,
-        too_complex: false,
-    };
-    let normalised = walk.node(schema, path, 1);
-    errors.append(&mut walk.errors);
-    normalised
+    let complexity = walk.complexity();
+    Some((normalised, complexity))
 }
 
-struct SchemaWalk {
+struct SchemaWalk<'a> {
+    /// The schema as sent: the place every local `$ref` is looked up.
+    root: &'a Value,
     errors: Vec<FieldError>,
     properties: usize,
     /// `schema_too_complex` is reported once.
     too_complex: bool,
+    /// The definitions being inlined, outermost first. A `$ref` to one of them
+    /// is a cycle.
+    expanding: Vec<&'a Value>,
+    /// The serialized size of every definition inlined so far. Past the schema
+    /// size limit the walk refuses further references.
+    inlined: usize,
+    /// Whether an `anyOf` or `oneOf` was kept (for the complexity class).
+    unions: bool,
+    /// The deepest schema node reached (for the complexity class).
+    deepest: usize,
 }
 
-impl SchemaWalk {
+impl<'a> SchemaWalk<'a> {
+    fn new(root: &'a Value) -> Self {
+        Self {
+            root,
+            errors: Vec::new(),
+            properties: 0,
+            too_complex: false,
+            expanding: Vec::new(),
+            inlined: 0,
+            unions: false,
+            deepest: 0,
+        }
+    }
+
+    /// `Complex` past the depth or the property bound, or with an `anyOf` or `oneOf`.
+    fn complexity(&self) -> ComplexityClass {
+        if self.deepest > COMPLEX_SCHEMA_DEPTH
+            || self.properties > COMPLEX_SCHEMA_PROPERTIES
+            || self.unions
+        {
+            ComplexityClass::Complex
+        } else {
+            ComplexityClass::Simple
+        }
+    }
+
     fn push(&mut self, path: &str, code: &str, message: &str) {
         if self.errors.len() < MAX_SCHEMA_ERRORS {
             self.errors.push(FieldError::new(path, code, message));
@@ -585,9 +664,28 @@ impl SchemaWalk {
             );
             return None;
         }
+        self.deepest = self.deepest.max(depth);
+        let is_root = std::ptr::eq(node, self.root);
+        if is_root {
+            // The definitions are dropped once inlined; here only their shape is checked.
+            for key in DEFINITION_KEYWORDS {
+                if object.get(key).is_some_and(|value| !value.is_object()) {
+                    self.push(
+                        &format!("{path}.{key}"),
+                        "invalid_type",
+                        "expected an object of schemas",
+                    );
+                }
+            }
+        }
+        if let Some(reference) = object.get("$ref") {
+            return self.reference_node(object, reference, path, is_root, depth);
+        }
         let mut out = Map::new();
         for (key, value) in object {
-            if STRIPPED_KEYWORDS.contains(&key.as_str()) {
+            if STRIPPED_KEYWORDS.contains(&key.as_str())
+                || (is_root && DEFINITION_KEYWORDS.contains(&key.as_str()))
+            {
                 continue;
             }
             let at = format!("{path}.{}", clip(key, 64));
@@ -601,6 +699,94 @@ impl SchemaWalk {
             }
             if let Some(kept) = self.keyword(key, value, &at, depth) {
                 out.insert(key.clone(), kept);
+            }
+        }
+        Some(Value::Object(out))
+    }
+
+    /// A node with a `$ref`. A local reference to a definition is inlined in
+    /// place of the node, and the node's own `title` and `description` are laid
+    /// over it. Any other sibling keyword would be ignored, so it is refused.
+    fn reference_node(
+        &mut self,
+        object: &Map<String, Value>,
+        reference: &Value,
+        path: &str,
+        is_root: bool,
+        depth: usize,
+    ) -> Option<Value> {
+        let at = format!("{path}.$ref");
+        let Some(text) = reference.as_str() else {
+            self.push(&at, "invalid_type", "expected a string");
+            return None;
+        };
+        for key in object.keys() {
+            let accepted = matches!(key.as_str(), "$ref" | "title" | "description")
+                || STRIPPED_KEYWORDS.contains(&key.as_str())
+                || (is_root && DEFINITION_KEYWORDS.contains(&key.as_str()));
+            if !accepted {
+                self.push(
+                    &format!("{path}.{}", clip(key, 64)),
+                    "schema_keyword_not_supported",
+                    "a $ref takes no keyword beside it but title and description",
+                );
+            }
+        }
+        let root = self.root;
+        let Some(target) = local_definition(root, text) else {
+            if text.starts_with("#/$defs/") || text.starts_with("#/definitions/") {
+                self.push(&at, "invalid_value", "the $ref names no definition in this schema");
+            } else {
+                self.push(
+                    &at,
+                    "schema_ref_not_supported",
+                    "only a local $ref to #/$defs/ or #/definitions/ is accepted",
+                );
+            }
+            return None;
+        };
+        if self.expanding.iter().any(|seen| std::ptr::eq(*seen, target)) {
+            self.push(
+                &at,
+                "schema_recursive",
+                "the definition refers back to itself, so it cannot be inlined",
+            );
+            return None;
+        }
+        // A chain of references adds no level to the schema, so its nesting is bounded here.
+        if self.expanding.len() >= MAX_SCHEMA_DEPTH {
+            self.complex(
+                &at,
+                &format!("the schema nests at most {MAX_SCHEMA_DEPTH} levels"),
+            );
+            return None;
+        }
+        // Each inlined definition is charged its size, so a schema that fans out
+        // through references cannot grow past the limit, or take long to check.
+        // Once the charge is over the limit, no further definition is measured.
+        if self.inlined <= MAX_SCHEMA_BYTES {
+            let size = serde_json::to_vec(target).map(|bytes| bytes.len()).unwrap_or(usize::MAX);
+            self.inlined = self.inlined.saturating_add(size);
+        }
+        if self.inlined > MAX_SCHEMA_BYTES {
+            self.push(
+                &at,
+                "schema_too_large",
+                &format!("the schema is at most {MAX_SCHEMA_BYTES} bytes once its $refs are inlined"),
+            );
+            return None;
+        }
+        self.expanding.push(target);
+        let inlined = self.node(target, path, depth);
+        self.expanding.pop();
+        let Some(Value::Object(mut out)) = inlined else {
+            return None;
+        };
+        for key in ["title", "description"] {
+            if let Some(value) = object.get(key) {
+                if let Some(kept) = self.keyword(key, value, &format!("{path}.{key}"), depth) {
+                    out.insert(key.to_owned(), kept);
+                }
             }
         }
         Some(Value::Object(out))
@@ -641,6 +827,26 @@ impl SchemaWalk {
                     return None;
                 }
                 Some(value.clone())
+            }
+            "const" => Some(value.clone()),
+            "anyOf" | "oneOf" => {
+                let Some(options) = value.as_array() else {
+                    self.push(at, "invalid_type", "expected an array of schemas");
+                    return None;
+                };
+                if options.is_empty() {
+                    self.push(at, "invalid_value", "expected at least one schema");
+                    return None;
+                }
+                self.unions = true;
+                let mut kept = Vec::with_capacity(options.len());
+                for (index, option) in options.iter().enumerate() {
+                    let branch = format!("{at}[{index}]");
+                    if let Some(normalised) = self.node(option, &branch, depth + 1) {
+                        kept.push(normalised);
+                    }
+                }
+                Some(Value::Array(kept))
             }
             "minItems" | "maxItems" | "minLength" | "maxLength" => {
                 if value.as_u64().is_none() {
@@ -718,6 +924,45 @@ impl SchemaWalk {
             _ => None,
         }
     }
+}
+
+/// The definition a local `$ref` names: `#/$defs/<name>` or `#/definitions/<name>`,
+/// or a JSON pointer below one, looked up in the schema as sent.
+fn local_definition<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    let tokens: Vec<&str> = reference.strip_prefix("#/")?.split('/').collect();
+    if tokens.len() < 2 || !DEFINITION_KEYWORDS.contains(&tokens[0]) {
+        return None;
+    }
+    let mut node = root.get(tokens[0])?;
+    for token in &tokens[1..] {
+        let key = pointer_token(token)?;
+        node = match node {
+            Value::Object(map) => map.get(&key)?,
+            Value::Array(items) => items.get(key.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(node)
+}
+
+/// One token of a JSON pointer in a URI fragment: percent-decoded, then `~1` is
+/// `/` and `~0` is `~`. `None` for a bad escape or a name that is not UTF-8.
+fn pointer_token(token: &str) -> Option<String> {
+    let bytes = token.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' {
+            let hex = token.get(at + 1..at + 3)?;
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            at += 3;
+        } else {
+            decoded.push(bytes[at]);
+            at += 1;
+        }
+    }
+    let text = String::from_utf8(decoded).ok()?;
+    Some(text.replace("~1", "/").replace("~0", "~"))
 }
 
 // ---- the report -----------------------------------------------------------
@@ -802,6 +1047,35 @@ pub struct SchemaIssue {
     pub code: String,
 }
 
+/// Which part of the page's own markup held a `json` field the model was not asked for (WS16.S5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiPrefillSource {
+    /// A schema.org JSON-LD node.
+    JsonLd,
+    /// A microdata or RDFa property.
+    Microdata,
+    /// A framework hydration or state payload.
+    Hydration,
+}
+
+/// The rule that admitted a prefilled value (WS16.S5). Exact name is the only rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiPrefillRule {
+    /// The page key equals the property name after case and underscore folding.
+    ExactName,
+}
+
+/// One `json` field taken from the page's own markup, without a model call (WS16.S5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AiPrefill {
+    /// The top-level property of the request's schema.
+    pub field: String,
+    pub source: AiPrefillSource,
+    pub rule: AiPrefillRule,
+}
+
 /// What one AI format did (`data.ai.<kind>`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AiFormatReport {
@@ -834,6 +1108,11 @@ pub struct AiFormatReport {
     pub repair: Option<AiRepair>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub schema_issues: Vec<SchemaIssue>,
+    /// json only, and only with `QUARRY_EDGE__AI_FORMATS_HARVEST=prefill` (WS16.S5): the
+    /// top-level fields the page's own markup stated, taken without a model call. Absent
+    /// when none was taken.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefilled: Vec<AiPrefill>,
     // question
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub found: Option<bool>,
@@ -861,6 +1140,7 @@ impl AiFormatReport {
             schema_valid: None,
             repair: None,
             schema_issues: Vec::new(),
+            prefilled: Vec::new(),
             found: None,
             grounded: None,
             dropped: None,
@@ -1103,7 +1383,7 @@ mod tests {
     #[test]
     fn every_keyword_the_validator_ignores_is_refused_with_its_path() {
         for keyword in [
-            "$ref", "anyOf", "oneOf", "allOf", "not", "const", "pattern", "format", "if", "then", "else",
+            "allOf", "not", "pattern", "format", "if", "then", "else",
             "patternProperties", "dependentRequired", "dependentSchemas", "default", "examples", "uniqueItems",
         ] {
             let errors = json_with(json!({

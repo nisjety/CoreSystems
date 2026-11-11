@@ -590,6 +590,147 @@ export async function listRunEventReplay(
   }
 }
 
+// ── Durable run trace (WS10.S6, GW-2) ───────────────────────────────────────
+// `GET /api/v1/runs/:run_id/trace` reads one page of a run's durable browser trace, oldest first.
+// Model Plane decides the run is the caller's own (anyone else reads the same 404 `run_not_found`
+// as an unknown run); 501 `run_trace_unavailable` means the trace store is not serving yet. A
+// zero-retention run keeps no rows, so its page is empty. Read-only: no action contract.
+
+/** The seven browser trace event types, without their `EVENT_TYPE_` prefix. */
+export const RUN_TRACE_EVENT_TYPES = [
+  'BROWSER_SESSION_OPENED',
+  'BROWSER_SESSION_CLOSED',
+  'BROWSER_CONTROL_CHANGED',
+  'BROWSER_TAB_CHANGED',
+  'BROWSER_STEP_RECEIPT_RECORDED',
+  'BROWSER_EGRESS_DECIDED',
+  'BROWSER_ARTIFACT_RECORDED',
+] as const
+
+export type RunTraceEventType = (typeof RUN_TRACE_EVENT_TYPES)[number]
+
+/** The agent a trace event names. */
+export type RunTraceAgent = {
+  id: string
+  role: string
+  parentId: string
+}
+
+/** One run-trace envelope (the 17 keys of `run-trace-envelope.golden.json`), camelCased. */
+export type RunTraceEvent = {
+  eventId: string
+  /** One of `RUN_TRACE_EVENT_TYPES` for a browser trace; kept as the server's name otherwise. */
+  eventType: string
+  schemaVersion: number
+  /** RFC 3339 time the event occurred, or null when the row has none. */
+  ts: string | null
+  producer: string
+  correlationId: string
+  causationId: string
+  orgId: string
+  userId: string
+  resourceRef: string
+  /** The JSON object Quarry sent, `{ type_url }` for any other payload, or null. */
+  payload: Record<string, unknown> | null
+  zdr: boolean
+  producerSeq: number
+  agent: RunTraceAgent | null
+  /** The run origin name without `RUN_ORIGIN_`, or null when unspecified. */
+  origin: string | null
+  runId: string
+  requestId: string
+}
+
+export type RunTracePage = {
+  events: RunTraceEvent[]
+  /** The cursor of the next page, or null when none was given. */
+  cursor: string | null
+  hasMore: boolean
+}
+
+export type RunTraceQuery = {
+  cursor?: string
+  limit?: number
+  types?: readonly RunTraceEventType[]
+}
+
+const RUN_TRACE_MAX_LIMIT = 500
+const RUN_TRACE_MAX_CURSOR = 256
+
+function text(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function normalizeRunTraceAgent(raw: unknown): RunTraceAgent | null {
+  const item = objectRecord(raw)
+  if (!item) return null
+  const id = text(item.id)
+  if (!id) return null
+  return { id, role: text(item.role), parentId: text(item.parent_id ?? item.parentId) }
+}
+
+function normalizeRunTraceEvent(raw: unknown): RunTraceEvent | null {
+  const item = objectRecord(raw)
+  if (!item) return null
+  const eventId = str(item.event_id) ?? str(item.eventId)
+  const eventType = str(item.event_type) ?? str(item.eventType)
+  if (!eventId || !eventType) return null
+  const ts = normalizeOptionalIsoTimestamp(str(item.ts)) ?? null
+  return {
+    eventId,
+    eventType,
+    schemaVersion: nonNegativeInt(item.schema_version ?? item.schemaVersion) ?? 0,
+    ts,
+    producer: text(item.producer),
+    correlationId: text(item.correlation_id ?? item.correlationId),
+    causationId: text(item.causation_id ?? item.causationId),
+    orgId: text(item.org_id ?? item.orgId),
+    userId: text(item.user_id ?? item.userId),
+    resourceRef: text(item.resource_ref ?? item.resourceRef),
+    payload: objectRecord(item.payload),
+    zdr: item.zdr === true,
+    producerSeq: nonNegativeInt(item.producer_seq ?? item.producerSeq) ?? 0,
+    agent: normalizeRunTraceAgent(item.agent),
+    origin: str(item.origin) ?? null,
+    runId: text(item.run_id ?? item.runId),
+    requestId: text(item.request_id ?? item.requestId),
+  }
+}
+
+/** Fetch one page of a run's durable trace. Events the client cannot read are dropped, never guessed. */
+export async function getRunTrace(
+  runId: string,
+  options: RunTraceQuery = {},
+  signal?: AbortSignal,
+): Promise<RunTracePage> {
+  const search = new URLSearchParams()
+  const cursor = options.cursor?.trim()
+  if (cursor && cursor.length <= RUN_TRACE_MAX_CURSOR) search.set('cursor', cursor)
+  if (options.limit != null && Number.isFinite(options.limit) && options.limit >= 1) {
+    search.set('limit', String(Math.min(Math.floor(options.limit), RUN_TRACE_MAX_LIMIT)))
+  }
+  const types = (options.types ?? []).filter((type) =>
+    (RUN_TRACE_EVENT_TYPES as readonly string[]).includes(type),
+  )
+  if (types.length > 0) search.set('types', [...new Set(types)].join(','))
+  const query = search.toString()
+  const raw = await requestJson<unknown>(
+    `/api/v1/runs/${encodeURIComponent(runId)}/trace${query ? `?${query}` : ''}`,
+    { signal },
+  )
+  const envelope = objectRecord(raw)
+  const data = objectRecord(envelope?.data)
+  const meta = objectRecord(envelope?.meta)
+  const events = Array.isArray(data?.events) ? data.events : []
+  return {
+    events: events
+      .map(normalizeRunTraceEvent)
+      .filter((event): event is RunTraceEvent => event !== null),
+    cursor: str(meta?.cursor) ?? null,
+    hasMore: data?.hasMore === true,
+  }
+}
+
 // ── Durable run timing (EP-14 S5) ───────────────────────────────────────────
 // `GET /api/v1/agents/runs/:run_id/timing` reads what the run kept of its timing: an Ask turn's
 // `turn_timing` report (`turn-timing-v1`), a Do run's per-round inference intervals

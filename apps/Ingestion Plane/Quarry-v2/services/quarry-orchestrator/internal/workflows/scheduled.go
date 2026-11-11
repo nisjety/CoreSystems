@@ -72,6 +72,7 @@ func ScheduledJobWF(ctx workflow.Context, in ScheduledJobInput, a *activities.Ac
 	if err := workflow.ExecuteActivity(ctx, a.PreflightFire, activities.PreflightInput{
 		ScheduleID: in.ScheduleID,
 		OrgID:      in.OrgID,
+		TargetKind: in.Kind,
 	}).Get(ctx, &pre); err != nil {
 		return err
 	}

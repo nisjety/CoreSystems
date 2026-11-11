@@ -302,6 +302,33 @@ async fn create_crawl(
     }))
 }
 
+/// The most parallel pages a batch body may ask for. The edge clamps a larger ask to its own
+/// ceiling and reports the clamp, so the gateway checks only the shape of the ask.
+const MAX_BATCH_PARALLEL: u64 = 64;
+
+/// The parallel pages a batch body asks for, under `maxParallel` or `max_parallel`. `Ok(None)`
+/// when neither is sent, or the sent value is null, so the edge applies its own default. Any
+/// other value must be a whole number from 1 to 64. A value that is not one, or both spellings
+/// together, is refused with a fixed sentence that does not echo the value.
+fn batch_max_parallel(body: &Value) -> Result<Option<u64>, Response> {
+    let sent: Vec<&Value> = ["maxParallel", "max_parallel"]
+        .into_iter()
+        .filter_map(|key| body.get(key))
+        .filter(|value| !value.is_null())
+        .collect();
+    match sent.as_slice() {
+        [] => Ok(None),
+        [value] => value
+            .as_u64()
+            .filter(|parallel| (1..=MAX_BATCH_PARALLEL).contains(parallel))
+            .map(Some)
+            .ok_or_else(|| validation("maxParallel must be a whole number from 1 to 64.")),
+        _ => Err(validation(
+            "send one spelling of maxParallel, not maxParallel and max_parallel.",
+        )),
+    }
+}
+
 async fn create_batch(
     state: &AppState,
     body: &Value,
@@ -318,12 +345,20 @@ async fn create_batch(
         Err(_) => return validation("At least one URL is required for batch runs."),
     };
     let count = urls.len();
+    let max_parallel = match batch_max_parallel(body) {
+        Ok(value) => value,
+        Err(refusal) => return refusal,
+    };
 
     let mut request = json!({ "urls": urls });
     // Selective ingest: quarry keeps the pages out of Knowledge unless `ingest` is true,
     // so only a boolean the caller sent is forwarded.
     if let Some(ingest) = body.get("ingest").and_then(Value::as_bool) {
         request["ingest"] = json!(ingest);
+    }
+    // The parallel pages the caller asked for. Absent, the request is sent exactly as before.
+    if let Some(parallel) = max_parallel {
+        request["max_parallel"] = json!(parallel);
     }
     let (status, resp) = quarry_call(
         state,
@@ -338,15 +373,19 @@ async fn create_batch(
         return forward(status, resp);
     }
     let data = unwrap_data(&resp);
-    created(json!({
-        "run": {
-            "id": handoff_id(&data),
-            "kind": "batch",
-            "status": "queued",
-            "createdAt": handoff_accepted_at(&data),
-            "target": format!("{count} URLs"),
-        }
-    }))
+    let mut run = json!({
+        "id": handoff_id(&data),
+        "kind": "batch",
+        "status": "queued",
+        "createdAt": handoff_accepted_at(&data),
+        "target": format!("{count} URLs"),
+    });
+    // The edge's answer on the bounds it applied (`limits`: the URLs it kept, and the parallel
+    // pages when the caller asked for them), passed on as it came.
+    if let Some(limits) = data.get("limits").filter(|limits| !limits.is_null()) {
+        run["limits"] = limits.clone();
+    }
+    created(json!({ "run": run }))
 }
 
 /// The typed code for a structured-extraction refusal, read from the `error` text that
@@ -1151,5 +1190,91 @@ mod batch_forward_tests {
         assert_eq!(forwarded["error"]["details"]["zdr_refusal"]["code"], "zdr_durable_mutation_forbidden");
         assert_eq!(forwarded["error"]["details"]["zdr_refusal"]["action"], "batch");
         assert_eq!(sent_bodies(&quarry).await[0]["ingest"], true);
+    }
+
+    /// E3.7.2w: a `maxParallel` the caller sends goes to quarry as the integer `max_parallel`,
+    /// and the edge's answer on the bounds it applied comes back on the run unchanged.
+    #[tokio::test]
+    async fn a_max_parallel_is_forwarded_as_an_integer_and_the_edge_answer_comes_back() {
+        let answer = json!({
+            "data": {
+                "job_id": "job_b2",
+                "accepted_at": "2026-11-08T10:00:00Z",
+                "limits": { "max_parallel": { "requested": 8, "effective": 4, "clamped_by": [] } },
+            }
+        });
+        let quarry = quarry_answering(201, answer.clone(), 1).await;
+        let body = json!({ "kind": "batch", "urls": ["https://vg.no/a"], "maxParallel": 8 });
+
+        let response = create_batch(&state_for(&quarry), &body, None, "user-1").await;
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            sent_bodies(&quarry).await,
+            vec![json!({ "urls": ["https://vg.no/a"], "max_parallel": 8 })]
+        );
+        let forwarded = json_of(response).await;
+        assert_eq!(forwarded["data"]["run"]["limits"], answer["data"]["limits"]);
+    }
+
+    /// E3.7.2w: a batch that names no parallel pages sends the URLs alone, as it always did, and
+    /// so does one whose `maxParallel` is null.
+    #[tokio::test]
+    async fn a_batch_without_a_max_parallel_sends_no_max_parallel() {
+        let quarry = quarry_answering(201, accepted(), 2).await;
+        let state = state_for(&quarry);
+        let plain = json!({ "kind": "batch", "urls": ["https://vg.no/a"] });
+        let null = json!({ "kind": "batch", "urls": ["https://vg.no/a"], "maxParallel": null });
+
+        for body in [plain, null] {
+            let response = create_batch(&state, &body, None, "user-1").await;
+            assert_eq!(response.status(), StatusCode::CREATED);
+        }
+
+        assert_eq!(
+            sent_bodies(&quarry).await,
+            vec![
+                json!({ "urls": ["https://vg.no/a"] }),
+                json!({ "urls": ["https://vg.no/a"] }),
+            ]
+        );
+    }
+
+    /// E3.7.2w: a parallel count that is not a whole number from 1 to 64, or both spellings of it,
+    /// is refused before quarry is called, and the refusal does not echo the value.
+    #[tokio::test]
+    async fn a_max_parallel_that_is_not_a_whole_number_from_one_to_sixty_four_is_refused() {
+        let quarry = quarry_answering(201, accepted(), 0).await;
+        let state = state_for(&quarry);
+        let bad_values = [
+            json!(0),
+            json!(65),
+            json!(4242),
+            json!(2.5),
+            json!(-3),
+            json!("4"),
+        ];
+        for bad in bad_values {
+            let body = json!({
+                "kind": "batch",
+                "urls": ["https://vg.no/a"],
+                "maxParallel": bad.clone(),
+            });
+            let response = create_batch(&state, &body, None, "user-1").await;
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+            let refusal = json_of(response).await;
+            assert_eq!(refusal["error"]["code"], "validation_error", "{bad}");
+            assert!(!refusal.to_string().contains("4242"), "{bad}");
+        }
+        // Both spellings together are refused as well: the gateway never picks one silently.
+        let both = json!({
+            "kind": "batch",
+            "urls": ["https://vg.no/a"],
+            "maxParallel": 4,
+            "max_parallel": 4,
+        });
+        let response = create_batch(&state, &both, None, "user-1").await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(sent_bodies(&quarry).await.is_empty());
     }
 }

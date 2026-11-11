@@ -481,6 +481,8 @@ async fn extract_target(ctx: &TargetCtx<'_>, raw: &str) -> TargetOutcome {
                 zdr: ctx.zdr.is_active(),
                 request_id: ctx.request_id,
                 deadline: Some(ctx.deadline),
+                // WS16.S5 covers `/v1/scrape` only; `/v1/extract` carries no harvest yet.
+                harvest: None,
             },
         )
         .await;
@@ -641,9 +643,10 @@ async fn run_extract(
         let mut body = serde_json::Map::new();
         body.insert("schema".to_owned(), schema);
         match quarry_core::ai_spec::parse_ai_object(AiKind::Json, &body, "") {
-            Ok(AiSpec::Json(JsonSpec { schema, .. })) => Some(AiSpec::Json(JsonSpec {
+            Ok(AiSpec::Json(JsonSpec { schema, complexity, .. })) => Some(AiSpec::Json(JsonSpec {
                 schema,
                 prompt: prompt.clone(),
+                complexity,
             })),
             Ok(_) => None,
             Err(errors) => {

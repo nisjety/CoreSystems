@@ -92,7 +92,7 @@ This is the safety net firing — investigate where ZDR-on requests are being ro
 
 1. Find the offending caller in logs (`run_id`, `org_id`).
 2. Check that the upstream is correctly threading `zdr: true` through the contract chain.
-3. Audit the ZDR field on the request: `AgentActionRequest.zdr`, `DataPlaneIngestRequest.zdr`, `StructuredExtractRequest.zdr`.
+3. Audit the ZDR field on the request: `AgentActionRequest.zdr`, `DataPlaneIngestRequest.zdr`.
 
 ## ZDR floor from the token (user principals) — 403 on durable crawl / batch
 
@@ -119,12 +119,12 @@ Expected, not a fault. A USER token whose `zdr` claim is `true` (the org has ZDR
 
 **Symptom:** Authenticated scrapes returning login pages.
 
-1. Verify the profile is captured:
+1. Verify the profile is captured. The route takes a user token; a service principal gets 403:
    ```bash
-   curl http://edge:8082/v1/profiles/<profile_id>
+   curl -s -H "Authorization: Bearer <token>" http://edge:8082/v1/profiles/<profile_id>
    ```
 2. If 404: re-run the capture flow with the agent loop.
-3. If found: check `expires_at` and `viewport.is_mobile` match the original capture context.
+3. If found: check the cookie expiry and the viewport against the original capture context. The cookie expiry is `data.cookies[].expires` (a cookie with `session: true` has none). `data.has_viewport` says whether a viewport was captured; the viewport values are not shown. `POST /v1/profiles/<profile_id>/restore_probe` (body `{"url": "<target>"}`) returns `earliest_expiry`, `cookies_expired` and `restorable`. The save time is `saved_at`, the capture start. It is a column of `quarry_profiles` and is not in any HTTP answer: `SELECT saved_at, rev FROM quarry_profiles WHERE org_id = '<org>' AND profile_id = '<profile_id>';`. If the row is sealed under `oc:` and the edge logs `org-core key call failed`, follow `apps/Control Plane/ORG_KEY_CUSTODY_RUNBOOK.md`, section 7.
 4. For S3-backed `S3ProfileStore`, ensure the bucket is reachable and the IAM role allows `GetObject`/`ListObjectsV2`.
 
 ## OpenTelemetry traces missing
@@ -293,6 +293,14 @@ A tab attach does not hold the driver's browser lock while it runs (WS3.F; see "
 **SC4 D3 (2026-10-29): a navigation the browser's network guard refuses is refused at once.** The tab's Fetch guard refuses a request with `Fetch.failRequest(Aborted)`; for a main-frame document that commits nothing and raises no error, so a navigate to a host outside the run's list, or one redirected there (live R3-SC4: `slow.crawl.test/redir` 302 to fixture-b), waited out the whole navigate deadline (25 s) and answered 504 `TIMEOUT`, `effect: "unknown"`; the block showed only in the next observation's egress receipts. The driver now watches the navigation each `goto` waits on (its own first main-frame document request, for the `goto`'s URL less its fragment or the `https` form of an `http` one, and every redirect hop of it, matched by `redirectedRequestId` or, when Chromium leaves that out, the chain's network id) and ends it as soon as the guard refuses one: 403 `SECURITY_BLOCKED`, `details {reason: domain_grant_blocked | url_or_dns_blocked, op: navigate}`, no URL or host, the message for `domain_grant_blocked` being the edge's own "browser navigation is outside the run's allowed domains" (`docs/ERROR_REASONS.md`). The guard records the egress receipt before it ends the `goto`. The refused navigation still holds chromiumoxide's queue, so it gets the TIMEOUT bookkeeping: the tab is marked, the load stopped and its metadata refreshed, and the next navigate drains it first; the tab keeps the page it had (`about:blank` on a run's first step). Every navigation through the chromium `goto` has it (agent navigate on every step path, a run's first step, the resume's recovery navigation, a browser-rendered scrape), and so does the attach navigation of a new tab opened with a URL (that tab is then closed, as on any failure there). `reload`, `back` and `forward` do not wait for a navigation, so they never had the wait. A document request the page makes itself (a script or meta redirect after the document committed, a navigation the old page starts for another URL while the `goto` waits, a frame) and any subresource never end a `goto`: a refused image is only a receipt. A `goto` whose own request goes unrecognised (a URL Chromium rewrites beyond that) only loses the early end and runs to its deadline as before (review of `3bc6823ca`). For a scrape the browser is the last driver of its plan, so a refused redirect ends the fetch at once with the same code instead of after 25 s (a static shell already held is still returned).
 
 **SC4 D1 (2026-10-29): an observing step on a session with no page answers the blank tab.** A chromium session has no tab until something opens one: a run that never navigated, a run resumed from a checkpoint with no URL (the resume makes no recovery navigation; live R3-SC4 RS), a run whose first new-tab-with-URL failed. Its first wait answered 502 `DRIVER_FAILED` `no_current_page` (`retryable: false`), while a navigate worked. An agent step whose action only reads the page (`wait`, `wait_for`, `screenshot`, `pdf`, `get_content`) now first asks the driver for a page (`BrowserDriver::ensure_page`, called by the shared observation runner, so the REST step, the browser socket and the delegate step all have it): a session with no tab gets a placeholder tab on `about:blank`, active, navigated nowhere (opened, like any page, only with the pinned egress proxy and the session's installed egress policy), and the step answers 200 with the blank observation (`url` `about:blank`, a `completed` receipt, the checkpoint keeps `""`), exactly as after a first-step navigate TIMEOUT (T4b-1). This is also the answer to a fresh run whose first step is a wait: no navigation first is needed. A `wait_for` waits on that blank tab as on any page (`body` is there at once; a selector a blank page lacks times out as it would anywhere); its snapshot forms need an observed snapshot, so a page, first. `about:blank` stays refused as a navigation target at the edge. An acting step (click, type, select, ...) on a session with no page still answers `no_current_page`; a lost or released session and a pinned handle whose tab is gone keep their errors, and a session that has a tab keeps it. The session's next `goto` navigates the placeholder tab (no second tab). WS17.C2 profiles: the placeholder has no URL to plan the restore for, so it neither loads nor restores the saved profile; the session's first `goto` does it on that tab before its navigation (load, locale/timezone emulation, cookies and web storage planned for the `goto`'s target, once per context), the same as a first `goto` that opens its own tab, including the 503 `profile_key_unavailable` refusal. A session that only observed never restored its profile and its release does not save over it (`profile_save_skipped_not_restored`).
+
+## Fetch deadline: one budget across the driver chain (E3.8.2, `QUARRY_EDGE__FETCH_DEADLINE`, built, NOT run)
+
+- **Switch.** `QUARRY_EDGE__FETCH_DEADLINE`: `1`, `true` or `on` (any case) turns it on; anything else is off, which is the default. It is read once per process, at the first fetch chain that is built, so a change needs an edge restart. Off, every tier runs on its own timeout, and no fetch carries the two reasons below.
+- **The budget.** The chain's deadline is the run's fetch policy `timeout_s`: 30 s by default, `0` for none, and a value above 600 is taken as 600. Every scrape run carries the default fetch policy today, so the budget is 30 s whatever `timeout_ms` the request sets. `timeout_ms` is a separate bound, with its own `504` (`details.op` `scrape`).
+- **The split.** Each tier gets a share of what is left. A browser tier counts as two plain tiers, and time a tier does not use goes to the tiers after it. No share is under 250 ms while budget is left, and the last tier gets all that remains.
+- **The reasons.** The error is `504 TIMEOUT`, retryable. `details.reason` is `tier_stalled` (one tier missed its share while budget was left for the tiers after it, which were then tried) or `fetch_deadline_exceeded` (the whole budget is spent). `details.fallback_attempts` lists each tier with its own error. The message names the tier and the times, never the URL. A caller retries, and a later call gets a new budget. The full table is in `docs/ERROR_REASONS.md`, "504 `TIMEOUT` from the fetch deadline".
+- **Check.** The edge logs `quarry.fetch_deadline` once, with the field `enabled`, at the first read. On a stack with the switch on, a fetch that runs out of budget answers `504` with one of the two reasons. With the switch off, no fetch carries either reason.
 
 ## Document parser isolation
 
@@ -1255,11 +1263,11 @@ Settings (edge environment):
 |---|---|---|---|
 | `QUARRY_EDGE__PROFILE_ENCRYPTION` | `off`, `compat`, `on` | `off` | `off`: plaintext, as before. `compat`: reads both, writes plaintext. `on`: reads both, writes envelopes only, lazy re-seal of plaintext rows. |
 | `QUARRY_EDGE__PROFILE_ENCRYPTION_REQUIRED` | `true` / `false` | `false` | Boot refuses any mode below `on`. Set only in the production overlay after the backfill (WS17.E3). |
-| `QUARRY_EDGE__PROFILE_KEY_PROVIDER` | `env` | `env` | `org_core` is refused at boot (WS17.E2 is not built). |
+| `QUARRY_EDGE__PROFILE_KEY_PROVIDER` | `env`, `org_core` | `env` | `org_core` (WS17.E2b) needs `QUARRY_EDGE__ORG_CORE_KEYS_URL` and `QUARRY_EDGE__ORG_CORE_KEYS_TOKEN`; the edge refuses to boot without both. New wraps go to org-core. Flip only through the gates in `apps/Control Plane/ORG_KEY_CUSTODY_RUNBOOK.md`. |
 | `QUARRY_PROFILE_MASTER_KEYS` | JSON `{"v1":"<base64 of 32 bytes>"}` | unset | Required for `compat` and `on`. Minted once; listed in the secrets ledger, never in a committed file. |
 | `QUARRY_PROFILE_MASTER_KEY_ACTIVE` | a key id, for example `v1` | unset | Required for `compat` and `on`. Must name a configured key. |
 
-Boot refusals (the edge stops, the message names the setting and never the value): an unknown mode; `org_core`; `REQUIRED` with a mode below `on`; `compat` or `on` without master keys or without an active id; a master key that is not 32 bytes; an active id that is not configured. `on` with the env provider logs a WARN: there is no crypto-shredding until WS17.E2.
+Boot refusals (the edge stops, the message names the setting and never the value): an unknown mode; `org_core` without its URL or token; `REQUIRED` with a mode below `on`; `compat` or `on` without master keys or without an active id; a master key that is not 32 bytes; an active id that is not configured. `on` with the env provider logs a WARN: there is no crypto-shredding until WS17.E2.
 
 Encryption needs the Postgres profile store (`QUARRY_EDGE__PROFILE_STORE_KIND=postgres` and `QUARRY_EDGE__DATABASE_URL`). Without it the edge refuses to start with encryption on.
 
@@ -1272,6 +1280,8 @@ Rollout, one step per fully rolled-out release:
 Rollback from `on`: set `compat`. Envelope rows stay readable by the new pods; `compat` writes plaintext again. Rollback past `compat` to `off` is not supported while envelope rows exist.
 
 Key loss: losing `QUARRY_PROFILE_MASTER_KEYS` (every key id that wrapped a DEK) makes every profile it wrapped unreadable. A load then fails with `RuntimeNotReady` (HTTP 503 class; the message reads `profile key unavailable`). The route layer does not yet set a `details.reason` field (depth). It never starts a profile fresh, and the row is not changed. Keep the master key in the secrets ledger and in a second place before `on`.
+
+Custody of the org-core master key (the `oc:` provider: minting, two-person escrow, loss, the restore drill and the flip gates) is in `apps/Control Plane/ORG_KEY_CUSTODY_RUNBOOK.md`. This section covers the `env` provider and its master, `QUARRY_PROFILE_MASTER_KEYS`, which is a separate key with its own custody.
 
 Checks (for the test phase, not run here):
 - Unit: `cargo test -p quarry-runtime profile` (crypto, keys, blob store, envelope store, Redis cache with `REDIS_URL`, Postgres blob row with `DATABASE_URL`).
@@ -1714,6 +1724,7 @@ Series (labels are closed sets; a value outside its set is recorded as `other`, 
 | `quarry_agent_run_starts_total` | `class`, `outcome` = `started`, `resumed`, `denied`, `draining`, `aborted` | `start_run` (`aborted` = admitted, then failed before the run was registered; a start refused while draining has no class yet and counts under `other`) |
 | `quarry_agent_run_denied_total` | `reason` = `global_run_cap`, `org_run_cap`, `org_interactive_run_cap`, `org_plan_cap`, `org_allowance`, `draining` | `start_run` refusals |
 | `quarry_agent_run_expired_total` | `reason` = `idle`, `ttl`, `takeover_idle`, `max_age`, `shutdown` | the run sweeper; the drain at shutdown (`shutdown`) |
+| `quarry_agent_attach_released_total` | `reason` = `idle`, `revoked` | the run sweeper (Q2-WS8.J): a live attachment idle past `QUARRY_EDGE__ATTACH_IDLE_TTL_S` (default 180 s), or whose attach grant no longer validates, on a run that is not expiring this pass. A broker outage keeps the attachment. Nothing is recorded in a dry run (`would_release` is logged instead) |
 | `quarry_agent_takeover_exempt_steps_total`, `quarry_agent_takeover_exempt_step_duration_seconds` | none (a run id would be unbounded; the per-run view is the run's `human` receipts under their control epoch) | `step` and the WebSocket action path: a person's step during a takeover of an agent-class run, which the step budget does not count (TAKEOVER-BUDGET). The histogram `_sum` is the seconds those steps ran. Read it in the X-12 shadow review: it is the unmetered takeover use |
 | `quarry_agent_steps_total`, `quarry_agent_step_duration_seconds` | `action_class` (eleven values: `navigate`, `click`, `type`, `press`, `scroll`, `select`, `wait`, `capture`, `evaluate`, `file`, `other`), `outcome` = `ok`, `error` | `step` and the WebSocket action path, around the driver call |
 | `quarry_agent_run_duration_seconds` | `class` | `finish_run` (already built, WS6.K) |
@@ -1935,6 +1946,9 @@ Not done, owed in the test phase (written, not run): broker `go test ./...` and 
 - Logs and events: no URL is logged. The rejected list is returned to the caller only, and it holds the caller's own URLs.
 - Not built or not run: the WS14.S4 robots gate, the deployment evidence against the fixture stack (a `POST /v1/batch` with a `file://` URL, a duplicate and a private literal, checking the events and the fixture log), and the gateway cap.
 - Test phase (not yet run): `cargo test -p quarry-edge batch_check`; `cargo test -p quarry-edge --test batch_handoff_check`; `cd services/quarry-orchestrator && go test ./internal/workflows -run 'TestBatch' -count=1`.
+- **Parallel pages (W3-E3.7.2w).** `QUARRY_EDGE__BATCH_PARALLEL` (`1`, `true`, `yes` or `on`; default off) lets a batch body's `max_parallel` take effect. It is read on each batch request from the edge's environment, so a change needs an edge restart. The edge's ceiling is `QUARRY_EDGE__BATCH_MAX_PARALLEL` (a whole number from 1 to 16, default 4). It is checked at boot, where an unparsable value stops the edge and the value is not echoed, and it is read once per process. A request above the ceiling is clamped to it, and the ack reports `limits.max_parallel` with `clamped_by` `hard`. Nothing in an organization's plan or allowance sets or bounds the ceiling.
+- **Running the pages at once.** The orchestrator runs a batch's pages together only when its own `QUARRY_BATCH_PARALLEL` is on (`true`, `on` or `yes` for 4, or a whole number up to 16; default off, read once per execution). The pages at once are the smallest of that value, the job's `max_parallel` and the number of URLs. With the orchestrator's flag off a batch runs one page at a time, whatever the edge is set to, so check both flags when a batch seems sequential.
+- **Idempotency with the batch options.** With `QUARRY_EDGE__BATCH_IDEMPOTENCY` on, a replay of an `Idempotency-Key` whose `webhook` or `max_parallel` differs from the held job's is a `409 CONFLICT` with `details.reason` `idempotency_key_reused`, as a different URL list is. The hash covers the two fields as the caller sent them, before the checks and the clamp. The per-job `webhook` and its switch, `QUARRY_EDGE__JOB_WEBHOOK`, are in CONTRACTS, "Batch request options"; control's half is `QUARRY_CONTROL__JOB_WEBHOOK`.
 
 ## robots.txt gate on crawl and batch pages, `Crawl-delay` and `/v1/map` (WS14.S4, unit W2-U63, observe build, NOT run, 2026-10-24)
 
@@ -2004,7 +2018,7 @@ Events and timeline: `agent.attached` `{attach_id, tab_id}` and `agent.detached`
 
 Rollback: set `QUARRY_EDGE__ATTACH=0` and restart the edge. Live attachments end at their next step (404 for the delegate). Receipts already written keep their `tab_id` and `attach_id` (migration `0018_step_receipt_tab_attach.sql` is additive and has no backfill).
 
-Not done (open, see `.plan-work/quarry-w1w2/depth/W2-U67.md`): the list-tabs view for a delegate (filtered to its tab, with holder and openedBy); the projection fields `tabControl`, `attachAvailable` and `attach`; the sweeper's release of an idle or lapsed attachment; the `session_ended` release at `finish_run`; the per-lane step counter (`step_seq`, WS8.H); the enabled-path integration test with a driver double that supports `open_tab`; the ZDR feature-matrix rows for the new routes. A process restart ends every live attachment (the attach state is process-local).
+Not done (open, see `.plan-work/quarry-w1w2/depth/W2-U67.md`): the list-tabs view for a delegate (filtered to its tab, with holder and openedBy); the sweeper's release of an idle or lapsed attachment; the `session_ended` release at `finish_run`; the per-lane step counter (`step_seq`, WS8.H); the enabled-path integration test with a driver double that supports `open_tab`; the ZDR feature-matrix rows for the new routes. A process restart ends every live attachment (the attach state is process-local).
 
 ## Execution lanes: the person's and the attached delegate's (WS8.H, unit W2-U68, built, NOT run, 2026-10-24)
 
@@ -2257,6 +2271,15 @@ The contract is `docs/CONTRACTS.md`, "Saved job definitions (E4.1-6)"; the wire 
 4. `PUT` with `{"definition": null}`, then the same schedule create answers 400 `source_has_no_definition`.
 
 **Not run.** Code only: no test covers these routes yet, and no stack, Postgres or Temporal was used.
+
+## Monitor tags: control migration 027 (E3.5-6, D-E356-13, built, NOT run, 2026-11-11)
+
+The contract is `docs/CONTRACTS.md`, "Monitor tags on sources and schedules". The migration is `services/quarry-control/internal/store/pg/migrations/027_monitor_tags.sql`.
+
+- **Applies on boot.** Control runs every migration file that is not yet in `schema_migrations`, in name order, each in its own transaction, before it serves. Migration 027 needs no step by hand. It adds `tag TEXT NOT NULL DEFAULT ''` to `schedules` and to `quarry_sources`, and two partial indexes on `(org_id, tag, created_at)` for tagged rows. Its statements are `IF NOT EXISTS`, so a re-run changes nothing. The indexes are built without `CONCURRENTLY`, so each build locks its table while it runs; the migration notes that these are small control tables.
+- **Deploy order.** Deploy control first, then the edge, as for migration 025. An edge that forwards a `tag` or a `?tag=` filter needs the column. An older control reads explicit column lists, so it neither sees the column nor fails on it.
+- **Rollback.** There is no down migration. Rolling back the code leaves the column and the indexes in place, the older code does not read them, and the rows keep their tags.
+- **Check by hand (not run).** `SELECT name FROM schema_migrations WHERE name = '027_monitor_tags.sql';` returns one row, and `\d quarry_sources` shows the `tag` column. On a stack: `PATCH /v1/sources/<id>` with `{"tag": "Pricing"}` answers 200 with `tag` `pricing`; `GET /v1/sources?tag=pricing` lists that source; `{"tag": "bad tag"}` answers 400 `invalid_tag`; `{}` answers 400 `tag_required`.
 
 ## Change text fingerprint: enable and roll out (E3.5-4, built, NOT run, 2026-11-04)
 

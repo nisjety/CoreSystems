@@ -31,16 +31,18 @@ type reaperFakeHandle struct {
 	deleted bool
 }
 
-func (h *reaperFakeHandle) GetID() string                                              { return h.id }
-func (h *reaperFakeHandle) Delete(context.Context) error                               { h.deleted = true; return nil }
-func (h *reaperFakeHandle) Backfill(context.Context, client.ScheduleBackfillOptions) error { return nil }
+func (h *reaperFakeHandle) GetID() string                { return h.id }
+func (h *reaperFakeHandle) Delete(context.Context) error { h.deleted = true; return nil }
+func (h *reaperFakeHandle) Backfill(context.Context, client.ScheduleBackfillOptions) error {
+	return nil
+}
 func (h *reaperFakeHandle) Update(context.Context, client.ScheduleUpdateOptions) error { return nil }
 func (h *reaperFakeHandle) Describe(context.Context) (*client.ScheduleDescription, error) {
 	return &client.ScheduleDescription{}, nil
 }
-func (h *reaperFakeHandle) Trigger(context.Context, client.ScheduleTriggerOptions) error   { return nil }
-func (h *reaperFakeHandle) Pause(context.Context, client.SchedulePauseOptions) error       { return nil }
-func (h *reaperFakeHandle) Unpause(context.Context, client.ScheduleUnpauseOptions) error   { return nil }
+func (h *reaperFakeHandle) Trigger(context.Context, client.ScheduleTriggerOptions) error { return nil }
+func (h *reaperFakeHandle) Pause(context.Context, client.SchedulePauseOptions) error     { return nil }
+func (h *reaperFakeHandle) Unpause(context.Context, client.ScheduleUnpauseOptions) error { return nil }
 
 // reaperFakeClient lists a fixed set of existing Temporal schedules (each with
 // an org Memo) and hands out a per-id handle so the test can assert exactly
@@ -247,7 +249,7 @@ func TestTriggerAndBackfill_CallRealScheduleClient(t *testing.T) {
 		sc := &fakeScheduleClient{handle: h}
 		m := New(nil, Config{})
 		now := time.Now()
-		if err := m.backfillWith(context.Background(), sc, "sch_b", now, now); err == nil {
+		if err := m.backfillWith(context.Background(), sc, "sch_b", now, now, ""); err == nil {
 			t.Fatal("expected error for non-advancing window")
 		}
 	})

@@ -149,6 +149,36 @@ pub(super) async fn finish_run(
     if entry.closed {
         return Ok(None);
     }
+    // Q2-WS8.J (WS8.F): a live attachment ends `SessionEnded` with its run. Only the event
+    // half of `finish_attach` runs (timeline, then `agent.detached` through `emit_for_zdr`):
+    // the session's release below closes every tab, the agent tab and a borrowed one with it.
+    // This runs before the durable record, so the attach event's checkpoint never lands after
+    // an explicit close has closed the checkpoint, and an expiry's saved trace seq counts it.
+    // Its lane is still waited for below, before the session is released.
+    let live_attach = handle.live.attaches().live().map(|attach| attach.attach_id.clone());
+    let ended_attach = live_attach.and_then(|attach_id| {
+        handle
+            .live
+            .attaches()
+            .end(&attach_id, BrowserAttachState::SessionEnded)
+    });
+    let attach_lane = ended_attach.as_ref().map(|attach| attach.lane.clone());
+    if let Some(ended) = ended_attach.as_ref() {
+        let recorded = super::attach::record_attach_end(
+            state,
+            &handle,
+            &entry,
+            ended,
+            BrowserAttachState::SessionEnded,
+        );
+        if let CloseReason::Drain(wait) = reason {
+            if tokio::time::timeout(wait, recorded).await.is_err() {
+                tracing::warn!(run_id, "drain: the attachment's end was not recorded in time");
+            }
+        } else {
+            recorded.await;
+        }
+    }
     let zdr = entry.zdr;
     let rid = entry.run_id.clone();
     if !zdr.is_active() {
@@ -249,7 +279,9 @@ pub(super) async fn finish_run(
     let usage_actor = entry.actor_id.clone();
     let session = entry.session.clone();
     // WS8.H: the lanes are named while the entry is held, and waited for once it is released.
-    let lanes = lane_refs(&entry, &handle.live);
+    let mut lanes = lane_refs(&entry, &handle.live);
+    // Q2-WS8.J: the attachment ended above is no longer live, so its lane is added here.
+    lanes.extend(attach_lane);
     drop(entry);
     wait_for_lanes(run_id, &lanes, LANE_WAIT).await;
     if let Some(segment) = segment_usage.as_ref() {

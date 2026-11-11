@@ -29,24 +29,33 @@
 //!   reports `cost_usd` it is summed, and past the optional cost ceiling the next
 //!   call is skipped `BUDGET_EXHAUSTED` with dimension `llm_cost`. The model
 //!   repair of `json` can be switched off (the local repair still runs).
+//! - **The page's own markup (WS16.S5).** A request may carry the harvest of the
+//!   page's markup. In `context` mode a bounded block of its figures follows the page
+//!   text inside the same frame. In `prefill` mode a `json` field that the markup
+//!   states under its own name is taken without a model call, and the whole schema
+//!   still judges the answer. Highlights and the question are checked against the
+//!   page text alone, so a quote that only the block holds cannot verify.
 //! - **Logs** carry the kind, the outcome, a code and counts, never the page, the
 //!   schema, a prompt or an output.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 use quarry_core::ai_spec::{
-    AiBudgetDimension, AiCode, AiFormatReport, AiKind, AiReason, AiRepair, AiReport, AiSpec, AiTotal, AiUsage,
-    Highlight, HighlightsSpec, JsonSpec, QuestionSpec, SchemaIssue, SummarySpec, MAX_ANSWER_CHARS,
-    MAX_AI_JSON_OUTPUT_BYTES, MAX_SCHEMA_ISSUES,
+    AiBudgetDimension, AiCode, AiFormatReport, AiKind, AiPrefill, AiPrefillRule, AiPrefillSource, AiReason,
+    AiRepair, AiReport, AiSpec, AiTotal, AiUsage, ComplexityClass, Highlight, HighlightsSpec, JsonSpec,
+    QuestionSpec, SchemaIssue, SummarySpec, MAX_ANSWER_CHARS, MAX_AI_JSON_OUTPUT_BYTES, MAX_SCHEMA_ISSUES,
 };
 use quarry_core::json_schema::{self, ValidationIssue};
+use quarry_transform::json_ld::JsonLdSummary;
+use quarry_transform::structured::StructuredData;
 
 use crate::ai_verify::{is_grounded, verify_highlights, FoldedText};
+use crate::harvest_map::{self, Prefill, PrefillRule, PrefillSource};
 use crate::mp_client::{
     AiChatMessage, AiChatRequest, AiChatResponse, ModelHopError, ModelPlaneClient,
     AI_CHAT_PURPOSE_QUARRY_EXTRACT,
@@ -82,13 +91,31 @@ const TEMPERATURE_PROSE: f32 = 0.2;
 const MAX_ISSUE_PATH_CHARS: usize = 200;
 /// The supporting quote of an answer is asked for at this length.
 const QUOTE_ASK_CHARS: usize = 300;
+/// WS16.S5: the most the harvest block adds to the page text, in chars.
+pub const HARVEST_BLOCK_MAX_CHARS: usize = 4_000;
+
+/// WS16.S5: how the page's own markup (the harvest of `quarry_transform`) reaches the
+/// model. `Off` sends none of it. `Context` appends a bounded block of its figures
+/// inside the page frame, after the page text. `Prefill` also takes the `json` fields
+/// the markup states under the property's own name, without a model call for them
+/// (see [`crate::harvest_map`]). The edge reads `QUARRY_EDGE__AI_FORMATS_HARVEST`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HarvestMode {
+    Off,
+    #[default]
+    Context,
+    Prefill,
+}
 
 /// What the edge sets from its environment. Models are routing aliases, never
 /// vendor ids.
 #[derive(Debug, Clone)]
 pub struct AiScrapeConfig {
-    /// `json`.
+    /// `json`, for a `Simple` schema.
     pub model_json: String,
+    /// `json`, for a `Complex` schema (see `ComplexityClass`). Default: the same as
+    /// `model_json`'s default.
+    pub model_json_complex: String,
     /// `summary`, `question`, `highlights` and the `json` repair call.
     pub model_text: String,
     /// Page characters sent per call (clamped to 1,000..=80,000).
@@ -111,12 +138,16 @@ pub struct AiScrapeConfig {
     /// further call is made in this request; `None` is no cost ceiling. A
     /// negative or non-finite value is `None`.
     pub max_cost_usd: Option<f64>,
+    /// WS16.S5: how the page's markup harvest reaches the model (default `context`).
+    /// A request without a harvest is unaffected whatever this says.
+    pub harvest: HarvestMode,
 }
 
 impl Default for AiScrapeConfig {
     fn default() -> Self {
         Self {
             model_json: DEFAULT_MODEL_JSON.to_owned(),
+            model_json_complex: DEFAULT_MODEL_JSON.to_owned(),
             model_text: DEFAULT_MODEL_TEXT.to_owned(),
             max_input_chars: DEFAULT_INPUT_CHARS,
             max_total_tokens: DEFAULT_MAX_TOTAL_TOKENS,
@@ -126,6 +157,7 @@ impl Default for AiScrapeConfig {
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             model_repair: true,
             max_cost_usd: None,
+            harvest: HarvestMode::default(),
         }
     }
 }
@@ -170,6 +202,10 @@ pub struct AiScrapeInput<'a> {
     pub request_id: &'a str,
     /// When the AI phase must be over; `None` is now + the config's phase deadline.
     pub deadline: Option<Instant>,
+    /// WS16.S5: the structured data of the page's own markup and its JSON-LD summary,
+    /// when the caller harvested them for this request. Page data, untrusted like the
+    /// text. `None` leaves the request exactly as it was without a harvest.
+    pub harvest: Option<(&'a StructuredData, Option<&'a JsonLdSummary>)>,
 }
 
 /// The values the formats produced. Each is present only for an `ok` format.
@@ -209,6 +245,27 @@ impl AiScrapeEngine {
         &self.config
     }
 
+    /// WS16.S5: the page text the model reads. In `context` and `prefill` mode the
+    /// harvest block follows the page text, inside the same untrusted frame. The text
+    /// that highlights and the question are checked against stays the page text alone.
+    fn page_for_model(
+        &self,
+        source: &str,
+        harvest: Option<(&StructuredData, Option<&JsonLdSummary>)>,
+    ) -> String {
+        let block = match (self.config.harvest, harvest) {
+            (HarvestMode::Off, _) | (_, None) => String::new(),
+            (_, Some((data, ld))) => {
+                harvest_map::render_harvest_block(data, ld, HARVEST_BLOCK_MAX_CHARS)
+            }
+        };
+        if block.is_empty() {
+            source.to_owned()
+        } else {
+            format!("{source}{block}")
+        }
+    }
+
     /// Run the specs against the page. Never fails: what went wrong is in the
     /// report. Under ZDR no model is called and every format is skipped with
     /// `ZDR_UNAVAILABLE`.
@@ -238,9 +295,10 @@ impl AiScrapeEngine {
             engine: self,
             org_id: input.org_id,
             request_id: input.request_id,
-            source,
+            sent: self.page_for_model(source, input.harvest),
             truncated,
             page: FoldedText::new(source),
+            harvest: input.harvest,
             deadline: input
                 .deadline
                 .unwrap_or_else(|| Instant::now() + self.config.phase_deadline),
@@ -339,10 +397,14 @@ struct Ctx<'a> {
     engine: &'a AiScrapeEngine,
     org_id: &'a str,
     request_id: &'a str,
-    /// What the model sees (the page cut to the input cap).
-    source: &'a str,
+    /// What the model sees: the page cut to the input cap, and in `context` and
+    /// `prefill` mode the harvest block after it (WS16.S5).
+    sent: String,
     truncated: bool,
+    /// The page text alone: highlights and the question are checked against it.
     page: FoldedText,
+    /// WS16.S5: the page's markup harvest, for the `prefill` step of `json`.
+    harvest: Option<(&'a StructuredData, Option<&'a JsonLdSummary>)>,
     deadline: Instant,
     local: Semaphore,
     state: Mutex<State>,
@@ -470,18 +532,42 @@ impl Ctx<'_> {
 
     // ---- json ----
 
+    /// WS16.S5: the fields the page's markup states for this schema, when the mode is
+    /// `prefill` and the request carries a harvest. `None` when there is nothing to take.
+    fn prefill_for(&self, spec: &JsonSpec) -> Option<Prefill> {
+        if self.engine.config.harvest != HarvestMode::Prefill {
+            return None;
+        }
+        let (data, ld) = self.harvest?;
+        let found = harvest_map::prefill(&spec.schema, data, ld);
+        (!found.values.is_empty()).then_some(found)
+    }
+
     async fn run_json(&self, spec: &JsonSpec, tally: &mut Tally) -> Outcome {
         let kind = AiKind::Json;
         let config = &self.engine.config;
-        let schema_text = serde_json::to_string(&spec.schema).unwrap_or_default();
-        let pretty = serde_json::to_string_pretty(&spec.schema).unwrap_or_default();
-        let nonce = fresh_nonce(self.source);
+        // WS16.S5: in `prefill` mode the fields the markup states leave the schema the
+        // model is asked for. The whole schema still judges the answer (`accepted`).
+        let prefill = self.prefill_for(spec);
+        let asked = prefill.as_ref().map_or(&spec.schema, |found| &found.remainder_schema);
+        if let Some(found) = prefill.as_ref().filter(|found| nothing_left(&found.remainder_schema)) {
+            // The markup states every field the schema asks for: no model call is made.
+            return accepted(spec, Some(found), json!({}), AiRepair::None);
+        }
+        let schema_text = serde_json::to_string(asked).unwrap_or_default();
+        let pretty = serde_json::to_string_pretty(asked).unwrap_or_default();
+        let nonce = fresh_nonce(&self.sent);
+        // WS16.S6: a complex schema goes to the complex alias (the same alias by default).
+        let model = match spec.complexity {
+            ComplexityClass::Simple => config.model_json.clone(),
+            ComplexityClass::Complex => config.model_json_complex.clone(),
+        };
         let req = AiChatRequest {
             messages: vec![
                 AiChatMessage::system(json_system(&pretty, spec.prompt.as_deref())),
-                AiChatMessage::user(frame("PAGE", &nonce, self.source)),
+                AiChatMessage::user(frame("PAGE", &nonce, &self.sent)),
             ],
-            model: config.model_json.clone(),
+            model,
             structured_output_schema: Some(schema_text.clone()),
             zdr: false,
             max_tokens: Some(config.output_cap(OUTPUT_TOKENS_JSON)),
@@ -492,10 +578,11 @@ impl Ctx<'_> {
             Ok(resp) => resp,
             Err(failure) => return self.fail(kind, failure),
         };
-        let first_eval = evaluate_json(&first.content, &spec.schema);
+        let first_eval = evaluate_json(&first.content, asked, prefill.as_ref());
         let (issues, reason) = match first_eval {
             JsonEval::Valid { value, local } => {
-                return json_ok(value, if local { AiRepair::Local } else { AiRepair::None });
+                let repair = if local { AiRepair::Local } else { AiRepair::None };
+                return accepted(spec, prefill.as_ref(), value, repair);
             }
             JsonEval::Invalid { issues, reason } => (issues, reason),
         };
@@ -530,8 +617,8 @@ impl Ctx<'_> {
             }) => return json_invalid(issues, reason, false),
             Err(failure) => return self.fail(kind, failure),
         };
-        match evaluate_json(&second.content, &spec.schema) {
-            JsonEval::Valid { value, .. } => json_ok(value, AiRepair::Model),
+        match evaluate_json(&second.content, asked, prefill.as_ref()) {
+            JsonEval::Valid { value, .. } => accepted(spec, prefill.as_ref(), value, AiRepair::Model),
             JsonEval::Invalid { issues, reason } => json_invalid(issues, reason, true),
         }
     }
@@ -540,11 +627,11 @@ impl Ctx<'_> {
 
     async fn run_summary(&self, spec: &SummarySpec, tally: &mut Tally) -> Outcome {
         let kind = AiKind::Summary;
-        let nonce = fresh_nonce(self.source);
+        let nonce = fresh_nonce(&self.sent);
         let req = AiChatRequest {
             messages: vec![
                 AiChatMessage::system(summary_system(spec)),
-                AiChatMessage::user(frame("PAGE", &nonce, self.source)),
+                AiChatMessage::user(frame("PAGE", &nonce, &self.sent)),
             ],
             model: self.engine.config.model_text.clone(),
             structured_output_schema: None,
@@ -574,11 +661,11 @@ impl Ctx<'_> {
 
     async fn run_question(&self, spec: &QuestionSpec, tally: &mut Tally) -> Outcome {
         let kind = AiKind::Question;
-        let nonce = fresh_nonce(self.source);
+        let nonce = fresh_nonce(&self.sent);
         let req = AiChatRequest {
             messages: vec![
                 AiChatMessage::system(question_system(spec)),
-                AiChatMessage::user(frame("PAGE", &nonce, self.source)),
+                AiChatMessage::user(frame("PAGE", &nonce, &self.sent)),
             ],
             model: self.engine.config.model_text.clone(),
             structured_output_schema: None,
@@ -625,11 +712,11 @@ impl Ctx<'_> {
 
     async fn run_highlights(&self, spec: &HighlightsSpec, tally: &mut Tally) -> Outcome {
         let kind = AiKind::Highlights;
-        let nonce = fresh_nonce(self.source);
+        let nonce = fresh_nonce(&self.sent);
         let req = AiChatRequest {
             messages: vec![
                 AiChatMessage::system(highlights_system(spec)),
-                AiChatMessage::user(frame("PAGE", &nonce, self.source)),
+                AiChatMessage::user(frame("PAGE", &nonce, &self.sent)),
             ],
             model: self.engine.config.model_text.clone(),
             structured_output_schema: None,
@@ -739,6 +826,7 @@ fn log_outcome(request_id: &str, kind: AiKind, report: &AiFormatReport, latency_
         input_tokens,
         output_tokens,
         latency_ms,
+        prefilled = report.prefilled.len(),
         "ai scrape format finished"
     );
 }
@@ -757,19 +845,35 @@ enum JsonEval {
     },
 }
 
-fn evaluate_json(content: &str, schema: &Value) -> JsonEval {
+/// Read and check one model answer against `schema`. WS16.S5: with a prefill, a field the
+/// markup states is taken out of the answer first, since the markup's own value replaces
+/// whatever the model wrote for it.
+fn evaluate_json(content: &str, schema: &Value, prefill: Option<&Prefill>) -> JsonEval {
     if content.len() > MAX_AI_JSON_OUTPUT_BYTES {
         return JsonEval::Invalid {
             issues: Vec::new(),
             reason: Some(AiReason::TooLarge),
         };
     }
-    let Some((value, local)) = parse_model_json(content, |value| value.is_object()) else {
+    let Some((mut value, local)) = parse_model_json(content, |value| value.is_object()) else {
         return JsonEval::Invalid {
             issues: Vec::new(),
             reason: Some(AiReason::NotJson),
         };
     };
+    if let (Some(found), Some(map)) = (prefill, value.as_object_mut()) {
+        for field in found.values.keys() {
+            map.remove(field);
+        }
+    }
+    match evaluate_value(value, schema) {
+        JsonEval::Valid { value, .. } => JsonEval::Valid { value, local },
+        invalid => invalid,
+    }
+}
+
+/// The schema check and then the size check of a parsed value.
+fn evaluate_value(value: Value, schema: &Value) -> JsonEval {
     let issues = json_schema::validate(&value, schema);
     if !issues.is_empty() {
         return JsonEval::Invalid {
@@ -783,7 +887,58 @@ fn evaluate_json(content: &str, schema: &Value) -> JsonEval {
             reason: Some(AiReason::TooLarge),
         };
     }
-    JsonEval::Valid { value, local }
+    JsonEval::Valid { value, local: false }
+}
+
+/// WS16.S5: whether a schema left after a prefill asks the model for nothing: no property
+/// and no required name remain. Only then is the model call skipped.
+fn nothing_left(schema: &Value) -> bool {
+    let no_properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .is_none_or(|properties| properties.is_empty());
+    let no_required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .is_none_or(|required| required.is_empty());
+    no_properties && no_required
+}
+
+/// WS16.S5: the value a model answer becomes once the fields the markup stated are put
+/// back over it. Without a prefill this is `json_ok` of the value as it came. With one,
+/// the merged object is checked against the whole schema the caller sent, and the
+/// report names every field taken from the markup.
+fn accepted(spec: &JsonSpec, prefill: Option<&Prefill>, value: Value, repair: AiRepair) -> Outcome {
+    let Some(found) = prefill else {
+        return json_ok(value, repair);
+    };
+    match evaluate_value(harvest_map::merge(found, value), &spec.schema) {
+        JsonEval::Valid { value, .. } => {
+            let mut outcome = json_ok(value, repair);
+            outcome.report.prefilled = prefilled_fields(found);
+            outcome
+        }
+        JsonEval::Invalid { issues, reason } => json_invalid(issues, reason, repair == AiRepair::Model),
+    }
+}
+
+/// The provenance of a prefill, in the report's wire shape.
+fn prefilled_fields(found: &Prefill) -> Vec<AiPrefill> {
+    found
+        .provenance
+        .iter()
+        .map(|entry| AiPrefill {
+            field: entry.field.clone(),
+            source: match entry.source {
+                PrefillSource::JsonLd => AiPrefillSource::JsonLd,
+                PrefillSource::Microdata => AiPrefillSource::Microdata,
+                PrefillSource::Hydration => AiPrefillSource::Hydration,
+            },
+            rule: match entry.rule {
+                PrefillRule::ExactName => AiPrefillRule::ExactName,
+            },
+        })
+        .collect()
 }
 
 /// A path and a code, never a value. A property name that came from the model

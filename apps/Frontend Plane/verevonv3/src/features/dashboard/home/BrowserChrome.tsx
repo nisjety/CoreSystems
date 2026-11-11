@@ -66,6 +66,12 @@ import { streamBrowserEvents } from '@/shared/api/browser-client'
 import { browserActionTarget, type BrowserActionTarget } from './browser-action-target'
 import type { ApprovalDecision } from '@/shared/api/orchestration-client'
 import { ERROR_COPY } from '@/shared/i18n/errors'
+import {
+  browserTabMenuActionSchema,
+  browserTabMenuItems,
+  browserTabMenuOutsideAction,
+  type BrowserTabMenuItem,
+} from '@/shared/actions/browser-tab-menu'
 import { isBrowserLoopRunning, type BrowserLoopState } from './browser-loop'
 import { BrowserBlockedNotice } from './BrowserBlockedNotice'
 import { blockedStateFor } from './browser-blocked'
@@ -603,6 +609,9 @@ export function BrowserChrome(props: {
   // Tab context menu (WS9 tab strip, behind VITE_BROWSER_TAB_MENU=true).
   const [tabMenu, setTabMenu] = createSignal<{ tabId: string } | null>(null)
   const tabMenuEnabled = () => import.meta.env.VITE_BROWSER_TAB_MENU === 'true'
+  let tabMenuRef: HTMLDivElement | undefined
+  // The tab button that opened the menu. Focus goes back to it when the menu closes (see closeTabMenu).
+  let tabMenuOpener: HTMLElement | null = null
   // Bookmarks (F-t2-068 local slice, behind VITE_BROWSER_BOOKMARKS=true).
   const bookmarks = useBrowserBookmarks()
   const bookmarksEnabled = () => import.meta.env.VITE_BROWSER_BOOKMARKS === 'true'
@@ -643,7 +652,14 @@ export function BrowserChrome(props: {
       return null
     }
   }
-  const closeTabMenu = () => setTabMenu(null)
+  // Closes the tab menu. With restoreFocus, focus goes back to the tab button that opened it, if it is still in
+  // the page. Escape asks for it only while focus was in the menu, so a menu closed from elsewhere never takes focus.
+  const closeTabMenu = (options: { restoreFocus?: boolean } = {}) => {
+    const opener = tabMenuOpener
+    tabMenuOpener = null
+    setTabMenu(null)
+    if (options.restoreFocus && opener?.isConnected) opener.focus()
+  }
   const currentPageUrl = () => session().url ?? ''
   const toggleBookmark = () => {
     if (!bookmarksEnabled()) return
@@ -1452,6 +1468,97 @@ export function BrowserChrome(props: {
     },
   )
 
+  // The tab menu's items for the open tab, rebuilt from the session on each change. The list is rendered
+  // by position (see the For below), so the item that has focus keeps it when the session updates.
+  const tabMenuItems = (): BrowserTabMenuItem[] => {
+    const tab = tabMenuTab()
+    if (!tab) return []
+    return browserTabMenuItems({
+      tab,
+      tabCount: session().tabs.length,
+      busy: Boolean(props.browserBusy),
+      controlsDisabled: controlsDisabled(),
+      hasCloseHandler: Boolean(props.onBrowserCloseTab),
+      outsideUrl: tabOutsideUrl(tab),
+    })
+  }
+  // Runs a chosen tab-menu item. The action is parsed through the contract before any handler sees it, and
+  // each handler is the one the chrome already used for the same operation. Returns false when nothing ran.
+  const runTabMenuItem = (item: BrowserTabMenuItem): boolean => {
+    if (item.disabled) return false
+    const parsed = browserTabMenuActionSchema.safeParse(item.action)
+    if (!parsed.success) return false
+    const action = parsed.data
+    if (action.type === 'browser.tab.open_outside') {
+      // The link's own navigation opens the page. The menu closes on a later turn, so the link is still in
+      // place when the browser follows it.
+      window.setTimeout(() => closeTabMenu({ restoreFocus: true }), 0)
+      return true
+    }
+    closeTabMenu({ restoreFocus: true })
+    if (action.type === 'browser.tab.select') {
+      setSelectedTimelineStep(null)
+      void props.onBrowserSelectTab?.(action.tabId)
+    } else if (action.type === 'browser.tab.new') {
+      void prepareNewTabNavigation()
+    } else if (action.type === 'browser.tab.close') {
+      void props.onBrowserCloseTab?.(action.tabId)
+    }
+    return true
+  }
+  // Tab context menu dismissal and focus (behind VITE_BROWSER_TAB_MENU=true). Focus stays on the tab button
+  // that opened the menu, so a key handler on the menu itself never saw Escape. While the menu is open the
+  // document listens instead: Escape closes it, a pointer down outside closes it, Tab leaves it, and the
+  // arrow keys move between its enabled items. The first enabled item takes focus when the menu opens.
+  createEffect(
+    () => tabMenu(),
+    (menu) => {
+      if (!menu) return
+      const enabledItems = () => Array.from(
+        tabMenuRef?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [],
+      )
+      const onPointerDown = (event: PointerEvent) => {
+        if (event.target instanceof Node && tabMenuRef?.contains(event.target)) return
+        // The pointer's own mousedown then moves focus to whatever it pressed, so this only sets the default.
+        closeTabMenu({ restoreFocus: true })
+      }
+      const onKeyDown = (event: KeyboardEvent) => {
+        if (event.key === 'Escape') {
+          event.preventDefault()
+          event.stopPropagation()
+          const inMenu = tabMenuRef?.contains(document.activeElement) ?? false
+          closeTabMenu({ restoreFocus: inMenu })
+          return
+        }
+        // Tab and the arrow keys act only while focus is in the menu, so typing elsewhere is never intercepted.
+        if (!tabMenuRef?.contains(document.activeElement)) return
+        if (event.key === 'Tab') {
+          closeTabMenu({ restoreFocus: true })
+          return
+        }
+        if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+        const items = enabledItems()
+        if (items.length === 0) return
+        event.preventDefault()
+        const current = items.indexOf(document.activeElement as HTMLElement)
+        const step = event.key === 'ArrowDown' ? 1 : -1
+        const next = current < 0
+          ? (step > 0 ? 0 : items.length - 1)
+          : (current + step + items.length) % items.length
+        items[next]?.focus()
+      }
+      document.addEventListener('pointerdown', onPointerDown, true)
+      document.addEventListener('keydown', onKeyDown)
+      queueMicrotask(() => {
+        if (tabMenu()) enabledItems()[0]?.focus()
+      })
+      return () => {
+        document.removeEventListener('pointerdown', onPointerDown, true)
+        document.removeEventListener('keydown', onKeyDown)
+      }
+    },
+  )
+
   return (
     <div
       class={['knowledge-browser-chrome', { 'knowledge-browser-chrome--compact': Boolean(props.compact), 'knowledge-browser-chrome--personal': Boolean(props.personalBrowsing) }]}
@@ -1494,6 +1601,7 @@ export function BrowserChrome(props: {
                     onContextMenu={(event) => {
                       if (!tabMenuEnabled()) return
                       event.preventDefault()
+                      tabMenuOpener = event.currentTarget
                       setTabMenu({ tabId: tab.tabId })
                     }}
                   >
@@ -1565,44 +1673,40 @@ export function BrowserChrome(props: {
           <Show when={tabMenuEnabled() && tabMenuTab()}>
             {(tab) => (
               <div
+                ref={(element) => { tabMenuRef = element }}
                 class="knowledge-browser-tab-menu"
                 role="menu"
                 aria-label={`Fanealternativ for ${liveTabLabel(tab())}`}
-                onKeyDown={(event) => { if (event.key === 'Escape') closeTabMenu() }}
               >
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={tab().active || props.browserBusy}
-                  onClick={() => { closeTabMenu(); setSelectedTimelineStep(null); void props.onBrowserSelectTab?.(tab().tabId) }}
-                >
-                  Vis fane
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={controlsDisabled()}
-                  onClick={() => { closeTabMenu(); void prepareNewTabNavigation() }}
-                >
-                  Ny fane
-                </button>
-                <Show when={props.onBrowserCloseTab && session().tabs.length > 1}>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    disabled={controlsDisabled()}
-                    onClick={() => { closeTabMenu(); void props.onBrowserCloseTab?.(tab().tabId) }}
-                  >
-                    Lukk fane
-                  </button>
-                </Show>
-                <Show when={tabOutsideUrl(tab())}>
-                  {(url) => (
-                    <a role="menuitem" href={url()} target="_blank" rel="noopener noreferrer" onClick={closeTabMenu}>
-                      Åpne utenfor Verevon
-                    </a>
+                <For each={tabMenuItems()} keyed={false}>
+                  {(item) => (
+                    <Show
+                      when={browserTabMenuOutsideAction(item().action)}
+                      fallback={(
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={item().disabled}
+                          onClick={() => { runTabMenuItem(item()) }}
+                        >
+                          {item().label}
+                        </button>
+                      )}
+                    >
+                      {(outside) => (
+                        <a
+                          role="menuitem"
+                          href={outside().url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          onClick={(event) => { if (!runTabMenuItem(item())) event.preventDefault() }}
+                        >
+                          {item().label}
+                        </a>
+                      )}
+                    </Show>
                   )}
-                </Show>
+                </For>
               </div>
             )}
           </Show>

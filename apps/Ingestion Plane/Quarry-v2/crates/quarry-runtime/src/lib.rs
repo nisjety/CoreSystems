@@ -72,6 +72,7 @@ pub mod lease_pool;
 pub mod local_index;
 #[cfg(feature = "postgres-queue")]
 pub mod migrations;
+pub mod model_trace_publisher;
 pub mod mp_client;
 pub mod observation;
 pub mod observation_redaction;
@@ -111,7 +112,6 @@ pub mod smart_router;
 pub mod source_registrar;
 pub mod step_expect;
 pub mod step_receipts;
-pub mod structured_extract;
 pub mod target_repair;
 #[cfg(feature = "test-site")]
 pub mod test_site;
@@ -157,7 +157,7 @@ pub use driver_plan::DriverPlan;
 pub use driver_registry::DriverRegistry;
 pub use egress_broker::{EgressBroker, EgressDecision, EgressIdentity};
 pub use event_bus::{EventBus, EventReceiver, InProcessEventBus};
-pub use events::{EventSink, ReplayGap, ReplaySubscription, RingLimits};
+pub use events::{EventSink, ReplayGap, ReplaySubscription, RingLimits, RunTraceMeta};
 pub use fallback_driver::FallbackDriver;
 pub use fetch::StaticDriver;
 pub use fingerprint_rotation::is_block_status;
@@ -175,6 +175,9 @@ pub use lease_pool::RuntimeLeasePool;
 pub use local_index::{LocalDocument, TantivyLocalIndex};
 pub use mp_client::{
     ModelPlaneClient, ModelPlaneInvokeRequest, ModelPlaneInvokeResponse, ModelPlanePlanner,
+};
+pub use model_trace_publisher::{
+    ModelTraceConfig, ModelTracePublisher, NatsTraceTransport, TraceRefusal, TraceTransport,
 };
 pub use nats_event_bus::{NatsConfig, NatsEventBus};
 pub use observation::build_dom_summary;
@@ -212,7 +215,6 @@ pub use step_receipts::{AgentRunCheckpoint, AgentRunStatus};
 pub use step_receipts::{
     InMemoryStepReceiptStore, ReceiptBuilder, StepOutcome, StepReceipt, StepReceiptStore,
 };
-pub use structured_extract::StructuredExtractClient;
 pub use tls_driver::TlsProfileDriver;
 pub use trace_projection::{
     model_event_type, to_model_envelope, PublishCtx, MAX_PAYLOAD_BYTES as TRACE_MAX_PAYLOAD_BYTES,

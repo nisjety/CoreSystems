@@ -18,6 +18,13 @@ import (
 type PreflightInput struct {
 	ScheduleID string `json:"schedule_id"`
 	OrgID      string `json:"org_id"`
+	// TargetKind is the schedule's kind (scrape, crawl, batch, change_monitor).
+	// The edge answers skipped_kind_disabled for a kind it does not run; empty
+	// leaves that check out (inputs recorded before WS15.S4a).
+	TargetKind string `json:"target_kind,omitempty"`
+	// Enabled is the schedule's enabled state when the caller knows it; nil
+	// leaves the edge's skipped_disabled check out.
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // PreflightResult is the edge's answer. S2 always answers allow with the
@@ -27,6 +34,9 @@ type PreflightResult struct {
 	Reason      string `json:"reason,omitempty"`
 	Posture     string `json:"posture,omitempty"`
 	Entitlement string `json:"entitlement,omitempty"`
+	// Zdr is the effective ZDR posture the edge read at fire time; false when
+	// the posture was unchecked or unknown.
+	Zdr bool `json:"zdr,omitempty"`
 }
 
 // PreflightFire asks the edge whether a scheduled fire may run. The call uses

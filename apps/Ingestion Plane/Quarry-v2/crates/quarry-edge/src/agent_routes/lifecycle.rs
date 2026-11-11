@@ -151,6 +151,42 @@ pub(super) fn resume_arc(prior: AgentRunStatus, run_ttl: bool) -> Option<&'stati
     (run_ttl && prior.is_resumable()).then(|| prior.as_str())
 }
 
+/// WS10.S4: the trace labels of a run being started or resumed: its origin, the caller's
+/// (Model Plane) run id and the agent. Labels only, never authority (`origin_is_not_authz`).
+///
+/// The trace context is sanitized first: an invalid token is dropped, never a 400. The
+/// origin comes from the verified token kind and the hint (`derive_origin`). `run_id` and
+/// `agent` are kept only for a service token: a user token cannot claim a Model run id.
+/// A resume keeps the origin and the Model run id its checkpoint holds (a label written by
+/// the start that created the run); the agent is process-local and is taken from this
+/// request only.
+pub(super) fn run_trace_labels(
+    is_service: bool,
+    trace: Option<quarry_core::trace::RunTraceContext>,
+    checkpoint: Option<&AgentRunCheckpoint>,
+) -> (
+    quarry_core::trace::RunOrigin,
+    Option<String>,
+    Option<quarry_core::trace::AgentRef>,
+) {
+    let trace = trace.unwrap_or_default().sanitized();
+    let derived = quarry_core::trace::derive_origin(is_service, trace.origin.as_deref());
+    let origin = checkpoint
+        .and_then(|checkpoint| checkpoint.origin.as_deref())
+        .and_then(quarry_core::trace::RunOrigin::from_hint)
+        .unwrap_or(derived);
+    let (requested_run_id, agent) = if is_service {
+        (trace.run_id, trace.agent)
+    } else {
+        (None, None)
+    };
+    let model_run_id = checkpoint
+        .and_then(|checkpoint| checkpoint.model_run_id.clone())
+        .filter(|id| quarry_core::trace::valid_token(id, quarry_core::trace::TRACE_TOKEN_MAX))
+        .or(requested_run_id);
+    (origin, model_run_id, agent)
+}
+
 /// `POST /v1/agent/runs` — acquire a leased browser session for a new run.
 pub async fn start_run(
     State(state): State<AppState>,
@@ -299,6 +335,13 @@ pub async fn start_run(
     } else {
         None
     };
+
+    // WS10.S4: the run's trace labels. Never read by admission, budget or control.
+    let (run_origin, model_run_id, trace_agent) = run_trace_labels(
+        claims.is_service(),
+        body.trace.clone(),
+        resume_checkpoint.as_ref(),
+    );
 
     // A resumed run's persisted constraints are authoritative. This
     // prevents a caller from widening a budget or allowed-domain set after
@@ -679,6 +722,7 @@ pub async fn start_run(
         &state,
         &nav_policy,
         crate::agent_policy_gate::egress_policy(&web_decision, &constraints.allowed_domains),
+        Some(&web_decision),
     );
     if let Err(error) = state
         .agent_driver
@@ -845,6 +889,9 @@ pub async fn start_run(
         nav_policy,
         origin_extension: None,
         origin_extension_lane_stale: false,
+        origin: run_origin,
+        model_run_id: model_run_id.clone(),
+        agent: trace_agent.clone(),
     };
     let live = RunLive::new(
         entry.org_id.clone(),
@@ -912,7 +959,21 @@ pub async fn start_run(
 
     // WS10.S3: the run's event trace starts here, so the AgentStarted below is the first
     // event of this segment's replay ring (seq 1 on a start, past the checkpoint on a resume).
-    state.event_sink.open_run(&run_id, trace_start);
+    // WS10.S4: opened with the run's trace labels, so every event it mints carries its
+    // origin, Model run id, agent and the request id of the call behind it.
+    state.event_sink.open_run_with(
+        &run_id,
+        quarry_runtime::events::RunTraceMeta {
+            start_seq: trace_start,
+            origin: run_origin,
+            model_run_id,
+            agent: trace_agent,
+            org_id: org_id.clone(),
+            actor_id: claims.actor_id().to_owned(),
+            browser_run_id: run_id.to_string(),
+            zdr,
+        },
+    );
 
     state
         .event_sink

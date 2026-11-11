@@ -4,9 +4,9 @@ use quarry_core::artifact::{self, ArtifactKind};
 use quarry_core::cache::{CacheMode, CachePolicy};
 use quarry_core::contracts::{
     ActionOutcome, ActionOutcomeStatus, AgentAction, AgentActionRequest, AgentConstraints,
-    BrowserObservation, ChunkRef, DataPlaneIngestRequest, DataPlaneIngestResponse, DomSummary,
-    EmbeddingStatus, ExtractionUsage, IndexStatus, InteractiveElement, BrowserTelemetry, SemanticLocator,
-    SourceTrace, StructuredExtractRequest, StructuredExtractResponse,
+    BrowserObservation, BrowserTelemetry, ChunkRef, DataPlaneIngestRequest,
+    DataPlaneIngestResponse, DomSummary, EmbeddingStatus, IndexStatus, InteractiveElement,
+    SemanticLocator, SourceTrace,
 };
 use quarry_core::envelope::{Envelope, EnvelopeMeta};
 use quarry_core::error::{ErrorCode, QuarryError};
@@ -535,49 +535,6 @@ fn data_plane_ingest_response_serde_roundtrip() {
     assert_eq!(back.document_id, "doc_123");
     assert_eq!(back.index_status, IndexStatus::Indexed);
     assert_eq!(back.embedding_status, EmbeddingStatus::Embedded);
-}
-
-#[test]
-fn structured_extract_request_serde_roundtrip() {
-    let req = StructuredExtractRequest {
-        source_artifact_ref: quarry_core::ids::Id::new(),
-        markdown: Some("# Product\nPrice: $10".into()),
-        structured_output_schema: Some(json!({
-            "type": "object",
-            "properties": { "price": { "type": "number" } }
-        })),
-        source_trace_required: true,
-        max_cost_usd: Some(0.01),
-        max_tokens: Some(1000),
-        zdr: ZdrMode::On,
-    };
-    let json = serde_json::to_string(&req).unwrap();
-    let back: StructuredExtractRequest = serde_json::from_str(&json).unwrap();
-    assert!(back.source_trace_required);
-    assert_eq!(back.zdr, ZdrMode::On);
-    assert!(back.structured_output_schema.is_some());
-}
-
-#[test]
-fn structured_extract_response_serde_roundtrip() {
-    let resp = StructuredExtractResponse {
-        artifact_id: quarry_core::ids::Id::new(),
-        data: json!({"price": 10}),
-        schema_valid: true,
-        usage: ExtractionUsage {
-            input_tokens: 500,
-            output_tokens: 50,
-            cost_usd: 0.002,
-        },
-        source_trace: None,
-        model: "claude-sonnet-4-6".into(),
-        provider: "anthropic".into(),
-    };
-    let json = serde_json::to_string(&resp).unwrap();
-    let back: StructuredExtractResponse = serde_json::from_str(&json).unwrap();
-    assert!(back.schema_valid);
-    assert_eq!(back.usage.input_tokens, 500);
-    assert_eq!(back.model, "claude-sonnet-4-6");
 }
 
 #[test]

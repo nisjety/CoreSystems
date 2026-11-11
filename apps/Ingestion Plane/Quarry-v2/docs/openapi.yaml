@@ -7420,6 +7420,43 @@ components:
           - $ref: '#/components/schemas/RequestAsk'
         driver_requirements:
           $ref: '#/components/schemas/BrowserDriverCapabilities'
+        trace:
+          type: object
+          nullable: true
+          description: >-
+            WS10.S4 trace context (Model Plane execution-core's run trace).
+            Labels only, never authority. Every value must be 1 to 64
+            characters of letters, digits, underscore or hyphen; an invalid
+            value is dropped, never a 400. `origin` is a hint: a user token
+            yields `user` (or `agent` when the hint says so), a service token
+            yields its hint or `api`. `run_id` and `agent` are kept only for a
+            service token. The labels are stamped on the run's events and the
+            origin on the browser-session projection (`runOrigin`).
+          properties:
+            run_id:
+              type: string
+              maxLength: 64
+              description: The caller's (Model Plane) run id, for correlation.
+            origin:
+              type: string
+              enum:
+              - user
+              - agent
+              - schedule
+              - webhook
+              - api
+            agent:
+              type: object
+              properties:
+                id:
+                  type: string
+                  maxLength: 64
+                role:
+                  type: string
+                  maxLength: 64
+                parent_id:
+                  type: string
+                  maxLength: 64
     BrowserDriverCapabilities:
       type: object
       description: Requested or selected execution capabilities. Every true value is an affirmative provider claim; omitted values are not inferred. Agent runs always require isolated_egress and security_evidence
@@ -12077,12 +12114,16 @@ components:
       description: >-
         An AI format of a scrape (INNH-1). Unknown keys in the object are 400 unknown_field. Every field
         error is 400 with details.fields[] {path, code, message} and never echoes a value. A json schema
-        may use only the keywords type, properties, required, items, enum, minItems, maxItems, minLength,
-        maxLength, minimum, maximum, additionalProperties (true or false), description and title
-        ($schema, $id and $comment are dropped); any other keyword (for example $ref, anyOf, oneOf, allOf,
-        not, const, pattern, format) is 400 schema_keyword_not_supported at its path, because the
-        validator would ignore it. The schema root must be an object schema; at most 65,536 bytes,
-        10 levels and 200 properties (schema_root_not_object, schema_too_large, schema_too_complex).
+        may use only the keywords type, properties, required, items, enum, const, anyOf, oneOf, minItems,
+        maxItems, minLength, maxLength, minimum, maximum, additionalProperties (true or false), description
+        and title ($schema, $id and $comment are dropped). A local $ref to #/$defs/ or #/definitions/ is
+        inlined in its place (those two root keywords are dropped), and only title and description may sit
+        beside it. A definition that refers back to itself is 400 schema_recursive; any other $ref is 400
+        schema_ref_not_supported, and a $ref that names no definition is 400 invalid_value, all at the
+        $ref. Any other keyword (for example allOf, not, pattern, format) is 400 schema_keyword_not_supported
+        at its path, because the validator would ignore it. The schema root must be an object schema once
+        the references are inlined; at most 65,536 bytes, 10 levels and 200 properties, counted on the
+        inlined schema (schema_root_not_object, schema_too_large, schema_too_complex).
       oneOf:
       - type: object
         required: [type, schema]
@@ -12240,6 +12281,25 @@ components:
                 type: string
               code:
                 type: string
+        prefilled:
+          type: array
+          description: >-
+            json only, and only when the server runs with QUARRY_EDGE__AI_FORMATS_HARVEST=prefill (WS16.S5).
+            The top-level fields of the schema that the page's own markup states under the same name (JSON-LD,
+            microdata or a hydration payload), taken without a model call. Each names the field, the source the
+            value came from, and the rule (exact_name). Absent when no field was taken from the markup.
+          items:
+            type: object
+            required: [field, source, rule]
+            properties:
+              field:
+                type: string
+              source:
+                type: string
+                enum: [json_ld, microdata, hydration]
+              rule:
+                type: string
+                enum: [exact_name]
         found:
           type: boolean
           description: question only. False when the page does not answer the question (no answer field).

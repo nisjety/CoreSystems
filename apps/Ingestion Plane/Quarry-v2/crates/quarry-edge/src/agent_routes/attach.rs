@@ -347,7 +347,7 @@ async fn attach_run_inner(
         None => BrowserEgressPolicy::from_allowed_domains(&allowed_domains).with_public_assets(),
     };
     // E3.8.7: the attachment's tab carries the host reputation hook when the mode is on.
-    let egress = crate::agent_policy_gate::attach_reputation(&state, egress);
+    let egress = crate::agent_policy_gate::attach_reputation(&state, egress, handle.live.policy());
     let (tab_id, tabs, borrowed, opened_by) = if let Some(target) = &body.attach_tab {
         let changed = || driver_err(&request_id, QuarryError::new(ErrorCode::Conflict, "browser_continue_tab_changed"));
         let tabs = state.agent_driver.list_tabs(&entry.session).await
@@ -662,22 +662,24 @@ pub async fn release_attach(
 }
 
 /// End an attachment with the run lock held. An owner's borrowed tab is always
-/// returned. An agent-created tab survives only a successfully marked release.
-async fn finish_attach(
+/// returned. An agent-created tab survives only a successfully marked release (an
+/// explicit one, or Q2-WS8.J's idle release, whose mark the sweeper rechecked against
+/// the grant first); a revoked, aborted or session-ended attachment's tab is closed.
+pub(super) async fn finish_attach(
     state: &AppState,
     handle: &RunHandle,
     entry: &mut RunEntry,
-    ended: AttachState,
+    mut ended: AttachState,
     phase: BrowserAttachState,
 ) {
-    if let Some(borrowed) = ended.borrowed {
+    if let Some(borrowed) = ended.borrowed.take() {
         if let Err(error) = state.agent_driver.swap_tab_egress_policy(
             &entry.session, &ended.tab_id, borrowed.prior_egress,
         ).await {
             tracing::warn!(%error, "could not restore the egress of a returned browser tab");
         }
         handle.live.tabs().return_borrowed_tab(&ended.tab_id, &ended.attach_id);
-    } else if !(phase == BrowserAttachState::Released
+    } else if !(matches!(phase, BrowserAttachState::Released | BrowserAttachState::IdleReleased)
         && handle.live.tabs().handoff_marked_tab(&ended.tab_id, &ended.attach_id)) {
         if let Err(error) = state.agent_driver.close_tab(&entry.session, &ended.tab_id).await {
             // zdr-log-ok: the tab id is opaque; the caller's driver path masks error text.
@@ -685,6 +687,20 @@ async fn finish_attach(
         }
         handle.live.tabs().forget(&ended.tab_id);
     }
+    record_attach_end(state, handle, entry, &ended, phase).await;
+}
+
+/// The event half of [`finish_attach`]: the attach end on the run's timeline (skipped for a
+/// ZDR run by `record_browser_timeline_event`) and `agent.detached` through `emit_for_zdr`,
+/// with the attach id and the disposition only (never a URL). Q2-WS8.J: `finish_run` calls
+/// this alone for `SessionEnded`, since the session's release then closes every tab.
+pub(super) async fn record_attach_end(
+    state: &AppState,
+    handle: &RunHandle,
+    entry: &RunEntry,
+    ended: &AttachState,
+    phase: BrowserAttachState,
+) {
     if let Err(error) = record_browser_timeline_event(
         state,
         entry,
@@ -718,6 +734,77 @@ async fn finish_attach(
             format!("{}:agent_detached:{}", entry.run_id, ended.attach_id),
         )
         .await;
+}
+
+/// Q2-WS8.J (D8 S8.9): the run sweeper's pass over a live run's attachment, so an
+/// execution-core crash does not leave the agent tab and its attachment alive until the
+/// run ends. Under the run's entry lock (a run whose entry is held right now, or with an
+/// action in flight, is in use and is skipped this pass):
+///
+/// - an attachment idle for `idle_ttl_s` or longer ends `IdleReleased`. An agent tab the
+///   delegate marked for handoff is kept for the person only while the attach grant still
+///   validates (the same recheck as an explicit release); otherwise it is closed;
+/// - otherwise its attach grant is validated again, and a grant the broker refuses
+///   (`attach_grant_refusal`: revoked, expired, or no longer this run's) ends it `Revoked`.
+///   A broker outage keeps the attachment (the next pass looks again).
+///
+/// The end runs [`finish_attach`]: an unmarked agent tab is closed, a borrowed tab returned,
+/// and `agent.detached` is emitted through `emit_for_zdr` (no URL). The sweeper never
+/// touches the run's clocks. In a dry run nothing is ended; the phase it would end with is
+/// returned. `None`: the attachment stays (or there is none).
+pub(super) async fn sweep_attach(
+    state: &AppState,
+    handle: &RunHandle,
+    now_ms: u64,
+    idle_ttl_s: u64,
+    dry_run: bool,
+) -> Option<BrowserAttachState> {
+    let mut entry = handle.entry.try_lock().ok()?;
+    if entry.closed || handle.live.in_flight() > 0 {
+        return None;
+    }
+    let attach = handle.live.attaches().live().cloned()?;
+    let run_id = entry.run_id.to_string();
+    // `None`: the broker could not answer, so nothing is decided on the grant.
+    let grant_refused = |grant: QuarryResult<GrantValidation>, parent: Option<&str>| -> Option<bool> {
+        let Some(parent) = parent else {
+            return Some(true);
+        };
+        grant
+            .ok()
+            .map(|grant| attach_grant_refusal(&grant, &run_id, &entry.actor_id, parent).is_some())
+    };
+    let phase = if attach.idle_expired(now_ms, idle_ttl_s) {
+        BrowserAttachState::IdleReleased
+    } else {
+        let grant = state
+            .grant_validator
+            .validate_for_org(&entry.org_id, &attach.grant_id)
+            .await;
+        match grant_refused(grant, entry.grant_id.as_deref()) {
+            Some(true) => BrowserAttachState::Revoked,
+            Some(false) | None => return None,
+        }
+    };
+    if dry_run {
+        return Some(phase);
+    }
+    if phase == BrowserAttachState::IdleReleased
+        && attach.borrowed.is_none()
+        && handle.live.tabs().is_marked_for_handoff(&attach.tab_id, &attach.attach_id)
+    {
+        // A mark is only a request: an idle release hands the tab over only on a live grant.
+        let grant = state
+            .grant_validator
+            .validate_for_org(&entry.org_id, &attach.grant_id)
+            .await;
+        if grant_refused(grant, entry.grant_id.as_deref()) != Some(false) {
+            handle.live.tabs().clear_handoff(&attach.tab_id);
+        }
+    }
+    let ended = handle.live.attaches().end(&attach.attach_id, phase)?;
+    finish_attach(state, handle, &mut entry, ended, phase).await;
+    Some(phase)
 }
 
 /// `POST /v1/agent/runs/{run_id}/tabs/{tab_id}/control`: a person hands a tab to the

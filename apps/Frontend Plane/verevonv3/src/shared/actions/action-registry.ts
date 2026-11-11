@@ -2174,6 +2174,23 @@ const orchestrationCancelRunInput = z.object({
 // StartAiRunBody) documents it as accepted for API back-compat only and never
 // read — it would arm a confirmed-broken legacy gate in execution-core.
 // Offering it here would describe a safety control that does not exist.
+// The saved recipe a browser run start names (Q4-E4.2-4c): the gateway's RecipeAsk bounds. A version or
+// a tag, not both; up to 32 slots keyed ^[a-z0-9_]{1,40}$ with values of at most 2000 characters.
+const browserRunRecipeInput = z
+  .object({
+    id: z.string().regex(/^proc_[A-Za-z0-9_-]{1,59}$/),
+    version: z.number().int().nonnegative().max(4294967295).optional(),
+    tag: z.string().regex(/^[a-z0-9._-]{1,32}$/).optional(),
+    slots: z
+      .record(z.string().regex(/^[a-z0-9_]{1,40}$/), z.string().max(2000))
+      .refine((slots) => Object.keys(slots).length <= 32, { message: 'recipe_slots_invalid' })
+      .optional(),
+  })
+  .strict()
+  .refine((recipe) => recipe.version === undefined || recipe.tag === undefined, {
+    message: 'recipe_version_and_tag',
+  })
+
 const browserRunStartInput = z.object({
   sessionId: z.string().min(1),
   goal: z.string().trim().min(1),
@@ -2184,6 +2201,10 @@ const browserRunStartInput = z.object({
   maxRuntimeSeconds: z.number().int().positive().optional(),
   stopCriteria: z.string().trim().optional(),
   maxCostUsd: z.number().nonnegative().optional(),
+  // A saved recipe the run replays (Q4-E4.2-4c), behind BROWSER_RECIPES. A person starts it; recipe
+  // runs are unattached, so the owner refuses it with requireAttached (recipe_attach_unsupported).
+  // Slot values are user data, never logged.
+  recipe: browserRunRecipeInput.optional(),
 })
 
 const browserRunControlInput = z.object({
@@ -2345,6 +2366,20 @@ const browserCloseTabInput = z.object({
   sessionId: z.string().min(1),
   tabId: z.string().min(1),
   actor: z.enum(['human', 'agent']),
+})
+
+// Q2-WS8.I: the owner's per-tab Take over (`holder: 'human'`) and Give back (`holder: 'agent'`) of one tab.
+// `expectedEpoch` is the tab epoch the person saw: a tab that changed hands since is refused, nothing moves.
+const browserControlTabInput = z.object({
+  sessionId: z.string().min(1),
+  tabId: z.string().min(1),
+  holder: z.enum(['human', 'agent']),
+  expectedEpoch: z.number().int().nonnegative().optional(),
+})
+
+// Q2-WS8.I: the owner's Stop agent for the session's attached browser agent.
+const browserAttachStopInput = z.object({
+  sessionId: z.string().min(1),
 })
 
 // `action` is passed through as a raw object: `sanitize_action` in browser.rs
@@ -5545,6 +5580,28 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: false,
     inputSchema: browserCloseTabInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser_tab.control',
+    label: 'Set browser tab control',
+    description: 'Hand one tab of a browser session to the agent attached to it (holder agent, Give back) or take it back (holder human, Take over). Compare-and-set on the tab epoch: a tab that changed hands since is refused and nothing moves. Human-only: a model cannot call it, and the owner refuses it from any token but the person\'s own. Refused under zero data retention. Off unless BROWSER_AI_RUN_ATTACH_SESSION is on.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: browserControlTabInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'browser_attach.stop',
+    label: 'Stop attached browser agent',
+    description: 'Stop the browser agent attached to a session: its access to the session is revoked and its attachment ends, and an ended attachment cannot be resumed. Human-only: the person\'s own Stop agent, which a model cannot call. Refused under zero data retention. Off unless BROWSER_AI_RUN_ATTACH_SESSION is on.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: browserAttachStopInput,
     outputSchema: envelopeStatusOutput,
   },
   {

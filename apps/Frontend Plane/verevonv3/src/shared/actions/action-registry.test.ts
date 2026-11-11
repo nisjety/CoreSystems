@@ -1804,7 +1804,9 @@ describe('action registry', () => {
     // the Settings > Browser consent list and forget (323 + 2 = 325).
     // Union (W-sweep): HEAD (W3-E3.2-g1 browser.get/set_org_policy: +2) and
     // model-plane (P1 chat.open_computer_viewer: +1): 320 + 3 = 323.
-    expect(ids).toHaveLength(325)
+    // +2 after Q2-WS8.I-b registered browser_tab.control and browser_attach.stop, the per-tab Take over and
+    // Give back and the Stop agent of an attached browser (325 + 2 = 327).
+    expect(ids).toHaveLength(327)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

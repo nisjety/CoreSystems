@@ -81,6 +81,13 @@ pub struct InlineParts {
     /// The run still succeeds; the URL result cache never stores such a page. Never
     /// serialized.
     pub soft_404: bool,
+    /// WS16.S5: the structured data harvested from the fetched page's own markup
+    /// (hydration payloads, JSON-LD, microdata, tables), when
+    /// [`InlineRequest::want_harvest`] was set and the run was not a document. Never
+    /// serialized and never stored: the caller hands it to the AI engine and drops it.
+    pub ai_structured: Option<quarry_transform::structured::StructuredData>,
+    /// WS16.S5: the JSON-LD summary of the same markup, under the same rules.
+    pub ai_json_ld: Option<quarry_transform::json_ld::JsonLdSummary>,
 }
 
 /// What [`PageRunner::persist_captures`] made of one run's captures. The refs
@@ -111,6 +118,10 @@ pub struct InlineRequest {
     /// INNH-1: when set, [`InlineParts::ai_source`] carries the page text cut to
     /// this many chars. `None` (the default) leaves it out.
     pub ai_source_max_chars: Option<usize>,
+    /// WS16.S5: when set, [`InlineParts::ai_structured`] and
+    /// [`InlineParts::ai_json_ld`] carry the page's own markup harvest. `false` (the
+    /// default) leaves both out.
+    pub want_harvest: bool,
 }
 
 impl InlineRequest {
@@ -124,6 +135,7 @@ impl InlineRequest {
             max_bytes: quarry_core::scrape::DEFAULT_INLINE_MAX_BYTES,
             clean: quarry_transform::clean_html::CleanOptions::default(),
             ai_source_max_chars: None,
+            want_harvest: false,
         }
     }
 }
@@ -2521,6 +2533,13 @@ impl PageRunner {
                 let end = md.char_indices().nth(max_chars).map_or(md.len(), |(byte, _)| byte);
                 parts.ai_source = Some(md[..end].to_owned());
             }
+            if inline_request.want_harvest && !is_doc {
+                // WS16.S5: the page's own markup, read once more for the AI formats. It is
+                // the decoded body the markdown came from (the redaction stage has run on
+                // it when it runs for this page). Nothing here is stored or serialized.
+                parts.ai_structured = Some(quarry_transform::structured::extract(&body_text));
+                parts.ai_json_ld = quarry_transform::json_ld::extract(&body_text);
+            }
             if inline_request.markdown {
                 offer_inline(
                     "markdown",
@@ -4093,6 +4112,7 @@ mod content_routing_tests {
             max_bytes,
             clean: Default::default(),
             ai_source_max_chars: None,
+            want_harvest: false,
         }
     }
 

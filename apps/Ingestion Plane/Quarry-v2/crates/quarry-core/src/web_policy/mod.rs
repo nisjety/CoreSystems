@@ -46,6 +46,7 @@ pub enum CapKey {
     ActDownload,
     ProfilePersistent,
     ConsentReject,
+    ReputationBlock,
     Recording,
     SearchPaidProvider,
     RequestCredentials,
@@ -57,7 +58,7 @@ pub enum CapKey {
 
 impl CapKey {
     /// Every key, in catalogue order.
-    pub const ALL: [CapKey; 14] = [
+    pub const ALL: [CapKey; 15] = [
         CapKey::ActScript,
         CapKey::ActInput,
         CapKey::ActInteract,
@@ -65,6 +66,7 @@ impl CapKey {
         CapKey::ActDownload,
         CapKey::ProfilePersistent,
         CapKey::ConsentReject,
+        CapKey::ReputationBlock,
         CapKey::Recording,
         CapKey::SearchPaidProvider,
         CapKey::RequestCredentials,
@@ -84,6 +86,7 @@ impl CapKey {
             Self::ActDownload => "browser.act.download",
             Self::ProfilePersistent => "browser.profile.persistent",
             Self::ConsentReject => "browser.consent.reject",
+            Self::ReputationBlock => "browser.reputation.block",
             Self::Recording => "browser.recording",
             Self::SearchPaidProvider => "search.paid_provider",
             Self::RequestCredentials => "request.credentials",
@@ -605,8 +608,8 @@ fn catalogue_defaults() -> PolicyLayer {
 }
 
 /// Keys whose catalogue row is not unlockable, at their baseline mode. v1 has
-/// one such key, `browser.act.script`. Only the lattice is built in v1, so an
-/// unlock path does not exist yet (see the depth file).
+/// two such keys, `browser.act.script` and `browser.reputation.block`. Only the
+/// lattice is built in v1, so an unlock path does not exist yet (see the depth file).
 fn invariant_layer() -> PolicyLayer {
     let modes = CATALOGUE
         .iter()
@@ -959,8 +962,8 @@ fn mode_str(mode: Mode) -> &'static str {
 mod tests {
     use super::*;
 
-    // The v1 catalogue has no protection key, so the protection rule is checked
-    // on the kind directly here; the integration tests cover the ability rule.
+    // The protection rule is checked on the kind directly here, with `ActScript` as a label.
+    // The integration tests cover the ability rule.
     #[test]
     fn disabled_on_a_protection_is_rejected() {
         assert_eq!(

@@ -45,7 +45,7 @@ func (f *fakeTemporal) Trigger(_ context.Context, id string) error {
 	return f.next()
 }
 
-func (f *fakeTemporal) Backfill(_ context.Context, id string, start, end time.Time) error {
+func (f *fakeTemporal) Backfill(_ context.Context, id string, start, end time.Time, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.backfills = append(f.backfills, id)

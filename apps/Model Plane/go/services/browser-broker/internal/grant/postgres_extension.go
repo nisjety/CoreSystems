@@ -83,7 +83,11 @@ func (s *PgStore) CreateOriginExtension(ctx context.Context, p ExtensionParams) 
 			return err
 		}
 		g := newExtensionGrant(id, p, parent, fresh, extensionExpiry(now, p.TTL, parent))
-		if _, err := tx.Exec(ctx, insertGrant, insertArgs(g)...); err != nil {
+		args, err := insertArgs(g)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, insertGrant, args...); err != nil {
 			return s.dbErr(ctx, "create_extension", err)
 		}
 		out = g

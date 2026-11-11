@@ -29,6 +29,19 @@ export type StartBrowserAiRunParams = {
   stopCriteria?: string
   requireApproval?: boolean
   maxCostUsd?: number
+  /** A saved recipe to replay (Q4-E4.2-4c), behind `BROWSER_RECIPES`. Recipe runs are
+   * unattached: the gateway refuses it with `requireAttached`, `continueInTab`,
+   * `assistantInteractive` (`recipe_attach_unsupported`) or `planMode`. Slot values are user data. */
+  recipe?: BrowserAiRunRecipe
+}
+
+/** The saved recipe a browser AI run start names: `proc_` id, a version or a tag (not both),
+ * and up to 32 slot values keyed `^[a-z0-9_]{1,40}$`, each at most 2000 characters. */
+export type BrowserAiRunRecipe = {
+  id: string
+  version?: number
+  tag?: string
+  slots?: Record<string, string>
 }
 
 export type StartBrowserAiRunResponse = {
@@ -101,6 +114,10 @@ function startFingerprint(sessionId: string, params: StartBrowserAiRunParams): s
     params.stopCriteria ?? null,
     params.requireApproval ?? null,
     params.maxCostUsd ?? null,
+    // Only a recipe start carries it, so a plain start's fingerprint is unchanged.
+    ...(params.recipe
+      ? [[params.recipe.id, params.recipe.version ?? null, params.recipe.tag ?? null, Object.entries(params.recipe.slots ?? {}).sort()]]
+      : []),
   ])
 }
 
@@ -176,6 +193,8 @@ export async function startBrowserAiRun(
         stopCriteria: params.stopCriteria,
         requireApproval: params.requireApproval,
         maxCostUsd: params.maxCostUsd,
+        // Omitted when absent (JSON.stringify drops undefined), so a plain start's body is unchanged.
+        recipe: params.recipe,
       }),
       headers: idempotencyKey === undefined ? orgHeaders(orgId) : { ...orgHeaders(orgId), 'Idempotency-Key': idempotencyKey },
       signal,

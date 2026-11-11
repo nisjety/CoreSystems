@@ -93,6 +93,18 @@
       ]
     },
     {
+      "name": "BROWSER_BROKER_FILL_OTP_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "0",
+      "purpose": "fill_otp sensitive approvals (E3.1, ADR-2a) in the browser broker: a one-time OTP fill bound to one https origin and one mail connection. Off until the OTP live proof; remove the switch after it.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "browser-broker", "env": "BROWSER_BROKER_FILL_OTP_ENABLED", "default": "0" }
+      ]
+    },
+    {
       "name": "CONTROL_PLANE_ENFORCEMENT",
       "kind": "choice",
       "owner": "frontend-plane",
@@ -167,6 +179,17 @@
       "purpose": "Q4-E4.2-3h: a browser run whose input names a saved recipe replays that procedure step by step with Quarry, under its own broker grant. Only the literal true turns it on.",
       "declarations": [
         { "service": "execution-core", "env": "EXECUTION_CORE_RECIPE_RUNNER", "default": "false" }
+      ]
+    },
+    {
+      "name": "EXECUTION_CORE_SKILL_URL_MATCH",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Q4-E4.3-043c2: a browser run appends the site-skill blocks whose url_patterns match the page after screening. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_CORE_SKILL_URL_MATCH", "default": "false" }
       ]
     },
     {
@@ -300,7 +323,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "Q4-E4.2-3i: a browser run start may name a saved recipe, written into execution-core's tool_input.recipe with for_user_id from the verified claims. Off refuses it 400 browser_recipe_unavailable. Only the literal true turns it on; needs EXECUTION_CORE_RECIPE_RUNNER.",
+      "purpose": "Q4-E4.2-3i: a browser run start may name a saved recipe (tool_input.recipe, for_user_id from the verified claims). Off refuses it 400 browser_recipe_unavailable. Literal true only; needs EXECUTION_CORE_RECIPE_RUNNER.",
       "declarations": [
         { "service": "model-gateway", "env": "MODEL_GATEWAY_BROWSER_RECIPE", "default": "false" }
       ]
@@ -514,7 +537,6 @@
     "APPROVAL_WRITE_PREVIEW_ENABLED",
     "AUTHORED_KINDS_ENABLED",
     "BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED",
-    "BROWSER_BROKER_FILL_OTP_ENABLED",
     "BROWSER_BROKER_HUMAN_BROWSE_ENABLED",
     "BROWSER_BROKER_KEY_GRANTS_ENABLED",
     "BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED",
@@ -532,7 +554,6 @@
     "EXECUTION_CORE_ALLOW_INSECURE_APPROVAL_GATE_LOOPBACK",
     "EXECUTION_CORE_ALLOW_INSECURE_TICKET_LOOPBACK",
     "EXECUTION_CORE_QUARANTINE_MODE",
-    "EXECUTION_CORE_SKILL_URL_MATCH",
     "EXECUTION_DO_BROWSER_ACT_ENABLED",
     "EXECUTION_DO_BROWSER_ENABLED",
     "EXECUTION_EFFECT_LEDGER_ENABLED",

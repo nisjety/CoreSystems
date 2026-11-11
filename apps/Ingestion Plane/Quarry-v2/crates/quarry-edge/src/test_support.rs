@@ -276,6 +276,9 @@ pub fn insert_live_run(state: &AppState, claims: &Claims) -> crate::agent_routes
         nav_policy: crate::agent_routes::human_browse::RunNavPolicy::Allowlist,
         origin_extension: None,
         origin_extension_lane_stale: false,
+        origin: quarry_core::trace::RunOrigin::User,
+        model_run_id: None,
+        agent: None,
     };
     let run_id = entry.run_id.to_string();
     let live = RunLive::new(

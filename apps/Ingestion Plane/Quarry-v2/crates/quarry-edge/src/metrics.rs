@@ -291,6 +291,18 @@ pub fn record_run_expired(reason: &str, count: u64) {
     metrics::counter!("quarry_agent_run_expired_total", "reason" => reason).increment(count);
 }
 
+/// Q2-WS8.J: the run sweeper ended a live agent attachment of a run that is still live.
+/// `reason` is the `agent.detached` disposition: `idle` (idle past
+/// `QUARRY_EDGE__ATTACH_IDLE_TTL_S`) or `revoked` (its attach grant no longer validates).
+pub fn record_attach_released(reason: &str) {
+    let reason = match reason {
+        "idle" => "idle",
+        "revoked" => "revoked",
+        _ => "other",
+    };
+    metrics::counter!("quarry_agent_attach_released_total", "reason" => reason).increment(1);
+}
+
 /// The coarse class of an agent action, from its wire name
 /// (`browser_action_name`): a closed set of eleven, so no step metric grows
 /// with the action vocabulary.
@@ -435,6 +447,10 @@ fn describe_all() {
     describe_counter!(
         "quarry_agent_run_expired_total",
         "Agent runs ended without a client closing them, by reason (idle, ttl, takeover_idle, max_age, shutdown)."
+    );
+    describe_counter!(
+        "quarry_agent_attach_released_total",
+        "Agent attachments the run sweeper ended on a live run, by reason (idle, revoked)."
     );
     describe_gauge!(
         "quarry_agent_runs_active",

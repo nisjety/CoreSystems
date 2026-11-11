@@ -64,6 +64,17 @@ pub struct RunEntry {
     /// `origin_extension` (the extension was dropped while another path held the entry), so its
     /// next action rebuilds the boundary from the run's own policy before it runs.
     pub origin_extension_lane_stale: bool,
+    /// WS10.S4: who started the run, as a trace label derived from the verified token kind
+    /// and the start's `trace.origin` hint (`quarry_core::trace::derive_origin`). Stamped on
+    /// every run event and the projection. Never authority: admission, budget and the
+    /// control model do not read it.
+    pub origin: quarry_core::trace::RunOrigin,
+    /// WS10.S4: the caller's (Model Plane) run id from the start's trace context, kept only
+    /// when a service token started the run. A correlation label, never authority.
+    pub model_run_id: Option<String>,
+    /// WS10.S4: the agent named in the start's trace context, kept only when a service token
+    /// started the run. Process-local (a resume does not restore it). A label only.
+    pub agent: Option<quarry_core::trace::AgentRef>,
 }
 
 /// WS8.H: the state one lane of a run owns. A lane is the person's browsing or one
@@ -212,6 +223,11 @@ pub struct StartRunBody {
     /// Resolved once at start. A resumed run does not carry it (see the W2-U29 depth notes).
     #[serde(default)]
     pub policy: Option<quarry_core::web_policy::RequestAsk>,
+    /// WS10.S4: the optional trace context `{run_id?, agent?, origin?}` (Model Plane
+    /// execution-core `WireRunTrace`). Labels only, never authority: invalid tokens are
+    /// dropped (never a 400), and `run_id`/`agent` are kept only for a service token.
+    #[serde(default)]
+    pub trace: Option<quarry_core::trace::RunTraceContext>,
 }
 
 /// Browser execution contract selected at run creation. The renderer
@@ -338,6 +354,10 @@ pub struct BrowserSessionProjectionData {
     /// WS8.F: the live agent attachment, absent when none is live.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attach: Option<AttachProjection>,
+    /// WS10.S4: who started the run, as a lowercase trace label (`user`, `agent`, `schedule`,
+    /// `webhook`, `api`). A label, never authority. Absent in a checkpoint projection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_origin: Option<&'static str>,
 }
 
 /// WS8.F: the live agent attachment as the owner projection shows it. Ids and words only.

@@ -1214,45 +1214,6 @@ pub enum EmbeddingStatus {
     Skipped,
 }
 
-// ---------------------------------------------------------------------------
-// §4  StructuredExtract  (Quarry → Model Plane)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StructuredExtractRequest {
-    pub source_artifact_ref: kinds::ArtifactKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub markdown: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub structured_output_schema: Option<serde_json::Value>,
-    #[serde(default)]
-    pub source_trace_required: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_cost_usd: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
-    pub zdr: ZdrMode,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StructuredExtractResponse {
-    pub artifact_id: kinds::ArtifactKind,
-    pub data: serde_json::Value,
-    pub schema_valid: bool,
-    pub usage: ExtractionUsage,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_trace: Option<SourceTrace>,
-    pub model: String,
-    pub provider: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtractionUsage {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub cost_usd: f64,
-}
-
 #[cfg(test)]
 mod fill_otp_contract_tests {
     use super::AgentAction;

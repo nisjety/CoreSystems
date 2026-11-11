@@ -120,6 +120,7 @@ fn base_run_egress(state: &AppState, handle: &RunHandle, entry: &RunEntry) -> Br
             entry.zdr.is_active(),
             &entry.constraints.allowed_domains,
         ),
+        handle.live.policy(),
     )
 }
 
@@ -141,6 +142,7 @@ fn current_run_egress(
                 &entry.constraints.allowed_domains,
                 extension,
             ),
+            handle.live.policy(),
         ),
         None => base_run_egress(state, handle, entry),
     }
@@ -165,6 +167,7 @@ pub(super) fn tab_egress_policy(
             entry.zdr.is_active(),
             &entry.constraints.allowed_domains,
         ),
+        handle.live.policy(),
     )
 }
 
@@ -264,6 +267,7 @@ async fn drop_origin_extension(
                     state,
                     BrowserEgressPolicy::from_allowed_domains(&allowed_domains)
                         .with_public_assets(),
+                    handle.live.policy(),
                 )),
             )
             .await?;

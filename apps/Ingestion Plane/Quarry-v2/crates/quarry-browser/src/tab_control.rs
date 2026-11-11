@@ -47,6 +47,8 @@ pub fn addressed_tab_id<'a>(pin: Option<&'a str>, active: Option<&'a str>) -> Op
 pub struct TabEgressPolicy {
     session: BrowserEgressPolicy,
     tab: Option<BrowserEgressPolicy>,
+    /// The session had no policy, so `session` is the deny-all stand-in.
+    session_missing: bool,
 }
 
 impl TabEgressPolicy {
@@ -63,6 +65,18 @@ impl TabEgressPolicy {
         };
         allows(&self.session) && self.tab.as_ref().map_or(true, allows)
     }
+
+    /// Whether the tab's egress receipts carry the host only (WS7.G, D2-U34-5): true
+    /// when either layer is a ZDR policy, or when the session has no policy yet (its
+    /// ZDR posture is unknown, so the receipt fails closed to the host).
+    pub fn host_only_receipts(&self) -> bool {
+        self.session_missing
+            || self.session.host_only_receipts()
+            || self
+                .tab
+                .as_ref()
+                .is_some_and(BrowserEgressPolicy::host_only_receipts)
+    }
 }
 
 /// The egress policy for a request made from one tab: the session policy met with
@@ -78,6 +92,7 @@ pub fn resolve_tab_egress_policy(
             .cloned()
             .unwrap_or_else(BrowserEgressPolicy::deny_all),
         tab: tab.cloned(),
+        session_missing: session.is_none(),
     }
 }
 

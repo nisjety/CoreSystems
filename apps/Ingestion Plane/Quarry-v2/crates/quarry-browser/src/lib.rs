@@ -51,6 +51,10 @@ pub struct BrowserEgressPolicy {
     /// The URL reputation hook (E3.8.7, D2-100). `None` (the default, and
     /// always when the mode is `Off`) never consults a list.
     reputation: Option<ReputationHook>,
+    /// Under ZDR an egress receipt stores the host only (D2-U34-5, WS7.G):
+    /// `scheme://host[:port]`, never the path. Default `false`, so every
+    /// policy built without [`Self::with_host_only_receipts`] is unchanged.
+    host_only_receipts: bool,
 }
 
 /// A reputation source and the mode the run's org applies it in (E3.8.7). Two
@@ -209,6 +213,7 @@ impl BrowserEgressPolicy {
             public_assets: false,
             only_origin: None,
             reputation: None,
+            host_only_receipts: false,
         }
     }
 
@@ -258,6 +263,7 @@ impl BrowserEgressPolicy {
             public_assets: false,
             only_origin: None,
             reputation: None,
+            host_only_receipts: false,
         }
     }
 
@@ -279,7 +285,21 @@ impl BrowserEgressPolicy {
             public_assets: false,
             only_origin: None,
             reputation: None,
+            host_only_receipts: false,
         }
+    }
+
+    /// Record egress receipts as `scheme://host[:port]` only (WS7.G,
+    /// D2-U34-5). Callers pass the run's ZDR posture; `false` keeps the
+    /// established `scheme://host:port/path` receipt.
+    pub fn with_host_only_receipts(mut self, host_only: bool) -> Self {
+        self.host_only_receipts = host_only;
+        self
+    }
+
+    /// Whether this policy's egress receipts carry the host only (ZDR runs).
+    pub fn host_only_receipts(&self) -> bool {
+        self.host_only_receipts
     }
 
     /// Limit credentialed traffic in a borrowed tab to the origin the owner approved.

@@ -20,6 +20,8 @@ import {
   Trash2,
 } from '@/shared/icons'
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch, untrack } from 'solid-js'
+import { useNavigate } from '@solidjs/router'
+import { writePendingChatLaunch } from '@/features/chat/lib/pending-chat-launch'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { executeAction } from '@/shared/actions/action-client'
 import { leftWithRunControlsDisabled, runControlsDisabledNotice } from './browser-blocked'
@@ -198,6 +200,37 @@ async function loadOrgContext() {
   }
 }
 
+type ComposerNavigate = ReturnType<typeof useNavigate>
+
+/** The composer also mounts outside a <Router> (unit tests render it bare); there the router
+ * primitive throws, so the Ask row falls back to a plain page load of /chat. */
+function useOptionalNavigate(): ComposerNavigate | null {
+  try {
+    return useNavigate()
+  } catch {
+    return null
+  }
+}
+
+/** Same hand-off as DashboardSearchPanel's navigateToChat: a view transition unless the person
+ * asked for reduced motion. */
+function navigateToChat(navigate: ComposerNavigate | null) {
+  if (!navigate) {
+    window.location.assign('/chat')
+    return
+  }
+  const doc = document as Document & {
+    startViewTransition?: (callback: () => void) => { finished: Promise<void> }
+  }
+  const reducedMotion = typeof window.matchMedia === 'function'
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  if (!reducedMotion && typeof doc.startViewTransition === 'function') {
+    doc.startViewTransition(() => navigate('/chat'))
+    return
+  }
+  navigate('/chat')
+}
+
 function isTerminal(status: string): boolean {
   return TERMINAL.has(status.trim().toLowerCase())
 }
@@ -217,6 +250,7 @@ export function KnowledgeComposer(props: {
   previewCollapsed?: boolean
 }) {
   const i18n = useI18n()
+  const navigate = useOptionalNavigate()
   let pollTimer: number | undefined
   let tabRefreshTimers: number[] = []
   let tabRefreshGeneration = 0
@@ -1198,6 +1232,25 @@ export function KnowledgeComposer(props: {
 
   const closePreviewBrowserSession = (current: ScrapePreview | null) => {
     closeBrowserSessionById(current?.browserSession?.session.id)
+  }
+
+  /**
+   * WS9.A: the omnibox "Ask Verevon" row. Only the text the person typed travels: page content,
+   * the URL and the observation never leave this browser for the Model (plan: page context never
+   * travels from the SPA to the Model). A ZDR session, or a ZDR request for the next one, starts the
+   * chat as a temporary thread (`zdr: true` keeps the launch record in memory only).
+   */
+  const askVerevonFromBrowser = async (text: string) => {
+    const question = text.trim()
+    if (!question) return
+    const zdr = zdrRequested() || Boolean(preview()?.browserSession?.session.zdr)
+    try {
+      await writePendingChatLaunch({ text: question, startNewThread: true, zdr })
+    } catch {
+      setFormError(i18n.tr('Kunne ikke åpne chatten. Prøv igjen.', 'Could not open the chat. Try again.'))
+      return
+    }
+    navigateToChat(navigate)
   }
 
   /** Hydrates compact history from Quarry after a browser session is created,
@@ -2344,6 +2397,7 @@ export function KnowledgeComposer(props: {
             onBrowserSuggestAction={current.browserSession?.session.capabilities.includes('human_browsing') ? undefined : performBrowserSuggestedAction}
             onBrowserSocketObservation={handleBrowserSocketObservation}
             onBrowserTryOtherSource={() => void tryOtherSourceAfterBlock()}
+            onAskVerevon={(text) => void askVerevonFromBrowser(text)}
             onAdd={(markdown, allSelected) => void addToKnowledge(markdown, allSelected)}
             onDiscard={clearPreview}
             preview={current}

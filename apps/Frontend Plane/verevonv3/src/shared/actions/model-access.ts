@@ -392,6 +392,8 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'browser_tab.create': exempt('no_owner_executor', 'external_write'),
   'browser_tab.select': exempt('no_owner_executor', 'external_write'),
   'browser_tab.close': exempt('no_owner_executor', 'external_write'),
+  'browser_tab.control': exempt('no_owner_executor', 'external_write'),
+  'browser_attach.stop': exempt('no_owner_executor', 'external_write'),
   'browser_action.run': exempt('irreversible_destructive', 'destructive'),
   'browser_action.set_control_mode': exempt('agent_cannot_self_govern', 'external_write'),
   'browser_action.suggest': exempt('no_owner_executor', 'external_write'),

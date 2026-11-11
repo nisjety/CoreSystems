@@ -49,7 +49,11 @@ func (s *PgStore) CreateHumanBrowse(ctx context.Context, p CreateHumanBrowsePara
 				return ErrTooManyGrants
 			}
 		}
-		if _, err := tx.Exec(ctx, insertGrant, insertArgs(g)...); err != nil {
+		args, err := insertArgs(g)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, insertGrant, args...); err != nil {
 			return s.dbErr(ctx, "create_human_browse", err)
 		}
 		return nil

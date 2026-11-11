@@ -8,6 +8,9 @@
 //   - jobs                    org_id NOT NULL (010_jobs_org_id.sql) — the
 //     crawl/scrape/search/etc. runs themselves.
 //   - schedules                org_id NOT NULL (008_schedules_org_id.sql).
+//   - schedule_requests        org_id NOT NULL (026_schedule_requests.sql,
+//     WS15.S3b) — trigger/backfill request rows; no FK to schedules, so
+//     purged by their own org_id before the schedules.
 //   - quarry_sources           org_id NOT NULL (005_cycle23.sql) — Sources().
 //   - quarry_benchmarks        org_id NOT NULL (005_cycle23.sql) — schema
 //     exists as a cycle-28 placeholder; no Go code writes rows yet. Included
@@ -61,12 +64,15 @@ type PurgeResult struct {
 	// their delivery rows, which hold full event payloads (INNH-5, migration 025).
 	WebhooksDeleted          int64 `json:"webhooks_deleted"`
 	WebhookDeliveriesDeleted int64 `json:"webhook_deliveries_deleted"`
+	// ScheduleRequestsDeleted: the org's trigger/backfill request rows (WS15.S3b,
+	// migration 026). They hold ids, window times and short error text only.
+	ScheduleRequestsDeleted int64 `json:"schedule_requests_deleted"`
 }
 
 // Total sums every deleted-row count. Convenience for logging and tests.
 func (r PurgeResult) Total() int64 {
 	return r.JobsDeleted + r.SchedulesDeleted + r.SourcesDeleted + r.BenchmarksDeleted + r.IdempotencyKeysDeleted + r.ZdrTombstonesDeleted +
-		r.WebhooksDeleted + r.WebhookDeliveriesDeleted
+		r.WebhooksDeleted + r.WebhookDeliveriesDeleted + r.ScheduleRequestsDeleted
 }
 
 // PurgeOrg hard-deletes every row this in-memory store holds for orgID
@@ -82,6 +88,7 @@ func (d *memDB) PurgeOrg(orgID string) (PurgeResult, error) {
 		return PurgeResult{}, fmt.Errorf("store: PurgeOrg requires a non-empty orgID")
 	}
 	jobsDeleted := d.jobs.purgeByOrg(orgID, func(j Job) string { return j.OrgID })
+	requestsDeleted := d.schedReqs.purgeByOrg(orgID)
 	schedulesDeleted := d.schedules.purgeByOrg(orgID, func(s Schedule) string { return s.OrgID })
 	sourcesDeleted := d.sources.PurgeByOrg(orgID)
 	tombstonesDeleted := d.zdrTombs.purgeByOrg(orgID)
@@ -94,7 +101,30 @@ func (d *memDB) PurgeOrg(orgID string) (PurgeResult, error) {
 		ZdrTombstonesDeleted:     tombstonesDeleted,
 		WebhooksDeleted:          int64(webhooksDeleted),
 		WebhookDeliveriesDeleted: int64(deliveriesDeleted),
+		ScheduleRequestsDeleted:  int64(requestsDeleted),
 	}, nil
+}
+
+// purgeByOrg permanently removes every schedule request row of orgID, open or
+// finished (WS15.S3b). Matches the literal OrgID only; safe to call twice.
+func (m *memScheduleRequests) purgeByOrg(orgID string) int {
+	if m == nil || orgID == "" {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var removed int
+	kept := make([]quarrycontracts.ID, 0, len(m.order))
+	for _, id := range m.order {
+		if m.items[id].OrgID == orgID {
+			delete(m.items, id)
+			removed++
+			continue
+		}
+		kept = append(kept, id)
+	}
+	m.order = kept
+	return removed
 }
 
 // purgeByOrg removes every item for which orgOf(item) equals orgID,

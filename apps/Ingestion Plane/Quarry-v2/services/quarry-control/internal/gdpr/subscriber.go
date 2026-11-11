@@ -100,6 +100,7 @@ func handleDelivery(msg *nats.Msg, purger OrgPurger, edge EdgePurger, users User
 		logger.Info().
 			Int64("jobs_deleted", result.JobsDeleted).
 			Int64("schedules_deleted", result.SchedulesDeleted).
+			Int64("schedule_requests_deleted", result.ScheduleRequestsDeleted).
 			Int64("sources_deleted", result.SourcesDeleted).
 			Int64("benchmarks_deleted", result.BenchmarksDeleted).
 			Int64("idempotency_keys_deleted", result.IdempotencyKeysDeleted).
