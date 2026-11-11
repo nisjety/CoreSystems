@@ -1317,6 +1317,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   run_control_unavailable: { no: 'Kontrollen av kjøringen er midlertidig utilgjengelig.', en: 'Run control is temporarily unavailable.', retryable: true },
   run_not_found: { no: 'Fant ikke kjøringen, eller du har ikke tilgang til den.', en: 'The run was not found, or you do not have access to it.' },
   sidebar_too_large: { no: 'Sidepanelets oppsett er for stort til å lagres.', en: 'The sidebar layout is too large to save.' },
+  skip_authority_unavailable: { no: 'Siden kunne ikke hoppes over på en trygg måte. Kjøringen venter fortsatt.', en: 'The page could not be skipped safely. The run is still waiting.' },
   space_reminders_disabled: { no: 'Påminnelser i rom er ikke slått på.', en: 'Space reminders are not turned on.' },
   space_run_control_not_authorized: { no: 'Du kan ikke stoppe denne kjøringen.', en: 'Stopping this run is not authorized.' },
   space_sidebar_conflict: { no: 'Sidepanelets oppsett er endret et annet sted. Last det inn på nytt og gjør endringen igjen.', en: 'The sidebar layout changed somewhere else. Reload it and apply your change again.' },

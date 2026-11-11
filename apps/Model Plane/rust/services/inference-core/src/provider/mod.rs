@@ -13,6 +13,7 @@ pub mod effort;
 pub mod fallback;
 pub mod gemini;
 pub mod gemini_schema;
+pub mod health;
 pub mod intent;
 pub mod language;
 pub mod logprobs;
@@ -467,6 +468,11 @@ pub struct InferChunk {
     /// the FINAL chunk only (same rule as the token counts). `None` on every
     /// other chunk.
     pub provider_timing: Option<ProviderTiming>,
+    /// The service tier the call was sent to the provider on, populated on the FINAL chunk only (same
+    /// rule as the token counts): `"priority"` when the priority tier went upstream, empty when none
+    /// did or the serving adapter does not report one. Same source as
+    /// [`InferResponse::service_tier_used`]; never inferred from the request.
+    pub service_tier_used: String,
 }
 
 /// A unified embedding request used internally across providers.

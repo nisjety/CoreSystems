@@ -224,6 +224,8 @@ fn config(azure_endpoint: &str, broker_url: &str) -> InferenceConfig {
         codex_subscription_internal_api_key: Some(BROKER_KEY.to_owned()),
         codex_subscription_models: vec![MODEL.to_owned()],
         byo_gateway_enabled: false,
+        provider_benching: false,
+        same_tier_fallback: false,
         customer_gateway_internal_api_key: None,
         azure_openai_endpoint: Some(azure_endpoint.to_owned()),
         azure_openai_api_key: Some("test-key".to_owned()),

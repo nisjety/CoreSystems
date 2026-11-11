@@ -554,6 +554,14 @@ message InferChunk {
   // The route note of the call, on the final chunk only, as provider_timing is
   // (WS27-S7). Absent for a pinned model or while INFERENCE_ROUTE_NOTE is off.
   RouteNote route_note = 16;
+
+  // The service tier the provider actually served this stream on, populated on
+  // the final (usage-bearing) chunk only, as the token counts are. "priority"
+  // when the priority tier went upstream; empty when the provider does not
+  // report one. Same meaning as InferResponse.service_tier_used: it is never
+  // inferred from the request, and it carries no content, so Zero Data
+  // Retention does not change it.
+  string service_tier_used = 17;
 }
 
 // ProviderTiming — where inference-core's share of one Infer or InferStream

@@ -19,7 +19,7 @@
 //! `replace`), a stale revision (`aborted` `thread_goal_revision_conflict`) and a change to a
 //! closed goal (`failed_precondition` `thread_goal_closed`). This RPC writes only `active`,
 //! `paused` and `cleared`, and `met` as the owner's own mark, which also reopens a `met` or
-//! `blocked` goal to `active`. `RecordGoalVerdict` (EP-7 S3, model-gateway only) closes a goal as
+//! `blocked` goal to `active`. `RecordGoalVerdict` (EP-7 S3, the goal-judge principal only) closes a goal as
 //! `met` or `blocked`; the stop states come from the S2 ledger. The
 //! switch is `SESSION_CORE_THREAD_GOALS_ENABLED`, default off; while it is off every RPC answers
 //! `unavailable` `thread_goals_disabled`.
@@ -101,8 +101,19 @@ const USAGE_SOURCES: [&str; 4] = ["run_response", "progress", "ledger", "none"];
 /// The verdicts a judge may return: the table's CHECK and the gateway's closed set (EP-7 S3).
 const VERDICTS: [&str; 4] = ["met", "not_met", "blocked", "unsure"];
 
-/// The one caller that records a verdict: model-gateway, which runs the completion judge (EP-7 S3).
-const JUDGE_CALLER: &str = "service:model-gateway";
+/// The one caller that records a verdict or reads for the judge: the persistent goal-judge principal
+/// of model-gateway (EP-7 S3, S6), which is not the ZDR `service:model-gateway` principal. Control's
+/// `plane-service-principals.json` registry grants it the two scopes below.
+const JUDGE_CALLER: &str = "service:model-gateway-goal-judge";
+
+/// The scope `RecordGoalVerdict` needs, held by the goal-judge principal alone. Named in
+/// `plane-service-principals.json`; it is narrower than the org-wide `session:write`.
+pub(crate) const GOAL_VERDICT_WRITE_SCOPE: &str = "session:goal-verdict:write";
+
+/// The scope `GetGoalTurnForJudge` and `ListRunToolCallsForJudge` need, held by the goal-judge
+/// principal alone. Named in `plane-service-principals.json`; it is narrower than the org-wide
+/// `session:read`. It ends in `:read`, so `authorize_operation` treats it as a read.
+pub(crate) const GOAL_JUDGE_READ_SCOPE: &str = "session:goal-judge:read";
 
 /// The status reason a judge's `blocked` verdict writes.
 const JUDGE_BLOCKED: &str = "judge_blocked";
@@ -272,8 +283,9 @@ impl ThreadGoalService for ThreadGoalGrpc {
         let started = Instant::now();
         let result = async {
             let caller = identity(&request)?;
-            authorize_operation(&caller, "session:write")?;
             refuse_retention_exempt(&caller)?;
+            refuse_non_judge(&caller)?;
+            authorize_operation(&caller, GOAL_VERDICT_WRITE_SCOPE)?;
             if !thread_goals_enabled() {
                 return Err(Status::unavailable(DISABLED));
             }
@@ -294,7 +306,8 @@ impl ThreadGoalService for ThreadGoalGrpc {
         let result = async {
             let caller = identity(&request)?;
             refuse_retention_exempt(&caller)?;
-            authorize_operation(&caller, "session:read")?;
+            refuse_non_judge(&caller)?;
+            authorize_operation(&caller, GOAL_JUDGE_READ_SCOPE)?;
             if !thread_goals_enabled() {
                 return Err(Status::unavailable(DISABLED));
             }
@@ -315,7 +328,8 @@ impl ThreadGoalService for ThreadGoalGrpc {
         let result = async {
             let caller = identity(&request)?;
             refuse_retention_exempt(&caller)?;
-            authorize_operation(&caller, "session:read")?;
+            refuse_non_judge(&caller)?;
+            authorize_operation(&caller, GOAL_JUDGE_READ_SCOPE)?;
             if !thread_goals_enabled() {
                 return Err(Status::unavailable(DISABLED));
             }
@@ -546,6 +560,36 @@ async fn thread_is_waived(
     .fetch_one(&mut **tx)
     .await
     .map_err(internal)
+}
+
+/// Refuse a thread that holds a zero-retention or waived run, with the closed durable-mutation
+/// refusal (DEC-32: a waived run counts as ZDR). The judge RPCs call it before they read or write
+/// anything about the thread, so a held thread is never judged and no judge text reaches its rows.
+async fn refuse_retention_exempt_thread<'e, E>(
+    executor: E,
+    org_id: &str,
+    thread_id: &str,
+) -> Result<(), Status>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let held: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM runs
+                        WHERE thread_id = $1 AND org_id = $2
+                          AND retention_class IN ('zdr', 'zdr_waived'))",
+    )
+    .bind(thread_id)
+    .bind(org_id)
+    .fetch_one(executor)
+    .await
+    .map_err(internal)?;
+    if held {
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
+    }
+    Ok(())
 }
 
 /// Set a goal on a thread. The switch and the session scope are the RPC's to check, so the store
@@ -1184,7 +1228,7 @@ pub(crate) async fn settle_goal_turn(
 fn refuse_non_judge(caller: &VerifiedIdentity) -> Result<(), Status> {
     if !caller.is_service() || caller.principal_id() != JUDGE_CALLER {
         return Err(Status::permission_denied(
-            "a goal verdict is recorded by model-gateway",
+            "a goal verdict is recorded by the goal judge principal",
         ));
     }
     Ok(())
@@ -1259,8 +1303,10 @@ struct VerdictTurnRow {
 /// met, `blocked` stops it as `judge_blocked`, and `not_met` and `unsure` leave it open. The judge's
 /// tokens count toward the turn and the goal, and the stop rules run again on the new total.
 /// Idempotent per turn: a turn already judged changes nothing. A goal the owner already closed keeps
-/// its status, while the verdict and the spent tokens are still recorded. On a thread that holds a
-/// waived run only the verdict and the counts are kept, never the reasons or the evidence ids.
+/// its status, while the verdict and the spent tokens are still recorded. A thread that holds a
+/// zero-retention or waived run is refused before the turn is read, a retry included. A verdict row
+/// keeps the closed verdict, the judge model and the token count only: the reasons and the evidence
+/// ids are validated and never stored.
 /// Scoped to the goal's org, not to an owner: the judge is a service and acts for no person.
 pub(crate) async fn record_goal_verdict(
     pool: &PgPool,
@@ -1277,8 +1323,9 @@ pub(crate) async fn record_goal_verdict(
     }
     let turn_no = i32::try_from(req.turn_no).map_err(|_| invalid("turn_no out of range"))?;
     let verdict = check_verdict(&req.verdict)?;
-    let reasons = check_verdict_reasons(&req.reasons)?;
-    let evidence = check_evidence_ids(&req.evidence_ids)?;
+    // Input validation only: the reasons and the evidence ids are never stored.
+    check_verdict_reasons(&req.reasons)?;
+    check_evidence_ids(&req.evidence_ids)?;
     let judge_model = check_judge_model(&req.judge_model)?;
     let judge = bounded_tokens(req.judge_tokens);
     caller.authorize_org(org_id)?;
@@ -1293,6 +1340,10 @@ pub(crate) async fn record_goal_verdict(
     .await
     .map_err(internal)?
     .ok_or_else(|| Status::not_found("thread goal not found"))?;
+    // ZDR: a thread that holds a zero-retention or waived run is never judged. The refusal comes
+    // before the already-judged short-circuit, so a retry on a thread that gained such a run is
+    // refused too.
+    refuse_retention_exempt_thread(&mut *tx, org_id, &goal.thread_id).await?;
     let turn: VerdictTurnRow = sqlx::query_as(
         "SELECT outcome, verdict FROM thread_goal_turns
          WHERE goal_id = $1 AND turn_no = $2 FOR UPDATE",
@@ -1311,8 +1362,8 @@ pub(crate) async fn record_goal_verdict(
         tx.commit().await.map_err(internal)?;
         return Ok(found(goal));
     }
-    // ZDR: a thread holding a waived run keeps no judge text, only the verdict and the counts.
-    let keep_text = !thread_is_waived(&mut tx, &goal.thread_id).await?;
+    // A verdict row is content-free: the judge's reasons and evidence ids are validated above and
+    // written NULL, so only the closed verdict, the judge model and the token count are kept.
     sqlx::query(
         "UPDATE thread_goal_turns
          SET verdict = $3, verdict_reasons = $4, evidence_ids = $5, judge_model = $6,
@@ -1322,8 +1373,8 @@ pub(crate) async fn record_goal_verdict(
     .bind(&goal.id)
     .bind(turn_no)
     .bind(verdict)
-    .bind(keep_text.then_some(sqlx::types::Json(reasons)))
-    .bind(keep_text.then_some(sqlx::types::Json(evidence)))
+    .bind(Option::<sqlx::types::Json<Vec<String>>>::None)
+    .bind(Option::<sqlx::types::Json<Vec<String>>>::None)
     .bind(judge_model)
     .bind(judge)
     .execute(&mut *tx)
@@ -1382,7 +1433,9 @@ struct JudgeTurnRow {
 /// The goal and the unattended turn one scheduled fire ledgered, for the completion judge (EP-7 S6).
 /// Only model-gateway reads it, and only for a goal of its own org. The turn must belong to this goal
 /// and be bound to the named schedule and fire, so the judge reads that fire and no other. A waived
-/// run is refused (DEC-32). The answer is read only for a completed turn, and only its tail.
+/// run is refused (DEC-32), and so is a goal thread (or the fire's own thread) that holds a
+/// zero-retention or waived run, before the objective or the answer is read. The answer is read only
+/// for a completed turn, and only its tail.
 pub(crate) async fn get_goal_turn_for_judge(
     pool: &PgPool,
     caller: &VerifiedIdentity,
@@ -1443,6 +1496,18 @@ pub(crate) async fn get_goal_turn_for_judge(
                 .grpc_status(tonic::Code::FailedPrecondition),
         );
     }
+    let goal_thread: Option<String> =
+        sqlx::query_scalar("SELECT thread_id FROM thread_goals WHERE id = $1 AND org_id = $2")
+            .bind(goal_id)
+            .bind(org_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(internal)?;
+    let goal_thread = goal_thread.ok_or_else(|| Status::not_found("thread goal not found"))?;
+    refuse_retention_exempt_thread(pool, org_id, &goal_thread).await?;
+    if let Some(fire_thread) = turn.scheduled_thread_id.as_deref() {
+        refuse_retention_exempt_thread(pool, org_id, fire_thread).await?;
+    }
     let goal: GoalRow = sqlx::query_as(&format!(
         "SELECT {GOAL_COLUMNS} FROM thread_goals WHERE id = $1 AND org_id = $2"
     ))
@@ -1483,9 +1548,9 @@ const JUDGE_TOOL_CALLS_MAX: i64 = 200;
 
 /// The tool calls one run reserved, as the completion judge may cite them: action id, tool name and
 /// status, in reservation order. Only model-gateway reads it, for a run of its own org; a run of
-/// another org is `not_found`. A run that is not `persistent` (zero-retention or waived) is refused
-/// with the closed durable-mutation refusal and none of its rows is selected, and a row a
-/// zero-retention call wrote is left out. No argument, digest, result or receipt is selected.
+/// another org is `not_found`. A run that is not `persistent` (zero-retention or waived), and a
+/// persistent run on a thread that holds one, is refused with the closed durable-mutation refusal
+/// and none of its rows is selected, and a row a zero-retention call wrote is left out. No argument, digest, result or receipt is selected.
 pub(crate) async fn list_run_tool_calls_for_judge(
     pool: &PgPool,
     caller: &VerifiedIdentity,
@@ -1515,6 +1580,15 @@ pub(crate) async fn list_run_tool_calls_for_judge(
             )
         }
     }
+    let run_thread: Option<String> =
+        sqlx::query_scalar("SELECT thread_id FROM runs WHERE id = $1 AND org_id = $2")
+            .bind(run_id)
+            .bind(org_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(internal)?;
+    let run_thread = run_thread.ok_or_else(|| Status::not_found("run not found"))?;
+    refuse_retention_exempt_thread(pool, org_id, &run_thread).await?;
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT i.action_id, i.tool, i.status
          FROM session_tool_audit_intents i

@@ -130,6 +130,8 @@ interface ImportMetaEnv {
 	readonly VITE_REASONING_TRANSLATE?: string;
 	/** "true" offers a Problem mode in the feedback widget: the person ticks which content-free diagnostics go with the note (recent error ids, the app build, the chat run; never a transcript). Default off (W5-096-a). */
 	readonly VITE_REPORT_PROBLEM?: string;
+	/** "true" shows the active approval grants of a thread with a Revoke control (WS13-S6). Default off. */
+	readonly VITE_APPROVAL_SCOPE_GRANTS?: string;
 }
 
 interface ImportMeta {

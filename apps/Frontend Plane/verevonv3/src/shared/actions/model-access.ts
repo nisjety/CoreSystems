@@ -345,6 +345,8 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'chat.answer_question': exempt('no_owner_executor', 'context_write'),
   'approvals.decide': exempt('irreversible_destructive', 'destructive'),
   'approvals.preview': exempt('approval_authority', 'read'),
+  'approvals.list_grants': exempt('approval_authority', 'read'),
+  'approvals.revoke_grant': exempt('agent_cannot_self_govern', 'external_write'),
   'chat.clear_threads': exempt('irreversible_destructive', 'destructive'),
   'chat.delete_thread': exempt('no_owner_executor', 'context_write'),
   'chat.mark_thread_seen': exempt('no_owner_executor', 'context_write'),

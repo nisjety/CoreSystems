@@ -695,6 +695,9 @@ services:
       # PRIORITY_TIER_COST_MULTIPLIER (default 2.0, clamped to 1 through 5), so the choice costs more. Only an
       # explicit 1/on/true/yes/enabled turns it on. The frontend chip also needs VITE_CHAT_SPEED_TIER=true.
       MODEL_GATEWAY_SPEED_TIER: ${MODEL_GATEWAY_SPEED_TIER:-false}
+      # The multiplier itself, passed so model-gateway and cost-core (which prices the ledger row) run with the
+      # same value. Empty or unset means 2.0.
+      PRIORITY_TIER_COST_MULTIPLIER: ${PRIORITY_TIER_COST_MULTIPLIER:-}
       # WS16.S1, OFF by default: whose POST /v1/ai/chat calls publish a USAGE_ENVELOPE to cost-core.
       # off (nobody), service (a service principal such as service:quarry-edge, outside ZDR), all
       # (users too, which changes user accounting). Anything else is off. The build plan's default
@@ -1119,6 +1122,10 @@ services:
       APPROVAL_WRITE_PREVIEW_ENABLED: ${APPROVAL_WRITE_PREVIEW_ENABLED:-false}
       # EP-10 S4: the owner's edit of a pending approval before it is decided. Only the literal true.
       APPROVAL_EDIT_ENABLED: ${APPROVAL_EDIT_ENABLED:-false}
+      # WS13-S6: standing thread and run approval grants. Off by default; only the literal true.
+      APPROVAL_SCOPE_GRANTS_ENABLED: ${APPROVAL_SCOPE_GRANTS_ENABLED:-false}
+      # WS13-S7: "Always" rule proposals; the decide route reads it. Off by default; only the literal true.
+      APPROVAL_RULE_PROPOSALS_ENABLED: ${APPROVAL_RULE_PROPOSALS_ENABLED:-false}
       # ADR-0003 — the platform layer of the authored-instruction hierarchy
       # (`apps/AUTHORED_INSTRUCTIONS_ADR_2026-08-19.md`): deployment-level
       # configuration, deliberately not a database row (no "platform
@@ -1166,6 +1173,8 @@ services:
       NATS_SHARED_PASSWORD: ${SESSION_CORE_GDPR_NATS_PASSWORD:?SESSION_CORE_GDPR_NATS_PASSWORD is required}
       # OD-59: a user erasure also erases thread-bound memory of the person's threads. Only the literal true.
       SESSION_CORE_GDPR_THREAD_MEMORY_ERASURE: ${SESSION_CORE_GDPR_THREAD_MEMORY_ERASURE:-false}
+      # ZDR Z-17 (thread half): CreateThread stamps the caller's retention receipt on the thread and AppendMessage refuses a caller whose posture is not the thread's (zdr_posture_mismatch). NULL reads as persistent. Only the literal true.
+      SESSION_THREAD_RECEIPT_ENFORCE: ${SESSION_THREAD_RECEIPT_ENFORCE:-false}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: session-core
       # F-t3-075 (W5-075-a): JSON logs and exported span attributes keep only the names on TRACE_FIELDS. Only the literal true.
@@ -1302,6 +1311,10 @@ services:
       # D2-1149: refuse an approval create or decide from a waived run's credential before any metadata is
       # stored (DEC-32). Off by default; only the literal true turns it on.
       APPROVAL_WAIVER_REFUSE: ${APPROVAL_WAIVER_REFUSE:-false}
+      # WS13-S6: standing thread and run grants; off unless APPROVAL_AUDIT_EVENTS_ENABLED is on too (K3-2). Only the literal true.
+      APPROVAL_SCOPE_GRANTS_ENABLED: ${APPROVAL_SCOPE_GRANTS_ENABLED:-false}
+      # WS13-S7: "Always" rule proposals; session-core reads it once W2-WS13-S7-proposal-store-b lands. Off by default; only the literal true.
+      APPROVAL_RULE_PROPOSALS_ENABLED: ${APPROVAL_RULE_PROPOSALS_ENABLED:-false}
       # WS03-S8: park a crashed run instead of ending it (needs park recovery and the fold store on). Off by
       # default and owner-gated: the executor half is not built, so the worker parks nothing yet.
       SESSION_CORE_CRASH_PARK_ENABLED: ${SESSION_CORE_CRASH_PARK_ENABLED:-false}
@@ -1536,6 +1549,13 @@ services:
       # A customer gateway is never zero data retention and is billed to the customer. The service key is the
       # one Integration Core's customer-gateway broker accepts; unset, the subscription key above is used.
       INFERENCE_BYO_GATEWAY_ENABLED: ${INFERENCE_BYO_GATEWAY_ENABLED:-false}
+      # W5-072 platform-only resilient routing (OD-40). Benches a failing platform provider and model for a bounded
+      # time, never routes a platform call to a user subscription route, and refuses typed when all are benched.
+      # Only the literal true enables it.
+      INFERENCE_PROVIDER_BENCHING: ${INFERENCE_PROVIDER_BENCHING:-false}
+      # W5-072: keeps every fallback hop of a call at or above the privacy tier of the first eligible provider. It
+      # can refuse a call a lower-tier provider would serve, so it is its own switch. Only the literal true enables it.
+      INFERENCE_SAME_TIER_FALLBACK: ${INFERENCE_SAME_TIER_FALLBACK:-false}
       CUSTOMER_GATEWAY_INTERNAL_API_KEY: ${CUSTOMER_GATEWAY_INTERNAL_API_KEY:-}
       # The same switch model-gateway and execution-core read (see the
       # model-gateway block). Here it only adds the `agentic` feature to the
@@ -1771,6 +1791,8 @@ services:
       # both switches and refuses to start with the child on and the parent off.
       APPROVAL_SHELL_RULE_PROPOSALS_ENABLED: ${APPROVAL_SHELL_RULE_PROPOSALS_ENABLED:-false}
       APPROVAL_RULE_PROPOSALS_ENABLED: ${APPROVAL_RULE_PROPOSALS_ENABLED:-false}
+      # WS13-S6: standing thread and run grants, read here too. Off by default; only the literal true.
+      APPROVAL_SCOPE_GRANTS_ENABLED: ${APPROVAL_SCOPE_GRANTS_ENABLED:-false}
       # WS06-S9 Space `shell` lease rule: `observe` (default) leases when it can and counts
       # the unleased calls; `enforce` refuses a Space shell call without a sandbox lease.
       EXECUTION_CORE_SPACE_SHELL_LEASE: ${EXECUTION_CORE_SPACE_SHELL_LEASE:-observe}
@@ -2437,6 +2459,8 @@ services:
       CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED: ${CAPABILITY_CORE_SCHEDULED_NOTIFY_ENABLED:-false}
       # WS05-S5: stored per-tool allow/ask/never policies. Only the literal `true` enables them; off, they are stored and ignored.
       TOOL_POLICY_ENFORCED: ${TOOL_POLICY_ENFORCED:-false}
+      # WS13-S7: tool_policy_rule_used audit rows and the rule-expiry sweeper for "Always" rules. Off by default; only the literal true.
+      TOOL_POLICY_RULE_AUDIT_ENABLED: ${TOOL_POLICY_RULE_AUDIT_ENABLED:-false}
       BROWSER_AGENT_POLICY_ENFORCED: ${BROWSER_AGENT_POLICY_ENFORCED:-false}
       # Outbound service-token minting for the skill-learning review, which
       # calls session-core (read the transcript, upsert the skill) and
@@ -2967,6 +2991,12 @@ services:
       # image_price_rates (no row is seeded; an unpriced image is recorded with no
       # image cost and flagged). Only the literal true turns it on.
       COST_CORE_IMAGE_PRICING_ENABLED: ${COST_CORE_IMAGE_PRICING_ENABLED:-false}
+      # The list-price multiplier of a call model-gateway reports as served on the priority tier
+      # (service_tier_used "priority" on its USAGE_ENVELOPE). Empty or unset means 2.0, and a number is
+      # clamped to 1 through 5. It must equal the value model-gateway runs with, so the frames and the
+      # ledger state the same amount. No row carries the tier while MODEL_GATEWAY_SPEED_TIER and
+      # INFERENCE_SPEED_TIER_SPLIT are off, so this changes nothing then.
+      PRIORITY_TIER_COST_MULTIPLIER: ${PRIORITY_TIER_COST_MULTIPLIER:-}
       # Optional Azure Cost Management actual-charge import. Grant this service
       # Cost Management Reader at the configured Azure scope and map Foundry
       # `project` tag values to Verevon organization IDs. Azure totals remain

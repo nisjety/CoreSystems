@@ -297,6 +297,13 @@ services:
             #                                     as if the route did not exist.
             WEB_POLICY_CLAIM_ENABLED: ${WEB_POLICY_CLAIM_ENABLED:-0}
             API_KEY_AGENT_EXCHANGE_ENABLED: ${API_KEY_AGENT_EXCHANGE_ENABLED:-0}
+            # ZDR-Z-03b: read org-core's effectiveZdr (lapse rule applied) instead of
+            # computing intent AND entitlement here. Strict literal "true" turns it on.
+            # Rollout order: org-core with ZDR-Z-03a goes first, then this switch. On
+            # an older org-core every lookup fails closed (every token mint answers 503
+            # retention_posture_unavailable). Flip it together with integration-corev2's
+            # INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED (D-ZDR-10).
+            AUTH_CORE_ZDR_EFFECTIVE_POSTURE_ENABLED: ${AUTH_CORE_ZDR_EFFECTIVE_POSTURE_ENABLED:-false}
             USER_CORE_SERVICE_TOKEN: ${USER_CORE_AUTH_TOKEN:?USER_CORE_AUTH_TOKEN is required}
             # Dedicated read-only credential for user-core's exact Better Auth
             # membership decision. It must not be reused as a general internal key.

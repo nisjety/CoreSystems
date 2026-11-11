@@ -644,6 +644,12 @@ message ApprovalCause {
   // EP-1 design reserved: `host_class` took 11 in the mp-w2w3 merge. WS21-S6's
   // site-consent cause reuses this field.
   string host = 15;
+
+  // The registry capability the paused MCP tool is bound to, as execution-core resolved it from
+  // its verified registry binding, never from model text. Set only for a pinned MCP tool whose
+  // pause is the high-risk capability check alone, the one pause a confirmed Always rule (a
+  // capability-core user-scope allow) lifts (WS13 S7, D-WS13-8). Empty otherwise.
+  string capability_id = 16;
 }
 
 // A durable todo record.

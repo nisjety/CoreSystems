@@ -7054,9 +7054,9 @@ mod approval_scope_grant_db_tests {
         let p = pending(
             &pool,
             "always",
-            "risky_effect_under_ask",
+            "capability_high_risk",
             "mcp__fixture__create_note",
-            "external_write",
+            "read",
         )
         .await;
         sqlx::query(
@@ -7068,6 +7068,15 @@ mod approval_scope_grant_db_tests {
         .execute(&pool)
         .await
         .expect("pin the tool definition");
+        sqlx::query(
+            "UPDATE approvals SET metadata = jsonb_set(metadata, '{cause,capability_id}', to_jsonb($2::text)) \
+             WHERE id = $1",
+        )
+        .bind(&p.approval_id)
+        .bind("cap.mcp_tool.fixture.create_note")
+        .execute(&pool)
+        .await
+        .expect("bind the registry capability");
         let record = DecisionRecord {
             source: "user",
             scope: "thread",

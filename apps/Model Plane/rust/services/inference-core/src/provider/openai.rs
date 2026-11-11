@@ -1038,6 +1038,7 @@ impl ProviderRouter for OpenAiProvider {
                                     cache_read_input_tokens,
                                     cache_creation_input_tokens,
                                     provider_timing: None,
+                                    service_tier_used: String::new(),
                                 })
                                 .await;
                             return;
@@ -1103,6 +1104,7 @@ impl ProviderRouter for OpenAiProvider {
                                     cache_read_input_tokens: 0,
                                     cache_creation_input_tokens: 0,
                                     provider_timing: None,
+                                    service_tier_used: String::new(),
                                 };
                                 if tx.send(chunk).await.is_err() {
                                     return;
@@ -1145,6 +1147,7 @@ impl ProviderRouter for OpenAiProvider {
                     cache_read_input_tokens,
                     cache_creation_input_tokens,
                     provider_timing: None,
+                    service_tier_used: String::new(),
                 })
                 .await;
         });

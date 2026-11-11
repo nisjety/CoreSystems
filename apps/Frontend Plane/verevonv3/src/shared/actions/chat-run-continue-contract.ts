@@ -126,8 +126,9 @@ export const CHAT_RUN_CONTINUE_HTTP_REFUSALS = [
 export type ChatRunContinueHttpRefusalCode = (typeof CHAT_RUN_CONTINUE_HTTP_REFUSALS)[number]['code']
 
 /**
- * The refusal codes an `error` frame of a continuation can carry: 20 message
- * tokens the executor returns (the last three, `park_not_restorable`,
+ * The refusal codes an `error` frame of a continuation can carry: 21 message
+ * tokens the executor returns (`skip_authority_unavailable` is its refusal of a
+ * skipped-site continuation whose retained authority cannot be read; the last three, `park_not_restorable`,
  * `park_route_unavailable` and `park_not_due`, are its refusals of the resume of a
  * PARKED run, WS03 S8: the gateway sends them only on a park continue, which never
  * spends an approval), 2 the gateway derives from the status (a vanished approval
@@ -152,6 +153,7 @@ export const CHAT_RUN_CONTINUE_FRAME_REFUSALS = [
   'resume_checkpoint_unavailable',
   'not_resumable',
   'resume_forbidden',
+  'skip_authority_unavailable',
   'park_not_restorable',
   'park_route_unavailable',
   'park_not_due',

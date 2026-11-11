@@ -80,6 +80,54 @@
       ]
     },
     {
+      "name": "APPROVAL_AUDIT_EVENTS_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS13-S3: the approval decision audit event, a content-free approval_decided outbox row and its provenance record. Off by default; only the literal true.",
+      "declarations": [
+        { "service": "session-core", "env": "APPROVAL_AUDIT_EVENTS_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "APPROVAL_RULE_PROPOSALS_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS13-S7 'Always' rule proposals and their list, confirm and dismiss routes. Needs APPROVAL_SCOPE_GRANTS_ENABLED, and TOOL_POLICY_ENFORCED plus TOOL_POLICY_RULE_AUDIT_ENABLED on capability-core. Only the literal true.",
+      "declarations": [
+        { "service": "model-gateway", "env": "APPROVAL_RULE_PROPOSALS_ENABLED", "default": "false" },
+        { "service": "execution-core", "env": "APPROVAL_RULE_PROPOSALS_ENABLED", "default": "false" },
+        { "service": "session-core", "env": "APPROVAL_RULE_PROPOSALS_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "APPROVAL_SCOPE_GRANTS_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS13-S6 standing grants. Session-core refuses to boot with it on and APPROVAL_AUDIT_EVENTS_ENABLED off (K3-2). Keep off until execution-core holds approval:grant_use (D-WS13-5) and grants are digest-bound (W2-WS13-S7-grant-digest).",
+      "declarations": [
+        { "service": "model-gateway", "env": "APPROVAL_SCOPE_GRANTS_ENABLED", "default": "false" },
+        { "service": "execution-core", "env": "APPROVAL_SCOPE_GRANTS_ENABLED", "default": "false" },
+        { "service": "session-core", "env": "APPROVAL_SCOPE_GRANTS_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "APPROVAL_SHELL_RULE_PROPOSALS_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "EP-9 E4: shell-rule narrowing of WS13-S7 rule proposals. Stays off (D-WS13-6). Refused at startup unless APPROVAL_RULE_PROPOSALS_ENABLED is on.",
+      "declarations": [
+        { "service": "execution-core", "env": "APPROVAL_SHELL_RULE_PROPOSALS_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "APPROVAL_WAIVER_REFUSE",
       "kind": "switch",
       "owner": "model-plane",
@@ -452,6 +500,28 @@
       "purpose": "W4-BYO-3 per-org overlay (hide, order, role candidates; narrow-only) read from session-core and applied after the platform overlay; entitlement and ZDR, privacy and residency floors still apply. Needs SESSION_ORG_ROUTING_OVERLAY.",
       "declarations": [
         { "service": "inference-core", "env": "INFERENCE_ORG_OVERLAY", "default": "false" }
+      ]
+    },
+    {
+      "name": "INFERENCE_PROVIDER_BENCHING",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Benches a failing platform provider and model for a bounded time, never routes a platform request to a user subscription route, and refuses typed when all are benched. Only the literal true.",
+      "declarations": [
+        { "service": "inference-core", "env": "INFERENCE_PROVIDER_BENCHING", "default": "false" }
+      ]
+    },
+    {
+      "name": "INFERENCE_SAME_TIER_FALLBACK",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Keeps every fallback hop of a call at or above the privacy tier of the first eligible provider. Only the literal true.",
+      "declarations": [
+        { "service": "inference-core", "env": "INFERENCE_SAME_TIER_FALLBACK", "default": "false" }
       ]
     },
     {
@@ -1052,6 +1122,17 @@
       ]
     },
     {
+      "name": "SESSION_THREAD_RECEIPT_ENFORCE",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Z-17: CreateThread stamps the retention receipt; AppendMessage refuses a caller whose posture differs (zdr_posture_mismatch) before any write; a waiver needs the same connection and acknowledgement. No receipt = persistent. Only true.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_THREAD_RECEIPT_ENFORCE", "default": "false" }
+      ]
+    },
+    {
       "name": "SKILL_BUNDLE_MOUNT_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -1118,6 +1199,17 @@
       ]
     },
     {
+      "name": "TOOL_POLICY_RULE_AUDIT_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS13-S7 rule audit: tool_policy_rule_used rows (W2-WS13-S7-rule-use-b) and the tool_policy_rule_expired sweeper (W2-WS13-S7-rule-expiry). An unstated run counts as retention_bound. Refs D2-1124, D2-1125, D2-1126.",
+      "declarations": [
+        { "service": "capability-core", "env": "TOOL_POLICY_RULE_AUDIT_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "USER_CORE_ORG_ERASURE_CONSUMER_ENABLED",
       "kind": "switch",
       "owner": "control-plane",
@@ -1160,6 +1252,28 @@
       "orgOverridable": true,
       "purpose": "Thumbs and reason chips on a durable run's result, an agent run or a scheduled run, rated by run id. Off, the control renders nothing. Only the literal true turns it on.",
       "codePath": "apps/Frontend Plane/verevonv3/src/features/chat/components/ResultFeedback.tsx"
+    },
+    {
+      "name": "VITE_APPROVAL_RULE_PROPOSALS",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "orgOverridable": false,
+      "purpose": "WS13-S7: the settings section to confirm or dismiss rules proposed from Always. Built by W2-WS13-S7-spa-proposals. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/src/features/settings/components/ApprovalRuleProposalsSection.tsx"
+    },
+    {
+      "name": "VITE_APPROVAL_SCOPE_GRANTS",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "orgOverridable": false,
+      "purpose": "WS13-S6: the thread's active approval grants, with Revoke. Built by W2-WS13-S6-spa-grants. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/src/features/chat/components/ThreadApprovalGrants.tsx"
     },
     {
       "name": "VITE_CHAT_CHANGED_FILES",
@@ -1254,11 +1368,8 @@
     "AGENT_ASK_USER_RESUME_ENABLED",
     "AGENT_CONTINUE_AFTER_APPROVAL_ENABLED",
     "AGENT_MEMORY_AUTH_MODE",
-    "APPROVAL_AUDIT_EVENTS_ENABLED",
     "APPROVAL_DENIAL_MEMORY_ENABLED",
     "APPROVAL_EDIT_ENABLED",
-    "APPROVAL_RULE_PROPOSALS_ENABLED",
-    "APPROVAL_SHELL_RULE_PROPOSALS_ENABLED",
     "APPROVAL_WRITE_PREVIEW_ENABLED",
     "AUTHORED_KINDS_ENABLED",
     "BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED",

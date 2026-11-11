@@ -112,6 +112,12 @@ pub struct FallbackChain {
     /// `MODEL_ENTITLEMENT_MODE` says otherwise; the handlers ask it, and the
     /// chain applies the answer a request carries.
     entitlement: Arc<EntitlementGate>,
+    /// Failure bench and user-route guard (`INFERENCE_PROVIDER_BENCHING`). `None` when the switch is off:
+    /// the walk then neither benches nor guards and is unchanged.
+    bench: Option<Arc<super::health::BenchBoard>>,
+    /// Whether every fallback hop stays at or above the privacy tier of the first eligible provider
+    /// (`INFERENCE_SAME_TIER_FALLBACK`). Off, a hop may land on a lower tier, as it does today.
+    same_tier: bool,
 }
 
 /// Switch for the route note (WS27-S7): what the budget did to a Verevon call, carried on the wire. Off
@@ -510,9 +516,20 @@ struct ThrottleState {
     /// ends the walk as `vision_unsupported`, ahead of the privacy, retention
     /// and residency refusals, which a candidate that reached this gate passed.
     vision_skipped: bool,
+    /// The privacy tier of the first provider this call found eligible, set only under
+    /// `INFERENCE_SAME_TIER_FALLBACK`. It holds for the whole call: every rung of the ladder and both
+    /// passes, so a pass reset keeps it ([`ThrottleState::next_pass`]).
+    anchor_tier: Option<PrivacyTier>,
 }
 
 impl ThrottleState {
+    /// Clears what one pass learned before the second pass, and keeps the call's tier anchor.
+    fn next_pass(&mut self) {
+        let anchor = self.anchor_tier;
+        *self = Self::default();
+        self.anchor_tier = anchor;
+    }
+
     fn record_refusal(&mut self, refusal: ProviderError) {
         if self.refused.is_none() {
             self.refused = Some(refusal);
@@ -1139,6 +1156,8 @@ impl FallbackChain {
             deployed,
             catalogs,
             entitlement: Arc::new(EntitlementGate::new(&EntitlementConfig::from_env())),
+            bench: None,
+            same_tier: false,
         }
     }
 
@@ -1182,6 +1201,8 @@ impl FallbackChain {
             // the ladder is walked as written.
             deployed: DeployedModels::default(),
             entitlement: Arc::new(EntitlementGate::off()),
+            bench: None,
+            same_tier: false,
         }
     }
 
@@ -1191,6 +1212,70 @@ impl FallbackChain {
     pub fn with_entitlement(mut self, gate: EntitlementGate) -> Self {
         self.entitlement = Arc::new(gate);
         self
+    }
+
+    /// Turn the failure bench and the user-route guard on or off (`INFERENCE_PROVIDER_BENCHING`).
+    /// Off leaves every walk as it is today.
+    #[must_use]
+    pub fn with_benching(mut self, on: bool) -> Self {
+        self.bench = on.then(|| Arc::new(super::health::BenchBoard::default()));
+        self
+    }
+
+    /// Turn the same-tier fallback anchor on or off (`INFERENCE_SAME_TIER_FALLBACK`). Off leaves every
+    /// walk as it is today.
+    #[must_use]
+    pub fn with_same_tier_fallback(mut self, on: bool) -> Self {
+        self.same_tier = on;
+        self
+    }
+
+    /// The route rules that run after every other gate of a chat walk: the user-route guard, then the
+    /// same-tier anchor. `true` means the provider is skipped. A skipped-by-guard provider is not
+    /// eligible, so it neither sets the anchor nor counts as an attempt. Logs name the provider and the
+    /// tier labels, never content.
+    fn route_rules_skip(
+        &self,
+        req: &InferRequest,
+        name: &str,
+        caps: &ProviderCapabilities,
+        throttle: &mut ThrottleState,
+    ) -> bool {
+        if self.bench.is_some()
+            && (caps.provider_id == mp_contracts::agentic_subscription::PROVIDER_ID
+                || name == mp_contracts::agentic_subscription::PROVIDER_ID)
+        {
+            // A platform call never moves onto the user's subscription route (ownership-matrix rule 17):
+            // only a request that names it and carries a connection may reach it.
+            let named = !req.provider_hint.trim().is_empty()
+                && Self::hint_matches(&req.provider_hint, name, &caps.aliases);
+            if !(named && !req.subscription_connection_id.trim().is_empty()) {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    "provider skipped: a platform call is never moved onto the user subscription route"
+                );
+                return true;
+            }
+        }
+        if self.same_tier {
+            let tier = PrivacyTier::classify(caps);
+            match throttle.anchor_tier {
+                None => throttle.anchor_tier = Some(tier),
+                Some(anchor) if tier < anchor => {
+                    warn!(
+                        provider = %name,
+                        request_id = %req.request_id,
+                        anchor_tier = anchor.label(),
+                        provider_tier = tier.label(),
+                        "provider skipped: privacy tier below the first eligible provider of this call"
+                    );
+                    return true;
+                }
+                Some(_) => {}
+            }
+        }
+        false
     }
 
     /// The gate the handlers resolve a caller's entitlement through.
@@ -1848,7 +1933,7 @@ impl FallbackChain {
                 let wait_began = tokio::time::Instant::now();
                 tokio::time::sleep(wait).await;
                 clock.waited(wait_began);
-                throttle = ThrottleState::default();
+                throttle.next_pass();
             }
 
             for model in Self::attempt_models(&req.model, &ladder) {
@@ -2001,6 +2086,9 @@ impl FallbackChain {
                     "provider skipped: the request carries images and this model does not accept them"
                 );
                 throttle.vision_skipped = true;
+                continue;
+            }
+            if self.route_rules_skip(req, name, &caps, throttle) {
                 continue;
             }
             for attempt in 1..=self.max_retries {
@@ -2312,7 +2400,7 @@ impl FallbackChain {
                 let wait_began = tokio::time::Instant::now();
                 tokio::time::sleep(wait).await;
                 clock.waited(wait_began);
-                throttle = ThrottleState::default();
+                throttle.next_pass();
             }
 
             for model in Self::attempt_models(&req.model, &ladder) {
@@ -2429,6 +2517,9 @@ impl FallbackChain {
                     "provider skipped: the request carries images and this model does not accept them"
                 );
                 throttle.vision_skipped = true;
+                continue;
+            }
+            if self.route_rules_skip(req, name, &caps, throttle) {
                 continue;
             }
             for attempt in 1..=self.max_retries {
@@ -4260,6 +4351,7 @@ mod resolution_tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 provider_timing: None,
+                service_tier_used: String::new(),
             };
             tokio::spawn(async move {
                 let _ = tx.send(chunk).await;
@@ -5172,6 +5264,7 @@ mod resolution_tests {
                         cache_read_input_tokens: 0,
                         cache_creation_input_tokens: 0,
                         provider_timing: None,
+                        service_tier_used: String::new(),
                     })
                     .await;
                 let _ = tx
@@ -5191,6 +5284,7 @@ mod resolution_tests {
                         cache_read_input_tokens: 0,
                         cache_creation_input_tokens: 0,
                         provider_timing: None,
+                        service_tier_used: String::new(),
                     })
                     .await;
             });
@@ -5875,5 +5969,221 @@ mod resolution_tests {
 
         chain.infer(&text_only).await.unwrap();
         assert_eq!(seen.lock().unwrap().as_deref(), Some("gpt-4o"));
+    }
+
+    /// A routing double for the same-tier anchor and the user-route guard: it declares its own id,
+    /// family and residency, counts its calls, and either serves or fails them.
+    struct RouteStub {
+        provider_id: &'static str,
+        family: ModelFamily,
+        residency: Residency,
+        fails: bool,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl RouteStub {
+        fn boxed(
+            provider_id: &'static str,
+            family: ModelFamily,
+            residency: Residency,
+            fails: bool,
+        ) -> (BoxedProvider, Arc<std::sync::atomic::AtomicUsize>) {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let provider: BoxedProvider = Arc::new(Self {
+                provider_id,
+                family,
+                residency,
+                fails,
+                calls: calls.clone(),
+            });
+            (provider, calls)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRouter for RouteStub {
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities {
+                provider_id: self.provider_id.to_owned(),
+                model_family: self.family,
+                residency: self.residency,
+                ..crate::provider::ProviderCapabilities::default()
+            }
+        }
+
+        async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fails {
+                return Err(ProviderError::Http("500 Internal Server Error: upstream".to_owned()));
+            }
+            Ok(InferResponse {
+                request_id: req.request_id.clone(),
+                content: "ok".to_owned(),
+                model_used: req.model.clone(),
+                stop_reason: "stop".to_owned(),
+                ..InferResponse::default()
+            })
+        }
+
+        async fn infer_stream(
+            &self,
+            _req: &InferRequest,
+        ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProviderError::Unavailable("route stub".to_owned()))
+        }
+    }
+
+    fn route_request(id: &str, model: &str) -> InferRequest {
+        InferRequest {
+            request_id: id.to_owned(),
+            model: model.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// Both switches off: a failed EU first hop is followed by the GLOBAL provider, as before.
+    #[tokio::test]
+    async fn route_rules_off_walk_is_unchanged() {
+        use std::sync::atomic::Ordering;
+        let (eu, eu_calls) =
+            RouteStub::boxed("azure-openai", ModelFamily::OpenAiCompatible, Residency::Eu, true);
+        let (global, global_calls) =
+            RouteStub::boxed("openai", ModelFamily::OpenAiCompatible, Residency::Global, false);
+        let chain = FallbackChain::new_with_providers(
+            vec![("azure-openai".to_owned(), eu), ("openai".to_owned(), global)],
+            1,
+        )
+        .with_benching(false)
+        .with_same_tier_fallback(false);
+
+        chain.infer(&route_request("off-1", "gpt-4o-mini")).await.expect("GLOBAL serves");
+        assert_eq!(eu_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(global_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Same-tier on: a GLOBAL provider is never tried after an EU_RESIDENT first hop failed.
+    #[tokio::test]
+    async fn same_tier_never_falls_to_a_lower_tier_within_one_rung() {
+        use std::sync::atomic::Ordering;
+        let (eu, eu_calls) =
+            RouteStub::boxed("azure-openai", ModelFamily::OpenAiCompatible, Residency::Eu, true);
+        let (global, global_calls) =
+            RouteStub::boxed("openai", ModelFamily::OpenAiCompatible, Residency::Global, false);
+        let chain = FallbackChain::new_with_providers(
+            vec![("azure-openai".to_owned(), eu), ("openai".to_owned(), global)],
+            1,
+        )
+        .with_same_tier_fallback(true);
+
+        let outcome = chain.infer(&route_request("tier-1", "gpt-4o-mini")).await;
+        // A failed eligible provider is exhaustion, not a tier refusal, and nothing is downgraded.
+        assert!(outcome.is_err(), "the only provider at the anchor tier failed");
+        assert_eq!(eu_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(global_calls.load(Ordering::SeqCst), 0, "GLOBAL is never tried");
+    }
+
+    /// The anchor holds on a later rung of the ladder and across the pass reset: the first model fails
+    /// on the EU provider, the second model is served only by a GLOBAL provider, and the call never
+    /// reaches it. With the switch off the same walk does reach it.
+    #[tokio::test]
+    async fn same_tier_anchor_holds_on_a_later_rung_and_across_the_pass_reset() {
+        use std::sync::atomic::Ordering;
+        for same_tier in [true, false] {
+            let (eu, eu_calls) = RouteStub::boxed(
+                "azure-openai",
+                ModelFamily::OpenAiCompatible,
+                Residency::Eu,
+                true,
+            );
+            let (global, global_calls) =
+                RouteStub::boxed("anthropic", ModelFamily::Anthropic, Residency::Global, false);
+            let chain = FallbackChain::new_with_providers(
+                vec![("azure-openai".to_owned(), eu), ("anthropic".to_owned(), global)],
+                1,
+            )
+            .with_same_tier_fallback(same_tier);
+            let req = route_request("tier-2", "gpt-4o-mini");
+            let mut attempts = 0u32;
+            let mut throttle = ThrottleState::default();
+            let mut clock = CallClock::start();
+
+            let first = chain
+                .infer_one_model(&req, "gpt-4o-mini", &mut attempts, &mut throttle, &mut clock)
+                .await;
+            assert!(first.is_none(), "the EU provider fails the first rung");
+            throttle.next_pass();
+            let second = chain
+                .infer_one_model(&req, "claude-sonnet-4", &mut attempts, &mut throttle, &mut clock)
+                .await;
+
+            assert_eq!(eu_calls.load(Ordering::SeqCst), 1);
+            if same_tier {
+                assert_eq!(throttle.anchor_tier, Some(PrivacyTier::EuResident));
+                assert!(second.is_none(), "the GLOBAL provider is below the anchor");
+                assert_eq!(global_calls.load(Ordering::SeqCst), 0);
+            } else {
+                assert_eq!(throttle.anchor_tier, None);
+                assert!(second.is_some(), "without the anchor the later rung is served");
+                assert_eq!(global_calls.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    /// Benching on: a request with no hint and no connection never reaches the subscription provider
+    /// and makes no attempt on it; the platform provider after it serves.
+    #[tokio::test]
+    async fn benching_keeps_an_unhinted_request_off_the_subscription_route() {
+        use std::sync::atomic::Ordering;
+        let id = mp_contracts::agentic_subscription::PROVIDER_ID;
+        let (subscription, subscription_calls) =
+            RouteStub::boxed(id, ModelFamily::OpenAiCompatible, Residency::Eu, false);
+        let (platform, platform_calls) =
+            RouteStub::boxed("azure-openai", ModelFamily::OpenAiCompatible, Residency::Eu, false);
+        let providers = || {
+            vec![
+                (id.to_owned(), subscription.clone()),
+                ("azure-openai".to_owned(), platform.clone()),
+            ]
+        };
+
+        let guarded = FallbackChain::new_with_providers(providers(), 1).with_benching(true);
+        guarded.infer(&route_request("bench-1", "gpt-4o-mini")).await.expect("platform serves");
+        assert_eq!(subscription_calls.load(Ordering::SeqCst), 0, "no attempt on the subscription");
+        assert_eq!(platform_calls.load(Ordering::SeqCst), 1);
+
+        // Off, the walk is byte-identical to today: the subscription provider is asked first.
+        let unguarded = FallbackChain::new_with_providers(providers(), 1);
+        unguarded.infer(&route_request("bench-2", "gpt-4o-mini")).await.expect("served");
+        assert_eq!(subscription_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Benching on: a request that names the subscription provider and carries a connection still
+    /// reaches it; naming it without a connection does not, and moves nowhere else.
+    #[tokio::test]
+    async fn benching_lets_a_hinted_subscription_request_with_a_connection_through() {
+        use std::sync::atomic::Ordering;
+        let id = mp_contracts::agentic_subscription::PROVIDER_ID;
+        let (subscription, subscription_calls) =
+            RouteStub::boxed(id, ModelFamily::OpenAiCompatible, Residency::Eu, false);
+        let (platform, platform_calls) =
+            RouteStub::boxed("azure-openai", ModelFamily::OpenAiCompatible, Residency::Eu, false);
+        let chain = FallbackChain::new_with_providers(
+            vec![(id.to_owned(), subscription), ("azure-openai".to_owned(), platform)],
+            1,
+        )
+        .with_benching(true);
+
+        let mut pinned = route_request("bench-3", "gpt-4o-mini");
+        pinned.provider_hint = id.to_owned();
+        pinned.subscription_connection_id = "connection".to_owned();
+        chain.infer(&pinned).await.expect("the pinned subscription request is served");
+        assert_eq!(subscription_calls.load(Ordering::SeqCst), 1);
+
+        let mut no_connection = route_request("bench-4", "gpt-4o-mini");
+        no_connection.provider_hint = id.to_owned();
+        assert!(chain.infer(&no_connection).await.is_err());
+        assert_eq!(subscription_calls.load(Ordering::SeqCst), 1, "not asked without a connection");
+        assert_eq!(platform_calls.load(Ordering::SeqCst), 0, "never moved onto a platform route");
     }
 }

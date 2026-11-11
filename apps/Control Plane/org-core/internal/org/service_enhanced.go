@@ -55,12 +55,12 @@ type AuditPublisher interface {
 type Service struct {
 	repo            *Repository
 	publisher       Publisher
-	sharedPublisher SharedPublisher    // cross-plane events on verevon-nats
-	auditPublisher  AuditPublisher     // durable verevon.audit.v2.* dispatch on local controlplane-nats
-	cache           *rediscache.Client // optional, nil if Redis disabled
-	siemSealer      *SIEMSealer        // nil unless ORG_SIEM_DESTINATIONS_ENABLED (WS06-S7)
-	domainResolver  DomainTXTResolver  // nil unless ORG_DOMAIN_VERIFICATION_ENABLED (WS05-S6)
-	identityAdmin   IdentityProviderAdmin // nil unless auth-core's SSO admin credential is set (WS05-S7)
+	sharedPublisher SharedPublisher           // cross-plane events on verevon-nats
+	auditPublisher  AuditPublisher            // durable verevon.audit.v2.* dispatch on local controlplane-nats
+	cache           *rediscache.Client        // optional, nil if Redis disabled
+	siemSealer      *SIEMSealer               // nil unless ORG_SIEM_DESTINATIONS_ENABLED (WS06-S7)
+	domainResolver  DomainTXTResolver         // nil unless ORG_DOMAIN_VERIFICATION_ENABLED (WS05-S6)
+	identityAdmin   IdentityProviderAdmin     // nil unless auth-core's SSO admin credential is set (WS05-S7)
 	scimProvisioner ScimMembershipProvisioner // nil unless ORG_SCIM_ENABLED and the auth-core credential are set (WS05-S8)
 }
 
@@ -102,7 +102,7 @@ func (s *Service) GetOrganization(ctx context.Context, id string) (*Organization
 		if cached, err := s.cache.Get(ctx, key); err == nil {
 			var org Organization
 			if json.Unmarshal([]byte(cached), &org) == nil {
-				return &org, nil
+				return withRetentionView(&org), nil
 			}
 		}
 	}
@@ -118,7 +118,7 @@ func (s *Service) GetOrganization(ctx context.Context, id string) (*Organization
 		}
 	}
 
-	return org, nil
+	return withRetentionView(org), nil
 }
 
 func (s *Service) GetOrganizationWithDetails(ctx context.Context, id string) (*OrganizationWithDetails, error) {
@@ -235,14 +235,28 @@ func (s *Service) SetQuotaLimit(
 // [1, 500]; callers wanting the full set should page with offset until a
 // page shorter than the requested limit is returned.
 func (s *Service) ListOrganizations(ctx context.Context, limit, offset int) ([]Organization, error) {
-	return s.repo.ListOrganizations(ctx, limit, offset)
+	orgs, err := s.repo.ListOrganizations(ctx, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	for i := range orgs {
+		withRetentionView(&orgs[i])
+	}
+	return orgs, nil
 }
 
 func (s *Service) ListUserOrganizations(ctx context.Context, userID string) ([]Organization, error) {
 	if userID == "" {
 		return nil, fmt.Errorf("user id is required")
 	}
-	return s.repo.ListUserOrganizations(ctx, userID)
+	orgs, err := s.repo.ListUserOrganizations(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range orgs {
+		withRetentionView(&orgs[i])
+	}
+	return orgs, nil
 }
 
 func (s *Service) AddOrganizationMember(ctx context.Context, orgID, userID, role string) error {
@@ -507,7 +521,11 @@ func (s *Service) GetOrganizationByTenant(ctx context.Context, provider, tenantI
 	if strings.TrimSpace(tenantID) == "" {
 		return nil, fmt.Errorf("tenant id is required")
 	}
-	return s.repo.GetOrganizationByTenant(ctx, provider, tenantID)
+	found, err := s.repo.GetOrganizationByTenant(ctx, provider, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return withRetentionView(found), nil
 }
 
 // UpdateOnboardingState upserts onboarding state for an organization.

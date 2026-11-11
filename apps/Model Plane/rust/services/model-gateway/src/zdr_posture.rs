@@ -956,6 +956,8 @@ pub(crate) mod tests {
             // gated too, since a waived run never owns a question.
             ("http_routes.rs", "list_run_questions"),
             ("http_routes.rs", "answer_run_question"),
+            // A branch move rewrites the thread's active path (WS17 S8, DEC-29).
+            ("http_routes.rs", "branch_thread"),
             // Human posts in a Space room (WS01-S4) store free text under a member's name.
             ("space_routes/posts.rs", "create_space_post"),
             ("space_routes/posts.rs", "append_space_post"),

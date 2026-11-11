@@ -72,7 +72,14 @@ type Golden = {
 
 const RESPONSE_EXAMPLE = {
   status: 200,
-  body: { zdrIntent: true, entitled: true },
+  // The body ZDR-Z-03a's handler serves for intent on + entitled.
+  body: {
+    zdrIntent: true,
+    entitled: true,
+    effectiveZdr: true,
+    lapsed: false,
+    planLapsePolicy: 'intent_stays_zdr',
+  },
 };
 
 // org-core's answer for an organization it has no active record of. It is the

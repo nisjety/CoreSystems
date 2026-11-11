@@ -40,8 +40,9 @@ const (
 // zero-retention or waived credential and another person's thread; a write
 // also refuses a Space thread (`failed_precondition`
 // `thread_goal_space_unsupported`) and a thread holding a waived run.
-// `RecordGoalVerdict` is the one write a service makes: it answers only model-gateway and
-// checks the org, not an owner.
+// `RecordGoalVerdict` is the one write a service makes: it answers only the goal-judge principal
+// (service:model-gateway-goal-judge, scope session:goal-verdict:write) and checks the org, not an
+// owner.
 type ThreadGoalServiceClient interface {
 	// Set a goal on a thread (one open goal per thread).
 	// Response type is shared by several goal RPCs; renaming it would break generated code.
@@ -67,16 +68,19 @@ type ThreadGoalServiceClient interface {
 	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	SettleGoalTurn(ctx context.Context, in *SettleGoalTurnRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error)
-	// EP-7 S3. Record the completion judge's verdict on a settled turn (model-gateway only).
+	// EP-7 S3. Record the completion judge's verdict on a settled turn (goal-judge principal only,
+	// session:goal-verdict:write; refuses a thread holding a zero-retention or waived run).
 	// Response type is shared by several goal RPCs; renaming it would break generated code.
 	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	RecordGoalVerdict(ctx context.Context, in *RecordGoalVerdictRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error)
-	// EP-7 S6. Read the unattended turn of one scheduled fire for the completion judge (model-gateway
-	// only). Like RecordGoalVerdict it checks the org, not an owner.
+	// EP-7 S6. Read the unattended turn of one scheduled fire for the completion judge (goal-judge
+	// principal only, session:goal-judge:read; refuses a thread holding a zero-retention or waived
+	// run). Like RecordGoalVerdict it checks the org, not an owner.
 	GetGoalTurnForJudge(ctx context.Context, in *GetGoalTurnForJudgeRequest, opts ...grpc.CallOption) (*GetGoalTurnForJudgeResponse, error)
 	// Read the names and statuses of the tool calls one run reserved, for the completion judge's
-	// evidence (model-gateway only). Checks the org, not an owner; refuses a run that is not persistent.
+	// evidence (goal-judge principal only, session:goal-judge:read). Checks the org, not an owner;
+	// refuses a run that is not persistent and a run on a thread holding a zero-retention or waived run.
 	ListRunToolCallsForJudge(ctx context.Context, in *ListRunToolCallsForJudgeRequest, opts ...grpc.CallOption) (*ListRunToolCallsForJudgeResponse, error)
 }
 
@@ -188,8 +192,9 @@ func (c *threadGoalServiceClient) ListRunToolCallsForJudge(ctx context.Context, 
 // zero-retention or waived credential and another person's thread; a write
 // also refuses a Space thread (`failed_precondition`
 // `thread_goal_space_unsupported`) and a thread holding a waived run.
-// `RecordGoalVerdict` is the one write a service makes: it answers only model-gateway and
-// checks the org, not an owner.
+// `RecordGoalVerdict` is the one write a service makes: it answers only the goal-judge principal
+// (service:model-gateway-goal-judge, scope session:goal-verdict:write) and checks the org, not an
+// owner.
 type ThreadGoalServiceServer interface {
 	// Set a goal on a thread (one open goal per thread).
 	// Response type is shared by several goal RPCs; renaming it would break generated code.
@@ -215,16 +220,19 @@ type ThreadGoalServiceServer interface {
 	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	SettleGoalTurn(context.Context, *SettleGoalTurnRequest) (*ThreadGoalResponse, error)
-	// EP-7 S3. Record the completion judge's verdict on a settled turn (model-gateway only).
+	// EP-7 S3. Record the completion judge's verdict on a settled turn (goal-judge principal only,
+	// session:goal-verdict:write; refuses a thread holding a zero-retention or waived run).
 	// Response type is shared by several goal RPCs; renaming it would break generated code.
 	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	RecordGoalVerdict(context.Context, *RecordGoalVerdictRequest) (*ThreadGoalResponse, error)
-	// EP-7 S6. Read the unattended turn of one scheduled fire for the completion judge (model-gateway
-	// only). Like RecordGoalVerdict it checks the org, not an owner.
+	// EP-7 S6. Read the unattended turn of one scheduled fire for the completion judge (goal-judge
+	// principal only, session:goal-judge:read; refuses a thread holding a zero-retention or waived
+	// run). Like RecordGoalVerdict it checks the org, not an owner.
 	GetGoalTurnForJudge(context.Context, *GetGoalTurnForJudgeRequest) (*GetGoalTurnForJudgeResponse, error)
 	// Read the names and statuses of the tool calls one run reserved, for the completion judge's
-	// evidence (model-gateway only). Checks the org, not an owner; refuses a run that is not persistent.
+	// evidence (goal-judge principal only, session:goal-judge:read). Checks the org, not an owner;
+	// refuses a run that is not persistent and a run on a thread holding a zero-retention or waived run.
 	ListRunToolCallsForJudge(context.Context, *ListRunToolCallsForJudgeRequest) (*ListRunToolCallsForJudgeResponse, error)
 	mustEmbedUnimplementedThreadGoalServiceServer()
 }

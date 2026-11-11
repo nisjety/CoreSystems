@@ -95,6 +95,7 @@ impl ProviderRouterDyn for Recording {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             provider_timing: None,
+            service_tier_used: String::new(),
         };
         tokio::spawn(async move {
             let _ = tx.send(chunk).await;

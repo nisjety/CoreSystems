@@ -983,8 +983,10 @@ func (x *SettleGoalTurnRequest) GetUsageSource() string {
 	return ""
 }
 
-// EP-7 S3. Record the completion judge's verdict on a settled goal turn. Only the judge's own
-// service principal, model-gateway, may record one; a person or any other caller is refused.
+// EP-7 S3. Record the completion judge's verdict on a settled goal turn. Called only by the
+// goal-judge principal (service:model-gateway-goal-judge) holding session:goal-verdict:write; a
+// person or any other caller is refused. A thread that holds a zero-retention or waived run is
+// refused with zdr_durable_mutation_forbidden before any read or write, a retry included.
 // `met` closes an open goal as met, `blocked` stops it as "judge_blocked", and `not_met` and
 // `unsure` leave it open. Idempotent per turn: a turn already judged answers the goal as it
 // stands. The judge's tokens count toward the turn and the goal.
@@ -998,11 +1000,12 @@ type RecordGoalVerdictRequest struct {
 	TurnNo uint32 `protobuf:"varint,3,opt,name=turn_no,json=turnNo,proto3" json:"turn_no,omitempty"`
 	// One closed token: "met", "not_met", "blocked" or "unsure".
 	Verdict string `protobuf:"bytes,4,opt,name=verdict,proto3" json:"verdict,omitempty"`
-	// At most 3 reasons of at most 200 characters each; blank lines are dropped. Model
-	// text, erased with the goal; not kept on a thread that holds a waived run.
+	// At most 3 reasons of at most 200 characters each; blank lines are dropped. Validated and
+	// never stored: a verdict row keeps the closed verdict, the judge model and the token count
+	// (content-free).
 	Reasons []string `protobuf:"bytes,5,rep,name=reasons,proto3" json:"reasons,omitempty"`
 	// The ids of the evidence the verdict cites: at most 32 of at most 200 characters
-	// each; blank ids are dropped. Not kept on a thread that holds a waived run.
+	// each; blank ids are dropped. Validated and never stored (a verdict row is content-free).
 	EvidenceIds []string `protobuf:"bytes,6,rep,name=evidence_ids,json=evidenceIds,proto3" json:"evidence_ids,omitempty"`
 	// The model that gave the verdict, at most 128 characters; empty when none is named.
 	JudgeModel string `protobuf:"bytes,7,opt,name=judge_model,json=judgeModel,proto3" json:"judge_model,omitempty"`
@@ -1100,8 +1103,10 @@ func (x *RecordGoalVerdictRequest) GetJudgeTokens() uint64 {
 }
 
 // EP-7 S6. Read the unattended turn one scheduled fire of a goal-bound schedule ledgered on its goal,
-// for the completion judge. Only model-gateway may read it, for a goal of its own org. The fire is
-// named by its run, schedule and fire key, so the judge is pointed at that fire and no other.
+// for the completion judge. Called only by the goal-judge principal (service:model-gateway-goal-judge)
+// holding session:goal-judge:read, for a goal of its own org. The fire is named by its run, schedule
+// and fire key, so the judge is pointed at that fire and no other. A thread holding a zero-retention
+// or waived run is refused with zdr_durable_mutation_forbidden before any read.
 type GetGoalTurnForJudgeRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The goal the fire belongs to.
@@ -1267,8 +1272,10 @@ func (x *GetGoalTurnForJudgeResponse) GetFound() bool {
 }
 
 // Read the names and closed statuses of the tool calls one run reserved, for the completion judge's
-// evidence. Only model-gateway may read it, for a run of its own org. A run that is not persistent
-// (zero-retention or waived) is refused; no row of such a run is ever read.
+// evidence. Called only by the goal-judge principal (service:model-gateway-goal-judge) holding
+// session:goal-judge:read, for a run of its own org. A run that is not persistent (zero-retention or
+// waived), or that sits on a thread holding such a run, is refused with
+// zdr_durable_mutation_forbidden before any read; no row of such a run is ever read.
 type ListRunToolCallsForJudgeRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The org the run belongs to; must match the caller's org.

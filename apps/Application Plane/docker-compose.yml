@@ -527,6 +527,11 @@ services:
             CONVERSATION_CAPABILITY_HEALTH_SERVICE_ID: ${CONVERSATION_CAPABILITY_HEALTH_SERVICE_ID:-conversation-core}
             CONVERSATION_CAPABILITY_HEALTH_SERVICE_API_KEY: ${CONVERSATION_CAPABILITY_HEALTH_SERVICE_API_KEY:-}
             CONVERSATION_CAPABILITY_HEALTH_INTERVAL_SECONDS: ${CONVERSATION_CAPABILITY_HEALTH_INTERVAL_SECONDS:-120}
+            # DARK switch (strict literal "true"). On: the org-core reader takes the
+            # effective ZDR answer from the org record's retention_posture and treats a
+            # record without one as an error (fail closed). Off: the raw
+            # interactiveRetention.zdr metadata rule.
+            CONVERSATION_ZDR_EFFECTIVE_POSTURE_ENABLED: ${CONVERSATION_ZDR_EFFECTIVE_POSTURE_ENABLED:-false}
             # Governed agent ticket-action lane -- ENABLED over the internal TLS proxy.
             #
             # OwnerActionHealthReady in internal/config/config.go requires ALL of these

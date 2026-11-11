@@ -59,6 +59,10 @@ const (
 // image generation. Only an event of this kind is priced per image.
 const imageGenerationKind = "image_generation"
 
+// servedPriorityTier is the usage payload's service_tier_used value for a call
+// served on the provider's priority tier (model-gateway's SERVICE_TIER_PRIORITY).
+const servedPriorityTier = "priority"
+
 // maxImagesPerUsageEvent bounds the images one image_generation event may report.
 // A count outside 1..maxImagesPerUsageEvent is a malformed event.
 const maxImagesPerUsageEvent = 100
@@ -104,6 +108,12 @@ type usagePayload struct {
 	CacheReadInputTokens     int64   `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens"`
 	CostBasis                string  `json:"cost_basis"`
+	// ServiceTierUsed is the speed tier model-gateway reports the call was
+	// served on: "priority" prices the entry at the priority-tier multiplier
+	// (see server.RecordUsage). The gateway writes the key only for a priority
+	// call, so an older gateway and every other call omit it and are priced as
+	// before.
+	ServiceTierUsed string `json:"service_tier_used"`
 	// CacheMissReason is model-gateway's advisory classification of a turn
 	// that did not read from the prompt cache. Absent from an older gateway
 	// and from any turn it did not classify.
@@ -631,6 +641,7 @@ func decodeUsageMessage(subject string, data []byte, createdAt time.Time) (ledge
 		CacheCreationInputTokens: p.CacheCreationInputTokens,
 		CacheMissReason:          cacheMissReasonOf(subjectOrgID, p),
 		CostBasis:                costBasisOf(subjectOrgID, p),
+		PriorityTier:             p.ServiceTierUsed == servedPriorityTier,
 	}
 	if err := ledger.ValidateEntry(entry); err != nil {
 		return ledger.Entry{}, err

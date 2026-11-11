@@ -165,9 +165,17 @@ async fn handle_message(
         if let Some(user) =
             crate::gdpr::parse_user_erasure_event(payload).map_err(|e| anyhow::anyhow!(e.to_string()))?
         {
-            // The legal-hold check comes first: a held organization erases nothing, so no store is
-            // touched before a refusal. It maps to a delayed nak in the consumer.
+            // The legal-hold checks come first: a held organization, and (OD-59 switch on) a held
+            // thread whose memory this erasure touches, erase nothing, so no store is touched before
+            // a refusal. Either maps to a delayed nak in the consumer.
             crate::gdpr::ensure_user_erasure_not_held(&user.org_id).await?;
+            let checked = crate::gdpr::ensure_user_thread_erasure_not_held(
+                pool,
+                &user.org_id,
+                &user.user_id,
+                user.kind,
+            )
+            .await?;
             if user.kind == crate::gdpr::UserErasureKind::Erase {
                 let space =
                     crate::gdpr::erase_user_space_memory_sources(pool, &user.org_id, &user.user_id).await?;
@@ -183,6 +191,7 @@ async fn handle_message(
                 &user.org_id,
                 &user.user_id,
                 user.kind,
+                &checked,
                 letta,
             )
             .await?;
@@ -190,6 +199,8 @@ async fn handle_message(
                 org_id = %user.org_id,
                 user_profiles = personal.user_profiles,
                 personal_memory = personal.personal_memory,
+                thread_memory = personal.thread_memory,
+                thread_memory_narrowed = personal.thread_memory_narrowed,
                 run_request_snapshots = personal.run_request_snapshots,
                 run_request_snapshot_blobs = personal.run_request_snapshot_blobs,
                 promote_use_counts = personal.promote_use_counts,

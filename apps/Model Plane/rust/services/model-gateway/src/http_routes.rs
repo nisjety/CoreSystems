@@ -10567,6 +10567,7 @@ mod approval_rule_tests {
             action_key: "mcp__fixture__create_note".to_owned(),
             call_digest: "digest-of-the-exact-call".to_owned(),
             tool_digest: PINNED_DIGEST.to_owned(),
+            capability_id: "cap.mcp_tool.fixture.create_note".to_owned(),
             ..ApprovalCause::default()
         })
         .0
@@ -10591,7 +10592,7 @@ mod approval_rule_tests {
 
     #[test]
     fn an_always_choice_before_confirmation_is_a_thread_grant() {
-        let cause = mcp_cause("risky_effect_under_ask", "external_write");
+        let cause = mcp_cause("capability_high_risk", "read");
         let scope = checked_decision_scope_with(
             "thread",
             ApprovalState::Granted,
@@ -10622,7 +10623,7 @@ mod approval_rule_tests {
 
     #[test]
     fn a_rule_is_proposed_only_from_an_mcp_grant_the_person_may_relax() {
-        let grant = mcp_cause("risky_effect_under_ask", "external_write");
+        let grant = mcp_cause("capability_high_risk", "read");
         let mut built_in = grant.clone();
         built_in.tool = "write_file".to_owned();
         assert_eq!(
@@ -10633,6 +10634,11 @@ mod approval_rule_tests {
             ("risky_effect_under_ask", "destructive"),
             ("risky_effect_under_ask", "owner_effect"),
             ("risky_effect_under_ask", ""),
+            // The permission gate's pauses are not lifted by a confirmed rule.
+            ("risky_effect_under_ask", "external_write"),
+            ("consent_to_disclose", "read"),
+            // A high-risk external write is once only.
+            ("capability_high_risk", "external_write"),
             ("hook_ask", "external_write"),
             ("capability_policy_ask", "external_write"),
         ] {
@@ -10666,8 +10672,19 @@ mod approval_rule_tests {
             refusal_code(ask(Some(&grant), SCOPE_THREAD, ApprovalState::Denied)),
             "rule_not_applicable"
         );
-        for class in ["read", "sandbox_compute", "context_write", "external_write"] {
-            let cause = mcp_cause("consent_to_disclose", class);
+        let mut no_capability = grant.clone();
+        no_capability.capability_id.clear();
+        assert_eq!(
+            refusal_code(ask(
+                Some(&no_capability),
+                SCOPE_THREAD,
+                ApprovalState::Granted
+            )),
+            "rule_not_offered",
+            "a rule needs the capability id the confirm write names"
+        );
+        for class in ["read", "sandbox_compute", "context_write"] {
+            let cause = mcp_cause("capability_high_risk", class);
             assert!(
                 ask(Some(&cause), SCOPE_THREAD, ApprovalState::Granted).expect(class),
                 "{class} may be relaxed"
@@ -15732,6 +15749,13 @@ async fn branch_thread(
 /// Session Core's refusals of a branch move, as the typed codes the client acts on. A stale
 /// leaf is a conflict to reload from; any other refusal keeps the session error mapping.
 pub(crate) fn branch_thread_error(error: &tonic::Status) -> HttpJsonError {
+    // A typed catalogue refusal from session-core (a zero-retention or waived caller, or a thread
+    // that holds a waived run) keeps its own code and status instead of reading as a branch
+    // refusal: 412 for zdr_feature_not_supported and zdr_durable_mutation_forbidden, 403 for the
+    // credential refusals.
+    if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_status(error) {
+        return crate::zdr_posture::http(&refusal);
+    }
     match error.code() {
         tonic::Code::Aborted => (
             StatusCode::CONFLICT,
@@ -22815,6 +22839,14 @@ mod thread_messages_page_tests {
         ));
         assert_eq!(busy.0, StatusCode::CONFLICT);
         assert_eq!(busy.1 .0["error"]["code"], "history_branch_refused");
+
+        let waived = branch_thread_error(
+            &mp_contracts::zdr_refusal::Refusal::feature_not_supported("message_versions")
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
+        assert_eq!(waived.0, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(waived.1 .0["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(waived.1 .0["error"]["feature"], "message_versions");
     }
 
     #[test]

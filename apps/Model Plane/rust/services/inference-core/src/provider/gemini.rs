@@ -612,6 +612,7 @@ fn delta_chunk(request_id: &str, model: &str, delta: String) -> InferChunk {
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         provider_timing: None,
+        service_tier_used: String::new(),
     }
 }
 
@@ -693,6 +694,7 @@ async fn relay_stream(
             cache_read_input_tokens: totals.cache_read,
             cache_creation_input_tokens: 0,
             provider_timing: None,
+            service_tier_used: String::new(),
         })
         .await;
 }

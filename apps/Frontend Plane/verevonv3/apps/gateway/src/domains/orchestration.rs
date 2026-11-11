@@ -25,6 +25,25 @@
 //! these HTTP routes are the decide/list/reconcile surface, not the
 //! rich-detail surface.
 //!
+//! **Standing authority (build plan WS13 S6/S7):** five more pass-through routes
+//! reach the thread approval grants and the rule proposals behind "Always":
+//!
+//! - `GET /api/v1/orchestration/threads/{thread_id}/approval-grants`
+//! - `DELETE /api/v1/orchestration/approval-grants/{grant_id}`
+//! - `GET /api/v1/orchestration/rule-proposals`
+//! - `POST /api/v1/orchestration/rule-proposals/{proposal_id}/confirm`
+//! - `POST /api/v1/orchestration/rule-proposals/{proposal_id}/dismiss`
+//!
+//! The BFF has no flag for them: model-gateway gates the confirm behind its own
+//! switch and answers typed 404s, and list, revoke and dismiss stay reachable so a
+//! person can remove what was made while a switch was on. Confirm and dismiss
+//! forward the body `{}` and refuse any client body, so the BFF never relays a
+//! capability, digest, scope or expiry; the org and user come only from the
+//! verified session. Confirm also carries the caller's `aud=capability-core`
+//! bearer, because model-gateway writes the rule with it. Upstream statuses and
+//! typed error bodies (`rule_proposal_busy` 409, `rule_confirm_incomplete` 503, ...)
+//! pass through unchanged.
+//!
 //! Every route carries the model-plane audience token (or dev-bypass) and the
 //! verified user id via [`proxy_model_json`]; nothing trusts client input beyond
 //! the path id and the decision body, which model-gateway re-validates.
@@ -38,10 +57,11 @@
 use std::time::Duration;
 
 use axum::{
+    body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Extension, Json, Router,
 };
 use reqwest::Method;
@@ -52,8 +72,10 @@ use crate::{
     config::AppState,
     domains::chat::shared::{
         data_plane_token, delegated_auth_unavailable, invalid_chat_request, model_token,
-        proxy_model_json_with_data_plane, proxy_model_json_with_session, required_execution_token,
-        required_inference_token, required_session_token, skipped_site_browser_token,
+        proxy_model_json_with_data_plane, proxy_model_json_with_session,
+        proxy_model_json_with_session_and_capability, required_capability_token,
+        required_execution_token, required_inference_token, required_session_token,
+        skipped_site_browser_token,
     },
     envelope::error,
     middleware::{require_session, AuthenticatedUser},
@@ -102,10 +124,30 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/orchestration/threads/{thread_id}/lineage",
             get(get_lineage),
         )
+        .route(
+            "/api/v1/orchestration/threads/{thread_id}/approval-grants",
+            get(list_thread_approval_grants),
+        )
+        .route(
+            "/api/v1/orchestration/rule-proposals",
+            get(list_rule_proposals),
+        )
         // ── decisions / run control ──────────────────────────────────────────
         .route(
             "/api/v1/orchestration/approvals/{approval_id}/decide",
             post(decide_approval),
+        )
+        .route(
+            "/api/v1/orchestration/approval-grants/{grant_id}",
+            delete(revoke_approval_grant),
+        )
+        .route(
+            "/api/v1/orchestration/rule-proposals/{proposal_id}/confirm",
+            post(confirm_rule_proposal),
+        )
+        .route(
+            "/api/v1/orchestration/rule-proposals/{proposal_id}/dismiss",
+            post(dismiss_rule_proposal),
         )
         .route(
             "/api/v1/orchestration/questions/{question_id}/answer",
@@ -532,6 +574,190 @@ async fn get_lineage(
         &user,
         &headers,
         &format!("/v1/orchestration/threads/{}/lineage", enc(&thread_id)),
+    )
+    .await
+}
+
+// ── standing authority: thread approval grants + rule proposals (WS13 S6/S7) ──
+
+/// The longest id the standing-authority routes accept before proxying.
+const STANDING_ID_MAX_CHARS: usize = 128;
+
+fn invalid_standing_id(code: &'static str, message: &'static str) -> (StatusCode, Json<Value>) {
+    (StatusCode::BAD_REQUEST, Json(error(code, message)))
+}
+
+/// A thread id: 1 to 128 characters, so a blank or oversized id never reaches model-gateway.
+fn validate_thread_id(thread_id: &str) -> Result<(), (StatusCode, Json<Value>)> {
+    let len = thread_id.chars().count();
+    if len == 0 || len > STANDING_ID_MAX_CHARS {
+        return Err(invalid_standing_id(
+            "invalid_thread_id",
+            "The thread id is not valid.",
+        ));
+    }
+    Ok(())
+}
+
+/// A grant id: the `apg_` prefix and at most 128 characters.
+fn validate_grant_id(grant_id: &str) -> Result<(), (StatusCode, Json<Value>)> {
+    if !grant_id.starts_with("apg_") || grant_id.chars().count() > STANDING_ID_MAX_CHARS {
+        return Err(invalid_standing_id(
+            "invalid_grant_id",
+            "The approval grant id is not valid.",
+        ));
+    }
+    Ok(())
+}
+
+/// A rule proposal id: the `arp_` prefix and at most 128 characters.
+fn validate_proposal_id(proposal_id: &str) -> Result<(), (StatusCode, Json<Value>)> {
+    if !proposal_id.starts_with("arp_") || proposal_id.chars().count() > STANDING_ID_MAX_CHARS {
+        return Err(invalid_standing_id(
+            "invalid_proposal_id",
+            "The rule proposal id is not valid.",
+        ));
+    }
+    Ok(())
+}
+
+/// Confirm and dismiss take no client input: the body must be absent, blank or an empty JSON
+/// object. Anything else is refused, so a capability, digest, scope or expiry the client names
+/// is never relayed; the upstream is always sent `{}`.
+fn require_empty_standing_body(body: &Bytes) -> Result<(), (StatusCode, Json<Value>)> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(());
+    }
+    match serde_json::from_slice::<Value>(body) {
+        Ok(Value::Object(map)) if map.is_empty() => Ok(()),
+        _ => Err(invalid_chat_request("This request takes no body.")),
+    }
+}
+
+/// The thread's standing approval grants (WS13 S6), as the caller's own. A plain pass-through:
+/// model-gateway scopes the list to the verified org and user and answers the typed errors.
+async fn list_thread_approval_grants(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(refusal) = validate_thread_id(&thread_id) {
+        return refusal;
+    }
+    mg_get(
+        &state,
+        &user,
+        &headers,
+        &format!(
+            "/v1/orchestration/threads/{}/approval-grants",
+            enc(&thread_id)
+        ),
+    )
+    .await
+}
+
+/// Revokes one standing approval grant (WS13 S6). Reachable whatever the grant switch says, so a
+/// person can remove a grant made while it was on. A plain pass-through with no body.
+async fn revoke_approval_grant(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(grant_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(refusal) = validate_grant_id(&grant_id) {
+        return refusal;
+    }
+    mg_proxy(
+        &state,
+        &user,
+        &headers,
+        Method::DELETE,
+        &format!("/v1/orchestration/approval-grants/{}", enc(&grant_id)),
+        None,
+        false,
+    )
+    .await
+}
+
+/// The caller's own rule proposals, the ones "Always" made and nobody has confirmed or
+/// dismissed yet (WS13 S7). A plain pass-through.
+async fn list_rule_proposals(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    mg_get(&state, &user, &headers, "/v1/orchestration/rule-proposals").await
+}
+
+/// Confirms a rule proposal (WS13 S7): the person, not the model, turns it into a rule.
+/// model-gateway writes the capability-core rule with the caller's own `aud=capability-core`
+/// bearer, so that bearer rides along; the body sent upstream is always `{}`. model-gateway owns
+/// the switch and the typed answers (`rule_confirm_incomplete` 503 among them), passed through.
+async fn confirm_rule_proposal(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(proposal_id): Path<String>,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(refusal) = validate_proposal_id(&proposal_id) {
+        return refusal;
+    }
+    if let Err(refusal) = require_empty_standing_body(&body) {
+        return refusal;
+    }
+    let token = model_token(&state, &user, &headers).await;
+    let session = match required_session_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error),
+    };
+    let capability = match required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error),
+    };
+    let url = format!(
+        "{}/v1/orchestration/rule-proposals/{}/confirm",
+        state.model_gateway_url,
+        enc(&proposal_id)
+    );
+    proxy_model_json_with_session_and_capability(
+        &state,
+        Method::POST,
+        &url,
+        Some(serde_json::json!({})),
+        token.as_deref(),
+        Some(&session),
+        Some(&capability),
+        &user,
+    )
+    .await
+}
+
+/// Dismisses a rule proposal (WS13 S7). Works with the server switch off, and may answer 409
+/// `rule_proposal_busy`, which passes through. The body sent upstream is always `{}`.
+async fn dismiss_rule_proposal(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(proposal_id): Path<String>,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Err(refusal) = validate_proposal_id(&proposal_id) {
+        return refusal;
+    }
+    if let Err(refusal) = require_empty_standing_body(&body) {
+        return refusal;
+    }
+    mg_post(
+        &state,
+        &user,
+        &headers,
+        &format!(
+            "/v1/orchestration/rule-proposals/{}/dismiss",
+            enc(&proposal_id)
+        ),
+        serde_json::json!({}),
     )
     .await
 }

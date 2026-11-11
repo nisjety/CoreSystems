@@ -5906,8 +5906,10 @@ pub async fn invoke_stream_sse(
                         output: i64::from(output_tokens),
                         cache_read: i64::from(cache_read_tokens),
                         cache_write: i64::from(cache_creation_tokens),
-                        // A stream carries no service tier: the answer is priced at its list price.
-                        priority: false,
+                        // Served on the priority tier only when the final chunk reports it, as the unary
+                        // answer reads `InferResponse.service_tier_used`: the same multiplier then
+                        // applies once, in `turn_usage`'s pricing, for the frames and the ledger row.
+                        priority: chunk.service_tier_used == crate::pricing::SERVICE_TIER_PRIORITY,
                     });
                     // The route note rides the final chunk, so the answer's routing is read with its call (WS27-S7).
                     let answer_routing = crate::tool_loop::route_shift(chunk.route_note.as_ref());
@@ -6819,6 +6821,11 @@ pub async fn invoke_stream_sse(
                         cache_read_tokens,
                         cache_creation_tokens,
                         cost_basis,
+                    );
+                    // The answer's served tier rides its ledger row, as the frames above price it.
+                    stamp_served_tier(
+                        &mut usage_envelope,
+                        answer_call.as_ref().is_some_and(|call| call.priority),
                     );
                     // Read only now: the verification pass above records its judge and resample
                     // calls, and a read before it would leave them out of the rows and the total.
@@ -10127,6 +10134,11 @@ async fn run_infer_fallback(
                 cache_read_tokens,
                 cache_creation_tokens,
                 cost_basis,
+            );
+            // The answer's served tier rides its ledger row, as the unary frames price it.
+            stamp_served_tier(
+                &mut usage,
+                resp.service_tier_used == crate::pricing::SERVICE_TIER_PRIORITY,
             );
             // Under the switch, the tool phase's calls get ledger rows of their own and the row names the run.
             if turn_usage_complete_switch() {
@@ -15661,9 +15673,20 @@ fn turn_call_rows(
         );
         row.idempotency_key = format!("{request_id}-USAGE_ENVELOPE-{tag}{index}");
         row.payload["run_id"] = json!(run_id);
+        stamp_served_tier(&mut row, call.priority);
         rows.push(row);
     }
     rows
+}
+
+/// States on a ledger row that its call was served on the priority tier, so cost-core prices the row at
+/// the priority multiplier the frames already state. A call served on any other tier, or on none, adds no
+/// key, so a row is byte-identical to the one an older gateway writes. The tier is a label and carries no
+/// content, so Zero Data Retention does not change it.
+fn stamp_served_tier(envelope: &mut Envelope, priority: bool) {
+    if priority {
+        envelope.payload["service_tier_used"] = json!(crate::pricing::SERVICE_TIER_PRIORITY);
+    }
 }
 
 /// A token count as a ledger field: a negative count is nothing, an overflowing one the maximum.
@@ -20923,6 +20946,8 @@ pub(crate) const CONTINUE_HTTP_REFUSALS: &[(&str, StatusCode)] = &[
 /// token needs a row here. The last three (`park_not_restorable`,
 /// `park_route_unavailable`, `park_not_due`) are the executor's refusals of the
 /// resume of a PARKED run (WS03 S8); the executor builds them from S8-6 on.
+/// `skip_authority_unavailable` is the executor's refusal of a skipped-site continuation
+/// whose retained authority cannot be read (nothing is run under placeholders).
 pub(crate) const CONTINUE_EXECUTOR_MESSAGE_TOKENS: &[&str] = &[
     "continue_disabled",
     "resume_incomplete",
@@ -20941,6 +20966,7 @@ pub(crate) const CONTINUE_EXECUTOR_MESSAGE_TOKENS: &[&str] = &[
     "resume_checkpoint_unavailable",
     "not_resumable",
     "resume_forbidden",
+    "skip_authority_unavailable",
     "park_not_restorable",
     "park_route_unavailable",
     "park_not_due",
@@ -20978,6 +21004,7 @@ pub(crate) const CONTINUE_FRAME_REFUSALS: &[&str] = &[
     "resume_checkpoint_unavailable",
     "not_resumable",
     "resume_forbidden",
+    "skip_authority_unavailable",
     "park_not_restorable",
     "park_route_unavailable",
     "park_not_due",
@@ -22891,9 +22918,9 @@ mod continue_run_tests {
         let http: Vec<&str> = CONTINUE_HTTP_REFUSALS.iter().map(|(code, _)| *code).collect();
         assert_eq!(http.len(), 10, "{http:?}");
         assert_distinct(&http);
-        assert_eq!(CONTINUE_EXECUTOR_MESSAGE_TOKENS.len(), 20);
+        assert_eq!(CONTINUE_EXECUTOR_MESSAGE_TOKENS.len(), 21);
         assert_distinct(CONTINUE_EXECUTOR_MESSAGE_TOKENS);
-        assert_eq!(CONTINUE_FRAME_REFUSALS.len(), 25);
+        assert_eq!(CONTINUE_FRAME_REFUSALS.len(), 26);
         assert_distinct(CONTINUE_FRAME_REFUSALS);
 
         let mut expected: Vec<&str> = CONTINUE_EXECUTOR_MESSAGE_TOKENS.to_vec();

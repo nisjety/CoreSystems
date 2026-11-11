@@ -49,6 +49,16 @@ pub struct InferenceConfig {
     /// platform provider ever serves it.
     pub byo_gateway_enabled: bool,
 
+    /// Whether a failing platform provider and model is benched for a bounded time, and a platform call is
+    /// kept off the user subscription route (from `INFERENCE_PROVIDER_BENCHING`, the literal `true` only).
+    /// Off, the walk neither benches nor guards and is unchanged.
+    pub provider_benching: bool,
+
+    /// Whether every fallback hop of a call stays at or above the privacy tier of the first eligible
+    /// provider (from `INFERENCE_SAME_TIER_FALLBACK`, the literal `true` only). Off, a hop may land on a
+    /// lower tier than the first, as it does today.
+    pub same_tier_fallback: bool,
+
     /// The service credential Integration Core's customer-gateway broker accepts from Model Plane (from
     /// `CUSTOMER_GATEWAY_INTERNAL_API_KEY`, falling back to `CODEX_SUBSCRIPTION_INTERNAL_API_KEY` as the broker
     /// itself falls back). It authenticates this service, not the customer's endpoint.
@@ -317,6 +327,12 @@ impl InferenceConfig {
             codex_subscription_models: csv_env("CODEX_SUBSCRIPTION_MODELS", &[]),
             byo_gateway_enabled: byo_gateway_switch_on(
                 std::env::var("INFERENCE_BYO_GATEWAY_ENABLED").ok().as_deref(),
+            ),
+            provider_benching: byo_gateway_switch_on(
+                std::env::var("INFERENCE_PROVIDER_BENCHING").ok().as_deref(),
+            ),
+            same_tier_fallback: byo_gateway_switch_on(
+                std::env::var("INFERENCE_SAME_TIER_FALLBACK").ok().as_deref(),
             ),
             customer_gateway_internal_api_key: trimmed_env("CUSTOMER_GATEWAY_INTERNAL_API_KEY")
                 .or_else(|| trimmed_env("CODEX_SUBSCRIPTION_INTERNAL_API_KEY")),

@@ -1622,7 +1622,12 @@ type ApprovalCause struct {
 	// cause, so it is never kept for a zero-retention caller. Field 15, not the 11 the
 	// EP-1 design reserved: `host_class` took 11 in the mp-w2w3 merge. WS21-S6's
 	// site-consent cause reuses this field.
-	Host          string `protobuf:"bytes,15,opt,name=host,proto3" json:"host,omitempty"`
+	Host string `protobuf:"bytes,15,opt,name=host,proto3" json:"host,omitempty"`
+	// The registry capability the paused MCP tool is bound to, as execution-core resolved it from
+	// its verified registry binding, never from model text. Set only for a pinned MCP tool whose
+	// pause is the high-risk capability check alone, the one pause a confirmed Always rule (a
+	// capability-core user-scope allow) lifts (WS13 S7, D-WS13-8). Empty otherwise.
+	CapabilityId  string `protobuf:"bytes,16,opt,name=capability_id,json=capabilityId,proto3" json:"capability_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1751,6 +1756,13 @@ func (x *ApprovalCause) GetAssistOrigin() string {
 func (x *ApprovalCause) GetHost() string {
 	if x != nil {
 		return x.Host
+	}
+	return ""
+}
+
+func (x *ApprovalCause) GetCapabilityId() string {
+	if x != nil {
+		return x.CapabilityId
 	}
 	return ""
 }
@@ -10502,7 +10514,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\tgrant_ref\x18\x16 \x01(\tR\bgrantRef\x12\x1f\n" +
 	"\vturn_origin\x18\x17 \x01(\tR\n" +
 	"turnOrigin\x12\x1a\n" +
-	"\brevision\x18\x19 \x01(\rR\brevision\"\xc1\x03\n" +
+	"\brevision\x18\x19 \x01(\rR\brevision\"\xe6\x03\n" +
 	"\rApprovalCause\x12\x12\n" +
 	"\x04code\x18\x01 \x01(\tR\x04code\x12\x12\n" +
 	"\x04tool\x18\x02 \x01(\tR\x04tool\x12!\n" +
@@ -10523,7 +10535,8 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\vassist_kind\x18\r \x01(\tR\n" +
 	"assistKind\x12#\n" +
 	"\rassist_origin\x18\x0e \x01(\tR\fassistOrigin\x12\x12\n" +
-	"\x04host\x18\x0f \x01(\tR\x04host\"\x92\x04\n" +
+	"\x04host\x18\x0f \x01(\tR\x04host\x12#\n" +
+	"\rcapability_id\x18\x10 \x01(\tR\fcapabilityId\"\x92\x04\n" +
 	"\x04Todo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +

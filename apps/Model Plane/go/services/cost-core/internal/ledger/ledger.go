@@ -145,6 +145,12 @@ type Entry struct {
 	// with a cost of 0; the other bases are priced from the catalogue when
 	// they arrive without a cost.
 	CostBasis string
+	// PriorityTier is true when the call was served on the provider's priority
+	// tier (the usage payload's service_tier_used). It is a pricing input only:
+	// RecordUsage multiplies a catalogue-priced metered entry by the
+	// priority-tier multiplier, and the entry is stored with the resulting
+	// cost. It is not a ledger column and carries no content.
+	PriorityTier bool
 }
 
 // ValidateEntry rejects values that can poison aggregates, overflow durable

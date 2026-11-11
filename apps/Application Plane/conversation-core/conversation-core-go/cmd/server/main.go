@@ -84,7 +84,8 @@ func main() {
 	// policy. The typed nil is intentional: its methods fail closed when the
 	// service-principal configuration is absent, while the optional corpus
 	// builder below remains disabled in that configuration.
-	orgCoreClient := clients.NewOrgCoreClient(cfg.OrgCoreBaseURL, cfg.OrgCoreServicePrincipal, cfg.OrgCoreServiceToken)
+	orgCoreClient := clients.NewOrgCoreClient(cfg.OrgCoreBaseURL, cfg.OrgCoreServicePrincipal, cfg.OrgCoreServiceToken).
+		WithEffectivePostureRead(cfg.ZDREffectivePostureRead)
 
 	// Outbound client to integration-corev2, shared by the draft.reply act-leg
 	// AND the human-typed Inbox reply path. Constructed only when configured, so

@@ -700,6 +700,13 @@ func (s *Server) RecordUsage(ctx context.Context, e ledger.Entry) error {
 	if e.CostUSD == 0 && (e.InputTokens > 0 || e.OutputTokens > 0) && s.pricing != nil &&
 		ledger.IsPlatformSpend(e.CostBasis) {
 		e.CostUSD = s.pricing.CostWithCache(e.Model, e.InputTokens, e.OutputTokens, e.CacheReadInputTokens, e.CacheCreationInputTokens)
+		// A call served on the priority tier costs its list price times the
+		// priority multiplier, as the gateway's frames state it. This is the one
+		// place the ledger applies it, and only to a cost priced here: a cost the
+		// producer stated is kept as stated.
+		if e.PriorityTier {
+			e.CostUSD *= pricing.PriorityTierMultiplierFromEnv()
+		}
 	}
 	return s.recordPriced(ctx, e)
 }

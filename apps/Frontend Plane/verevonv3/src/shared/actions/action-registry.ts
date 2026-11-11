@@ -2221,6 +2221,47 @@ const approvalsPreviewOutput = z.object({
   canEdit: z.boolean().optional(),
 })
 
+// A standing approval grant as the thread list shows it (WS13-S6). No argument value and no other
+// person's grant ever rides here: the list is the caller's own, in one thread.
+const approvalGrantOutput = z.object({
+  id: z.string(),
+  threadId: z.string(),
+  runId: z.string().nullable(),
+  scope: z.enum(['thread', 'run']),
+  toolName: z.string(),
+  effectClass: z.string(),
+  causeCode: z.string(),
+  createdAt: z.string(),
+  expiresAt: z.string(),
+  revokedAt: z.string().nullable(),
+  useCount: z.number().int().nonnegative(),
+  lastUsedAt: z.string().nullable(),
+})
+
+// The caller's own grants in one thread (WS13-S6). Only the thread id is an input: the org and the
+// owner are the verified credential's.
+export const approvalsListGrantsInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+  })
+  .strict()
+
+const approvalsListGrantsOutput = z.object({
+  grants: z.array(approvalGrantOutput),
+})
+
+// Revoking one of the caller's own grants (WS13-S6). The id is the grant's `apg_` id, never a thread
+// or a tool, so one revoke narrows exactly one standing authority.
+export const approvalsRevokeGrantInput = z
+  .object({
+    grantId: z.string().regex(/^apg_[A-Za-z0-9_-]{1,124}$/),
+  })
+  .strict()
+
+const approvalsRevokeGrantOutput = z.object({
+  grant: approvalGrantOutput.optional(),
+})
+
 const chatClearThreadsInput = z.object({})
 
 const chatDeleteThreadInput = z.object({
@@ -5294,6 +5335,28 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: approvalsPreviewInput,
     outputSchema: approvalsPreviewOutput,
+  },
+  {
+    id: 'approvals.list_grants',
+    label: 'List the approval grants of a thread',
+    description: "List the caller's own live and past thread and run approval grants in one thread: the tool, how far it reaches, when it lapses, whether it was revoked and how often it was used. Read-only. Never another person's grant, and never an argument value. Empty for a zero-retention principal, since such a run holds no grant. Served with the grant switch off too, so a grant made while it was on stays visible. Never model-executable: a person's standing authority is shown to that person.",
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: approvalsListGrantsInput,
+    outputSchema: approvalsListGrantsOutput,
+  },
+  {
+    id: 'approvals.revoke_grant',
+    label: 'Revoke an approval grant',
+    description: "Revoke one of the caller's own standing approval grants at once, so the next matching call pauses for approval again. Idempotent: revoking a revoked grant answers the same. Works with the grant switch off (it only narrows authority). Refused by session-core for a zero-retention credential, since a zero-retention principal holds no grant; allowed for a waived credential. Another person's grant and an unknown id answer the same 404. Not reversible: a revoked grant is not restored, the next approval makes a new one. Never model-executable: a person's authority is managed by that person.",
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: approvalsRevokeGrantInput,
+    outputSchema: approvalsRevokeGrantOutput,
   },
   {
     id: 'chat.clear_threads',

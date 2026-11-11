@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-/// The sites that refuse ZDR work, by file, each built from the catalogue (15 in all).
+/// The sites that refuse ZDR work, by file, each built from the catalogue (16 in all).
 const NAMED_SITES: &[(&str, &str)] = &[
     ("auth.rs", "authorize_operation write gate"),
     ("auth.rs", "authorize_space_deletion_service"),
@@ -27,6 +27,7 @@ const NAMED_SITES: &[(&str, &str)] = &[
     ("memory_grpc.rs", "authorize_memory_preflight"),
     ("memory_grpc.rs", "set_memory_controls"),
     ("message_search.rs", "recall search"),
+    ("message_tree.rs", "set_active_leaf waived caller and waived thread"),
     ("terminalization.rs", "validate_managed_start_request"),
     ("terminalization.rs", "complete_direct_run_with_message_inner"),
 ];
@@ -83,7 +84,11 @@ fn every_zdr_refusal_in_session_core_carries_a_catalogue_kind() {
 
 #[test]
 fn the_named_sites_are_typed_where_they_are_declared() {
-    assert_eq!(NAMED_SITES.len(), 15, "the WS06-S1 inventory is 15 sites");
+    assert_eq!(
+        NAMED_SITES.len(),
+        16,
+        "the WS06-S1 inventory plus message versions is 16 sites"
+    );
     for (file, site) in NAMED_SITES {
         let source = std::fs::read_to_string(src_path(file)).expect("a named site's file exists");
         assert!(

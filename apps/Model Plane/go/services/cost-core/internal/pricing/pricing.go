@@ -18,13 +18,57 @@ package pricing
 import (
 	"context"
 	"log/slog"
+	"math"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// PriorityTierCostMultiplierEnv is the environment variable that sets the list-price multiplier of a call
+// served on the priority tier. It is the same variable model-gateway's pricing.rs reads
+// (`PRIORITY_TIER_COST_MULTIPLIER_ENV`), with the same default and bounds, so the displayed cost and the
+// ledgered cost of a priority call agree.
+const PriorityTierCostMultiplierEnv = "PRIORITY_TIER_COST_MULTIPLIER"
+
+// PriorityTierMultiplierDefault is the multiplier used when the variable is unset, empty or not a number.
+const PriorityTierMultiplierDefault = 2.0
+
+// The bounds the multiplier is clamped to: a priority call is never priced below its list price and never
+// above five times it.
+const (
+	priorityTierMultiplierMin = 1.0
+	priorityTierMultiplierMax = 5.0
+)
+
+// PriorityTierMultiplier is the multiplier a value of [PriorityTierCostMultiplierEnv] gives: the number,
+// clamped to 1 through 5, or the default when the value is empty or not a finite number. It mirrors
+// model-gateway's `priority_tier_cost_multiplier_from`.
+func PriorityTierMultiplier(raw string) float64 {
+	parsed, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		parsed = PriorityTierMultiplierDefault
+	}
+	return math.Min(math.Max(parsed, priorityTierMultiplierMin), priorityTierMultiplierMax)
+}
+
+var (
+	priorityTierMultiplierOnce  sync.Once
+	priorityTierMultiplierValue float64
+)
+
+// PriorityTierMultiplierFromEnv is the priority-tier multiplier of this process, read once from the
+// environment.
+func PriorityTierMultiplierFromEnv() float64 {
+	priorityTierMultiplierOnce.Do(func() {
+		priorityTierMultiplierValue = PriorityTierMultiplier(os.Getenv(PriorityTierCostMultiplierEnv))
+	})
+	return priorityTierMultiplierValue
+}
 
 // DefaultModelKey is the mandatory fallback key. It is always present so an
 // unrecognised model is priced (at a mid tier) rather than counted as free.

@@ -3626,6 +3626,7 @@ mod tests {
                     cache_creation_input_tokens: 0,
                     provider_timing: None,
                     route_note: None,
+                    service_tier_used: String::new(),
                 }),
                 Ok(InferChunk {
                     compaction_summary: String::new(),
@@ -3644,6 +3645,7 @@ mod tests {
                     cache_creation_input_tokens: 0,
                     provider_timing: None,
                     route_note: None,
+                    service_tier_used: String::new(),
                 }),
             ]))))
         }

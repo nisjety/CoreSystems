@@ -5201,25 +5201,38 @@ async fn create_thread_inner(
     pool: &PgPool,
     req: pb::CreateThreadRequest,
 ) -> Result<Response<pb::CreateThreadResponse>, Status> {
+    create_thread_inner_with_receipt(pool, req, None).await
+}
+
+/// [`create_thread_inner`] that also stamps the thread's retention receipt (Z-17, thread half). `receipt`
+/// is `Some` only from the `create_thread` handler while `SESSION_THREAD_RECEIPT_ENFORCE` is on; `None`
+/// leaves the receipt columns NULL, which reads as persistent.
+async fn create_thread_inner_with_receipt(
+    pool: &PgPool,
+    req: pb::CreateThreadRequest,
+    receipt: Option<&crate::retention_receipt::RunRetention>,
+) -> Result<Response<pb::CreateThreadResponse>, Status> {
     let signed_kind = verify_thread_space_decision(&req)?;
     let space_kind = crate::space::memory_scope::normalize_claim_space_kind(&signed_kind);
-    create_thread_inner_preverified_kind(pool, req, space_kind).await
+    create_thread_inner_preverified_kind(pool, req, space_kind, receipt).await
 }
 
 async fn create_thread_inner_preverified(
     pool: &PgPool,
     req: pb::CreateThreadRequest,
 ) -> Result<Response<pb::CreateThreadResponse>, Status> {
-    create_thread_inner_preverified_kind(pool, req, None).await
+    create_thread_inner_preverified_kind(pool, req, None, None).await
 }
 
 /// WS17-S1: `space_kind` is the Space kind from the verified Control decision, already
 /// normalised; `None` leaves the column NULL (contained). Only the verified create path
-/// passes one.
+/// passes one. `receipt` is the thread's retention receipt (Z-17): written in the insert, once, and
+/// never on a retried create that finds the thread already there.
 async fn create_thread_inner_preverified_kind(
     pool: &PgPool,
     req: pb::CreateThreadRequest,
     space_kind: Option<String>,
+    receipt: Option<&crate::retention_receipt::RunRetention>,
 ) -> Result<Response<pb::CreateThreadResponse>, Status> {
     let mut tx = pool
         .begin()
@@ -5295,8 +5308,8 @@ async fn create_thread_inner_preverified_kind(
     let origin = resolve_thread_origin(&req)?;
 
     sqlx::query(
-        "INSERT INTO threads (id, session_key, org_id, user_id, created_at, space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision, origin, space_kind)
-         VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, 0), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, 0), $14, $15)",
+        "INSERT INTO threads (id, session_key, org_id, user_id, created_at, space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision, origin, space_kind, retention_class, waiver_ack_id, waiver_connection_id)
+         VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, 0), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, 0), $14, $15, $16, $17, $18)",
     )
     .bind(&thread_id)
     .bind(&req.session_key)
@@ -5317,6 +5330,9 @@ async fn create_thread_inner_preverified_kind(
     })?)
     .bind(origin)
     .bind(space_kind.as_deref())
+    .bind(receipt.map(|receipt| receipt.class.as_str()))
+    .bind(receipt.and_then(|receipt| receipt.ack_id()))
+    .bind(receipt.and_then(|receipt| receipt.connection_id()))
     .execute(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -8953,7 +8969,13 @@ impl SessionCore for SessionService {
                 None => authorize_system_run_owner(&caller)?,
             };
             req.user_id = user_id;
-            create_thread_inner(&self.pool, req).await
+            // Z-17 (thread half): stamp the creating caller's retention receipt, only while
+            // SESSION_THREAD_RECEIPT_ENFORCE is on. Off, the columns stay NULL and nothing reads them.
+            // A ZDR credential was refused by `authorize_operation` above, so the receipt is
+            // persistent or waived here.
+            let receipt = crate::retention_receipt::thread_receipt_enforce_enabled()
+                .then(|| crate::retention_receipt::RunRetention::from_caller(&caller));
+            create_thread_inner_with_receipt(&self.pool, req, receipt.as_ref()).await
         }
         .await;
         record_metrics("create_thread", started, result.is_ok());
@@ -8972,6 +8994,10 @@ impl SessionCore for SessionService {
             // The thread's owner keeps the owner path unchanged; another Space member may append
             // a human `post` only through the member gate (WS01-S3, flag `SPACE_HUMAN_POSTS_CORE`).
             let append_as = crate::space::authz::authorize_append(&self.pool, &caller, &req).await?;
+            // Z-17 (thread half): the appending caller's posture must be the thread's receipt, checked
+            // before any write. A ZDR credential never gets here (`authorize_operation` refused it).
+            crate::retention_receipt::require_thread_posture(&self.pool, &caller, &req.thread_id)
+                .await?;
             let author_subject_id = caller.user_id().unwrap_or_default().to_owned();
             append_message_inner_as(
                 &self.pool,

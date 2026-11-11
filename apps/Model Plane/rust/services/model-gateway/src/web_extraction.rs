@@ -160,6 +160,9 @@ pub struct ExtractSpec {
     pub inference_bearer: String,
     /// `grpc` or `tool_loop`, for the usage envelope.
     pub transport: &'static str,
+    /// The tool name to check each page's final URL under, against the org's domain rules (`WEB_DOMAIN_POLICY_MODE`),
+    /// after the fetch and before any inference call. `None` for a caller that applies no domain rules (the gRPC method).
+    pub site_policy_tool: Option<&'static str>,
 }
 
 impl ExtractSpec {
@@ -222,6 +225,7 @@ impl ExtractSpec {
             max_output_tokens,
             inference_bearer: inference_bearer.to_owned(),
             transport: "grpc",
+            site_policy_tool: None,
         })
     }
 }
@@ -363,6 +367,30 @@ async fn extract_page(state: &AppState, spec: &ExtractSpec, url: &str, id: Strin
             };
         }
     };
+    // The page may have ended on another host than the one asked for (a redirect, or the browser driver's escalation).
+    // The org's domain rules apply to where it ended too, and they are checked here, after the fetch and BEFORE any
+    // inference call, so the text of a page on a host the org does not allow never reaches an inference provider. The
+    // outcome carries the typed refusal and nothing derived from the page (no final URL, title or fingerprint). The same
+    // check `fetch_url` runs; under `off` nothing is read and under `shadow` it only logs.
+    if let Some(tool) = spec.site_policy_tool {
+        if let Some(refusal) = crate::site_policy_client::final_url_refusal(
+            crate::site_policy_client::policy_mode(),
+            crate::site_policy_client::shared_checker(),
+            &crate::site_policy_client::SiteOwner::of(state),
+            &spec.org_id,
+            url,
+            &scrape.final_url,
+            tool,
+        )
+        .await
+        {
+            result.error_message = refusal;
+            return PageOutcome {
+                result,
+                fetch_error: None,
+            };
+        }
+    }
     result.final_url = scrape.final_url.clone();
     result.title = scrape.title.clone();
     result.source_fingerprint = scrape.fingerprint.clone();
@@ -1465,6 +1493,7 @@ mod tests {
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             inference_bearer: "bearer-x".to_owned(),
             transport: "grpc",
+            site_policy_tool: None,
         }
     }
 

@@ -28,6 +28,7 @@ import {
 } from '@/shared/api/orchestration-client'
 import { approvalKindLabel } from '@/shared/approvals/approval-copy'
 import { ToolCallCard } from './ChatMessages'
+import { ThreadApprovalGrants } from './ThreadApprovalGrants'
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import type { JSX } from '@solidjs/web'
@@ -1060,6 +1061,11 @@ export function StepsPanel(props: {
                   )}
                 </For>
               </section>
+            </Show>
+            {/* WS13-S6: the standing approvals live in this thread, each with Revoke. Off until
+                the grants flag is "true"; the list is the caller's own and empty under ZDR. */}
+            <Show when={import.meta.env.VITE_APPROVAL_SCOPE_GRANTS === 'true' && props.threadId}>
+              {(id) => <ThreadApprovalGrants threadId={id()} />}
             </Show>
             {/* Question 4: what happened underneath. Run telemetry, the lifecycle
                 rows and the raw event stream in one collapsed disclosure, the

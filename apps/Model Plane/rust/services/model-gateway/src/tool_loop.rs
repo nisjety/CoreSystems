@@ -4645,8 +4645,18 @@ async fn dispatch_tool_with_cost(
                 max_output_tokens: crate::web_extraction::DEFAULT_MAX_OUTPUT_TOKENS,
                 inference_bearer: inference_bearer.to_owned(),
                 transport: "tool_loop",
+                site_policy_tool: Some("extract_structured"),
             };
             let outcomes = crate::web_extraction::extract(state, &spec).await;
+            // A page that ended on a host the org's rules refuse was dropped by the extraction BEFORE any inference
+            // call (EP-9 W3). The typed refusal is returned as `fetch_url` returns it, and the whole result is dropped.
+            if let Some(refusal) = outcomes
+                .iter()
+                .map(|o| o.result.error_message.as_str())
+                .find(|m| m.starts_with(crate::site_policy_client::SITE_BLOCKED_CODE))
+            {
+                return err_outcome(call, refusal.to_owned());
+            }
             if outcomes.iter().all(|o| !o.result.error_message.is_empty()) {
                 let reasons: Vec<&str> = outcomes
                     .iter()

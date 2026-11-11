@@ -1719,6 +1719,7 @@ impl ProviderRouter for AnthropicProvider {
                                 cache_read_input_tokens: cache_read_tokens,
                                 cache_creation_input_tokens: cache_creation_tokens,
                                 provider_timing: None,
+                                service_tier_used: String::new(),
                             };
                             let _ = tx.send(final_chunk).await;
                             return;
@@ -1786,6 +1787,7 @@ impl ProviderRouter for AnthropicProvider {
                                     cache_read_input_tokens: 0,
                                     cache_creation_input_tokens: 0,
                                     provider_timing: None,
+                                    service_tier_used: String::new(),
                                 };
                                 if tx.send(chunk).await.is_err() {
                                     return;
@@ -1811,6 +1813,7 @@ impl ProviderRouter for AnthropicProvider {
                                     cache_read_input_tokens: cache_read_tokens,
                                     cache_creation_input_tokens: cache_creation_tokens,
                                     provider_timing: None,
+                                    service_tier_used: String::new(),
                                 };
                                 let _ = tx.send(final_chunk).await;
                                 return;
@@ -1845,6 +1848,7 @@ impl ProviderRouter for AnthropicProvider {
                 cache_read_input_tokens: cache_read_tokens,
                 cache_creation_input_tokens: cache_creation_tokens,
                 provider_timing: None,
+                service_tier_used: String::new(),
             };
             let _ = tx.send(final_chunk).await;
         });

@@ -516,6 +516,7 @@ fn delta_chunk(request_id: &str, delta: String) -> InferChunk {
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         provider_timing: None,
+        service_tier_used: String::new(),
     }
 }
 
@@ -525,6 +526,7 @@ fn done_chunk(
     model: &str,
     event: &BrokerStreamEvent,
     ready: Option<Duration>,
+    service_tier_used: &str,
 ) -> InferChunk {
     let tokens = event.usage.map(BrokerUsage::counts).unwrap_or_default();
     InferChunk {
@@ -552,6 +554,8 @@ fn done_chunk(
         cache_read_input_tokens: tokens.cache_read,
         cache_creation_input_tokens: tokens.cache_write,
         provider_timing: Some(broker_timing(event.usage, &event.phases_ms, ready)),
+        // The tier this call went upstream on, the same value `infer` echoes as `service_tier_used`.
+        service_tier_used: service_tier_used.to_owned(),
     }
 }
 
@@ -578,6 +582,7 @@ fn failed_chunk(
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         provider_timing: Some(broker_timing(None, &BTreeMap::new(), ready)),
+        service_tier_used: String::new(),
     }
 }
 
@@ -787,6 +792,8 @@ impl ProviderRouter for CodexSubscriptionProvider {
             ));
         }
         let body = self.request_body(req)?;
+        // The tier this stream is sent upstream on, reported on the final chunk like `infer` does.
+        let service_tier_used = body.service_tier.unwrap_or_default().to_owned();
         let started = Instant::now();
         let response = self
             .client
@@ -848,7 +855,9 @@ impl ProviderRouter for CodexSubscriptionProvider {
                     "delta" if !event.delta.is_empty() => {
                         break delta_chunk(&request_id, event.delta);
                     }
-                    "done" => break done_chunk(&request_id, &model, &event, ready),
+                    "done" => {
+                        break done_chunk(&request_id, &model, &event, ready, &service_tier_used)
+                    }
                     "error" => {
                         let code = code_token(&event.code);
                         warn!(code = %code, "subscription broker stream failed before its first token");
@@ -900,7 +909,9 @@ impl ProviderRouter for CodexSubscriptionProvider {
                         }
                     }
                     "done" => {
-                        let _ = tx.send(done_chunk(&request_id, &model, &event, ready)).await;
+                        let _ = tx
+                            .send(done_chunk(&request_id, &model, &event, ready, &service_tier_used))
+                            .await;
                         return;
                     }
                     "error" => {

@@ -664,6 +664,7 @@ fn chunk(request_id: &str, served_by: &str) -> InferChunk {
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         provider_timing: None,
+        service_tier_used: String::new(),
     }
 }
 
@@ -692,6 +693,7 @@ fn done_chunk(
         stop_reason,
         cache_read_input_tokens: counts.cache_read,
         provider_timing: Some(timing(usage.is_some(), ready)),
+        service_tier_used: String::new(),
         ..chunk(request_id, served_by)
     }
 }
@@ -709,6 +711,7 @@ fn failed_chunk(
         model_used: model.to_owned(),
         stop_reason: stop_reason.to_owned(),
         provider_timing: Some(timing(false, ready)),
+        service_tier_used: String::new(),
         ..chunk(request_id, served_by)
     }
 }

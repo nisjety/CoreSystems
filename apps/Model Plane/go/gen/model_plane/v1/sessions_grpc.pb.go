@@ -2327,9 +2327,11 @@ type MessageTreeServiceClient interface {
 	// rewind: the leaf becomes the target and nothing is deleted. Any other target is
 	// a version switch: the leaf becomes the newest turn beneath it, so the chosen
 	// branch shows its own continuation. With `exact` set, the leaf is the target
-	// itself (an undo of a rewind). Owner only, with `session:write`. Refused
-	// for a Space thread, a thread that holds a waived run and a thread with a queued
-	// or running run. Refused with unavailable `message_versions_disabled` while
+	// itself (an undo of a rewind). Owner only, with `session:write`. Refused with
+	// zdr_durable_mutation_forbidden for a zero-retention caller, and with
+	// zdr_feature_not_supported (feature message_versions) for a waived caller or a
+	// thread that holds a waived run. Refused for a Space thread and a thread with a
+	// queued or running run. Refused with unavailable `message_versions_disabled` while
 	// SESSION_CORE_MESSAGE_VERSIONS_ENABLED is not `true`.
 	SetActiveLeaf(ctx context.Context, in *SetActiveLeafRequest, opts ...grpc.CallOption) (*SetActiveLeafResponse, error)
 }
@@ -2364,9 +2366,11 @@ type MessageTreeServiceServer interface {
 	// rewind: the leaf becomes the target and nothing is deleted. Any other target is
 	// a version switch: the leaf becomes the newest turn beneath it, so the chosen
 	// branch shows its own continuation. With `exact` set, the leaf is the target
-	// itself (an undo of a rewind). Owner only, with `session:write`. Refused
-	// for a Space thread, a thread that holds a waived run and a thread with a queued
-	// or running run. Refused with unavailable `message_versions_disabled` while
+	// itself (an undo of a rewind). Owner only, with `session:write`. Refused with
+	// zdr_durable_mutation_forbidden for a zero-retention caller, and with
+	// zdr_feature_not_supported (feature message_versions) for a waived caller or a
+	// thread that holds a waived run. Refused for a Space thread and a thread with a
+	// queued or running run. Refused with unavailable `message_versions_disabled` while
 	// SESSION_CORE_MESSAGE_VERSIONS_ENABLED is not `true`.
 	SetActiveLeaf(context.Context, *SetActiveLeafRequest) (*SetActiveLeafResponse, error)
 	mustEmbedUnimplementedMessageTreeServiceServer()

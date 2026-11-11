@@ -1296,9 +1296,16 @@ type InferChunk struct {
 	ProviderTiming *ProviderTiming `protobuf:"bytes,15,opt,name=provider_timing,json=providerTiming,proto3" json:"provider_timing,omitempty"`
 	// The route note of the call, on the final chunk only, as provider_timing is
 	// (WS27-S7). Absent for a pinned model or while INFERENCE_ROUTE_NOTE is off.
-	RouteNote     *RouteNote `protobuf:"bytes,16,opt,name=route_note,json=routeNote,proto3" json:"route_note,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	RouteNote *RouteNote `protobuf:"bytes,16,opt,name=route_note,json=routeNote,proto3" json:"route_note,omitempty"`
+	// The service tier the provider actually served this stream on, populated on
+	// the final (usage-bearing) chunk only, as the token counts are. "priority"
+	// when the priority tier went upstream; empty when the provider does not
+	// report one. Same meaning as InferResponse.service_tier_used: it is never
+	// inferred from the request, and it carries no content, so Zero Data
+	// Retention does not change it.
+	ServiceTierUsed string `protobuf:"bytes,17,opt,name=service_tier_used,json=serviceTierUsed,proto3" json:"service_tier_used,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *InferChunk) Reset() {
@@ -1441,6 +1448,13 @@ func (x *InferChunk) GetRouteNote() *RouteNote {
 		return x.RouteNote
 	}
 	return nil
+}
+
+func (x *InferChunk) GetServiceTierUsed() string {
+	if x != nil {
+		return x.ServiceTierUsed
+	}
+	return ""
 }
 
 // ProviderTiming — where inference-core's share of one Infer or InferStream
@@ -6587,7 +6601,7 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x0fprovider_timing\x18\x0e \x01(\v2\x1e.model_plane.v1.ProviderTimingR\x0eproviderTiming\x128\n" +
 	"\n" +
 	"route_note\x18\x0f \x01(\v2\x19.model_plane.v1.RouteNoteR\trouteNote\x12*\n" +
-	"\x11service_tier_used\x18\x10 \x01(\tR\x0fserviceTierUsed\"\xbd\x05\n" +
+	"\x11service_tier_used\x18\x10 \x01(\tR\x0fserviceTierUsed\"\xe9\x05\n" +
 	"\n" +
 	"InferChunk\x12\x1d\n" +
 	"\n" +
@@ -6610,7 +6624,8 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x12compaction_summary\x18\x0e \x01(\tR\x11compactionSummary\x12G\n" +
 	"\x0fprovider_timing\x18\x0f \x01(\v2\x1e.model_plane.v1.ProviderTimingR\x0eproviderTiming\x128\n" +
 	"\n" +
-	"route_note\x18\x10 \x01(\v2\x19.model_plane.v1.RouteNoteR\trouteNote\"\x85\x04\n" +
+	"route_note\x18\x10 \x01(\v2\x19.model_plane.v1.RouteNoteR\trouteNote\x12*\n" +
+	"\x11service_tier_used\x18\x11 \x01(\tR\x0fserviceTierUsed\"\x85\x04\n" +
 	"\x0eProviderTiming\x12\x1d\n" +
 	"\n" +
 	"handler_ms\x18\x01 \x01(\x04R\thandlerMs\x12\x1d\n" +

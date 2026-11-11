@@ -54,12 +54,12 @@ const MATRIX: &str = include_str!("fixtures/zdr-posture-matrix.json");
 /// The enforcement rows of the canonical matrix when this test was written, and
 /// how they split by decision. A row added or removed without this file being
 /// read is a change nobody reviewed against the durable stores.
-const ENFORCEMENT_ROWS: usize = 34;
+const ENFORCEMENT_ROWS: usize = 37;
 const REFUSE: usize = 18;
 // One more ZDR row than before: the computer tools' refusal (W4-C C1).
-const ZDR: usize = 8;
+const ZDR: usize = 10;
 const PERSISTENT: usize = 3;
-const WAIVED: usize = 5;
+const WAIVED: usize = 6;
 
 /// The only rows whose decision is `persistent`: the shared gate is open for these and
 /// for nothing else.
@@ -399,6 +399,7 @@ fn the_old_not_zdr_rule_is_caught_by_the_waived_rows_and_by_nothing_else() {
         [
             "e_equal_waived_bearers",
             "e_waived_deck_manifest_not_persisted",
+            "e_waived_message_versions_refused",
             "e_waived_research_metadata_not_persisted",
             "e_waived_web_reader_keeps_inline_head",
             "e_waiver_on_bound_route",

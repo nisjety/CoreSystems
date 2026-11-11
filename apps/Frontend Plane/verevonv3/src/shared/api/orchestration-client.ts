@@ -1,11 +1,13 @@
 import type { z } from 'zod'
 import {
+  approvalsListGrantsInput,
+  approvalsRevokeGrantInput,
   getActionDescriptor,
   type integrationsConnectorPoliciesOutput,
   integrationsSetConnectorPolicyInput,
   orchestrationDecideApprovalInput,
 } from '@/shared/actions/action-registry'
-import { causeCodeOf, type ApprovalCause } from '../approvals/approval-copy'
+import { causeCodeOf, type ApprovalCause, type CauseCode } from '../approvals/approval-copy'
 import { APPROVAL_EDIT_CODES, type MailSendPatch } from '../approvals/approval-edit-limits'
 import { ApiError, requestJson } from './http'
 import { readSseStream, type SseEvent } from './sse'
@@ -549,6 +551,97 @@ export async function getApprovalPreview(
     revision: Number.isInteger(raw.revision) && (raw.revision as number) >= 0 ? (raw.revision as number) : 0,
     canEdit: raw.can_edit === true,
   }
+}
+
+/**
+ * A standing approval grant of a thread (WS13-S6, actions `approvals.list_grants` and
+ * `approvals.revoke_grant`). The caller's own, in one thread; it names a tool and an effect class,
+ * never an argument value. A grant is live while `revokedAt` is null and `expiresAt` is ahead.
+ */
+export type ApprovalGrant = {
+  id: string
+  threadId: string
+  runId: string | null
+  scope: 'thread' | 'run'
+  toolName: string
+  effectClass: string
+  causeCode: CauseCode
+  createdAt: string
+  expiresAt: string
+  revokedAt: string | null
+  useCount: number
+  lastUsedAt: string | null
+}
+
+/**
+ * Read a grant row from the server (snake_case). A row without an id or with a scope this build does
+ * not know is dropped, not guessed at; the cause is read through the closed vocabulary.
+ */
+export function normalizeApprovalGrant(raw: unknown): ApprovalGrant | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  const row = raw as Record<string, unknown>
+  const id = str(row.id) ?? str(row.grant_id)
+  if (!id) return null
+  const scope = row.scope === 'thread' || row.scope === 'run' ? row.scope : null
+  if (!scope) return null
+  const count = row.use_count
+  return {
+    id,
+    threadId: str(row.thread_id) ?? '',
+    runId: str(row.run_id) ?? null,
+    scope,
+    toolName: str(row.tool_name) ?? str(row.tool) ?? '',
+    effectClass: str(row.effect_class) ?? '',
+    causeCode: causeCodeOf(row.cause_code),
+    createdAt: str(row.created_at) ?? '',
+    expiresAt: str(row.expires_at) ?? '',
+    revokedAt: str(row.revoked_at) ?? null,
+    useCount: typeof count === 'number' && Number.isInteger(count) && count >= 0 ? count : 0,
+    lastUsedAt: str(row.last_used_at) ?? null,
+  }
+}
+
+/**
+ * The caller's own grants in one thread, live and past. The input is checked against the
+ * `approvals.list_grants` contract before it is sent. The server answers empty for a zero-retention
+ * principal, and keeps answering while the grant switch is off.
+ */
+export async function listApprovalGrants(
+  threadId: string,
+  signal?: AbortSignal,
+): Promise<ApprovalGrant[]> {
+  const checked = approvalsListGrantsInput.safeParse({ threadId })
+  if (!checked.success) {
+    throw new ApiError('Ugyldig tråd.', 400, 'invalid_thread_id')
+  }
+  // The `{data: {grants}}` envelope is unwrapped by `requestJson`.
+  const payload = await requestJson<{ grants?: unknown[] }>(
+    `/api/v1/orchestration/threads/${encodeURIComponent(checked.data.threadId)}/approval-grants`,
+    { signal },
+  )
+  const list = Array.isArray(payload?.grants) ? payload.grants : []
+  return list.map(normalizeApprovalGrant).filter((grant): grant is ApprovalGrant => grant !== null)
+}
+
+/**
+ * Revoke one of the caller's own grants at once. Idempotent, and it works with the grant switch off
+ * because it only narrows authority. The id is checked against the `approvals.revoke_grant`
+ * contract before it is sent. Returns the grant as the server now holds it, or null when the
+ * answer carries none.
+ */
+export async function revokeApprovalGrant(
+  grantId: string,
+  signal?: AbortSignal,
+): Promise<ApprovalGrant | null> {
+  const checked = approvalsRevokeGrantInput.safeParse({ grantId })
+  if (!checked.success) {
+    throw new ApiError('Ugyldig godkjenning.', 400, 'invalid_grant_id')
+  }
+  const payload = await requestJson<{ grant?: unknown }>(
+    `/api/v1/orchestration/approval-grants/${encodeURIComponent(checked.data.grantId)}`,
+    { method: 'DELETE', signal },
+  )
+  return normalizeApprovalGrant(payload?.grant)
 }
 
 /** Resume a run that paused for approval, after the decision is recorded. */

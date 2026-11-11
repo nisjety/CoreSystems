@@ -49,6 +49,11 @@ pub const AGENTS_PAUSED_CODE: &str = "org_agents_paused";
 /// The words a person reads with [`AGENTS_PAUSED_CODE`]. The code is the contract; the words are copy.
 pub const AGENTS_PAUSED_MESSAGE: &str = "Your organisation has paused agent runs.";
 
+/// The words a person reads with [`agent_mode::LOCKDOWN_CODE`] when the org's mode cap refuses a standalone run
+/// ([`admit_standalone_run`]). The code is the contract; the words are copy.
+pub const MODE_CAP_REFUSED_MESSAGE: &str =
+    "Your organisation's agent mode does not allow agent runs.";
+
 /// How long a read org policy is served without asking capability-core again (DEC-13, D8).
 pub const POLICY_TTL: Duration = Duration::from_secs(30);
 
@@ -606,12 +611,74 @@ pub async fn admit_continuation(
     }
 }
 
-/// The HTTP status, and the words a person reads, of a refusal the org policy makes: a paused org is `403`, and a policy
-/// that cannot be read is `503`, as a Do turn's refusal answers. The code is the contract; the words are copy.
+/// Decides whether the org policy admits a standalone run that acts on pages, such as a browser agent run started
+/// outside a chat turn (D2-1119, WS25-S9). Such a run is a Do run by any measure, yet it has no turn to resolve a mode
+/// for, so the org's pause and mode cap bind it here. Off reads nothing and admits. Shadow reads and logs what would be
+/// refused and admits. Enforce refuses a paused org with [`AGENTS_PAUSED_CODE`], a policy that cannot be read inside
+/// its bound with [`POLICY_UNAVAILABLE_CODE`], and an org whose mode cap is `lockdown` or `read_only` with
+/// [`agent_mode::LOCKDOWN_CODE`]: a browser run clicks and types and cannot be made read-only, so the strictest-wins
+/// cap forbids it.
+///
+/// # Errors
+///
+/// [`AGENTS_PAUSED_CODE`] when the org has paused agent runs, [`agent_mode::LOCKDOWN_CODE`] when the org caps its mode
+/// at lockdown or read-only, or [`POLICY_UNAVAILABLE_CODE`] when the policy is enforced and cannot be read.
+pub async fn admit_standalone_run(
+    mode: PolicyMode,
+    cache: &OrgPolicyCache,
+    client: &reqwest::Client,
+    base_url: &str,
+    org_id: &str,
+    bearer: &str,
+) -> Result<(), &'static str> {
+    match mode {
+        PolicyMode::Off => Ok(()),
+        PolicyMode::Shadow => {
+            match ensure(cache, client, base_url, org_id, bearer).await {
+                Ok(policy) => {
+                    if policy.agents_paused {
+                        tracing::info!(
+                            %org_id,
+                            "org agent policy (shadow): agent runs would be paused for this standalone run"
+                        );
+                    }
+                    if matches!(policy.mode_cap, AgentMode::Lockdown | AgentMode::ReadOnly) {
+                        tracing::info!(
+                            %org_id,
+                            would_mode_cap = policy.mode_cap.as_str(),
+                            "org agent policy (shadow): the mode cap would refuse this standalone run"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%org_id, %error, "org agent policy (shadow) could not be read");
+                }
+            }
+            Ok(())
+        }
+        PolicyMode::Enforce => match ensure(cache, client, base_url, org_id, bearer).await {
+            Ok(policy) if policy.agents_paused => Err(AGENTS_PAUSED_CODE),
+            Ok(policy) if matches!(policy.mode_cap, AgentMode::Lockdown | AgentMode::ReadOnly) => {
+                Err(agent_mode::LOCKDOWN_CODE)
+            }
+            Ok(_) => Ok(()),
+            Err(error) => {
+                tracing::warn!(%org_id, %error, "org agent policy cannot be read; the standalone run is not started");
+                Err(POLICY_UNAVAILABLE_CODE)
+            }
+        },
+    }
+}
+
+/// The HTTP status, and the words a person reads, of a refusal the org policy makes: a paused org or a mode cap that
+/// allows no agent run is `403`, and a policy that cannot be read is `503`, as a Do turn's refusal answers. The code is
+/// the contract; the words are copy.
 #[must_use]
 pub fn refusal_answer(code: &str) -> (StatusCode, &'static str) {
     if code == AGENTS_PAUSED_CODE {
         (StatusCode::FORBIDDEN, AGENTS_PAUSED_MESSAGE)
+    } else if code == agent_mode::LOCKDOWN_CODE {
+        (StatusCode::FORBIDDEN, MODE_CAP_REFUSED_MESSAGE)
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, POLICY_UNAVAILABLE_MESSAGE)
     }
