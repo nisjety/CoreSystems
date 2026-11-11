@@ -170,6 +170,43 @@ pub struct RiskyActionDetail {
     pub selector: String,
     pub risk_category: RiskCategory,
     pub reason: String,
+    /// One-time-code gate context. `None` for every non-OTP gate; when set,
+    /// its four fields ride on `BrowserActionApprovalRequired` so the approval
+    /// card can name the asking origins and the mail connection.
+    pub otp: Option<OtpApprovalContext>,
+}
+
+/// Origins and mail connection a one-time-code approval gate is about.
+/// Carries the person's connection label, never a mailbox address; the
+/// `Debug` impl omits the label so logs never print it.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct OtpApprovalContext {
+    /// Origin (scheme://host[:port]) of the top-level page asking for the code.
+    pub top_origin: String,
+    /// Origin of the frame holding the code field.
+    pub frame_origin: String,
+    /// Closed provider key of the mail connection (e.g. `gmail`).
+    pub mail_provider_key: String,
+    /// The person's own label for that mail connection. Never an address.
+    pub mail_account_label: String,
+}
+
+impl std::fmt::Debug for OtpApprovalContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtpApprovalContext")
+            .field("top_origin", &self.top_origin)
+            .field("frame_origin", &self.frame_origin)
+            .field("mail_provider_key", &self.mail_provider_key)
+            .field(
+                "mail_account_label",
+                &if self.mail_account_label.is_empty() {
+                    "<empty>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            .finish()
+    }
 }
 
 /// Outcome of the Phase 5 in-loop HITL approval gate.

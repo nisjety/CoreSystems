@@ -182,6 +182,14 @@ export type BrowserActionApprovalRequiredEvent = {
   /** login|checkout|posting_form|destructive|cross_domain_navigation|persistent_cookie_use */
   riskCategory?: string
   approvalId?: string
+  /** One-time-code gate only (QF-15, MP-ASKS W3-E3.1-i): the asking page's origin. */
+  topOrigin?: string
+  /** One-time-code gate only: the origin of the frame holding the code field. */
+  frameOrigin?: string
+  /** One-time-code gate only: integration-core's mail provider key. */
+  mailProviderKey?: string
+  /** One-time-code gate only: the person's connection label, never a mailbox address. */
+  mailAccountLabel?: string
   at?: string
 }
 
@@ -251,6 +259,22 @@ export type RunEventHandlers = {
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/** Longest one-time-code gate field kept from the wire (QF-15). */
+const OTP_GATE_FIELD_MAX = 256
+
+/**
+ * A one-time-code gate field (QF-15): trimmed, dropped when empty or longer
+ * than the cap. A mail connection label holding '@' looks like an address and
+ * is dropped, so a mailbox address never reaches the card.
+ */
+function otpGateField(value: unknown, label = false): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (!trimmed || trimmed.length > OTP_GATE_FIELD_MAX) return undefined
+  if (label && trimmed.includes('@')) return undefined
+  return trimmed
 }
 
 function attachmentId(value: unknown): string | undefined {
@@ -423,6 +447,10 @@ function dispatch(event: SseEvent, handlers: RunEventHandlers): void {
         reason: str(payload.reason),
         riskCategory: str(payload.risk_category) ?? str(payload.riskCategory),
         approvalId: str(payload.approval_id) ?? str(payload.approvalId),
+        topOrigin: otpGateField(payload.top_origin),
+        frameOrigin: otpGateField(payload.frame_origin),
+        mailProviderKey: otpGateField(payload.mail_provider_key),
+        mailAccountLabel: otpGateField(payload.mail_account_label, true),
         at: str(payload.at),
       })
       break

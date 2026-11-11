@@ -40,6 +40,16 @@ function printStyleSheet(): string {
     [role="button"] {
       display: none !important;
     }
+    /* Interactive parts a surface marks out of the PDF, such as the crawl-plan picker (QF-20). */
+    [data-print-hide] {
+      display: none !important;
+    }
+    /* Print-only text a surface holds in place of an interactive part, such as the plan text (QF-20). */
+    [data-print-only] {
+      display: block !important;
+      position: static;
+      white-space: pre-wrap;
+    }
   `
 }
 

@@ -41,6 +41,11 @@ type Principal struct {
 	Scopes                 []string
 	ZeroDataRetention      bool
 	RetentionPolicyPresent bool
+	// WebPolicy is the token's `web_policy` claim (WS7.I/WS7.K) exactly as
+	// signed, or nil when the token carries none. It is optional on every
+	// audience and never read from a header or body; a consumer parses and
+	// checks it (the browser broker's grant.ClaimPolicyResolver).
+	WebPolicy json.RawMessage
 	// KeyID is the API key id of an api_key principal (INNH-10), empty for
 	// every other type. It names the key, it is never the key.
 	KeyID string
@@ -101,6 +106,8 @@ type claims struct {
 	PrincipalType string   `json:"principal_type"`
 	Scopes        []string `json:"scopes"`
 	ZDR           *bool    `json:"zdr"`
+	// WebPolicy is the org web-policy claim (WS7.I); optional.
+	WebPolicy json.RawMessage `json:"web_policy"`
 	// INNH-10 api_key claims (Auth Core CP-1).
 	KeyID        string     `json:"key_id"`
 	ActingUserID string     `json:"acting_user_id"`
@@ -204,6 +211,10 @@ func (v *Verifier) Verify(raw string) (Principal, error) {
 	}
 	if parsedClaims.ZDR != nil {
 		principal.ZeroDataRetention = *parsedClaims.ZDR
+	}
+	// The claim is tolerated on every audience; JSON null is no claim.
+	if raw := strings.TrimSpace(string(parsedClaims.WebPolicy)); raw != "" && raw != "null" {
+		principal.WebPolicy = append(json.RawMessage(nil), parsedClaims.WebPolicy...)
 	}
 	subject := strings.TrimSpace(parsedClaims.Subject)
 	// key_id names an API key; on any other principal type it would make the
@@ -370,6 +381,7 @@ func PrincipalFromContext(ctx context.Context) (Principal, bool) {
 	}
 	principal.Scopes = append([]string(nil), principal.Scopes...)
 	principal.KeyHostCeiling = append([]string(nil), principal.KeyHostCeiling...)
+	principal.WebPolicy = cloneRaw(principal.WebPolicy)
 	return principal, true
 }
 
@@ -393,7 +405,16 @@ func withPrincipal(ctx context.Context, principal Principal) context.Context {
 	copy := principal
 	copy.Scopes = append([]string(nil), principal.Scopes...)
 	copy.KeyHostCeiling = append([]string(nil), principal.KeyHostCeiling...)
+	copy.WebPolicy = cloneRaw(principal.WebPolicy)
 	return context.WithValue(ctx, principalContextKey{}, copy)
+}
+
+// cloneRaw copies a raw claim so no holder can mutate the stored principal's.
+func cloneRaw(raw json.RawMessage) json.RawMessage {
+	if raw == nil {
+		return nil
+	}
+	return append(json.RawMessage(nil), raw...)
 }
 
 func normalizedUnique(values []string) []string {

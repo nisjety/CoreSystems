@@ -371,6 +371,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'chat.update_goal': exempt('agent_cannot_self_govern', 'context_write'),
   'chat.clear_goal': exempt('agent_cannot_self_govern', 'context_write'),
   'chat.continue_goal': exempt('no_owner_executor', 'external_write'),
+  'chat.research_run.cancel': exempt('no_owner_executor', 'external_write'),
   'chat.goal_auto_toggle': exempt('agent_cannot_self_govern', 'context_write'),
   'chat.stage_widget_followup': exempt('ui_state_only', 'read'),
   'chat.open_widget_link': exempt('ui_state_only', 'read'),

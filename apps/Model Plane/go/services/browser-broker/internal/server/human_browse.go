@@ -98,6 +98,8 @@ func (s *Server) acquireResponse(g *grant.Grant) *AcquireGrantResponse {
 		AbsoluteExpiresAt:  timestamppb.New(absoluteOf(g)),
 		KeyId:              g.KeyID,
 		ConsentScope:       g.ConsentScope,
+		MailConnectionId:   g.MailConnectionID,
+		GrantOrigin:        g.GrantOrigin,
 	}
 }
 

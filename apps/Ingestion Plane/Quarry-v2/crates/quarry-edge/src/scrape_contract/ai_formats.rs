@@ -34,8 +34,9 @@ use quarry_core::ai_spec::{AiCode, AiFormatReport, AiReason, AiReport, AiSpec};
 use quarry_core::error::{ErrorCode, QuarryError};
 use quarry_runtime::ai_scrape::{
     AiFields, AiScrapeConfig, AiScrapeEngine, AiScrapeInput, DEFAULT_INPUT_CHARS,
-    DEFAULT_MAX_CALLS, DEFAULT_MAX_TOTAL_TOKENS, DEFAULT_MODEL_JSON, DEFAULT_MODEL_TEXT,
-    MAX_INPUT_CHARS, MIN_INPUT_CHARS,
+    DEFAULT_MAX_CALLS, DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MAX_TOTAL_TOKENS, DEFAULT_MODEL_JSON,
+    DEFAULT_MODEL_TEXT, MAX_INPUT_CHARS, MAX_OUTPUT_TOKENS_CEILING, MIN_INPUT_CHARS,
+    MIN_OUTPUT_TOKENS,
 };
 use quarry_runtime::mp_client::ModelPlaneClient;
 use serde_json::Value;
@@ -53,10 +54,18 @@ pub const ENV_MAX_TOTAL_TOKENS: &str = "QUARRY_EDGE__AI_FORMATS_MAX_TOTAL_TOKENS
 pub const ENV_MAX_CALLS: &str = "QUARRY_EDGE__AI_FORMATS_MAX_CALLS";
 pub const ENV_CONCURRENCY: &str = "QUARRY_EDGE__AI_FORMATS_CONCURRENCY";
 pub const ENV_INFERENCE_TOKEN: &str = "QUARRY_EDGE__MODEL_PLANE_INFERENCE_TOKEN";
+/// WS16.S6: the ceiling of every call's output cap (64..=8192, default 8192).
+pub const ENV_MAX_OUTPUT_TOKENS: &str = "QUARRY_EDGE__AI_FORMATS_MAX_OUTPUT_TOKENS";
+/// WS16.S6: the one model repair call of `json` (default `1`; `0`, `off`,
+/// `false` turn it off, the local repair still runs).
+pub const ENV_REPAIR: &str = "QUARRY_EDGE__AI_FORMATS_REPAIR";
+/// WS16.S6: the per-request ceiling on the model cost the gateway reports
+/// (`cost_usd`), in USD. Unset: no cost ceiling.
+pub const ENV_MAX_COST_USD: &str = "QUARRY_EDGE__AI_FORMATS_MAX_COST_USD";
 
 /// Every name this module reads; a test pins that the code reads exactly these.
 #[cfg(test)]
-const ENV_NAMES: [&str; 9] = [
+const ENV_NAMES: [&str; 12] = [
     ENV_AI_FORMATS,
     ENV_AI_FORMATS_ZDR,
     ENV_MODEL_JSON,
@@ -66,13 +75,17 @@ const ENV_NAMES: [&str; 9] = [
     ENV_MAX_CALLS,
     ENV_CONCURRENCY,
     ENV_INFERENCE_TOKEN,
+    ENV_MAX_OUTPUT_TOKENS,
+    ENV_REPAIR,
+    ENV_MAX_COST_USD,
 ];
 
 /// The process-wide cap on model calls in flight, across requests.
 pub const PROCESS_CONCURRENCY: usize = 16;
 
-/// What the operator configured, read once.
-#[derive(Clone, PartialEq, Eq)]
+/// What the operator configured, read once. (`PartialEq` only: the cost
+/// ceiling is a float.)
+#[derive(Clone, PartialEq)]
 pub struct AiFormatsSettings {
     /// The switch.
     pub enabled: bool,
@@ -87,6 +100,12 @@ pub struct AiFormatsSettings {
     pub concurrency: usize,
     /// Development bypass only: the token for the inference audience.
     pub inference_token: Option<String>,
+    /// WS16.S6: the output-cap ceiling (64..=8192).
+    pub max_output_tokens: u32,
+    /// WS16.S6: whether `json` gets its one model repair call.
+    pub model_repair: bool,
+    /// WS16.S6: the per-request model cost ceiling in USD; `None` is none.
+    pub max_cost_usd: Option<f64>,
 }
 
 // The token is a credential: it never reaches a log or a debug dump.
@@ -105,6 +124,9 @@ impl std::fmt::Debug for AiFormatsSettings {
                 "inference_token",
                 &self.inference_token.as_ref().map(|_| "<set>"),
             )
+            .field("max_output_tokens", &self.max_output_tokens)
+            .field("model_repair", &self.model_repair)
+            .field("max_cost_usd", &self.max_cost_usd)
             .finish()
     }
 }
@@ -152,6 +174,20 @@ impl AiFormatsSettings {
                 .map(|value| value.clamp(1, quarry_runtime::ai_scrape::DEFAULT_CONCURRENCY))
                 .unwrap_or(quarry_runtime::ai_scrape::DEFAULT_CONCURRENCY),
             inference_token: non_empty(lookup(ENV_INFERENCE_TOKEN)),
+            // The ceiling can only be lowered, and never under the floor.
+            max_output_tokens: number::<u32>(lookup(ENV_MAX_OUTPUT_TOKENS))
+                .map(|value| value.clamp(MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS_CEILING))
+                .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
+            // Default on; only an explicit off value turns the model repair off.
+            model_repair: !matches!(
+                lookup(ENV_REPAIR)
+                    .map(|raw| raw.trim().to_ascii_lowercase())
+                    .as_deref(),
+                Some("0" | "off" | "false")
+            ),
+            // A negative, non-finite or unreadable value is no ceiling.
+            max_cost_usd: number::<f64>(lookup(ENV_MAX_COST_USD))
+                .filter(|value| value.is_finite() && *value >= 0.0),
         }
     }
 
@@ -164,6 +200,9 @@ impl AiFormatsSettings {
             max_total_tokens: self.max_total_tokens,
             max_calls: self.max_calls,
             concurrency: self.concurrency,
+            max_output_tokens: self.max_output_tokens,
+            model_repair: self.model_repair,
+            max_cost_usd: self.max_cost_usd,
             ..AiScrapeConfig::default()
         }
         .clamped()
@@ -371,6 +410,11 @@ pub fn privacy_report(specs: &[AiSpec]) -> AiReport {
 /// wrong is in the report. Under ZDR, or when the privacy block forbids a model
 /// hop (`model_hop_allowed` false), it answers without building a client, so no
 /// call can be made.
+///
+/// WS16.S6: each format that finished `ok` is metered as one `quarry.extract.llm`
+/// (`QUARRY_EDGE__USAGE_LLM_METRICS`, default off), keyed by the server-minted
+/// `usage_id` and a hash of `url`. Failures, skips and ZDR emit nothing.
+#[allow(clippy::too_many_arguments)] // one call site; the last two are the usage key
 pub async fn run_ai_formats(
     state: &AppState,
     org_id: &str,
@@ -379,6 +423,8 @@ pub async fn run_ai_formats(
     zdr: bool,
     model_hop_allowed: bool,
     request_id: &str,
+    url: &str,
+    usage_id: &str,
 ) -> (AiFields, AiReport) {
     if zdr {
         return (AiFields::default(), zdr_report(specs));
@@ -397,7 +443,7 @@ pub async fn run_ai_formats(
         }
         return (AiFields::default(), report);
     };
-    engine
+    let (fields, report) = engine
         .run(
             specs,
             AiScrapeInput {
@@ -408,7 +454,10 @@ pub async fn run_ai_formats(
                 deadline: None,
             },
         )
-        .await
+        .await;
+    crate::usage_attrs::emit_llm_formats(&*state.usage, usage_id, url, org_id, &report, zdr)
+        .await;
+    (fields, report)
 }
 
 #[cfg(test)]

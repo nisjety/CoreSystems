@@ -769,6 +769,14 @@ export type BrowserApprovalEntry = {
   decidedBy: string | null
   requestedAt: string
   decidedAt: string | null
+  /** One-time-code gate only (QF-15): the asking page's origin. */
+  topOrigin?: string
+  /** One-time-code gate only: the origin of the frame holding the code field. */
+  frameOrigin?: string
+  /** One-time-code gate only: integration-core's mail provider key. */
+  mailProviderKey?: string
+  /** One-time-code gate only: the person's connection label, never an address. */
+  mailAccountLabel?: string
 }
 
 const maxBrowserApprovalEntries = 16
@@ -812,6 +820,11 @@ export function withBrowserApprovalRequested(
     decidedBy: null,
     requestedAt: event.at ?? new Date().toISOString(),
     decidedAt: null,
+    // QF-15: present only on a one-time-code gate (already bounded by the parser).
+    ...(event.topOrigin ? { topOrigin: event.topOrigin } : {}),
+    ...(event.frameOrigin ? { frameOrigin: event.frameOrigin } : {}),
+    ...(event.mailProviderKey ? { mailProviderKey: event.mailProviderKey } : {}),
+    ...(event.mailAccountLabel ? { mailAccountLabel: event.mailAccountLabel } : {}),
   }
   return [...entries.filter((existing) => existing.key !== key), entry].slice(
     -maxBrowserApprovalEntries,

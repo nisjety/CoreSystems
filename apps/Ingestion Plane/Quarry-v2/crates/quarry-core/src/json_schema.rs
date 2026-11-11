@@ -12,12 +12,31 @@
 //! - **minItems** / **maxItems** / **minLength** / **maxLength**
 //! - **minimum** / **maximum** (numeric) inclusive bounds
 //! - **additionalProperties: false** rejects unknown keys
+//! - **const**: value must equal the given JSON value (deep equality)
+//! - **anyOf**: value must match at least one of the subschemas
+//! - **oneOf**: value must match exactly one of the subschemas
 //!
 //! Returns a list of typed [`ValidationIssue`] paths so callers can
 //! surface "data.user.age expected integer, got string" errors instead of
 //! a vague "schema_valid: false". Enables Quarry's structured-extract
 //! cost-ceiling enforcement to refuse malformed model responses with a
 //! clear actionable error.
+//!
+//! Each `anyOf` and `oneOf` subschema is checked on its own. Its issues go to a
+//! scratch list and are dropped, so a failed subschema never reaches the report:
+//! the keyword reports one issue, at the value's path. Issues come in a fixed
+//! order (type, `enum`, `const`, `anyOf`, `oneOf`, then the checks for the
+//! value's kind), so one schema and value always give the same list.
+//!
+//! Not validated: **pattern**, **format** and **$ref**. The validator ignores
+//! them, so a schema that uses one must be refused, or have its references
+//! resolved, before it reaches this module. The AI spec normaliser
+//! (`ai_spec.rs`) refuses all three today.
+//!
+//! The walk follows the schema's own nesting, one level per subschema (an
+//! `anyOf` or `oneOf` branch included), so its depth is the depth of the schema.
+//! The validator sets no depth limit of its own. The AI spec normaliser
+//! (`ai_spec.rs`) caps schema depth at `MAX_SCHEMA_DEPTH` for the AI formats.
 
 use serde_json::Value;
 
@@ -57,6 +76,19 @@ pub enum ValidationIssue {
         path: String,
         reason: String,
     },
+    /// The value is not equal to the schema's `const`.
+    ConstMismatch {
+        path: String,
+    },
+    /// The value matches none of the `anyOf` subschemas.
+    AnyOfNoMatch {
+        path: String,
+    },
+    /// The value matches `matched` `oneOf` subschemas; exactly one must match.
+    OneOfMismatch {
+        path: String,
+        matched: usize,
+    },
 }
 
 impl ValidationIssue {
@@ -68,7 +100,10 @@ impl ValidationIssue {
             | ValidationIssue::LengthOutOfRange { path, .. }
             | ValidationIssue::NumberOutOfRange { path, .. }
             | ValidationIssue::AdditionalProperty { path, .. }
-            | ValidationIssue::InvalidSchema { path, .. } => path,
+            | ValidationIssue::InvalidSchema { path, .. }
+            | ValidationIssue::ConstMismatch { path }
+            | ValidationIssue::AnyOfNoMatch { path }
+            | ValidationIssue::OneOfMismatch { path, .. } => path,
         }
     }
 
@@ -108,6 +143,15 @@ impl ValidationIssue {
             }
             ValidationIssue::InvalidSchema { path, reason } => {
                 format!("{path}: invalid schema fragment — {reason}")
+            }
+            ValidationIssue::ConstMismatch { path } => {
+                format!("{path}: value does not equal the const")
+            }
+            ValidationIssue::AnyOfNoMatch { path } => {
+                format!("{path}: value matches none of the anyOf schemas")
+            }
+            ValidationIssue::OneOfMismatch { path, matched } => {
+                format!("{path}: value matches {matched} of the oneOf schemas, expected one")
             }
         }
     }
@@ -150,6 +194,41 @@ fn validate_at(path: &str, value: &Value, schema: &Value, issues: &mut Vec<Valid
                 allowed: en.clone(),
                 got: value.clone(),
             });
+        }
+    }
+
+    if let Some(constant) = schema_obj.get("const") {
+        if constant != value {
+            issues.push(ValidationIssue::ConstMismatch {
+                path: path.to_string(),
+            });
+        }
+    }
+
+    // An empty `anyOf` or `oneOf`, or one that is not a list, constrains nothing.
+    if let Some(branches) = schema_obj.get("anyOf").and_then(|v| v.as_array()) {
+        let any_match = branches
+            .iter()
+            .any(|branch| branch_matches(path, value, branch));
+        if !branches.is_empty() && !any_match {
+            issues.push(ValidationIssue::AnyOfNoMatch {
+                path: path.to_string(),
+            });
+        }
+    }
+
+    if let Some(branches) = schema_obj.get("oneOf").and_then(|v| v.as_array()) {
+        if !branches.is_empty() {
+            let matched = branches
+                .iter()
+                .filter(|branch| branch_matches(path, value, branch))
+                .count();
+            if matched != 1 {
+                issues.push(ValidationIssue::OneOfMismatch {
+                    path: path.to_string(),
+                    matched,
+                });
+            }
         }
     }
 
@@ -258,6 +337,15 @@ fn validate_at(path: &str, value: &Value, schema: &Value, issues: &mut Vec<Valid
         }
         _ => {}
     }
+}
+
+/// Whether `value` passes one `anyOf` or `oneOf` subschema on its own. The
+/// subschema's issues go to a scratch list and are dropped, so only the
+/// keyword's own issue reaches the caller.
+fn branch_matches(path: &str, value: &Value, branch: &Value) -> bool {
+    let mut scratch = Vec::new();
+    validate_at(path, value, branch, &mut scratch);
+    scratch.is_empty()
 }
 
 fn matches_type(value: &Value, type_decl: &Value) -> bool {

@@ -180,6 +180,7 @@ import {
 } from "@/features/browser/page-context/tab-mention";
 import type {
 	BrowserRegionAttachment,
+	RegionImagePayload,
 	RegionRect,
 } from "@/features/browser/page-context/region-attach";
 import { hostnameOf } from "./knowledge-preview";
@@ -399,13 +400,17 @@ export type DashboardComposerTabMention = {
 
 /**
  * One browser region attached to the message (E3.3-d2b), as the send names it: the session, the tab and the
- * region in viewport CSS pixels. No picture and no attachment id: the gateway answers a region ephemerally and
- * keeps nothing, so a send can only name the region it was drawn over. The picture stays in the composer.
+ * region in viewport CSS pixels. The gateway answers a region ephemerally and keeps nothing, so the send also
+ * carries the picture it answered and its attach token (QF-9), which the gateway verifies before it forwards
+ * the region. `attachToken` is null when the gateway issued none; such a region is refused at send.
  */
 export type DashboardComposerBrowserRegion = {
 	sessionId: string;
 	tabId: string;
 	region: RegionRect;
+	attachToken: string | null;
+	image: RegionImagePayload & { width: number; height: number };
+	selectionText?: string;
 };
 
 /**
@@ -3093,6 +3098,14 @@ export function DashboardComposer(props: {
 				sessionId: item.sessionId,
 				tabId: item.tabId,
 				region: item.region,
+				attachToken: item.attachToken,
+				image: {
+					mimeType: item.image.mimeType,
+					dataBase64: item.image.dataBase64,
+					width: item.image.width,
+					height: item.image.height,
+				},
+				...(item.selection ? { selectionText: item.selection.text } : {}),
 			})),
 		);
 		const submittedConnectorScope = connectorScopeBlockReason() === null && connectorScopeAdvertised()

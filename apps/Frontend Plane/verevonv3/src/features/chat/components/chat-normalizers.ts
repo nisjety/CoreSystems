@@ -593,6 +593,33 @@ export function streamFailurePresentation(
         unavailable: false,
         action: 'none',
       }
+    case 'browser_region_unverified':
+      // QF-9: the gateway could not verify a browser region the turn carried (its attach token
+      // expired, or does not match the session, tab, area or picture), so the whole turn was
+      // refused before anything reached Quarry or a model. The text comes back to the composer;
+      // the area has to be attached again for a fresh token. The server's text is English
+      // operator wording and is never shown.
+      return {
+        message: tr(
+          'Området fra nettleseren kunne ikke bekreftes, så meldingen ble ikke sendt. Legg ved området på nytt og send igjen. Utkastet er beholdt.',
+          'The area from the browser could not be verified, so the message was not sent. Attach the area again and send it again. Your draft is kept.',
+        ),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
+    case 'browser_context_refused_zdr':
+      // QF-9: browser page context (a tab or an area) never rides a zero-data-retention turn.
+      // The turn was refused before anything reached Quarry or a model; the text comes back.
+      return {
+        message: tr(
+          'Sidekontekst fra nettleseren brukes ikke i en økt uten datalagring. Meldingen ble ikke sendt. Fjern området eller @tab og send igjen. Utkastet er beholdt.',
+          'Page context from the browser is not used in a zero-data-retention session. The message was not sent. Remove the area or @tab and send again. Your draft is kept.',
+        ),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
     case 'agentic_subscription_disabled':
       // The server refused Do on the ChatGPT subscription because its switch is
       // off, before any model ran. Sending the same turn again would be refused

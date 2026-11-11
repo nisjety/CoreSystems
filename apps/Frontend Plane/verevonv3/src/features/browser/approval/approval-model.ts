@@ -81,7 +81,8 @@ export function approvalTargetSummary(url: string, selector: string): string {
 
 /**
  * A browser gate as the card reads it. The OTP fields are optional: the approval event
- * does not send them yet (MP-ASKS W3-E3.1-i), so a gate without them still maps to a card.
+ * sends them only on a one-time-code gate (QF-15, MP-ASKS W3-E3.1-i), so a gate without
+ * them still maps to a card.
  */
 export type BrowserApprovalGate = BrowserApprovalEntry &
   Pick<ApprovalCardModel, 'topOrigin' | 'frameOrigin' | 'mailProviderKey' | 'mailAccountLabel'>

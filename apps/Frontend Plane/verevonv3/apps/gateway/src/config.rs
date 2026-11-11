@@ -66,6 +66,15 @@ pub(crate) struct AppState {
     /// `browser_context.resolve_tab_mentions`). Read once here, never in a handler. Off unless set
     /// to a truthy word (1/true/yes/on); while off the route is absent and the action answers 404.
     pub(crate) browser_tab_mentions: bool,
+    /// `BROWSER_TURN_CONTEXT` (QF-8, E3.3-c/-d): whether a chat turn may carry browser page
+    /// context. Read once here, never in a handler. Exactly `true` enables it. Off or on, the
+    /// chat send path drops any client-built `browser_tab_refs` / `browser_regions`; on, the
+    /// gateway re-resolves the tab refs against Quarry and verifies each region's attach token,
+    /// and writes back only what it vouched for.
+    pub(crate) browser_turn_context: bool,
+    /// `BROWSER_REGION_ATTACH_KEY` (QF-8): the HMAC key of the stateless region attach token.
+    /// Empty means no token is issued and every region on a chat turn is refused. Never logged.
+    pub(crate) browser_region_attach_key: String,
     pub(crate) auth_core_url: String,
     pub(crate) verevon_public_origin: String,
     pub(crate) session_core_url: String,
@@ -258,6 +267,13 @@ pub(crate) struct SpaceFeatureFlags {
     /// and `source_ref` are ignored and every copy is a `chat-attachment`. A rollout control, never
     /// an authorization input: documents-api decides under the user's own scoped token.
     pub(crate) chat_artifact_promote: bool,
+    /// `CHAT_RESEARCH_RUNS` (Quarry v2 E4.6, Q4-062b): `GET /api/v1/chat/research-runs/{id}` and
+    /// `POST /api/v1/chat/research-runs/{id}/cancel`, the person's read and stop of one addressable
+    /// research run. `1`/`true`/`yes`/`on` turns it on; default off, never by default in development.
+    /// Off, the routes are not registered (404). A rollout control, never an authorization input:
+    /// Model Gateway and Session Core decide that the run is the caller's own, and a zero-retention
+    /// run comes back with ids, status and counters only.
+    pub(crate) chat_research_runs: bool,
     /// `SPACE_DENIALS_TYPED` (WS03-S5): map Control's typed Space denials to the browser envelope.
     /// Off restores pass-through. A rollout control, never an authorization input.
     pub(crate) denials_typed: bool,
@@ -528,6 +544,7 @@ impl SpaceFeatureFlags {
             chat_artifact_promote: chat_artifact_promote_from(
                 env::var("CHAT_ARTIFACT_PROMOTE_ENABLED").ok().as_deref(),
             ),
+            chat_research_runs: env_bool("CHAT_RESEARCH_RUNS", false),
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             dm_api: space_flag("SPACE_DM_API"),
             message_revise_api: space_flag("SPACE_MESSAGE_REVISE_API"),
@@ -611,6 +628,10 @@ pub(crate) struct ScheduleCapabilities {
     pub(crate) overlap: bool,
     pub(crate) kinds: Vec<String>,
     pub(crate) needs_activation: bool,
+    /// Q2-WS15.L5c: crawl/batch pause, resume and cancel are honoured
+    /// (QUARRY_EDGE__JOB_CONTROL on at the edge). The SPA draws the crawl
+    /// controls only when this is true. Key `job_control` in the JSON value.
+    pub(crate) job_control: bool,
 }
 
 /// Parse `QUARRY_SCHEDULE_CAPABILITIES` (a JSON object). Unset, blank or
@@ -688,6 +709,13 @@ pub(crate) async fn build_state() -> Result<AppState> {
         browser_tab_mentions: human_browse_enabled(
             env::var(crate::domains::browser_context::TAB_MENTIONS_FLAG).ok().as_deref(),
         ),
+        browser_turn_context: browser_turn_context_enabled(
+            env::var("BROWSER_TURN_CONTEXT").ok().as_deref(),
+        ),
+        browser_region_attach_key: env::var("BROWSER_REGION_ATTACH_KEY")
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
         auth_core_url: env_url("AUTH_CORE_URL", "http://auth-core:3011"),
         verevon_public_origin: canonical_public_origin(
             &env::var("VEREVON_PUBLIC_ORIGIN")
@@ -1073,6 +1101,12 @@ pub(crate) fn browser_consent_api_enabled(raw: Option<&str>) -> bool {
 /// Parses `BROWSER_DOWNLOADS` (Q3-E3.4-7b). Only the literal `true` enables the downloads list and
 /// the knowledge hand-off; unset, blank or any other value is off, in every environment.
 pub(crate) fn browser_downloads_enabled(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// Parses `BROWSER_TURN_CONTEXT` (QF-8). Only the literal `true` lets a chat turn carry
+/// gateway-verified browser context; unset, blank or any other value is off, in every environment.
+pub(crate) fn browser_turn_context_enabled(raw: Option<&str>) -> bool {
     raw == Some("true")
 }
 

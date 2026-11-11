@@ -9567,9 +9567,23 @@ type OrchestrationEvent_BrowserActionApprovalRequired struct {
 	// Durable approval id (from the CreateApproval call this event
 	// accompanies) — lets a UI jump straight to deciding it via the existing
 	// generic `POST /v1/orchestration/approvals/{id}/decide` route.
-	ApprovalId    string `protobuf:"bytes,9,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ApprovalId string `protobuf:"bytes,9,opt,name=approval_id,json=approvalId,proto3" json:"approval_id,omitempty"`
+	// One-time-code gate only: origin (scheme://host[:port]) of the top-level
+	// page asking for the code. Empty for every non-OTP gate.
+	TopOrigin string `protobuf:"bytes,10,opt,name=top_origin,json=topOrigin,proto3" json:"top_origin,omitempty"`
+	// One-time-code gate only: origin of the frame holding the code field
+	// (equals top_origin when the field is not in a child frame). Empty for
+	// every non-OTP gate.
+	FrameOrigin string `protobuf:"bytes,11,opt,name=frame_origin,json=frameOrigin,proto3" json:"frame_origin,omitempty"`
+	// One-time-code gate only: closed provider key of the mail connection
+	// the code would be read from (e.g. "gmail", "outlook"). Empty for every
+	// non-OTP gate.
+	MailProviderKey string `protobuf:"bytes,12,opt,name=mail_provider_key,json=mailProviderKey,proto3" json:"mail_provider_key,omitempty"`
+	// One-time-code gate only: the person's own label for that mail
+	// connection. Never a mailbox address. Empty for every non-OTP gate.
+	MailAccountLabel string `protobuf:"bytes,13,opt,name=mail_account_label,json=mailAccountLabel,proto3" json:"mail_account_label,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *OrchestrationEvent_BrowserActionApprovalRequired) Reset() {
@@ -9661,6 +9675,34 @@ func (x *OrchestrationEvent_BrowserActionApprovalRequired) GetRiskCategory() str
 func (x *OrchestrationEvent_BrowserActionApprovalRequired) GetApprovalId() string {
 	if x != nil {
 		return x.ApprovalId
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) GetTopOrigin() string {
+	if x != nil {
+		return x.TopOrigin
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) GetFrameOrigin() string {
+	if x != nil {
+		return x.FrameOrigin
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) GetMailProviderKey() string {
+	if x != nil {
+		return x.MailProviderKey
+	}
+	return ""
+}
+
+func (x *OrchestrationEvent_BrowserActionApprovalRequired) GetMailAccountLabel() string {
+	if x != nil {
+		return x.MailAccountLabel
 	}
 	return ""
 }
@@ -10740,7 +10782,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\alineage\x18\x02 \x01(\v2\x1f.model_plane.v1.SubagentLineageR\alineage\"U\n" +
 	"\x16StreamRunEventsRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12$\n" +
-	"\x0eafter_event_id\x18\x02 \x01(\tR\fafterEventId\"\xc50\n" +
+	"\x0eafter_event_id\x18\x02 \x01(\tR\fafterEventId\"\xe11\n" +
 	"\x12OrchestrationEvent\x12*\n" +
 	"\x02at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12\x19\n" +
 	"\bevent_id\x18\x02 \x01(\tR\aeventId\x12b\n" +
@@ -10848,7 +10890,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\aplan_id\x18\x02 \x01(\tR\x06planId\x12\x1b\n" +
 	"\tattach_id\x18\x03 \x01(\tR\battachId\x12$\n" +
 	"\x0esession_run_id\x18\x04 \x01(\tR\fsessionRunId\x12\x15\n" +
-	"\x06tab_id\x18\x05 \x01(\tR\x05tabId\x1a\x99\x02\n" +
+	"\x06tab_id\x18\x05 \x01(\tR\x05tabId\x1a\xb5\x03\n" +
 	"\x1dBrowserActionApprovalRequired\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\aplan_id\x18\x02 \x01(\tR\x06planId\x12\x1b\n" +
@@ -10860,7 +10902,13 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\x06reason\x18\a \x01(\tR\x06reason\x12#\n" +
 	"\rrisk_category\x18\b \x01(\tR\friskCategory\x12\x1f\n" +
 	"\vapproval_id\x18\t \x01(\tR\n" +
-	"approvalId\x1a\xbf\x01\n" +
+	"approvalId\x12\x1d\n" +
+	"\n" +
+	"top_origin\x18\n" +
+	" \x01(\tR\ttopOrigin\x12!\n" +
+	"\fframe_origin\x18\v \x01(\tR\vframeOrigin\x12*\n" +
+	"\x11mail_provider_key\x18\f \x01(\tR\x0fmailProviderKey\x12,\n" +
+	"\x12mail_account_label\x18\r \x01(\tR\x10mailAccountLabel\x1a\xbf\x01\n" +
 	"\x14BrowserActionDecided\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\aplan_id\x18\x02 \x01(\tR\x06planId\x12\x1b\n" +

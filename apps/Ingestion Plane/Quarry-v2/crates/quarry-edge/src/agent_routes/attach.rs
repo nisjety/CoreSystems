@@ -281,6 +281,14 @@ async fn attach_run_inner(
         .map(crate::agent_policy_gate::attachment_policy)
         .transpose()
         .map_err(|error| driver_err(&request_id, error))?;
+    // WS7.K: the attach grant's web-policy snapshot and the caller's claim, held beside the
+    // run's decision for every URL this attachment starts on.
+    let attach_snapshot = crate::agent_policy_gate::GrantSnapshot::from_grant(&grant);
+    let attach_claim = crate::agent_policy_gate::step_claim(&state.policy, &claims);
+    let attach_layers = crate::agent_policy_gate::StepLayers {
+        grant: &attach_snapshot,
+        claim: &attach_claim,
+    };
 
     if let Some(url) = body.start_url.as_deref() {
         if !domain_allowed(url, &allowed_domains) {
@@ -303,7 +311,7 @@ async fn attach_run_inner(
         )
         .await
         .map_err(|error| driver_err(&request_id, error))?;
-        crate::agent_policy_gate::gate_visit(&state, &handle.live, false, url)
+        crate::agent_policy_gate::gate_visit_for_step(&state, &handle.live, false, url, &attach_layers)
             .map_err(|error| driver_err(&request_id, error))?;
         if let Some(policy) = &attachment_policy {
             crate::agent_policy_gate::gate_attachment_url(policy, url)
@@ -375,7 +383,7 @@ async fn attach_run_inner(
             state.security.as_ref(),
             &entry.nav_policy,
         ).await.map_err(|error| driver_err(&request_id, error))?;
-        crate::agent_policy_gate::gate_visit(&state, &handle.live, false, raw_url)
+        crate::agent_policy_gate::gate_visit_for_step(&state, &handle.live, false, raw_url, &attach_layers)
             .map_err(|error| driver_err(&request_id, error))?;
         if let Some(policy) = &attachment_policy {
             crate::agent_policy_gate::gate_attachment_url(policy, raw_url)
@@ -542,9 +550,9 @@ pub async fn mark_tab(
 ) -> Result<Json<Envelope<serde_json::Value>>, ApiErr> {
     let request_id = crate::request_id::current();
     let not_found = || status_err(StatusCode::NOT_FOUND, &request_id, "agent run not found");
-    if !matches!(body.mark.as_str(), "deliverable" | "handoff") {
+    let Some(mark) = TabMark::from_wire(&body.mark) else {
         return Err(status_err(StatusCode::BAD_REQUEST, &request_id, "invalid tab mark"));
-    }
+    };
     let handle = lookup_run(&state, &run_id).ok_or_else(not_found)?;
     let _in_flight = handle.live.in_flight_guard();
     // Match the delegate step's lane-before-entry lock order. This waits for any
@@ -566,7 +574,7 @@ pub async fn mark_tab(
     if attach_grant_refusal(&grant, &run_id, &entry.actor_id, parent_grant).is_some() {
         return Err(driver_err(&request_id, QuarryError::new(ErrorCode::Forbidden, "attach_grant_invalid")));
     }
-    handle.live.tabs().mark_for_handoff(&tab_id, &attach.attach_id).map_err(|_| not_found())?;
+    handle.live.tabs().mark_for_handoff(&tab_id, &attach.attach_id, mark).map_err(|_| not_found())?;
     handle.live.touch();
     Ok(Json(Envelope::ok(request_id, serde_json::json!({"tab_id": tab_id, "mark": body.mark}))))
 }
@@ -947,6 +955,9 @@ pub(super) async fn delegate_step(
             QuarryError::new(ErrorCode::SecurityBlocked, "attach_grant_invalid"),
         ));
     }
+    // WS7.K: the attach grant's web-policy snapshot, from this step's revalidation: the grant
+    // layer of the delegate's landed-page check (gate 8 reads the run grant's).
+    let attach_snapshot = crate::agent_policy_gate::GrantSnapshot::from_grant(&grant);
 
     // Q3-E3.2-e1w: the run's origin extension is read again before the delegate's step as well.
     // One that is no longer usable is dropped (the owner's session and this attachment's tab go
@@ -1011,6 +1022,7 @@ pub(super) async fn delegate_step(
             enforce_takeover: crate::run_limits::takeover_enforced(),
             consented_tab_control: attach.borrowed.is_some(),
             last_observation: lane.last_observation.as_deref(),
+            caller: Some(claims),
         },
     )
     .await
@@ -1167,6 +1179,10 @@ pub(super) async fn delegate_step(
             &handle.live,
             entry.zdr.is_active(),
             &observation.url,
+            &crate::agent_policy_gate::StepLayers {
+                grant: &attach_snapshot,
+                claim: &admitted.step_claim,
+            },
             |url| domain_allowed(url, &attach.allowed_domains),
             "browser action reached a domain outside the attachment's allowed domains",
         )?;
@@ -1580,14 +1596,14 @@ mod delegate_lane_tests {
     async fn owner_release_hands_off_but_revocation_before_release_closes() {
         let f = fixture(&["tab_home", "tab_agent"]).await;
         f.handle.entry.lock().await.grant_id = Some(String::new());
-        f.handle.live.tabs().mark_for_handoff("tab_agent", "att_1").unwrap();
+        f.handle.live.tabs().mark_for_handoff("tab_agent", "att_1", TabMark::Handoff).unwrap();
         let _ = release_attach(State(f.state.clone()), Extension(crate::test_support::claims_for_org("org")),
             Path((f.run_id.clone(), "att_1".into())), Query(ReleaseQuery::default())).await.unwrap();
         assert_eq!(f.handle.live.tabs().get("tab_agent").unwrap().holder, BrowserTabHolder::Human);
 
         let revoked = fixture(&["tab_home", "tab_agent"]).await;
         revoked.handle.entry.lock().await.grant_id = Some(String::new());
-        revoked.handle.live.tabs().mark_for_handoff("tab_agent", "att_1").unwrap();
+        revoked.handle.live.tabs().mark_for_handoff("tab_agent", "att_1", TabMark::Handoff).unwrap();
         revoked.grant_active.store(false, Ordering::SeqCst);
         let _ = release_attach(State(revoked.state.clone()), Extension(service_claims()),
             Path((revoked.run_id.clone(), "att_1".into())), Query(ReleaseQuery::default())).await.unwrap();
@@ -1597,7 +1613,7 @@ mod delegate_lane_tests {
     #[tokio::test]
     async fn abort_discards_even_a_marked_tab() {
         let f = fixture(&["tab_home", "tab_agent"]).await;
-        f.handle.live.tabs().mark_for_handoff("tab_agent", "att_1").unwrap();
+        f.handle.live.tabs().mark_for_handoff("tab_agent", "att_1", TabMark::Deliverable).unwrap();
         let _ = release_attach(State(f.state.clone()), Extension(service_claims()),
             Path((f.run_id.clone(), "att_1".into())),
             Query(ReleaseQuery { disposition: Some("abort".into()) })).await.unwrap();

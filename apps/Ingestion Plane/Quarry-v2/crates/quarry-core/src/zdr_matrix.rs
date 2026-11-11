@@ -131,6 +131,23 @@ pub const ROWS: &[Row] = &[
         log: Log::Unverified,
     },
     Row {
+        id: "scrape_profile_pin",
+        routes: &[],
+        treatment: Treatment::Refused {
+            code: "BAD_REQUEST",
+            feature: "persistent_profile",
+        },
+        status: Status::Enforced,
+        enforced_by: &[
+            "routes::tests::a_pinned_scrape_is_refused_under_zdr_before_any_fetch",
+            "routes::tests::a_pinned_scrape_with_ingest_is_refused_and_nothing_is_ingested",
+            "routes::tests::a_service_principal_or_api_key_cannot_pin_a_profile",
+            "routes::tests::the_stream_route_refuses_a_profile_id_while_the_pin_is_on",
+        ],
+        basis: "same route as scrape: scrape_with refuses a profile_id under ZDR with 400 profile_zdr_forbidden, by the request's zdr flag or the token's ZDR floor, before any profile is read or any page fetched, and refuses ingest with 400 profile_ingest_forbidden; profile_guard::precheck refuses a service principal with 403, an API key is refused with 403 api_key_profile_refused, profile_guard::authorize decides the owner check (it denies a non-owner only under QUARRY_EDGE__PROFILE_OWNER_ENFORCE=enforce), and scrape_with answers 404 for a profile the organization does not hold (a scrape never creates one). The restore is read-only, so nothing is written back to the profile, and a pinned scrape is never cached (it takes the browser plan, which both cache gates refuse) or ingested",
+        log: Log::Unverified,
+    },
+    Row {
         id: "durable_jobs",
         routes: &["/v1/crawl", "/v1/batch"],
         treatment: Treatment::Refused {
@@ -184,13 +201,11 @@ pub const ROWS: &[Row] = &[
         id: "search_suggest",
         routes: &["/v1/search/suggest"],
         treatment: Treatment::Degraded {
-            warning: "the partial query is sent to the Model Plane without the ZDR posture",
+            warning: "no suggestions under ZDR: the partial query never leaves Quarry",
         },
-        status: Status::Gap {
-            issue: "unassigned: forward the posture, or refuse under ZDR",
-        },
-        enforced_by: &["zdr_gap_rows::gap_rows_currently_violate_search_suggest"],
-        basis: "search_routes::suggest calls the Model Plane and never reads the token's ZDR floor",
+        status: Status::Enforced,
+        enforced_by: &["zdr_gap_rows::a_zdr_caller_gets_no_suggestions_and_the_model_plane_sees_no_request"],
+        basis: "search_routes::suggest (dark behind QUARRY_EDGE__SEARCH_SUGGEST) reads the token's ZDR floor (effective_zdr) after the switch check and, under ZDR, answers an empty 200 before any Model Plane call, because the Model Plane hop carries no ZDR posture (ADR-4, the INNH-8 /v1/answer precedent); the route's contract is always 200 so the UI degrades instead of seeing a refusal; the skip is logged as the row id only, never the query",
         log: Log::Unverified,
     },
     Row {

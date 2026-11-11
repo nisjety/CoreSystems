@@ -170,6 +170,10 @@ pub mod metrics {
     pub const CRAWL_PAGE: &str = "quarry.crawl.page";
     /// WS6.C-e: URLs fetched or extracted by `/v1/extract`.
     pub const EXTRACT_URL: &str = "quarry.extract.url";
+    /// WS16.S6: one AI format (`json`, `summary`, `question`, `highlights`) that finished `ok`,
+    /// on `/v1/scrape` or per source of `/v1/extract`. Governed by its own switch,
+    /// `QUARRY_EDGE__USAGE_LLM_METRICS`, not by the browser metrics switch below.
+    pub const EXTRACT_LLM: &str = "quarry.extract.llm";
     /// WS6.C-e: one `/v1/map` call.
     pub const MAP_CALL: &str = "quarry.map.call";
     /// The seven metrics that `QUARRY_EDGE__USAGE_BROWSER_METRICS` governs. The five
@@ -200,6 +204,12 @@ pub trait UsageMeter: Send + Sync {
     fn browser_metrics_mode(&self) -> BrowserMetricsMode {
         BrowserMetricsMode::Off
     }
+
+    /// WS16.S6: the mode of `quarry.extract.llm`. The default reports `Off`, so a meter that
+    /// does not gate the metric is never handed one.
+    fn llm_metrics_mode(&self) -> LlmMetricsMode {
+        LlmMetricsMode::Off
+    }
 }
 
 /// How the seven browser and crawl metrics are emitted (`QUARRY_EDGE__USAGE_BROWSER_METRICS`).
@@ -214,6 +224,37 @@ pub enum BrowserMetricsMode {
 }
 
 impl BrowserMetricsMode {
+    /// `off` (also the empty value), `shadow` or `on`. Anything else is `None`.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "" | "off" => Some(Self::Off),
+            "shadow" => Some(Self::Shadow),
+            "on" => Some(Self::On),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::On => "on",
+        }
+    }
+}
+
+/// How `quarry.extract.llm` is emitted (`QUARRY_EDGE__USAGE_LLM_METRICS`, WS16.S6). A switch of
+/// its own, separate from [`BrowserMetricsMode`]: `Off` emits nothing; `Shadow` counts the
+/// events without publishing; `On` publishes them through the usage meter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LlmMetricsMode {
+    #[default]
+    Off,
+    Shadow,
+    On,
+}
+
+impl LlmMetricsMode {
     /// `off` (also the empty value), `shadow` or `on`. Anything else is `None`.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim() {

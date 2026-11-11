@@ -21,11 +21,15 @@ const LANDED_OUTSIDE_RUN: &str =
 /// of it reached no host. That is all it is accepted as; as a navigation target it is still
 /// refused by the edge (gate 11's `RunNavPolicy::allows`, the tab and attach routes, the
 /// delegate navigate). The browser's `guard_navigation_target` admits it: it loads nothing.
+///
+/// WS7.K: `layers` are the step layers the action was admitted under (the grant snapshot and
+/// the step caller's claim), checked after the run's decision and only ever tightening it.
 pub(super) fn check_landed_page(
     state: &AppState,
     live: &RunLive,
     zdr: bool,
     url: &str,
+    layers: &crate::agent_policy_gate::StepLayers<'_>,
     domain_allows: impl FnOnce(&str) -> bool,
     outside: &'static str,
 ) -> QuarryResult<()> {
@@ -35,7 +39,7 @@ pub(super) fn check_landed_page(
     if !domain_allows(url) {
         return Err(QuarryError::new(ErrorCode::SecurityBlocked, outside));
     }
-    crate::agent_policy_gate::gate_visit(state, live, zdr, url)
+    crate::agent_policy_gate::gate_visit_for_step(state, live, zdr, url, layers)
 }
 
 /// W3-E3.4-4: the flag that turns on the download admission policy. Default off: while it
@@ -129,6 +133,7 @@ fn check_landed_on_run(
     state: &AppState,
     handle: &RunHandle,
     entry: &RunEntry,
+    admitted: &Admitted,
     obs: BrowserObservation,
 ) -> QuarryResult<BrowserObservation> {
     check_landed_page(
@@ -136,6 +141,7 @@ fn check_landed_on_run(
         &handle.live,
         entry.zdr.is_active(),
         &obs.url,
+        &admitted.step_layers(),
         |url| {
             entry
                 .nav_policy
@@ -257,6 +263,7 @@ pub async fn step(
             enforce_takeover: crate::run_limits::takeover_enforced(),
             consented_tab_control: false,
             last_observation: lane.last_observation.as_deref(),
+            caller: Some(&claims),
         },
     )
     .await
@@ -379,7 +386,7 @@ pub async fn step(
     // caller is refused is a failed step, and its observation is not kept. The action did
     // run, so it keeps the driver's cost.
     let ran = step_result.as_ref().ok().map(|obs| obs.telemetry.clone());
-    let step_result = step_result.and_then(|obs| check_landed_on_run(&state, &handle, &entry, obs));
+    let step_result = step_result.and_then(|obs| check_landed_on_run(&state, &handle, &entry, &admitted, obs));
     crate::metrics::record_agent_step(
         browser_action_name(&receipt_action),
         step_result.is_ok(),
@@ -502,6 +509,7 @@ pub(super) async fn execute_ws_action(
             enforce_takeover: crate::run_limits::takeover_enforced(),
             consented_tab_control: false,
             last_observation: lane.last_observation.as_deref(),
+            caller: Some(claims),
         },
     )
     .await?;
@@ -597,7 +605,7 @@ pub(super) async fn execute_ws_action(
     }
     let mut entry = handle.entry.lock().await;
     let ran = step_result.as_ref().ok().map(|obs| obs.telemetry.clone());
-    let step_result = step_result.and_then(|obs| check_landed_on_run(state, handle, &entry, obs));
+    let step_result = step_result.and_then(|obs| check_landed_on_run(state, handle, &entry, &admitted, obs));
     crate::metrics::record_agent_step(
         browser_action_name(&receipt_action),
         step_result.is_ok(),

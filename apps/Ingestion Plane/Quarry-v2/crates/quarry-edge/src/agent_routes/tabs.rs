@@ -216,8 +216,8 @@ pub async fn new_tab(
 
     // Opening a tab is an effectful browser operation in its own right;
     // do not let it bypass the per-action broker revalidation that normal
-    // REST/WebSocket steps receive.
-    if let Some(grant_id) = entry.grant_id.as_deref() {
+    // REST/WebSocket steps receive. WS7.K: its snapshot is the grant layer of the tab's URL check.
+    let grant_snapshot = if let Some(grant_id) = entry.grant_id.as_deref() {
         validate_run_grant(
             &state,
             &entry.org_id,
@@ -227,14 +227,16 @@ pub async fn new_tab(
             &entry.nav_policy,
         )
         .await
-            .map_err(|error| driver_err(&request_id, error))?;
+            .map_err(|error| driver_err(&request_id, error))?
     } else if state.require_browser_grants || entry.key_id.is_some() {
         return Err(status_err(
             StatusCode::FORBIDDEN,
             &request_id,
             "browser grant is required for tab creation",
         ));
-    }
+    } else {
+        crate::agent_policy_gate::GrantSnapshot::Absent
+    };
 
     if let Some(url) = body.url.as_deref() {
         if !entry.nav_policy.allows(url, &entry.constraints.allowed_domains) {
@@ -244,9 +246,20 @@ pub async fn new_tab(
                 "browser tab navigation is outside the run's allowed domains",
             ));
         }
-        // WS7.D: the tab's URL is held to the run's web policy before it is opened.
-        crate::agent_policy_gate::gate_visit(&state, &handle.live, entry.zdr.is_active(), url)
-            .map_err(|error| driver_err(&request_id, error))?;
+        // WS7.D: the tab's URL is held to the run's web policy before it is opened, and (WS7.K)
+        // to the grant snapshot and the caller's claim, which only tighten it.
+        let step_claim = crate::agent_policy_gate::step_claim(&state.policy, &claims);
+        crate::agent_policy_gate::gate_visit_for_step(
+            &state,
+            &handle.live,
+            entry.zdr.is_active(),
+            url,
+            &crate::agent_policy_gate::StepLayers {
+                grant: &grant_snapshot,
+                claim: &step_claim,
+            },
+        )
+        .map_err(|error| driver_err(&request_id, error))?;
         // WS8.B: run-aware, so an open-web run's new tab stays DNS-guarded even when the
         // engine allows private hosts.
         validate_navigation_for_run(
@@ -1043,7 +1056,7 @@ pub(super) async fn admit_attach_mode_tab_with(
 
     // The run grant first, exactly as gate 4 checks it, then its snapshot for the org caps and
     // the grant layer.
-    validate_run_grant(
+    let grant_snapshot = validate_run_grant(
         state,
         &entry.org_id,
         run_grant_id,
@@ -1083,9 +1096,22 @@ pub(super) async fn admit_attach_mode_tab_with(
     };
     check_origin_extension(state, &handle.live, false, run_denied, &run_grant, &extension)
         .map_err(&deny)?;
-    // The tab's own host, which may sit under a listed host, must pass the web policy too.
-    if crate::agent_policy_gate::gate_visit(state, &handle.live, false, &format!("https://{host}/"))
-        .is_err()
+    // The tab's own host, which may sit under a listed host, must pass the web policy too, with
+    // the run grant's snapshot as the grant layer (WS7.K). No caller token reaches this check,
+    // so it states no claim layer.
+    let no_claim = quarry_core::web_policy::OrgInput::Absent;
+    let consent_layers = crate::agent_policy_gate::StepLayers {
+        grant: &grant_snapshot,
+        claim: &no_claim,
+    };
+    if crate::agent_policy_gate::gate_visit_for_step(
+        state,
+        &handle.live,
+        false,
+        &format!("https://{host}/"),
+        &consent_layers,
+    )
+    .is_err()
         || run_denied.iter().any(|denied_host| {
             host == *denied_host
                 || host

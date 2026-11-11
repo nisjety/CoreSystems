@@ -76,3 +76,53 @@
   max-height: none;
   border-left: 0;
 }
+
+/* The empty chat's action row (WS9.H). The browser entry sits beside the resume offer, above the composer. The
+   header's round icon button takes a label here, with the layout picker's pressed state. It renders only with the
+   dock on, so nothing in this block shows with the flag off. */
+.verevon-chat-empty__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 0;
+}
+
+.verevon-chat-empty__actions .verevon-chat-header-button {
+  display: inline-flex;
+  width: auto;
+  height: 32px;
+  gap: 6px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--verevon-e-muted, #5f5f5f);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* The heading paints its icons in the accent colour; this icon follows the control, so the pressed state reads whole. */
+.verevon-chat-empty__actions .verevon-chat-header-button svg {
+  color: inherit;
+}
+
+.verevon-chat-empty__actions .verevon-chat-header-button:hover {
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text, inherit);
+  box-shadow: none;
+  transform: none;
+}
+
+.verevon-chat-empty__actions .verevon-chat-header-button:focus-visible {
+  outline: 2px solid var(--verevon-chat-fjord, #0071e3);
+  outline-offset: 1px;
+}
+
+.verevon-chat-empty__actions .verevon-chat-header-button[aria-pressed='true'] {
+  background: var(--verevon-chat-fjord-soft, #eaf3fd);
+  color: var(--verevon-chat-fjord, #0071e3);
+}

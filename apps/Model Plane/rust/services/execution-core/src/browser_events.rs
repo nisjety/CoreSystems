@@ -55,6 +55,19 @@ fn redirect_text(enabled: bool, decided_by: &str, reason: &str) -> Option<String
     crate::browser_agent::bound_redirect_text(reason)
 }
 
+/// QF-15: one one-time-code field for `BrowserActionApprovalRequired`, empty
+/// for every non-OTP gate (`detail.otp` is `None`).
+fn otp_field(
+    detail: &RiskyActionDetail,
+    pick: impl Fn(&crate::browser_agent::OtpApprovalContext) -> &String,
+) -> String {
+    detail
+        .otp
+        .as_ref()
+        .map(|otp| pick(otp).clone())
+        .unwrap_or_default()
+}
+
 /// `BrowserRunPaused.reason` when a person took the agent tab (WS8.G).
 pub const PAUSED_REASON_USER_TOOK_OVER: &str = "user_took_over";
 /// `BrowserRunResumed.reason` when the person gave the tab back (WS8.G).
@@ -468,6 +481,10 @@ impl BrowserEventSink for OrchestrationEventSink {
                     reason: detail.reason.clone(),
                     risk_category: detail.risk_category.as_str().to_owned(),
                     approval_id: String::new(),
+                    top_origin: otp_field(detail, |o| &o.top_origin),
+                    frame_origin: otp_field(detail, |o| &o.frame_origin),
+                    mail_provider_key: otp_field(detail, |o| &o.mail_provider_key),
+                    mail_account_label: otp_field(detail, |o| &o.mail_account_label),
                 },
             ),
         )
@@ -585,6 +602,10 @@ impl BrowserEventSink for OrchestrationEventSink {
                     reason: detail.reason.clone(),
                     risk_category: detail.risk_category.as_str().to_owned(),
                     approval_id: approval_id.clone(),
+                    top_origin: otp_field(detail, |o| &o.top_origin),
+                    frame_origin: otp_field(detail, |o| &o.frame_origin),
+                    mail_provider_key: otp_field(detail, |o| &o.mail_provider_key),
+                    mail_account_label: otp_field(detail, |o| &o.mail_account_label),
                 },
             ),
         ).await;
@@ -1198,6 +1219,7 @@ mod tests {
             selector: String::new(),
             risk_category: RiskCategory::Login,
             reason: "test".to_owned(),
+            otp: None,
         }
     }
 
@@ -1617,6 +1639,7 @@ mod tests {
             selector: String::new(),
             risk_category: crate::browser_agent::RiskCategory::Checkout,
             reason: "checkout".to_owned(),
+            otp: None,
         };
         let outcome = sink
             .decided(&config, &detail, "appr_1", DECISION_REDIRECTED, "use guest", "user_1")

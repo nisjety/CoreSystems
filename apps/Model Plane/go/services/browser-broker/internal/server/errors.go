@@ -52,6 +52,10 @@ func mapErr(err error) error {
 		return status.Error(codes.PermissionDenied, err.Error())
 	case errors.Is(err, grant.ErrAttachResourceInvalid):
 		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, grant.ErrFillOtpBindingInvalid), errors.Is(err, grant.ErrFillOtpBindingUnexpected):
+		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, grant.ErrFillOtpZdrRefused), errors.Is(err, grant.ErrFillOtpNotDurable):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, grant.ErrDeriveConflict):
 		return status.Error(codes.AlreadyExists, err.Error())
 	case errors.Is(err, grant.ErrInvalidGrantText):
@@ -115,6 +119,12 @@ func grantOutcome(err error) string {
 		return "attach_needs_owner"
 	case errors.Is(err, grant.ErrAttachResourceInvalid):
 		return "attach_resource_invalid"
+	case errors.Is(err, grant.ErrFillOtpBindingInvalid), errors.Is(err, grant.ErrFillOtpBindingUnexpected):
+		return "fill_otp_binding_invalid"
+	case errors.Is(err, grant.ErrFillOtpZdrRefused):
+		return "fill_otp_zdr_refused"
+	case errors.Is(err, grant.ErrFillOtpNotDurable):
+		return "fill_otp_not_durable"
 	case errors.Is(err, grant.ErrDeriveConflict):
 		return "derive_conflict"
 	case errors.Is(err, grant.ErrInvalidGrantText):

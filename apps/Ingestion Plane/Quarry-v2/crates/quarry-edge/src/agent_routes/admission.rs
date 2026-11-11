@@ -54,6 +54,9 @@ async fn validate_navigation_with(
 /// prove that the live run is still using the broker's exact canonical
 /// host authority. This prevents a caller from presenting a valid grant
 /// while retaining a broader client-supplied `allowed_domains` list.
+///
+/// WS7.K: returns the web-policy snapshot the broker stored on the grant it just
+/// revalidated, read as the grant layer of the step (`GrantSnapshot::from_grant`).
 pub(super) async fn validate_run_grant(
     state: &AppState,
     org_id: &str,
@@ -61,7 +64,7 @@ pub(super) async fn validate_run_grant(
     run_key_id: Option<&str>,
     run_domains: &[String],
     run_nav: &super::human_browse::RunNavPolicy,
-) -> QuarryResult<()> {
+) -> QuarryResult<crate::agent_policy_gate::GrantSnapshot> {
     let grant = state.grant_validator.validate_for_org(org_id, grant_id).await?;
     if !grant.is_usable() {
         return Err(QuarryError::new(
@@ -102,7 +105,7 @@ pub(super) async fn validate_run_grant(
             ));
         }
     }
-    Ok(())
+    Ok(crate::agent_policy_gate::GrantSnapshot::from_grant(&grant))
 }
 
 pub(super) fn domain_allowed(url: &str, allowed_domains: &[String]) -> bool {
@@ -342,6 +345,23 @@ pub(super) struct Admitted {
     /// is bound to (checked non-empty and https in `validate_sensitive_approval`). `None` for
     /// every other action. The step puts it, with the run's actor, on the observation context.
     pub otp_binding: Option<OtpGrantBinding>,
+    /// WS7.K: the web-policy snapshot of the run grant revalidated at gate 4 (`Absent` for a
+    /// run with no grant, and for a tab operation, which revalidates the grant itself).
+    pub grant_snapshot: crate::agent_policy_gate::GrantSnapshot,
+    /// WS7.K: the org layer of the step caller's own token (`Absent` when the caller was not
+    /// passed, or claim mode is `off`).
+    pub step_claim: quarry_core::web_policy::OrgInput,
+}
+
+impl Admitted {
+    /// The step layers this action was admitted under. Every visit check of the same step
+    /// (the landed page, a tab's URL) applies the same layers as gate 8 did.
+    pub(super) fn step_layers(&self) -> crate::agent_policy_gate::StepLayers<'_> {
+        crate::agent_policy_gate::StepLayers {
+            grant: &self.grant_snapshot,
+            claim: &self.step_claim,
+        }
+    }
 }
 
 pub(super) struct AdmitInput<'a> {
@@ -355,6 +375,9 @@ pub(super) struct AdmitInput<'a> {
     /// WS8.H: the last observation of the lane this action runs on (the approval checks read
     /// the dialogs and targets it names). `None` before the lane has observed anything.
     pub last_observation: Option<&'a BrowserObservation>,
+    /// WS7.K: the verified claims of the request's caller. Their `web_policy` claim is the
+    /// org layer gate 8 checks beside the run's decision; `None` checks no claim layer.
+    pub caller: Option<&'a crate::auth::Claims>,
 }
 
 /// 409 `USER_TOOK_OVER` with the state that caused it: `control_mode`, `control_epoch`
@@ -474,8 +497,8 @@ pub(super) async fn admit_action(
         }
     };
 
-    // 4. grant
-    if let Some(grant_id) = entry.grant_id.as_deref() {
+    // 4. grant (WS7.K: its web-policy snapshot is the grant layer of gate 8)
+    let grant_snapshot = if let Some(grant_id) = entry.grant_id.as_deref() {
         validate_run_grant(
             state,
             &entry.org_id,
@@ -484,13 +507,15 @@ pub(super) async fn admit_action(
             &entry.constraints.allowed_domains,
             &entry.nav_policy,
         )
-        .await?;
+        .await?
     } else if state.require_browser_grants || entry.key_id.is_some() {
         return Err(QuarryError::new(
             ErrorCode::Forbidden,
             "browser grant is required for every action",
         ));
-    }
+    } else {
+        crate::agent_policy_gate::GrantSnapshot::Absent
+    };
 
     // INNH-10: an API key takes no sensitive action: there is no person to sign an ask. Refused
     // on the kind of the action, ahead of the driver's capabilities, with nothing consumed.
@@ -510,9 +535,23 @@ pub(super) async fn admit_action(
     // 7. raw script
     deny_raw_script(action, &entry.run_id.to_string())?;
     deny_agent_reload(action, input.initiator.class, &entry.run_id.to_string())?;
-    // 8. web policy (WS7.D): the run's resolved decision. Before the budget and the one-shot
+    // 8. web policy (WS7.D): the run's resolved decision, then (WS7.K) the grant snapshot and
+    // the step caller's claim, which only tighten it. Before the budget and the one-shot
     // approval, so a refusal consumes neither.
-    crate::agent_policy_gate::gate_policy(state, &handle.live, entry.zdr.is_active(), action)?;
+    let step_claim = input
+        .caller
+        .map(|caller| crate::agent_policy_gate::step_claim(&state.policy, caller))
+        .unwrap_or(quarry_core::web_policy::OrgInput::Absent);
+    crate::agent_policy_gate::gate_policy_for_step(
+        state,
+        &handle.live,
+        entry.zdr.is_active(),
+        action,
+        &crate::agent_policy_gate::StepLayers {
+            grant: &grant_snapshot,
+            claim: &step_claim,
+        },
+    )?;
 
     // 9. budget: the request's own step cap where the gate does not own it, then the
     // gate, whose first refusal per segment is announced before the 402 is returned.
@@ -573,6 +612,8 @@ pub(super) async fn admit_action(
         control_epoch: snapshot.epoch,
         takeover,
         otp_binding,
+        grant_snapshot,
+        step_claim,
     })
 }
 
@@ -596,6 +637,8 @@ pub(super) fn admit_tab_operation(
         control_epoch: snapshot.epoch,
         takeover: snapshot.mode == BrowserControlMode::HumanTakeover,
         otp_binding: None,
+        grant_snapshot: crate::agent_policy_gate::GrantSnapshot::Absent,
+        step_claim: quarry_core::web_policy::OrgInput::Absent,
     })
 }
 

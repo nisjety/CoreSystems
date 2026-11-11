@@ -13,8 +13,10 @@ use super::failure::BrowserFailureKind;
 use super::BrowserLoopUsage;
 use crate::planner_policy::DeterministicReason;
 
+/// The `planner` label of a recipe run: a saved procedure replayed by `RecipePlanner` (Q4-E4.2-3h).
+pub const RECIPE_PLANNER_LABEL: &str = "recipe";
 /// The `planner` label.
-pub const PLANNER_LABELS: [&str; 2] = ["llm", "deterministic"];
+pub const PLANNER_LABELS: [&str; 3] = ["llm", "deterministic", RECIPE_PLANNER_LABEL];
 /// The `outcome` label: how the browser tool call ended.
 pub const OUTCOME_LABELS: [&str; 8] = [
     "completed",

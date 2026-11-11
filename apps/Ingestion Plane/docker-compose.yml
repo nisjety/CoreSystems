@@ -55,7 +55,10 @@ services:
       # person's sessions, then set QUARRY_EDGE_RUN_SWEEPER_DRY_RUN=0.
       QUARRY_EDGE__RUN_SWEEPER_DRY_RUN: "${QUARRY_EDGE_RUN_SWEEPER_DRY_RUN:-1}"
       QUARRY_EDGE__PORT: "8082"
-      QUARRY_EDGE__USER_AGENT: "Quarry/2.0 (+https://triodelab.com/quarry)"
+      # The edge user agent is no longer set here: the binary chooses it (config.rs default_ua, via
+      # quarry_core::identity). 0 (default) keeps the legacy Quarry/2.0 string byte-for-byte; 1 moves
+      # the edge, policy and HTTP/3 user agents to the one honest identity (ADR 5, D-W5-1). Dark by default.
+      QUARRY_EDGE__UNIFIED_UA: "${QUARRY_EDGE_UNIFIED_UA:-0}"
       # The browser driver is chosen at BUILD time, never by an env var, so
       # QUARRY_EDGE__BROWSER_PROVIDER / __BROWSERLESS_BASE_URL / __BROWSERLESS_TOKEN
       # are gone from here: EdgeConfig (crates/quarry-edge/src/config.rs) has no
@@ -107,6 +110,10 @@ services:
       # failure). Redis (QUARRY_EDGE__REDIS_URL below) still layers a
       # read-through cache in front of either backend.
       QUARRY_EDGE__PROFILE_STORE_KIND: ${QUARRY_EDGE_PROFILE_STORE_KIND:-postgres}
+      # F-t2-068: POST /v1/profiles/:id/clear-data answers 501 unless this is on (default off). A call
+      # is a dry run unless its body sets dry_run to false. Read once at boot: a change needs a
+      # quarry-edge restart (docs/RUNBOOKS.md, "Clear a stored profile's browsing data").
+      QUARRY_EDGE__PROFILE_CLEAR_DATA: "${QUARRY_EDGE_PROFILE_CLEAR_DATA:-false}"
       # WS17.E1: profile envelope encryption (default off; see RUNBOOKS WS17.E1). Master keys
       # come from the secrets ledger, never from this file.
       QUARRY_EDGE__PROFILE_ENCRYPTION: ${QUARRY_EDGE__PROFILE_ENCRYPTION:-off}
@@ -144,6 +151,9 @@ services:
       QUARRY_EDGE__USAGE_BUS_URL: ${QUARRY_EDGE__USAGE_BUS_URL:-}
       QUARRY_EDGE__USAGE_BUS_USER: ${QUARRY_EDGE__USAGE_BUS_USER:-}
       QUARRY_EDGE__USAGE_BUS_PASSWORD: ${QUARRY_EDGE__USAGE_BUS_PASSWORD:-}
+      # WS16.S6: quarry.extract.llm (one event per AI format that finished ok). off | shadow | on;
+      # off until Lago has the code. Its own switch, not USAGE_BROWSER_METRICS.
+      QUARRY_EDGE__USAGE_LLM_METRICS: ${QUARRY_EDGE__USAGE_LLM_METRICS:-off}
       # Web search providers (SmartRouter): SearXNG free primary + Brave paid fallback.
       # SearXNG is owned by this Ingestion Plane stack so Quarry-v2 is
       # self-contained and does not depend on a root mega-stack service.
@@ -174,6 +184,11 @@ services:
       # auth-core (Better Auth / convex-auth) signs the `quarry` audience token;
       # the edge fetches its JWKS to verify the signature and enforces aud=quarry.
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:-http://auth-core:3011/api/convex-auth/jwks}
+      # Stale-if-error window for the JWKS cache, in seconds (auth.rs, capped at 3600). When a refresh
+      # fails transiently (connect error, timeout, 5xx, unparseable body), the last good key set may be
+      # served up to this long past the TTL. 0 (default) is off. A 4xx or an unknown-key refresh never
+      # uses it, and a revoked key is accepted for at most the TTL plus this window.
+      AUTH_CORE_JWKS_STALE_IF_ERROR_SECS: "${AUTH_CORE_JWKS_STALE_IF_ERROR_SECS:-0}"
       AUTH_CORE_AUDIENCE: ${AUTH_CORE_AUDIENCE:-quarry}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:-http://localhost:3011/api/convex-auth}
       # Durable credential used only to mint short-lived, per-org Data and
@@ -1280,6 +1295,10 @@ services:
       # Viktig: må være en FIL, ikke mappe (ellers får du "Is a directory")
       - ./init-databases.sql:/docker-entrypoint-initdb.d/001-init-databases.sql:ro
     shm_size: "64mb"
+    # Autovacuum for the update- and delete-heavy tables (the quarry_edge job, tombstone, profile
+    # and baseline tables). These are server arguments: they apply when the container is recreated
+    # (docker compose up -d postgres), not on a plain restart. The defaults are a 1min naptime and
+    # scale factors 0.2 (vacuum) and 0.1 (analyze).
     command:
       - "postgres"
       - "-c"
@@ -1296,6 +1315,16 @@ services:
       - "random_page_cost=1.1"
       - "-c"
       - "log_min_messages=warning"
+      - "-c"
+      - "autovacuum_naptime=30s"
+      - "-c"
+      - "autovacuum_vacuum_scale_factor=0.05"
+      - "-c"
+      - "autovacuum_analyze_scale_factor=0.05"
+      - "-c"
+      - "autovacuum_vacuum_cost_limit=1000"
+      - "-c"
+      - "log_autovacuum_min_duration=1s"
     deploy:
       resources:
         limits:

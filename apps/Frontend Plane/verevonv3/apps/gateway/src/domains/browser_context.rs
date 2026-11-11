@@ -381,6 +381,227 @@ pub(crate) async fn resolve_turn_tab_mentions(
 }
 
 // ---------------------------------------------------------------------------
+// Chat send path (QF-8)
+// ---------------------------------------------------------------------------
+
+/// Chat body field of a turn's tab refs.
+const TURN_TAB_REFS_FIELD: &str = "browser_tab_refs";
+/// Chat body field of a turn's attached regions.
+const TURN_REGIONS_FIELD: &str = "browser_regions";
+/// Chat body field that says the gateway vouched for the browser context it carries.
+const TURN_VERIFIED_FIELD: &str = "browser_context_verified";
+/// Regions one turn may carry.
+const TURN_REGIONS_MAX: usize = 4;
+/// Largest error body read back from a refusal built by the shared resolver.
+const REFUSAL_BODY_MAX_BYTES: usize = 64 * 1024;
+
+type TurnRefusal = (StatusCode, Json<Value>);
+
+fn turn_refusal(status: StatusCode, code: &'static str, message: &'static str) -> TurnRefusal {
+    (status, Json(error(code, message)))
+}
+
+/// The status and JSON body of a refusal the shared resolver built as a `Response`.
+async fn refusal_from_response(response: Response) -> TurnRefusal {
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), REFUSAL_BODY_MAX_BYTES)
+        .await
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .unwrap_or_else(|| {
+            error(
+                "browser_tab_mention_unresolved",
+                "The browser tab refs could not be resolved, so nothing was attached.",
+            )
+        });
+    (status, Json(body))
+}
+
+/// A gateway ref (camelCase, as the resolver answers it) in the chat body's snake_case.
+fn turn_tab_ref(reference: &Value) -> Value {
+    let field = |name: &str| reference.get(name).cloned().unwrap_or(Value::Null);
+    json!({
+        "kind": field("kind"),
+        "session_id": field("sessionId"),
+        "tab_id": field("tabId"),
+        "label": field("label"),
+        "label_source": field("labelSource"),
+        "title": field("title"),
+        "target": field("target"),
+        "trust_class": TAB_TRUST_CLASS,
+        "grant": "none",
+    })
+}
+
+/// The one session and the mentions a turn's client-built tab refs ask for. Each ref is only a
+/// request: its session id and tab id are read, everything else is dropped.
+fn turn_tab_mentions(refs: &[Value]) -> Result<(String, Vec<TabMentionInput>), &'static str> {
+    if refs.len() > MENTIONS_MAX {
+        return Err("at most eight browser tab refs may ride one turn");
+    }
+    let mut session: Option<String> = None;
+    let mut mentions = Vec::with_capacity(refs.len());
+    for reference in refs {
+        let pick = |snake: &str, camel: &str| {
+            reference
+                .get(snake)
+                .or_else(|| reference.get(camel))
+                .and_then(Value::as_str)
+                .map(|value| value.trim().to_owned())
+        };
+        let Some(session_id) = pick("session_id", "sessionId").filter(|id| !id.is_empty()) else {
+            return Err("every browser tab ref needs a session_id");
+        };
+        let Some(tab_id) = pick("tab_id", "tabId").filter(|id| !id.is_empty()) else {
+            return Err("every browser tab ref needs a tab_id");
+        };
+        match &session {
+            Some(existing) if existing != &session_id => {
+                return Err("all browser tab refs of one turn must name the same session");
+            }
+            Some(_) => {}
+            None => session = Some(session_id),
+        }
+        mentions.push(TabMentionInput {
+            token: None,
+            tab_id: Some(tab_id),
+        });
+    }
+    session
+        .map(|session_id| (session_id, mentions))
+        .ok_or("at least one browser tab ref is required")
+}
+
+/// Takes a field out of the body: None when absent or null, the array when it is one.
+fn take_turn_list(
+    object: &mut serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<Vec<Value>>, ()> {
+    match object.remove(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => Ok(Some(items)),
+        Some(_) => Err(()),
+    }
+}
+
+/// QF-8: the chat send path's browser context gate. The gateway is the only place a browser
+/// tab ref or region is vouched for, so whatever the client put in `browser_tab_refs` and
+/// `browser_regions` is always removed first (as is any client `browser_context_verified`).
+/// With `BROWSER_TURN_CONTEXT` off that is all. On:
+///
+/// - a zero-data-retention turn that carried either field is refused (400
+///   `browser_context_refused_zdr`) before anything reaches Quarry or a model;
+/// - tab refs (at most eight, one session) are re-resolved with `resolve_turn_tab_mentions`,
+///   the same owner-gated, ZDR-refusing, fail-closed resolver the tab-mentions route uses, and
+///   only the gateway's refs are written back;
+/// - regions (at most four) must each carry an attach token that verifies for this user and
+///   org, is unexpired and matches the sent rect and image digest, or the turn is refused (400
+///   `browser_region_unverified`); only the verified region is written back.
+///
+/// What is written back is classified `browser-scraped` with `grant: none`, and
+/// `browser_context_verified: true` marks the body. Nothing is stored. Identity comes from the
+/// verified session only.
+pub(crate) async fn inject_turn_browser_context(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    body: &mut Value,
+) -> Result<(), TurnRefusal> {
+    let Some(object) = body.as_object_mut() else {
+        return Ok(());
+    };
+    object.remove(TURN_VERIFIED_FIELD);
+    let tab_refs = take_turn_list(object, TURN_TAB_REFS_FIELD);
+    let regions = take_turn_list(object, TURN_REGIONS_FIELD);
+    if !state.browser_turn_context {
+        return Ok(());
+    }
+    let (Ok(tab_refs), Ok(regions)) = (tab_refs, regions) else {
+        return Err(turn_refusal(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "browser_tab_refs and browser_regions must be arrays.",
+        ));
+    };
+    if tab_refs.is_none() && regions.is_none() {
+        return Ok(());
+    }
+    let zdr = object.get("zdr").and_then(Value::as_bool).unwrap_or(false);
+    if zdr {
+        return Err(turn_refusal(
+            StatusCode::BAD_REQUEST,
+            "browser_context_refused_zdr",
+            "Browser page context is never attached to a zero-data-retention turn.",
+        ));
+    }
+    let tab_refs = tab_refs.unwrap_or_default();
+    let regions = regions.unwrap_or_default();
+
+    // Regions first: verifying them needs no upstream.
+    let mut verified_regions: Vec<Value> = Vec::with_capacity(regions.len());
+    if !regions.is_empty() {
+        if regions.len() > TURN_REGIONS_MAX {
+            return Err(turn_refusal(
+                StatusCode::BAD_REQUEST,
+                "browser_region_unverified",
+                "At most four browser regions may ride one turn.",
+            ));
+        }
+        let org_id = crate::upstream::authorized_org_id(state, user).await;
+        for region in &regions {
+            match super::browser_evidence::verify_turn_region(
+                &state.browser_region_attach_key,
+                &user.user_id,
+                &org_id,
+                region,
+            ) {
+                Ok(verified) => verified_regions.push(verified),
+                Err(reason) => {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(error_with_details(
+                            "browser_region_unverified",
+                            "A browser region could not be verified, so nothing was attached.",
+                            json!({ "reason": reason }),
+                        )),
+                    ))
+                }
+            }
+        }
+    }
+
+    let mut gateway_refs: Vec<Value> = Vec::new();
+    if !tab_refs.is_empty() {
+        let (session_id, mentions) = turn_tab_mentions(&tab_refs)
+            .map_err(|message| turn_refusal(StatusCode::BAD_REQUEST, "invalid_input", message))?;
+        match resolve_turn_tab_mentions(state, user, headers, &session_id, &mentions).await {
+            Ok(refs) => gateway_refs = refs.iter().map(turn_tab_ref).collect(),
+            Err(response) => return Err(refusal_from_response(response).await),
+        }
+    }
+
+    let Some(object) = body.as_object_mut() else {
+        return Ok(());
+    };
+    let mut verified = false;
+    if !gateway_refs.is_empty() {
+        object.insert(TURN_TAB_REFS_FIELD.to_owned(), Value::Array(gateway_refs));
+        verified = true;
+    }
+    if !verified_regions.is_empty() {
+        object.insert(
+            TURN_REGIONS_FIELD.to_owned(),
+            Value::Array(verified_regions),
+        );
+        verified = true;
+    }
+    if verified {
+        object.insert(TURN_VERIFIED_FIELD.to_owned(), Value::Bool(true));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Route
 // ---------------------------------------------------------------------------
 

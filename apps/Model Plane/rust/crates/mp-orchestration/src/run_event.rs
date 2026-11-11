@@ -249,6 +249,20 @@ pub enum OrchestrationEvent {
         risk_category: String,
         /// Durable approval id this event accompanies.
         approval_id: String,
+        /// One-time-code gate only: top-level page origin. Empty otherwise.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        top_origin: String,
+        /// One-time-code gate only: origin of the frame holding the code
+        /// field. Empty otherwise.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        frame_origin: String,
+        /// One-time-code gate only: closed mail provider key. Empty otherwise.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        mail_provider_key: String,
+        /// One-time-code gate only: the person's connection label, never a
+        /// mailbox address. Empty otherwise.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        mail_account_label: String,
         /// Timestamp.
         at: DateTime<Utc>,
     },

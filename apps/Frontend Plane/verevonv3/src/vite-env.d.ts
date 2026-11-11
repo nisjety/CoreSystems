@@ -70,6 +70,8 @@ interface ImportMetaEnv {
 	readonly VITE_BROWSER_RECIPES?: string;
 	/** "true" shows the save-as-PDF toolbar action in BrowserChrome (F-t2-069 step 1, E5.1; hidden for ZDR sessions). Default off. */
 	readonly VITE_BROWSER_PDF?: string;
+	/** "true" lets a chat turn send the browser regions attached in the composer, each with the gateway's attach token (QF-9; the gateway also needs BROWSER_TURN_CONTEXT). Default off: a send with a region is refused and keeps its draft. */
+	readonly VITE_BROWSER_REGION_SEND?: string;
 }
 
 interface ImportMeta {

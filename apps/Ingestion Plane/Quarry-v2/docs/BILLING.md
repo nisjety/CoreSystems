@@ -52,6 +52,7 @@ billing-core accepts the same JSON shape over HTTP if NATS is unhealthy.
 | `usage_metrics::SEARCH_QUERY`       | `quarry.search.query`        | On every successful `/v1/search`                 | `1.0` per query         |
 | `usage_metrics::ANSWER_SYNTH`       | `quarry.answer.synth`        | On every successful `/v1/answer` and `/v1/answer/stream`, and on every `/v1/search` with `include_answer` that called the model (metadata `via: "search.include_answer"`); never on a cache hit, a refused or failed synthesis, an empty `no_sources` answer or a ZDR request | `1.0` per synthesis     |
 | `usage_metrics::BATCH_URL`          | `quarry.batch.url`           | On every `/v1/batch` job Control creates (not a replay) | `len(urls) as f64`      |
+| `usage_metrics::EXTRACT_LLM`        | `quarry.extract.llm`         | Per AI format that finished `ok` on `/v1/scrape`, and per `/v1/extract` source whose model run finished `ok`; only under `QUARRY_EDGE__USAGE_LLM_METRICS=on` (see "AI format metrics (WS16.S6)") | `1.0` per format |
 
 **Pricing model:** these are free-form strings — Lago billable-metric
 codes must match exactly. To add a new metric:
@@ -195,6 +196,33 @@ billing owner (WAITING-OTHER). Rollback is `off`.
 **Not in this change.** Usage is emitted at segment close only, so a segment that ends with a crash is
 not billed (ZDR runs are unbilled by design, ADR-4). The shutdown drain flush is WS6.J. Segment usage
 needs budget enforcement not `off`, because the budget ledger is the clock.
+
+## AI format metrics (WS16.S6)
+
+`quarry.extract.llm` (`usage_metrics::EXTRACT_LLM`) meters the AI formats (`json`, `summary`,
+`question`, `highlights`) under its own switch, `QUARRY_EDGE__USAGE_LLM_METRICS` (`off`, `shadow`,
+`on`; default `off`; read once at boot, a value outside the set is `off` and logged once). It is
+not one of the seven browser metrics and `QUARRY_EDGE__USAGE_BROWSER_METRICS` does not govern it.
+
+- **Emitted by.** `POST /v1/scrape`: one event per AI format whose report is `ok`
+  (`scrape_contract::ai_formats::run_ai_formats`). `POST /v1/extract`: one event per source whose
+  `json` run is `ok`, after the request is known to answer 200 (a request that ends in the 429 or
+  the lane-refused 501 emits none). A failed or skipped format emits nothing. Under ZDR no format
+  runs, so nothing is emitted.
+- **Id.** `quarry:<usage_id>:<url_hash16>:<kind>:quarry.extract.llm`. `usage_id` is server-minted
+  (the scrape's run id; one minted id per `/v1/extract` request), never the caller's
+  `x-request-id` (D2-033). `url_hash16` is the first 16 hex digits of SHA-256 of the page URL; the
+  URL itself is never in the event.
+- **Quantity.** `1.0`.
+- **Metadata.** The closed set `kind` (`json`, `summary`, `question`, `highlights`), `repair`
+  (`none`, `local`, `model`; `none` for every format but `json`), `zdr` (always `false` in practice),
+  `input_tokens`, `output_tokens` (what the gateway reported for the format). No content, no URL, no
+  schema, no prompt.
+- **Modes.** `off`: nothing is built or sent. `shadow`: each event is counted in
+  `quarry_usage_shadow_events_total{metric="quarry.extract.llm"}` and nothing is published. `on`:
+  published through the usage meter like every other metric.
+- **Prerequisite.** A Lago billable-metric code `quarry.extract.llm` before `on` reaches invoices.
+  Rollback is `off`.
 
 ## Organization limits (WS6.D-s)
 

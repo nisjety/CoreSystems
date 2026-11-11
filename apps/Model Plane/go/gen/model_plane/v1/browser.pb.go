@@ -87,6 +87,16 @@ type AcquireGrantRequest struct {
 	// approved host equal to, below or above a denied entry is dropped, and a
 	// request left with no host is refused. Refused for any other grant.
 	ConsentDeniedDomains []string `protobuf:"bytes,22,rep,name=consent_denied_domains,json=consentDeniedDomains,proto3" json:"consent_denied_domains,omitempty"`
+	// fill_otp approval binding (Q3-E3.1-b1-c, ADR-2a; tags 23-24 of F-t2-032's
+	// band). The mail connection the one-time code is read from: required, and
+	// matching ^[A-Za-z0-9_-]{1,128}$, when allowed_actions is ["fill_otp"];
+	// refused for any other grant. Stored verbatim, never logged. Dark behind
+	// BROWSER_BROKER_FILL_OTP_ENABLED.
+	MailConnectionId string `protobuf:"bytes,23,opt,name=mail_connection_id,json=mailConnectionId,proto3" json:"mail_connection_id,omitempty"`
+	// The canonical https origin (scheme https, lowercase host, optional port,
+	// no path, query or fragment) the code may be typed into: required for a
+	// fill_otp approval and refused for any other grant.
+	GrantOrigin string `protobuf:"bytes,24,opt,name=grant_origin,json=grantOrigin,proto3" json:"grant_origin,omitempty"`
 	// The Space the run belongs to (WS21-S8). The site policy reads the Space
 	// floor from it; empty outside a Space. Tag 11 (R-6 allocates 10 to zdr).
 	SpaceId string `protobuf:"bytes,11,opt,name=space_id,json=spaceId,proto3" json:"space_id,omitempty"`
@@ -257,6 +267,20 @@ func (x *AcquireGrantRequest) GetConsentDeniedDomains() []string {
 	return nil
 }
 
+func (x *AcquireGrantRequest) GetMailConnectionId() string {
+	if x != nil {
+		return x.MailConnectionId
+	}
+	return ""
+}
+
+func (x *AcquireGrantRequest) GetGrantOrigin() string {
+	if x != nil {
+		return x.GrantOrigin
+	}
+	return ""
+}
+
 func (x *AcquireGrantRequest) GetSpaceId() string {
 	if x != nil {
 		return x.SpaceId
@@ -337,6 +361,12 @@ type AcquireGrantResponse struct {
 	// E3.2-e1: the consent scope of an origin_extension grant ("turn",
 	// "conversation" or "always"); empty for every other kind.
 	ConsentScope string `protobuf:"bytes,21,opt,name=consent_scope,json=consentScope,proto3" json:"consent_scope,omitempty"`
+	// Q3-E3.1-b1-c: the mail connection a fill_otp approval is bound to; empty
+	// for every other grant.
+	MailConnectionId string `protobuf:"bytes,23,opt,name=mail_connection_id,json=mailConnectionId,proto3" json:"mail_connection_id,omitempty"`
+	// Q3-E3.1-b1-c: the canonical https origin a fill_otp approval is bound to;
+	// empty for every other grant.
+	GrantOrigin string `protobuf:"bytes,24,opt,name=grant_origin,json=grantOrigin,proto3" json:"grant_origin,omitempty"`
 	// INNH-10: the API key this grant was issued for (the key id, never the
 	// key). Empty for every grant not acquired by an api_key principal. 60:
 	// 54-59 stay reserved for the WS8.C follow-ons.
@@ -525,6 +555,20 @@ func (x *AcquireGrantResponse) GetReadOnly() bool {
 func (x *AcquireGrantResponse) GetConsentScope() string {
 	if x != nil {
 		return x.ConsentScope
+	}
+	return ""
+}
+
+func (x *AcquireGrantResponse) GetMailConnectionId() string {
+	if x != nil {
+		return x.MailConnectionId
+	}
+	return ""
+}
+
+func (x *AcquireGrantResponse) GetGrantOrigin() string {
+	if x != nil {
+		return x.GrantOrigin
 	}
 	return ""
 }
@@ -935,6 +979,14 @@ type ValidateGrantResponse struct {
 	// origin_extension grant only while it validates and its parent_grant_id is
 	// the run grant it holds.
 	ConsentScope string `protobuf:"bytes,21,opt,name=consent_scope,json=consentScope,proto3" json:"consent_scope,omitempty"`
+	// Q3-E3.1-b1-c: the mail connection a fill_otp approval is bound to; empty
+	// for every other grant. A consumer reads the one-time code only from this
+	// connection.
+	MailConnectionId string `protobuf:"bytes,23,opt,name=mail_connection_id,json=mailConnectionId,proto3" json:"mail_connection_id,omitempty"`
+	// Q3-E3.1-b1-c: the canonical https origin a fill_otp approval is bound to;
+	// empty for every other grant. A consumer types the code only into a frame
+	// whose origin equals it.
+	GrantOrigin string `protobuf:"bytes,24,opt,name=grant_origin,json=grantOrigin,proto3" json:"grant_origin,omitempty"`
 	// INNH-10: the API key the grant was issued for (the key id, never the
 	// key); empty for a grant not acquired by an api_key principal. A consumer
 	// running a key-driven run binds the grant to the key it was started for.
@@ -1145,6 +1197,20 @@ func (x *ValidateGrantResponse) GetReadOnly() bool {
 func (x *ValidateGrantResponse) GetConsentScope() string {
 	if x != nil {
 		return x.ConsentScope
+	}
+	return ""
+}
+
+func (x *ValidateGrantResponse) GetMailConnectionId() string {
+	if x != nil {
+		return x.MailConnectionId
+	}
+	return ""
+}
+
+func (x *ValidateGrantResponse) GetGrantOrigin() string {
+	if x != nil {
+		return x.GrantOrigin
 	}
 	return ""
 }
@@ -1600,7 +1666,7 @@ var File_model_plane_v1_browser_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\n" +
-	"\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xa9\x06\n" +
+	"\x1cmodel_plane/v1/browser.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xfa\x06\n" +
 	"\x13AcquireGrantRequest\x12\x1f\n" +
 	"\vsession_key\x18\x01 \x01(\tR\n" +
 	"sessionKey\x12\x12\n" +
@@ -1622,11 +1688,13 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\n" +
 	"grant_kind\x182 \x01(\tR\tgrantKind\x12#\n" +
 	"\rconsent_scope\x18\x15 \x01(\tR\fconsentScope\x124\n" +
-	"\x16consent_denied_domains\x18\x16 \x03(\tR\x14consentDeniedDomains\x12\x19\n" +
+	"\x16consent_denied_domains\x18\x16 \x03(\tR\x14consentDeniedDomains\x12,\n" +
+	"\x12mail_connection_id\x18\x17 \x01(\tR\x10mailConnectionId\x12!\n" +
+	"\fgrant_origin\x18\x18 \x01(\tR\vgrantOrigin\x12\x19\n" +
 	"\bspace_id\x18\v \x01(\tR\aspaceId\x12\x1b\n" +
 	"\tread_only\x18\f \x01(\bR\breadOnly\x12\x1f\n" +
 	"\vttl_seconds\x18\r \x01(\x05R\n" +
-	"ttlSeconds\"\xbe\a\n" +
+	"ttlSeconds\"\x8f\b\n" +
 	"\x14AcquireGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x1a\n" +
 	"\bendpoint\x18\x02 \x01(\tR\bendpoint\x129\n" +
@@ -1653,7 +1721,9 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x0edenied_domains\x183 \x03(\tR\rdeniedDomains\x12J\n" +
 	"\x13absolute_expires_at\x184 \x01(\v2\x1a.google.protobuf.TimestampR\x11absoluteExpiresAt\x12\x1b\n" +
 	"\tread_only\x18\f \x01(\bR\breadOnly\x12#\n" +
-	"\rconsent_scope\x18\x15 \x01(\tR\fconsentScope\x12\x15\n" +
+	"\rconsent_scope\x18\x15 \x01(\tR\fconsentScope\x12,\n" +
+	"\x12mail_connection_id\x18\x17 \x01(\tR\x10mailConnectionId\x12!\n" +
+	"\fgrant_origin\x18\x18 \x01(\tR\vgrantOrigin\x12\x15\n" +
 	"\x06key_id\x18< \x01(\tR\x05keyIdJ\x04\b\r\x10\x0e\"\xa1\x02\n" +
 	"\tWebPolicy\x12\f\n" +
 	"\x01v\x18\x01 \x01(\rR\x01v\x12\x10\n" +
@@ -1676,7 +1746,7 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\x15BrowserHealthResponse\x12\x16\n" +
 	"\x06status\x18\x01 \x01(\tR\x06status\"1\n" +
 	"\x14ValidateGrantRequest\x12\x19\n" +
-	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\x92\b\n" +
+	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"\xe3\b\n" +
 	"\x15ValidateGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\x12\x16\n" +
 	"\x06active\x18\x02 \x01(\bR\x06active\x129\n" +
@@ -1708,7 +1778,9 @@ const file_model_plane_v1_browser_proto_rawDesc = "" +
 	"\vsession_key\x18\r \x01(\tR\n" +
 	"sessionKey\x12\x1b\n" +
 	"\tread_only\x18\x0e \x01(\bR\breadOnly\x12#\n" +
-	"\rconsent_scope\x18\x15 \x01(\tR\fconsentScope\x12\x15\n" +
+	"\rconsent_scope\x18\x15 \x01(\tR\fconsentScope\x12,\n" +
+	"\x12mail_connection_id\x18\x17 \x01(\tR\x10mailConnectionId\x12!\n" +
+	"\fgrant_origin\x18\x18 \x01(\tR\vgrantOrigin\x12\x15\n" +
 	"\x06key_id\x18< \x01(\tR\x05keyId\"\xd9\x03\n" +
 	"\x15DeriveRunGrantRequest\x12&\n" +
 	"\x0fparent_grant_id\x18\x01 \x01(\tR\rparentGrantId\x12\x1f\n" +

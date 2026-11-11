@@ -28,7 +28,9 @@ use failure::{ActionFailure, BrowserFailureKind, FailureBudget, FailureVerdict, 
 
 pub(crate) use browser_risk::{approval_poll_interval, approval_timeout_seconds};
 use browser_risk::{classify_action_risk_with_focus, risk_reason};
-pub use browser_risk::{host_class, ApprovalOutcome, RiskCategory, RiskyActionDetail};
+pub use browser_risk::{
+    host_class, ApprovalOutcome, OtpApprovalContext, RiskCategory, RiskyActionDetail,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanStatus {
@@ -2610,6 +2612,7 @@ async fn gate_persistent_cookie_use(
         reason: format!(
             "run reuses persistent browser profile '{profile_id}' — cookies/session state carry over from prior sessions"
         ),
+        otp: None,
     };
     match request_approval(&plan.config, &detail, sink).await {
         // Approved — nothing to report; the caller falls through to normal
@@ -2679,6 +2682,7 @@ async fn gate_risky_action(
         selector: action.selector.clone(),
         risk_category: category,
         reason: risk_reason(category, &action),
+        otp: None,
     };
     match request_approval(&plan.config, &detail, sink).await {
         ApprovalOutcome::Granted => PlanStepResult::Action(action),

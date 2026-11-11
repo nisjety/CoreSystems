@@ -1336,6 +1336,11 @@ async fn scrape_with(
     let run_id: RunKind = quarry_core::ids::Id::new();
     let prev_fp = req.prev_fingerprint.clone();
     let tombstone_started = chrono::Utc::now();
+    // WS6.G: a browser-capable request takes its organization's share of the browser pool, as its
+    // plan sets it (a no-op while the switch is off, and a cache hit never reaches this point).
+    if plan.driver == quarry_core::output::DriverKind::Browser {
+        crate::limits::apply_org_render_permits(state.limits.as_ref(), &org_id).await;
+    }
     // The caller's bound, never past the table's cap, so the typed Timeout
     // reaches the caller before the router's own limit drops the request.
     let run_deadline_ms =
@@ -1442,6 +1447,10 @@ async fn scrape_with(
                     zdr.is_active(),
                     ai_model_hop_allowed,
                     &request_id,
+                    // WS16.S6: quarry.extract.llm is keyed by the server-minted run id and a
+                    // hash of the URL (the URL never reaches the event).
+                    url.as_str(),
+                    &run_id.to_string(),
                 )
                 .await;
                 (fields, Some(report))
@@ -1691,6 +1700,8 @@ async fn crawl_handoff(
         .org_limits(&org_id)
         .await
         .map_err(|error| limits_refusal(&request_id, error))?;
+    // WS6.G: the plan sets the organization's share of the browser pool for this crawl's pages.
+    crate::limits::apply_org_render_permits_from(&org_limits, &org_id);
     let limits = limits
         .clamp_pages_to(org_limits.crawl_pages)
         .map_err(|exhausted| limits_refusal(&request_id, exhausted.into_error()))?;
@@ -2002,9 +2013,18 @@ async fn batch_handoff(
     // gate below sees only the accepted URLs.
     // W3-E3.7.1 (`QUARRY_EDGE__BATCH_IDEMPOTENCY`, default off): the hash of the request as
     // the caller sent it, taken before the URL check and the allowance clamp, so a retry of
-    // the same request hashes the same even when the plan changed in between.
-    let batch_payload_hash = crate::handoff::batch_idempotency_enabled()
-        .then(|| crate::handoff::batch_payload_hash(&req.urls, req.ingest));
+    // the same request hashes the same even when the plan changed in between. The webhook and
+    // max_parallel (either spelling) are covered when the caller sent them.
+    let batch_payload_hash = crate::handoff::batch_idempotency_enabled().then(|| {
+        crate::handoff::batch_payload_hash(
+            &req.urls,
+            req.ingest,
+            req.webhook.as_ref(),
+            req.max_parallel
+                .as_ref()
+                .or(req.max_parallel_camel.as_ref()),
+        )
+    });
     let mut req = req;
     let check = crate::batch_check::validate_batch_urls(
         &req.urls,
@@ -2039,6 +2059,8 @@ async fn batch_handoff(
         .org_limits(&claims.org_id)
         .await
         .map_err(|error| limits_refusal(&request_id, error))?;
+    // WS6.G: the plan sets the organization's share of the browser pool for this batch's pages.
+    crate::limits::apply_org_render_permits_from(&org_limits, &claims.org_id);
     let urls_bound = crate::limits::clamp_batch_urls(req.urls.len(), org_limits.batch_urls)
         .map_err(|exhausted| limits_refusal(&request_id, exhausted.into_error()))?;
     req.urls.truncate(urls_bound.accepted);

@@ -113,6 +113,9 @@ var allowedSensitiveActions = map[string]struct{}{
 	"respond_dialog": {},
 	"upload_ref":     {},
 	"download_ref":   {},
+	// Q3-E3.1-b1-c (ADR-2a): bound to one https origin and one mail
+	// connection; see fill_otp.go.
+	ActionFillOtp: {},
 }
 
 // Kind says what a grant authorizes.
@@ -152,6 +155,11 @@ type Grant struct {
 	// ConsentScope is the scope of an origin_extension grant (E3.2-e1:
 	// "turn", "conversation" or "always"); empty for every other kind.
 	ConsentScope string
+	// MailConnectionID and GrantOrigin bind a fill_otp approval (Q3-E3.1-b1-c)
+	// to the one mail connection its code is read from and the one canonical
+	// https origin it is typed into; empty for every other grant. Never logged.
+	MailConnectionID string
+	GrantOrigin      string
 	// Zdr marks a Zero Data Retention grant. It can be raised, never lowered,
 	// and a derived or approval grant inherits it.
 	Zdr bool
@@ -159,6 +167,13 @@ type Grant struct {
 	// may spend, never a raise. The zero Budget is no claim. A run grant's claim
 	// is never looser than its parent's.
 	Budget Budget
+	// WebPolicy is the org web-policy snapshot the grant carries (WS7.K): the
+	// verified principal's web_policy claim at mint, nil when there was none or
+	// BROWSER_BROKER_WEB_POLICY_SNAPSHOT is off. A derived or approval grant
+	// copies its parent's unchanged, so a child never carries a looser one.
+	// The durable store does not hold it yet (Q2-WS7.K-c); a ZDR grant keeps it
+	// in memory only.
+	WebPolicy *WebPolicySnapshot
 	// AllowedDomains is the broker-owned, canonical navigation policy. It is
 	// copied at every storage boundary so no caller can mutate a persisted grant.
 	AllowedDomains []string
@@ -202,6 +217,9 @@ type CreateSessionParams struct {
 	// Budget is an optional budget claim (see Budget). MintedAtUnix must be
 	// zero; the store stamps it.
 	Budget Budget
+	// WebPolicy is the org web-policy snapshot read from the verified token
+	// (WS7.K); nil is none. The caller has already narrowed AllowedDomains by it.
+	WebPolicy *WebPolicySnapshot
 	// MaxActivePerOwner > 0 refuses creation with ErrTooManyGrants when the
 	// owner already holds that many active ordinary grants. The check and the
 	// insert are one atomic step.
@@ -261,6 +279,9 @@ type ApprovalParams struct {
 	TTL                                                                                   time.Duration
 	// Zdr raises the approval's flag; it never lowers the parent's.
 	Zdr bool
+	// MailConnectionID and GrantOrigin bind a fill_otp approval (Q3-E3.1-b1-c);
+	// both are required for fill_otp and must be empty for any other action.
+	MailConnectionID, GrantOrigin string
 }
 
 // DeriveParams describes a run grant derived from a session grant.
@@ -377,6 +398,7 @@ func (s *MemoryRepository) CreateSession(_ context.Context, p CreateSessionParam
 		Zdr:            p.Zdr,
 		ReadOnly:       p.ReadOnly,
 		Budget:         budget,
+		WebPolicy:      p.WebPolicy.Clone(),
 		AllowedDomains: domains,
 		PolicyMode:     PolicyModeAllowlist,
 		ExpiresAt:      s.now().Add(p.TTL),
@@ -434,6 +456,12 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(_ context.Context, p Ap
 		return nil, errors.New("sensitive grant requires an action")
 	}
 	zdr := parent.Zdr || p.Zdr
+	if err := checkFillOtpBinding(scopes.actions, p.GrantOrigin, p.MailConnectionID, parent); err != nil {
+		return nil, err
+	}
+	if zdr && IsFillOtp(scopes.actions) {
+		return nil, ErrFillOtpZdrRefused
+	}
 	id, err := newID(zdr)
 	if err != nil {
 		return nil, err
@@ -446,6 +474,7 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(_ context.Context, p Ap
 		SessionKey:         p.SessionKey,
 		ScopeURL:           p.ScopeURL,
 		Zdr:                zdr,
+		WebPolicy:          parent.WebPolicy.Clone(),
 		AllowedDomains:     domains,
 		PolicyMode:         PolicyModeAllowlist,
 		AllowedActions:     scopes.actions,
@@ -453,6 +482,8 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(_ context.Context, p Ap
 		AllowedDialogIDs:   scopes.dialogs,
 		AllowedArtifactIDs: scopes.artifacts,
 		ParentGrantID:      p.ParentGrantID,
+		MailConnectionID:   p.MailConnectionID,
+		GrantOrigin:        p.GrantOrigin,
 	}
 	if s.betweenLocks != nil {
 		s.betweenLocks()
@@ -546,6 +577,8 @@ func (s *MemoryRepository) Derive(ctx context.Context, p DeriveParams) (*Grant, 
 	if s.activeChildrenLocked(plan.kind, parent.ID, parent.OrgID) >= maxRuns {
 		return nil, ErrTooManyGrants
 	}
+	// WebPolicy is the parent's snapshot, never a fresher or looser one: a run
+	// grant keeps every deny entry its parent was minted with (WS7.K).
 	g := &Grant{
 		ID:                id,
 		Kind:              plan.kind,
@@ -556,6 +589,7 @@ func (s *MemoryRepository) Derive(ctx context.Context, p DeriveParams) (*Grant, 
 		Zdr:               parent.Zdr,
 		ReadOnly:          parent.ReadOnly,
 		Budget:            budget,
+		WebPolicy:         parent.WebPolicy.Clone(),
 		AllowedDomains:    plan.domains,
 		PolicyMode:        PolicyModeAllowlist,
 		ResourceID:        plan.resourceID,
@@ -831,6 +865,7 @@ func clone(grant *Grant) *Grant {
 	copy.AllowedFrameIDs = append([]string(nil), grant.AllowedFrameIDs...)
 	copy.AllowedDialogIDs = append([]string(nil), grant.AllowedDialogIDs...)
 	copy.AllowedArtifactIDs = append([]string(nil), grant.AllowedArtifactIDs...)
+	copy.WebPolicy = grant.WebPolicy.Clone()
 	return &copy
 }
 
@@ -888,6 +923,10 @@ func NormalizeSensitiveScopes(actions, frames, dialogs, artifacts []string) (sen
 	case "download_ref":
 		if len(canonicalArtifacts) != 0 || len(canonicalDialogs) != 0 || len(canonicalFrames) != 1 {
 			return sensitiveScopes{}, errors.New("download_ref grant requires one frame and no dialog or artifact scopes")
+		}
+	case ActionFillOtp:
+		if len(canonicalArtifacts) != 0 || len(canonicalDialogs) != 0 || len(canonicalFrames) != 1 {
+			return sensitiveScopes{}, errors.New("fill_otp grant requires one frame and no dialog or artifact scopes")
 		}
 	}
 	return sensitiveScopes{canonicalActions, canonicalFrames, canonicalDialogs, canonicalArtifacts}, nil

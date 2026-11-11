@@ -119,7 +119,7 @@ impl Double {
     }
 }
 
-const GATEWAY_FIELDS: [&str; 7] = [
+const GATEWAY_FIELDS: [&str; 10] = [
     "messages",
     "model",
     "provider",
@@ -127,6 +127,10 @@ const GATEWAY_FIELDS: [&str; 7] = [
     "stream",
     "structured_output_schema",
     "zdr",
+    // WS16.S1: honoured by the gateway since the service lane landed.
+    "temperature",
+    "max_tokens",
+    "purpose",
 ];
 
 fn reject(shared: &Shared, status: u16, why: &str) -> Response<Body> {

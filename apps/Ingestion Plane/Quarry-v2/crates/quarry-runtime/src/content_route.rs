@@ -724,8 +724,9 @@ fn apply_limits(limits: ChildLimits) -> std::io::Result<()> {
 // ---- Office hybrid: imports-core extract client (E3.6-6a) -------------------
 
 /// The flag that sends XLSX, PPTX, OpenDocument and EPUB bodies to imports-core's
-/// ephemeral extract endpoint. Default off: those kinds stay a typed 415.
-pub const OFFICE_VIA_IMPORTS_FLAG: &str = "QUARRY_EDGE__OFFICE_VIA_IMPORTS";
+/// ephemeral extract endpoint. Default off: those kinds stay a typed 415. It is the
+/// pipeline's flag ([`crate::pipeline::OFFICE_VIA_IMPORTS_ENV`]), read in one place.
+pub const OFFICE_VIA_IMPORTS_FLAG: &str = crate::pipeline::OFFICE_VIA_IMPORTS_ENV;
 
 /// The imports-core origin (for example `http://imports-core:8000`) the wiring
 /// reads to build an [`ImportsExtractClient`].
@@ -755,9 +756,10 @@ pub const MAX_OFFICE_INPUT_BYTES: usize = 25 * 1024 * 1024;
 /// answer larger than this is not an extract answer.
 const MAX_OFFICE_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
-/// Whether [`OFFICE_VIA_IMPORTS_FLAG`] is on in this process.
+/// Whether [`OFFICE_VIA_IMPORTS_FLAG`] is on in this process. It is the mode the
+/// pipeline's Office route reads, so the edge gate and the route agree (`yes` is off).
 pub fn office_via_imports_enabled() -> bool {
-    flag_on(std::env::var(OFFICE_VIA_IMPORTS_FLAG).ok().as_deref())
+    crate::pipeline::office_via_imports_mode() == crate::pipeline::OfficeViaImports::On
 }
 
 /// The environment variable that sets the input cap of the imports-core client
@@ -781,16 +783,6 @@ pub fn office_max_input_bytes_from_env() -> Result<usize, String> {
             "{OFFICE_MAX_INPUT_BYTES_ENV} must be a positive whole number of bytes"
         )),
     }
-}
-
-/// `1`, `true`, `yes` or `on` (any case); anything else, or unset, is off.
-fn flag_on(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
 }
 
 /// The kinds that go to imports-core when the flag is on. PDF and DOCX stay in
@@ -1624,17 +1616,6 @@ mod office_tests {
             .as_str()
             .expect("a reason")
             .to_owned()
-    }
-
-    #[test]
-    fn the_flag_is_off_unless_it_says_on() {
-        assert!(!flag_on(None));
-        for off in ["", "0", "false", "off", "no", "maybe"] {
-            assert!(!flag_on(Some(off)), "{off}");
-        }
-        for on in ["1", "true", "TRUE", " yes ", "on"] {
-            assert!(flag_on(Some(on)), "{on}");
-        }
     }
 
     #[test]

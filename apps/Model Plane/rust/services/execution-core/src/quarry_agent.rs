@@ -44,6 +44,8 @@ const READY_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A single browser action. Internally tagged on `type`, snake_case — matches
 /// quarry-core `AgentAction` exactly.
+///
+/// No Evaluate variant: Quarry refuses raw script (WS2.A, ADR-6); a read-only evaluator would be a new variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentAction {
@@ -163,9 +165,6 @@ pub enum AgentAction {
         full_page: bool,
     },
     Pdf,
-    Evaluate {
-        script: String,
-    },
     Back,
     GetContent,
 }
@@ -3049,9 +3048,6 @@ mod tests {
             },
             AgentAction::Press {
                 key: "Enter".to_owned(),
-            },
-            AgentAction::Evaluate {
-                script: "1".to_owned(),
             },
             AgentAction::RespondDialog {
                 dialog_id: "dialog-1".to_owned(),

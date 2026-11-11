@@ -1906,6 +1906,20 @@ message OrchestrationEvent {
     // accompanies) — lets a UI jump straight to deciding it via the existing
     // generic `POST /v1/orchestration/approvals/{id}/decide` route.
     string approval_id = 9;
+    // One-time-code gate only: origin (scheme://host[:port]) of the top-level
+    // page asking for the code. Empty for every non-OTP gate.
+    string top_origin = 10;
+    // One-time-code gate only: origin of the frame holding the code field
+    // (equals top_origin when the field is not in a child frame). Empty for
+    // every non-OTP gate.
+    string frame_origin = 11;
+    // One-time-code gate only: closed provider key of the mail connection
+    // the code would be read from (e.g. "gmail", "outlook"). Empty for every
+    // non-OTP gate.
+    string mail_provider_key = 12;
+    // One-time-code gate only: the person's own label for that mail
+    // connection. Never a mailbox address. Empty for every non-OTP gate.
+    string mail_account_label = 13;
   }
 
   // The pending browser-action approval above was decided (granted, denied,

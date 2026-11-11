@@ -323,6 +323,7 @@ pub(super) async fn schedule_capabilities(State(state): State<AppState>) -> Resp
         "overlap": caps.overlap,
         "kinds": caps.kinds,
         "needsActivation": caps.needs_activation,
+        "jobControl": caps.job_control,
     }))
 }
 
@@ -496,6 +497,7 @@ mod capability_tests {
         assert_eq!(body["data"]["overlap"], false);
         assert_eq!(body["data"]["kinds"], json!(["crawl"]));
         assert_eq!(body["data"]["needsActivation"], true);
+        assert_eq!(body["data"]["jobControl"], false);
     }
 }
 

@@ -96,6 +96,11 @@ import {
   resolveBrowserTabMentions,
   type BrowserTabContextRef,
 } from '@/shared/api/browser-client'
+import {
+  BROWSER_REGIONS_PER_TURN_MAX,
+  browserRegionSendEnabled,
+  type BrowserRegionTurnInput,
+} from '@/features/browser/page-context/region-attach'
 import { getRun, listRuns } from '@/shared/api/runs-client'
 import { getRunProofBundle } from '@/shared/api/run-console-client'
 import {
@@ -3804,6 +3809,7 @@ export function useChatController() {
           connectorScope: options.connectorScope,
           contextRefs: options.contextRefs,
           browserTabRefs: options.browserTabRefs,
+          browserRegions: options.browserRegions,
           agentMode: options.agentMode,
           deepResearch: options.deepResearch,
           researchPhase: options.researchPhase,
@@ -4227,24 +4233,68 @@ export function useChatController() {
   }
 
   /**
-   * E3.3-d: a send that carries browser regions is refused before anything reaches a model. Unlike an `@tab`
-   * mention, a region has no live source to re-resolve against: the picture a send would carry is the
-   * client's own copy, and the region attach route keeps nothing that vouches for it. The Model Plane has no
-   * classification for a browser-region attachment yet either. The composer keeps the draft and the regions.
-   * Lift this refusal together with the forwarding once both are in place.
+   * E3.3-d / QF-9: the browser regions a send carries, checked before anything reaches a model. With
+   * `VITE_BROWSER_REGION_SEND` off (the default) a send with regions is refused as before. On, each region
+   * must carry the gateway's attach token (the gateway verifies it against the session, tab, area and picture
+   * and forwards only what it covers), and none is ever sent from a temporary or zero-retention chat or while
+   * an answer streams (queued input carries no regions). Any refusal throws a typed message, so the composer
+   * keeps the draft and the regions. Returns the regions to send, or undefined when the send carries none.
    */
-  const assertComposerRegionsSendable = (payload: DashboardComposerSubmitPayload): void => {
-    if ((payload.browserContext?.regions?.length ?? 0) === 0) return
-    throw new Error(i18n.tr(
-      'Områder fra nettleseren kan ikke sendes ennå. Fjern området og send på nytt. Utkastet er beholdt.',
-      'Areas from the browser cannot be sent yet. Remove the area and send again. Your draft is kept.',
-    ))
+  const assertComposerRegionsSendable = (
+    payload: DashboardComposerSubmitPayload,
+  ): BrowserRegionTurnInput[] | undefined => {
+    const regions = payload.browserContext?.regions ?? []
+    if (regions.length === 0) return undefined
+    if (!browserRegionSendEnabled()) {
+      throw new Error(i18n.tr(
+        'Områder fra nettleseren kan ikke sendes ennå. Fjern området og send på nytt. Utkastet er beholdt.',
+        'Areas from the browser cannot be sent yet. Remove the area and send again. Your draft is kept.',
+      ))
+    }
+    // A picture of the page is never carried into a zero-retention or temporary turn.
+    if (payload.zdr || isTemporaryThread(state.threadId)) {
+      throw new Error(i18n.tr(
+        'Områder fra nettleseren kan ikke brukes i en midlertidig chat. Fjern området og prøv igjen.',
+        'Areas from the browser cannot be used in a temporary chat. Remove the area and try again.',
+      ))
+    }
+    // A message typed mid-run is queued input, which carries no regions, so it is refused instead of sent without them.
+    if (state.status === 'streaming') {
+      throw new Error(i18n.tr(
+        'Vent til svaret er ferdig før du sender et område fra nettleseren. Utkastet er beholdt.',
+        'Wait for the answer to finish before sending an area from the browser. Your draft is kept.',
+      ))
+    }
+    if (regions.length > BROWSER_REGIONS_PER_TURN_MAX) {
+      throw new Error(i18n.tr(
+        `Du kan sende opptil ${BROWSER_REGIONS_PER_TURN_MAX} områder i én melding. Fjern ett og send igjen. Utkastet er beholdt.`,
+        `You can send up to ${BROWSER_REGIONS_PER_TURN_MAX} areas in one message. Remove one and send again. Your draft is kept.`,
+      ))
+    }
+    const sendable: BrowserRegionTurnInput[] = []
+    for (const item of regions) {
+      if (!item.attachToken) {
+        throw new Error(i18n.tr(
+          'Et område fra nettleseren mangler bekreftelse fra tjenesten. Legg ved området på nytt og send igjen. Utkastet er beholdt.',
+          'An area from the browser has no confirmation from the service. Attach the area again and send it again. Your draft is kept.',
+        ))
+      }
+      sendable.push({
+        sessionId: item.sessionId,
+        tabId: item.tabId,
+        attachToken: item.attachToken,
+        region: item.region,
+        image: item.image,
+        ...(item.selectionText ? { selectionText: item.selectionText } : {}),
+      })
+    }
+    return sendable
   }
 
   const handleComposerSubmit = async (payload: DashboardComposerSubmitPayload) => {
     if (isForeignOriginThread(state.threadId)) return
     // Before the launch motion and before any model-bound step: a refusal throws, the composer keeps the draft.
-    assertComposerRegionsSendable(payload)
+    const browserRegions = assertComposerRegionsSendable(payload)
     const browserTabRefs = await resolveComposerTabMentions(payload)
     if (!hasMessages()) triggerLaunchMotion()
     const attachments = await toStreamAttachments(payload.attachments)
@@ -4276,6 +4326,8 @@ export function useChatController() {
       connectorScope: payload.connectorScope,
       contextRefs: payload.contextRefs,
       browserTabRefs,
+      // QF-9: the composer clears the sent regions once this submit resolves; a refused send keeps them.
+      browserRegions,
       agentMode: payload.agentMode,
       deepResearch: payload.tools.includes('research'),
       // EP-2 S5: with the plan turn on, a composer deep research first asks for the editable plan.

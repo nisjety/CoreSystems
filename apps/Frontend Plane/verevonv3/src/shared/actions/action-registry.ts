@@ -1485,6 +1485,15 @@ const chatContinueGoalInput = z
   })
   .strict()
 
+// The person's stop of one addressable research run (Quarry v2 E4.6, Q4-062b): `rsr_` and a ULID, as
+// Session Core issues it. The gateway answers 202 once the stop is asked; the run's stream then ends it
+// as `cancelled`. Ownership is decided upstream from the verified session, never from this input.
+const chatResearchRunCancelInput = z
+  .object({
+    researchRunId: z.string().regex(/^rsr_[0-9A-HJKMNP-TV-Z]{26}$/),
+  })
+  .strict()
+
 // "Keep going" on the goal bar (EP-7 S4): the person's own switch for the goal pump on one thread. It
 // is held in the open tab only and grants nothing: each turn the pump sends is claimed by the server,
 // which refuses while a decision waits on the person.
@@ -5239,6 +5248,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatGoalAutoToggleInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.research_run.cancel',
+    label: 'Stop the research run',
+    description: 'Ask the live stream of one of the person\'s own research runs to stop. The gateway answers 202 with stopRequested, and the run then ends as cancelled with what it found so far. Another owner\'s run reads as not found. Human-only, from the research card: a model cannot stop a run. Not reversible: a cancelled run does not resume.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: chatResearchRunCancelInput,
     outputSchema: envelopeStatusOutput,
   },
   {

@@ -868,6 +868,30 @@ async fn run_extract(
         zdr.is_active(),
     )
     .await;
+    // WS16.S6: one `quarry.extract.llm` per source whose `json` run finished `ok`
+    // (QUARRY_EDGE__USAGE_LLM_METRICS, default off). Keyed by a server-minted id, never the
+    // caller's request id (D2-033), and a hash of the source URL; the URL itself never reaches
+    // the event. A failed or skipped source emits nothing, and under ZDR no model runs.
+    if !zdr.is_active() && state.usage.llm_metrics_mode() != quarry_runtime::LlmMetricsMode::Off {
+        let llm_usage_id: quarry_core::ids::kinds::RunKind = quarry_core::ids::Id::new();
+        let llm_usage_id = llm_usage_id.to_string();
+        for item in results.iter().filter(|item| item.status == "ok") {
+            let Some(format) = item.ai.as_ref() else {
+                continue;
+            };
+            let mut report = quarry_core::ai_spec::AiReport::default();
+            report.set(AiKind::Json, format.clone());
+            crate::usage_attrs::emit_llm_formats(
+                &*state.usage,
+                &llm_usage_id,
+                &item.url,
+                &claims.org_id,
+                &report,
+                zdr.is_active(),
+            )
+            .await;
+        }
+    }
     if !crate::usage_attrs::corrected_rules(&*state.usage) {
         // D2-033: this id is server-minted, never the caller's `X-Request-Id`. The request
         // id is not unique across tenants and a client can repeat or oversize it, so using it

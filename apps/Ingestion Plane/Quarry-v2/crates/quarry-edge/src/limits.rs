@@ -1021,6 +1021,65 @@ pub fn org_render_permits(pool_org_max: usize, pool_size: usize, limits: &OrgLim
     effective_capacity(floor, plan, global, limits.origin).max(1) as usize
 }
 
+/// The boot settings of the plan-aware render cap: the switch
+/// (`QUARRY_EDGE__POOL_ORG_MAX_PERMITS`) and the size of the browser pool the
+/// plan's value is capped by. Set once from `main`, when the browser pool is built.
+#[derive(Debug, Clone, Copy)]
+struct RenderPermitsBoot {
+    pool_org_max: usize,
+    pool_size: usize,
+}
+
+static RENDER_PERMITS_BOOT: OnceLock<RenderPermitsBoot> = OnceLock::new();
+
+/// Record the boot settings of the render cap. `main` calls it once for the
+/// browser pool it builds: one browser pool serves the scrape path per process
+/// (the managed one, or the local one when no managed one is configured).
+/// Until it is called the cap stays off, so the plan is never read.
+pub fn set_render_permits_boot(pool_org_max: usize, pool_size: usize) {
+    let _ = RENDER_PERMITS_BOOT.set(RenderPermitsBoot {
+        pool_org_max,
+        pool_size,
+    });
+}
+
+/// The boot settings, when the switch names a per-organization cap. `None`
+/// keeps the cap off.
+fn render_permits_boot() -> Option<RenderPermitsBoot> {
+    RENDER_PERMITS_BOOT
+        .get()
+        .copied()
+        .filter(|boot| boot.pool_org_max > 0)
+}
+
+/// WS6.G: put one organization's render cap, from its answer, on the browser
+/// lease pool (`org_render_permits`, then `set_org_render_cap`). Does nothing
+/// while the switch is off.
+pub fn apply_org_render_permits_from(answer: &OrgLimits, org_id: &str) {
+    let Some(boot) = render_permits_boot() else {
+        return;
+    };
+    if org_id.is_empty() {
+        return;
+    }
+    let cap = org_render_permits(boot.pool_org_max, boot.pool_size, answer);
+    quarry_runtime::lease_pool::set_org_render_cap(org_id, cap);
+}
+
+/// WS6.G: [`apply_org_render_permits_from`] for a caller that has not read the
+/// organization's limits yet. The read is skipped while the switch is off, and
+/// an unreadable answer is taken as the floor.
+pub async fn apply_org_render_permits(state_limits: &dyn LimitsResolver, org_id: &str) {
+    if render_permits_boot().is_none() || org_id.is_empty() {
+        return;
+    }
+    let answer = state_limits
+        .org_limits(org_id)
+        .await
+        .unwrap_or_else(|_| OrgLimits::floor());
+    apply_org_render_permits_from(&answer, org_id);
+}
+
 /// The organization's allowance for one metric is spent. Becomes a 402
 /// `BUDGET_EXHAUSTED` with `details.dimension = org_allowance`. It carries the
 /// metric name only: no counts, no organization id.

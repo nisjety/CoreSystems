@@ -10945,6 +10945,11 @@ h3 {
   font-weight: 600;
 }
 
+/* The plan text the card keeps for a PDF export (QF-20). Hidden on screen; print.ts's print sheet shows it. */
+.verevon-crawl-plan__print[data-print-only] {
+  display: none;
+}
+
 /* Product picker: extracted product cards (image+price+specs) + AI summary. */
 .product-picker {
   display: flex;

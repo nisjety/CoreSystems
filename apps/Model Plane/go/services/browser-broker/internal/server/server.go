@@ -105,6 +105,16 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	if err != nil {
 		return nil, err
 	}
+	// Q3-E3.1-b1-c: fill_otp approvals are dark behind
+	// BROWSER_BROKER_FILL_OTP_ENABLED, and their binding fields are refused on
+	// every other grant (a binding there would be dropped silently).
+	fillOtp := grant.IsFillOtp(req.GetAllowedActions())
+	if fillOtp && !s.cfg.FillOtpEnabled {
+		return nil, status.Error(codes.InvalidArgument, "fill_otp approvals are not enabled")
+	}
+	if (req.GetMailConnectionId() != "" || req.GetGrantOrigin() != "") && (!fillOtp || req.GetGrantKind() != "") {
+		return nil, status.Error(codes.InvalidArgument, grant.ErrFillOtpBindingUnexpected.Error())
+	}
 	// An API key (INNH-10) has its own path and never reaches the user or
 	// service rules below.
 	if principal.PrincipalType == authz.PrincipalAPIKey {
@@ -138,6 +148,10 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	allowedDomains, err := grant.NormalizeAllowedDomains(req.GetAllowedDomains())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "allowed_domains must contain bounded hostnames")
+	}
+	webPolicy, allowedDomains, err := s.applyWebPolicy(ctx, principal, allowedDomains)
+	if err != nil {
+		return nil, err
 	}
 	if err := s.cfg.Policy.CheckSession(ctx, principal.OrganizationID, allowedDomains); err != nil {
 		telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
@@ -205,6 +219,7 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 			Zdr:               zdr,
 			ReadOnly:          readOnly,
 			Budget:            budget,
+			WebPolicy:         webPolicy,
 			MaxActivePerOwner: s.cfg.MaxActivePerOwner,
 		})
 	} else {
@@ -224,6 +239,8 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 			ParentGrantID:      req.GetParentGrantId(),
 			TTL:                s.cfg.TTL,
 			Zdr:                zdr,
+			MailConnectionID:   req.GetMailConnectionId(),
+			GrantOrigin:        req.GetGrantOrigin(),
 		})
 	}
 	if err != nil {
@@ -234,6 +251,7 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	logGrantIssued(ctx, g)
 	resp := s.acquireResponse(g)
 	resp.ReadOnly = g.ReadOnly
+	resp.WebPolicy = s.webPolicyResponse(g)
 	// An allowlist grant has no deny suffixes of its own, so the hosts the site
 	// policy dropped (WS21-S4) are the hosts it may never reach.
 	resp.DeniedDomains = append(resp.DeniedDomains, deniedDomains...)
@@ -313,6 +331,9 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 		ReadOnly:           g.ReadOnly,
 		KeyId:              g.KeyID,
 		ConsentScope:       g.ConsentScope,
+		MailConnectionId:   g.MailConnectionID,
+		GrantOrigin:        g.GrantOrigin,
+		WebPolicy:          s.webPolicyResponse(g),
 	}, nil
 }
 
@@ -413,7 +434,59 @@ func (s *Server) DeriveRunGrant(ctx context.Context, req *DeriveRunGrantRequest)
 		BudgetMaxRuntimeS:  g.Budget.MaxRuntimeS,
 		BudgetSource:       g.Budget.Source,
 		BudgetMintedAtUnix: g.Budget.MintedAtUnix,
+		// The parent's snapshot as stored, copied unchanged by the grant layer.
+		WebPolicy: s.webPolicyResponse(g),
 	}, nil
+}
+
+// applyWebPolicy reads the org web-policy snapshot from the verified token
+// (WS7.K) and narrows an ordinary grant's canonical hosts by it. With
+// BROWSER_BROKER_WEB_POLICY_SNAPSHOT off it reads nothing and changes nothing.
+// On, an unreadable claim refuses the mint (InvalidArgument
+// web_policy_unreadable), a denied host refuses it (browser host is not
+// grantable), and a token without the claim mints with no snapshot. The
+// snapshot is never read from the request.
+func (s *Server) applyWebPolicy(ctx context.Context, principal authctx.Principal, domains []string) (*grant.WebPolicySnapshot, []string, error) {
+	if !s.cfg.WebPolicySnapshot {
+		return nil, domains, nil
+	}
+	snapshot, err := grant.ClaimPolicyResolver{}.Snapshot(principal)
+	if err != nil {
+		telemetry.GrantsDeniedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "web_policy_unreadable")))
+		return nil, nil, status.Error(codes.InvalidArgument, grant.ErrWebPolicyUnreadable.Error())
+	}
+	narrowed, err := grant.Narrow(domains, snapshot)
+	if err != nil {
+		telemetry.GrantsDeniedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "web_policy")))
+		telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
+		return nil, nil, mapErr(err)
+	}
+	return snapshot, narrowed, nil
+}
+
+// webPolicyResponse is a grant's snapshot as field 20, or nil when the switch
+// is off or the grant carries none (send nothing rather than an empty message,
+// which a consumer reads as unreadable).
+func (s *Server) webPolicyResponse(g *grant.Grant) *mpv1.WebPolicy {
+	if !s.cfg.WebPolicySnapshot || g == nil || g.WebPolicy == nil {
+		return nil
+	}
+	p := g.WebPolicy
+	out := &mpv1.WebPolicy{
+		V:            p.V,
+		Rev:          p.Rev,
+		RobotsMax:    p.RobotsMax,
+		ProxyMax:     p.ProxyMax,
+		DomainsAllow: append([]string(nil), p.DomainsAllow...),
+		DomainsDeny:  append([]string(nil), p.DomainsDeny...),
+	}
+	if len(p.Caps) > 0 {
+		out.Caps = make(map[string]string, len(p.Caps))
+		for k, v := range p.Caps {
+			out.Caps[k] = v
+		}
+	}
+	return out
 }
 
 // budgetFromRequest reads the budget claim fields of a request. The stamp is

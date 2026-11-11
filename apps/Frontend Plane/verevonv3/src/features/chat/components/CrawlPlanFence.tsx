@@ -13,6 +13,9 @@
  * quota) is shown as text and never hidden. No new action id.
  *
  * With `VITE_CRAWL_PLAN_CARD` off, or a fence that does not parse, the caller's plain code block shows.
+ *
+ * A PDF export (print.ts) prints the fence text in place of the card's body: the body is marked
+ * `data-print-hide` and the text is a `data-print-only` `<pre>` (QF-20), so no approval control reaches the PDF.
  */
 
 import { createMemo, createSignal, Show } from 'solid-js'
@@ -107,26 +110,30 @@ export function CrawlPlanFence(props: { text: string; fallback: JSX.Element }) {
       {(current) => (
         <Show when={!dismissed()}>
           <div class="crawl-plan-fence">
-            <Show
-              when={started()}
-              fallback={
-                <CrawlPagePicker
-                  discovery={{ url: current.url, pages: current.pages, count: current.pages.length }}
-                  submitting={submitting()}
-                  onCrawl={crawlPages}
-                  onDiscard={() => setDismissed(true)}
-                  plan={{ ...(current.goal ? { goal: current.goal } : {}), scope: current.scope }}
-                  onCrawlScope={(scope) => crawlScope(current, scope)}
-                />
-              }
-            >
-              {(job) => (
-                <p class="crawl-plan-fence__started" role="status">
-                  {i18n.tr('Crawl startet.', 'Crawl started.')}
-                  <Show when={job().id}>{` ${i18n.tr('Kjøring', 'Run')} ${job().id}`}</Show>
-                </p>
-              )}
-            </Show>
+            {/* The plan as text, for a PDF export only (QF-20): print.ts shows it and hides the body below. */}
+            <pre class="verevon-crawl-plan__print" data-print-only>{props.text}</pre>
+            <div data-print-hide>
+              <Show
+                when={started()}
+                fallback={
+                  <CrawlPagePicker
+                    discovery={{ url: current.url, pages: current.pages, count: current.pages.length }}
+                    submitting={submitting()}
+                    onCrawl={crawlPages}
+                    onDiscard={() => setDismissed(true)}
+                    plan={{ ...(current.goal ? { goal: current.goal } : {}), scope: current.scope }}
+                    onCrawlScope={(scope) => crawlScope(current, scope)}
+                  />
+                }
+              >
+                {(job) => (
+                  <p class="crawl-plan-fence__started" role="status">
+                    {i18n.tr('Crawl startet.', 'Crawl started.')}
+                    <Show when={job().id}>{` ${i18n.tr('Kjøring', 'Run')} ${job().id}`}</Show>
+                  </p>
+                )}
+              </Show>
+            </div>
             <Show when={error()}>
               {(message) => (
                 <p class="crawl-plan-fence__error" role="alert">

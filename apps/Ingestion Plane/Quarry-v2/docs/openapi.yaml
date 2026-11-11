@@ -429,9 +429,10 @@ paths:
                 $ref: '#/components/schemas/Envelope_Error'
         '409':
           description: >-
-            A repeated Idempotency-Key that reuses the key for a different URL list or ingest flag, with
-            QUARRY_EDGE__BATCH_IDEMPOTENCY on. The body is CONFLICT with details.reason idempotency_key_reused and
-            details.job_id, the job the key already holds. Nothing is created and nothing is billed.
+            A repeated Idempotency-Key that reuses the key for a different URL list, ingest flag, webhook or
+            max_parallel (the last two when the body sent them), with QUARRY_EDGE__BATCH_IDEMPOTENCY on. The body
+            is CONFLICT with details.reason idempotency_key_reused and details.job_id, the job the key already
+            holds. Nothing is created and nothing is billed.
           content:
             application/json:
               schema:
@@ -1554,9 +1555,10 @@ paths:
         so the delegate takes no further step on it. A successful release (`DELETE .../attach/{attach_id}`
         with the default `release`) then keeps an agent-opened tab open for the owner, if the grant still
         passes the check made at release; a borrowed tab always goes back to its owner. Both `mark` values
-        are accepted and echoed, and the ledger keeps no separate deliverable state, so they have the same
-        effect today. A closed run, a ZDR run, or a tab that is not this delegate's attached tab is 404. A
-        grant that is no longer usable for the run is 403 attach_grant_invalid.
+        are accepted and echoed. The ledger keeps the mark on the tab, and the owner projection
+        (`GET .../browser-session`, see CONTRACTS.md) shows it as the tab's `mark`; the two values have the
+        same effect on the holder and on release today. A closed run, a ZDR run, or a tab that is not this
+        delegate's attached tab is 404. A grant that is no longer usable for the run is 403 attach_grant_invalid.
       tags:
       - agent
       parameters:
@@ -5807,7 +5809,8 @@ components:
         longer or not visible ASCII value is ignored, as if no key were sent. Keys are unique per organization
         (control migration 028). A repeated key answers 200 with the job the first request created (the same
         job_id), and that repeat is not billed again. With QUARRY_EDGE__BATCH_IDEMPOTENCY on, a batch that reuses
-        a key for a different URL list or ingest flag is a 409 CONFLICT with details.reason idempotency_key_reused.
+        a key for a different URL list, ingest flag, webhook or max_parallel (the last two when sent) is a 409
+        CONFLICT with details.reason idempotency_key_reused.
         With the flag off, or on a crawl, a reused key re-attaches to the held job whatever the body says.
       schema:
         type: string
@@ -12176,7 +12179,9 @@ components:
           enum: [MODEL_UNAVAILABLE, MODEL_RATE_LIMITED, SCHEMA_INVALID, ZDR_UNAVAILABLE, BUDGET_EXHAUSTED, EMPTY_SOURCE, PRIVACY_POLICY]
           description: >-
             Absent when status is ok. ZDR_UNAVAILABLE: the request is under Zero Data Retention (skipped, no
-            model call). BUDGET_EXHAUSTED: the request's call or token budget is spent (skipped).
+            model call). BUDGET_EXHAUSTED: the request's call or token budget is spent (skipped), or,
+            with dimension llm_cost, the model cost the gateway reported reached the operator's
+            per-request cost ceiling (QUARRY_EDGE__AI_FORMATS_MAX_COST_USD; skipped).
             EMPTY_SOURCE: the page had no text (skipped). PRIVACY_POLICY: the request's privacy block
             (privacy_classification credential_or_secret or zdr_ephemeral) forbids a model hop (skipped,
             no model call). MODEL_RATE_LIMITED: error, with retry_after_s;
@@ -12186,6 +12191,13 @@ components:
         reason:
           type: string
           enum: [model_lane_denied, model_lane_unauthorized, model_rejected_request, model_lane_unavailable, upstream_unavailable, timeout, transport, bad_reply, not_json, too_large, deadline]
+        dimension:
+          type: string
+          enum: [llm_cost]
+          description: >-
+            BUDGET_EXHAUSTED only, and only when the budget spent is not the call or token cap.
+            llm_cost: the summed model cost the gateway reported reached the per-request cost
+            ceiling, so no further model call was made.
         retry_after_s:
           type: integer
           minimum: 0

@@ -2510,6 +2510,32 @@ With the switch on, every tab the local Chromium driver opens keeps the browser'
 
 **Disable.** Unset the variable or set it to `off`, and restart. Nothing stored changes, and no ZDR rule changes (the override stores nothing).
 
+## Pinning a profile to a scrape: `profile_id` on `POST /v1/scrape` (E4.4-b, built, NOT run, 2026-11-11)
+
+`POST /v1/scrape` accepts `profile_id` (alias `profileId`): one stored browser profile of the caller's organization, written `prof_<ulid>`. The page loads with that profile restored read-only, so the person's cookies and storage at the site are used, and nothing the page sets is written back to the profile. The contract is `ScrapeRequest.profile_id` in `docs/openapi.yaml`, and the refusals are listed in `docs/ERROR_REASONS.md` under "Scrape `profile_id` (E4.4-b)". The ZDR refusals are also in the matrix row `scrape_profile_pin` (`crates/quarry-core/src/zdr_matrix.rs`). The feature is off: `QUARRY_EDGE__SCRAPE_PROFILE_PIN` is unset in the default composes. While it is off, `profile_id` is an unknown field, ignored with an `unknown_field` warning (a 400 under strict validation) and never read.
+
+**Who may use it.** A person's token only. A service principal gets 403 `FORBIDDEN` with the profile guard's message. An API key gets 403 with `details.reason` `api_key_profile_refused`, since a key is neither a person nor a service. A profile this organization does not hold is 404 `profile not found`. A scrape never creates a profile.
+
+**Ownership is observed, not enforced, by default.** The owner check for a pin is `profile_guard::authorize` with the operation `attach`, and it follows `QUARRY_EDGE__PROFILE_OWNER_ENFORCE`, which is `observe` by default. Under `observe` a profile that another person owns, in the same organization, is served and only logged as `profile.owner.would_deny`. So until the operator sets `enforce`, one person can pin another person's `user_private` profile. An `org_shared` profile is open to every member in both modes, as for any attach.
+
+**What it refuses.**
+- `ingest` true: 400 `BAD_REQUEST` at `ingest`, `profile_ingest_forbidden`. A pinned scrape is never ingested.
+- Zero data retention, by the request's `zdr` flag or by the token's ZDR floor: 400 at `profile_id`, `profile_zdr_forbidden`. This is checked before the profile is read and before any page is fetched, whatever the durable-resource switch says.
+- `actions` or `no_egress` with `profile_id`: 400 at `profile_id`, `conflicting_option`.
+- `POST /v1/scrape/stream` with `profile_id` while the switch is on: 400 `BAD_REQUEST` with `details.reason` `unsupported_in_stream`, sent as the stream's `error` event. Nothing is fetched.
+- An edge with no browser: 400 at `profile_id`, `unsupported_option`.
+- A browser that cannot restore a profile, which is a remote provider or the local browser without a profile store: 501 `UNSUPPORTED` with `details.reason` `browser_capability_unavailable`.
+
+**What it does.** The restore runs in a browser context that no other request reuses, and before the egress policy is set and the first navigation. If the restore fails, the scrape fails with the browser's error, and the page is not loaded without the profile. The privacy class is forced to `CredentialOrSecret`, so no managed browser takes the page and no model hop reads it. The run keeps no local index, title enricher, ingest, page-image or OCR hop. It takes the browser plan, so neither the page cache nor the URL result cache reads or writes it. `data.effective_options.profile_pinned` is `true`; the profile id is never echoed. The edge logs `scrape.profile_pinned` with the operation `attach` and nothing else about the profile.
+
+**What it does not change.** A pinned scrape that is not under ZDR is recorded like any other scrape: a scrape record (the output and the effective options, never the inline text) and the artifacts the page run writes are kept, and the organization can read them (`GET /v1/scrape/{id}` and the artifact routes). Decide that before the switch goes on for `user_private` profiles.
+
+**Turn on.** Set `QUARRY_EDGE__SCRAPE_PROFILE_PIN=on` (also `1` or `true`, trimmed, any case; anything else is off) on the edge and restart it. It is read once with the other scrape settings in `scrape_contract.rs`. No default compose file sets it or passes it through, so add the line to the edge service's environment. The edge also needs a browser that can restore a profile: the local Chromium driver, wired with the profile store that `/v1/profiles` uses, can. Before turning it on for `user_private` profiles, decide whether the owner check should refuse rather than only log, which is `QUARRY_EDGE__PROFILE_OWNER_ENFORCE=enforce` (see above).
+
+**Check.** Take a profile the person already has (`GET /v1/profiles` lists them). `POST /v1/scrape` with `{"url": "https://example.com/", "profile_id": "prof_<ulid>"}` returns 200 with `data.effective_options.profile_pinned` `true`. The same request with `"ingest": true` is 400 `profile_ingest_forbidden`. With a ZDR token it is 400 `profile_zdr_forbidden`, and with a service token it is 403.
+
+**Disable.** Unset the variable or set it to `off`, and restart. `profile_id` is an unknown field again and is never read. Nothing stored changes.
+
 ## Parent-run usage attribute (E4.6 062a, edge half)
 
 Switch: `QUARRY_EDGE__USAGE_PARENT_RUN` = `on`, `1` or `true`. Unset or anything else is off. Read once, by `usage_attrs::parent_run_enabled`. Dark by default.

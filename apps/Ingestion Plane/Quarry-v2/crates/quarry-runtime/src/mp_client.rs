@@ -327,9 +327,10 @@ impl ModelPlaneClient {
 // the gateway refuses service principals on `/v1/invoke` and its non-ZDR path
 // writes the prompt into a Session Core thread, while `/v1/ai/chat` persists
 // nothing and takes `structured_output_schema` and `zdr`. The body carries
-// exactly the fields the gateway reads: no `session_key`, no `thread_id`, and
-// no `max_tokens` or `temperature` (the route fixes them and ignores ours, so
-// sending them would suggest a cap that does not exist).
+// exactly the fields the gateway reads: no `session_key` and no `thread_id`.
+// Since WS16.S1 the route honours `temperature` (0..1), `max_tokens` (1..8192)
+// and `purpose` (a closed set; `quarry.extract` only for `service:quarry-edge`),
+// so WS16.S6 sends them; each is left out when unset.
 
 /// One chat message. `role` is `system` or `user`.
 #[derive(Clone, Serialize)]
@@ -381,7 +382,21 @@ pub struct AiChatRequest {
     /// Omitted when false.
     #[serde(skip_serializing_if = "is_false")]
     pub zdr: bool,
+    /// The output cap (the gateway takes 1..=8192). Omitted when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// Sampling temperature (the gateway takes 0..=1). Omitted when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    /// Why the call is made, from the gateway's closed set (`quarry.extract`,
+    /// see [`AI_CHAT_PURPOSE_QUARRY_EXTRACT`]). Omitted when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<&'static str>,
 }
+
+/// The `purpose` of every Quarry extraction call on `/v1/ai/chat`. The gateway
+/// accepts it only from `service:quarry-edge`.
+pub const AI_CHAT_PURPOSE_QUARRY_EXTRACT: &str = "quarry.extract";
 
 impl std::fmt::Debug for AiChatRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -390,6 +405,9 @@ impl std::fmt::Debug for AiChatRequest {
             .field("model", &self.model)
             .field("has_schema", &self.structured_output_schema.is_some())
             .field("zdr", &self.zdr)
+            .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
+            .field("purpose", &self.purpose)
             .finish()
     }
 }

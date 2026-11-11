@@ -328,6 +328,32 @@ pub struct BrowserSessionProjectionData {
     /// navigation mode it admitted, and only a person's grant admits the open web.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grant_kind: Option<&'static str>,
+    /// WS8.F: whether the tab routes are on (`QUARRY_EDGE__ATTACH`). The gateway offers tab control
+    /// only when this is true. Always false in a checkpoint projection.
+    pub tab_control: bool,
+    /// WS8.F: whether an agent may attach to this run now: the switch is on, the run is not ZDR,
+    /// it holds a grant, the driver can background, pin and egress-limit a tab, and no attachment
+    /// is live. Always false in a checkpoint projection.
+    pub attach_available: bool,
+    /// WS8.F: the live agent attachment, absent when none is live.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attach: Option<AttachProjection>,
+}
+
+/// WS8.F: the live agent attachment as the owner projection shows it. Ids and words only.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachProjection {
+    /// The attachment's phase. A live attachment is `attached`, the same word the timeline uses.
+    pub state: BrowserAttachState,
+    pub attach_id: String,
+    pub tab_id: String,
+    /// The holder epoch of the attached tab.
+    pub tab_epoch: u64,
+    /// Owner-internal: the attach grant's id. It is not for the SPA: the gateway must remove it
+    /// before the projection reaches the browser.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -343,6 +369,15 @@ pub struct BrowserSessionTab {
     /// tab the browser opened itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opened_by: Option<TabOrigin>,
+    /// WS8.F: the mark the attachment nominated the tab with, `deliverable` or `handoff`. Absent
+    /// until the tab is marked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mark: Option<&'static str>,
+    /// WS8.F: the attachment the ledger records for this tab (the one that opened it, or the one it
+    /// was lent to). A handed-off tab keeps it after the attachment ends, so `attach` is the signal
+    /// that an attachment is live. Absent when the ledger records none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attach_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

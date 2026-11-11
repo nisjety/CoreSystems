@@ -3,7 +3,7 @@
 //!
 //! The matrix says where Zero Data Retention is NOT honoured yet. For a ZDR
 //! organization, the schedule create, the browser profile create and save, the
-//! change check, history, snapshot and refresh, the search suggest and the
+//! change check, history, snapshot and refresh and the
 //! orchestrator's internal change record are all answered as if the organization
 //! were not ZDR. One `gap_rows_currently_violate_*` test per gap row measures that
 //! with real RS256 tokens, the golden Auth Core claims and the real router (the
@@ -23,6 +23,8 @@
 //! `enforced_refusals_hold_for_durable_jobs` and
 //! `a_service_principal_with_body_zdr_gets_the_same_persistent_profile_refusal` pin
 //! refusals the matrix calls enforced. They keep passing after WS4.H.
+//! `a_zdr_caller_gets_no_suggestions_and_the_model_plane_sees_no_request` pins the
+//! `search_suggest` row, closed by WS4.G (an empty 200 under ZDR, no Model Plane call).
 //! `a_service_principal_is_refused_durable_jobs_by_the_scope_gate` pins the route scope
 //! gate's refusal of service principals on the durable routes. That is not the ZDR
 //! refusal, so no matrix row cites it.
@@ -322,14 +324,12 @@ async fn change_record_internal_pins_the_token_check_and_the_501() {
     );
 }
 
-/// Row `search_suggest` (Gap, unassigned). Today the partial query goes to the Model
-/// Plane without the ZDR posture: the invoke body is `content` and nothing else,
-/// whatever the caller's organization.
-///
-/// INVERT when the row is assigned: the body carries a posture the Model Plane
-/// honours, or the ZDR organization's suggest is refused.
+/// Row `search_suggest` (Enforced, WS4.G). The Model Plane hop carries no ZDR posture,
+/// so a ZDR organization's suggest degrades to an empty 200 and its partial query never
+/// leaves Quarry: the Model Plane double receives no request. A standard organization
+/// still gets the double's suggestion through one invoke.
 #[tokio::test]
-async fn gap_rows_currently_violate_search_suggest() {
+async fn a_zdr_caller_gets_no_suggestions_and_the_model_plane_sees_no_request() {
     let model_plane = model_plane_double(
         r#"{"corrected_query":"rust async","related_queries":["rust async await"],"entity":null}"#,
     )
@@ -337,8 +337,8 @@ async fn gap_rows_currently_violate_search_suggest() {
     let model_plane_url = model_plane.uri();
     let harness = Harness::start_with(move |state| AppState {
         model_plane_url: Some(model_plane_url),
-        // QB-T17: /v1/search/suggest is off unless its switch is on; this test pins the gap that
-        // remains once it is on (the invoke body carries no ZDR posture).
+        // QB-T17: /v1/search/suggest is off unless its switch is on; the ZDR guard applies
+        // whenever the route is on.
         model_plane: quarry_edge::model_plane_gate::ModelPlaneFeatures {
             search_suggest: true,
             ..Default::default()
@@ -354,32 +354,42 @@ async fn gap_rows_currently_violate_search_suggest() {
             json!({ "query": "rust asnyc" }),
         )
         .await;
+    assert_eq!(
+        response.status().as_u16(),
+        200,
+        "the UI degrades, it is not refused"
+    );
+    let payload: Value = response.json().await.unwrap();
+    assert_eq!(
+        payload,
+        json!({ "related_queries": [] }),
+        "a ZDR caller gets empty suggestions: {payload}"
+    );
+    assert!(
+        model_plane.received_requests().await.unwrap().is_empty(),
+        "a ZDR caller's partial query never reaches the Model Plane"
+    );
+
+    let response = harness
+        .post(
+            &user_in_standard_org(),
+            "/v1/search/suggest",
+            json!({ "query": "rust asnyc" }),
+        )
+        .await;
     assert_eq!(response.status().as_u16(), 200);
     let payload: Value = response.json().await.unwrap();
     assert_eq!(
         payload["corrected_query"], "rust async",
-        "the suggestion came back from the Model Plane"
+        "a standard organization still gets the Model Plane's suggestion: {payload}"
     );
-
     let invokes = model_plane.received_requests().await.unwrap();
-    assert_eq!(invokes.len(), 1, "one invoke reached the Model Plane");
-    assert_eq!(invokes[0].url.path(), "/v1/invoke");
-    let body: Value = invokes[0].body_json().unwrap();
-    let keys: BTreeSet<&str> = body
-        .as_object()
-        .expect("the invoke body is an object")
-        .keys()
-        .map(String::as_str)
-        .collect();
     assert_eq!(
-        keys,
-        BTreeSet::from(["content"]),
-        "the Model Plane body carries no ZDR posture: {body}"
+        invokes.len(),
+        1,
+        "one invoke, from the standard organization"
     );
-    assert!(body["content"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("rust asnyc"));
+    assert_eq!(invokes[0].url.path(), "/v1/invoke");
 }
 
 // ── refusals the matrix calls enforced (these keep passing after WS4.H) ──────

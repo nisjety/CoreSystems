@@ -34,12 +34,41 @@ pub enum Actor {
     Agent,
 }
 
+/// The mark an attachment puts on its own tab for the owner (`POST .../tabs/{id}/mark`). The wire
+/// words are `deliverable` and `handoff`. It is a label the owner's projection shows: it changes no
+/// holder rule and no release rule, so a marked release keeps the tab for either kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabMark {
+    Deliverable,
+    Handoff,
+}
+
+impl TabMark {
+    /// The mark a wire word names. Any other word is `None`.
+    pub fn from_wire(word: &str) -> Option<Self> {
+        match word {
+            "deliverable" => Some(Self::Deliverable),
+            "handoff" => Some(Self::Handoff),
+            _ => None,
+        }
+    }
+
+    /// The wire word of the mark.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deliverable => "deliverable",
+            Self::Handoff => "handoff",
+        }
+    }
+}
+
 /// What the ledger keeps for one tab: ids and classes only, never a URL or a title.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabMeta {
     pub opened_by: OpenedBy,
     pub holder: BrowserTabHolder,
-    /// The attachment that opened the tab, when an agent opened it.
+    /// The attachment that holds the tab: the one that opened it, or the one it was lent to
+    /// (`attach_visible_tab`). Cleared when a lent tab is returned.
     pub attach_id: Option<String>,
     /// Moves by one on each real change of holder; starts at 0.
     pub epoch: u64,
@@ -84,6 +113,9 @@ pub struct TabLedger {
     consents: BTreeMap<String, TabConsent>,
     /// Attachment-scoped handoffs, retained only until the attachment ends.
     retained: BTreeMap<String, String>,
+    /// WS8.F: the mark each tab was nominated with. It outlives the handoff, so the owner's
+    /// projection shows it on the tab, and it goes with the tab (`forget`, `retain_live`).
+    marks: BTreeMap<String, TabMark>,
 }
 
 impl TabLedger {
@@ -127,6 +159,7 @@ impl TabLedger {
     pub fn forget(&mut self, tab_id: &str) -> Option<TabMeta> {
         self.consents.remove(tab_id);
         self.retained.remove(tab_id);
+        self.marks.remove(tab_id);
         self.tabs.remove(tab_id)
     }
 
@@ -135,16 +168,29 @@ impl TabLedger {
         self.tabs.retain(|id, _| live.contains(&id.as_str()));
         self.consents.retain(|id, _| live.contains(&id.as_str()));
         self.retained.retain(|id, _| live.contains(&id.as_str()));
+        self.marks.retain(|id, _| live.contains(&id.as_str()));
     }
 
-    /// Mark only the tab belonging to this attachment for the owner to continue using.
-    pub fn mark_for_handoff(&mut self, tab_id: &str, attach_id: &str) -> Result<(), TabError> {
+    /// Mark only the tab belonging to this attachment for the owner to continue using. The mark
+    /// kind is kept for the owner's projection (`mark_of`); it changes no holder or release rule.
+    pub fn mark_for_handoff(
+        &mut self,
+        tab_id: &str,
+        attach_id: &str,
+        mark: TabMark,
+    ) -> Result<(), TabError> {
         let tab = self.tabs.get(tab_id).ok_or(TabError::NotFound)?;
         if tab.attach_id.as_deref() != Some(attach_id) { return Err(TabError::NotFound); }
         // Prevent another delegate step after the marking step has finished.
         self.set_holder(tab_id, BrowserTabHolder::Human, None)?;
         self.retained.insert(tab_id.to_owned(), attach_id.to_owned());
+        self.marks.insert(tab_id.to_owned(), mark);
         Ok(())
+    }
+
+    /// The mark a tab was nominated with, if any. It survives the handoff.
+    pub fn mark_of(&self, tab_id: &str) -> Option<TabMark> {
+        self.marks.get(tab_id).copied()
     }
 
     pub fn is_marked_for_handoff(&self, tab_id: &str, attach_id: &str) -> bool {

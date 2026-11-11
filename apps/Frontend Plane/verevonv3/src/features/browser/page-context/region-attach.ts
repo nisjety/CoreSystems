@@ -13,7 +13,9 @@
  * The gateway route is mounted only with `BROWSER_REGION_ATTACH` (default off);
  * with the flag off the call answers 404. The client call is `attachBrowserRegion`
  * in shared/api/browser-client.ts; the drag overlay is in InteractiveBrowserPane.
- * The composer chip that carries the attachment is not wired here.
+ * The composer chip that carries the attachment lives in DashboardComposer; a chat
+ * turn sends it as `browser_regions` (QF-9, VITE_BROWSER_REGION_SEND) with the
+ * gateway's attach token, which the gateway verifies before forwarding anything.
  *
  * The pure helpers mirror the gateway rules (browser_evidence.rs) so the UI can
  * refuse early, but the gateway answer is the one that counts.
@@ -69,6 +71,38 @@ export type BrowserRegionAttachment = {
   viewport: ViewportSize
   image: RegionImagePayload & { width: number; height: number; byteLength: number }
   selection: { text: string; length: number } | null
+  /**
+   * The gateway's short-lived token over exactly this user, org, session, tab, region and image
+   * (QF-8). A chat turn sends it back beside the region so the gateway can verify the picture it
+   * forwards is the one it attached. Null when the gateway issued none (no signing key configured);
+   * such a region cannot be sent on a turn.
+   */
+  attachToken: string | null
+}
+
+/**
+ * One region as a chat turn carries it (QF-9): what the gateway attached, with the token that
+ * vouches for it. The gateway verifies the token against the session, tab, region and image and
+ * forwards only what it covers; a region without a token is never sent.
+ */
+export type BrowserRegionTurnInput = {
+  sessionId: string
+  tabId: string
+  attachToken: string
+  region: RegionRect
+  image: RegionImagePayload & { width: number; height: number }
+  selectionText?: string
+}
+
+/** Most browser regions one chat turn sends (QF-9). */
+export const BROWSER_REGIONS_PER_TURN_MAX = 4
+
+/**
+ * Build-time switch for sending browser regions on a chat turn (QF-9), VITE_BROWSER_REGION_SEND.
+ * Only `true` turns it on (default off); off, a send that carries a region is refused and keeps its draft.
+ */
+export function browserRegionSendEnabled(): boolean {
+  return import.meta.env.VITE_BROWSER_REGION_SEND === 'true'
 }
 
 export type RegionAttachRefusal =

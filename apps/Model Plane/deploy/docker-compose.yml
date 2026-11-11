@@ -648,6 +648,10 @@ services:
       MODEL_GATEWAY_BROWSER_ATTACH: ${MODEL_GATEWAY_BROWSER_ATTACH:-off}
       # Enable only after the matching execution and Quarry policy protocol is deployed.
       MODEL_GATEWAY_BROWSER_ATTACH_POLICY_ENFORCED: ${MODEL_GATEWAY_BROWSER_ATTACH_POLICY_ENFORCED:-off}
+      # Q4-E4.2-3i, OFF by default: a browser run start may name a saved recipe (id, version or tag, slots),
+      # written into execution-core's tool_input.recipe with for_user_id from the verified claims. Off answers
+      # 400 browser_recipe_unavailable. Needs EXECUTION_CORE_RECIPE_RUNNER too. Only the literal true turns it on.
+      MODEL_GATEWAY_BROWSER_RECIPE: ${MODEL_GATEWAY_BROWSER_RECIPE:-false}
       # WS16.S8, OFF by default: advertise the extract_structured chat tool (schema-validated,
       # verbatim-grounded extraction over 1-5 pages). The gRPC ExtractStructured fixes are unflagged.
       MODEL_GATEWAY_EXTRACT_TOOL: ${MODEL_GATEWAY_EXTRACT_TOOL:-0}
@@ -1960,6 +1964,9 @@ services:
       # E4.3, OFF by default: the planner's view of a leased browser run names the browser environment
       # (its tier and the capabilities Quarry reports, as advisory text). Only the literal true turns it on.
       EXECUTION_CORE_PLANNER_RUN_ENV: ${EXECUTION_CORE_PLANNER_RUN_ENV:-false}
+      # Q4-E4.2-3h, OFF by default: a browser run whose input names a saved recipe replays that procedure step by step
+      # with Quarry, under its own broker grant. Only the literal true turns it on.
+      EXECUTION_CORE_RECIPE_RUNNER: ${EXECUTION_CORE_RECIPE_RUNNER:-false}
       # Data Plane v2 retrieval — backs the real knowledge_search agentic tool
       # (RAG over the org's ingested docs). DATAPLANE_INTERNAL_KEY is sent as
       # the x-api-key credential.
@@ -2543,6 +2550,16 @@ services:
       # eight more exact origins for a run; the grant is parent-bound, never
       # renewed, and validates as revoked again when the switch goes back off.
       BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED: ${BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED:-0}
+      # fill_otp sensitive approvals (Q3-E3.1-b1-c, ADR-2a, internal/grant/fill_otp.go).
+      # OFF unless exactly 1, true or on. On, a one-time approval for fill_otp is
+      # bound to one https origin and one mail connection; ZDR is refused.
+      BROWSER_BROKER_FILL_OTP_ENABLED: ${BROWSER_BROKER_FILL_OTP_ENABLED:-0}
+      # Org web-policy snapshot (WS7.K, internal/grant/policy.go). OFF unless 1 or
+      # true (strict: any other value stops the broker). On, an ordinary grant's
+      # hosts are narrowed by the verified token's web_policy claim, an
+      # unreadable claim refuses the mint, and the snapshot is returned as
+      # web_policy (field 20). Not persisted by the durable store yet.
+      BROWSER_BROKER_WEB_POLICY_SNAPSHOT: ${BROWSER_BROKER_WEB_POLICY_SNAPSHOT:-0}
     # The entrypoint's migrations need postgres, so wait for it to be healthy;
     # otherwise a first boot before it answers fails and restarts the container.
     depends_on:

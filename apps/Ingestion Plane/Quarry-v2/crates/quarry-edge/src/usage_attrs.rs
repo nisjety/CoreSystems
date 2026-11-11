@@ -16,7 +16,7 @@ use axum::extract::Request;
 use axum::middleware::Next;
 use axum::response::Response;
 use quarry_runtime::usage_metrics as names;
-use quarry_runtime::{BrowserMetricsMode, UsageEvent, UsageMeter};
+use quarry_runtime::{BrowserMetricsMode, LlmMetricsMode, UsageEvent, UsageMeter};
 use serde_json::{json, Map, Value};
 
 use crate::auth::Claims;
@@ -35,6 +35,9 @@ pub const ENV_PARENT_RUN: &str = "QUARRY_EDGE__USAGE_PARENT_RUN";
 
 /// The environment switch for the seven browser metrics. Unset means `off`.
 pub const ENV_BROWSER_METRICS: &str = "QUARRY_EDGE__USAGE_BROWSER_METRICS";
+
+/// WS16.S6: the environment switch for `quarry.extract.llm`. Unset means `off`.
+pub const ENV_LLM_METRICS: &str = "QUARRY_EDGE__USAGE_LLM_METRICS";
 
 /// The keys a ZDR usage event may carry. Any other key is never written under ZDR.
 pub const ZDR_ALLOWLIST: [&str; 8] = [
@@ -391,18 +394,44 @@ async fn emit_segment_events(
 pub struct ShadowMeter {
     inner: Arc<dyn UsageMeter>,
     mode: BrowserMetricsMode,
+    /// WS16.S6: `QUARRY_EDGE__USAGE_LLM_METRICS`, for `quarry.extract.llm` only.
+    llm_mode: LlmMetricsMode,
 }
 
 impl ShadowMeter {
     pub fn new(inner: Arc<dyn UsageMeter>, mode: BrowserMetricsMode) -> Self {
-        Self { inner, mode }
+        Self {
+            inner,
+            mode,
+            llm_mode: LlmMetricsMode::Off,
+        }
+    }
+
+    /// WS16.S6: the mode of `quarry.extract.llm` (default `off`).
+    pub fn with_llm_metrics(mut self, llm_mode: LlmMetricsMode) -> Self {
+        self.llm_mode = llm_mode;
+        self
     }
 }
 
 #[async_trait]
 impl UsageMeter for ShadowMeter {
     async fn meter(&self, event: UsageEvent) {
-        if names::BROWSER_METRICS.contains(&event.metric.as_str()) {
+        if event.metric == names::EXTRACT_LLM {
+            match self.llm_mode {
+                LlmMetricsMode::Off => return,
+                LlmMetricsMode::Shadow => {
+                    // Counts only: the metric name, never the event's ids or metadata.
+                    ::metrics::counter!(
+                        "quarry_usage_shadow_events_total",
+                        "metric" => event.metric.clone()
+                    )
+                    .increment(1);
+                    return;
+                }
+                LlmMetricsMode::On => {}
+            }
+        } else if names::BROWSER_METRICS.contains(&event.metric.as_str()) {
             match self.mode {
                 BrowserMetricsMode::Off => return,
                 BrowserMetricsMode::Shadow => {
@@ -426,6 +455,10 @@ impl UsageMeter for ShadowMeter {
     fn browser_metrics_mode(&self) -> BrowserMetricsMode {
         self.mode
     }
+
+    fn llm_metrics_mode(&self) -> LlmMetricsMode {
+        self.llm_mode
+    }
 }
 
 /// The mode the environment selects. Unset is `off`. A value that is not `off`, `shadow` or `on`
@@ -440,6 +473,90 @@ pub fn browser_metrics_mode_from_env() -> BrowserMetricsMode {
         }),
         Err(_) => BrowserMetricsMode::Off,
     }
+}
+
+/// WS16.S6: the mode `QUARRY_EDGE__USAGE_LLM_METRICS` selects. Unset is `off`. A value that is
+/// not `off`, `shadow` or `on` is also `off`, and is logged once at boot.
+pub fn llm_metrics_mode_from_env() -> LlmMetricsMode {
+    match std::env::var(ENV_LLM_METRICS) {
+        Ok(raw) => LlmMetricsMode::parse(&raw).unwrap_or_else(|| {
+            tracing::warn!("QUARRY_EDGE__USAGE_LLM_METRICS is not off, shadow or on; using off");
+            LlmMetricsMode::Off
+        }),
+        Err(_) => LlmMetricsMode::Off,
+    }
+}
+
+/// The wire label of a `repair` attribute. A format that is not `json` has no repair: `none`.
+fn repair_label(repair: Option<quarry_core::ai_spec::AiRepair>) -> &'static str {
+    use quarry_core::ai_spec::AiRepair;
+    match repair {
+        None | Some(AiRepair::None) => "none",
+        Some(AiRepair::Local) => "local",
+        Some(AiRepair::Model) => "model",
+    }
+}
+
+/// WS16.S6: one `quarry.extract.llm` event per AI format of `report` that finished `ok`. The id
+/// is `quarry:<usage_id>:<url_hash16>:<kind>:quarry.extract.llm`, where `url_hash16` is the first
+/// 16 hex digits of the SHA-256 of the page URL; the URL itself is never in the event. The
+/// metadata is the closed set `kind`, `repair`, `zdr`, `input_tokens`, `output_tokens`: no
+/// content, no URL, no schema. A failed or skipped format emits nothing, and nothing is emitted
+/// under ZDR (no format runs there) or while the switch is `off`. Returns the events handed to
+/// the meter.
+pub async fn emit_llm_formats(
+    meter: &dyn UsageMeter,
+    usage_id: &str,
+    url: &str,
+    org_id: &str,
+    report: &quarry_core::ai_spec::AiReport,
+    zdr: bool,
+) -> usize {
+    use quarry_core::ai_spec::{AiKind, AiStatus};
+    use sha2::{Digest, Sha256};
+    if zdr || meter.llm_metrics_mode() == LlmMetricsMode::Off {
+        return 0;
+    }
+    let digest = format!("{:x}", Sha256::digest(url.as_bytes()));
+    let url_hash16 = &digest[..16];
+    let mut emitted = 0;
+    for kind in AiKind::ALL {
+        let Some(format) = report.get(kind) else {
+            continue;
+        };
+        if format.status != AiStatus::Ok {
+            continue;
+        }
+        let usage = format.usage.unwrap_or_default();
+        let metadata = json!({
+            "kind": kind.wire_name(),
+            "repair": repair_label(format.repair),
+            "zdr": zdr,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+        });
+        match UsageEvent::keyed(
+            &[usage_id, url_hash16, kind.wire_name()],
+            org_id,
+            names::EXTRACT_LLM,
+            1.0,
+            metadata,
+        ) {
+            Ok(event) => {
+                meter.meter(event).await;
+                emitted += 1;
+            }
+            Err(error) => {
+                // zdr-log-ok: the id error variant and the closed metric name; the id (a server-minted id and a hash) is never logged
+                tracing::warn!(
+                    ?error,
+                    metric = names::EXTRACT_LLM,
+                    "usage event id refused"
+                );
+            }
+        }
+    }
+    emitted
 }
 
 #[cfg(test)]

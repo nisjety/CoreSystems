@@ -11,6 +11,7 @@ import {
   Link2,
   ListChecks,
   Loader2,
+  Pause,
   Pencil,
   Plus,
   RefreshCw,
@@ -65,6 +66,7 @@ import {
   createDocument,
   discoverCrawlPages,
   extractProducts,
+  getCrawlStatus,
   getImportJob,
   importUpload,
   knowledgeScrapeOptionsEnabled,
@@ -80,9 +82,11 @@ import {
   type ProductExtraction,
 } from '@/shared/api/knowledge-client'
 import { resolveCrawlIngest } from '@/shared/api/settings-client'
+import { createBrowserPolicyPort } from '@/features/settings/components/browser-policy-port'
 import { cn } from '@/shared/lib/cn'
 import { useI18n, translateApiError, LocalizedError } from '@/shared/i18n'
 import { readClientJson, removeClientValue, writeClientJson } from '@/shared/session/client-storage'
+import { CrawlControls } from './CrawlControls'
 import { CrawlPagePicker } from './CrawlPagePicker'
 import {
   CrawlApprovalPrompt,
@@ -177,7 +181,7 @@ type PersistedBrowserPreview = {
   savedAt: string
 }
 
-const TERMINAL = new Set(['completed', 'complete', 'failed', 'error', 'succeeded', 'cancelled'])
+const TERMINAL = new Set(['completed', 'complete', 'failed', 'error', 'succeeded', 'cancelled', 'timed_out', 'skipped'])
 const POLL_INTERVAL_MS = 2500
 const BROWSER_SESSION_TIMEOUT_MS = 30000
 const BROWSER_AI_LOOP_MAX_STEPS = 5
@@ -239,6 +243,10 @@ export function KnowledgeComposer(props: {
   const [crawlAllowSubdomains, setCrawlAllowSubdomains] = createSignal(false)
   // WS14.S3: follow links to unrelated hosts. UI only; the default stays off, so an untouched crawl sends nothing.
   const [crawlAllowExternalLinks, setCrawlAllowExternalLinks] = createSignal(false)
+  // WS14.S7: ignore the site's robots.txt. Offered only when the org's effective browser policy lets
+  // robots go to `ignore` AND the org holds `web.robots_override`; the edge decides again on every crawl.
+  const [crawlIgnoreRobots, setCrawlIgnoreRobots] = createSignal(false)
+  const [robotsOverrideAllowed, setRobotsOverrideAllowed] = createSignal(false)
   // W3-E3.7.9b: a crawl over the approval threshold waits here for the person. Set when the gateway
   // answers a crawl start with a pending approval (W3-E3.7.9a, not built yet), so nothing sets it today;
   // the prompt itself also renders nothing unless VITE_KNOWLEDGE_CRAWL_APPROVAL_ENABLED is "true".
@@ -360,6 +368,32 @@ export function KnowledgeComposer(props: {
     (active) => { props.onPreviewActiveChange?.(active) },
   )
 
+  // WS14.S7: read the org's browser policy once per org to decide whether "Ignore robots.txt" is
+  // offered. A failed read, `available: false` or a stale answer (the org changed) hides the box.
+  // Nothing is stored client side; this only gates the control, the edge enforces the override.
+  if (scrapeOptions && !props.browserOnly) {
+    const browserPolicy = createBrowserPolicyPort()
+    let policyOrg: string | null = null
+    createEffect(orgId, (id) => {
+      if (id === policyOrg) return
+      policyOrg = id
+      setRobotsOverrideAllowed(false)
+      setCrawlIgnoreRobots(false)
+      if (!id) return
+      void browserPolicy.load(id).then(
+        (load) => {
+          if (policyOrg !== id) return
+          setRobotsOverrideAllowed(
+            load.available && load.effective.robots_max === 'ignore' && load.entitlements['web.robots_override'] === true,
+          )
+        },
+        () => {
+          if (policyOrg === id) setRobotsOverrideAllowed(false)
+        },
+      )
+    })
+  }
+
   const ready = createMemo(() => orgId().length > 0)
   const canSubmitUrl = createMemo(() => url().trim().length > 0 && !submitting() && !discovering() && ready() && (mode() !== 'crawl' || crawlMaxPages() > 0))
   const canDiscover = createMemo(() => url().trim().length > 0 && !discovering() && !submitting() && ready())
@@ -396,6 +430,13 @@ export function KnowledgeComposer(props: {
   const updateJob = (key: string, patch: Partial<IngestJob>) => {
     setJobs((current) => current.map((job) => (job.key === key ? { ...job, ...patch } : job)))
   }
+
+  // A job row is keyed by the job's key and id: it keeps its state (a cancel it is asking to confirm, say) across
+  // the updates to its job, and never hands that state to another job.
+  const rowKey = (job: IngestJob) => `${job.key}#${job.id ?? ''}`
+  const jobKeys = createMemo(() => jobs().map(rowKey))
+  const readJob = (key: string) => jobs().find((job) => rowKey(job) === key)
+  const setJobStatus = (key: string, status: string) => updateJob(key, { status })
 
   const appendJobEvent = (key: string, event: CrawlWorkflowEvent) => {
     const next: IngestEvent = {
@@ -517,6 +558,18 @@ export function KnowledgeComposer(props: {
     })
   }
 
+  // WS15.L5: a reload re-reads a live crawl's status: it may have paused, finished or been cancelled while the page was away.
+  const refreshCrawlJobStatus = async (key: string, runId: string) => {
+    const id = orgId()
+    if (!id) return
+    try {
+      const current = await getCrawlStatus(id, runId)
+      if (current.status) updateJob(key, { pages: current.counts.completed, status: current.status })
+    } catch {
+      // A failed read keeps the stored status; the poll and the stream catch up.
+    }
+  }
+
   createEffect(
     () => crawlJobsStorageKey(),
     (key) => {
@@ -526,7 +579,9 @@ export function KnowledgeComposer(props: {
       setJobs(restored)
       hydratedJobsKey = key
       for (const job of restored.filter(hasActiveJobId)) {
-        if (job.kind === 'crawl') startCrawlEventStream(job.key, job.id)
+        if (job.kind !== 'crawl') continue
+        startCrawlEventStream(job.key, job.id)
+        void refreshCrawlJobStatus(job.key, job.id)
       }
       if (restored.some(hasActiveJobId)) ensurePolling()
     },
@@ -638,7 +693,16 @@ export function KnowledgeComposer(props: {
         })
         startCrawlEventStream(key, execution.runId)
       } else {
-        const job = await startCrawl(orgId(), { ingest, maxPages, ...scope, url: target })
+        // WS14.S7: only a direct crawl carries the robots override; the agent-run path above has no
+        // such key (knowledge.crawl_site is Model-visible). A 403 policy_denied maps through translateApiError.
+        const ignoreRobotsTxt = scrapeOptions && robotsOverrideAllowed() && crawlIgnoreRobots()
+        const job = await startCrawl(orgId(), {
+          ingest,
+          maxPages,
+          ...scope,
+          ...(ignoreRobotsTxt ? { ignoreRobotsTxt: true } : {}),
+          url: target,
+        })
         updateJob(key, { eventStream: job.eventStream, id: job.id, status: job.status || 'running' })
         startCrawlEventStream(key, job.id)
       }
@@ -2169,13 +2233,47 @@ export function KnowledgeComposer(props: {
                   <input
                     type="checkbox"
                     checked={crawlAllowExternalLinks()}
+                    disabled={agentMode()}
                     onChange={(event) => setCrawlAllowExternalLinks(event.currentTarget.checked)}
                   />
                   <span>{i18n.tr('Følg lenker til andre nettsteder', 'Follow links to other sites')}</span>
                 </label>
-                <Show when={crawlAllowExternalLinks()}>
+                <Show when={crawlAllowExternalLinks() && !agentMode()}>
                   <span class="dashboard-knowledge-composer__status" style={{ 'flex-basis': '100%' }}>
                     {i18n.tr('Kan hente sider fra andre nettsteder', 'May fetch pages from other sites')}
+                  </span>
+                </Show>
+                {/* WS14.S7: offered only when the org's effective policy allows the override (see robotsOverrideAllowed). */}
+                <Show when={robotsOverrideAllowed()}>
+                  <label class="dashboard-knowledge-composer__agent-toggle">
+                    <input
+                      type="checkbox"
+                      checked={crawlIgnoreRobots()}
+                      disabled={agentMode()}
+                      onChange={(event) => setCrawlIgnoreRobots(event.currentTarget.checked)}
+                    />
+                    <span>{i18n.tr('Ignorer robots.txt', 'Ignore robots.txt')}</span>
+                  </label>
+                  <Show when={crawlIgnoreRobots() && !agentMode()}>
+                    <span class="dashboard-knowledge-composer__status" role="alert" style={{ 'flex-basis': '100%' }}>
+                      {i18n.tr(
+                        'Nettstedets robots.txt blir ikke fulgt. Bruken loggføres.',
+                        "The site's robots.txt will not be followed. Every use is audited.",
+                      )}
+                    </span>
+                  </Show>
+                </Show>
+                <Show when={agentMode()}>
+                  <span class="dashboard-knowledge-composer__status" style={{ 'flex-basis': '100%' }}>
+                    {robotsOverrideAllowed()
+                      ? i18n.tr(
+                          'Lenker til andre nettsteder og robots.txt-valg gjelder bare direkte crawl, ikke agentstyrt workflow.',
+                          'Links to other sites and the robots.txt choice apply to direct crawls only, not the agent-run workflow.',
+                        )
+                      : i18n.tr(
+                          'Lenker til andre nettsteder gjelder bare direkte crawl, ikke agentstyrt workflow.',
+                          'Links to other sites apply to direct crawls only, not the agent-run workflow.',
+                        )}
                   </span>
                 </Show>
                 <label>
@@ -2354,8 +2452,8 @@ export function KnowledgeComposer(props: {
 
       <Show when={!props.browserOnly && mode() !== 'monitor' && jobs().length > 0}>
         <ul class="dashboard-knowledge-composer__jobs">
-          <For each={jobs()}>
-            {(job) => <IngestJobRow job={job} />}
+          <For each={jobKeys()}>
+            {(key) => <IngestJobRow rowKey={key} readJob={readJob} orgId={orgId()} onStatus={setJobStatus} />}
           </For>
         </ul>
       </Show>
@@ -2363,20 +2461,38 @@ export function KnowledgeComposer(props: {
   )
 }
 
-function IngestJobRow(props: { job: IngestJob }) {
+/** A stand-in for a job that has just left the list, so a row being removed reads a blank job. */
+function idleJob(key: string): IngestJob {
+  return { detail: '', key, kind: 'link', label: '', status: 'completed' }
+}
+
+function IngestJobRow(props: {
+  rowKey: string
+  readJob: (rowKey: string) => IngestJob | undefined
+  orgId: string
+  onStatus: (key: string, status: string) => void
+}) {
   const i18n = useI18n()
-  const running = () => !isTerminal(props.job.status)
-  const failed = () => /fail|error|cancel/.test(props.job.status.toLowerCase())
+  // The row outlives each update to its job, so every read goes to the latest copy of the job.
+  const job = (): IngestJob => props.readJob(props.rowKey) ?? idleJob(props.rowKey)
+  const running = () => !isTerminal(job().status)
+  const paused = () => job().status.trim().toLowerCase() === 'paused'
+  const failed = () => /fail|error|cancel|timed_out|skipped/.test(job().status.toLowerCase())
   const kindLabel = () => {
-    if (props.job.kind === 'crawl') return props.job.agentMode ? i18n.tr('Agent-crawl', 'Agent crawl') : i18n.tr('Crawl', 'Crawl')
-    return props.job.kind === 'upload' ? i18n.tr('Opplasting', 'Upload') : i18n.tr('Lenke', 'Link')
+    if (job().kind === 'crawl') return job().agentMode ? i18n.tr('Agent-crawl', 'Agent crawl') : i18n.tr('Crawl', 'Crawl')
+    return job().kind === 'upload' ? i18n.tr('Opplasting', 'Upload') : i18n.tr('Lenke', 'Link')
   }
-  const progress = () => normalizeProgress(props.job.progress)
+  const progress = () => normalizeProgress(job().progress)
+  // A live crawl carries its own controls (WS15.L5); a finished job has none.
+  const controllable = () => job().kind === 'crawl' && running() && Boolean(job().id)
 
   return (
     <li class="dashboard-knowledge-composer__job">
       <span class={cn('dashboard-knowledge-composer__job-icon', failed() && 'dashboard-knowledge-composer__job-icon--error')}>
         <Switch fallback={<CheckCircle2 class="size-4" />}>
+          <Match when={paused()}>
+            <Pause class="size-4" />
+          </Match>
           <Match when={running()}>
             <Loader2 class="size-4 dashboard-xsearch-spin" />
           </Match>
@@ -2386,19 +2502,19 @@ function IngestJobRow(props: { job: IngestJob }) {
         </Switch>
       </span>
       <span class="dashboard-knowledge-composer__job-body">
-        <span class="dashboard-knowledge-composer__job-label">{props.job.label}</span>
+        <span class="dashboard-knowledge-composer__job-label">{job().label}</span>
         <span class="dashboard-knowledge-composer__job-detail">
-          {kindLabel()} · {props.job.error ?? (running() ? props.job.detail : terminalDetail(props.job, i18n))}
+          {kindLabel()} · {job().error ?? (paused() ? i18n.tr('Pauset', 'Paused') : running() ? job().detail : terminalDetail(job(), i18n))}
         </span>
-        <Show when={(props.job.pagesBlockedByRobots ?? 0) > 0}>
+        <Show when={(job().pagesBlockedByRobots ?? 0) > 0}>
           <span class="dashboard-knowledge-composer__job-robots">
-            {robotsBlockedText(props.job.pagesBlockedByRobots, (no, en) => i18n.tr(no, en))}
+            {robotsBlockedText(job().pagesBlockedByRobots, (no, en) => i18n.tr(no, en))}
           </span>
         </Show>
         {/* Reuses the muted note style of the robots line. */}
-        <Show when={(props.job.linksDenied ?? 0) > 0}>
+        <Show when={(job().linksDenied ?? 0) > 0}>
           <span class="dashboard-knowledge-composer__job-robots dashboard-knowledge-composer__job-links">
-            {linksDeniedText(props.job.linksDenied, (no, en) => i18n.tr(no, en))}
+            {linksDeniedText(job().linksDenied, (no, en) => i18n.tr(no, en))}
           </span>
         </Show>
         <Show when={progress() !== null}>
@@ -2406,12 +2522,20 @@ function IngestJobRow(props: { job: IngestJob }) {
             <span style={{ width: `${progress() ?? 0}%` }} />
           </span>
         </Show>
-        <Show when={(props.job.events ?? []).length > 0}>
+        <Show when={(job().events ?? []).length > 0}>
           <span class="dashboard-knowledge-composer__job-events">
-            <For each={(props.job.events ?? []).slice(0, 2)}>
+            <For each={(job().events ?? []).slice(0, 2)}>
               {(event) => <span>{event.detail}</span>}
             </For>
           </span>
+        </Show>
+        <Show when={controllable()}>
+          <CrawlControls
+            orgId={props.orgId}
+            jobId={job().id ?? ''}
+            status={job().status}
+            onStatusChange={(status) => props.onStatus(job().key, status)}
+          />
         </Show>
       </span>
     </li>
@@ -2440,6 +2564,8 @@ function statusLabel(job: IngestJob, i18n: ReturnType<typeof useI18n>): string {
   if (normalized === 'completed' || normalized === 'complete' || normalized === 'succeeded') return completedLabel(job, i18n)
   if (normalized === 'failed' || normalized === 'error') return i18n.tr('Mislyktes', 'Failed')
   if (normalized === 'cancelled') return i18n.tr('Avbrutt', 'Cancelled')
+  if (normalized === 'timed_out') return i18n.tr('Tidsavbrutt', 'Timed out')
+  if (normalized === 'skipped') return i18n.tr('Hoppet over', 'Skipped')
   return job.status
 }
 

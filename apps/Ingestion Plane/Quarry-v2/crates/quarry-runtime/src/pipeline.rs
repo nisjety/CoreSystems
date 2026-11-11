@@ -241,17 +241,26 @@ impl OfficeViaImports {
         }
     }
 
+    /// The mode a raw flag value means: unset is `Off`, and so is an unreadable
+    /// value (logged). Every Office call site reads the flag through this one
+    /// mapping, so a value the parser refuses (`yes`) is `Off` everywhere.
+    fn from_env_value(raw: Option<&str>) -> Self {
+        match raw {
+            None => Self::Off,
+            Some(raw) => Self::parse(raw).unwrap_or_else(|message| {
+                tracing::warn!(%message, "unreadable Office route flag; the route stays off");
+                Self::Off
+            }),
+        }
+    }
+
     /// Read once per process. Unset is `Off`. An unreadable value is `Off` as
     /// well (and logged): this route sends document bytes to another service,
     /// so a bad value must not switch it on.
     pub fn cached() -> Self {
         static MODE: std::sync::OnceLock<OfficeViaImports> = std::sync::OnceLock::new();
-        *MODE.get_or_init(|| match std::env::var(OFFICE_VIA_IMPORTS_ENV) {
-            Err(_) => Self::Off,
-            Ok(raw) => Self::parse(&raw).unwrap_or_else(|message| {
-                tracing::warn!(%message, "unreadable Office route flag; the route stays off");
-                Self::Off
-            }),
+        *MODE.get_or_init(|| {
+            Self::from_env_value(std::env::var(OFFICE_VIA_IMPORTS_ENV).ok().as_deref())
         })
     }
 }
@@ -278,8 +287,9 @@ fn takes_imports_route(
 }
 
 /// The Office flag a run reads. A test installs its own for the thread it runs
-/// on, as for the PII stage.
-fn office_via_imports_mode() -> OfficeViaImports {
+/// on, as for the PII stage. `content_route::office_via_imports_enabled` reads
+/// the same mode, so the edge gate and the route cannot disagree.
+pub(crate) fn office_via_imports_mode() -> OfficeViaImports {
     #[cfg(test)]
     if let Some(mode) = TEST_OFFICE_VIA_IMPORTS.with(|slot| *slot.borrow()) {
         return mode;
@@ -3858,6 +3868,31 @@ mod content_routing_tests {
         assert_eq!(OfficeViaImports::parse(" TRUE "), Ok(OfficeViaImports::On));
         let error = OfficeViaImports::parse("maybe").unwrap_err();
         assert!(error.contains("QUARRY_EDGE__OFFICE_VIA_IMPORTS"), "{error}");
+    }
+
+    /// `yes` is not a canonical value: the strict parser refuses it, and the mode
+    /// reads a refused value as `Off`. The Office route and the edge gate both read
+    /// that mode, so `yes` is off at both call sites.
+    #[test]
+    fn yes_is_off_at_both_office_call_sites() {
+        assert!(OfficeViaImports::parse("yes").is_err());
+        assert_eq!(
+            OfficeViaImports::from_env_value(Some("yes")),
+            OfficeViaImports::Off
+        );
+        assert_eq!(
+            OfficeViaImports::from_env_value(None),
+            OfficeViaImports::Off
+        );
+        assert_eq!(
+            OfficeViaImports::from_env_value(Some(" On ")),
+            OfficeViaImports::On
+        );
+        for (mode, enabled) in [(OfficeViaImports::Off, false), (OfficeViaImports::On, true)] {
+            let _flag = office_flag(mode, None);
+            assert_eq!(office_via_imports_mode(), mode);
+            assert_eq!(crate::content_route::office_via_imports_enabled(), enabled);
+        }
     }
 
     #[test]

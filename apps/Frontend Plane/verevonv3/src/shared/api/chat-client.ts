@@ -33,6 +33,7 @@ import {
   reconcileLocalThreads,
 } from '@/features/chat/lib/chat-retention'
 import { runParkedFrameOf, type RunParkedFrame } from '@/features/chat/lib/run-park'
+import { BROWSER_REGIONS_PER_TURN_MAX } from '@/features/browser/page-context/region-attach'
 import type { ThreadGoalStatus } from './thread-goal-client'
 
 // ── Wide research (EP-2 S8) ─────────────────────────────────────────────────
@@ -264,6 +265,12 @@ export type ChatInvokeRequest = {
    * Support-read-only or subscription turn.
    */
   browserTabRefs?: import('@/shared/api/browser-client').BrowserTabContextRef[]
+  /**
+   * The browser regions attached to the turn (QF-9), each with the gateway's attach token. Sent as
+   * `browser_regions` (at most 4) only when non-empty, and never on a zero-retention, conversation-only,
+   * Support-read-only or subscription turn. The gateway verifies each token and forwards only what it covers.
+   */
+  browserRegions?: import('@/features/browser/page-context/region-attach').BrowserRegionTurnInput[]
   /** The thread goal a Continue turn works toward (EP-7 S1). Sent as `goal_id` only when set, never on a zero-retention turn. */
   goalId?: string
   /**
@@ -2150,6 +2157,26 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
         trust_class: ref.trustClass,
         grant: ref.grant,
       }))
+  // Browser regions (QF-9): the regions the gateway attached, each sent back with its attach token so the gateway can
+  // verify the picture before forwarding it. Same guard as the tab refs: never on a zero-retention turn or a blocked one.
+  const browserRegions = request.zdr || subscriptionBacked || supportReadOnly || conversationOnly
+    ? []
+    : (request.browserRegions ?? [])
+        .filter((item) => typeof item.attachToken === 'string' && item.attachToken.length > 0)
+        .slice(0, BROWSER_REGIONS_PER_TURN_MAX)
+        .map((item) => ({
+          session_id: item.sessionId,
+          tab_id: item.tabId,
+          attach_token: item.attachToken,
+          region: { x: item.region.x, y: item.region.y, width: item.region.width, height: item.region.height },
+          image: {
+            mime_type: item.image.mimeType,
+            data_base64: item.image.dataBase64,
+            width: item.image.width,
+            height: item.image.height,
+          },
+          ...(item.selectionText ? { selection_text: item.selectionText } : {}),
+        }))
   // Deck template (EP-5 S7): present only when the person picked one. A zero-retention turn never applies a
   // template, and the server refuses one there, so this client never sends it on the turns it would refuse.
   const deckTemplate = request.zdr || subscriptionBacked || supportReadOnly || conversationOnly
@@ -2259,6 +2286,8 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     ...(contextRefs.length > 0 ? { context_refs: contextRefs } : {}),
     // Omitted entirely when the turn named no tab, like `context_refs`: an ordinary turn is unchanged.
     ...(browserTabRefs.length > 0 ? { browser_tab_refs: browserTabRefs } : {}),
+    // Omitted entirely when no region was attached, like `browser_tab_refs`: an ordinary turn is unchanged.
+    ...(browserRegions.length > 0 ? { browser_regions: browserRegions } : {}),
     // Omitted entirely when no template was picked, like `context_refs`: an ordinary turn is unchanged.
     ...(deckTemplate ? { deck_template: deckTemplate } : {}),
     // The goal of a Continue turn (EP-7 S1): omitted on every other turn, so an ordinary body is unchanged.

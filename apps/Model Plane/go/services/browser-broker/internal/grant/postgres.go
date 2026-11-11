@@ -372,6 +372,14 @@ func (s *PgStore) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalP
 	if p.Zdr {
 		return nil, ErrZdrPostureChanged
 	}
+	// Q3-E3.1-b1-c: this store has no columns for a fill_otp binding, so a
+	// validated grant would come back without its origin and mail connection.
+	if IsFillOtp(p.AllowedActions) {
+		return nil, ErrFillOtpNotDurable
+	}
+	if p.GrantOrigin != "" || p.MailConnectionID != "" {
+		return nil, ErrFillOtpBindingUnexpected
+	}
 	if !validText(p.OrgID, p.OwnerID, p.SessionKey, p.ScopeURL, p.ParentGrantID) {
 		return nil, ErrInvalidGrantText
 	}

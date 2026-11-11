@@ -768,6 +768,16 @@ pub enum AiReason {
     Deadline,
 }
 
+/// Which request budget a `BUDGET_EXHAUSTED` entry ran into, when it is not the
+/// call or token cap (those leave it out). A closed set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiBudgetDimension {
+    /// The model cost the gateway reported (`cost_usd`) reached the configured
+    /// per-request ceiling (WS16.S6, `QUARRY_EDGE__AI_FORMATS_MAX_COST_USD`).
+    LlmCost,
+}
+
 /// How a `json` output was made valid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -800,6 +810,10 @@ pub struct AiFormatReport {
     pub code: Option<AiCode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<AiReason>,
+    /// `BUDGET_EXHAUSTED` only, and only for a budget other than the call and
+    /// token caps (`llm_cost`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimension: Option<AiBudgetDimension>,
     /// `MODEL_RATE_LIMITED` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_s: Option<u32>,
@@ -838,6 +852,7 @@ impl AiFormatReport {
             status,
             code: None,
             reason: None,
+            dimension: None,
             retry_after_s: None,
             model: None,
             usage: None,

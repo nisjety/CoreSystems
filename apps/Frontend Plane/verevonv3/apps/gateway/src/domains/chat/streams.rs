@@ -163,6 +163,19 @@ async fn stream_chat(
     // Before the turn goes out, not after: a ZDR turn that fails midway is still
     // a ZDR turn, so the posture has to be settled on the body that is sent.
     shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;
+    // QF-8: after the ZDR posture is settled, so a ZDR turn is refused before any browser
+    // context reaches Quarry or the model. Client-built `browser_tab_refs` / `browser_regions`
+    // are always dropped; with `BROWSER_TURN_CONTEXT` on, only gateway-verified ones go back in.
+    if let Err((status, body)) = crate::domains::browser_context::inject_turn_browser_context(
+        &state,
+        &user,
+        &headers,
+        &mut outbound_body,
+    )
+    .await
+    {
+        return (status, body).into_response();
+    }
     // Read the EFFECTIVE posture off that body rather than the header. The
     // header alone misses both the SPA's body flag and the org's standing
     // posture, so this argument used to disagree with the `zdr` field sitting

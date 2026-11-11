@@ -91,6 +91,7 @@ async fn admission_refuses_an_agents_reload_before_the_budget_and_spends_nothing
                 enforce_takeover: true,
                 consented_tab_control: false,
                 last_observation: None,
+                caller: None,
             },
         )
         .await
@@ -1018,6 +1019,7 @@ fn input(initiator: StepInitiator, action: &AgentAction, enforce: bool) -> Admit
         enforce_takeover: enforce,
         consented_tab_control: false,
         last_observation: None,
+        caller: None,
     }
 }
 
@@ -1028,6 +1030,7 @@ fn input_observed<'a>(initiator: StepInitiator, action: &'a AgentAction, enforce
         enforce_takeover: enforce,
         consented_tab_control: false,
         last_observation: lane.last_observation.as_deref(),
+        caller: None,
     }
 }
 
@@ -2276,13 +2279,23 @@ async fn a_step_on_a_released_run_carries_the_hint() {
 fn the_live_owner_projection_carries_the_session_grant_id() {
     let mut entry = entry_with_budget(None);
     entry.grant_id = Some("grant-live-abc".into());
-    let json = serde_json::to_value(live_browser_session_projection(&entry, Vec::new(), None))
-        .expect("projection serializes");
+    let json = serde_json::to_value(live_browser_session_projection(
+        &entry,
+        Vec::new(),
+        None,
+        BrowserDriverCapabilities::default(),
+    ))
+    .expect("projection serializes");
     assert_eq!(json["grantId"], "grant-live-abc");
 
     entry.grant_id = None;
-    let json = serde_json::to_value(live_browser_session_projection(&entry, Vec::new(), None))
-        .expect("projection serializes");
+    let json = serde_json::to_value(live_browser_session_projection(
+        &entry,
+        Vec::new(),
+        None,
+        BrowserDriverCapabilities::default(),
+    ))
+    .expect("projection serializes");
     assert!(json.get("grantId").is_none(), "{json}");
 }
 
@@ -2711,8 +2724,13 @@ async fn projection_does_not_wait_for_a_running_step() {
     let entry = tokio::time::timeout(Duration::from_secs(1), handle.entry.lock())
         .await
         .expect("the entry is free while a step runs");
-    let json = serde_json::to_value(live_browser_session_projection(&entry, Vec::new(), None))
-        .expect("the projection serializes");
+    let json = serde_json::to_value(live_browser_session_projection(
+        &entry,
+        Vec::new(),
+        None,
+        BrowserDriverCapabilities::default(),
+    ))
+    .expect("the projection serializes");
     assert_eq!(json["step"], serde_json::json!(entry.summary.step));
 }
 

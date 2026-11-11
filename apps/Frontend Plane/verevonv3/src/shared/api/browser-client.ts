@@ -1116,6 +1116,16 @@ export async function resolveBrowserTabMentions(
 /** The image types the gateway accepts for a region (E3.3-d). */
 const REGION_IMAGE_MIME_TYPES: readonly string[] = ['image/png', 'image/jpeg']
 
+/**
+ * The region attach token as the gateway issues it (QF-8): 16-512 characters of
+ * `[A-Za-z0-9_.-]` (`<expires_unix>.<base64url HMAC>`). Anything else is no token.
+ */
+const REGION_ATTACH_TOKEN_RE = /^[A-Za-z0-9_.-]{16,512}$/
+
+function regionAttachTokenOf(value: unknown): string | null {
+  return typeof value === 'string' && REGION_ATTACH_TOKEN_RE.test(value) ? value : null
+}
+
 function recordOf(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
 }
@@ -1182,6 +1192,7 @@ function browserRegionAttachmentFromWire(value: unknown, sessionId: string): Bro
     selection: typeof selectionText === 'string' && selectionLength !== null
       ? { text: selectionText, length: selectionLength }
       : null,
+    attachToken: regionAttachTokenOf(wire.attachToken),
   }
 }
 

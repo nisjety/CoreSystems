@@ -24,7 +24,8 @@ type VerevonUiEventBody =
   | { type: 'state.delta'; at: string; patch: unknown[] }
   | { type: 'activity.updated'; at: string; id?: string; activityType?: string; value?: unknown; patch?: unknown[] }
   | { type: 'delegation.updated'; at: string; runId?: string; childRunId?: string; status?: string; detail?: string }
-  | { type: 'approval.requested'; at: string; runId?: string; approvalId?: string; kind?: string; detail?: string }
+  /** The four OTP fields are set only for a browser one-time-code gate (QF-15); the label is never an address. */
+  | { type: 'approval.requested'; at: string; runId?: string; approvalId?: string; kind?: string; detail?: string; topOrigin?: string; frameOrigin?: string; mailProviderKey?: string; mailAccountLabel?: string }
   | { type: 'approval.decided'; at: string; runId?: string; approvalId?: string; decision?: string; detail?: string }
   | { type: 'receipt.verified'; at: string; runId?: string; receiptId?: string; status?: string; detail?: string }
   /** Envelope-only event recovered from Session Core's durable thread log. */
@@ -51,6 +52,39 @@ const stringArray = (value: unknown): string[] => Array.isArray(value) ? value.f
 const recordValue = (value: unknown): Record<string, unknown> => (
   value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 )
+
+/** Longest one-time-code gate field kept from the wire (QF-15). */
+const OTP_GATE_FIELD_MAX = 256
+
+/**
+ * The one-time-code gate fields of a browser approval (QF-15), each trimmed and
+ * kept only when non-empty and within the cap. A connection label holding '@'
+ * looks like an address and is dropped. Absent keys stay absent.
+ */
+function otpGateFields(payload: Record<string, unknown>): {
+  topOrigin?: string
+  frameOrigin?: string
+  mailProviderKey?: string
+  mailAccountLabel?: string
+} {
+  const field = (value: unknown, label = false): string | undefined => {
+    if (typeof value !== 'string') return undefined
+    const trimmed = value.trim()
+    if (!trimmed || trimmed.length > OTP_GATE_FIELD_MAX) return undefined
+    if (label && trimmed.includes('@')) return undefined
+    return trimmed
+  }
+  const out: { topOrigin?: string; frameOrigin?: string; mailProviderKey?: string; mailAccountLabel?: string } = {}
+  const topOrigin = field(payload.top_origin)
+  const frameOrigin = field(payload.frame_origin)
+  const mailProviderKey = field(payload.mail_provider_key)
+  const mailAccountLabel = field(payload.mail_account_label, true)
+  if (topOrigin) out.topOrigin = topOrigin
+  if (frameOrigin) out.frameOrigin = frameOrigin
+  if (mailProviderKey) out.mailProviderKey = mailProviderKey
+  if (mailAccountLabel) out.mailAccountLabel = mailAccountLabel
+  return out
+}
 
 function pauseKindFrom(value: unknown): VerevonPauseKind | undefined {
   if (typeof value !== 'string') return undefined
@@ -273,6 +307,7 @@ export function toVerevonUiEvent(name: string, payload: Record<string, unknown>,
         detail: [stringValue(payload.action_type) ?? stringValue(payload.actionType), stringValue(payload.reason)]
           .filter(Boolean)
           .join(' · ') || undefined,
+        ...otpGateFields(payload),
       }
     case 'browser_action_decided':
       return {

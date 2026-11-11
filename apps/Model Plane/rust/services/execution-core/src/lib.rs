@@ -39,6 +39,7 @@ pub mod promote_on_use;
 pub mod provenance;
 pub mod quarry_agent;
 mod quarry_auth;
+mod recipe_store;
 pub(crate) mod run_budget;
 pub mod run_inputs;
 pub mod runtime_loop;

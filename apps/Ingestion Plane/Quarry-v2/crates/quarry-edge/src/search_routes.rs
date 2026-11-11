@@ -1948,8 +1948,8 @@ struct RawSuggestions {
 
 /// `POST /v1/search/suggest` — Model-Plane-backed spelling correction + related
 /// queries. Degrade-safe: returns an empty `200` when `QUARRY_EDGE__SEARCH_SUGGEST` is off
-/// (QB-T17), no Model Plane is wired, or the call/parse fails, so the search UX never breaks
-/// on suggestions.
+/// (QB-T17), the caller is ZDR (WS4.G: the partial query never leaves Quarry), no Model
+/// Plane is wired, or the call/parse fails, so the search UX never breaks on suggestions.
 pub async fn suggest(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -1958,6 +1958,17 @@ pub async fn suggest(
     let query = req.query.trim();
     // QB-T17: off unless QUARRY_EDGE__SEARCH_SUGGEST is on and a model path exists.
     if !state.model_plane.search_suggest {
+        return (StatusCode::OK, Json(SuggestResponse::default()));
+    }
+    // WS4.G (D1-009/D1-072): the Model Plane hop carries no ZDR posture, so a ZDR caller's
+    // partial query never leaves Quarry. The route's contract is "always 200, UI degrades",
+    // so this degrades to empty suggestions instead of refusing (INNH-8 precedent).
+    if claims.effective_zdr(false) {
+        tracing::debug!(
+            target: "quarry_edge::search",
+            row = "search_suggest",
+            "zdr.suggest_skipped"
+        );
         return (StatusCode::OK, Json(SuggestResponse::default()));
     }
     let Some(mp_url) = state.model_plane_url.as_deref().filter(|s| !s.is_empty()) else {

@@ -1,8 +1,13 @@
 //! Tool execution bridge.
 
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use mp_contracts::model_plane::v1::ValidateGrantResponse;
 
-use crate::{browser_agent, browser_session, computer_action, wiki_agent};
+use crate::browser_agent::recipe::{bind_slots, Recipe, RecipeRefusal};
+use crate::browser_agent::recipe_planner::{QuarryReplayChecker, RecipePlanner};
+use crate::{browser_agent, browser_session, computer_action, recipe_store, wiki_agent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolExecution {
@@ -258,7 +263,9 @@ pub(crate) async fn execute_browser_agent(
     };
     let config: Result<BrowserAgentInput, _> = serde_json::from_str(tool_input);
     match config {
-        Ok(input) => {
+        Ok(mut input) => {
+            // A saved recipe is taken out before the plan config takes the rest of the input (Q4-E4.2-3h).
+            let recipe = input.recipe.take();
             let plan_config =
                 match browser_plan_config(input, verified_org_id, verified_zdr, validated_grant) {
                     Ok(config) => config,
@@ -274,6 +281,20 @@ pub(crate) async fn execute_browser_agent(
                     reason: "browser planner organization policy unavailable".to_owned(),
                 };
             }
+            // A recipe run replays one saved procedure. It is off by default, and it never attaches to
+            // the person's own session: it runs in a browser session of its own, under its own grant.
+            if recipe.is_some() {
+                if !recipe_store::recipe_runner_enabled() {
+                    return BrowserAgentExecution::Failed {
+                        reason: "recipe runner is not enabled".to_owned(),
+                    };
+                }
+                if plan_config.attach.is_some() {
+                    return BrowserAgentExecution::Failed {
+                        reason: "recipe runs need their own browser session".to_owned(),
+                    };
+                }
+            }
             // Real Quarry agent client from env (`QUARRY_BROWSER_AGENT_ENABLED`
             // + `QUARRY_EDGE_URL`); `None` → the loop fails fast.
             let client = match crate::quarry_agent::QuarryAgentClient::from_env() {
@@ -284,45 +305,87 @@ pub(crate) async fn execute_browser_agent(
                     };
                 }
             };
+            // A recipe run replays its saved procedure with `RecipePlanner` in place of the planner
+            // policy's choice (Q4-E4.2-3h). Its planner is built after the client it checks with, and a
+            // planner that cannot be built fails the run.
+            let recipe_planner = match recipe {
+                None => None,
+                Some(recipe) => {
+                    let Some(quarry) = client.clone() else {
+                        return BrowserAgentExecution::Failed {
+                            reason: "browser agent unavailable: set QUARRY_BROWSER_AGENT_ENABLED=1 and QUARRY_EDGE_URL"
+                                .to_owned(),
+                        };
+                    };
+                    let Some(source) = recipe_store::default_source() else {
+                        return BrowserAgentExecution::Failed {
+                            reason: "recipe source is unavailable".to_owned(),
+                        };
+                    };
+                    match recipe_planner_for_run(
+                        source.as_ref(),
+                        &recipe,
+                        validated_grant.owner_id(),
+                        &plan_config.org_id,
+                        plan_config.request_id.clone(),
+                        quarry,
+                    )
+                    .await
+                    {
+                        Ok(planner) => Some(planner),
+                        Err(reason) => return BrowserAgentExecution::Failed { reason },
+                    }
+                }
+            };
+            let recipe_run = recipe_planner.is_some();
             // The planner policy (deployment mode plus the org's flag) decides;
             // a selected planner that cannot be built fails the run with a
             // reason, it never degrades to the deterministic loop.
-            let selection = select_planner(
-                &crate::planner_policy::PlannerPolicy::from_env(),
-                &plan_config.org_id,
-                plan_config.zdr,
-                plan_config.planner_flag.as_deref(),
-                inference_bearer,
-            );
-            let (planner, deterministic_reason) = match selection {
-                PlannerSelection::Llm(planner) => (Some(planner), None),
-                PlannerSelection::Deterministic(reason) => {
-                    if plan_config.attach.is_some() && plan_config.policy.as_ref().is_some_and(|ask| !ask.is_empty()) {
-                        // A restricted attached run is surfaced as a live AI
-                        // assistant. Never silently substitute observation-only
-                        // deterministic behavior when its planner is disabled.
-                        return BrowserAgentExecution::Failed {
-                            reason: format!("browser planner unavailable ({})", reason.as_str()),
-                        };
+            let (planner, deterministic_reason) = match recipe_planner {
+                Some(recipe_planner) => {
+                    let planner: Box<dyn crate::llm_planner::ActionPlanner> =
+                        Box::new(recipe_planner);
+                    (Some(planner), None)
+                }
+                None => match select_planner(
+                    &crate::planner_policy::PlannerPolicy::from_env(),
+                    &plan_config.org_id,
+                    plan_config.zdr,
+                    plan_config.planner_flag.as_deref(),
+                    inference_bearer,
+                ) {
+                    PlannerSelection::Llm(planner) => {
+                        let planner: Box<dyn crate::llm_planner::ActionPlanner> = Box::new(planner);
+                        (Some(planner), None)
                     }
-                    tracing::info!(reason = reason.as_str(), "browser run uses the deterministic loop");
-                    browser_agent::metrics::record_deterministic(reason);
-                    // The default deployment (`mode_off`) keeps the output it
-                    // always had; every other reason is worth saying.
-                    (
-                        None,
-                        (reason != crate::planner_policy::DeterministicReason::ModeOff)
-                            .then(|| reason.as_str()),
-                    )
-                }
-                PlannerSelection::Unavailable(reason) => {
-                    tracing::warn!("browser planner selected but unavailable");
-                    browser_agent::metrics::record_run(
-                        browser_agent::metrics::planner_label(true),
-                        "failed",
-                    );
-                    return BrowserAgentExecution::Failed { reason };
-                }
+                    PlannerSelection::Deterministic(reason) => {
+                        if plan_config.attach.is_some() && plan_config.policy.as_ref().is_some_and(|ask| !ask.is_empty()) {
+                            // A restricted attached run is surfaced as a live AI
+                            // assistant. Never silently substitute observation-only
+                            // deterministic behavior when its planner is disabled.
+                            return BrowserAgentExecution::Failed {
+                                reason: format!("browser planner unavailable ({})", reason.as_str()),
+                            };
+                        }
+                        tracing::info!(reason = reason.as_str(), "browser run uses the deterministic loop");
+                        browser_agent::metrics::record_deterministic(reason);
+                        // The default deployment (`mode_off`) keeps the output it
+                        // always had; every other reason is worth saying.
+                        (
+                            None,
+                            (reason != crate::planner_policy::DeterministicReason::ModeOff)
+                                .then(|| reason.as_str()),
+                        )
+                    }
+                    PlannerSelection::Unavailable(reason) => {
+                        tracing::warn!("browser planner selected but unavailable");
+                        browser_agent::metrics::record_run(
+                            browser_agent::metrics::planner_label(true),
+                            "failed",
+                        );
+                        return BrowserAgentExecution::Failed { reason };
+                    }
+                },
             };
             // Captured before the loop consumes the config — the postcondition
             // judgment below needs all three, and the loop result carries
@@ -333,13 +396,15 @@ pub(crate) async fn execute_browser_agent(
                 zdr: plan_config.zdr,
                 deterministic_reason,
             };
-            let planner_label = browser_agent::metrics::planner_label(planner.is_some());
+            let planner_label = if recipe_run {
+                browser_agent::metrics::RECIPE_PLANNER_LABEL
+            } else {
+                browser_agent::metrics::planner_label(planner.is_some())
+            };
             let result = browser_agent::run_browser_agent_loop(
                 plan_config,
                 client.as_ref(),
-                planner
-                    .as_ref()
-                    .map(|planner| planner as &dyn crate::llm_planner::ActionPlanner),
+                planner.as_deref(),
                 sink,
                 state,
             )
@@ -356,6 +421,51 @@ pub(crate) async fn execute_browser_agent(
             reason: format!("invalid browser_agent input: {e}"),
         },
     }
+}
+
+/// Reads the saved procedure a recipe run replays and builds the planner that replays it (Q4-E4.2-3h).
+/// The request is judged, the procedure is read and checked against its digest, parsed, bound to the
+/// person's slot values, and then checked step by step with Quarry through `quarry`. Every refusal is a
+/// fixed reason, and neither the procedure nor a slot value is ever echoed into one.
+async fn recipe_planner_for_run(
+    source: &dyn recipe_store::RecipeSource,
+    recipe: &RecipeInput,
+    grant_owner: &str,
+    org_id: &str,
+    request_id: Option<String>,
+    quarry: crate::quarry_agent::QuarryAgentClient,
+) -> Result<RecipePlanner, String> {
+    let procedure_id = recipe.id.trim();
+    let for_user_id = recipe.for_user_id.trim();
+    let tag = recipe
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty());
+    if let Some(refusal) =
+        recipe_store::request_refusal(procedure_id, recipe.version, tag, for_user_id, grant_owner)
+    {
+        return Err(refusal.to_owned());
+    }
+    let fetched = source
+        .get(org_id, procedure_id, recipe.version, tag, for_user_id)
+        .await
+        .map_err(|status| {
+            tracing::warn!(code = ?status.code(), "recipe procedure read refused");
+            "recipe procedure is unavailable".to_owned()
+        })?;
+    let saved = Recipe::parse(&fetched.body).map_err(recipe_refusal_reason)?;
+    let bound = bind_slots(&saved, &recipe.slots).map_err(recipe_refusal_reason)?;
+    let procedure: serde_json::Value = serde_json::from_slice(&fetched.body)
+        .map_err(|_| recipe_refusal_reason(RecipeRefusal::Malformed))?;
+    let checker = QuarryReplayChecker::new(quarry, org_id, request_id);
+    Ok(RecipePlanner::new(procedure, bound, Arc::new(checker)))
+}
+
+/// The fixed reason a refused recipe fails its run with: the closed refusal token, and nothing of the
+/// procedure or its values.
+fn recipe_refusal_reason(refusal: RecipeRefusal) -> String {
+    format!("recipe refused: {}", refusal.as_str())
 }
 
 /// Execute one narrow, already-leased Quarry browser operation for the
@@ -1998,6 +2108,30 @@ struct BrowserAgentInput {
     /// outside the set fails the input. Meaningless without `attach_session_id`.
     #[serde(default)]
     tab_mark_on_complete: Option<crate::quarry_agent::TabMark>,
+    /// A saved recipe the run replays (Q4-E4.2-3h). The gateway writes it from the person's request and
+    /// verified claims (3i); `for_user_id` must be the person the run's grant was issued to. Absent, the
+    /// run is an ordinary browser run.
+    #[serde(default)]
+    recipe: Option<RecipeInput>,
+}
+
+/// A saved recipe a run replays (Q4-E4.2-3h), read strictly: an unknown key fails the input.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecipeInput {
+    /// The saved procedure's identifier: "proc_" and a UUID.
+    id: String,
+    /// The version to replay. Zero or absent reads the tag named, or the newest version when none is.
+    #[serde(default)]
+    version: Option<u32>,
+    /// The tag to replay when no version is named.
+    #[serde(default)]
+    tag: Option<String>,
+    /// The values a person supplied for the recipe's typed steps, by slot name.
+    #[serde(default)]
+    slots: BTreeMap<String, String>,
+    /// The person the procedure belongs to, written by the gateway from the verified claims.
+    for_user_id: String,
 }
 
 /// The three keys of [`crate::quarry_agent::WireRequestAsk`], strictly.

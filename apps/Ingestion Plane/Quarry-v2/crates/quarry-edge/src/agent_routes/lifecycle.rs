@@ -595,6 +595,8 @@ pub async fn start_run(
             }
         }
     };
+    // WS6.G: the plan sets the organization's share of the browser pool for this run's lease.
+    crate::limits::apply_org_render_permits_from(&org_limits, &org_id);
     let agent_seconds = if run_class == crate::budget::RunClass::Agent {
         if org_limits.browser_seconds_agent.is_exhausted() {
             match crate::budget::current_mode() {

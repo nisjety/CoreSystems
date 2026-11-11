@@ -23,7 +23,12 @@
 //!   `skipped` (no call made) or `error` (a call made and failed) in the report.
 //! - **Budget.** Per request: calls, reported tokens, page characters and calls in
 //!   flight are capped. With several calls in flight the token cap can be passed
-//!   by the calls already started; it stops the next one.
+//!   by the calls already started; it stops the next one. WS16.S6: every call
+//!   carries an output cap (`max_tokens`, per format, clamped to the configured
+//!   ceiling), a temperature and `purpose: quarry.extract`; when the gateway
+//!   reports `cost_usd` it is summed, and past the optional cost ceiling the next
+//!   call is skipped `BUDGET_EXHAUSTED` with dimension `llm_cost`. The model
+//!   repair of `json` can be switched off (the local repair still runs).
 //! - **Logs** carry the kind, the outcome, a code and counts, never the page, the
 //!   schema, a prompt or an output.
 
@@ -35,14 +40,17 @@ use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 use quarry_core::ai_spec::{
-    AiCode, AiFormatReport, AiKind, AiReason, AiRepair, AiReport, AiSpec, AiTotal, AiUsage,
+    AiBudgetDimension, AiCode, AiFormatReport, AiKind, AiReason, AiRepair, AiReport, AiSpec, AiTotal, AiUsage,
     Highlight, HighlightsSpec, JsonSpec, QuestionSpec, SchemaIssue, SummarySpec, MAX_ANSWER_CHARS,
     MAX_AI_JSON_OUTPUT_BYTES, MAX_SCHEMA_ISSUES,
 };
 use quarry_core::json_schema::{self, ValidationIssue};
 
 use crate::ai_verify::{is_grounded, verify_highlights, FoldedText};
-use crate::mp_client::{AiChatMessage, AiChatRequest, AiChatResponse, ModelHopError, ModelPlaneClient};
+use crate::mp_client::{
+    AiChatMessage, AiChatRequest, AiChatResponse, ModelHopError, ModelPlaneClient,
+    AI_CHAT_PURPOSE_QUARRY_EXTRACT,
+};
 
 pub const DEFAULT_MODEL_JSON: &str = "verevon-balance";
 pub const DEFAULT_MODEL_TEXT: &str = "verevon-budget";
@@ -53,6 +61,22 @@ pub const DEFAULT_MAX_TOTAL_TOKENS: u64 = 200_000;
 pub const DEFAULT_MAX_CALLS: u32 = 8;
 pub const DEFAULT_CONCURRENCY: usize = 4;
 pub const DEFAULT_PHASE_DEADLINE: Duration = Duration::from_secs(45);
+/// WS16.S6: the ceiling on any one call's output cap, and its default. It is the
+/// gateway's own upper bound on `max_tokens`, so it can only be lowered.
+pub const MAX_OUTPUT_TOKENS_CEILING: u32 = 8_192;
+pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = MAX_OUTPUT_TOKENS_CEILING;
+/// The lowest the configured output ceiling may go.
+pub const MIN_OUTPUT_TOKENS: u32 = 64;
+/// The output cap asked for per format (each clamped to the configured ceiling).
+pub const OUTPUT_TOKENS_JSON: u32 = 2_048;
+pub const OUTPUT_TOKENS_SUMMARY: u32 = 1_024;
+pub const OUTPUT_TOKENS_QUESTION: u32 = 512;
+pub const OUTPUT_TOKENS_HIGHLIGHTS: u32 = 1_024;
+pub const OUTPUT_TOKENS_REPAIR: u32 = 2_048;
+/// Exact output (a schema object, a verbatim quote, a repair): no sampling spread.
+const TEMPERATURE_EXACT: f32 = 0.0;
+/// Free prose (a summary).
+const TEMPERATURE_PROSE: f32 = 0.2;
 /// A path in a schema issue is cut here (a path is the schema's own names, but a
 /// deep one is still bounded).
 const MAX_ISSUE_PATH_CHARS: usize = 200;
@@ -77,6 +101,16 @@ pub struct AiScrapeConfig {
     pub concurrency: usize,
     /// The bound on the whole AI phase when the caller gives no deadline.
     pub phase_deadline: Duration,
+    /// WS16.S6: the ceiling every per-format output cap is clamped to
+    /// (clamped to 64..=8,192; default 8,192).
+    pub max_output_tokens: u32,
+    /// WS16.S6: whether an invalid `json` output gets the one model repair call.
+    /// Off, only the local repair runs. Default on.
+    pub model_repair: bool,
+    /// WS16.S6: the model cost (the gateway's `cost_usd`, summed) after which no
+    /// further call is made in this request; `None` is no cost ceiling. A
+    /// negative or non-finite value is `None`.
+    pub max_cost_usd: Option<f64>,
 }
 
 impl Default for AiScrapeConfig {
@@ -89,6 +123,9 @@ impl Default for AiScrapeConfig {
             max_calls: DEFAULT_MAX_CALLS,
             concurrency: DEFAULT_CONCURRENCY,
             phase_deadline: DEFAULT_PHASE_DEADLINE,
+            max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            model_repair: true,
+            max_cost_usd: None,
         }
     }
 }
@@ -100,7 +137,21 @@ impl AiScrapeConfig {
         self.max_total_tokens = self.max_total_tokens.max(1_000);
         self.max_calls = self.max_calls.clamp(1, DEFAULT_MAX_CALLS);
         self.concurrency = self.concurrency.clamp(1, DEFAULT_CONCURRENCY);
+        self.max_output_tokens = self
+            .max_output_tokens
+            .clamp(MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS_CEILING);
+        self.max_cost_usd = self
+            .max_cost_usd
+            .filter(|limit| limit.is_finite() && *limit >= 0.0);
         self
+    }
+
+    /// The output cap of one call: what the format asks for, clamped to the
+    /// configured ceiling and never under the floor.
+    pub fn output_cap(&self, wanted: u32) -> u32 {
+        wanted
+            .min(self.max_output_tokens)
+            .clamp(MIN_OUTPUT_TOKENS, MAX_OUTPUT_TOKENS_CEILING)
     }
 }
 
@@ -229,6 +280,9 @@ struct State {
     calls: u32,
     input_tokens: u64,
     output_tokens: u64,
+    /// WS16.S6: the model cost the gateway reported (`cost_usd`), summed over
+    /// the request's calls. Calls without a reported cost add nothing.
+    cost_usd: f64,
     /// Set by the first 429: `Some(retry_after_s)`.
     rate_limited: Option<Option<u32>>,
 }
@@ -248,6 +302,8 @@ enum Failure {
     Skipped {
         code: AiCode,
         retry_after_s: Option<u32>,
+        /// `BUDGET_EXHAUSTED` by a budget other than calls and tokens.
+        dimension: Option<AiBudgetDimension>,
     },
     /// A call was made (or the deadline passed) and no usable answer came.
     Failed {
@@ -342,6 +398,7 @@ impl Ctx<'_> {
                 return Err(Failure::Skipped {
                     code: AiCode::ModelRateLimited,
                     retry_after_s,
+                    dimension: None,
                 });
             }
             let used = state.input_tokens + state.output_tokens;
@@ -349,6 +406,20 @@ impl Ctx<'_> {
                 return Err(Failure::Skipped {
                     code: AiCode::BudgetExhausted,
                     retry_after_s: None,
+                    dimension: None,
+                });
+            }
+            // WS16.S6: the reported model cost has reached the request ceiling.
+            if self
+                .engine
+                .config
+                .max_cost_usd
+                .is_some_and(|limit| state.cost_usd >= limit)
+            {
+                return Err(Failure::Skipped {
+                    code: AiCode::BudgetExhausted,
+                    retry_after_s: None,
+                    dimension: Some(AiBudgetDimension::LlmCost),
                 });
             }
             if Instant::now() >= self.deadline {
@@ -382,6 +453,9 @@ impl Ctx<'_> {
             Ok(Ok(resp)) => {
                 state.input_tokens += resp.usage.input_tokens;
                 state.output_tokens += resp.usage.output_tokens;
+                if let Some(cost) = resp.cost_usd.filter(|cost| cost.is_finite() && *cost > 0.0) {
+                    state.cost_usd += cost;
+                }
                 tally.input_tokens += resp.usage.input_tokens;
                 tally.output_tokens += resp.usage.output_tokens;
                 tally.model = Some(resp.model_used.clone());
@@ -410,6 +484,9 @@ impl Ctx<'_> {
             model: config.model_json.clone(),
             structured_output_schema: Some(schema_text.clone()),
             zdr: false,
+            max_tokens: Some(config.output_cap(OUTPUT_TOKENS_JSON)),
+            temperature: Some(TEMPERATURE_EXACT),
+            purpose: Some(AI_CHAT_PURPOSE_QUARRY_EXTRACT),
         };
         let first = match self.call(req, tally).await {
             Ok(resp) => resp,
@@ -425,6 +502,10 @@ impl Ctx<'_> {
         if reason == Some(AiReason::TooLarge) {
             return json_invalid(issues, reason, false);
         }
+        // WS16.S6: the model repair is switched off; the local repair already ran.
+        if !config.model_repair {
+            return json_invalid(issues, reason, false);
+        }
 
         // One repair call: the invalid output, the issues and the schema; never the page.
         let draft_nonce = fresh_nonce(&first.content);
@@ -436,6 +517,9 @@ impl Ctx<'_> {
             model: config.model_text.clone(),
             structured_output_schema: Some(schema_text),
             zdr: false,
+            max_tokens: Some(config.output_cap(OUTPUT_TOKENS_REPAIR)),
+            temperature: Some(TEMPERATURE_EXACT),
+            purpose: Some(AI_CHAT_PURPOSE_QUARRY_EXTRACT),
         };
         let second = match self.call(repair_req, tally).await {
             Ok(resp) => resp,
@@ -465,6 +549,9 @@ impl Ctx<'_> {
             model: self.engine.config.model_text.clone(),
             structured_output_schema: None,
             zdr: false,
+            max_tokens: Some(self.engine.config.output_cap(OUTPUT_TOKENS_SUMMARY)),
+            temperature: Some(TEMPERATURE_PROSE),
+            purpose: Some(AI_CHAT_PURPOSE_QUARRY_EXTRACT),
         };
         let resp = match self.call(req, tally).await {
             Ok(resp) => resp,
@@ -496,6 +583,10 @@ impl Ctx<'_> {
             model: self.engine.config.model_text.clone(),
             structured_output_schema: None,
             zdr: false,
+            max_tokens: Some(self.engine.config.output_cap(OUTPUT_TOKENS_QUESTION)),
+            // A JSON reply with a verbatim quote: exact, not prose.
+            temperature: Some(TEMPERATURE_EXACT),
+            purpose: Some(AI_CHAT_PURPOSE_QUARRY_EXTRACT),
         };
         let resp = match self.call(req, tally).await {
             Ok(resp) => resp,
@@ -543,6 +634,10 @@ impl Ctx<'_> {
             model: self.engine.config.model_text.clone(),
             structured_output_schema: None,
             zdr: false,
+            max_tokens: Some(self.engine.config.output_cap(OUTPUT_TOKENS_HIGHLIGHTS)),
+            // Verbatim quotes: exact, not prose.
+            temperature: Some(TEMPERATURE_EXACT),
+            purpose: Some(AI_CHAT_PURPOSE_QUARRY_EXTRACT),
         };
         let resp = match self.call(req, tally).await {
             Ok(resp) => resp,
@@ -607,9 +702,14 @@ fn failure_of(error: ModelHopError) -> Failure {
 
 fn failure_report(failure: &Failure) -> AiFormatReport {
     match failure {
-        Failure::Skipped { code, retry_after_s } => {
+        Failure::Skipped {
+            code,
+            retry_after_s,
+            dimension,
+        } => {
             let mut report = AiFormatReport::skipped(*code);
             report.retry_after_s = *retry_after_s;
+            report.dimension = *dimension;
             report
         }
         Failure::Failed {
@@ -697,6 +797,9 @@ fn schema_issue(issue: &ValidationIssue) -> SchemaIssue {
         ValidationIssue::NumberOutOfRange { path, .. } => (path.clone(), "number_out_of_range"),
         ValidationIssue::AdditionalProperty { path, .. } => (path.clone(), "additional_property"),
         ValidationIssue::InvalidSchema { path, .. } => (path.clone(), "invalid_schema"),
+        ValidationIssue::ConstMismatch { path } => (path.clone(), "const_mismatch"),
+        ValidationIssue::AnyOfNoMatch { path } => (path.clone(), "any_of_no_match"),
+        ValidationIssue::OneOfMismatch { path, .. } => (path.clone(), "one_of_mismatch"),
     };
     SchemaIssue {
         path: path.chars().take(MAX_ISSUE_PATH_CHARS).collect(),

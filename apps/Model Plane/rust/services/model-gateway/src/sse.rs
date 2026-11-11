@@ -16099,6 +16099,18 @@ fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
             object.insert("reason".to_owned(), json!(payload.reason));
             object.insert("risk_category".to_owned(), json!(payload.risk_category));
             object.insert("approval_id".to_owned(), json!(payload.approval_id));
+            // QF-15: one-time-code gate context, present only on an OTP gate.
+            // The label is the person's connection label, never an address.
+            for (key, value) in [
+                ("top_origin", &payload.top_origin),
+                ("frame_origin", &payload.frame_origin),
+                ("mail_provider_key", &payload.mail_provider_key),
+                ("mail_account_label", &payload.mail_account_label),
+            ] {
+                if !value.is_empty() {
+                    object.insert(key.to_owned(), json!(value));
+                }
+            }
         }
         orchestration_event::Event::BrowserActionDecided(payload) => {
             object.insert("run_id".to_owned(), json!(payload.run_id));
@@ -17235,6 +17247,7 @@ mod tests {
                     reason: "action appears to interact with a checkout/payment flow".to_owned(),
                     risk_category: "checkout".to_owned(),
                     approval_id: "appr-1".to_owned(),
+                    ..Default::default()
                 },
             )),
             ..Default::default()

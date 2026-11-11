@@ -1,9 +1,14 @@
 package grant
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+
+	"github.com/triodelab/model-plane/pkg/authctx"
 )
 
 // ErrDomainNotGrantable means a host passed the syntax check but may not be
@@ -91,4 +96,236 @@ func (p StaticPolicy) ResolveHumanBrowse(_ context.Context, _, _ string) (HumanB
 		denied = DefaultDeniedSuffixes
 	}
 	return HumanBrowsePolicy{Allowed: true, DeniedSuffixes: append([]string(nil), denied...)}, nil
+}
+
+// ErrDomainDenied means a requested host is refused by the org web policy
+// (WS7.K): the claim's deny rules name it, or no host of the request falls
+// under the claim's allow rules. It wraps ErrDomainNotGrantable, so it maps to
+// the same refusal; the message never echoes the hosts.
+var ErrDomainDenied = fmt.Errorf("%w: the org web policy denies it", ErrDomainNotGrantable)
+
+// ErrWebPolicyUnreadable means the verified token carries a web_policy claim
+// the broker cannot read: malformed JSON, a version other than 1, a bad
+// revision or an unbounded entry. Acquire refuses rather than mint a grant
+// without the org's rules.
+var ErrWebPolicyUnreadable = errors.New("web_policy_unreadable")
+
+// WebPolicyClaimVersion is the only web_policy claim version.
+const WebPolicyClaimVersion = 1
+
+// Bounds on a web_policy snapshot. Auth Core caps the claim at 2 KiB, so these
+// are guards, not code paths.
+const (
+	maxWebPolicyCaps        = 64
+	maxWebPolicyCapBytes    = 128
+	maxWebPolicyDomains     = 256
+	maxWebPolicyDomainBytes = 253
+	maxWebPolicyRevBytes    = 12
+)
+
+// WebPolicySnapshot is the org web policy a grant carries (WS7.K, ADR-1
+// outcome C): the verified principal's web_policy claim, mapped 1:1. It is
+// built from the verified token only, never from a request field, and a
+// derived grant copies its parent's unchanged, so it can never loosen. Nil is
+// no snapshot (the token carried no claim), which a consumer reads as no
+// grant layer.
+type WebPolicySnapshot struct {
+	// V is the claim version (1).
+	V uint32
+	// Rev is the issuer's revision: "0" (no policy) or 1-12 lowercase hex.
+	Rev string
+	// Caps maps a capability key to its mode or ceiling name, as signed.
+	Caps map[string]string
+	// RobotsMax and ProxyMax are the org's ceilings, "" when none is stated.
+	RobotsMax, ProxyMax string
+	// DomainsAllow is the allow rule; empty means no allow rule.
+	DomainsAllow []string
+	// DomainsDeny is the deny rule.
+	DomainsDeny []string
+}
+
+// Clone returns a deep copy, or nil for nil.
+func (s *WebPolicySnapshot) Clone() *WebPolicySnapshot {
+	if s == nil {
+		return nil
+	}
+	out := *s
+	if s.Caps != nil {
+		out.Caps = make(map[string]string, len(s.Caps))
+		for k, v := range s.Caps {
+			out.Caps[k] = v
+		}
+	}
+	out.DomainsAllow = append([]string(nil), s.DomainsAllow...)
+	out.DomainsDeny = append([]string(nil), s.DomainsDeny...)
+	return &out
+}
+
+// webPolicyClaim is the web_policy claim exactly as Auth Core signs it:
+// {"v":1,"rev":"...","caps":{...},"robots_max":...,"proxy_max":...,
+// "domains":{"allow":[...],"deny":[...]}}.
+type webPolicyClaim struct {
+	V         *uint32           `json:"v"`
+	Rev       *string           `json:"rev"`
+	Caps      map[string]string `json:"caps"`
+	RobotsMax string            `json:"robots_max"`
+	ProxyMax  string            `json:"proxy_max"`
+	Domains   *struct {
+		Allow []string `json:"allow"`
+		Deny  []string `json:"deny"`
+	} `json:"domains"`
+}
+
+// ClaimPolicyResolver reads the org web policy from the verified principal's
+// web_policy claim (WS7.K). It is stateless and asks no service: the claim is
+// already signed by Auth Core. A web_policy in gRPC metadata or a request body
+// is never read.
+type ClaimPolicyResolver struct{}
+
+// Snapshot builds the grant snapshot from p.WebPolicy. It returns nil, nil
+// when the token carries no claim, and ErrWebPolicyUnreadable when the claim
+// is malformed, its version is not 1, its revision is not "0" or 1-12
+// lowercase hex, or an entry is empty or unbounded.
+func (ClaimPolicyResolver) Snapshot(p authctx.Principal) (*WebPolicySnapshot, error) {
+	raw := bytes.TrimSpace(p.WebPolicy)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return nil, nil
+	}
+	var claim webPolicyClaim
+	if err := json.Unmarshal(raw, &claim); err != nil {
+		return nil, ErrWebPolicyUnreadable
+	}
+	if claim.V == nil || *claim.V != WebPolicyClaimVersion || claim.Rev == nil || !validWebPolicyRev(*claim.Rev) {
+		return nil, ErrWebPolicyUnreadable
+	}
+	snapshot := &WebPolicySnapshot{V: *claim.V, Rev: *claim.Rev}
+	if len(claim.Caps) > maxWebPolicyCaps {
+		return nil, ErrWebPolicyUnreadable
+	}
+	if len(claim.Caps) > 0 {
+		snapshot.Caps = make(map[string]string, len(claim.Caps))
+		for key, mode := range claim.Caps {
+			if !boundedClaimText(key, maxWebPolicyCapBytes) || !boundedClaimText(mode, maxWebPolicyCapBytes) {
+				return nil, ErrWebPolicyUnreadable
+			}
+			snapshot.Caps[key] = mode
+		}
+	}
+	for _, ceiling := range []string{claim.RobotsMax, claim.ProxyMax} {
+		if ceiling != "" && !boundedClaimText(ceiling, maxWebPolicyCapBytes) {
+			return nil, ErrWebPolicyUnreadable
+		}
+	}
+	snapshot.RobotsMax, snapshot.ProxyMax = claim.RobotsMax, claim.ProxyMax
+	if claim.Domains != nil {
+		allow, err := claimDomains(claim.Domains.Allow)
+		if err != nil {
+			return nil, err
+		}
+		deny, err := claimDomains(claim.Domains.Deny)
+		if err != nil {
+			return nil, err
+		}
+		snapshot.DomainsAllow, snapshot.DomainsDeny = allow, deny
+	}
+	return snapshot, nil
+}
+
+// Narrow applies a snapshot's domain rules to a canonical requested host list
+// (the output of NormalizeAllowedDomains). A nil snapshot changes nothing. A
+// requested host under a deny rule (equal or below it, on a dot boundary) is
+// refused with ErrDomainDenied, never silently dropped. With an allow rule the
+// result is the intersection: a requested host equal to or below an allowed
+// host is kept, and an allowed host below a requested host replaces it; an
+// allowed host under a deny rule is never added. An empty result is
+// ErrDomainDenied. The result is canonical (sorted, unique).
+func Narrow(requested []string, s *WebPolicySnapshot) ([]string, error) {
+	if s == nil {
+		return append([]string(nil), requested...), nil
+	}
+	allow := ruleNames(s.DomainsAllow)
+	deny := ruleNames(s.DomainsDeny)
+	kept := make([]string, 0, len(requested))
+	for _, raw := range requested {
+		host := strings.ToLower(strings.TrimSpace(raw))
+		if hostWithin(host, deny) {
+			return nil, ErrDomainDenied
+		}
+		if len(s.DomainsAllow) == 0 || hostWithin(host, allow) {
+			kept = append(kept, host)
+			continue
+		}
+		for _, allowed := range allow {
+			if strings.HasSuffix(allowed, "."+host) && isCanonicalDomain(allowed) && !hostWithin(allowed, deny) {
+				kept = append(kept, allowed)
+			}
+		}
+	}
+	if len(kept) == 0 {
+		return nil, ErrDomainDenied
+	}
+	return NormalizeAllowedDomains(kept)
+}
+
+// ruleNames turns claim domain rules into names to match on a dot boundary: a
+// leading "*." or "." marks a suffix rule, which matches the same hosts.
+func ruleNames(rules []string) []string {
+	out := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		name := strings.ToLower(strings.TrimSpace(rule))
+		name = strings.TrimPrefix(name, "*.")
+		name = strings.TrimPrefix(name, ".")
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// claimDomains copies a claim domain list after bounding it.
+func claimDomains(list []string) ([]string, error) {
+	if len(list) > maxWebPolicyDomains {
+		return nil, ErrWebPolicyUnreadable
+	}
+	out := make([]string, 0, len(list))
+	for _, entry := range list {
+		if !boundedClaimText(entry, maxWebPolicyDomainBytes) {
+			return nil, ErrWebPolicyUnreadable
+		}
+		out = append(out, entry)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+// validWebPolicyRev reports "0" or 1-12 lowercase hex.
+func validWebPolicyRev(rev string) bool {
+	if rev == "0" {
+		return true
+	}
+	if rev == "" || len(rev) > maxWebPolicyRevBytes {
+		return false
+	}
+	for i := 0; i < len(rev); i++ {
+		c := rev[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// boundedClaimText reports a non-empty, bounded, printable ASCII value.
+func boundedClaimText(value string, limit int) bool {
+	if value == "" || len(value) > limit {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x21 || value[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }

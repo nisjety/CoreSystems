@@ -454,6 +454,10 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                 reason,
                 risk_category,
                 approval_id,
+                top_origin,
+                frame_origin,
+                mail_provider_key,
+                mail_account_label,
                 at,
             } => envelope(
                 at,
@@ -467,6 +471,10 @@ impl From<OrchestrationEvent> for ProtoOrchestrationEvent {
                     reason,
                     risk_category,
                     approval_id,
+                    top_origin,
+                    frame_origin,
+                    mail_provider_key,
+                    mail_account_label,
                 }),
             ),
             OrchestrationEvent::BrowserActionDecided {
@@ -643,6 +651,10 @@ impl TryFrom<ProtoOrchestrationEvent> for OrchestrationEvent {
                     reason: p.reason,
                     risk_category: p.risk_category,
                     approval_id: p.approval_id,
+                    top_origin: p.top_origin,
+                    frame_origin: p.frame_origin,
+                    mail_provider_key: p.mail_provider_key,
+                    mail_account_label: p.mail_account_label,
                     at,
                 }
             }
@@ -851,6 +863,10 @@ mod tests {
             reason: "action appears to interact with a checkout/payment flow".into(),
             risk_category: "checkout".into(),
             approval_id: "appr-1".into(),
+            top_origin: String::new(),
+            frame_origin: String::new(),
+            mail_provider_key: String::new(),
+            mail_account_label: String::new(),
             at: fixture_at(),
         });
     }

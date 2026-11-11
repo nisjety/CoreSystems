@@ -27,7 +27,7 @@ describe('ChatPage browser dock class list', () => {
     expect(page).toContain("'verevon-chat-page--dock-right': dockLayout() === 'right',")
     expect(page).toContain("'verevon-chat-page--dock-bottom': dockLayout() === 'bottom',")
     expect(page).toContain("'verevon-chat-page--dock-maximised': dockLayout() === 'maximised',")
-    expect(page).toContain("'verevon-chat-page--split': Boolean(liveRunId()) && !runPanelCollapsed(),")
+    expect(page).toContain("'verevon-chat-page--split': (Boolean(liveRunId()) && !runPanelCollapsed()) || browserBodyShown(),")
     expect(page).toContain("'verevon-chat-page--railed': Boolean(liveRunId()) && runPanelCollapsed(),")
     expect(page).toContain("'verevon-chat-page--canvas': activeTab() !== 'chat',")
   })

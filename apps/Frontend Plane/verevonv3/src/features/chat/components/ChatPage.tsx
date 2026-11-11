@@ -22,6 +22,7 @@ import {
 } from '@/shared/icons'
 import { spaceDisplayName } from '@/features/spaces/lib/space-name'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
+import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
 import {
   DashboardComposer,
   type DashboardComposerAttachment,
@@ -443,10 +444,11 @@ export default function ChatPage() {
   const browserBodyDock = () => (browserBodyOpen() ? browserDockPageClass(browserDock().position) : null) ?? ''
 
   // One interactive browser session per chat page (WS9.H). Its zero retention follows the thread on
-  // screen and the workspace's retention verdict.
+  // screen, the Temporary chat toggle for the next message (a fresh chat has no thread yet) and the
+  // workspace's retention verdict.
   const dockSession = useDockBrowserSession({
     orgId: () => session.activeOrg?.id,
-    threadTemporary: () => isActiveThreadTemporary(),
+    threadTemporary: () => temporaryChat() || isActiveThreadTemporary(),
     tr: i18n.tr,
   })
 
@@ -1263,7 +1265,8 @@ export default function ChatPage() {
       ? <BrowserDockControls position={browserDock().position} onPositionChange={setBrowserDockPosition} />
       : undefined
   ))
-  // The browser header control (WS9.H), built once. Absent while the dock is off in this build.
+  // The browser control (WS9.H), built once. It sits in the chat header once there are messages and in the empty
+  // state's action row before the first one. Absent while the dock is off in this build.
   const browserHeaderButton = createMemo(() => (
     isChatBrowserDockEnabled()
       ? <OpenBrowserButton open={browserBodyOpen} onToggle={toggleBrowserBody} />
@@ -1414,6 +1417,8 @@ export default function ChatPage() {
         threadId={state.threadId}
         temporaryChat={readAloudBlocked()}
         spaceScoped={spaceScoped()}
+        // QF-20: the crawl-plan approval card never mounts in a foreign-origin or Support read-only thread.
+        crawlPlanCardAllowed={!isForeignOriginThread() && !isSupportChatThread(state.threadId ?? undefined)}
         connectorSuggestion={{
           orgId: session.activeOrg?.id,
           onUse: (suggestion, connectionId) => void acceptConnectorSuggestion(suggestion, connectionId),
@@ -1431,7 +1436,8 @@ export default function ChatPage() {
       class={[
         `verevon-chat-page${launchMotion() ? ' verevon-chat-page-launch' : ''}`,
         {
-          'verevon-chat-page--split': Boolean(liveRunId()) && !runPanelCollapsed(),
+          // The browser body beside the chat takes the split too, with or without a live run.
+          'verevon-chat-page--split': (Boolean(liveRunId()) && !runPanelCollapsed()) || browserBodyShown(),
           'verevon-chat-page--railed': Boolean(liveRunId()) && runPanelCollapsed(),
           'verevon-chat-page--canvas': activeTab() !== 'chat',
           'verevon-chat-page--dock-right': dockLayout() === 'right',
@@ -1501,6 +1507,7 @@ export default function ChatPage() {
             <EmptyChatState
               onSelectPrompt={setInput}
               onResumeThread={(threadId) => selectChatThread(threadId)}
+              actions={browserHeaderButton()}
               orgId={session.activeOrg?.id}
               orgName={session.activeOrg?.name}
               userId={session.user?.id}

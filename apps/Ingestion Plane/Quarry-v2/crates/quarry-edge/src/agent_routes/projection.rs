@@ -15,7 +15,9 @@ fn browser_session_tab(
     tab: BrowserTab,
     opened_by: Option<TabOrigin>,
     meta: Option<TabMeta>,
+    mark: Option<TabMark>,
 ) -> BrowserSessionTab {
+    let attach_id = meta.as_ref().and_then(|tab| tab.attach_id.clone());
     BrowserSessionTab {
         opened_by,
         tab_id: tab.tab_id,
@@ -28,6 +30,8 @@ fn browser_session_tab(
         active: tab.active,
         tab_epoch: meta.as_ref().map_or(0, |tab| tab.epoch),
         holder: meta.map_or(BrowserTabHolder::Human, |tab| tab.holder),
+        mark: mark.map(TabMark::as_str),
+        attach_id,
     }
 }
 
@@ -41,7 +45,52 @@ pub(super) fn live_browser_session_projection(
     entry: &RunEntry,
     tabs: Vec<BrowserTab>,
     live: Option<&RunLive>,
+    driver: BrowserDriverCapabilities,
 ) -> BrowserSessionProjectionData {
+    // WS8.F: the attachment is copied out under its own lock, before the ledger is read below.
+    let attach = live.and_then(|live| {
+        let (state, attach_id, tab_id, grant_id) = {
+            let attaches = live.attaches();
+            let live_attach = attaches.live()?;
+            (
+                live_attach.phase,
+                live_attach.attach_id.clone(),
+                live_attach.tab_id.clone(),
+                live_attach.grant_id.clone(),
+            )
+        };
+        let tab_epoch = live.tabs().get(&tab_id).map_or(0, |meta| meta.epoch);
+        Some(AttachProjection {
+            state,
+            attach_id,
+            tab_id,
+            tab_epoch,
+            grant_id: Some(grant_id),
+        })
+    });
+    let attach_switch = crate::run_limits::attach_enabled();
+    let attach_available = attach_switch
+        && !entry.zdr.is_active()
+        && entry.grant_id.is_some()
+        && driver.background_tabs
+        && driver.tab_pinning
+        && driver.per_tab_egress
+        && attach.is_none();
+    let tabs = {
+        let ledger = live.map(|live| live.tabs());
+        tabs.into_iter()
+            .map(|tab| {
+                let opened_by = entry.tab_origins.get(&tab.tab_id).cloned();
+                let meta = ledger
+                    .as_deref()
+                    .and_then(|ledger| ledger.get(&tab.tab_id).cloned());
+                let mark = ledger
+                    .as_deref()
+                    .and_then(|ledger| ledger.mark_of(&tab.tab_id));
+                browser_session_tab(tab, opened_by, meta, mark)
+            })
+            .collect::<Vec<_>>()
+    };
     BrowserSessionProjectionData {
         run_id: entry.run_id.to_string(),
         lease_id: entry.lease.lease_id.to_string(),
@@ -61,14 +110,7 @@ pub(super) fn live_browser_session_projection(
         control_mode: entry.control_mode,
         control_epoch: entry.control_epoch,
         execution_tier: entry.execution_tier,
-        tabs: tabs
-            .into_iter()
-            .map(|tab| {
-                let opened_by = entry.tab_origins.get(&tab.tab_id).cloned();
-                let meta = live.and_then(|live| live.tabs().get(&tab.tab_id).cloned());
-                browser_session_tab(tab, opened_by, meta)
-            })
-            .collect(),
+        tabs,
         profile_restore: entry
             .summary
             .last_observation
@@ -80,6 +122,9 @@ pub(super) fn live_browser_session_projection(
             .nav_policy
             .is_open_web()
             .then_some(super::human_browse::GRANT_KIND_HUMAN_BROWSE),
+        tab_control: attach_switch,
+        attach_available,
+        attach,
     }
 }
 
@@ -112,6 +157,9 @@ pub(super) fn checkpoint_browser_session_projection(
         profile_restore: None,
         grant_kind: (checkpoint.policy_mode.as_deref() == Some("open_web"))
             .then_some(super::human_browse::GRANT_KIND_HUMAN_BROWSE),
+        tab_control: false,
+        attach_available: false,
+        attach: None,
     }
 }
 
@@ -127,7 +175,13 @@ mod grant_kind_tests {
         if open_web {
             entry.nav_policy = super::super::human_browse::RunNavPolicy::OpenWeb { denied: Vec::new() };
         }
-        serde_json::to_value(live_browser_session_projection(&entry, Vec::new(), None)).unwrap()
+        serde_json::to_value(live_browser_session_projection(
+            &entry,
+            Vec::new(),
+            None,
+            state.agent_driver.capabilities(),
+        ))
+        .unwrap()
     }
 
     /// D2-030: a person's open-web session says so, which is what the gateway reads to
@@ -268,7 +322,12 @@ pub async fn browser_session(
         prune_tab_openers(&mut entry, &tabs);
         return Ok(Json(Envelope::ok(
             request_id,
-            live_browser_session_projection(&entry, tabs, Some(&handle.live)),
+            live_browser_session_projection(
+                &entry,
+                tabs,
+                Some(&handle.live),
+                state.agent_driver.capabilities(),
+            ),
         )));
     }
 

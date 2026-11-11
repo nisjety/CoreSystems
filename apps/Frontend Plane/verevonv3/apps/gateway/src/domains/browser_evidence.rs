@@ -24,8 +24,13 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
+};
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::Method;
+use sha2::{Digest, Sha256};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -71,6 +76,13 @@ const SELECTION_MAX_CHARS: usize = 4000;
 const TAB_LABEL_MAX_CHARS: usize = 200;
 /// The wire name of `TrustClass::BrowserScraped` (mp-content-safety `trust.rs`).
 const REGION_TRUST_CLASS: &str = "browser-scraped";
+/// Lifetime of a region attach token (QF-8): the region must be sent on a chat turn
+/// within ten minutes of the attach.
+const REGION_ATTACH_TOKEN_TTL_SECS: u64 = 600;
+/// Version tag of the attach token payload (QF-8).
+const REGION_ATTACH_TOKEN_VERSION: &str = "v1";
+/// Longest attach token accepted on a chat turn: the expiry, a dot and a base64url SHA-256 MAC.
+const REGION_ATTACH_TOKEN_MAX_CHARS: usize = 96;
 
 /// Saved recipes (Q4-E4.2-4a), mounted only with `AppState::browser_recipes` (`BROWSER_RECIPES`).
 const SESSION_RECIPES_PATH: &str = "/api/v1/browser/sessions/{session_id}/recipes";
@@ -1445,9 +1457,245 @@ async fn region_attach_view(
             ))
         }
     };
-    Ok(region_attachment_view(
-        session_id, tab, region, viewport, &image, selection,
+    let mut view = region_attachment_view(session_id, tab, region, viewport, &image, selection);
+    // QF-8: a stateless token that lets the chat send path verify this exact region later.
+    // Nothing is stored; with no key configured no token is issued and a send is refused.
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
+    let resolved_tab_id = tab.get("tabId").and_then(Value::as_str).unwrap_or_default();
+    let expires_unix = unix_now().saturating_add(REGION_ATTACH_TOKEN_TTL_SECS);
+    if let Some(token) = issue_region_attach_token(
+        &state.browser_region_attach_key,
+        &RegionTokenClaims {
+            user_id: &user.user_id,
+            org_id: &org_id,
+            session_id,
+            tab_id: resolved_tab_id,
+            region,
+            image_sha256: &hex::encode(Sha256::digest(&image.bytes)),
+        },
+        expires_unix,
+    ) {
+        if let Some(attachment) = view.get_mut("attachment").and_then(Value::as_object_mut) {
+            attachment.insert("attachToken".to_owned(), Value::String(token));
+            attachment.insert("attachTokenExpiresAt".to_owned(), json!(expires_unix));
+        }
+    }
+    Ok(view)
+}
+
+// ---------------------------------------------------------------------------
+// Region attach token and chat-turn verification (QF-8)
+// ---------------------------------------------------------------------------
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Seconds since the Unix epoch (0 if the clock is before it).
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// What an attach token binds: the verified caller and org, the session and tab the
+/// gateway resolved, the resolved whole-pixel region and the SHA-256 of the image bytes.
+struct RegionTokenClaims<'a> {
+    user_id: &'a str,
+    org_id: &'a str,
+    session_id: &'a str,
+    tab_id: &'a str,
+    region: RegionRect,
+    image_sha256: &'a str,
+}
+
+/// `v1|user_id|org_id|session_id|tab_id|x,y,w,h|sha256(image)|expires_unix`, or None when a
+/// part could be confused with the separator.
+fn region_token_payload(claims: &RegionTokenClaims<'_>, expires_unix: u64) -> Option<String> {
+    let parts = [
+        claims.user_id,
+        claims.org_id,
+        claims.session_id,
+        claims.tab_id,
+        claims.image_sha256,
+    ];
+    if parts.iter().any(|part| part.contains('|')) {
+        return None;
+    }
+    let RegionRect {
+        x,
+        y,
+        width,
+        height,
+    } = claims.region;
+    Some(format!(
+        "{REGION_ATTACH_TOKEN_VERSION}|{}|{}|{}|{}|{x},{y},{width},{height}|{}|{expires_unix}",
+        claims.user_id, claims.org_id, claims.session_id, claims.tab_id, claims.image_sha256,
     ))
+}
+
+fn region_token_mac(key: &str, payload: &str) -> Option<HmacSha256> {
+    if key.is_empty() {
+        return None;
+    }
+    let mut mac = HmacSha256::new_from_slice(key.as_bytes()).ok()?;
+    mac.update(payload.as_bytes());
+    Some(mac)
+}
+
+/// `<expires_unix>.<base64url HMAC-SHA256 of the payload>`, or None when no key is configured.
+fn issue_region_attach_token(
+    key: &str,
+    claims: &RegionTokenClaims<'_>,
+    expires_unix: u64,
+) -> Option<String> {
+    let payload = region_token_payload(claims, expires_unix)?;
+    let mac = region_token_mac(key, &payload)?;
+    Some(format!(
+        "{expires_unix}.{}",
+        URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())
+    ))
+}
+
+/// True only when the token was issued with `key` for exactly these claims and is unexpired.
+/// The MAC comparison is constant time.
+fn verify_region_attach_token(
+    key: &str,
+    token: &str,
+    claims: &RegionTokenClaims<'_>,
+    now_unix: u64,
+) -> bool {
+    if token.is_empty() || token.len() > REGION_ATTACH_TOKEN_MAX_CHARS {
+        return false;
+    }
+    let Some((expires, signature)) = token.split_once('.') else {
+        return false;
+    };
+    let Ok(expires_unix) = expires.parse::<u64>() else {
+        return false;
+    };
+    // Expired, or further out than any token this gateway issues.
+    if expires_unix <= now_unix
+        || expires_unix > now_unix.saturating_add(REGION_ATTACH_TOKEN_TTL_SECS)
+    {
+        return false;
+    }
+    let Ok(signature) = URL_SAFE_NO_PAD.decode(signature.as_bytes()) else {
+        return false;
+    };
+    let Some(payload) = region_token_payload(claims, expires_unix) else {
+        return false;
+    };
+    let Some(mac) = region_token_mac(key, &payload) else {
+        return false;
+    };
+    mac.verify_slice(&signature).is_ok()
+}
+
+/// One region as a chat turn carries it (`browser_regions[]`), in the chat body's snake_case
+/// or the attach answer's camelCase. Other keys (labels, titles, selection text) are ignored:
+/// nothing the token does not cover is forwarded.
+#[derive(Debug, Deserialize)]
+struct TurnRegionInput {
+    #[serde(alias = "sessionId")]
+    session_id: String,
+    #[serde(alias = "tabId")]
+    tab_id: String,
+    region: TurnRegionRect,
+    image: TurnRegionImage,
+    #[serde(alias = "attachToken")]
+    attach_token: String,
+}
+
+/// The resolved whole-pixel region the attach answer returned.
+#[derive(Debug, Deserialize)]
+struct TurnRegionRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct TurnRegionImage {
+    #[serde(alias = "mimeType")]
+    mime_type: String,
+    #[serde(alias = "dataBase64")]
+    data_base64: String,
+}
+
+/// Verify one region a chat turn carries (QF-8) and build the value the gateway forwards in
+/// its place: the session, tab, region and image the token vouches for, classified
+/// `browser-scraped` with no grant. Any failure (no key configured, bad shape, image that is
+/// not the attached one, token for another user, org, session, tab or rect, expired token)
+/// refuses the region. Nothing is stored.
+pub(crate) fn verify_turn_region(
+    key: &str,
+    user_id: &str,
+    org_id: &str,
+    raw: &Value,
+) -> Result<Value, &'static str> {
+    if key.is_empty() {
+        return Err("region attach tokens are not configured");
+    }
+    let input: TurnRegionInput = serde_json::from_value(raw.clone())
+        .map_err(|_| "a region must carry session_id, tab_id, region, image and attach_token")?;
+    let session_id = input.session_id.trim();
+    if !is_valid_path_segment(session_id) {
+        return Err("the region's session id is invalid");
+    }
+    let tab_id = input.tab_id.trim();
+    if !valid_tab_id(tab_id) {
+        return Err("the region's tab id is invalid");
+    }
+    let region = RegionRect {
+        x: input.region.x,
+        y: input.region.y,
+        width: input.region.width,
+        height: input.region.height,
+    };
+    if region.width < REGION_MIN_EDGE_PX || region.height < REGION_MIN_EDGE_PX {
+        return Err("the region is smaller than 8 pixels");
+    }
+    let image = decode_region_image(&RegionImageInput {
+        mime_type: input.image.mime_type,
+        data_base64: input.image.data_base64,
+    })?;
+    if !image_matches_region(image.width, image.height, region) {
+        return Err("the image does not match the shape of the region");
+    }
+    let image_sha256 = hex::encode(Sha256::digest(&image.bytes));
+    let claims = RegionTokenClaims {
+        user_id,
+        org_id,
+        session_id,
+        tab_id,
+        region,
+        image_sha256: &image_sha256,
+    };
+    if !verify_region_attach_token(key, input.attach_token.trim(), &claims, unix_now()) {
+        return Err("the region's attach token does not verify");
+    }
+    Ok(json!({
+        "kind": "browser-region",
+        "session_id": session_id,
+        "tab_id": tab_id,
+        "region": {
+            "x": region.x,
+            "y": region.y,
+            "width": region.width,
+            "height": region.height,
+        },
+        "image": {
+            "mime_type": image.mime_type,
+            "data_base64": BASE64_STANDARD.encode(&image.bytes),
+            "width": image.width,
+            "height": image.height,
+            "byte_length": image.bytes.len(),
+        },
+        "trust_class": REGION_TRUST_CLASS,
+        "grant": "none",
+        "retention": "ephemeral",
+    }))
 }
 
 // ---------------------------------------------------------------------------

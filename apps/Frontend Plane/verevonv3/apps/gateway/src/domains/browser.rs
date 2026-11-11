@@ -539,6 +539,17 @@ fn classed_routes(limiter: &crate::rate_limit::RateLimiter) -> Router<AppState> 
             "/api/v1/browser/sessions/{session_id}/tabs/{tab_id}/select",
             post(select_tab),
         )
+        // Q2-WS8.I: the owner's per-tab Take over / Give back, and Stop agent for the
+        // session's attachment. Both 409 `browser_attach_unavailable` unless
+        // BROWSER_AI_RUN_ATTACH_SESSION is the literal `true`.
+        .route(
+            "/api/v1/browser/sessions/{session_id}/tabs/{tab_id}/control",
+            post(control_tab),
+        )
+        .route(
+            "/api/v1/browser/sessions/{session_id}/attach/stop",
+            post(stop_attach),
+        )
         .route(
             "/api/v1/browser/sessions/{session_id}/tabs/{tab_id}",
             delete(close_tab),
@@ -1221,6 +1232,12 @@ pub(crate) async fn run_action(
             .get("controlMode")
             .and_then(Value::as_str),
     );
+    // Q2-WS8.I: with per-tab control (`tabControl`), a person's action does not take the
+    // whole session over; Quarry decides per tab. The agent refusal below still holds.
+    let tab_control = current_projection
+        .get("tabControl")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if actor == BrowserActionActor::Agent && current_mode == BrowserControlMode::HumanTakeover {
         return (
             StatusCode::CONFLICT,
@@ -1231,7 +1248,10 @@ pub(crate) async fn run_action(
         )
             .into_response();
     }
-    if actor == BrowserActionActor::Human && current_mode != BrowserControlMode::HumanTakeover {
+    if actor == BrowserActionActor::Human
+        && current_mode != BrowserControlMode::HumanTakeover
+        && !tab_control
+    {
         let (status, body) = quarry_call(
             &state,
             Method::POST,
@@ -1487,6 +1507,272 @@ pub(crate) async fn close_tab(
         None,
     )
     .await
+}
+
+/// Who holds one tab (Q2-WS8.I). A closed enum: any other word is a 422 before Quarry is asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TabHolder {
+    Human,
+    Agent,
+}
+
+impl TabHolder {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Agent => "agent",
+        }
+    }
+}
+
+/// `POST /api/v1/browser/sessions/{session_id}/tabs/{tab_id}/control` (Q2-WS8.I): the owner
+/// gives one tab to the attached agent (`holder: "agent"`) or takes it back (`"human"`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TabControlBody {
+    pub(crate) holder: TabHolder,
+    /// The tab epoch the person saw. Quarry refuses with 409 `stale_tab_epoch` when the tab has
+    /// changed hands since, so a stale Take over or Give back cannot flip it.
+    #[serde(default)]
+    pub(crate) expected_epoch: Option<u64>,
+}
+
+/// The body the gateway sends Quarry for a tab control change. `expected_epoch` only when sent.
+fn tab_control_quarry_body(holder: TabHolder, expected_epoch: Option<u64>) -> Value {
+    let mut body = json!({ "holder": holder.as_str() });
+    if let Some(expected) = expected_epoch {
+        body["expected_epoch"] = json!(expected);
+    }
+    body
+}
+
+/// The refusal both attach routes give while BROWSER_AI_RUN_ATTACH_SESSION is off.
+fn attach_unavailable_refusal() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(error(
+            "browser_attach_unavailable",
+            "An attached browser agent is not available for this session.",
+        )),
+    )
+        .into_response()
+}
+
+/// The refusal both attach routes give for a ZDR session (or one whose posture is unknown):
+/// a ZDR run takes no attachment, so there is nothing to hand over or stop.
+fn attach_zdr_refusal() -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(error(
+            "browser_attach_zdr_unsupported",
+            "This browser session cannot attach an AI run under zero data retention.",
+        )),
+    )
+        .into_response()
+}
+
+/// Whether the owner projection is anything but an explicit `zdr: false` (fail closed).
+fn projection_not_zdr_off(projection: &Value) -> bool {
+    projection.get("zdr").and_then(Value::as_bool) != Some(false)
+}
+
+/// Q2-WS8.I: the owner hands one tab to the attached agent or takes it back. Owner-only: the
+/// owner projection read first proves the session is this user's, and Quarry checks the token
+/// is a person's (`control_transition_requires_human`). Answers `{ tabId, holder, tabEpoch }`.
+pub(crate) async fn control_tab(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path((session_id, tab_id)): Path<(String, String)>,
+    Json(body): Json<TabControlBody>,
+) -> Response {
+    control_tab_with_switch(state, user, headers, session_id, tab_id, body, browser_ai_run_attach_enabled()).await
+}
+
+// reason: route glue, every argument is a distinct request-scoped concern plus the switch.
+#[allow(clippy::too_many_arguments)]
+async fn control_tab_with_switch(
+    state: AppState,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    session_id: String,
+    tab_id: String,
+    body: TabControlBody,
+    attach_switch: bool,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    if !is_valid_path_segment(&tab_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_tab",
+                "The requested browser tab id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    if !attach_switch {
+        return attach_unavailable_refusal();
+    }
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let projection = match owner_browser_session_projection(
+        &state,
+        &user,
+        token.as_deref(),
+        &session_id,
+    )
+    .await
+    {
+        Ok(projection) => projection,
+        Err(response) => return response,
+    };
+    if projection_not_zdr_off(&projection) {
+        return attach_zdr_refusal();
+    }
+    let (status, upstream) = quarry_call(
+        &state,
+        Method::POST,
+        &format!(
+            "/v1/agent/runs/{}/tabs/{}/control",
+            urlencoding::encode(&session_id),
+            urlencoding::encode(&tab_id),
+        ),
+        Some(tab_control_quarry_body(body.holder, body.expected_epoch)),
+        token.as_deref(),
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() {
+        return forward_quarry_failure(status, upstream);
+    }
+    let data = unwrap_data(&upstream);
+    let holder = match data.get("holder").and_then(Value::as_str) {
+        Some(holder @ ("human" | "agent")) => holder,
+        _ => body.holder.as_str(),
+    };
+    let tab_epoch = data
+        .get("tab_epoch")
+        .or_else(|| data.get("tabEpoch"))
+        .and_then(Value::as_u64)
+        .map_or(Value::Null, |epoch| json!(epoch));
+    (
+        StatusCode::OK,
+        Json(ok(json!({
+            "tabId": tab_id,
+            "holder": holder,
+            "tabEpoch": tab_epoch,
+        }))),
+    )
+        .into_response()
+}
+
+/// The live attachment's ids from the owner projection (WS8.F `attach` object): the attach id,
+/// and the internal attach grant id. Each only when it is path-segment shaped. The grant id is
+/// read to revoke it and never sent to the SPA.
+fn projection_attach_ids(projection: &Value) -> (Option<String>, Option<String>) {
+    let Some(attach) = projection.get("attach").filter(|value| value.is_object()) else {
+        return (None, None);
+    };
+    let id = |keys: &[&str]| {
+        keys.iter().find_map(|key| {
+            attach
+                .get(*key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| is_valid_path_segment(value))
+                .map(str::to_owned)
+        })
+    };
+    (id(&["attachId", "attach_id"]), id(&["grantId", "grant_id"]))
+}
+
+/// `POST /api/v1/browser/sessions/{session_id}/attach/stop` (Q2-WS8.I): the owner's Stop agent.
+/// Revokes the attach grant through model-gateway, then ends the attachment in Quarry with
+/// `disposition=abort`, each best effort. Answers `{ stopped: true }`; never the grant id.
+pub(crate) async fn stop_attach(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+) -> Response {
+    stop_attach_with_switch(state, user, headers, session_id, browser_ai_run_attach_enabled()).await
+}
+
+async fn stop_attach_with_switch(
+    state: AppState,
+    user: AuthenticatedUser,
+    headers: HeaderMap,
+    session_id: String,
+    attach_switch: bool,
+) -> Response {
+    if !is_valid_path_segment(&session_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_browser_session",
+                "The requested browser session id is invalid.",
+            )),
+        )
+            .into_response();
+    }
+    if !attach_switch {
+        return attach_unavailable_refusal();
+    }
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let projection = match owner_browser_session_projection(
+        &state,
+        &user,
+        token.as_deref(),
+        &session_id,
+    )
+    .await
+    {
+        Ok(projection) => projection,
+        Err(response) => return response,
+    };
+    if projection_not_zdr_off(&projection) {
+        return attach_zdr_refusal();
+    }
+    let (attach_id, grant_id) = projection_attach_ids(&projection);
+    // The grant first: once it is revoked the agent's next step is refused even if the
+    // Quarry call below fails. `revoke_session_grant` is best effort and logs only a status.
+    if let Some(grant_id) = grant_id.as_deref() {
+        revoke_session_grant(&state, &user, &headers, grant_id).await;
+    }
+    if let Some(attach_id) = attach_id.as_deref() {
+        let (status, _) = quarry_call(
+            &state,
+            Method::DELETE,
+            &format!(
+                "/v1/agent/runs/{}/attach/{}?disposition=abort",
+                urlencoding::encode(&session_id),
+                urlencoding::encode(attach_id),
+            ),
+            None,
+            token.as_deref(),
+            &user.user_id,
+        )
+        .await;
+        if !status.is_success() {
+            tracing::warn!(
+                status = status.as_u16(),
+                "browser attach stop: Quarry did not end the attachment; the revoked grant stops it"
+            );
+        }
+    }
+    (StatusCode::OK, Json(ok(json!({ "stopped": true })))).into_response()
 }
 
 /// The body of a tab-open call. An open the model proposed carries
@@ -4174,9 +4460,35 @@ fn browser_response_from_owner_projection(projection: &Value, observation: Optio
             "timeline": [],
             "replay": { "events": [], "eventCount": 0 },
             "zdr": projection.get("zdr").and_then(Value::as_bool).unwrap_or(false),
-            "capabilities": browser_session_capabilities(projection)
+            "capabilities": browser_session_capabilities(projection),
+            "attach": session_attach_view(projection)
         },
         "observation": observation
+    })
+}
+
+/// The session's live attachment as the SPA may see it (Q2-WS8.I): `{ state, tabId, tabEpoch }`,
+/// allow-listed from Quarry's `attach` object. The attach grant id is never copied. `null` when
+/// the projection has no attachment or its state is not a known word.
+fn session_attach_view(projection: &Value) -> Value {
+    let Some(attach) = projection.get("attach").filter(|value| value.is_object()) else {
+        return Value::Null;
+    };
+    let state = match attach.get("state").and_then(Value::as_str) {
+        Some(
+            state @ ("attached" | "released" | "aborted" | "revoked" | "idle_released"
+            | "session_ended"),
+        ) => state,
+        _ => return Value::Null,
+    };
+    let tab_id = attach
+        .get("tabId")
+        .and_then(Value::as_str)
+        .filter(|id| is_valid_path_segment(id));
+    json!({
+        "state": state,
+        "tabId": tab_id,
+        "tabEpoch": attach.get("tabEpoch").and_then(Value::as_u64),
     })
 }
 
@@ -4276,6 +4588,33 @@ fn tab_with_opened_by(mut tab: Value, projection: &Value) -> Value {
         }
         if let Some(holder @ ("human" | "agent")) = projected_tab.and_then(|tab| tab.get("holder")).and_then(Value::as_str) {
             object.insert("holder".to_owned(), json!(holder));
+        }
+        // Q2-WS8.I: the attachment's mark and id, allow-listed: `mark` only as one of the two
+        // closed words, `attachId` only path-segment shaped, and never a grant id.
+        let mark = object
+            .get("mark")
+            .or_else(|| projected_tab.and_then(|tab| tab.get("mark")))
+            .and_then(Value::as_str)
+            .and_then(|mark| match mark {
+                "deliverable" => Some("deliverable"),
+                "handoff" => Some("handoff"),
+                _ => None,
+            });
+        let attach_id = object
+            .get("attachId")
+            .or_else(|| projected_tab.and_then(|tab| tab.get("attachId")))
+            .and_then(Value::as_str)
+            .filter(|id| is_valid_path_segment(id))
+            .map(str::to_owned);
+        object.remove("mark");
+        object.remove("attachId");
+        object.remove("grantId");
+        object.remove("grant_id");
+        if let Some(mark) = mark {
+            object.insert("mark".to_owned(), json!(mark));
+        }
+        if let Some(attach_id) = attach_id {
+            object.insert("attachId".to_owned(), json!(attach_id));
         }
         if let Some(marker) = marker {
             object.insert("openedBy".to_owned(), Value::String(marker.to_owned()));
@@ -5824,6 +6163,17 @@ fn spa_owner_projection(mut projection: Value) -> Value {
     if let Some(object) = projection.as_object_mut() {
         object.remove("grantId");
         object.remove("grant_id");
+        // Q2-WS8.I: the attach grant id (WS8.F `attach.grantId`) is internal too.
+        if let Some(attach) = object.get_mut("attach").and_then(Value::as_object_mut) {
+            attach.remove("grantId");
+            attach.remove("grant_id");
+        }
+        if let Some(tabs) = object.get_mut("tabs").and_then(Value::as_array_mut) {
+            for tab in tabs.iter_mut().filter_map(Value::as_object_mut) {
+                tab.remove("grantId");
+                tab.remove("grant_id");
+            }
+        }
     }
     projection
 }
@@ -6114,6 +6464,49 @@ fn browser_site_blocked_response(body: &Value) -> Option<Response> {
     Some((StatusCode::FORBIDDEN, Json(response)).into_response())
 }
 
+/// Quarry's WS8.F attach and tab-control refusals (Q2-WS8.I), in the gateway's own codes. The
+/// reason is Quarry's error message or `details.reason`, matched only against the closed set
+/// below; `None` for anything else, which passes through as before.
+fn browser_attach_refusal(body: &Value) -> Option<Response> {
+    let reason = ["/error/details/reason", "/error/message"]
+        .iter()
+        .find_map(|pointer| {
+            let value = body.pointer(pointer)?.as_str()?;
+            [
+                "attach_exists",
+                "no_attached_agent",
+                "attach_disabled",
+                "attach_zdr_refused",
+                "control_transition_requires_human",
+            ]
+            .into_iter()
+            .find(|known| *known == value)
+        })?;
+    let (status, code, message) = match reason {
+        "attach_exists" => (
+            StatusCode::CONFLICT,
+            "browser_attach_exists",
+            "An agent is already attached to this browser session.",
+        ),
+        "no_attached_agent" | "attach_disabled" => (
+            StatusCode::CONFLICT,
+            "browser_attach_unavailable",
+            "An attached browser agent is not available for this session.",
+        ),
+        "attach_zdr_refused" => (
+            StatusCode::CONFLICT,
+            "browser_attach_zdr_unsupported",
+            "This browser session cannot attach an AI run under zero data retention.",
+        ),
+        _ => (
+            StatusCode::FORBIDDEN,
+            "browser_tab_control_forbidden",
+            "Only the person who owns this browser session can change who holds a tab.",
+        ),
+    };
+    Some((status, Json(error(code, message))).into_response())
+}
+
 pub(super) fn forward_quarry_failure(status: StatusCode, body: Value) -> Response {
     if status == StatusCode::TOO_MANY_REQUESTS {
         if let Some(response) = browser_capacity_response(&body) {
@@ -6139,6 +6532,9 @@ pub(super) fn forward_quarry_failure(status: StatusCode, body: Value) -> Respons
             response["error"]["details"] = details.clone();
         }
         return (StatusCode::CONFLICT, Json(response)).into_response();
+    }
+    if let Some(response) = browser_attach_refusal(&body) {
+        return response;
     }
     // WS9.I: a control change refused because the epoch moved on. Quarry answers CONFLICT with
     // the epochs in its details; only that shape maps, any other 409 passes through.
@@ -9671,6 +10067,8 @@ pub(crate) mod tests {
             browser_consent_api: false,
             browser_downloads: false,
             browser_recipes: false, browser_region_attach: false, browser_tab_mentions: false,
+            browser_turn_context: false,
+            browser_region_attach_key: String::new(),
             auth_core_url: "http://127.0.0.1:1".into(),
             verevon_public_origin: "http://localhost:5173".into(),
             session_core_url: "http://127.0.0.1:1".into(),

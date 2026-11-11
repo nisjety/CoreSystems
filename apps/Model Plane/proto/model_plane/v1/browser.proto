@@ -107,6 +107,17 @@ message AcquireGrantRequest {
   // request left with no host is refused. Refused for any other grant.
   repeated string consent_denied_domains = 22;
 
+  // fill_otp approval binding (Q3-E3.1-b1-c, ADR-2a; tags 23-24 of F-t2-032's
+  // band). The mail connection the one-time code is read from: required, and
+  // matching ^[A-Za-z0-9_-]{1,128}$, when allowed_actions is ["fill_otp"];
+  // refused for any other grant. Stored verbatim, never logged. Dark behind
+  // BROWSER_BROKER_FILL_OTP_ENABLED.
+  string mail_connection_id = 23;
+  // The canonical https origin (scheme https, lowercase host, optional port,
+  // no path, query or fragment) the code may be typed into: required for a
+  // fill_otp approval and refused for any other grant.
+  string grant_origin = 24;
+
   // The Space the run belongs to (WS21-S8). The site policy reads the Space
   // floor from it; empty outside a Space. Tag 11 (R-6 allocates 10 to zdr).
   string space_id = 11;
@@ -193,6 +204,13 @@ message AcquireGrantResponse {
   // E3.2-e1: the consent scope of an origin_extension grant ("turn",
   // "conversation" or "always"); empty for every other kind.
   string consent_scope = 21;
+
+  // Q3-E3.1-b1-c: the mail connection a fill_otp approval is bound to; empty
+  // for every other grant.
+  string mail_connection_id = 23;
+  // Q3-E3.1-b1-c: the canonical https origin a fill_otp approval is bound to;
+  // empty for every other grant.
+  string grant_origin = 24;
 
   // INNH-10: the API key this grant was issued for (the key id, never the
   // key). Empty for every grant not acquired by an api_key principal. 60:
@@ -334,6 +352,15 @@ message ValidateGrantResponse {
   // origin_extension grant only while it validates and its parent_grant_id is
   // the run grant it holds.
   string consent_scope = 21;
+
+  // Q3-E3.1-b1-c: the mail connection a fill_otp approval is bound to; empty
+  // for every other grant. A consumer reads the one-time code only from this
+  // connection.
+  string mail_connection_id = 23;
+  // Q3-E3.1-b1-c: the canonical https origin a fill_otp approval is bound to;
+  // empty for every other grant. A consumer types the code only into a frame
+  // whose origin equals it.
+  string grant_origin = 24;
 
   // INNH-10: the API key the grant was issued for (the key id, never the
   // key); empty for a grant not acquired by an api_key principal. A consumer

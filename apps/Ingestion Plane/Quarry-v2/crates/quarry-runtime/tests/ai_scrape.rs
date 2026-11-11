@@ -144,7 +144,7 @@ impl Double {
     }
 }
 
-const GATEWAY_FIELDS: [&str; 7] = [
+const GATEWAY_FIELDS: [&str; 10] = [
     "messages",
     "model",
     "provider",
@@ -152,6 +152,10 @@ const GATEWAY_FIELDS: [&str; 7] = [
     "stream",
     "structured_output_schema",
     "zdr",
+    // WS16.S1: honoured by the gateway since the service lane landed.
+    "temperature",
+    "max_tokens",
+    "purpose",
 ];
 
 fn reject(shared: &Shared, status: u16, why: &str) -> Response<Body> {
@@ -368,6 +372,9 @@ fn request(model: &str, schema: Option<&str>, zdr: bool) -> AiChatRequest {
         model: model.to_owned(),
         structured_output_schema: schema.map(str::to_owned),
         zdr,
+        max_tokens: None,
+        temperature: None,
+        purpose: None,
     }
 }
 
@@ -632,6 +639,9 @@ fn debug_output_never_holds_the_page() {
         model: "verevon-balance".into(),
         structured_output_schema: Some("SCHEMA-SECRET".into()),
         zdr: false,
+        max_tokens: None,
+        temperature: None,
+        purpose: None,
     };
     let text = format!("{req:?}");
     assert!(!text.contains("SECRET"), "{text}");

@@ -360,13 +360,29 @@ fn flag_on(value: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
-/// The hash of a batch request as the caller sent it: its URLs, in order, and `ingest`.
+/// The hash of a batch request as the caller sent it: its URLs, in order, and `ingest`. When the
+/// caller sent them, its `webhook` and `max_parallel` are covered too, as the raw values (before
+/// any check or clamp). A key that is `None` is left out of the canonical JSON, so a request that
+/// sent neither hashes exactly as it did before, and a stored job keeps matching.
 /// The route takes it before the URL check and the allowance clamp, so a retry of the same
 /// request hashes the same even when the plan or the checks changed in between.
-pub fn batch_payload_hash(urls: &[String], ingest: Option<bool>) -> String {
+pub fn batch_payload_hash(
+    urls: &[String],
+    ingest: Option<bool>,
+    webhook: Option<&serde_json::Value>,
+    max_parallel: Option<&serde_json::Value>,
+) -> String {
     use sha2::{Digest, Sha256};
     use std::fmt::Write as _;
-    let canonical = serde_json::json!({ "kind": "batch", "urls": urls, "ingest": ingest });
+    let mut canonical = serde_json::json!({ "kind": "batch", "urls": urls, "ingest": ingest });
+    if let Some(map) = canonical.as_object_mut() {
+        if let Some(webhook) = webhook {
+            map.insert("webhook".to_string(), webhook.clone());
+        }
+        if let Some(max_parallel) = max_parallel {
+            map.insert("max_parallel".to_string(), max_parallel.clone());
+        }
+    }
     let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
     let digest = Sha256::digest(&bytes);
     let mut out = String::with_capacity(7 + 64);
@@ -730,13 +746,33 @@ mod tests {
     #[test]
     fn the_payload_hash_is_stable_and_tracks_urls_order_and_ingest() {
         let urls = vec!["https://a.example/".to_string(), "https://b.example/".to_string()];
-        let first = batch_payload_hash(&urls, Some(true));
-        assert_eq!(first, batch_payload_hash(&urls, Some(true)));
+        let first = batch_payload_hash(&urls, Some(true), None, None);
+        assert_eq!(first, batch_payload_hash(&urls, Some(true), None, None));
         assert!(first.starts_with("sha256:") && first.len() == 7 + 64, "{first}");
         let reversed: Vec<String> = urls.iter().rev().cloned().collect();
-        assert_ne!(first, batch_payload_hash(&reversed, Some(true)));
-        assert_ne!(first, batch_payload_hash(&urls, None));
-        assert_ne!(first, batch_payload_hash(&urls[..1], Some(true)));
+        assert_ne!(first, batch_payload_hash(&reversed, Some(true), None, None));
+        assert_ne!(first, batch_payload_hash(&urls, None, None, None));
+        assert_ne!(
+            first,
+            batch_payload_hash(&urls[..1], Some(true), None, None)
+        );
+        // W3-E3.7.1: a webhook-only and a max_parallel-only difference are different requests.
+        let hook = serde_json::json!({ "url": "https://hooks.example/a" });
+        let cap = serde_json::json!(4);
+        assert_ne!(
+            first,
+            batch_payload_hash(&urls, Some(true), Some(&hook), None)
+        );
+        assert_ne!(
+            first,
+            batch_payload_hash(&urls, Some(true), None, Some(&cap))
+        );
+        // None/None is the hash a job stored before those keys were covered: the SHA-256 of the
+        // compact canonical JSON {"ingest":true,"kind":"batch","urls":[...]}, keys sorted.
+        assert_eq!(
+            first,
+            "sha256:fa96cdc69a343e1f69f1901b7251daa4c815477ae5af96fda10bb6f9af878f1b"
+        );
     }
 
     #[test]

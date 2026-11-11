@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use dashmap::DashMap;
@@ -68,6 +69,89 @@ pub fn org_max_permits_from_env(get: impl Fn(&str) -> Option<String>) -> Result<
     }
 }
 
+/// Most organizations whose render cap the process keeps (see
+/// [`set_org_render_cap`]). Past this, recording a new organization first drops
+/// one other entry, so the registry stays bounded.
+const ORG_RENDER_CAP_SOFT_LIMIT: usize = 4096;
+
+/// The process-wide render caps that [`set_org_render_cap`] records.
+fn org_render_caps() -> &'static Mutex<HashMap<String, usize>> {
+    static CAPS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    CAPS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Set how many browser-pool permits `org_id` may hold, for every pool in the
+/// process: the plan's `render_permits`, or the floor when the plan says
+/// nothing. A pool applies it on the organization's next acquire, resizing that
+/// organization's share to it and never past the pool's own size. A cap below
+/// `1` is read as `1`. It has effect only on a pool built with a
+/// per-organization cap (`with_org_max_permits` above `0`); with the switch off
+/// it is ignored and the pool keeps its boot cap.
+pub fn set_org_render_cap(org_id: &str, cap: usize) {
+    if org_id.is_empty() {
+        return;
+    }
+    let cap = cap.max(1);
+    let mut caps = org_render_caps()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(slot) = caps.get_mut(org_id) {
+        *slot = cap;
+        return;
+    }
+    if caps.len() >= ORG_RENDER_CAP_SOFT_LIMIT {
+        if let Some(evicted) = caps.keys().next().cloned() {
+            caps.remove(&evicted);
+        }
+    }
+    caps.insert(org_id.to_owned(), cap);
+}
+
+/// The render cap [`set_org_render_cap`] recorded for `org_id`, if any.
+fn org_render_cap(org_id: &str) -> Option<usize> {
+    org_render_caps()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(org_id)
+        .copied()
+}
+
+/// One organization's share of a pool: the semaphore that enforces it, and how
+/// many permits that semaphore holds in total (available plus lent out), so a
+/// resize knows the difference to make.
+struct OrgShare {
+    semaphore: Arc<Semaphore>,
+    size: usize,
+}
+
+impl OrgShare {
+    fn new(size: usize) -> Self {
+        Self {
+            semaphore: Arc::new(Semaphore::new(size)),
+            size,
+        }
+    }
+
+    /// Permits held by requests right now.
+    fn held(&self) -> usize {
+        self.size.saturating_sub(self.semaphore.available_permits())
+    }
+
+    /// Move the share to `desired` permits. Growing adds permits. Shrinking
+    /// forgets only permits nobody holds, so a request that has its permit keeps
+    /// it; the rest of a shrink lands as those permits come back, on the next
+    /// acquire for this organization.
+    fn resize(&mut self, desired: usize) {
+        if desired > self.size {
+            self.semaphore.add_permits(desired - self.size);
+            self.size = desired;
+        } else if desired < self.size {
+            let forgotten = self.semaphore.forget_permits(self.size - desired);
+            self.size = self.size.saturating_sub(forgotten);
+        }
+    }
+}
+
 /// Standalone runtime lease pool: pairs an affinity-keyed lease registry with
 /// a semaphore that enforces a global concurrency cap, and optionally a
 /// per-organization cap so one tenant cannot hold every browser.
@@ -79,7 +163,7 @@ pub struct RuntimeLeasePool {
     metrics: Arc<LeaseMetrics>,
     /// Per-organization concurrent permits; `0` means no per-org cap.
     org_max: usize,
-    org_semaphores: Arc<DashMap<String, Arc<Semaphore>>>,
+    org_semaphores: Arc<DashMap<String, OrgShare>>,
 }
 
 impl RuntimeLeasePool {
@@ -109,23 +193,37 @@ impl RuntimeLeasePool {
         self.org_max
     }
 
+    /// How many permits `org_id`'s share should hold now: the render cap that
+    /// [`set_org_render_cap`] recorded for it (never past this pool's size), or
+    /// the boot cap when there is none. On a pool without a per-organization cap
+    /// it is `0`, so the override is ignored.
+    fn desired_org_permits(&self, org_id: &str) -> usize {
+        match org_render_cap(org_id) {
+            Some(cap) if self.org_max > 0 => cap.min(self.max_concurrent),
+            _ => self.org_max,
+        }
+    }
+
+    /// The organization's semaphore, resized to its cap as of this call.
     fn org_semaphore(&self, org_id: &str) -> Arc<Semaphore> {
         if self.org_semaphores.len() > ORG_SEMAPHORE_SOFT_LIMIT {
-            let org_max = self.org_max;
-            self.org_semaphores
-                .retain(|_, semaphore| semaphore.available_permits() < org_max);
+            self.org_semaphores.retain(|_, share| share.held() > 0);
         }
-        self.org_semaphores
+        let desired = self.desired_org_permits(org_id);
+        let mut share = self
+            .org_semaphores
             .entry(org_id.to_owned())
-            .or_insert_with(|| Arc::new(Semaphore::new(self.org_max)))
-            .clone()
+            .or_insert_with(|| OrgShare::new(desired));
+        share.resize(desired);
+        share.semaphore.clone()
     }
 
     fn org_cap_error(&self, org_id: &str) -> QuarryError {
         self.metrics.refused_org_cap.fetch_add(1, Ordering::Relaxed);
-        let active = self.org_semaphores.get(org_id).map_or(0, |semaphore| {
-            self.org_max - semaphore.available_permits().min(self.org_max)
-        });
+        let (active, limit) = self
+            .org_semaphores
+            .get(org_id)
+            .map_or((0, self.org_max), |share| (share.held(), share.size));
         QuarryError::new(
             ErrorCode::RateLimited,
             "this organization already holds its share of the browser pool",
@@ -133,7 +231,7 @@ impl RuntimeLeasePool {
         .with_details(serde_json::json!({
             "reason": ORG_RENDER_CAP_REASON,
             "scope": "org",
-            "limit": self.org_max,
+            "limit": limit,
             "active": active,
             "retry_after_seconds": 5,
         }))

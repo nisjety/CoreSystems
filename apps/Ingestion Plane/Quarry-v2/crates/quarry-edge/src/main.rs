@@ -531,6 +531,8 @@ async fn run() -> anyhow::Result<()> {
         let bb_driver = Arc::new(BrowserbaseDriver::new(bb_config));
         let pool = Arc::new(RuntimeLeasePool::new(4).with_org_max_permits(pool_org_max));
         metrics::register_pool("browserbase", (*pool).clone());
+        // WS6.G: the plan-aware render cap reads the switch and this pool's size.
+        limits::set_render_permits_boot(pool_org_max, pool.max_concurrent());
         let processor_id = std::env::var("QUARRY_BROWSERBASE_PROCESSOR_ID")
             .unwrap_or_else(|_| "browserbase".into());
         let adapter = BrowserDriverAdapter::managed_provider(bb_driver, pool, processor_id);
@@ -758,10 +760,12 @@ async fn run() -> anyhow::Result<()> {
     // seven browser metrics (default off); every other event passes through unchanged.
     let browser_metrics = usage_attrs::browser_metrics_mode_from_env();
     tracing::info!(mode = browser_metrics.label(), "usage browser metrics mode");
-    let usage: Arc<dyn quarry_runtime::UsageMeter> = Arc::new(usage_attrs::ShadowMeter::new(
-        inner_usage,
-        browser_metrics,
-    ));
+    // WS16.S6: quarry.extract.llm has its own switch, QUARRY_EDGE__USAGE_LLM_METRICS (default off).
+    let llm_metrics = usage_attrs::llm_metrics_mode_from_env();
+    tracing::info!(mode = llm_metrics.label(), "usage llm metrics mode");
+    let usage: Arc<dyn quarry_runtime::UsageMeter> = Arc::new(
+        usage_attrs::ShadowMeter::new(inner_usage, browser_metrics).with_llm_metrics(llm_metrics),
+    );
 
     // WS6.D-s: the organization limits resolver. Only the static source is built; a misspelt
     // source or fail mode, or the unbuilt `billing_core`, stops the edge here, naming the variable.
@@ -965,6 +969,8 @@ async fn run() -> anyhow::Result<()> {
         );
         let pool = Arc::new(RuntimeLeasePool::new(2).with_org_max_permits(pool_org_max));
         metrics::register_pool("chromium", (*pool).clone());
+        // WS6.G: the plan-aware render cap reads the switch and this pool's size.
+        limits::set_render_permits_boot(pool_org_max, pool.max_concurrent());
         let adapter = BrowserDriverAdapter::new(browser_driver, pool);
         tracing::info!(
             session_isolation = adapter.session_isolation(),

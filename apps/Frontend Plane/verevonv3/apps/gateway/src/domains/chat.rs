@@ -5,6 +5,7 @@ pub(crate) mod history;
 pub(crate) mod json_handlers;
 mod library;
 pub(crate) mod shared;
+mod research_runs;
 mod search;
 mod streams;
 pub(crate) mod support;
@@ -17,7 +18,22 @@ use axum::{
 use crate::{config::AppState, middleware::require_session};
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
-    Router::new()
+    let mut router = Router::new();
+    // One addressable research run (Quarry v2 E4.6, Q4-062b): the person's read and stop. Registered
+    // only while `CHAT_RESEARCH_RUNS` is on, so off both paths answer 404. Model Gateway and Session
+    // Core decide that the run is the caller's own.
+    if state.space_features.chat_research_runs {
+        router = router
+            .route(
+                "/api/v1/chat/research-runs/{run_id}",
+                get(research_runs::get_research_run),
+            )
+            .route(
+                "/api/v1/chat/research-runs/{run_id}/cancel",
+                post(research_runs::cancel_research_run),
+            );
+    }
+    router
         .route("/api/v1/chat/stream", streams::stream_route())
         .route("/api/v1/chat/invoke", post(json_handlers::invoke_chat))
         .route(

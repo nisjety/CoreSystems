@@ -159,6 +159,17 @@
       ]
     },
     {
+      "name": "EXECUTION_CORE_RECIPE_RUNNER",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Q4-E4.2-3h: a browser run whose input names a saved recipe replays that procedure step by step with Quarry, under its own broker grant. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_CORE_RECIPE_RUNNER", "default": "false" }
+      ]
+    },
+    {
       "name": "EXECUTION_DO_COMPUTER_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -281,6 +292,17 @@
       "codeDefault": "false",
       "declarations": [
         { "service": "session-core", "env": "MEMORY_GROUNDING_ENABLED", "default": "0" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_BROWSER_RECIPE",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Q4-E4.2-3i: a browser run start may name a saved recipe, written into execution-core's tool_input.recipe with for_user_id from the verified claims. Off refuses it 400 browser_recipe_unavailable. Only the literal true turns it on; needs EXECUTION_CORE_RECIPE_RUNNER.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_BROWSER_RECIPE", "default": "false" }
       ]
     },
     {
@@ -492,6 +514,7 @@
     "APPROVAL_WRITE_PREVIEW_ENABLED",
     "AUTHORED_KINDS_ENABLED",
     "BROWSER_BROKER_ASSISTANT_TASK_GRANTS_ENABLED",
+    "BROWSER_BROKER_FILL_OTP_ENABLED",
     "BROWSER_BROKER_HUMAN_BROWSE_ENABLED",
     "BROWSER_BROKER_KEY_GRANTS_ENABLED",
     "BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED",

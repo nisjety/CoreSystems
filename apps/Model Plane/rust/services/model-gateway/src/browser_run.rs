@@ -16,7 +16,7 @@
 //! including why this calls `ExecuteStep` directly rather than routing
 //! through the generic multi-tool chat loop.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -351,6 +351,44 @@ struct BrowserRunStartRequest {
     /// `tab_mark_requires_attach`, outside the set 400 `tab_mark_on_complete_invalid`.
     #[serde(default)]
     tab_mark_on_complete: Option<String>,
+    /// A saved recipe the run replays (Q4-E4.2-3i): a person starts it, the Model
+    /// never chooses one. Needs `MODEL_GATEWAY_BROWSER_RECIPE=true`, else the start
+    /// is refused 400 `browser_recipe_unavailable`. The goal still labels the run
+    /// but does not steer a recipe. Absent, the run is an ordinary browser run.
+    #[serde(default)]
+    recipe: Option<RecipeAsk>,
+}
+
+/// The saved recipe a start names (Q4-E4.2-3i), read strictly: an unknown key
+/// fails the body. The person it belongs to is never read from here; the gateway
+/// writes `for_user_id` from the verified claims.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecipeAsk {
+    /// The saved procedure's identifier: `proc_` and identifier characters.
+    id: String,
+    /// The version to replay. Exclusive with `tag`.
+    #[serde(default)]
+    version: Option<u32>,
+    /// The tag to replay, `^[a-z0-9._-]{1,32}$`. Exclusive with `version`.
+    #[serde(default)]
+    tag: Option<String>,
+    /// The values a person supplies for the recipe's typed steps, by slot name.
+    /// User data: never logged, never put in a run event.
+    #[serde(default)]
+    slots: BTreeMap<String, String>,
+}
+
+/// Slot values are user data, so a debug print names the slot count only.
+impl std::fmt::Debug for RecipeAsk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecipeAsk")
+            .field("id", &self.id)
+            .field("version", &self.version)
+            .field("tag", &self.tag)
+            .field("slots", &self.slots.len())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -719,6 +757,112 @@ fn insert_attach_fields(tool_input: &mut Value, attach_session_id: Option<&str>)
     fields.insert("profile_id".to_owned(), Value::Null);
 }
 
+/// `MODEL_GATEWAY_BROWSER_RECIPE` (Q4-E4.2-3i): strict, only the literal `true`
+/// lets a start name a saved recipe. Off (the default) refuses such a start 400
+/// `browser_recipe_unavailable` before any grant, thread or run write.
+fn recipe_flag(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// Longest saved procedure id a start may name (execution-core's bound).
+const MAX_RECIPE_ID_BYTES: usize = 64;
+/// Longest recipe tag (capability-core's bound).
+const MAX_RECIPE_TAG_BYTES: usize = 32;
+/// Most slots one start may fill.
+const MAX_RECIPE_SLOTS: usize = 32;
+/// Longest slot name.
+const MAX_RECIPE_SLOT_KEY_BYTES: usize = 40;
+/// Longest slot value, in characters.
+const MAX_RECIPE_SLOT_VALUE_CHARS: usize = 2000;
+
+/// Whether `id` is a saved procedure id: `proc_` then identifier characters
+/// (letters, digits, `_`, `-`), at most 64 bytes.
+fn is_recipe_procedure_id(id: &str) -> bool {
+    id.len() <= MAX_RECIPE_ID_BYTES
+        && id.strip_prefix("proc_").is_some_and(|rest| {
+            !rest.is_empty()
+                && rest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        })
+}
+
+/// Whether `tag` matches `^[a-z0-9._-]{1,32}$`.
+fn is_recipe_ask_tag(tag: &str) -> bool {
+    (1..=MAX_RECIPE_TAG_BYTES).contains(&tag.len())
+        && tag.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+}
+
+/// Whether `key` is a slot name, `^[a-z0-9_]{1,40}$`.
+fn is_recipe_slot_key(key: &str) -> bool {
+    (1..=MAX_RECIPE_SLOT_KEY_BYTES).contains(&key.len())
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// The recipe of a start, checked (Q4-E4.2-3i). `Ok(None)` when the start names
+/// none. With the flag off a start that names one is refused
+/// `browser_recipe_unavailable`. A recipe types and clicks, so an attached start
+/// is refused `recipe_attach_unsupported` and a plan-mode start
+/// `recipe_plan_mode_unsupported`. Every refusal comes before any write, and no
+/// refusal echoes a slot value.
+fn recipe_for(enabled: bool, req: &BrowserRunStartRequest) -> Result<Option<RecipeAsk>, ApiError> {
+    let Some(recipe) = req.recipe.as_ref() else {
+        return Ok(None);
+    };
+    if !enabled {
+        return Err(bad_request("browser_recipe_unavailable"));
+    }
+    if req.attach_session_id.is_some() || req.attach_tab.is_some() {
+        return Err(bad_request("recipe_attach_unsupported"));
+    }
+    if req.plan_mode == Some(true) {
+        return Err(bad_request("recipe_plan_mode_unsupported"));
+    }
+    if !is_recipe_procedure_id(&recipe.id) {
+        return Err(bad_request("recipe_id_invalid"));
+    }
+    if recipe.version.is_some() && recipe.tag.is_some() {
+        return Err(bad_request("recipe_version_and_tag"));
+    }
+    if recipe.tag.as_deref().is_some_and(|tag| !is_recipe_ask_tag(tag)) {
+        return Err(bad_request("recipe_tag_invalid"));
+    }
+    if recipe.slots.len() > MAX_RECIPE_SLOTS
+        || recipe.slots.iter().any(|(key, value)| {
+            !is_recipe_slot_key(key) || value.chars().count() > MAX_RECIPE_SLOT_VALUE_CHARS
+        })
+    {
+        return Err(bad_request("recipe_slots_invalid"));
+    }
+    Ok(Some(recipe.clone()))
+}
+
+/// Write the saved recipe into the browser `tool_input` (Q4-E4.2-3i) as
+/// execution-core's `tool_input.recipe`, with `for_user_id` from the VERIFIED
+/// claims, never from the body. A start that names no recipe carries the
+/// `tool_input` it always did. The `zdr` flag already in `tool_input` is left
+/// unchanged.
+fn insert_recipe_fields(tool_input: &mut Value, recipe: Option<&RecipeAsk>, user_id: &str) {
+    let (Some(recipe), Some(fields)) = (recipe, tool_input.as_object_mut()) else {
+        return;
+    };
+    let mut object = serde_json::Map::new();
+    object.insert("id".to_owned(), json!(recipe.id));
+    if let Some(version) = recipe.version {
+        object.insert("version".to_owned(), json!(version));
+    }
+    if let Some(tag) = &recipe.tag {
+        object.insert("tag".to_owned(), json!(tag));
+    }
+    object.insert("slots".to_owned(), json!(recipe.slots));
+    object.insert("for_user_id".to_owned(), json!(user_id));
+    fields.insert("recipe".to_owned(), Value::Object(object));
+}
+
 /// Write the policy ask, trace context and request id into the browser
 /// `tool_input`. Keys the run has no value for are not written, so a start with
 /// none of them carries the `tool_input` it always did, except the request id
@@ -990,6 +1134,17 @@ fn run_request_fingerprint(req: &BrowserRunStartRequest) -> String {
     }
     if let Some(policy) = req.policy.as_ref().filter(|policy| **policy != RunPolicyAsk::default()) {
         part("policy", &format!("{policy:?}"));
+    }
+    if let Some(recipe) = &req.recipe {
+        // Only when named, so a request without one keeps the fingerprint it had.
+        // Slot values enter the hash only; the digest never reveals them.
+        part("recipe_id", &recipe.id);
+        part("recipe_version", &format!("{:?}", recipe.version));
+        part("recipe_tag", recipe.tag.as_deref().unwrap_or(""));
+        for (key, value) in &recipe.slots {
+            part("recipe_slot", key);
+            part("recipe_slot_value", value);
+        }
     }
     let digest = hasher.finalize();
     let mut hex = String::with_capacity(32);
@@ -2085,6 +2240,16 @@ async fn browser_run_start_inner(
         return Err(bad_request("goal must not be empty"));
     }
     reject_unsupported_browser_approval(&req)?;
+    // A saved recipe (Q4-E4.2-3i) needs its strict flag and a well-formed ask;
+    // refused before any grant, thread or run write. It belongs to the person
+    // of the verified claims, so a credential without one cannot name a recipe.
+    let recipe = recipe_for(
+        recipe_flag(std::env::var("MODEL_GATEWAY_BROWSER_RECIPE").ok().as_deref()),
+        &req,
+    )?;
+    if recipe.is_some() && claims.user_id.trim().is_empty() {
+        return Err(bad_request("recipe_requires_user"));
+    }
     // A restriction the run cannot honour is refused before any grant, thread
     // or run write: flag off, or a malformed ask, never "run without it".
     let policy_ask = policy_ask_for(
@@ -2368,6 +2533,7 @@ async fn browser_run_start_inner(
         tool_input["attach_tab"] = json!(tab);
     }
     insert_tab_mark(&mut tool_input, tab_mark);
+    insert_recipe_fields(&mut tool_input, recipe.as_ref(), user_id.trim());
     insert_planner_fields(&mut tool_input, max_planner_tokens, planner.flag);
     insert_policy_and_trace_fields(&mut tool_input, policy_ask, run_source, &request_id);
     let tool_input = tool_input.to_string();
@@ -3198,6 +3364,7 @@ mod tests {
             attach_session_id: None,
             attach_tab: None,
             tab_mark_on_complete: None,
+            recipe: None,
         }
     }
 

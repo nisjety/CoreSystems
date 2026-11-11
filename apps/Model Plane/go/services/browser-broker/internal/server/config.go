@@ -53,6 +53,12 @@ const (
 	EnvMaxActiveGrantsPerKey = "BROWSER_BROKER_MAX_ACTIVE_GRANTS_PER_KEY"
 	// E3.2-e1 (OD13): origin-extension grants. Off unless exactly 1, true or on.
 	EnvOriginExtensionEnabled = "BROWSER_BROKER_ORIGIN_EXTENSION_ENABLED"
+	// Q3-E3.1-b1-c (ADR-2a): fill_otp sensitive approvals. Off unless exactly
+	// 1, true or on.
+	EnvFillOtpEnabled = "BROWSER_BROKER_FILL_OTP_ENABLED"
+	// WS7.K: the org web-policy snapshot a grant carries. Strict: unset, 0 or
+	// false is off, 1 or true is on, anything else stops the broker.
+	EnvWebPolicySnapshot = "BROWSER_BROKER_WEB_POLICY_SNAPSHOT"
 )
 
 // Config holds the limits applied when issuing grants.
@@ -95,6 +101,17 @@ type Config struct {
 	// by default: every request is PermissionDenied and an existing extension
 	// validates as revoked, so turning it off is also the kill switch.
 	OriginExtensionEnabled bool
+	// FillOtpEnabled lets a caller obtain a fill_otp sensitive approval bound to
+	// one https origin and one mail connection (Q3-E3.1-b1-c, ADR-2a,
+	// BROWSER_BROKER_FILL_OTP_ENABLED). Off by default: any request naming
+	// fill_otp is InvalidArgument.
+	FillOtpEnabled bool
+	// WebPolicySnapshot reads the verified token's web_policy claim at acquire
+	// (WS7.K, BROWSER_BROKER_WEB_POLICY_SNAPSHOT): an ordinary grant's hosts are
+	// narrowed by its domain rules, an unreadable claim refuses the mint, and
+	// the snapshot is stored with the grant and returned as field 20. Off by
+	// default: nothing is narrowed and field 20 is never set.
+	WebPolicySnapshot bool
 }
 
 // DefaultConfig returns the defaults.
@@ -143,6 +160,11 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.HumanBrowseEnabled = enabled
+	snapshot, err := boolEnv(getenv, EnvWebPolicySnapshot)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.WebPolicySnapshot = snapshot
 	if v, ok, err := positiveInt(getenv, EnvHumanAbsoluteTTLSeconds); err != nil {
 		return Config{}, err
 	} else if ok {
@@ -155,6 +177,7 @@ func ConfigFromEnv(getenv func(string) string) (Config, error) {
 	}
 	cfg.KeyGrantsEnabled = switchOn(getenv(EnvKeyGrantsEnabled))
 	cfg.OriginExtensionEnabled = switchOn(getenv(EnvOriginExtensionEnabled))
+	cfg.FillOtpEnabled = switchOn(getenv(EnvFillOtpEnabled))
 	if v, ok, err := positiveInt(getenv, EnvKeyGrantTTLSeconds); err != nil {
 		return Config{}, err
 	} else if ok {

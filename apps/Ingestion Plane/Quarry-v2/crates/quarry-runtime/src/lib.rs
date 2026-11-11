@@ -62,6 +62,7 @@ pub mod org_erasure;
 pub mod profile_backfill;
 #[cfg(feature = "grpc")]
 pub mod grpc;
+pub mod harvest_map;
 #[cfg(feature = "http3")]
 pub mod http3;
 pub mod hybrid;
@@ -218,8 +219,8 @@ pub use trace_projection::{
 };
 pub use transport_fallback_driver::TransportFallbackDriver;
 pub use usage::{
-    metrics as usage_metrics, BrowserMetricsMode, NatsUsageMeter, NoopUsageMeter, UsageEvent,
-    UsageIdError, UsageMeter,
+    metrics as usage_metrics, BrowserMetricsMode, LlmMetricsMode, NatsUsageMeter, NoopUsageMeter,
+    UsageEvent, UsageIdError, UsageMeter,
 };
 pub use vector_index::{DataPlaneVectorIndex, NoopVectorIndex, VectorHit, VectorIndex};
 pub use vision::{

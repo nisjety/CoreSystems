@@ -1,4 +1,4 @@
-import { requestForm, requestJson } from './http'
+import { ApiError, requestForm, requestJson } from './http'
 import { readSseStream } from './sse'
 
 export interface Source {
@@ -89,6 +89,8 @@ export interface CrawlJob {
   sourceId?: string
   orgId?: string
   createdAt?: string
+  /** WS14.S6/S7: the scope the crawl runs with, when the handoff echoed one (`effective`). */
+  effective?: CrawlEffectiveScope
 }
 
 export interface ScrapeRequest {
@@ -137,6 +139,10 @@ export interface CrawlRequest {
   allowSubdomains?: boolean
   /** WS14.S3: follow links to unrelated hosts. UI only; the gateway drops it for a Model proposal. */
   allowExternalLinks?: boolean
+  /** WS14.S7: ignore the site's robots.txt. Sent only as `true`; UI only (the gateway forwards it on the
+   * UI surface behind VEREVON_GATEWAY_CRAWL_ROBOTS_OVERRIDE and drops it for a Model proposal), and the
+   * edge allows it only for a person whose org's effective policy permits the override. */
+  ignoreRobotsTxt?: boolean
   /** Sitemap discovery: `skip` (default), `include` (sitemap URLs join the links) or `only` (sitemap URLs alone). */
   sitemap?: 'skip' | 'include' | 'only'
   /** Cleaning for every page of the crawl, as on `/scrape`. The inner keys are snake_case. */
@@ -163,6 +169,9 @@ export interface CrawlEffectiveScope {
   legacy: boolean
   warnings: string[]
   requestWarnings: { code: string; field: string }[]
+  /** WS14.S7: the authority that let this crawl ignore robots.txt (`effective.robots_override.authority`,
+   * e.g. `web.robots_override`); absent when robots.txt is followed. */
+  robotsOverride?: string
 }
 
 /** A single page surfaced by `/crawl/discover` (quarry `/v1/map`). */
@@ -676,6 +685,8 @@ export async function startCrawl(
       ...(body.excludePaths?.length ? { excludePaths: body.excludePaths } : {}),
       ...(body.allowSubdomains === undefined ? {} : { allowSubdomains: body.allowSubdomains }),
       ...(body.allowExternalLinks === undefined ? {} : { allowExternalLinks: body.allowExternalLinks }),
+      // WS14.S7: never sent as `false`; an untouched crawl follows robots.txt.
+      ...(body.ignoreRobotsTxt === true ? { ignoreRobotsTxt: true } : {}),
       ...(body.sitemap ? { sitemap: body.sitemap } : {}),
       ...(body.scrapeOptions && Object.keys(body.scrapeOptions).length ? { scrapeOptions: body.scrapeOptions } : {}),
     }),
@@ -854,6 +865,42 @@ export type CrawlWorkflowHandlers = {
   onEvent?: (event: CrawlWorkflowEvent) => void
 }
 
+/** WS15.L5: a crawl's event stream asks for the live tail (`follow=true`). A flagged edge then keeps the
+ * stream open until the job is over; an edge without the flag drains what the job has and ends. */
+function withFollow(path: string): string {
+  if (/[?&]follow=/.test(path)) return path
+  return `${path}${path.includes('?') ? '&' : '?'}follow=true`
+}
+
+/** How one connection of {@link streamCrawlRunEvents} ended. */
+interface CrawlStreamAttempt {
+  /** The stream reached its end: the `done` marker, or a terminal status. */
+  finished: boolean
+  /** The edge closed the stream with `reconnect` (its lifetime ran out): resume from the cursor. */
+  reconnect: boolean
+  /** The connection failed, or an `error` frame ended it. */
+  failed: boolean
+  /** The connection delivered at least one event (control frames do not count). */
+  progressed: boolean
+  error?: unknown
+}
+
+/** The `seq` of a frame's JSON envelope: the cursor of a frame that carries no SSE `id`. */
+function frameSeq(data: string): string | undefined {
+  try {
+    const record = asRecord(JSON.parse(data) as unknown)
+    const seq = record ? numberField(record, 'seq') : undefined
+    return seq === undefined ? undefined : String(seq)
+  } catch {
+    return undefined
+  }
+}
+
+/** The edge answers 403 to `follow=true` from a zero-retention caller: its live events name page URLs. */
+function isLiveTailRefusal(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 403
+}
+
 export async function streamCrawlRunEvents(
   orgId: string,
   runId: string,
@@ -867,20 +914,319 @@ export async function streamCrawlRunEvents(
   // that the SSE reader could not parse (the 0-pages bug).
   streamPath?: string,
 ): Promise<void> {
-  const path = streamPath && streamPath.trim()
+  const base = streamPath && streamPath.trim()
     ? streamPath
     : `/api/v1/knowledge/jobs/${encodeURIComponent(runId)}/events`
-  await readSseStream(
-    path,
+  // The cursor: the last frame's id (or envelope seq), sent as Last-Event-ID on a reconnect. `liveTail`
+  // drops to false when the edge refuses the live tail, and the stream then reads the drain instead.
+  const cursor: { lastEventId?: string; liveTail: boolean; retriesLeft: number } = { liveTail: true, retriesLeft: 1 }
+  try {
+    for (;;) {
+      const attempt: CrawlStreamAttempt = { finished: false, reconnect: false, failed: false, progressed: false }
+      await readSseStream(
+        cursor.liveTail ? withFollow(base) : base,
+        { headers: orgHeaders(orgId), signal, lastEventId: cursor.lastEventId },
+        (event) => {
+          if (event.id !== undefined) cursor.lastEventId = event.id || undefined
+          else cursor.lastEventId = frameSeq(event.data) ?? cursor.lastEventId
+          // Control frames, not progress: the snapshot that opens a live tail and the audit of a control request.
+          if (event.event === 'snapshot' || event.event === 'control_requested') return
+          if (event.event === 'reconnect') {
+            attempt.reconnect = true
+            return
+          }
+          if (event.event === 'error') {
+            attempt.failed = true
+            return
+          }
+          // The end marker (`data: done`). A frame named `done` carries the same marker.
+          if (event.data.trim() === 'done' && (event.event === undefined || event.event === 'done')) {
+            attempt.finished = true
+            return
+          }
+          const parsed = normalizeCrawlEvent(event.event, event.data)
+          attempt.progressed = true
+          handlers.onEvent?.(parsed)
+          if (parsed.status && isTerminalCrawlStatus(parsed.status)) attempt.finished = true
+        },
+        (err) => {
+          attempt.failed = true
+          attempt.error = err
+        },
+      )
+      if (signal?.aborted || attempt.finished) return
+      // The edge ended its stream on purpose (its lifetime ran out): resume from the cursor, which is no failure.
+      if (attempt.reconnect) continue
+      if (attempt.failed && cursor.liveTail && isLiveTailRefusal(attempt.error)) {
+        cursor.liveTail = false
+        continue
+      }
+      // A dropped stream gets one reconnect from the cursor before it counts as a failure. A connection that
+      // delivered events has made progress, so its drop earns a fresh reconnect; one that delivered none does not.
+      if (attempt.progressed) cursor.retriesLeft = 1
+      if (cursor.retriesLeft > 0) {
+        cursor.retriesLeft -= 1
+        continue
+      }
+      handlers.onError?.(
+        attempt.failed
+          ? (attempt.error instanceof Error ? attempt.error.message : 'Crawl event stream failed.')
+          : 'Crawl event stream ended before the job finished.',
+      )
+      return
+    }
+  } finally {
+    handlers.onDone?.()
+  }
+}
+
+/** WS15.L5: one crawl's status document. A plain read: no `wait` or `resume` query. */
+export async function getCrawlStatus(orgId: string, id: string, signal?: AbortSignal): Promise<CrawlJobStatus> {
+  const raw = await requestJson<unknown>(`/api/v1/knowledge/crawl/${encodeURIComponent(id)}`, {
+    headers: orgHeaders(orgId),
+    signal,
+  })
+  return normalizeCrawlStatus(raw)
+}
+
+/** WS15.L5: the failed and blocked pages of a crawl, one page at a time. `afterSeq` is the `nextSeq` of the
+ * page before; `limit` caps the page (the edge's default is 100, its ceiling 500). A zero-retention caller
+ * is refused, because the rows name page URLs. */
+export async function getCrawlErrors(
+  orgId: string,
+  id: string,
+  options: { limit?: number; afterSeq?: number } = {},
+  signal?: AbortSignal,
+): Promise<CrawlErrorsPage> {
+  const query = new URLSearchParams()
+  if (options.afterSeq !== undefined) query.set('after_seq', String(options.afterSeq))
+  if (options.limit !== undefined) query.set('limit', String(options.limit))
+  const suffix = query.toString()
+  const raw = await requestJson<unknown>(
+    `/api/v1/knowledge/crawl/${encodeURIComponent(id)}/errors${suffix ? `?${suffix}` : ''}`,
     { headers: orgHeaders(orgId), signal },
-    (event) => {
-      const parsed = normalizeCrawlEvent(event.event, event.data)
-      handlers.onEvent?.(parsed)
-      if (parsed.status && isTerminalCrawlStatus(parsed.status)) handlers.onDone?.()
-    },
-    (err) => handlers.onError?.(err instanceof Error ? err.message : 'Crawl event stream failed.'),
-    () => handlers.onDone?.(),
   )
+  return normalizeCrawlErrors(raw)
+}
+
+/** WS15.L5: pause a running crawl. Answers `202` while the orchestrator has yet to apply it, `200` once it has;
+ * `409` when the job is not running. The gateway answers `501` while the edge's job control is off. */
+export async function pauseCrawl(orgId: string, id: string, signal?: AbortSignal): Promise<CrawlControlResult> {
+  const raw = await requestJson<unknown>(`/api/v1/knowledge/crawl/${encodeURIComponent(id)}/pause`, {
+    method: 'POST',
+    headers: orgHeaders(orgId),
+    signal,
+  })
+  return normalizeCrawlControl(raw)
+}
+
+/** WS15.L5: resume a paused crawl (`409` when the job is not paused). Same answers as {@link pauseCrawl}. */
+export async function resumeCrawl(orgId: string, id: string, signal?: AbortSignal): Promise<CrawlControlResult> {
+  const raw = await requestJson<unknown>(`/api/v1/knowledge/crawl/${encodeURIComponent(id)}/resume`, {
+    method: 'POST',
+    headers: orgHeaders(orgId),
+    signal,
+  })
+  return normalizeCrawlControl(raw)
+}
+
+/** WS15.L5: stop a crawl for good. Irreversible: the caller confirms first. A cancelled crawl cannot be resumed;
+ * the pages already stored are kept. Same answers as {@link pauseCrawl}. */
+export async function cancelCrawl(orgId: string, id: string, signal?: AbortSignal): Promise<CrawlControlResult> {
+  const raw = await requestJson<unknown>(`/api/v1/knowledge/crawl/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    headers: orgHeaders(orgId),
+    signal,
+  })
+  return normalizeCrawlControl(raw)
+}
+
+// ── Crawl job control (WS15.L5) ───────────────────────────────────────────────
+// The status, errors and control verbs of one crawl. The gateway proxies them to the edge's
+// `/v1/crawl/{id}` family; the control verbs answer 501 while the edge's job control is off.
+
+/** The counts of one crawl, read from its event log. */
+export interface CrawlJobCounts {
+  completed: number
+  failed: number
+  blocked: number
+  retried: number
+}
+
+/** A non-fatal note about a crawl. `code` comes from a closed vocabulary on the edge. */
+export interface CrawlJobWarning {
+  code: string
+  message: string
+}
+
+/** What a crawl has been asked to do next, and whether the orchestrator has yet to carry it out. */
+export interface CrawlControlState {
+  /** `pause`, `resume` or `cancel`: the state the person asked for. */
+  desired?: string
+  /** True until the orchestrator applies the request. */
+  pending: boolean
+}
+
+/** One crawl's status document (`GET /api/v1/knowledge/crawl/{id}`). */
+export interface CrawlJobStatus {
+  jobId: string
+  kind: string
+  /** `accepted`, `running` or `paused` while the job is live; `completed`, `failed`, `cancelled`, `timed_out` or `skipped` once it is over. */
+  status: string
+  /** What a person reads: `queued`, `running`, `pausing`, `paused`, `resuming`, `cancelling`, then the terminal name. */
+  phase: string
+  /** True once the status is final; the job takes no further transition. */
+  terminal: boolean
+  counts: CrawlJobCounts
+  /** The page total: the exact URL count of a batch, or the page ceiling of a crawl (see `totalKind`). */
+  total?: number
+  totalKind?: string
+  warnings: CrawlJobWarning[]
+  control: CrawlControlState
+  runId?: string
+  createdAt?: string
+  finishedAt?: string
+}
+
+/** The answer to a pause, resume or cancel request: `202` while the orchestrator has yet to apply it, `200` once it has. */
+export interface CrawlControlResult {
+  jobId: string
+  status: string
+  phase: string
+  control: CrawlControlState
+}
+
+/** One failed page of a crawl (a final attempt only). */
+export interface CrawlErrorEntry {
+  id: string
+  ts: string
+  url?: string
+  code?: string
+  category?: string
+  retryable: boolean
+  /** The HTTP status of the failed fetch, when there was one. */
+  status?: number
+}
+
+/** One page a crawl did not visit because a rule blocked it. */
+export interface CrawlBlockedEntry {
+  url?: string
+  ts: string
+  reason?: string
+}
+
+/** One page of a crawl's failed and blocked pages. `nextSeq` is set when the page was full: pass it back as `afterSeq`. */
+export interface CrawlErrorsPage {
+  errors: CrawlErrorEntry[]
+  blocked: CrawlBlockedEntry[]
+  robotsBlocked: CrawlBlockedEntry[]
+  nextSeq?: number
+}
+
+function normalizeCrawlStatus(raw: unknown): CrawlJobStatus {
+  const root = asRecord(raw) ?? {}
+  const source = asRecord(root.data) ?? root
+  const status = stringField(source, 'status') ?? ''
+  const counts = asRecord(source.counts) ?? {}
+  const total = numberField(source, 'total')
+  const totalKind = stringField(source, 'total_kind')
+  const runId = stringField(source, 'run_id')
+  const createdAt = stringField(source, 'created_at')
+  const finishedAt = stringField(source, 'finished_at')
+  return {
+    jobId: stringField(source, 'job_id') ?? '',
+    kind: stringField(source, 'kind') ?? '',
+    status,
+    phase: stringField(source, 'phase') ?? status,
+    terminal: source.terminal === true || isTerminalCrawlStatus(status),
+    counts: {
+      completed: numberField(counts, 'completed') ?? 0,
+      failed: numberField(counts, 'failed') ?? 0,
+      blocked: numberField(counts, 'blocked') ?? 0,
+      retried: numberField(counts, 'retried') ?? 0,
+    },
+    ...(total !== undefined ? { total } : {}),
+    ...(totalKind ? { totalKind } : {}),
+    warnings: crawlJobWarnings(source.warnings),
+    control: crawlControlState(source.control),
+    ...(runId ? { runId } : {}),
+    ...(createdAt ? { createdAt } : {}),
+    ...(finishedAt ? { finishedAt } : {}),
+  }
+}
+
+function normalizeCrawlControl(raw: unknown): CrawlControlResult {
+  const root = asRecord(raw) ?? {}
+  const source = asRecord(root.data) ?? root
+  return {
+    jobId: stringField(source, 'job_id') ?? '',
+    status: stringField(source, 'status') ?? '',
+    phase: stringField(source, 'phase') ?? '',
+    control: crawlControlState(source.control),
+  }
+}
+
+function normalizeCrawlErrors(raw: unknown): CrawlErrorsPage {
+  const root = asRecord(raw) ?? {}
+  const source = asRecord(root.data) ?? root
+  const nextSeq = numberField(source, 'next_seq')
+  const errors = source.errors
+  return {
+    errors: Array.isArray(errors) ? errors.flatMap(normalizeCrawlErrorEntry) : [],
+    blocked: crawlBlockedEntries(source.blocked),
+    robotsBlocked: crawlBlockedEntries(source.robots_blocked),
+    ...(nextSeq !== undefined ? { nextSeq } : {}),
+  }
+}
+
+function crawlJobWarnings(raw: unknown): CrawlJobWarning[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((item) => {
+    const entry = asRecord(item)
+    const code = entry ? stringField(entry, 'code') : undefined
+    const message = entry ? stringField(entry, 'message') : undefined
+    return code && message ? [{ code, message }] : []
+  })
+}
+
+function crawlControlState(raw: unknown): CrawlControlState {
+  const record = asRecord(raw) ?? {}
+  const desired = stringField(record, 'desired')
+  return { ...(desired ? { desired } : {}), pending: record.pending === true }
+}
+
+function normalizeCrawlErrorEntry(raw: unknown): CrawlErrorEntry[] {
+  const record = asRecord(raw)
+  const id = record ? stringField(record, 'id') : undefined
+  if (!record || !id) return []
+  const url = stringField(record, 'url')
+  const code = stringField(record, 'code')
+  const category = stringField(record, 'category')
+  const status = numberField(record, 'status')
+  return [{
+    id,
+    ts: stringField(record, 'ts') ?? '',
+    retryable: record.retryable === true,
+    ...(url ? { url } : {}),
+    ...(code ? { code } : {}),
+    ...(category ? { category } : {}),
+    ...(status !== undefined ? { status } : {}),
+  }]
+}
+
+function crawlBlockedEntries(raw: unknown): CrawlBlockedEntry[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((item) => {
+    const record = asRecord(item)
+    if (!record) return []
+    const url = stringField(record, 'url')
+    const reason = stringField(record, 'reason')
+    return [{
+      ts: stringField(record, 'ts') ?? '',
+      ...(url ? { url } : {}),
+      ...(reason ? { reason } : {}),
+    }]
+  })
 }
 
 function normalizeCrawlJobs(raw: unknown): CrawlJob[] {
@@ -907,6 +1253,7 @@ function normalizeCrawlJob(raw: unknown): CrawlJob {
     ?? stringField(source, 'run_id')
     ?? stringField(source, 'runId')
     ?? ''
+  const effective = normalizeCrawlEffective(source.effective)
   return {
     acceptedAt: stringField(source, 'acceptedAt') ?? stringField(source, 'accepted_at'),
     createdAt: stringField(source, 'createdAt') ?? stringField(source, 'created_at'),
@@ -915,6 +1262,37 @@ function normalizeCrawlJob(raw: unknown): CrawlJob {
     orgId: stringField(source, 'orgId') ?? stringField(source, 'org_id'),
     sourceId: stringField(source, 'sourceId') ?? stringField(source, 'source_id'),
     status: stringField(source, 'status') ?? stringField(source, 'state') ?? 'queued',
+    ...(effective ? { effective } : {}),
+  }
+}
+
+/** WS14.S6/S7: the handoff's `effective` echo (snake_case from quarry-edge); undefined when absent.
+ * `robots_override` is `{ authority, rev }` only when the org's policy let this crawl ignore robots.txt. */
+function normalizeCrawlEffective(raw: unknown): CrawlEffectiveScope | undefined {
+  const record = asRecord(raw)
+  if (!record) return undefined
+  const override = asRecord(record.robots_override)
+  const robotsOverride = override ? stringField(override, 'authority') : undefined
+  const warnings = Array.isArray(record.warnings)
+    ? record.warnings.filter((item): item is string => typeof item === 'string')
+    : []
+  const requestWarnings = Array.isArray(record.request_warnings)
+    ? record.request_warnings.flatMap((item) => {
+        const entry = asRecord(item)
+        const code = entry ? stringField(entry, 'code') : undefined
+        const field = entry ? stringField(entry, 'field') : undefined
+        return code && field ? [{ code, field }] : []
+      })
+    : []
+  return {
+    scopeMode: stringField(record, 'scope_mode') ?? stringField(record, 'scopeMode') ?? '',
+    robots: stringField(record, 'robots') ?? '',
+    maxPages: numberField(record, 'max_pages') ?? numberField(record, 'maxPages') ?? 0,
+    maxDepth: numberField(record, 'max_depth') ?? numberField(record, 'maxDepth') ?? 0,
+    legacy: record.legacy === true,
+    warnings,
+    requestWarnings,
+    ...(robotsOverride ? { robotsOverride } : {}),
   }
 }
 
@@ -1032,9 +1410,9 @@ function normalizeCrawlEvent(event: string | undefined, data: string): CrawlWork
 }
 
 /** Map a quarry event `type` to a crawl status so terminal run events
- * (`run_completed` / `run_failed` / `run_cancelled`) drive onDone and the
- * completed UI state. Non-terminal types return undefined so the frame's
- * own status/phase wins. */
+ * (`run_completed` / `run_failed` / `run_cancelled` / `run_timed_out`) drive onDone and the
+ * completed UI state, and the pause and resume events move the row between running and paused
+ * (WS15.L5). Other types return undefined so the frame's own status/phase wins. */
 function mapEventTypeToStatus(type: string | undefined): string | undefined {
   switch (type) {
     case 'run_completed':
@@ -1043,6 +1421,14 @@ function mapEventTypeToStatus(type: string | undefined): string | undefined {
       return 'failed'
     case 'run_cancelled':
       return 'cancelled'
+    case 'run_timed_out':
+      return 'timed_out'
+    case 'run_paused':
+      return 'paused'
+    case 'run_resumed':
+      return 'running'
+    case 'schedule_skipped':
+      return 'skipped'
     default:
       return undefined
   }
@@ -1062,7 +1448,7 @@ function summarizeCount(
 }
 
 function isTerminalCrawlStatus(status: string): boolean {
-  return ['completed', 'complete', 'failed', 'error', 'succeeded', 'cancelled'].includes(status.trim().toLowerCase())
+  return ['completed', 'complete', 'failed', 'error', 'succeeded', 'cancelled', 'timed_out', 'skipped'].includes(status.trim().toLowerCase())
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

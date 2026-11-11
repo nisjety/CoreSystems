@@ -312,6 +312,12 @@ export function MessageBlock(props: {
    * is not offered there (EP-12 D8).
    */
   spaceScoped?: boolean
+  /**
+   * False where the crawl-plan approval card must not mount (QF-20): the page sets it for a foreign-origin or
+   * Support read-only thread, and the fence then renders as its plain code block. Absent means allowed; a
+   * temporary chat is still refused by `temporaryChat`.
+   */
+  crawlPlanCardAllowed?: boolean
   /** Which of this turn's controls the composer dock holds; see `DockedNodes`. */
   docked?: DockedNodes
   /** This turn's settled-turn fold (EP-14 S1), from the page. Absent when the switch is off or nothing folds. */
@@ -642,6 +648,8 @@ export function AssistantMessage(props: {
   temporaryChat?: boolean
   /** See `MessageBlock`'s doc: a Space thread's export is not offered. */
   spaceScoped?: boolean
+  /** See `MessageBlock`'s doc: a foreign-origin or Support read-only thread never mounts the crawl-plan card (QF-20). */
+  crawlPlanCardAllowed?: boolean
   /** See `MessageBlock`'s doc. */
   docked?: DockedNodes
   /** See `MessageBlock`'s doc. */
@@ -937,8 +945,9 @@ export function AssistantMessage(props: {
               A Space thread shown here is room content (D2), so it keeps the code block. */}
           <InlineWidgetSurface value={inlineWidgetsEnabled() && !props.spaceScoped ? 'live' : 'inert'}>
             {/* A temporary (zero-retention) chat never gets the crawl-plan approval card: its click
-                would start a crawl that writes into the knowledge base. */}
-            <CrawlPlanCardAllowed value={!props.temporaryChat}>
+                would start a crawl that writes into the knowledge base. A foreign-origin or Support
+                read-only thread gets none either (`crawlPlanCardAllowed`, set by the page, QF-20). */}
+            <CrawlPlanCardAllowed value={!props.temporaryChat && props.crawlPlanCardAllowed !== false}>
               <InlineWidgetAnswer onSelectFollowUp={props.onSelectFollowUp}>
                 <SettledTurnContent
                   fold={props.settledFold}
@@ -1659,9 +1668,13 @@ export function DynamicHeading(props: { block: Extract<MarkdownBlock, { kind: 'h
  * A closed ```crawl-plan fence is the approval card (`CrawlPlanFence`) where a widget may run
  * (`useInlineWidgetsLive`, so `VITE_CHAT_INLINE_WIDGETS` must be on as well) and only with
  * `VITE_CRAWL_PLAN_CARD` on. Everywhere else, while streaming, in a temporary (zero-retention)
- * chat (`CrawlPlanCardAllowed`), or when the plan does not parse, it is a code block.
+ * chat or a foreign-origin / Support read-only thread (`CrawlPlanCardAllowed`), or when the plan
+ * does not parse, it is a code block.
  */
-/** False inside a temporary (zero-retention) chat; true everywhere else (the widget surface gate still applies). */
+/**
+ * False inside a temporary (zero-retention) chat, and in a foreign-origin or Support read-only thread
+ * (`AssistantMessage`'s `crawlPlanCardAllowed`); true everywhere else (the widget surface gate still applies).
+ */
 const CrawlPlanCardAllowed = createContext<boolean>(true)
 
 export function MarkdownCodeBlock(props: { block: Extract<MarkdownBlock, { kind: 'code' }> }) {
@@ -5108,6 +5121,11 @@ export function EmptyChatState(props: {
    * reference it cannot resolve.
    */
   onResumeThread: (threadId: string) => void
+  /**
+   * Controls for the action row beside the resume offer, above the composer (for example the chat browser's
+   * entry, WS9.H). They never go into the composer. Omitted, no row is rendered.
+   */
+  actions?: JSX.Element
   /** Names the actual grounding scope when the session knows it. */
   orgId?: string
   orgName?: string
@@ -5364,6 +5382,10 @@ export function EmptyChatState(props: {
                 </span>
               </button>
             )}
+          </Show>
+          {/* The top action row, beside the resume offer. Rendered only when the page passes controls for it. */}
+          <Show when={props.actions}>
+            {(actions) => <div class="verevon-chat-empty__actions">{actions()}</div>}
           </Show>
         </div>
         <div class="verevon-chat-empty__composer">{props.children}</div>
