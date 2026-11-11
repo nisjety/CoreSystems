@@ -87,6 +87,8 @@ const (
 	QuickwitAdapterOrgErasureConsumerName             = "quickwit-adapter-gdpr-erasure-v1"
 	CostCoreOrgErasureConsumerName                    = "cost-core-org-erasure"
 	CostCoreOrgErasureDelivery                        = "_VEREVON.CONTROL.SHARED.DELIVER.model.cost-core.org-erasure"
+	UserCoreOrgErasureConsumerName                    = "user-core-org-erasure"
+	UserCoreOrgErasureDelivery                        = "_VEREVON.CONTROL.SHARED.DELIVER.control.user-core.org-erasure"
 	EmbeddingEngineOrgErasureConsumerName             = "embedding-engine-org-erasure"
 	VerevonGatewayOrgErasureConsumerName              = "verevon-gateway-gdpr-erasure-v1"
 
@@ -547,6 +549,9 @@ func ProvisionControlSharedRuntime(ctx context.Context, js nats.JetStreamContext
 	if err := ensureFixedConsumer(js, ControlSharedStreamName, costCoreOrgErasureConsumerConfig()); err != nil {
 		return err
 	}
+	if err := ensureFixedConsumer(js, ControlSharedStreamName, userCoreOrgErasureConsumerConfig()); err != nil {
+		return err
+	}
 	if err := ensureFixedConsumer(js, ControlSharedStreamName, embeddingEngineOrgErasureConsumerConfig()); err != nil {
 		return err
 	}
@@ -752,6 +757,21 @@ func costCoreOrgErasureConsumerConfig() *nats.ConsumerConfig {
 	}
 }
 
+// userCoreOrgErasureConsumerConfig is Control Plane's user-core org-erasure
+// push/queue consumer (nats.Bind + QueueSubscribe), mirroring
+// costCoreOrgErasureConsumerConfig's shape. user-core owns resource grants and
+// deletes the purged organisation's rows on this fan-out. The Durable value
+// must exactly match user-core's internal/nats/org_erasure_consumer.go
+// OrgErasureDurable.
+func userCoreOrgErasureConsumerConfig() *nats.ConsumerConfig {
+	return &nats.ConsumerConfig{
+		Durable: UserCoreOrgErasureConsumerName, DeliverSubject: UserCoreOrgErasureDelivery,
+		DeliverGroup: UserCoreOrgErasureConsumerName, FilterSubject: GDPRErasureRequestedSubject,
+		DeliverPolicy: nats.DeliverAllPolicy, AckPolicy: nats.AckExplicitPolicy,
+		AckWait: 30 * time.Second, MaxDeliver: 20, ReplayPolicy: nats.ReplayInstantPolicy,
+	}
+}
+
 // embeddingEngineOrgErasureConsumerConfig is Data Plane v2's
 // embedding-engine-rs GDPR org-erasure PULL consumer, purging org-scoped
 // Qdrant vector points (dataplane_knowledge / wiki_block_embeddings / the
@@ -944,6 +964,7 @@ func orgErasureConsumerConfigs() map[string]*nats.ConsumerConfig {
 		DataOrchestratorOrgErasureConsumerName: dataOrchestratorOrgErasureConsumerConfig(),
 		QuickwitAdapterOrgErasureConsumerName:  quickwitAdapterOrgErasureConsumerConfig(),
 		CostCoreOrgErasureConsumerName:         costCoreOrgErasureConsumerConfig(),
+		UserCoreOrgErasureConsumerName:         userCoreOrgErasureConsumerConfig(),
 		EmbeddingEngineOrgErasureConsumerName:  embeddingEngineOrgErasureConsumerConfig(),
 		VerevonGatewayOrgErasureConsumerName:   verevonGatewayOrgErasureConsumerConfig(),
 	}

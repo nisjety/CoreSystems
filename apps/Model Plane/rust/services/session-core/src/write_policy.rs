@@ -141,6 +141,40 @@ impl Origin {
         }
     }
 
+    /// The origin session-core accepts for a caller, given the origin it claimed.
+    /// `User` stays `User` only when the verified credential is a person's
+    /// (`caller_is_person`) or the one trusted checker that authenticates a
+    /// person and asks on that person's behalf (`trusted_checker`). Otherwise the
+    /// claim is downgraded to `ModelTool`, the least-privileged origin, and the
+    /// downgrade is counted with a closed label (no content, no ids). Every
+    /// other origin passes through unchanged.
+    pub(crate) fn bound(self, caller_is_person: bool, trusted_checker: bool) -> Self {
+        if self != Self::User || caller_is_person || trusted_checker {
+            return self;
+        }
+        counter!(
+            "mp_session_memory_origin_downgraded_total",
+            "claimed" => self.label()
+        )
+        .increment(1);
+        Self::ModelTool
+    }
+
+    /// The origin to hand the gate under `mode`. `Off` changes nothing and counts
+    /// nothing; `Report` counts what enforce would downgrade but keeps the
+    /// claimed origin, so the report measures enforce without changing a write;
+    /// `Enforce` uses the bound origin.
+    pub(crate) fn bound_for(self, mode: Mode, caller_is_person: bool, trusted_checker: bool) -> Self {
+        match mode {
+            Mode::Off => self,
+            Mode::Report => {
+                let _ = self.bound(caller_is_person, trusted_checker);
+                self
+            }
+            Mode::Enforce => self.bound(caller_is_person, trusted_checker),
+        }
+    }
+
     const fn label(self) -> &'static str {
         match self {
             Self::User => "user",

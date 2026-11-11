@@ -205,6 +205,10 @@ message ScheduledStepContext {
   string contract_digest = 7;
   // Expiry of the stored-consent contract, re-verified per step.
   string contract_expires_at = 8;
+  // The run's retention, stated as two flags (F-f10-26). `zdr` is a zero-retention run;
+  // `zdr_waived` is a run whose zero-retention was waived. Both false is a persistent run.
+  bool zdr = 9;
+  bool zdr_waived = 10;
 }
 
 message ListRunsRequest {

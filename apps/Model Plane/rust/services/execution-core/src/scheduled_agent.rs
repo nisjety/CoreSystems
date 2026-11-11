@@ -34,6 +34,9 @@ pub(crate) const REFUSAL_EXPIRED: &str = "scheduled_contract_expired";
 pub(crate) const REFUSAL_INVALID: &str = "scheduled_contract_invalid";
 /// The run is zero-retention or waived: an unattended loop keeps no durable state for it.
 pub(crate) const REFUSAL_RETENTION: &str = "scheduled_zdr_refused";
+/// The run's retention state is not one the lane knows (both retention flags set at once), so it
+/// is refused rather than guessed at: an unknown state is never read as persistent.
+pub(crate) const REFUSAL_RETENTION_UNKNOWN: &str = "scheduled_retention_unknown";
 
 /// What the scheduled lane changes in the loop it drives. `None` for every other run, whose
 /// loop is unchanged. Its presence also keeps the loop from offering held results and from
@@ -83,6 +86,18 @@ pub(crate) fn refuses_retention(zdr: bool, waived: bool) -> Option<&'static str>
     (zdr || waived).then_some(REFUSAL_RETENTION)
 }
 
+/// The retention refusal for a step context, checked first in the lane, before the contract is
+/// admitted. Session Core states the run's retention as two flags: zero-retention, or waived.
+/// A zero-retention or waived run is refused with [`REFUSAL_RETENTION`]; a context that carries
+/// both flags at once is a state Session Core never writes, so it fails closed with
+/// [`REFUSAL_RETENTION_UNKNOWN`]. Only a context with neither flag proceeds.
+pub(crate) fn refuses_step_retention(run: &pb::ScheduledStepContext) -> Option<&'static str> {
+    if run.zdr && run.zdr_waived {
+        return Some(REFUSAL_RETENTION_UNKNOWN);
+    }
+    refuses_retention(run.zdr, run.zdr_waived)
+}
+
 /// The loop scope a verified contract gives its run.
 pub(crate) fn loop_scope(contract: &ScheduledContract) -> LoopScope {
     LoopScope {
@@ -122,12 +137,14 @@ pub(crate) fn offered_defs(
 }
 
 /// The run request the scheduled lane drives. It is always plan mode at the read-only rung,
-/// carries no caller tools and no subagents, is never zero-retention, and is bounded by the
-/// contract's rounds and the lane's ceiling. The subject is the owner the schedule acts for.
+/// carries no caller tools and no subagents, carries the run's own zero-retention flag (a waived
+/// run is refused before it reaches here, so no waiver travels), and is bounded by the contract's
+/// rounds and the lane's ceiling. The subject is the owner the schedule acts for.
 pub(crate) fn run_request(
     step: &pb::ExecuteScheduledStepRequest,
     goal: &str,
     contract: &ScheduledContract,
+    zdr: bool,
 ) -> pb::RunAgentRequest {
     pb::RunAgentRequest {
         run_id: step.run_id.clone(),
@@ -138,7 +155,7 @@ pub(crate) fn run_request(
         model: MODEL.to_owned(),
         mode: "ask".to_owned(),
         max_rounds: contract.max_rounds.min(MAX_ROUNDS),
-        zdr: false,
+        zdr,
         tools: Vec::new(),
         plan_mode: true,
         autonomy_rung: pb::AutonomyRung::ReadOnly as i32,
@@ -328,7 +345,7 @@ mod tests {
     #[test]
     fn run_request_is_plan_mode_read_only_bounded_and_not_zdr() {
         let contract = ScheduledContract::parse(CONTRACT).unwrap();
-        let request = run_request(&step(), "summarise the week", &contract);
+        let request = run_request(&step(), "summarise the week", &contract, false);
         assert!(request.plan_mode);
         assert_eq!(request.autonomy_rung, pb::AutonomyRung::ReadOnly as i32);
         assert!(!request.zdr);
@@ -343,7 +360,7 @@ mod tests {
     fn run_request_caps_rounds_at_the_lane_ceiling() {
         let mut contract = ScheduledContract::parse(CONTRACT).unwrap();
         contract.max_rounds = MAX_ROUNDS;
-        let request = run_request(&step(), "goal", &contract);
+        let request = run_request(&step(), "goal", &contract, false);
         assert_eq!(request.max_rounds, MAX_ROUNDS);
     }
 

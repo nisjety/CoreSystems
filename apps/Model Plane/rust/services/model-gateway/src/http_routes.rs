@@ -3996,8 +3996,10 @@ async fn resume_run(
     crate::zdr_posture::continuation_gate(&claims)?;
     require_durable_run_owner(&state, &claims, &run_id, &session_bearer).await?;
     // The org's agent-run pause (F-t3-083, WS25-S9): a paused org resumes no run, and a policy that cannot be read resumes
-    // none either, as a Do turn is refused. Read after the owner check and before the execution is asked to resume.
-    crate::org_agent_policy::ensure_not_paused(
+    // none either, as a Do turn is refused. A lockdown mode cap refuses the resume too (D2-1114). A bare unblock starts no
+    // model call, so the read-only plan flag the cap would state is ignored here. Read after the owner check and before
+    // the execution is asked to resume.
+    let _plan_mode = crate::org_agent_policy::admit_continuation(
         crate::org_agent_policy::policy_mode(),
         crate::org_agent_policy::shared_cache(),
         &state.http_client,
@@ -8829,10 +8831,12 @@ async fn get_thread_workspace(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedSandboxBearer,
+    session: VerifiedModelBearer,
     Path(thread_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let thread_id = require_url_safe_thread_id(&thread_id)?;
     let zdr = crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))?;
+    require_thread_owner(&state, &claims, &session, &thread_id).await?;
     let mut sandbox = state.sandbox_client.clone();
     let lease = sandbox
         .acquire_lease(authenticated_sandbox_request(
@@ -8884,9 +8888,11 @@ async fn delete_thread_workspace(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedSandboxBearer,
+    session: VerifiedModelBearer,
     Path(thread_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let thread_id = require_url_safe_thread_id(&thread_id)?;
+    require_thread_owner(&state, &claims, &session, &thread_id).await?;
     let response = state
         .sandbox_client
         .clone()
@@ -8906,6 +8912,55 @@ async fn delete_thread_workspace(
         "files_deleted": response.files_deleted,
         "object_prefix": response.object_prefix,
     })))
+}
+
+/// Asks Session Core whether the caller owns this thread, before any sandbox RPC.
+///
+/// Sandbox-manager keys workspace rows by (org, owner, thread) but its blobs by
+/// (org, thread) alone, so it cannot tell a stranger from the owner by itself.
+/// Session Core owns thread ownership and is asked with the caller's own session
+/// bearer, so the answer is the caller's own. A thread that is not theirs answers
+/// the same 404 as one that does not exist (no existence leak), and a lookup that
+/// cannot be answered fails closed with 503. The request carries ids only.
+async fn require_thread_owner(
+    state: &AppState,
+    claims: &Claims,
+    session: &VerifiedModelBearer,
+    thread_id: &str,
+) -> Result<(), HttpJsonError> {
+    let request = authenticated_session_request(
+        mp_contracts::model_plane::v1::ResolveThreadOwnerRequest {
+            thread_id: thread_id.to_owned(),
+            org_id: claims.org_id.clone(),
+            user_id: claims.user_id.clone(),
+        },
+        session,
+    )
+    .map_err(|_| thread_ownership_unavailable())?;
+    let authorized = match state.run_client.clone().resolve_thread_owner(request).await {
+        Ok(response) => response.into_inner().authorized,
+        Err(status) => {
+            tracing::warn!(
+                code = ?status.code(),
+                "Session Core thread ownership lookup unavailable for the thread workspace"
+            );
+            return Err(thread_ownership_unavailable());
+        }
+    };
+    if !authorized {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "thread not found" })),
+        ));
+    }
+    Ok(())
+}
+
+fn thread_ownership_unavailable() -> HttpJsonError {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": "thread ownership could not be checked" })),
+    )
 }
 
 /// A thread id the workspace path accepts: the plain key segment the object store
@@ -18936,11 +18991,29 @@ mod run_owner_publish_tests {
 
         async fn resolve_thread_owner(
             &self,
-            _: TonicRequest<mp_contracts::model_plane::v1::ResolveThreadOwnerRequest>,
+            request: TonicRequest<mp_contracts::model_plane::v1::ResolveThreadOwnerRequest>,
         ) -> Result<TonicResponse<mp_contracts::model_plane::v1::ResolveThreadOwnerResponse>, Status>
         {
-            Err(Status::unimplemented(
-                "resolve_thread_owner not needed in gateway test",
+            let bearer = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok());
+            if bearer != Some("Bearer test-session-bearer") {
+                return Err(Status::unauthenticated(
+                    "verified session credential required",
+                ));
+            }
+            let request = request.into_inner();
+            // `thread-lookup-fails` stands for Session Core being unreachable.
+            if request.thread_id == "thread-lookup-fails" {
+                return Err(Status::unavailable("session core unavailable"));
+            }
+            Ok(TonicResponse::new(
+                mp_contracts::model_plane::v1::ResolveThreadOwnerResponse {
+                    authorized: request.thread_id.starts_with("thread-owned")
+                        && request.org_id == "org-owner"
+                        && request.user_id == "user-owner",
+                },
             ))
         }
 

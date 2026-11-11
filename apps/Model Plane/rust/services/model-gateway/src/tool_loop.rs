@@ -4490,6 +4490,22 @@ async fn dispatch_tool_with_cost(
             // this same arm, so both surfaces get the behaviour.
             match state.quarry.scrape_readable(&url, org_id, zdr).await {
                 Ok(r) => {
+                    // The page may have ended on another host than the one asked for (a redirect, or the browser
+                    // driver's escalation). The org's rules apply to where it ended too, and the body is dropped
+                    // unread, unscreened and unparked when that host is not allowed (EP-9 W3).
+                    if let Some(refusal) = crate::site_policy_client::final_url_refusal(
+                        crate::site_policy_client::policy_mode(),
+                        crate::site_policy_client::shared_checker(),
+                        &crate::site_policy_client::SiteOwner::of(state),
+                        org_id,
+                        &url,
+                        &r.final_url,
+                        &call.name,
+                    )
+                    .await
+                    {
+                        return err_outcome(call, refusal);
+                    }
                     let body = if r.markdown.trim().is_empty() {
                         r.text
                     } else {
@@ -4637,6 +4653,24 @@ async fn dispatch_tool_with_cost(
                     .map(|o| o.result.error_message.as_str())
                     .collect();
                 return err_outcome(call, format!("extract_structured failed: {}", reasons.join("; ")));
+            }
+            // Each page the reader resolved to is checked against the org's rules too, so an allowed address that
+            // redirected onto a blocked host never has its extraction handed to the model (EP-9 W3). The whole result
+            // is dropped on the first refusal: no extracted data, title or quote is returned.
+            for outcome in &outcomes {
+                if let Some(refusal) = crate::site_policy_client::final_url_refusal(
+                    crate::site_policy_client::policy_mode(),
+                    crate::site_policy_client::shared_checker(),
+                    &crate::site_policy_client::SiteOwner::of(state),
+                    org_id,
+                    &outcome.result.url,
+                    &outcome.result.final_url,
+                    &call.name,
+                )
+                .await
+                {
+                    return err_outcome(call, refusal);
+                }
             }
             let body = crate::web_extraction::tool_output(&outcomes, &mode).to_string();
             // Screen the complete result BEFORE it reaches the model, as `fetch_url` does.

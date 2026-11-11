@@ -10,6 +10,7 @@ import { HttpException, Logger } from '@nestjs/common';
 // the NATS audit publisher are doubles.
 const mockVerifyApiKey = jest.fn();
 const mockResolveCanonicalTokenContext = jest.fn();
+const mockIsUserBanned = jest.fn();
 const mockResolveInteractiveRetentionPosture = jest.fn();
 jest.mock('./auth', () => ({
   auth: {
@@ -21,6 +22,7 @@ jest.mock('./auth', () => ({
 }));
 jest.mock('./plane-token-membership', () => ({
   resolveCanonicalTokenContext: mockResolveCanonicalTokenContext,
+  isUserBanned: mockIsUserBanned,
 }));
 // Only the org posture lookup is replaced; the 503 error class stays real so
 // the controller's `instanceof` check is exercised.

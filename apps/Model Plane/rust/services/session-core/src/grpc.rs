@@ -3293,8 +3293,8 @@ async fn persist_scheduled_run_bindings(
         .begin()
         .await
         .map_err(|error| Status::internal(error.to_string()))?;
-    let existing: Option<(String, String, serde_json::Value)> = sqlx::query_as(
-        "SELECT r.org_id, COALESCE(t.space_id, ''), r.metadata
+    let existing: Option<(String, String, serde_json::Value, String)> = sqlx::query_as(
+        "SELECT r.org_id, COALESCE(t.space_id, ''), r.metadata, r.retention_class
          FROM runs r JOIN threads t ON t.id = r.thread_id
          WHERE r.id = $1 AND r.thread_id = $2
            AND r.org_id = $3 AND r.user_id = $4
@@ -3307,11 +3307,23 @@ async fn persist_scheduled_run_bindings(
     .fetch_optional(&mut *tx)
     .await
     .map_err(|error| Status::internal(error.to_string()))?;
-    let Some((org_id, space_id, metadata)) = existing else {
+    let Some((org_id, space_id, metadata, retention_class)) = existing else {
         return Err(Status::permission_denied(
             "scheduled run owner binding is unavailable",
         ));
     };
+    // A scheduled run is always persistent (Control refuses a ZDR schedule and start_scheduled_run
+    // creates the run persistent). A zero-retention or waived run, or an unreadable class, is refused
+    // before any UPDATE; dropping the transaction rolls it back. Waived counts as ZDR (DEC-32).
+    if !matches!(
+        crate::retention_receipt::RetentionClass::from_storage(&retention_class),
+        Some(crate::retention_receipt::RetentionClass::Persistent)
+    ) {
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
+    }
     let mut expected = serde_json::json!({
         "source": "scheduled_run",
         "schedule_id": req.schedule_id,

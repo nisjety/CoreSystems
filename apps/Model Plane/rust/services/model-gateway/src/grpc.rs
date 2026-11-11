@@ -1594,9 +1594,19 @@ impl ModelGateway for GatewayService {
         if let Some(refusal) = crate::zdr_posture::refuse_zdr_feature_for("web_search", req.zdr) {
             return Err(refusal.grpc_status(crate::zdr_posture::grpc_code(&refusal)));
         }
-        tools::handle_web_search(&self.state, req)
-            .await
-            .map(Response::new)
+        let mut response = tools::handle_web_search(&self.state, req).await?;
+        // The org's domain rules drop a hit on a host the org does not allow, as the chat tool loop does (EP-9 W3).
+        // The org is the verified identity's, never a request field. Under `off` nothing is read and nothing is dropped.
+        crate::site_policy_client::drop_denied_results_in(
+            crate::site_policy_client::policy_mode(),
+            crate::site_policy_client::shared_checker(),
+            &crate::site_policy_client::SiteOwner::of(&self.state),
+            identity.org_id(),
+            &mut response.results,
+        )
+        .await;
+        response.total = i32::try_from(response.results.len()).unwrap_or(i32::MAX);
+        Ok(Response::new(response))
     }
 
     async fn sleep(

@@ -57,6 +57,7 @@ export type ApiKeyExchangeDenialReason =
   | 'org_key_refused'
   | 'org_mismatch'
   | 'owner_not_member'
+  | 'owner_banned'
   | 'scope_not_granted'
   | 'audience_not_allowed';
 
@@ -147,7 +148,8 @@ function keyGrantsScope(
 
 /**
  * Decide one exchange. `membership` is the key owner's canonical membership
- * in `request.orgId` (null when there is none), read by the caller. The
+ * in `request.orgId` (null when there is none) and `ownerBanned` whether that
+ * owner's account is currently banned, both read by the caller. The
  * checks run from the key outwards so the reason names the first thing that
  * is wrong; every path that is not the last one refuses.
  */
@@ -156,6 +158,7 @@ export function decideApiKeyExchange(
   membership: CanonicalTokenContext | null,
   request: ApiKeyExchangeRequest,
   now: number = Date.now(),
+  ownerBanned = false,
 ): ApiKeyExchangeDecision {
   const audience = request.audience;
   if (!isApiKeyExchangeAudience(audience)) {
@@ -178,6 +181,9 @@ export function decideApiKeyExchange(
   if (!membership || membership.orgId !== orgId) {
     return deny('owner_not_member');
   }
+  // A banned owner keeps a member row; the key stops minting tokens while the
+  // ban stands (the key itself is left alone, a ban can expire).
+  if (ownerBanned) return deny('owner_banned');
 
   const scopes = [...new Set(request.scopes.map((scope) => scope.trim()))];
   const audienceScopes: readonly string[] =

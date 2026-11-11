@@ -147,20 +147,40 @@ func executeScheduledAgentStep(ctx workflow.Context, in ScheduledRunInput) (acti
 // complete (a refused contract, an incomplete run), needs_review when an effect was withheld for
 // the owner, completed otherwise. It carries counts only, never content (WS20 S6).
 func scheduledAgentOutcomeSummary(runID string, out activities.StepLoopOutput) string {
-	rounds, withheld := 0, 0
+	outcome, rounds, withheld := scheduledAgentOutcome(out)
+	return fmt.Sprintf("scheduled run %s outcome %s: %d rounds, %d withheld effects", runID, outcome, rounds, withheld)
+}
+
+// scheduledAgentOutcome classifies how an agent-lane run ended and totals its counts: "failed"
+// when the last step did not complete, "needs_review" when it completed with withheld effects,
+// "completed" otherwise.
+func scheduledAgentOutcome(out activities.StepLoopOutput) (outcome string, rounds, withheld int) {
 	for _, step := range out.Steps {
 		rounds += step.RoundsExecuted
 		withheld += step.WithheldEffects
 	}
 	completed := len(out.Steps) > 0 && out.Steps[len(out.Steps)-1].Completed
-	outcome := "completed"
+	outcome = "completed"
 	switch {
 	case !completed:
 		outcome = "failed"
 	case withheld > 0:
 		outcome = "needs_review"
 	}
-	return fmt.Sprintf("scheduled run %s outcome %s: %d rounds, %d withheld effects", runID, outcome, rounds, withheld)
+	return outcome, rounds, withheld
+}
+
+// scheduledAgentFailureReason is the closed failure code an agent-lane run that did not complete
+// its work is recorded under (FailRunActivity, not CompleteRunActivity), or "" for a run that
+// completed. A step that did not finish, or whose effects were withheld for the owner, must not
+// read as a completed run (decision D-f10-4: assumed, owner to confirm). The code is a closed
+// word, never content.
+func scheduledAgentFailureReason(out activities.StepLoopOutput) string {
+	outcome, _, _ := scheduledAgentOutcome(out)
+	if outcome == "completed" {
+		return ""
+	}
+	return "scheduled_agent_" + outcome
 }
 
 // executeScheduledStepLoop is the schedule-only driver. It never constructs a

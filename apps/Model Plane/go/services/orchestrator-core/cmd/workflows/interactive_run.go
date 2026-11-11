@@ -81,6 +81,12 @@ const (
 	scheduledAgentLaneChange  = "scheduled-agent-lane"
 	scheduledAgentLaneVersion = 1
 
+	// scheduledAgentOutcomeChange gates recording an agent-lane run that did not complete its work
+	// (failed, needs_review) through FailRunActivity instead of CompleteRunActivity. Histories that
+	// predate it complete as they did.
+	scheduledAgentOutcomeChange  = "scheduled-agent-outcome"
+	scheduledAgentOutcomeVersion = 1
+
 	// goalJudgeTurnChange gates the judge of a goal-bound fire (EP-7 S6). Histories that predate it
 	// complete without the activity.
 	goalJudgeTurnChange  = "goal-judge-turn"
@@ -281,6 +287,11 @@ func ScheduledRunSupervision(ctx workflow.Context, input ScheduledRunInput) erro
 	summary := stepOutput.Summary
 	if agentLane {
 		summary = scheduledAgentOutcomeSummary(input.RunID, stepOutput)
+		if workflow.GetVersion(ctx, scheduledAgentOutcomeChange, workflow.DefaultVersion, scheduledAgentOutcomeVersion) == scheduledAgentOutcomeVersion {
+			if reason := scheduledAgentFailureReason(stepOutput); reason != "" {
+				return handleFailure(ctx, input.RunID, input.OrgID, "", input.Retention, reason)
+			}
+		}
 	}
 	completionInput := activities.CompletionInput{
 		RunID:     input.RunID,

@@ -535,6 +535,77 @@ pub async fn ensure_not_paused(
     }
 }
 
+/// Decides what the org policy does to a stored run's resume or continuation: the pause [`ensure_not_paused`] reads,
+/// and the org's mode cap, which a fresh Do turn already obeys at [`admit_turn`] (D2-1114, D2-1117, WS25-S9). Off reads
+/// nothing and returns `Ok(false)`. Shadow reads and logs what would be refused or narrowed, and returns `Ok(false)`.
+/// Enforce refuses a paused org, and an org whose mode cap is `lockdown` (no Do runs), with [`AGENTS_PAUSED_CODE`], and
+/// a policy that cannot be read inside its bound with [`POLICY_UNAVAILABLE_CODE`]. Otherwise it returns the cap's plan
+/// gate: `true` for a read-only cap, so the caller states `plan_mode` on the continuation it starts.
+///
+/// Lockdown reuses [`AGENTS_PAUSED_CODE`] on purpose: both mean the org does not let a Do run proceed, and the BFF relay
+/// list and the SPA list pinned to the continue refusals need no new code. The executor only ever narrows a paused
+/// authority, so stating a narrower plan flag never widens a resumed run.
+///
+/// # Errors
+///
+/// [`AGENTS_PAUSED_CODE`] when the org has paused agent runs or caps its mode at lockdown, or
+/// [`POLICY_UNAVAILABLE_CODE`] when the policy is enforced and cannot be read.
+pub async fn admit_continuation(
+    mode: PolicyMode,
+    cache: &OrgPolicyCache,
+    client: &reqwest::Client,
+    base_url: &str,
+    org_id: &str,
+    bearer: &str,
+) -> Result<bool, &'static str> {
+    match mode {
+        PolicyMode::Off => Ok(false),
+        PolicyMode::Shadow => {
+            match ensure(cache, client, base_url, org_id, bearer).await {
+                Ok(policy) => {
+                    if policy.agents_paused {
+                        tracing::info!(
+                            %org_id,
+                            "org agent policy (shadow): agent runs would be paused for this resume or continuation"
+                        );
+                    }
+                    let preset = policy.mode_cap.preset();
+                    if !preset.do_runs {
+                        tracing::info!(
+                            %org_id,
+                            "org agent policy (shadow): the lockdown cap would refuse this resume or continuation"
+                        );
+                    } else if preset.plan_gate {
+                        tracing::info!(
+                            %org_id,
+                            "org agent policy (shadow): the read-only cap would hold this continuation to plan mode"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%org_id, %error, "org agent policy (shadow) could not be read");
+                }
+            }
+            Ok(false)
+        }
+        PolicyMode::Enforce => match ensure(cache, client, base_url, org_id, bearer).await {
+            Ok(policy) if policy.agents_paused => Err(AGENTS_PAUSED_CODE),
+            Ok(policy) => {
+                let preset = policy.mode_cap.preset();
+                if preset.do_runs {
+                    Ok(preset.plan_gate)
+                } else {
+                    Err(AGENTS_PAUSED_CODE)
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%org_id, %error, "org agent policy cannot be read; the run is not resumed or continued");
+                Err(POLICY_UNAVAILABLE_CODE)
+            }
+        },
+    }
+}
+
 /// The HTTP status, and the words a person reads, of a refusal the org policy makes: a paused org is `403`, and a policy
 /// that cannot be read is `503`, as a Do turn's refusal answers. The code is the contract; the words are copy.
 #[must_use]

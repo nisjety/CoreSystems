@@ -130,8 +130,10 @@ pub struct PendingPause {
     /// approval's idempotency key, `{run_id}:{step_id}`: the fold is saved
     /// **before** the approval exists (so a fast approve-and-continue can always
     /// claim it), and session-core mints the approval id only afterwards. A
-    /// resume derives the same key from the consumed approval's step id. For a
-    /// question or a park it is that record's id.
+    /// resume derives the same key from the consumed approval's step id. For an
+    /// input pause it is [`crate::user_question::input_pause_ref`], the question's
+    /// idempotency key, which is likewise saved before the question exists. For a
+    /// park it is [`park_ref`].
     pub pause_ref: String,
     /// The step the pause concerns, when it concerns one.
     #[serde(default)]
@@ -402,6 +404,128 @@ pub const EXT_ROUTE_CONNECTION: &str = "route_connection_id";
 /// The extension key of the ceiling on the sub-agents the run may start (a number): a
 /// park resume may use a narrower ceiling than this, never a wider one.
 pub const EXT_CHILD_CEILING: &str = "child_ceiling";
+
+/// The extension key of the tool definitions offered to the model when an input pause was
+/// written (an array of `{name, description, parameters_json}` objects, the same shape as the
+/// approval descriptor's `offered.tools`). Written ONLY on an input-pause fold, by
+/// execution-core's fold writer. Read it with [`offered_tools_in`]. Definitions only: no user
+/// content and no credential.
+pub const EXT_OFFERED_TOOLS: &str = "offered_tools";
+
+/// The extension key of the screening taint of the turn (a bool: connector content was seen).
+/// Written by execution-core's fold writer only. Read it with [`connector_taint_in`]. A flag,
+/// never content.
+pub const EXT_CONNECTOR_TAINT: &str = "connector_taint";
+
+/// The extension key of the turn's connector selection (an array of connection id strings).
+/// Written by execution-core's fold writer only. Read it with [`connector_scope_in`]. Ids only,
+/// never a credential.
+pub const EXT_CONNECTOR_SCOPE: &str = "connector_scope";
+
+/// Most tool definitions [`offered_tools_in`] accepts.
+pub const MAX_OFFERED_TOOLS: usize = 512;
+
+/// Most connection ids [`connector_scope_in`] accepts.
+pub const MAX_CONNECTOR_SCOPE: usize = 8;
+
+/// Longest connection id [`connector_scope_in`] accepts.
+pub const MAX_CONNECTOR_ID_LEN: usize = 128;
+
+/// One tool definition offered to the model, as recorded in [`EXT_OFFERED_TOOLS`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferedTool {
+    /// The tool's name (never empty).
+    pub name: String,
+    /// The tool's description; empty when the entry carried none.
+    pub description: String,
+    /// The tool's parameter schema as JSON text; empty when the entry carried none.
+    pub parameters_json: String,
+}
+
+/// What a fold says about connector taint ([`connector_taint_in`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaintRead {
+    /// The turn saw connector content (or the value was not a bool, which is never read as clear).
+    Marked,
+    /// The turn recorded that it saw none.
+    Clear,
+    /// The fold carries no taint key. The consumer decides what that means.
+    Absent,
+}
+
+/// The tool definitions an input-pause fold recorded ([`EXT_OFFERED_TOOLS`]); `None` when the
+/// key is absent, not an array, empty, over [`MAX_OFFERED_TOOLS`] entries, or any entry lacks a
+/// non-empty string `name`.
+#[must_use]
+pub fn offered_tools_in(fold: &LoopFoldV1) -> Option<Vec<OfferedTool>> {
+    let entries = fold.extensions.get(EXT_OFFERED_TOOLS)?.as_array()?;
+    if entries.is_empty() || entries.len() > MAX_OFFERED_TOOLS {
+        return None;
+    }
+    let text = |entry: &serde_json::Value, key: &str| {
+        entry
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    entries
+        .iter()
+        .map(|entry| {
+            let name = text(entry, "name");
+            if name.is_empty() {
+                return None;
+            }
+            Some(OfferedTool {
+                name,
+                description: text(entry, "description"),
+                parameters_json: text(entry, "parameters_json"),
+            })
+        })
+        .collect()
+}
+
+/// The connector taint a fold recorded ([`EXT_CONNECTOR_TAINT`]). A value that is not a bool
+/// reads [`TaintRead::Marked`], never clear.
+#[must_use]
+pub fn connector_taint_in(fold: &LoopFoldV1) -> TaintRead {
+    match fold.extensions.get(EXT_CONNECTOR_TAINT) {
+        None => TaintRead::Absent,
+        Some(serde_json::Value::Bool(false)) => TaintRead::Clear,
+        Some(_) => TaintRead::Marked,
+    }
+}
+
+/// The connection ids a fold's turn was scoped to ([`EXT_CONNECTOR_SCOPE`]); `None` when the
+/// key is absent. A value that is not an array, an entry that is not 1..=[`MAX_CONNECTOR_ID_LEN`]
+/// ASCII letters, digits, `_` or `-`, or more than [`MAX_CONNECTOR_SCOPE`] entries reads as
+/// `Some` of an empty list, the strictest scope.
+#[must_use]
+pub fn connector_scope_in(fold: &LoopFoldV1) -> Option<Vec<String>> {
+    let value = fold.extensions.get(EXT_CONNECTOR_SCOPE)?;
+    let Some(entries) = value.as_array() else {
+        return Some(Vec::new());
+    };
+    if entries.len() > MAX_CONNECTOR_SCOPE {
+        return Some(Vec::new());
+    }
+    let mut ids = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match entry.as_str() {
+            Some(id)
+                if !id.is_empty()
+                    && id.len() <= MAX_CONNECTOR_ID_LEN
+                    && id
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') =>
+            {
+                ids.push(id.to_owned());
+            }
+            _ => return Some(Vec::new()),
+        }
+    }
+    Some(ids)
+}
 
 /// How long, in seconds, a park waits when the stop carried no better hint (a provider
 /// that is out of quota and named no reset).
@@ -1379,5 +1503,93 @@ mod tests {
         assert!(parks_in(&fold) > MAX_PARKS_PER_RUN);
         fold.extensions.insert(EXT_CHILD_CEILING.to_owned(), serde_json::json!(u64::MAX));
         assert_eq!(child_ceiling_in(&fold), None, "an out-of-range ceiling is not a ceiling");
+    }
+
+    #[test]
+    fn the_input_pause_readers_read_absent_valid_and_malformed_values() {
+        let mut fold = fold();
+        assert_eq!(offered_tools_in(&fold), None);
+        assert_eq!(connector_taint_in(&fold), TaintRead::Absent);
+        assert_eq!(connector_scope_in(&fold), None);
+
+        fold.extensions.insert(
+            EXT_OFFERED_TOOLS.to_owned(),
+            serde_json::json!([
+                {"name": "t1", "description": "d", "parameters_json": "{}"},
+                {"name": "t2"}
+            ]),
+        );
+        let tools = offered_tools_in(&fold).expect("tools");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name, "t1");
+        assert_eq!(tools[0].parameters_json, "{}");
+        assert_eq!(tools[1].description, "");
+        fold.extensions
+            .insert(EXT_CONNECTOR_TAINT.to_owned(), serde_json::json!(false));
+        assert_eq!(connector_taint_in(&fold), TaintRead::Clear);
+        fold.extensions
+            .insert(EXT_CONNECTOR_TAINT.to_owned(), serde_json::json!(true));
+        assert_eq!(connector_taint_in(&fold), TaintRead::Marked);
+        fold.extensions.insert(
+            EXT_CONNECTOR_SCOPE.to_owned(),
+            serde_json::json!(["conn-1", "conn_2"]),
+        );
+        assert_eq!(
+            connector_scope_in(&fold),
+            Some(vec!["conn-1".to_owned(), "conn_2".to_owned()])
+        );
+        // They survive the wire.
+        let back = LoopFoldV1::from_bytes(&fold.to_bytes().expect("serialize")).expect("parse");
+        assert_eq!(offered_tools_in(&back), offered_tools_in(&fold));
+        assert_eq!(connector_taint_in(&back), TaintRead::Marked);
+        assert_eq!(connector_scope_in(&back), connector_scope_in(&fold));
+
+        // Malformed offered tools read as None.
+        let too_many: Vec<serde_json::Value> = (0..=MAX_OFFERED_TOOLS)
+            .map(|n| serde_json::json!({ "name": format!("t{n}") }))
+            .collect();
+        for bad in [
+            serde_json::json!("x"),
+            serde_json::json!([]),
+            serde_json::json!([{"name": ""}]),
+            serde_json::json!([{"description": "d"}]),
+            serde_json::json!([{"name": 3}]),
+            serde_json::json!(["t"]),
+            serde_json::Value::Array(too_many),
+        ] {
+            fold.extensions
+                .insert(EXT_OFFERED_TOOLS.to_owned(), bad.clone());
+            assert_eq!(offered_tools_in(&fold), None);
+        }
+
+        // A malformed taint is marked, never clear.
+        for bad in [
+            serde_json::json!("false"),
+            serde_json::json!(0),
+            serde_json::json!(null),
+            serde_json::json!([]),
+        ] {
+            fold.extensions
+                .insert(EXT_CONNECTOR_TAINT.to_owned(), bad.clone());
+            assert_eq!(connector_taint_in(&fold), TaintRead::Marked, "{bad}");
+        }
+
+        // A malformed scope is the strictest scope: present and empty.
+        let nine: Vec<String> = (0..=MAX_CONNECTOR_SCOPE)
+            .map(|n| format!("c{n}"))
+            .collect();
+        for bad in [
+            serde_json::json!("conn-1"),
+            serde_json::json!([""]),
+            serde_json::json!(["bad id"]),
+            serde_json::json!(["a:b"]),
+            serde_json::json!(["conn-1", 3]),
+            serde_json::json!(["x".repeat(MAX_CONNECTOR_ID_LEN + 1)]),
+            serde_json::json!(nine),
+        ] {
+            fold.extensions
+                .insert(EXT_CONNECTOR_SCOPE.to_owned(), bad.clone());
+            assert_eq!(connector_scope_in(&fold), Some(Vec::new()), "{bad}");
+        }
     }
 }

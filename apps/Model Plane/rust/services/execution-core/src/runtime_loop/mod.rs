@@ -647,6 +647,10 @@ pub(crate) async fn execute_step_with_browser_grant(
     browser_grant: Option<&tool_bridge::ValidatedBrowserGrant>,
     sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
     thread_scope: Option<&crate::sandbox_lease::workspace_sync::ThreadScope<'_>>,
+    // How this step's `knowledge_search` is scoped to its Space. The gRPC boundary derives it from
+    // `ExecuteStepRequest.space_id` and the retrieval header (`step_space_retrieval`); callers with
+    // no Space pass `Organisation`.
+    space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
     // `ExecuteStepRequest.space_id`: the Space the step is scoped to, empty outside one. Read by
     // the owner document listing, which refuses a Space-scoped step (D2-769).
     request_space_id: &str,
@@ -679,8 +683,9 @@ pub(crate) async fn execute_step_with_browser_grant(
         None,
         true,
         &[],
-        // The direct single-step RPC has no run, so no Space retrieval was authorised for it.
-        crate::knowledge_tools::SpaceRetrieval::Organisation,
+        // The scope the gRPC boundary chose for this step: a Space-scoped step with no decision is
+        // withheld there rather than searched organisation-wide.
+        space_retrieval,
         None,
         request_space_id,
     )
@@ -4956,6 +4961,7 @@ mod tests {
             grant,
             None,
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
             "",
         )
         .await
@@ -5078,6 +5084,7 @@ mod tests {
             Some(&grant),
             None,
             None,
+            crate::knowledge_tools::SpaceRetrieval::Organisation,
             "",
         )
         .await;

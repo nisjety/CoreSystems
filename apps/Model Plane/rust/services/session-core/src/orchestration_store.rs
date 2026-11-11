@@ -1319,6 +1319,18 @@ async fn decide_approval_inner(
         create_scope_grant(&mut transaction, id, org_id, record).await?;
     }
 
+    // The run's retention class is read once for both audit rows: the authz row marks a ZDR run,
+    // and the approval row is not written for one at all (DEC-32).
+    let retention: Option<String> = if updated && (record.audit || record.authz_audit) {
+        sqlx::query_scalar(APPROVAL_RUN_RETENTION_SQL)
+            .bind(id)
+            .bind(org_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+    } else {
+        None
+    };
+
     if updated && record.authz_audit {
         let (_, run_id, owner_user_id, metadata): (String, String, String, JsonValue) =
             sqlx::query_as(APPROVAL_AUDIT_CONTEXT_SQL)
@@ -1328,11 +1340,6 @@ async fn decide_approval_inner(
                 .await?;
         // A run that keeps no state (or whose class cannot be read) is reported as ZDR, so the
         // row carries ids and words only and no host class.
-        let retention: Option<String> = sqlx::query_scalar(APPROVAL_RUN_RETENTION_SQL)
-            .bind(id)
-            .bind(org_id)
-            .fetch_optional(&mut *transaction)
-            .await?;
         let zdr = retention.as_deref() != Some("persistent");
         let body = crate::audit_publisher::build_authz_decision_body(
             &crate::audit_publisher::AuthzDecisionAudit {
@@ -1357,7 +1364,9 @@ async fn decide_approval_inner(
             .await?;
     }
 
-    if updated && record.audit {
+    // A ZDR or waived run (or one whose class cannot be read) gets no approval_decided row; the
+    // skip is silent so no log line names the run (DEC-32).
+    if updated && record.audit && approval_audit_row_allowed(retention.as_deref()) {
         let (kind, run_id, owner_user_id, metadata): (String, String, String, JsonValue) =
             sqlx::query_as(APPROVAL_AUDIT_CONTEXT_SQL)
                 .bind(id)
@@ -1397,6 +1406,15 @@ async fn decide_approval_inner(
         delivery_id,
         loop_owned,
     })
+}
+
+/// Whether a decision on an approval may leave an `approval_decided` audit row, given the
+/// owning run's `retention_class`. Only a persistent run may: a zero-retention (`zdr`) or waived
+/// (`zdr_waived`) run keeps no durable record naming it, and a class that is missing or not
+/// recognised counts as ZDR (DEC-32, Approvals v2 ledger point 6).
+#[must_use]
+fn approval_audit_row_allowed(retention_class: Option<&str>) -> bool {
+    retention_class == Some("persistent")
 }
 
 /// Why a standing scope could not be recorded with its decision (build plan WS13 S6). The
@@ -4005,6 +4023,15 @@ mod tests {
         assert!(DECIDE_APPROVAL_SQL.contains("'{decision}', $7::jsonb, true)"));
         assert!(INSERT_APPROVAL_AUDIT_OUTBOX_SQL.contains("ON CONFLICT (event_id) DO NOTHING"));
         assert!(APPROVAL_AUDIT_CONTEXT_SQL.contains("id = $1 AND org_id = $2"));
+    }
+
+    #[test]
+    fn approval_audit_row_is_allowed_only_for_a_persistent_run() {
+        assert!(approval_audit_row_allowed(Some("persistent")));
+        assert!(!approval_audit_row_allowed(Some("zdr")));
+        assert!(!approval_audit_row_allowed(Some("zdr_waived")));
+        assert!(!approval_audit_row_allowed(None));
+        assert!(!approval_audit_row_allowed(Some("anything_else")));
     }
 
     #[test]

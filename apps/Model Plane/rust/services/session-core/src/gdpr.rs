@@ -496,6 +496,23 @@ pub(crate) fn erasure_hold_gate() -> &'static ErasureHoldGate {
     })
 }
 
+/// The switch for erasing thread-bound memory in a user erasure (OD-59), off by default.
+pub(crate) const THREAD_MEMORY_ERASURE_ENV: &str = "SESSION_CORE_GDPR_THREAD_MEMORY_ERASURE";
+
+/// Whether `value` of [`THREAD_MEMORY_ERASURE_ENV`] turns the switch on: only the trimmed literal
+/// `true`; `1`, `yes`, `TRUE`, an empty value and an unset one are all off.
+fn thread_memory_erasure_switch(value: Option<&str>) -> bool {
+    value.is_some_and(|raw| raw.trim() == "true")
+}
+
+/// Whether a user erasure also erases the memory learned in the person's own threads and their part
+/// of Space-thread memory (OD-59). Read once per process from [`THREAD_MEMORY_ERASURE_ENV`]; off, those
+/// rows stay until their thread is deleted.
+pub fn thread_memory_erasure_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| thread_memory_erasure_switch(std::env::var(THREAD_MEMORY_ERASURE_ENV).ok().as_deref()))
+}
+
 /// Hard-purge every org-scoped row this crate owns for `org_id`, in one
 /// transaction. Deletion order respects every FK with no `ON DELETE
 /// CASCADE` (children before parents); `approval_delivery_outbox`,
@@ -1051,7 +1068,40 @@ pub async fn erase_user_space_memory_sources(
     .fetch_all(&mut *tx)
     .await?;
 
-    let mut summary = SpaceSourceSummary::default();
+    let erased = erase_attributed_rows_in_tx(&mut tx, org_id, user_id, rows).await?;
+    let summary = SpaceSourceSummary { deleted: erased.deleted.len() as u64, narrowed: erased.narrowed };
+    tx.commit().await?;
+    if summary.deleted > 0 {
+        metrics::counter!("mp_session_space_memory_erased_total", "op" => "gdpr_user")
+            .increment(summary.deleted);
+    }
+    Ok(summary)
+}
+
+/// What [`erase_attributed_rows_in_tx`] did to the rows it was given.
+pub(crate) struct AttributedErasure {
+    /// The rows deleted, with their owner, so the caller can erase each semantic twin.
+    pub(crate) deleted: Vec<crate::memory_erasure::ErasedMemory>,
+    /// The rows kept but narrowed to the other members' sources.
+    pub(crate) narrowed: u64,
+}
+
+/// Applies the EP-8 S7 attribution rule to the given `agent_memory` rows of one person, inside the
+/// caller's transaction: for each row the attributable links are looked up, then
+/// [`space_source_erasure`] decides: a row only the person was the source of is deleted, a row with
+/// other sources keeps those and loses the person's, a row the person is no source of stays. The
+/// caller selects and locks the rows (`rows` is id, `source_links`, `source_label`) and commits.
+///
+/// # Errors
+///
+/// Returns an error if any statement fails; the caller's transaction is then to be rolled back.
+async fn erase_attributed_rows_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    user_id: &str,
+    rows: Vec<(String, Vec<String>, Option<String>)>,
+) -> anyhow::Result<AttributedErasure> {
+    let mut erased = AttributedErasure { deleted: Vec::new(), narrowed: 0 };
     for (memory_id, links, source_label) in rows {
         let mut attributed: std::collections::HashMap<String, String> = sqlx::query_as::<_, (String, String)>(
             "SELECT 'message:' || m.id, COALESCE(m.author_subject_id, t.user_id) \
@@ -1060,7 +1110,7 @@ pub async fn erase_user_space_memory_sources(
         )
         .bind(org_id)
         .bind(&links)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?
         .into_iter()
         .collect();
@@ -1072,7 +1122,7 @@ pub async fn erase_user_space_memory_sources(
             )
             .bind(org_id)
             .bind(&links)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?;
             if let Some(saver) = saver {
                 attributed.insert("tool:save_memory".to_owned(), saver);
@@ -1081,32 +1131,31 @@ pub async fn erase_user_space_memory_sources(
         match space_source_erasure(&links, &attributed, user_id) {
             SpaceSourceErasure::Untouched => {}
             SpaceSourceErasure::Delete => {
-                summary.deleted += sqlx::query("DELETE FROM agent_memory WHERE id = $1 AND org_id = $2")
-                    .bind(&memory_id)
-                    .bind(org_id)
-                    .execute(&mut *tx)
-                    .await?
-                    .rows_affected();
+                let gone: Option<(String, String)> = sqlx::query_as(
+                    "DELETE FROM agent_memory WHERE id = $1 AND org_id = $2 RETURNING id, owner",
+                )
+                .bind(&memory_id)
+                .bind(org_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+                if let Some((memory_id, owner)) = gone {
+                    erased.deleted.push(crate::memory_erasure::ErasedMemory { memory_id, owner });
+                }
             }
             SpaceSourceErasure::Keep(remaining) => {
-                summary.narrowed += sqlx::query(
+                erased.narrowed += sqlx::query(
                     "UPDATE agent_memory SET source_links = $3, updated_at = now() WHERE id = $1 AND org_id = $2",
                 )
                 .bind(&memory_id)
                 .bind(org_id)
                 .bind(&remaining)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?
                 .rows_affected();
             }
         }
     }
-    tx.commit().await?;
-    if summary.deleted > 0 {
-        metrics::counter!("mp_session_space_memory_erased_total", "op" => "gdpr_user")
-            .increment(summary.deleted);
-    }
-    Ok(summary)
+    Ok(erased)
 }
 
 /// Counts of one person's standing-profile and personal-memory erasure (EP-8 S4).

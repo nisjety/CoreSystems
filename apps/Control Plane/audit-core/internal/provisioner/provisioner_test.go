@@ -627,8 +627,8 @@ func TestEnsureOrgErasureConsumerRejectsAnUnknownDurable(t *testing.T) {
 // conversation content in Dragonfly, so erasure has to reach it too.
 func TestOrgErasureConsumerConfigsCoversAllFifteen(t *testing.T) {
 	configs := orgErasureConsumerConfigs()
-	if len(configs) != 15 {
-		t.Fatalf("orgErasureConsumerConfigs has %d entries, want 15: %v", len(configs), configs)
+	if len(configs) != 16 {
+		t.Fatalf("orgErasureConsumerConfigs has %d entries, want 16: %v", len(configs), configs)
 	}
 	if _, ok := configs[VerevonGatewayOrgErasureConsumerName]; !ok {
 		t.Fatalf("the Frontend Plane gateway's erasure consumer is missing from the map")

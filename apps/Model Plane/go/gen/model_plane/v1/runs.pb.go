@@ -632,8 +632,12 @@ type ScheduledStepContext struct {
 	ContractDigest string `protobuf:"bytes,7,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
 	// Expiry of the stored-consent contract, re-verified per step.
 	ContractExpiresAt string `protobuf:"bytes,8,opt,name=contract_expires_at,json=contractExpiresAt,proto3" json:"contract_expires_at,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// The run's retention, stated as two flags (F-f10-26). `zdr` is a zero-retention run;
+	// `zdr_waived` is a run whose zero-retention was waived. Both false is a persistent run.
+	Zdr           bool `protobuf:"varint,9,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	ZdrWaived     bool `protobuf:"varint,10,opt,name=zdr_waived,json=zdrWaived,proto3" json:"zdr_waived,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ScheduledStepContext) Reset() {
@@ -720,6 +724,20 @@ func (x *ScheduledStepContext) GetContractExpiresAt() string {
 		return x.ContractExpiresAt
 	}
 	return ""
+}
+
+func (x *ScheduledStepContext) GetZdr() bool {
+	if x != nil {
+		return x.Zdr
+	}
+	return false
+}
+
+func (x *ScheduledStepContext) GetZdrWaived() bool {
+	if x != nil {
+		return x.ZdrWaived
+	}
+	return false
 }
 
 type ListRunsRequest struct {
@@ -2502,7 +2520,7 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\x1eGetScheduledStepContextRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +
-	"\x06org_id\x18\x03 \x01(\tR\x05orgId\"\x8b\x02\n" +
+	"\x06org_id\x18\x03 \x01(\tR\x05orgId\"\xbc\x02\n" +
 	"\x14ScheduledStepContext\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +
@@ -2511,7 +2529,11 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\x06status\x18\x05 \x01(\tR\x06status\x12#\n" +
 	"\rcontract_json\x18\x06 \x01(\tR\fcontractJson\x12'\n" +
 	"\x0fcontract_digest\x18\a \x01(\tR\x0econtractDigest\x12.\n" +
-	"\x13contract_expires_at\x18\b \x01(\tR\x11contractExpiresAt\"\x98\x02\n" +
+	"\x13contract_expires_at\x18\b \x01(\tR\x11contractExpiresAt\x12\x10\n" +
+	"\x03zdr\x18\t \x01(\bR\x03zdr\x12\x1d\n" +
+	"\n" +
+	"zdr_waived\x18\n" +
+	" \x01(\bR\tzdrWaived\"\x98\x02\n" +
 	"\x0fListRunsRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12#\n" +
 	"\rstatus_filter\x18\x02 \x01(\tR\fstatusFilter\x12 \n" +

@@ -5866,6 +5866,7 @@ async fn run_rounds(
                 &pending.arguments_json,
                 pending.cause,
                 ctx.permission_wire,
+                ctx.route.is_waived(),
                 rounds_executed.saturating_add(delegated_rounds),
                 ctx.session_bearer,
                 offered.as_ref(),
@@ -9575,15 +9576,16 @@ fn shell_rule_proposals_on() -> bool {
 /// narrow rule an "Always" would propose, for example `shell:git status`, instead of `shell`. The
 /// rule is a program and subcommand from mp-contracts' closed tables, never a word of the command's
 /// arguments; a command with no rule (compound, redirected, substituted, unknown) keeps `shell` and
-/// is offered once, as before. A zero-retention run keeps `shell` too: its approval row states
-/// nothing read from the command.
+/// is offered once, as before. A zero-retention run keeps `shell` too, and so does a waived run (it
+/// counts as zero-retention for new stores): its approval row states nothing read from the command.
 fn propose_shell_rule(
     stored: &mut mp_contracts::model_plane::v1::ApprovalCause,
     zdr: bool,
+    waived: bool,
     tool_name: &str,
     tool_input: &str,
 ) {
-    if zdr || tool_name != mp_contracts::shell_rule::SHELL_TOOL || !shell_rule_proposals_on() {
+    if zdr || waived || tool_name != mp_contracts::shell_rule::SHELL_TOOL || !shell_rule_proposals_on() {
         return;
     }
     if let Some(rule) = mp_contracts::shell_rule::rule_for_shell_input(tool_input) {
@@ -9595,18 +9597,22 @@ fn propose_shell_rule(
 mod shell_rule_proposals {
     use super::*;
 
-    fn shell_cause(command: &str, zdr: bool) -> mp_contracts::model_plane::v1::ApprovalCause {
+    fn shell_cause(
+        command: &str,
+        zdr: bool,
+        waived: bool,
+    ) -> mp_contracts::model_plane::v1::ApprovalCause {
         let input = json!({ "command": command, "cwd": "/workspace" }).to_string();
         let mut cause =
             approval_cause::for_call(CauseCode::RiskyEffectUnderAsk, "run_test", "shell", &input);
-        propose_shell_rule(&mut cause, zdr, "shell", &input);
+        propose_shell_rule(&mut cause, zdr, waived, "shell", &input);
         cause
     }
 
     #[test]
     fn shell_rule_switch_off_keeps_the_tool_key() {
         let _switch = ShellRuleSwitch::set(false);
-        let cause = shell_cause("git status", false);
+        let cause = shell_cause("git status", false, false);
         assert_eq!(cause.action_key, "shell");
         assert_eq!(cause.scope_options, ["once"]);
     }
@@ -9615,7 +9621,7 @@ mod shell_rule_proposals {
     fn shell_rule_names_program_and_subcommand_only() {
         let _switch = ShellRuleSwitch::set(true);
         let command = "git commit -m 'Rettet særs viktig feil'";
-        let cause = shell_cause(command, false);
+        let cause = shell_cause(command, false, false);
         assert_eq!(cause.action_key, "shell:git commit");
         assert!(!cause.action_key.contains("Rettet"));
         // The rule changes what an "Always" would name, never which scopes the pause offers or
@@ -9629,14 +9635,22 @@ mod shell_rule_proposals {
     fn shell_rule_no_rule_for_compound_or_unknown_commands() {
         let _switch = ShellRuleSwitch::set(true);
         for command in ["git status && git push", "git log | head", "rm -rf build", "FOO=1 ls"] {
-            assert_eq!(shell_cause(command, false).action_key, "shell", "{command}");
+            assert_eq!(shell_cause(command, false, false).action_key, "shell", "{command}");
         }
     }
 
     #[test]
     fn shell_rule_not_proposed_for_a_zero_retention_run() {
         let _switch = ShellRuleSwitch::set(true);
-        assert_eq!(shell_cause("git status", true).action_key, "shell");
+        assert_eq!(shell_cause("git status", true, false).action_key, "shell");
+    }
+
+    #[test]
+    fn shell_rule_not_proposed_for_a_waived_run() {
+        let _switch = ShellRuleSwitch::set(true);
+        let cause = shell_cause("git status", false, true);
+        assert_eq!(cause.action_key, "shell");
+        assert_eq!(cause.scope_options, ["once"]);
     }
 
     #[test]
@@ -9649,7 +9663,7 @@ mod shell_rule_proposals {
             "code_interpreter",
             input,
         );
-        propose_shell_rule(&mut cause, false, "code_interpreter", input);
+        propose_shell_rule(&mut cause, false, false, "code_interpreter", input);
         assert_eq!(cause.action_key, "code_interpreter");
     }
 }
@@ -9683,6 +9697,9 @@ async fn pause_for_approval(
     // The gate that held the call (build plan WS13 S1), stored beside the approval.
     cause: CauseCode,
     permission_mode: &str,
+    // The run's route is waived: it counts as zero-retention for new stores, so the pause states
+    // no shell rule read from the command.
+    waived: bool,
     rounds_executed: u32,
     bearer: Option<&str>,
     offered: Option<&serde_json::Value>,
@@ -9820,7 +9837,7 @@ async fn pause_for_approval(
     );
     let mut request = request?;
     if let Some(stored) = request.get_mut().cause.as_mut() {
-        propose_shell_rule(stored, req.zdr, tool_name, tool_input);
+        propose_shell_rule(stored, req.zdr, waived, tool_name, tool_input);
     }
     // The fold of this pause is durable BEFORE the approval is visible, so a fast
     // approve-and-continue can always claim it. It is named by the approval's own
@@ -18489,6 +18506,7 @@ mod tests {
             "{}",
             CauseCode::RiskyEffectUnderAsk,
             "ask",
+            false,
             0,
             None,
             Some(&oversized),
@@ -18524,6 +18542,7 @@ mod tests {
             input,
             CauseCode::BrowserActionRisk,
             "ask",
+            false,
             0,
             Some("session-token"),
             None,
@@ -18572,6 +18591,7 @@ mod tests {
             "{}",
             CauseCode::BrowserHumanAssist,
             "ask",
+            false,
             0,
             Some("session-token"),
             None,
@@ -18640,6 +18660,7 @@ mod tests {
             "{}",
             CauseCode::RiskyEffectUnderAsk,
             "ask",
+            false,
             0,
             Some("session-token"),
             Some(&near_cap),

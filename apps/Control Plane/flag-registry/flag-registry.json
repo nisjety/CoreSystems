@@ -7,7 +7,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "WS18-S5: a Do run in a project forwards its Space retrieval decision to execution-core, so knowledge_search runs Space-scoped. Off, the Do search stays organisation-wide. Only the literal true enables it.",
+      "purpose": "WS18-S5: a Do run in a project forwards its Space retrieval decision to execution-core so knowledge_search is Space-scoped. Off, org-wide. Deploy execution-core (reads x-space-retrieval-authorization) first. Only the literal true.",
       "declarations": [
         { "service": "model-gateway", "env": "AGENTIC_SPACE_RETRIEVAL_ENABLED", "default": "false" }
       ]
@@ -239,6 +239,18 @@
       "purpose": "EP-7 W4-F T5: the wake gate in capability-core. A fire of a trigger with a wake filter reads its webhook payload from integration-corev2 and needs a match. Off, stored filters are ignored. Only the literal true turns it on.",
       "declarations": [
         { "service": "capability-core", "env": "EVENT_TRIGGER_WAKE_GATE_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "EXECUTE_STEP_SPACE_SEARCH_WITHHOLD",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "D2-771: ExecuteStep withholds a Space-scoped knowledge_search (typed PROJECT_KNOWLEDGE_UNAVAILABLE, before any Data Plane call) unless x-space-retrieval-authorization is forwarded. Off, org-wide. Only the literal true.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTE_STEP_SPACE_SEARCH_WITHHOLD", "default": "false" }
       ]
     },
     {
@@ -985,6 +997,17 @@
       ]
     },
     {
+      "name": "SESSION_CORE_GDPR_THREAD_MEMORY_ERASURE",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "A user erasure also erases memory learned in the person's own threads and their part of Space-thread memory. Off, those rows stay until the thread is deleted. Only the literal true enables it.",
+      "declarations": [
+        { "service": "session-core", "env": "SESSION_CORE_GDPR_THREAD_MEMORY_ERASURE", "default": "false" }
+      ]
+    },
+    {
       "name": "SESSION_ORG_ROUTING_OVERLAY",
       "kind": "switch",
       "owner": "model-plane",
@@ -1093,6 +1116,15 @@
       "declarations": [
         { "service": "capability-core", "env": "TASK_EXECUTOR_ENABLED", "default": "" }
       ]
+    },
+    {
+      "name": "USER_CORE_ORG_ERASURE_CONSUMER_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "user-core deletes a purged organisation's resource grants when org-core fans out the organisation erasure. Only the literal true subscribes. Needs the user-core-org-erasure durable from audit-core first.",
+      "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
     },
     {
       "name": "VEREVON_INTENT_ENABLED",

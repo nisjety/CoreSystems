@@ -21768,8 +21768,9 @@ async fn continue_skipped_site(
     )
     .await
     .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?;
-    // The org's agent-run pause, read after the owner check and before the run or the approval is read.
-    crate::org_agent_policy::ensure_not_paused(
+    // The org's agent-run pause, read after the owner check and before the run or the approval is read. A lockdown mode
+    // cap refuses it too, and a read-only cap states `plan_mode` on the continuation it starts (D2-1114, D2-1117).
+    let org_plan_mode = crate::org_agent_policy::admit_continuation(
         crate::org_agent_policy::policy_mode(),
         crate::org_agent_policy::shared_cache(),
         &state.http_client,
@@ -21880,7 +21881,8 @@ async fn continue_skipped_site(
         None,
         0,
         CONTINUE_PERMISSION_MODE.to_owned(),
-        false,
+        // The org's read-only cap holds the resumed run to plan mode (D2-1117); false when the cap states none.
+        org_plan_mode,
         // Never an execute turn: its authority is the run's own.
         false,
         // Nor an approve-then-execute turn: it names no plan.
@@ -21992,8 +21994,9 @@ pub(crate) async fn continue_run(
     .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?;
     // The org's agent-run pause (F-t3-083, WS25-S9): a paused org starts no continuation, and a policy that cannot be read
     // starts none either, as a Do turn is refused. Read after the owner check and before the run or the approval is read,
-    // so no approval is spent by a refused continuation.
-    crate::org_agent_policy::ensure_not_paused(
+    // so no approval is spent by a refused continuation. A lockdown mode cap refuses it too, and a read-only cap states
+    // `plan_mode` on the continuation it starts (D2-1114, D2-1117).
+    let org_plan_mode = crate::org_agent_policy::admit_continuation(
         crate::org_agent_policy::policy_mode(),
         crate::org_agent_policy::shared_cache(),
         &state.http_client,
@@ -22146,7 +22149,8 @@ pub(crate) async fn continue_run(
             None,
             0,
             CONTINUE_PERMISSION_MODE.to_owned(),
-            false,
+            // The org's read-only cap holds the continuation to plan mode (D2-1117); false when the cap states none.
+            org_plan_mode,
             // A continuation is never an execute turn: its authority is the pause's.
             false,
             // Nor an approve-then-execute turn (WS14 S2): it names no plan.
@@ -26394,8 +26398,10 @@ mod execute_turn_tests {
             "a continuation never names the flag; its slot is a literal false"
         );
         assert!(
-            continuation.contains("CONTINUE_PERMISSION_MODE.to_owned(),\n            false,\n            false,\n"),
-            "plan_mode false, execute_granted false: {continuation}"
+            continuation.contains(
+                "CONTINUE_PERMISSION_MODE.to_owned(),\n            // The org's read-only cap holds the continuation to plan mode (D2-1117); false when the cap states none.\n            org_plan_mode,\n            // A continuation is never an execute turn: its authority is the pause's.\n            false,\n"
+            ),
+            "plan_mode is the org cap's flag, execute_granted false: {continuation}"
         );
         let stream = code_of("fn agentic_run_stream(", "\n}\n");
         assert!(stream.contains("dispatch_rejection_event(&error)"), "the typed mapping");

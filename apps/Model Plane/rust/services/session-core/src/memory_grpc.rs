@@ -849,11 +849,14 @@ impl MemoryService for MemoryGrpc {
                     crate::space_memory::Skip::Waived.refusal(),
                 ));
             }
+            // The person origin is earned by the credential, not the request: a
+            // service asserting "user" here is counted and, under enforce, downgraded.
+            let mode = write_policy::Mode::configured();
             write_policy::gate(
-                write_policy::Mode::configured(),
+                mode,
                 &req.content,
                 crate::space_memory::SPACE_SCOPE,
-                write_policy::Origin::from_wire(&req.origin),
+                write_policy::Origin::from_wire(&req.origin).bound_for(mode, !caller.is_service(), false),
             )
             .map_err(|code| Status::failed_precondition(code.status_message()))?;
             let written = crate::space_memory::index_space_memory(
@@ -893,11 +896,13 @@ impl MemoryService for MemoryGrpc {
                     crate::space_memory::Skip::NotAgentTurn.agent_refusal(),
                 ));
             }
+            // The turn check above reads the claimed origin; the gate gets the bound one.
+            let mode = write_policy::Mode::configured();
             write_policy::gate(
-                write_policy::Mode::configured(),
+                mode,
                 &req.content,
                 crate::space_memory::AGENT_SCOPE,
-                origin,
+                origin.bound_for(mode, !caller.is_service(), false),
             )
             .map_err(|code| Status::failed_precondition(code.status_message()))?;
             let written = crate::space_memory::index_agent_memory(
@@ -924,11 +929,12 @@ impl MemoryService for MemoryGrpc {
         // so a paused person is told about the pause, and it precedes the write, so a
         // refusal leaves neither a row nor a semantic mirror.
         let scope = crate::dreaming::scope_for_topic(&crate::dreaming::normalize_topic(&req.topic));
+        let mode = write_policy::Mode::configured();
         write_policy::gate(
-            write_policy::Mode::configured(),
+            mode,
             &req.content,
             scope,
-            write_policy::Origin::from_wire(&req.origin),
+            write_policy::Origin::from_wire(&req.origin).bound_for(mode, !caller.is_service(), false),
         )
         .map_err(|code| Status::failed_precondition(code.status_message()))?;
         let memory_id = crate::dreaming::index_agent_memory(
@@ -1354,11 +1360,15 @@ impl MemoryService for MemoryGrpc {
             req.user_id.trim(),
             MEMORY_CONTROLS_READ_SCOPE,
         )?;
+        // capability-core authenticates a person and asks on that person's behalf, so it
+        // is the one service whose "user" origin is kept; any other service is downgraded.
+        let trusted_checker = caller.is_service() && caller.principal_id() == "service:capability-core";
+        let mode = write_policy::Mode::configured();
         let verdict = write_policy::gate(
-            write_policy::Mode::configured(),
+            mode,
             &req.content,
             req.scope.trim(),
-            write_policy::Origin::from_wire(&req.origin),
+            write_policy::Origin::from_wire(&req.origin).bound_for(mode, !caller.is_service(), trusted_checker),
         );
         Ok(Response::new(match verdict {
             Ok(()) => CheckMemoryWriteResponse {

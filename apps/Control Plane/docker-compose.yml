@@ -460,6 +460,11 @@ services:
             # WS04-S10: durable Space membership events (ledger outbox + re-announce).
             # Strict literal true; off by default and in production until enabled.
             SPACE_MEMBERSHIP_EVENTS_SWEEPER: ${SPACE_MEMBERSHIP_EVENTS_SWEEPER:-false}
+            # Org erasure: delete the purged organisation's resource grants on org-core's
+            # verevon.gdpr.erasure.requested fan-out. Strict literal true; off by default
+            # (off = no subscription). Needs the user-core-org-erasure durable that
+            # audit-core provisions on the shared bus.
+            USER_CORE_ORG_ERASURE_CONSUMER_ENABLED: ${USER_CORE_ORG_ERASURE_CONSUMER_ENABLED:-false}
             # WS04-S11: sign a history floor on shared thread-read decisions for since_join
             # rooms. Strict literal true; off by default and in production. 0 + restart: full history.
             SPACE_HISTORY_WINDOW_CLAIM: ${SPACE_HISTORY_WINDOW_CLAIM:-false}

@@ -1614,36 +1614,61 @@ impl FallbackChain {
     /// # Errors
     ///
     /// [`ProviderError::ModelHidden`] when the model the caller named, or the model its
-    /// alias stands for, is hidden. Nothing has been sent anywhere.
-    fn overlay_admission(&self, req: &InferRequest) -> Result<Option<InferRequest>, ProviderError> {
-        if !catalogue_overlay::catalogue_overlay_enabled()
-            || catalogue_overlay::is_reserved_id(&req.model)
-        {
+    /// alias stands for, is hidden by the platform overlay, or (while
+    /// `INFERENCE_ORG_OVERLAY` is on) by the caller's own organisation overlay. Nothing
+    /// has been sent anywhere.
+    async fn overlay_admission(
+        &self,
+        req: &InferRequest,
+    ) -> Result<Option<InferRequest>, ProviderError> {
+        if catalogue_overlay::is_reserved_id(&req.model) {
             return Ok(None);
         }
-        let policy = self.policy.load();
-        let overlay = &policy.catalogue_overlay;
-        if overlay.is_empty() {
-            return Ok(None);
+        // The platform overlay. The policy guard is dropped before the organisation
+        // overlay is awaited below.
+        let mut mapped: Option<InferRequest> = None;
+        if catalogue_overlay::catalogue_overlay_enabled() {
+            let policy = self.policy.load();
+            let overlay = &policy.catalogue_overlay;
+            if !overlay.is_empty() {
+                let target = overlay.alias_target(&req.model);
+                if overlay.is_hidden(target.unwrap_or(req.model.as_str())) {
+                    return Err(ProviderError::ModelHidden {
+                        model: req.model.clone(),
+                    });
+                }
+                if let Some(target) = target {
+                    info!(
+                        request_id = %req.request_id,
+                        alias = %req.model,
+                        resolved_model = %target,
+                        "catalogue alias resolved"
+                    );
+                    let mut aliased = req.clone();
+                    aliased.model = target.to_owned();
+                    mapped = Some(aliased);
+                }
+            }
         }
-        let target = overlay.alias_target(&req.model);
-        if overlay.is_hidden(target.unwrap_or(req.model.as_str())) {
-            return Err(ProviderError::ModelHidden {
-                model: req.model.clone(),
-            });
+        // The caller's organisation overlay (W4-BYO-3), by the resolved id, so an alias
+        // that stands for a model the organisation hides is refused too.
+        if catalogue_overlay::org_overlay_enabled() {
+            if let Some(client) = &self.policy_client {
+                let resolved = mapped.as_ref().map_or(req.model.as_str(), |m| m.model.as_str());
+                if !resolved.trim().is_empty()
+                    && client.org_overlay(&req.org_id).await.is_hidden(resolved)
+                {
+                    info!(
+                        request_id = %req.request_id,
+                        "model refused: hidden by the organisation overlay"
+                    );
+                    return Err(ProviderError::ModelHidden {
+                        model: req.model.clone(),
+                    });
+                }
+            }
         }
-        let Some(target) = target else {
-            return Ok(None);
-        };
-        info!(
-            request_id = %req.request_id,
-            alias = %req.model,
-            resolved_model = %target,
-            "catalogue alias resolved"
-        );
-        let mut mapped = req.clone();
-        mapped.model = target.to_owned();
-        Ok(Some(mapped))
+        Ok(mapped)
     }
 
     /// The model the caller named, after checking it against their entitlement:
@@ -1748,7 +1773,7 @@ impl FallbackChain {
         let mut clock = CallClock::start();
         // The catalogue overlay answers an alias as its target and refuses a hidden
         // model, before the retired-id, role and entitlement checks name it.
-        let aliased = self.overlay_admission(req)?;
+        let aliased = self.overlay_admission(req).await?;
         let req: &InferRequest = aliased.as_ref().unwrap_or(req);
         // A retired Claude id is answered by its successor, so the entitlement check,
         // the cache key and every rung of the ladder all name the model that serves.
@@ -2243,7 +2268,7 @@ impl FallbackChain {
         let mut clock = CallClock::start();
         // The catalogue overlay answers an alias as its target and refuses a hidden
         // model, as on the unary path.
-        let aliased = self.overlay_admission(req)?;
+        let aliased = self.overlay_admission(req).await?;
         let req: &InferRequest = aliased.as_ref().unwrap_or(req);
         // A retired Claude id is answered by its successor, as on the unary path.
         let current = super::anthropic::with_current_model(req);

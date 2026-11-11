@@ -553,6 +553,18 @@ so downstream planes can purge their own copy of the subject's data.
 - **Model Plane** — purge run history / sessions / conversations for the subject.
 - **Data Plane v2** — purge documents/chunks/embeddings/source-traces owned by the subject/org.
 
+**Org-erasure consumers on the shared bus.** Each acts on `subject_type: "organization"`
+only, through a server-provisioned JetStream durable that audit-core creates on the
+`CONTROLPLANE` stream:
+
+- **Model Plane cost-core** — durable `cost-core-org-erasure`; purges the org's cost ledger.
+- **Control Plane user-core** — durable `user-core-org-erasure`; deletes the org's resource
+  grants (`AclRepository.DeleteGrantsForOrg`). Control owns grants and erases its own rows;
+  no other plane acts as the owner. Off by default behind
+  `USER_CORE_ORG_ERASURE_CONSUMER_ENABLED` (strict literal `true`). The delete is a single
+  idempotent statement, so redelivery is safe; logs carry only the org id, the event id and
+  the deleted count.
+
 Until those subscribers exist, the event is emitted but not consumed; the
 Control Plane-side erasure (auth + user + org rows) is already complete.
 

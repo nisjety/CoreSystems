@@ -539,20 +539,12 @@ impl ExecutionService {
         inference_bearer: &str,
         receipt_id: &str,
     ) -> Result<Response<pb::ExecuteScheduledStepResponse>, Status> {
-        // Zero retention and waivers are refused before any work: the lane keeps no durable
-        // state for an unattended run (WS20 S6, ZDR clause). The caller is the lane's own
-        // identity, which carries no retention until the step context does.
-        let caller = AuthenticatedUser {
-            org_id: req.org_id.clone(),
-            user_id: req.subject_id.clone(),
-            zdr: false,
-            org_zdr: None,
-            zdr_waiver: None,
-        };
-        if let Some(code) = runtime_loop::scheduled_agent::refuses_retention(
-            caller.zdr,
-            caller.zdr_waiver.is_some(),
-        ) {
+        // Zero retention and waivers are refused before any work, ahead of the contract check: the
+        // lane keeps no durable state for an unattended run (WS20 S6, ZDR clause). The run's
+        // retention is what Session Core states on the step context, never a constant and never
+        // read from the orchestrator. A waived run is refused here, so the caller below carries
+        // no waiver: `ZdrWaiver` is never built for the lane.
+        if let Some(code) = runtime_loop::scheduled_agent::refuses_step_retention(run) {
             return self
                 .finish_scheduled_agent_step(
                     req,
@@ -562,6 +554,14 @@ impl ExecutionService {
                 )
                 .await;
         }
+        // The lane's own identity, carrying the run's real retention.
+        let caller = AuthenticatedUser {
+            org_id: req.org_id.clone(),
+            user_id: req.subject_id.clone(),
+            zdr: run.zdr,
+            org_zdr: None,
+            zdr_waiver: None,
+        };
         let now = chrono::Utc::now();
         let contract = match runtime_loop::scheduled_agent::admit(
             &run.contract_json,
@@ -590,7 +590,8 @@ impl ExecutionService {
             // A scheduled run is offered its contract's tools and nothing else, so it is not indexed.
             deferred: runtime_loop::tool_index::DeferredIndex::default(),
         };
-        let run_req = runtime_loop::scheduled_agent::run_request(req, &run.goal, &contract);
+        let run_req =
+            runtime_loop::scheduled_agent::run_request(req, &run.goal, &contract, run.zdr);
         self.state.begin_unattended(&req.run_id);
         let driven = tokio::time::timeout(
             runtime_loop::scheduled_agent::wall_clock(&contract, now),
@@ -1536,6 +1537,13 @@ impl ExecutionCore for ExecutionService {
         } else {
             None
         };
+        // The Space retrieval the gateway authorised for this step's knowledge search, read before
+        // the request is consumed exactly as `run_agent` reads it. A header that is not valid text
+        // is present-but-empty, so a Space step withholds rather than searching the organisation.
+        let space_retrieval_header = request
+            .metadata()
+            .get(crate::knowledge_tools::SPACE_RETRIEVAL_HEADER)
+            .map(|value| value.to_str().unwrap_or_default().to_owned());
         let req = request.into_inner();
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
@@ -1626,6 +1634,13 @@ impl ExecutionCore for ExecutionService {
             }
             _ => None,
         };
+        // A Space-scoped step with no decision is withheld, never searched organisation-wide
+        // (D2-771, `EXECUTE_STEP_SPACE_SEARCH_WITHHOLD`). Data Plane verifies the decision itself.
+        let space_retrieval = crate::knowledge_tools::step_space_retrieval(
+            crate::knowledge_tools::execute_step_space_search_withhold_enabled(),
+            &req.space_id,
+            space_retrieval_header.as_deref(),
+        );
         let outcome = runtime_loop::execute_step_with_browser_grant(
             &req.tool_name,
             &req.tool_input,
@@ -1660,6 +1675,7 @@ impl ExecutionCore for ExecutionService {
             browser_grant.as_ref(),
             sandbox.as_ref(),
             thread.as_ref(),
+            space_retrieval,
             // The step's own Space, so the owner document listing refuses a Space-scoped step even
             // when no sandbox context is built for it (D2-769, `OWNER_LIST_SPACE_REFUSE`).
             &req.space_id,

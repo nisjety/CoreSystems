@@ -359,6 +359,27 @@
       "quarry": "tenant"
     }
   },
+  "model-gateway-goal-judge": {
+    "tenancy": "directory",
+    "audiences": [
+      "session-core"
+    ],
+    "consumerEnv": "MODEL_GATEWAY_GOAL_JUDGE_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "session-core": "persistent"
+    },
+    "scopes": [
+      "session:goal-judge:read",
+      "session:goal-verdict:write"
+    ],
+    "scopesByAudience": {
+      "session-core": [
+        "session:goal-judge:read",
+        "session:goal-verdict:write"
+      ]
+    }
+  },
   "model-gateway-mail-task-bridge": {
     "tenancy": "directory",
     "audiences": [

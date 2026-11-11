@@ -1164,6 +1164,8 @@ services:
       NATS_SHARED_URL: nats://control-shared-nats:4222
       NATS_SHARED_USER: session-core-gdpr
       NATS_SHARED_PASSWORD: ${SESSION_CORE_GDPR_NATS_PASSWORD:?SESSION_CORE_GDPR_NATS_PASSWORD is required}
+      # OD-59: a user erasure also erases thread-bound memory of the person's threads. Only the literal true.
+      SESSION_CORE_GDPR_THREAD_MEMORY_ERASURE: ${SESSION_CORE_GDPR_THREAD_MEMORY_ERASURE:-false}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
       OTEL_SERVICE_NAME: session-core
       # F-t3-075 (W5-075-a): JSON logs and exported span attributes keep only the names on TRACE_FIELDS. Only the literal true.
@@ -2102,6 +2104,10 @@ services:
       # organisation-wide listing); only the literal `true`. Switch it on before MODEL_ACTION_ADMISSION=table in any
       # Space-capable deployment.
       OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-false}
+      # D2-771: the direct ExecuteStep RPC searches the organisation for a Space-scoped knowledge_search today. With this on
+      # such a step is withheld (typed PROJECT_KNOWLEDGE_UNAVAILABLE, before any Data Plane call) unless the caller forwards
+      # x-space-retrieval-authorization. Off by default; only the literal `true`.
+      EXECUTE_STEP_SPACE_SEARCH_WITHHOLD: ${EXECUTE_STEP_SPACE_SEARCH_WITHHOLD:-false}
       # WS26-S7: Do-mode tool results ask model-gateway ScreenContent for the same tighten-only verdict chat gets. Off by
       # default; only the literal `true`. A refused, slow or mismatched answer keeps the local verdict; ZDR runs never ask.
       CONTENT_SAFETY_SCREEN_RPC: ${CONTENT_SAFETY_SCREEN_RPC:-false}

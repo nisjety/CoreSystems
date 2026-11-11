@@ -67,6 +67,39 @@ impl<'a> SpaceRetrieval<'a> {
     }
 }
 
+/// Whether this deployment withholds a Space-scoped `knowledge_search` on the direct `ExecuteStep`
+/// RPC (`EXECUTE_STEP_SPACE_SEARCH_WITHHOLD`). Strict: only the literal `true` switches it on, so the
+/// step keeps its organisation-wide search everywhere else. Dark by default (D2-771, D2-776).
+#[must_use]
+pub(crate) fn execute_step_space_search_withhold_enabled() -> bool {
+    crate::control_http_client::env_value("EXECUTE_STEP_SPACE_SEARCH_WITHHOLD").as_deref()
+        == Some("true")
+}
+
+/// How the direct `ExecuteStep` RPC scopes one step's `knowledge_search` (D2-771).
+///
+/// Pure, so the rule is testable without the process environment:
+/// - switch off: the organisation's own search, as it has always been;
+/// - `space_id` empty or blank: not a Space step, so the search is the organisation's own and a
+///   retrieval header on it is ignored;
+/// - Space step, header absent: [`SpaceRetrieval::Withheld`], fail closed, never organisation-wide;
+/// - Space step, header present: [`SpaceRetrieval::from_header`] (an empty header withholds, a
+///   decision scopes). Data Plane verifies the decision, not this process.
+#[must_use]
+pub(crate) fn step_space_retrieval<'a>(
+    switch_on: bool,
+    space_id: &str,
+    header: Option<&'a str>,
+) -> SpaceRetrieval<'a> {
+    if !switch_on || space_id.trim().is_empty() {
+        return SpaceRetrieval::Organisation;
+    }
+    match header {
+        None => SpaceRetrieval::Withheld,
+        Some(_) => SpaceRetrieval::from_header(header),
+    }
+}
+
 /// The Data Plane retrieval gRPC endpoint, as configured for this process.
 ///
 /// The ONE resolver for everything that talks to retrieval: dispatch
