@@ -12,8 +12,10 @@ import { createInlineAssistantController, type InlineAssistantState } from '@/fe
 import { createAssistantNavigationAgent, type AssistantNavigationAgentState } from '@/features/core/assistant-agent/assistant-navigation-agent'
 import { assistantBrowserTarget, createAssistantBrowserAgent } from '@/features/core/assistant-agent/assistant-browser-agent'
 import { createAssistantDesktopAgent } from '@/features/core/assistant-agent/assistant-desktop-agent'
+import { createDesktopConsentPolicy } from '@/features/core/assistant-agent/desktop-consent-policy'
 import { AssistantBrowserContext, type NettBrowserOwner, type NettTabSelection } from '@/features/core/assistant-agent/assistant-browser-context'
 import { getDesktopBrowser } from '@/features/browser/desktop/desktop-browser'
+import { createBrowserPolicyPort } from '@/features/settings/components/browser-policy-port'
 import { isAssistantTaskBusy, submitAssistantTask } from '@/features/core/assistant-agent/assistant-task-routing'
 import { maybeRedact } from '@/features/core/assistant-agent/sensitive-redact'
 import { clearAssistantChatDraft, queueAssistantChatDraft } from '@/features/chat/lib/assistant-chat-draft'
@@ -163,6 +165,7 @@ export function CoreShell(props: { children?: JSX.Element }) {
     scope: assistantScope,
     onChange: setBrowserAgentState,
     tr: (no, en) => i18n.tr(no, en),
+    consentReject: createDesktopConsentPolicy(createBrowserPolicyPort(), () => session.activeOrg?.id ?? null),
   }) : null
   const sendBrowserTask = (goal: string, target: string) => localAgent
     ? localAgent.send(goal, target)

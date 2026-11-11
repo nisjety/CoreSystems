@@ -2023,9 +2023,17 @@ type ExecuteStepRequest struct {
 	// own matches, never from the model's arguments; at most three. Field 13 is
 	// ExecuteStepRequest.thread_id (WS22-S2). A zero-retention step refuses a
 	// non-empty list at the boundary.
-	SkillMounts   []*SkillMount `protobuf:"bytes,14,rep,name=skill_mounts,json=skillMounts,proto3" json:"skill_mounts,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	SkillMounts []*SkillMount `protobuf:"bytes,14,rep,name=skill_mounts,json=skillMounts,proto3" json:"skill_mounts,omitempty"`
+	// The connections the person selected for this turn (QF-16), the same shape
+	// as RunAgentRequest.connector_scope (field 23 there). Read only by a
+	// browser_agent step while EXECUTION_CORE_BROWSER_FILL_OTP is on: a run whose
+	// scope holds exactly one google or microsoft mail connection may be offered
+	// a one-time-code fill. The gateway writes it from the turn, never from the
+	// model's arguments. Absent or empty selects nothing; a zero-retention step
+	// ignores it.
+	ConnectorScope *ConnectorScope `protobuf:"bytes,15,opt,name=connector_scope,json=connectorScope,proto3" json:"connector_scope,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ExecuteStepRequest) Reset() {
@@ -2152,6 +2160,13 @@ func (x *ExecuteStepRequest) GetThreadId() string {
 func (x *ExecuteStepRequest) GetSkillMounts() []*SkillMount {
 	if x != nil {
 		return x.SkillMounts
+	}
+	return nil
+}
+
+func (x *ExecuteStepRequest) GetConnectorScope() *ConnectorScope {
+	if x != nil {
+		return x.ConnectorScope
 	}
 	return nil
 }
@@ -2830,7 +2845,7 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\routput_tokens\x18\x04 \x01(\x04R\foutputTokens\x125\n" +
 	"\x17cache_read_input_tokens\x18\x05 \x01(\x04R\x14cacheReadInputTokens\x12=\n" +
 	"\x1bcache_creation_input_tokens\x18\x06 \x01(\x04R\x18cacheCreationInputTokens\x12)\n" +
-	"\x10inference_rounds\x18\a \x01(\rR\x0finferenceRounds\"\x8d\x04\n" +
+	"\x10inference_rounds\x18\a \x01(\rR\x0finferenceRounds\"\xd6\x04\n" +
 	"\x12ExecuteStepRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x17\n" +
 	"\astep_id\x18\x02 \x01(\tR\x06stepId\x12\x1b\n" +
@@ -2847,7 +2862,8 @@ const file_model_plane_v1_execution_proto_rawDesc = "" +
 	"\bspace_id\x18\v \x01(\tR\aspaceId\x12?\n" +
 	"\vattachments\x18\f \x03(\v2\x1d.model_plane.v1.RunAttachmentR\vattachments\x12\x1b\n" +
 	"\tthread_id\x18\r \x01(\tR\bthreadId\x12=\n" +
-	"\fskill_mounts\x18\x0e \x03(\v2\x1a.model_plane.v1.SkillMountR\vskillMounts\"\xcf\x01\n" +
+	"\fskill_mounts\x18\x0e \x03(\v2\x1a.model_plane.v1.SkillMountR\vskillMounts\x12G\n" +
+	"\x0fconnector_scope\x18\x0f \x01(\v2\x1e.model_plane.v1.ConnectorScopeR\x0econnectorScope\"\xcf\x01\n" +
 	"\rRunAttachment\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
@@ -2972,28 +2988,29 @@ var file_model_plane_v1_execution_proto_depIdxs = []int32{
 	26, // 17: model_plane.v1.ExecuteStepRequest.min_privacy_tier:type_name -> model_plane.v1.PrivacyTier
 	18, // 18: model_plane.v1.ExecuteStepRequest.attachments:type_name -> model_plane.v1.RunAttachment
 	19, // 19: model_plane.v1.ExecuteStepRequest.skill_mounts:type_name -> model_plane.v1.SkillMount
-	0,  // 20: model_plane.v1.RunAttachment.kind:type_name -> model_plane.v1.RunAttachmentKind
-	1,  // 21: model_plane.v1.ExecutionCore.BrowserAgentCapabilities:input_type -> model_plane.v1.BrowserAgentCapabilitiesRequest
-	17, // 22: model_plane.v1.ExecutionCore.ExecuteRestrictedBrowserStep:input_type -> model_plane.v1.ExecuteStepRequest
-	17, // 23: model_plane.v1.ExecutionCore.ExecuteStep:input_type -> model_plane.v1.ExecuteStepRequest
-	21, // 24: model_plane.v1.ExecutionCore.ResumeRun:input_type -> model_plane.v1.ResumeRunRequest
-	31, // 25: model_plane.v1.ExecutionCore.CancelRun:input_type -> model_plane.v1.CancelRunRequest
-	23, // 26: model_plane.v1.ExecutionCore.PauseRun:input_type -> model_plane.v1.PauseRunRequest
-	5,  // 27: model_plane.v1.ExecutionCore.RunAgent:input_type -> model_plane.v1.RunAgentRequest
-	3,  // 28: model_plane.v1.ExecutionCore.ExecuteScheduledStep:input_type -> model_plane.v1.ExecuteScheduledStepRequest
-	2,  // 29: model_plane.v1.ExecutionCore.BrowserAgentCapabilities:output_type -> model_plane.v1.BrowserAgentCapabilitiesResponse
-	20, // 30: model_plane.v1.ExecutionCore.ExecuteRestrictedBrowserStep:output_type -> model_plane.v1.ExecuteStepResponse
-	20, // 31: model_plane.v1.ExecutionCore.ExecuteStep:output_type -> model_plane.v1.ExecuteStepResponse
-	22, // 32: model_plane.v1.ExecutionCore.ResumeRun:output_type -> model_plane.v1.ResumeRunResponse
-	32, // 33: model_plane.v1.ExecutionCore.CancelRun:output_type -> model_plane.v1.CancelRunResponse
-	24, // 34: model_plane.v1.ExecutionCore.PauseRun:output_type -> model_plane.v1.PauseRunResponse
-	13, // 35: model_plane.v1.ExecutionCore.RunAgent:output_type -> model_plane.v1.RunAgentResponse
-	4,  // 36: model_plane.v1.ExecutionCore.ExecuteScheduledStep:output_type -> model_plane.v1.ExecuteScheduledStepResponse
-	29, // [29:37] is the sub-list for method output_type
-	21, // [21:29] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	9,  // 20: model_plane.v1.ExecuteStepRequest.connector_scope:type_name -> model_plane.v1.ConnectorScope
+	0,  // 21: model_plane.v1.RunAttachment.kind:type_name -> model_plane.v1.RunAttachmentKind
+	1,  // 22: model_plane.v1.ExecutionCore.BrowserAgentCapabilities:input_type -> model_plane.v1.BrowserAgentCapabilitiesRequest
+	17, // 23: model_plane.v1.ExecutionCore.ExecuteRestrictedBrowserStep:input_type -> model_plane.v1.ExecuteStepRequest
+	17, // 24: model_plane.v1.ExecutionCore.ExecuteStep:input_type -> model_plane.v1.ExecuteStepRequest
+	21, // 25: model_plane.v1.ExecutionCore.ResumeRun:input_type -> model_plane.v1.ResumeRunRequest
+	31, // 26: model_plane.v1.ExecutionCore.CancelRun:input_type -> model_plane.v1.CancelRunRequest
+	23, // 27: model_plane.v1.ExecutionCore.PauseRun:input_type -> model_plane.v1.PauseRunRequest
+	5,  // 28: model_plane.v1.ExecutionCore.RunAgent:input_type -> model_plane.v1.RunAgentRequest
+	3,  // 29: model_plane.v1.ExecutionCore.ExecuteScheduledStep:input_type -> model_plane.v1.ExecuteScheduledStepRequest
+	2,  // 30: model_plane.v1.ExecutionCore.BrowserAgentCapabilities:output_type -> model_plane.v1.BrowserAgentCapabilitiesResponse
+	20, // 31: model_plane.v1.ExecutionCore.ExecuteRestrictedBrowserStep:output_type -> model_plane.v1.ExecuteStepResponse
+	20, // 32: model_plane.v1.ExecutionCore.ExecuteStep:output_type -> model_plane.v1.ExecuteStepResponse
+	22, // 33: model_plane.v1.ExecutionCore.ResumeRun:output_type -> model_plane.v1.ResumeRunResponse
+	32, // 34: model_plane.v1.ExecutionCore.CancelRun:output_type -> model_plane.v1.CancelRunResponse
+	24, // 35: model_plane.v1.ExecutionCore.PauseRun:output_type -> model_plane.v1.PauseRunResponse
+	13, // 36: model_plane.v1.ExecutionCore.RunAgent:output_type -> model_plane.v1.RunAgentResponse
+	4,  // 37: model_plane.v1.ExecutionCore.ExecuteScheduledStep:output_type -> model_plane.v1.ExecuteScheduledStepResponse
+	30, // [30:38] is the sub-list for method output_type
+	22, // [22:30] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_execution_proto_init() }

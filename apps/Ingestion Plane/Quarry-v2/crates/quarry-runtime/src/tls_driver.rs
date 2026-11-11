@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use quarry_core::identity;
 use quarry_core::output::DriverKind;
 use quarry_core::QuarryResult;
 pub use quarry_tls::TlsProfile;
@@ -29,11 +30,15 @@ impl TlsProfileDriver {
     /// `timeout` is the end-to-end request timeout. `profile` selects the
     /// browser-family fingerprint to impersonate. `user_agent_override`
     /// replaces only the HTTP header; it does not downgrade the TLS emulation.
+    /// Under `QUARRY_EDGE__UNIFIED_UA` the identity is made Chromium-only and
+    /// carries the product token (see `resolve_identity`).
     pub fn new(
         profile: TlsProfile,
         timeout: Duration,
         user_agent_override: Option<&str>,
     ) -> QuarryResult<Self> {
+        let (profile, user_agent_override) =
+            resolve_identity(profile, user_agent_override, identity::unified_enabled());
         let base_config = TlsClientConfig::default()
             .with_profile(profile)
             .with_timeout(timeout);
@@ -91,6 +96,39 @@ fn into_fetch_response(response: quarry_tls::TlsFetchResponse) -> FetchResponse 
         served_by: DriverKind::Tls,
         captures: None,
     }
+}
+
+/// The identity a TLS driver presents, from the caller's profile and user agent override.
+///
+/// With `unified` off the caller's choice is returned as it is. With it on (ADR 5, D-W5-2:
+/// never present a non-Chromium identity) a Firefox or Safari profile is driven as Chrome,
+/// so the TLS emulation matches the user agent; a caller override is kept and gets the
+/// product token unless it already names `QuarryBot`; and with no override the user agent is
+/// the Chrome user agent with the token. The quarry-tls profile presets are not changed here.
+fn resolve_identity(
+    profile: TlsProfile,
+    user_agent_override: Option<&str>,
+    unified: bool,
+) -> (TlsProfile, Option<String>) {
+    if !unified {
+        return (profile, user_agent_override.map(str::to_owned));
+    }
+    let profile = match profile {
+        TlsProfile::Chrome => profile,
+        other => {
+            tracing::warn!(
+                profile = other.as_str(),
+                "tls profile is not chromium; the driver uses the chrome profile instead"
+            );
+            TlsProfile::Chrome
+        }
+    };
+    let user_agent = match user_agent_override {
+        Some(user_agent) if user_agent.contains(identity::PRODUCT_TOKEN) => user_agent.to_owned(),
+        Some(user_agent) => identity::append_product_token(user_agent),
+        None => identity::tls_user_agent(TlsProfile::Chrome.user_agent()),
+    };
+    (profile, Some(user_agent))
 }
 
 #[cfg(test)]
@@ -159,5 +197,68 @@ mod tests {
             .expect_err("a mismatched pin must fail before any connection");
 
         assert_eq!(error.code, ErrorCode::BadRequest);
+    }
+
+    /// The switch value goes through the production parser, so no test touches the
+    /// process environment.
+    fn switch(raw: Option<&str>) -> bool {
+        identity::parse_unified(raw)
+    }
+
+    #[test]
+    fn unified_off_keeps_the_caller_identity() {
+        let off = switch(None);
+        for profile in [TlsProfile::Chrome, TlsProfile::Firefox, TlsProfile::Safari] {
+            assert_eq!(resolve_identity(profile, None, off), (profile, None));
+        }
+        assert_eq!(
+            resolve_identity(TlsProfile::Firefox, Some("CustomBot/1.0"), off),
+            (TlsProfile::Firefox, Some("CustomBot/1.0".to_owned()))
+        );
+    }
+
+    #[test]
+    fn unified_on_never_drives_firefox_or_safari() {
+        let on = switch(Some("on"));
+        for profile in [TlsProfile::Firefox, TlsProfile::Safari] {
+            let (resolved, _) = resolve_identity(profile, None, on);
+            assert_eq!(resolved, TlsProfile::Chrome);
+            let (resolved, _) = resolve_identity(profile, Some("CustomBot/1.0"), on);
+            assert_eq!(resolved, TlsProfile::Chrome);
+        }
+        let (resolved, _) = resolve_identity(TlsProfile::Chrome, None, on);
+        assert_eq!(resolved, TlsProfile::Chrome);
+    }
+
+    #[test]
+    fn unified_on_defaults_to_the_chrome_user_agent_with_the_token() {
+        let on = switch(Some("1"));
+        let chrome = TlsProfile::Chrome.user_agent();
+        let (_, user_agent) = resolve_identity(TlsProfile::Firefox, None, on);
+        assert_eq!(
+            user_agent,
+            Some(format!("{chrome} {}", identity::HONEST_USER_AGENT))
+        );
+    }
+
+    #[test]
+    fn unified_on_appends_the_token_to_a_caller_override_without_it() {
+        let on = switch(Some("yes"));
+        let (profile, user_agent) = resolve_identity(TlsProfile::Chrome, Some("CustomBot/1.0"), on);
+        assert_eq!(profile, TlsProfile::Chrome);
+        assert_eq!(
+            user_agent.as_deref(),
+            Some("CustomBot/1.0 QuarryBot/2.0 (+https://verevon.io/bot)")
+        );
+        let (_, blank) = resolve_identity(TlsProfile::Chrome, Some("   "), on);
+        assert_eq!(blank.as_deref(), Some(identity::HONEST_USER_AGENT));
+    }
+
+    #[test]
+    fn unified_on_keeps_a_caller_override_that_already_names_the_token() {
+        let on = switch(Some("true"));
+        let named = "Probe QuarryBot/1.0";
+        let (_, user_agent) = resolve_identity(TlsProfile::Chrome, Some(named), on);
+        assert_eq!(user_agent.as_deref(), Some(named));
     }
 }

@@ -72,6 +72,8 @@ interface ImportMetaEnv {
 	readonly VITE_BROWSER_PDF?: string;
 	/** "true" lets a chat turn send the browser regions attached in the composer, each with the gateway's attach token (QF-9; the gateway also needs BROWSER_TURN_CONTEXT). Default off: a send with a region is refused and keeps its draft. */
 	readonly VITE_BROWSER_REGION_SEND?: string;
+	/** "true" shows the research run status chip and Stop on a deep-research answer (Q4-062b). Default off. */
+	readonly VITE_CHAT_RESEARCH_RUNS?: string;
 }
 
 interface ImportMeta {

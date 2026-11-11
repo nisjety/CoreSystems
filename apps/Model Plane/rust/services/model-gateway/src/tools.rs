@@ -243,6 +243,8 @@ pub async fn handle_code_interpreter(
             .to_owned(),
         attachments: attachments.to_vec(),
         skill_mounts: skill_mounts.to_vec(),
+        // Only a browser_agent step reads a connector selection (QF-16).
+        connector_scope: None,
     });
     request.metadata_mut().insert(
         "authorization",

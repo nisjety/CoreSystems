@@ -656,6 +656,60 @@ impl IntegrationActionsClient {
             })
     }
 
+    /// QF-16: GET /api/v1/connections/{id} — the connection's own `providerKey` and the person's
+    /// `displayName` for it, read the way [`Self::provider_key_for_connection`] reads the key. Used to
+    /// find the one mail connection of a turn's connector scope; the id is checked before it is put
+    /// in the path. Nothing of the answer is logged.
+    pub async fn connection_provider_and_label(
+        &self,
+        org_id: &str,
+        connection_id: &str,
+        session_bearer: Option<&str>,
+    ) -> Result<(String, String), String> {
+        if org_id.trim().is_empty() || !is_connection_id(connection_id) {
+            return Err("connection lookup needs a run org and a connection id".to_owned());
+        }
+        let token = self
+            .resolve_ingestion_token(org_id, "integration:read", session_bearer)
+            .await?;
+        let resp = self
+            .http
+            .get(format!(
+                "{}/api/v1/connections/{}",
+                self.base_url, connection_id
+            ))
+            .bearer_auth(token)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| format!("integration-corev2 connection lookup failed: {e}"))?;
+        let status = resp.status();
+        let value: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("integration-corev2 connection lookup decode failed: {e}"))?;
+        if !status.is_success() {
+            return Err(format!(
+                "integration-corev2 connection lookup returned {status}"
+            ));
+        }
+        let provider_key = value
+            .pointer("/data/connection/providerKey")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                "integration-corev2 connection lookup did not return a providerKey".to_owned()
+            })?;
+        let label = value
+            .pointer("/data/connection/displayName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        Ok((provider_key, label))
+    }
+
     /// POST /api/v1/connections/{id}/actions with `{operation, params, body}`.
     /// `approval_ref`, when present (post-HITL-approval), is injected into the
     /// body as `approvalId` so integration-corev2's write-approval check

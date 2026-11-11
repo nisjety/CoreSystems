@@ -126,7 +126,7 @@ type ManagedCap = {
 }
 
 /**
- * The six abilities a person switches here: the non-reserved abilities of the catalogue
+ * The seven abilities a person switches here: the non-reserved abilities of the catalogue
  * (web-policy-catalogue.v1.json). browser.act.script is always off and has no switch, and
  * reserved keys have none either. Keys this list does not know are carried through on save and
  * never shown.
@@ -162,6 +162,15 @@ const MANAGED_CAPS: ManagedCap[] = [
     zdrOff: true,
     title: (tr) => tr('Beholde nettleserprofiler', 'Keep browser profiles'),
     help: (tr) => tr('Profiler beholder innlogginger og informasjonskapsler mellom økter.', 'Profiles keep sign-ins and cookies between sessions.'),
+  },
+  {
+    key: 'browser.consent.reject',
+    baseline: 'disabled',
+    title: (tr) => tr('Avvise informasjonskapsel-bannere', 'Reject cookie banners'),
+    help: (tr) => tr(
+      'Den lokale nettleseren kan trykke på en knapp for å avvise informasjonskapsler. Den godtar aldri, og hver avvisning blir loggført.',
+      'The desktop browser may press a reject-only button on cookie banners; it never accepts, and each dismissal is logged.',
+    ),
   },
   {
     key: 'search.paid_provider',

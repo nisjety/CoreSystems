@@ -85,6 +85,7 @@ Plane gateway:
 | `AUTH_CORE_AUDIENCE`             | `quarry-edge`                                    | Required unless `AUTH_CORE_AUDIENCE_OPTIONAL=1`. |
 | `AUTH_CORE_ISSUER`               | _(unset)_                                        | Optional. Validates `iss` when set. |
 | `AUTH_CORE_JWKS_TTL_SECS`        | `300`                                            | JWKS refresh cadence. |
+| `AUTH_CORE_JWKS_STALE_IF_ERROR_SECS` | `0` | Off. Seconds past the TTL a cached JWKS may be served when auth-core is unreachable. |
 | `AUTH_CORE_JWT_LEEWAY_SECS`      | `30`                                             | Clock-skew tolerance. |
 | `AUTH_CORE_AUDIENCE_OPTIONAL`    | _(unset)_                                        | `1` to skip `aud` check (warn-only). |
 | `QUARRY_EDGE_AUTH_DEV_BYPASS`    | _(unset)_                                        | `1` accepts any bearer + injects stub claims. **NEVER in production.** |

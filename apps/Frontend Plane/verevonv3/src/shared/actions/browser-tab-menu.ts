@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 // The Browser tab context menu (WS9 tab strip, behind VITE_BROWSER_TAB_MENU=true).
-// This is a presentation contract. It names the four menu actions and decides which
+// This is a presentation contract. It names the five menu actions and decides which
 // items the menu offers and which of them can be chosen. It performs nothing itself:
 // the chrome hands each chosen action to the handler that already owns the operation
 // (select, new tab, close), and the gateway and Quarry keep the authority they had.
@@ -24,6 +24,8 @@ export const browserTabMenuActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('browser.tab.select'), tabId: tabIdSchema }),
   z.object({ type: z.literal('browser.tab.new') }),
   z.object({ type: z.literal('browser.tab.close'), tabId: tabIdSchema }),
+  // Stop agent (Q2-WS8.I): the person's own stop of the attached agent. The chrome performs it through the owner's route.
+  z.object({ type: z.literal('browser.attach.stop') }),
   z.object({ type: z.literal('browser.tab.open_outside'), url: outsideUrlSchema }),
 ])
 export type BrowserTabMenuAction = z.infer<typeof browserTabMenuActionSchema>
@@ -55,20 +57,29 @@ export type BrowserTabMenuInput = {
   hasCloseHandler: boolean
   /** The tab's page as an http(s) url, or null when it cannot be opened outside Verevon. */
   outsideUrl: string | null
+  /**
+   * Stop agent (Q2-WS8.I): offered only while a live attached agent can be stopped; null otherwise. The label is the
+   * chrome's, already in the person's language. A disabled entry stays in the menu, as the others do.
+   */
+  stopAgent?: { label: string; disabled: boolean } | null
 }
 
 /**
  * The menu items for one tab, in display order: Vis fane, Ny fane, Lukk fane (only with a close
- * handler and more than one tab) and Åpne utenfor Verevon (only for an http(s) page).
+ * handler and more than one tab), Stopp agenten (only with a stop entry) and Åpne utenfor Verevon
+ * (only for an http(s) page).
  */
 export function browserTabMenuItems(input: BrowserTabMenuInput): BrowserTabMenuItem[] {
-  const { tab, tabCount, busy, controlsDisabled, hasCloseHandler, outsideUrl } = input
+  const { tab, tabCount, busy, controlsDisabled, hasCloseHandler, outsideUrl, stopAgent } = input
   const items: BrowserTabMenuItem[] = [
     { action: { type: 'browser.tab.select', tabId: tab.tabId }, label: 'Vis fane', disabled: tab.active || busy },
     { action: { type: 'browser.tab.new' }, label: 'Ny fane', disabled: controlsDisabled },
   ]
   if (hasCloseHandler && tabCount > 1) {
     items.push({ action: { type: 'browser.tab.close', tabId: tab.tabId }, label: 'Lukk fane', disabled: controlsDisabled })
+  }
+  if (stopAgent) {
+    items.push({ action: { type: 'browser.attach.stop' }, label: stopAgent.label, disabled: stopAgent.disabled })
   }
   // The url is parsed here too, so a link with an unsafe href is never offered, whatever the caller passes.
   const outside = outsideUrl === null

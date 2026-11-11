@@ -71,6 +71,8 @@ export interface ChangeMonitor {
   createdAt: string | null
   lastRunAt: string | null
   nextRunAt: string | null
+  /** The operator label (one per monitor), or `null` when the monitor is untagged. */
+  tag: string | null
 }
 
 /** Quarry stamps schedule times as unix seconds; tolerate ISO strings too. */
@@ -97,12 +99,18 @@ function toChangeMonitor(row: Record<string, unknown>): ChangeMonitor {
     createdAt: monitorTime(row.created_at ?? row.createdAt),
     lastRunAt: monitorTime(row.last_run_at ?? row.lastRunAt),
     nextRunAt: monitorTime(row.next_run_at ?? row.nextRunAt),
+    tag: text('tag') || null,
   }
 }
 
-/** The org's recurring change monitors. Empty until one is created. */
-export async function listMonitors(signal?: AbortSignal): Promise<ChangeMonitor[]> {
-  const rows = await requestJson<unknown>('/api/v1/monitoring/schedules', { signal })
+/**
+ * The org's recurring change monitors, or only those with `tag` when one is given (a blank tag is
+ * no filter). Empty until one is created.
+ */
+export async function listMonitors(signal?: AbortSignal, tag?: string): Promise<ChangeMonitor[]> {
+  const label = tag?.trim()
+  const query = label ? `?${new URLSearchParams({ tag: label }).toString()}` : ''
+  const rows = await requestJson<unknown>(`/api/v1/monitoring/schedules${query}`, { signal })
   if (!Array.isArray(rows)) return []
   return rows
     .filter((row): row is Record<string, unknown> => typeof row === 'object' && row !== null)
@@ -110,15 +118,20 @@ export async function listMonitors(signal?: AbortSignal): Promise<ChangeMonitor[
     .filter((monitor) => monitor.id.length > 0)
 }
 
-/** Create a recurring monitor for `url` (contract: `monitoring.create_monitor`). */
+/**
+ * Create a recurring monitor for `url` (contract: `monitoring.create_monitor`). A `tag` labels it;
+ * omit it, or pass a blank one, for an untagged monitor.
+ */
 export async function createMonitor(
   url: string,
   preset: MonitorPreset,
   signal?: AbortSignal,
+  tag?: string,
 ): Promise<ChangeMonitor | null> {
+  const label = tag?.trim()
   const row = await requestJson<unknown>('/api/v1/monitoring/schedules', {
     method: 'POST',
-    body: JSON.stringify({ url, preset }),
+    body: JSON.stringify(label ? { url, preset, tag: label } : { url, preset }),
     signal,
   })
   return typeof row === 'object' && row !== null ? toChangeMonitor(row as Record<string, unknown>) : null
@@ -130,6 +143,23 @@ export async function deleteMonitor(id: string, signal?: AbortSignal): Promise<v
     method: 'DELETE',
     signal,
   })
+}
+
+/**
+ * Set a recurring monitor's tag, or clear it with `''`. The gateway refuses a call that names no
+ * tag, so a clear is always explicit.
+ */
+export async function setMonitorTag(
+  id: string,
+  tag: string,
+  signal?: AbortSignal,
+): Promise<ChangeMonitor | null> {
+  const row = await requestJson<unknown>(`/api/v1/monitoring/schedules/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ tag }),
+    signal,
+  })
+  return typeof row === 'object' && row !== null ? toChangeMonitor(row as Record<string, unknown>) : null
 }
 
 /**

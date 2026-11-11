@@ -612,6 +612,8 @@ impl ObservationRunner {
         // WS12.S5: what the screenshot mask did (counts only), for the stamp.
         let mut screenshot_report: Option<ScreenshotReport> = None;
         let mut visual_observation_artifact_id: Option<ArtifactKind> = None;
+        // Q5-S1c: id of the PDF a `pdf` action stored (None under ZDR).
+        let mut pdf_artifact_id: Option<ArtifactKind> = None;
         let mut download_artifact_id: Option<ArtifactKind> = None;
         let policy_denials: Vec<String> = Vec::new();
         let mut current_screenshot: Option<Vec<u8>> = None;
@@ -809,7 +811,10 @@ impl ObservationRunner {
                         ));
                     }
                     let bytes = self.browser.pdf(session).await?;
-                    let _ = self
+                    // Q5-S1c: surface the stored PDF's id on the observation so the
+                    // caller can fetch it. ZDR/waived runs store nothing, so this
+                    // stays `None` there.
+                    pdf_artifact_id = self
                         .put_artifact_if_allowed(
                             request.zdr,
                             run_id,
@@ -1426,6 +1431,9 @@ impl ObservationRunner {
         if let Some(id) = download_artifact_id.clone() {
             artifact_ids.push(id);
         }
+        if let Some(id) = pdf_artifact_id.clone() {
+            artifact_ids.push(id);
+        }
         let proof_bundle = Some(ProofBundle {
             proof_id: format!("proof_{}_{}", run_id, ctx.step),
             source_url: redactor.live_url(&ctx.current_url),
@@ -1468,6 +1476,7 @@ impl ObservationRunner {
             dom_summary,
             screenshot_artifact_id,
             visual_observation_artifact_id,
+            pdf_artifact_id,
             evidence_delta_artifact_id,
             console_summary,
             network_summary,

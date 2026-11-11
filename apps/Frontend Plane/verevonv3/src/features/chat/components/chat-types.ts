@@ -630,6 +630,12 @@ export type ChatTurn = {
    * (`search_provenance` SSE event, EP-9 W1). Live only: nothing stores it, so a reloaded turn has none.
    */
   searchProvenance?: import('@/shared/api/chat-client').ChatSearchProvenanceEvent
+  /**
+   * The addressable research run this deep-research answer started (`research_run`, Q4-062b): its `rsr_` id and
+   * the run's latest status word. Ids and words only. Session-only: `turnsToTranscript` does not copy it, so a
+   * reloaded turn has none. Read by `ResearchRunStatus`, behind `VITE_CHAT_RESEARCH_RUNS`.
+   */
+  researchRun?: { id: string; status: import('@/shared/api/research-runs-client').ResearchRunStatusWord }
 }
 
 export type AgentTaskStep = {

@@ -265,6 +265,11 @@ async fn run() -> anyhow::Result<()> {
     let trace_ring = trace_config::TraceConfig::from_env()
         .map_err(|e| anyhow::anyhow!("trace: {e}"))?
         .ring;
+    // WS10.S5b: the Model Plane run-trace publisher (off unless
+    // QUARRY_EDGE__MODEL_TRACE_NATS_URL is set; a URL without its password or a bad
+    // queue/subject value aborts boot). The error names the variable, never the password.
+    let model_trace_cfg =
+        trace_config::ModelTraceEnv::from_env().map_err(|e| anyhow::anyhow!("model trace: {e}"))?;
     quarry_runtime::DocRouting::from_env().map_err(|e| anyhow::anyhow!("doc routing: {e}"))?;
     // Whether an agent action is refused while a person holds the browser. A typo
     // stops the edge here, naming the variable, rather than leaving it off.
@@ -351,6 +356,34 @@ async fn run() -> anyhow::Result<()> {
         tracing::warn!(
             "QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES is off in production: ZDR organizations are served on durable resources (profiles, schedules, change monitors) and only observed"
         );
+    }
+    // WS15.S4f: the schedule posture switch. Under `enforce`, a missing org-core URL or service
+    // token skips every scheduled fire as skipped_posture_unknown, so production refuses to start
+    // and elsewhere the boot logs an error that names the variables. The token is read for
+    // presence only and is never logged.
+    {
+        let posture_mode = schedule_preflight::mode_from_env();
+        let org_core_url = std::env::var(schedule_preflight::ENV_ORG_CORE_URL).ok();
+        let token_present = std::env::var(schedule_preflight::ENV_ORG_CORE_SERVICE_TOKEN)
+            .is_ok_and(|token| !token.trim().is_empty());
+        match schedule_preflight::boot_check(posture_mode, org_core_url.as_deref(), token_present) {
+            Ok(()) => {
+                if posture_mode == schedule_preflight::PostureMode::Observe
+                    && !schedule_preflight::posture_reads_configured(
+                        org_core_url.as_deref(),
+                        token_present,
+                    )
+                {
+                    tracing::warn!("schedule preflight observe: posture reads will be unknown");
+                }
+            }
+            Err(message) if matches!(environment.as_str(), "prod" | "production") => {
+                anyhow::bail!("{message}; refusing to start");
+            }
+            Err(message) => {
+                tracing::error!(mode = posture_mode.label(), "schedule preflight: {message}");
+            }
+        }
     }
     // Metrics are opt-in. An unreadable setting, or an enabled listener in
     // production without a usable token, stops the edge here rather than
@@ -712,6 +745,39 @@ async fn run() -> anyhow::Result<()> {
     } else {
         tracing::info!("nats event fan-out: disabled (no QUARRY_EDGE__NATS_URL)");
         event_sink
+    };
+
+    // WS10.S5b: browser-run events onto the Model Plane run trace, over a separate
+    // Model NATS connection as the publish-only principal. Dark unless the URL is set;
+    // a connection failure is non-fatal (warn, no publisher). ZDR runs are refused by
+    // the publisher itself. Neither the URL nor the password is logged.
+    let mut model_trace_publisher: Option<Arc<quarry_runtime::ModelTracePublisher>> = None;
+    let event_sink = match model_trace_cfg {
+        Some(trace_cfg) => match quarry_runtime::ModelTracePublisher::connect(&trace_cfg).await {
+            Ok(publisher) => {
+                let publisher = Arc::new(publisher);
+                tracing::info!(
+                    queue_cap = trace_cfg.queue_cap,
+                    subject_prefix = %trace_cfg.subject_prefix,
+                    "model trace publisher: connected"
+                );
+                model_trace_publisher = Some(publisher.clone());
+                event_sink.with_model_trace(publisher)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "model trace publisher: connect failed; continuing without it"
+                );
+                event_sink
+            }
+        },
+        None => {
+            tracing::info!(
+                "model trace publisher: disabled (no QUARRY_EDGE__MODEL_TRACE_NATS_URL)"
+            );
+            event_sink
+        }
     };
 
     // P3 / cluster #billing — Quarry-Edge → Control-Plane billing-core
@@ -2176,6 +2242,12 @@ async fn run() -> anyhow::Result<()> {
 
     // WS6.J: the usage events the drain just wrote leave the process before it does.
     usage_meter.flush(std::time::Duration::from_secs(5)).await;
+
+    // WS10.S5b: the run-trace events the drain just emitted (agent.expired) are
+    // flushed to the Model NATS for at most two seconds, then abandoned.
+    if let Some(publisher) = model_trace_publisher.as_ref() {
+        publisher.shutdown(std::time::Duration::from_secs(2)).await;
+    }
 
     // Serve returned, so no new requests can add to the corpus. Signal the
     // maintenance task and wait for its final commit — dropping straight out

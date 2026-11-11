@@ -103,6 +103,74 @@ pub(super) async fn record_browser_timeline_event(
         .await
 }
 
+/// WS10.S4: [`record_browser_timeline_event`], then the run-trace event of that change: a
+/// `Control` change emits `BrowserControlChanged {mode, initiated_by, control_epoch}` and a
+/// `Tab` change `BrowserTabChanged {operation, tab_id, active_tab_id}`. Other kinds record the
+/// timeline only. The event goes through `emit_for_zdr`, so a ZDR run's change reaches only
+/// live subscribers (its timeline is not written either). Nothing is emitted when the record
+/// fails. Payloads are closed labels and opaque ids: no URL, title, selector or typed text.
+pub(super) async fn record_timeline_and_trace(
+    state: &AppState,
+    entry: &RunEntry,
+    live: &RunLive,
+    event: BrowserTimelineEventKind,
+) -> QuarryResult<()> {
+    let trace = browser_trace_event(&event);
+    record_browser_timeline_event(state, entry, live, event).await?;
+    if let Some((event_type, payload, key)) = trace {
+        state
+            .event_sink
+            .emit_for_zdr(
+                entry.zdr,
+                entry.run_id.clone(),
+                event_type,
+                payload,
+                format!("{}:{key}", entry.run_id),
+            )
+            .await;
+    }
+    Ok(())
+}
+
+/// WS10.S4: the trace event type, payload and idempotency-key suffix of a timeline change, or
+/// `None` for a kind that has no browser trace event.
+fn browser_trace_event(
+    event: &BrowserTimelineEventKind,
+) -> Option<(EventType, serde_json::Value, String)> {
+    match event {
+        BrowserTimelineEventKind::Control {
+            mode,
+            initiated_by,
+            control_epoch,
+        } => Some((
+            EventType::BrowserControlChanged,
+            serde_json::json!({
+                "mode": mode,
+                "initiated_by": initiated_by,
+                "control_epoch": control_epoch,
+            }),
+            // One control transition per epoch.
+            format!("browser_control:{control_epoch}"),
+        )),
+        BrowserTimelineEventKind::Tab {
+            operation,
+            tab_id,
+            active_tab_id,
+            ..
+        } => Some((
+            EventType::BrowserTabChanged,
+            serde_json::json!({
+                "operation": operation,
+                "tab_id": tab_id,
+                "active_tab_id": active_tab_id,
+            }),
+            // A tab can be selected again under the same epoch, so each change is its own key.
+            format!("browser_tab:{}", uuid::Uuid::new_v4().simple()),
+        )),
+        _ => None,
+    }
+}
+
 /// `POST /v1/agent/runs/{run_id}/browser-session/control` — transfer
 /// browser input authority. Quarry owns this transition, stamps it with
 /// the verified actor, and appends a privacy-bounded audit event. ZDR
@@ -164,7 +232,7 @@ pub async fn set_browser_session_control(
         }
     }
     if changed {
-        record_browser_timeline_event(
+        record_timeline_and_trace(
             &state,
             &entry,
             &handle.live,

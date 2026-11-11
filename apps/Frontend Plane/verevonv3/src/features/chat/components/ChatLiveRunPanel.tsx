@@ -499,6 +499,13 @@ export function ChatLiveRunPanel(props: {
           kind: 'resume',
           title: 'Fortsatte',
         })),
+        // QF-12 (E3.3): the run took queued steers at a step. A count only, so the oldest queued entries in the
+        // strip become delivered, first in, first out. Only the current stream of the watched run may mark them.
+        onBrowserSteerTaken: (event) => {
+          if (generation !== activeStreamGeneration || props.runId !== runId) return
+          if (event.runId && event.runId !== runId) return
+          steer.markTaken(event.taken)
+        },
         onDone: () => {
           update(runId, (state) => closeChatRunWatch(state), generation)
           // Only a browser-agent run with the composer on asks the durable status, so a build with the flag off

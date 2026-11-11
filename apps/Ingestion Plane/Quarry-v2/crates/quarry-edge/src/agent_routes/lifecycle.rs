@@ -944,6 +944,9 @@ pub async fn start_run(
     if claims.is_api_key() {
         super::api_key_runs::log_started(&entry, run_class.label());
     }
+    // WS10.S4: the run's control mode as it starts (a resume restores its checkpoint's), read
+    // before the entry moves into the registry, for the AgentStarted payload below.
+    let started_control_mode = entry.control_mode;
     slot.commit(run_id.to_string(), RunHandle::new(entry, live));
     crate::metrics::record_run_start(
         run_class.label(),
@@ -981,7 +984,15 @@ pub async fn start_run(
             zdr,
             run_id.clone(),
             EventType::AgentStarted,
-            serde_json::json!({ "org_id": org_id }),
+            // WS10.S4: closed labels only (the trace projection allowlists them again; the
+            // org id stays inside Quarry, the envelope carries the verified one).
+            serde_json::json!({
+                "org_id": org_id,
+                "execution_tier": execution_tier,
+                "driver": execution_tier.engine_label(),
+                "profile_scope": profile_scope,
+                "control_mode": started_control_mode,
+            }),
             format!("{run_id}:agent_started"),
         )
         .await;

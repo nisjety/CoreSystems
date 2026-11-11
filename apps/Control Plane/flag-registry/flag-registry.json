@@ -160,6 +160,17 @@
       ]
     },
     {
+      "name": "EXECUTION_CORE_BROWSER_FILL_OTP",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "QF-16 (E3.1): a leased non-ZDR browser run with one google or microsoft mail connection may propose fill_otp; each use needs a Login approval and a single-use broker fill_otp grant. Literal true only.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_CORE_BROWSER_FILL_OTP", "default": "false" }
+      ]
+    },
+    {
       "name": "EXECUTION_CORE_PLANNER_RUN_ENV",
       "kind": "switch",
       "owner": "model-plane",

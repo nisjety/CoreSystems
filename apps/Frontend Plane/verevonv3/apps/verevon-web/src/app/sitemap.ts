@@ -9,6 +9,7 @@ const publicRoutes = [
 	"/plattform/kontrollert-arbeid",
 	"/integrasjoner",
 	"/trust",
+	"/bot",
 ];
 
 export default function sitemap(): MetadataRoute.Sitemap {

@@ -5,6 +5,9 @@ import { assistantBrowserTarget } from './assistant-browser-agent'
 
 const maximumSteps = 18
 const taskTimeout = 180_000
+// The gateway refuses a planner request with more than 20 history lines, and the client may add one retry line.
+// Only the latest 19 lines go to the planner, so dismissal receipts cannot push a run over that limit.
+const plannerHistoryLines = 19
 
 type Run = {
   scope: string
@@ -19,6 +22,8 @@ type Options = {
   onChange: (state: AssistantAgentView) => void
   tr: (no: string, en: string) => string
   suggest?: typeof suggestDesktopBrowserAction
+  /** Whether a run may reject cookie banners (org policy browser.consent.reject). Absent, false or a failed read is off. */
+  consentReject?: () => Promise<boolean>
 }
 
 function observation(snapshot: DesktopBrowserSnapshot) {
@@ -53,9 +58,11 @@ function actionFailure(error: unknown) {
 
 /** Transports the live page observation and the model's next typed proposal.
  * The browser lease and action validation stay in the native Quarry adapter. */
-export function createAssistantDesktopAgent({ bridge, scope, onChange, tr, suggest = suggestDesktopBrowserAction }: Options) {
+export function createAssistantDesktopAgent({ bridge, scope, onChange, tr, suggest = suggestDesktopBrowserAction, consentReject }: Options) {
   let active: Run | null = null
   let state: AssistantAgentView | null = null
+  // Counts resets, so a task that is still reading the policy notices it was reset before it started.
+  let resets = 0
   const current = (run: Run) => active === run && scope() === run.scope
   const publish = (patch: Partial<AssistantAgentView>) => {
     if (!state) return
@@ -66,11 +73,20 @@ export function createAssistantDesktopAgent({ bridge, scope, onChange, tr, sugge
     run.release ??= run.lease.then(id => bridge.endRun(id), () => undefined)
     return run.release
   }
+  // A missing or failed policy read leaves reject-only dismissal off for the run.
+  async function rejectConsentAllowed() {
+    try {
+      return (await consentReject?.()) === true
+    } catch {
+      return false
+    }
+  }
 
   async function work(run: Run, id: string, goal: string, url: string) {
     const signal = AbortSignal.any([run.abort.signal, AbortSignal.timeout(taskTimeout)])
     let terminal: Partial<AssistantAgentView>
     try {
+      const history: string[] = []
       const check = () => {
         signal.throwIfAborted()
         if (!current(run)) throw new Error('Desktop browser scope changed')
@@ -79,19 +95,20 @@ export function createAssistantDesktopAgent({ bridge, scope, onChange, tr, sugge
         check()
         const result = await bridge.execute(id, action)
         check()
+        // Each dismissed cookie banner is recorded in the run trace. Nothing else is clicked for it.
+        for (const receipt of result.receipts ?? []) history.push(`consent banner rejected on ${receipt.host}`.slice(0, 350))
         return result
       }
       const browser = await bridge.getState()
       const initialAction = browser.url === url ? { kind: 'snapshot' as const } : { kind: 'navigate' as const, url }
       let snapshot = await execute(initialAction)
-      const history: string[] = []
       terminal = { status: 'failed', error: tr('Agenten nådde grensen for denne oppgaven. Fanen er klar til bruk.', 'The agent reached this task’s step limit. The tab is ready to use.') }
       for (let step = 0; step < maximumSteps; step += 1) {
         check()
         const pageUrl = assistantBrowserTarget(snapshot.url)
         if (!pageUrl) throw new Error('The browser did not reach a web page')
         pageUrl.hash = ''
-        const proposal = await suggest({ goal, url: pageUrl.href, title: snapshot.title.slice(0, 500), observation: observation(snapshot), history }, signal)
+        const proposal = await suggest({ goal, url: pageUrl.href, title: snapshot.title.slice(0, 500), observation: observation(snapshot), history: history.slice(-plannerHistoryLines) }, signal)
         check()
         if (proposal.done) {
           terminal = proposal.outcome === 'completed'
@@ -154,7 +171,12 @@ export function createAssistantDesktopAgent({ bridge, scope, onChange, tr, sugge
     const prompt = goal.trim()
     if (!identity || !url || !prompt || prompt.length > 2000) throw new Error(tr('Oppgi en oppgave og en gyldig nettadresse.', 'Provide a task and a valid web address.'))
     if (active) throw new Error(tr('En oppgave er allerede i gang.', 'A task is already running.'))
-    const run = { scope: identity, abort: new AbortController(), lease: bridge.startRun() }
+    const attempt = resets
+    const rejectAllowed = await rejectConsentAllowed()
+    // The organization or the assistant may have changed while the policy was read. Nothing starts for the old one.
+    if (scope() !== identity || resets !== attempt) return
+    if (active) throw new Error(tr('En oppgave er allerede i gang.', 'A task is already running.'))
+    const run = { scope: identity, abort: new AbortController(), lease: bridge.startRun({ consentReject: rejectAllowed }) }
     active = run
     state = { available: true, kind: 'browser', localBrowser: true, status: 'starting', goal: prompt, error: null, action: null, sessionId: null, runId: null, receipt: null }
     onChange(state)
@@ -189,6 +211,7 @@ export function createAssistantDesktopAgent({ bridge, scope, onChange, tr, sugge
   }
 
   function reset() {
+    resets += 1
     const run = active
     active = null
     state = null

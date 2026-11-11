@@ -103,6 +103,13 @@ export interface BrowserSteer {
   /** A step took these messages: the `queued` entries they name become `delivered`. */
   readonly markDelivered: (clientMessageIds: readonly string[]) => void
   /**
+   * The run reported taking `count` steer messages at a step (`browser_steer_taken`, QF-12). The event
+   * carries a count only, never ids or text, so the oldest `count` entries in state `queued` become
+   * `delivered`, first in, first out, as the run's own queue takes them. A count above the queued
+   * entries marks them all; a count that is not a positive integer marks nothing.
+   */
+  readonly markTaken: (count: number) => void
+  /**
    * The run has ended. Steers it never took become `not_taken`. The held messages leave the strip and
    * are returned, oldest first, for the page to send as ordinary messages.
    */
@@ -246,6 +253,20 @@ export function createBrowserSteer(options: BrowserSteerOptions): BrowserSteer {
     )
   }
 
+  function markTaken(count: number): void {
+    if (!Number.isInteger(count) || count <= 0) return
+    let left = count
+    setEntries((current) =>
+      current.map((entry): SteerEntry => {
+        if (left > 0 && entry.state === 'queued') {
+          left -= 1
+          return { ...entry, state: 'delivered' }
+        }
+        return entry
+      }),
+    )
+  }
+
   function settle(): readonly SteerResend[] {
     ended = true
     const handed = entries()
@@ -276,6 +297,7 @@ export function createBrowserSteer(options: BrowserSteerOptions): BrowserSteer {
     steer,
     hold,
     markDelivered,
+    markTaken,
     settle,
     dismiss,
     reset,

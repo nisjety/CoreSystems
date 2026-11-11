@@ -2,17 +2,13 @@ import { For, Show, createSignal } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { browserErrorMessage } from '@/shared/api/browser-client'
 import { useI18n } from '@/shared/i18n'
-import { useBrowserEvidenceScope, useBrowserProcedure, useBrowserReceipts, useSaveRecipe } from './use-browser-evidence'
+import { recipesEnabled, useBrowserEvidenceScope, useBrowserProcedure, useBrowserReceipts, useSaveRecipe } from './use-browser-evidence'
+import { RecipesPanel } from './RecipesPanel'
 import { outcomeLabel, procedureActionSummary } from './receipts-view'
 import './browser-evidence.css'
 
 /** The longest recipe name the save accepts (the gateway's and the action contract's bound). */
 const RECIPE_NAME_MAX_CHARS = 120
-
-/** The save control is built only when the build sets VITE_BROWSER_RECIPES to the literal `true` (Q4-E4.2-4b). */
-function recipesEnabled(): boolean {
-  return import.meta.env.VITE_BROWSER_RECIPES === 'true'
-}
 
 /**
  * Evidence drawer "Procedure" section (WS9.D). "Compile procedure" asks the gateway to turn
@@ -23,7 +19,8 @@ function recipesEnabled(): boolean {
  *
  * With VITE_BROWSER_RECIPES set to `true`, a procedure that passes the check can be saved as a
  * recipe (Q4-E4.2-4b). The panel shows the names of the slots the recipe will ask for, never a
- * typed value, and the saved version once the save answers.
+ * typed value, and the saved version once the save answers. The saved recipes are listed under
+ * the procedure, and a listed recipe can be run from there (Q4-E4.2-4d).
  */
 export function ProcedurePanel(props: { sessionId: string; zdr: boolean }): JSX.Element {
   const i18n = useI18n()
@@ -184,6 +181,8 @@ export function ProcedurePanel(props: { sessionId: string; zdr: boolean }): JSX.
           </div>
         )}
       </Show>
+
+      <RecipesPanel sessionId={props.sessionId} zdr={props.zdr} savedRecipe={saveRecipe.result()} />
 
       <Show when={!props.zdr}>
         <div class="browser-evidence-procedure__sources">

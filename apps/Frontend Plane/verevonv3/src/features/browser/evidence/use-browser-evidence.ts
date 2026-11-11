@@ -5,12 +5,16 @@ import {
   compileBrowserProcedure,
   listBrowserEgressReceipts,
   listBrowserReceipts,
+  listBrowserRecipes,
   type BrowserEgressReceiptView,
   type BrowserProcedureResponse,
   type BrowserReceiptView,
+  type BrowserSavedRecipe,
 } from '@/shared/api/browser-client'
+import { createAiRunStartKeyring, startBrowserAiRun, type StartBrowserAiRunParams } from '@/shared/api/browser-run-client'
 import { getSessionContext } from '@/shared/api/auth-client'
 import { ApiError } from '@/shared/api/http'
+import { streamRunEvents } from '@/shared/api/run-console-client'
 import { executeAction } from '@/shared/actions/action-client'
 import { browserEvidenceSaveRecipeOutput } from '@/shared/actions/action-registry'
 import type { ActionActor } from '@/shared/actions/types'
@@ -28,6 +32,10 @@ import { getSession } from '@/shared/session/session-store'
  * - A zero-data-retention (ZDR) session sends the live egress read only. Receipts and
  *   the procedure compile are never requested for it; the server refuses them anyway.
  * - A recipe is saved only when the person asks for it (`save`), never for a ZDR session.
+ * - A saved recipe runs only when the person clicks Run (`runRecipe`). Its slot values go into the
+ *   start and are not kept by these hooks.
+ * - The saved-recipe list is the person's own recipes, not session content, so it is read in a ZDR
+ *   session too; the panel disables Run there.
  */
 
 export const EVIDENCE_POLL_INTERVAL_MS = 5000
@@ -408,4 +416,198 @@ export function useBrowserReceipts(scope: () => EvidenceSource | null): {
   })
 
   return { receipts, truncated, error, loading }
+}
+
+/**
+ * Whether the saved-recipe controls are built: the save in the Procedure panel, and the list of
+ * saved recipes with its Run. Only the literal `true` of VITE_BROWSER_RECIPES turns them on.
+ */
+export function recipesEnabled(): boolean {
+  return import.meta.env.VITE_BROWSER_RECIPES === 'true'
+}
+
+/** The recipes one page of the saved list asks for. The gateway caps a page at 100. */
+export const RECIPES_LIST_LIMIT = 20
+
+export type SavedRecipesStatus = 'loading' | 'ready' | 'error'
+
+/**
+ * The person's saved recipes, one page at a time (Q4-E4.2-4d). The first page loads once the org
+ * id is known. `reload` reads the first page again, which the panel does after a save, and
+ * `loadMore` reads the page after `nextAfterId`. The list is the person's own recipes, kept in
+ * memory only.
+ */
+export function useSavedRecipes(): {
+  status: () => SavedRecipesStatus
+  recipes: () => BrowserSavedRecipe[]
+  nextAfterId: () => string | null
+  error: () => unknown
+  reload: () => void
+  loadMore: () => void
+} {
+  const [orgId] = createResource(loadEvidenceOrgId)
+  const [status, setStatus] = createSignal<SavedRecipesStatus>('loading')
+  const [recipes, setRecipes] = createSignal<BrowserSavedRecipe[]>([])
+  const [nextAfterId, setNextAfterId] = createSignal<string | null>(null)
+  const [error, setError] = createSignal<unknown>(null)
+  let inflight: AbortController | undefined
+
+  const abort = () => {
+    inflight?.abort()
+    inflight = undefined
+  }
+
+  const fetchPage = (org: string, afterId: string | undefined, append: boolean) => {
+    abort()
+    const controller = new AbortController()
+    inflight = controller
+    setStatus('loading')
+    setError(null)
+    listBrowserRecipes(org, { limit: RECIPES_LIST_LIMIT, afterId }, controller.signal).then(
+      (page) => {
+        if (controller.signal.aborted) return
+        inflight = undefined
+        setRecipes((current) => (append ? [...current, ...page.recipes] : page.recipes))
+        setNextAfterId(page.nextAfterId ?? null)
+        setStatus('ready')
+      },
+      (failure: unknown) => {
+        if (controller.signal.aborted) return
+        inflight = undefined
+        setError(failure)
+        setStatus('error')
+      },
+    )
+  }
+
+  createEffect(
+    () => orgId(),
+    (org) => {
+      if (org === undefined) return
+      if (org === '') {
+        // The session context did not answer, so there is no org to ask the list for.
+        abort()
+        setRecipes([])
+        setNextAfterId(null)
+        setError(new ApiError('unauthenticated', 401, 'unauthenticated'))
+        setStatus('error')
+        return
+      }
+      fetchPage(org, undefined, false)
+    },
+  )
+  onCleanup(abort)
+
+  return {
+    status,
+    recipes,
+    nextAfterId,
+    error,
+    reload: () => {
+      const org = orgId()
+      if (org) fetchPage(org, undefined, false)
+    },
+    loadMore: () => {
+      const org = orgId()
+      const after = nextAfterId()
+      if (org && after && status() !== 'loading') fetchPage(org, after, true)
+    },
+  }
+}
+
+export type RecipeRunStatus = 'idle' | 'starting' | 'live' | 'done' | 'error'
+
+/** What a run of a saved recipe names: the recipe, the version or tag to replay, and its slot values. */
+export type RecipeRunInput = {
+  id: string
+  /** The recipe's name. The run is labelled with it. */
+  name: string
+  version?: number
+  tag?: string
+  slots: Record<string, string>
+}
+
+/**
+ * Starts a browser AI run from a saved recipe (Q4-E4.2-4d). Only the person's click calls
+ * `runRecipe`. The start reuses the composer's idempotency keyring, so a retry after an ambiguous
+ * failure reaches the same run. The run is `live` while its event stream stays open. The slot
+ * values go into the start and are not kept here: the caller clears its own inputs once the start
+ * is accepted.
+ */
+export function useRecipeRun(): {
+  status: () => RecipeRunStatus
+  error: () => unknown
+  runRecipe: (sessionId: string, input: RecipeRunInput) => Promise<boolean>
+  reset: () => void
+} {
+  const [orgId] = createResource(loadEvidenceOrgId)
+  const [status, setStatus] = createSignal<RecipeRunStatus>('idle')
+  const [error, setError] = createSignal<unknown>(null)
+  const keyring = createAiRunStartKeyring()
+  let inflight: AbortController | undefined
+
+  const abort = () => {
+    inflight?.abort()
+    inflight = undefined
+  }
+  onCleanup(abort)
+
+  const reset = () => {
+    abort()
+    setStatus('idle')
+    setError(null)
+  }
+
+  const runRecipe = (sessionId: string, input: RecipeRunInput): Promise<boolean> => {
+    const org = orgId()
+    const current = status()
+    if (!org || !sessionId || current === 'starting' || current === 'live') return Promise.resolve(false)
+    const params: StartBrowserAiRunParams = {
+      goal: input.name,
+      recipe: {
+        id: input.id,
+        ...(input.version === undefined ? {} : { version: input.version }),
+        ...(input.tag === undefined ? {} : { tag: input.tag }),
+        slots: input.slots,
+      },
+    }
+    abort()
+    const controller = new AbortController()
+    inflight = controller
+    setStatus('starting')
+    setError(null)
+    const idempotencyKey = keyring.keyFor(sessionId, params)
+    return startBrowserAiRun(org, sessionId, params, controller.signal, { idempotencyKey }).then(
+      (run) => {
+        keyring.succeeded()
+        if (controller.signal.aborted) return false
+        setStatus('live')
+        void streamRunEvents(
+          run.runId,
+          {
+            onDone: () => {
+              if (!controller.signal.aborted) setStatus('done')
+            },
+            onError: (failure) => {
+              if (controller.signal.aborted) return
+              setError(failure)
+              setStatus('error')
+            },
+          },
+          controller.signal,
+        )
+        return true
+      },
+      (failure: unknown) => {
+        keyring.failed(failure)
+        if (controller.signal.aborted) return false
+        inflight = undefined
+        setError(failure)
+        setStatus('error')
+        return false
+      },
+    )
+  }
+
+  return { status, error, runRecipe, reset }
 }

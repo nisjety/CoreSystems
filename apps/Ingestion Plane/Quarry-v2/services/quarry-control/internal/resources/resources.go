@@ -89,7 +89,10 @@ func MountArtifacts(r chi.Router, db store.DB) {
 func MountProfiles(r chi.Router, db store.DB) {
 	mountSimple[store.BrowserProfile](r, "/v1/profiles", db.Profiles())
 }
-func MountEvents(r chi.Router, db store.DB, apiKey string, sink notify.Sink) {
+func MountEvents(r chi.Router, db store.DB, apiKey string, sink notify.Sink, opts ...NoticeOption) {
+	// WS15.S4d: with WithScheduleNotices, a failed or timed-out fire of a schedule
+	// notifies the schedule's creator. Without it nothing is sent.
+	notices := noticeConfigOf(opts)
 	// GET /v1/runs/{id}/events backs quarry-edge's list_run_events fallback
 	// (crates/quarry-edge/src/resource_routes.rs), which deserializes every
 	// item strictly as quarry_core::job_history::JobHistoryEvent — org_id
@@ -195,6 +198,7 @@ func MountEvents(r chi.Router, db store.DB, apiKey string, sink notify.Sink) {
 			}
 			fanoutJobWebhook(db, batch[i], fanoutOrg)
 			notifyOnChange(sink, batch[i])
+			notifyOnScheduleRun(db, notices.scheduleSink, batch[i])
 		}
 		httpx.WriteJSON(w, r, http.StatusCreated, map[string]any{"accepted": len(batch)})
 	})

@@ -26,6 +26,23 @@
   font-size: 0.875rem;
 }
 
+/* The run's step budget (Q2-WS9.H): the steps taken of the cap. It takes the warning colour once two or fewer
+   remain (`data-tone="warning"`). */
+.verevon-browser-dock-pane__budget {
+  padding: 1px 6px;
+  border: 1px solid var(--verevon-d-border, rgb(0 0 0 / 12%));
+  border-radius: 999px;
+  color: var(--verevon-e-muted, #5f5f5f);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.verevon-browser-dock-pane__budget[data-tone='warning'] {
+  border-color: var(--verevon-warning, #a85e13);
+  color: var(--verevon-warning, #a85e13);
+}
+
 .verevon-browser-dock-pane__actions {
   display: inline-flex;
   flex-wrap: wrap;

@@ -14,6 +14,10 @@ function orgHeaders(orgId: string): Record<string, string> {
 
 export type BrowserTabContinuation = { tabId: string; expectedEpoch: number; expectedOrigin: string }
 
+/** What an attached run leaves on the agent's tab when it completes (WS8.J). `none` closes the tab;
+ * `deliverable` and `handoff` keep it open for the person. Absent, the server default applies. */
+export type BrowserTabMarkOnComplete = 'none' | 'deliverable' | 'handoff'
+
 export type StartBrowserAiRunParams = {
   goal: string
   /** Fail closed if this run cannot attach to the owner's session. This does not guarantee frames. */
@@ -33,6 +37,9 @@ export type StartBrowserAiRunParams = {
    * unattached: the gateway refuses it with `requireAttached`, `continueInTab`,
    * `assistantInteractive` (`recipe_attach_unsupported`) or `planMode`. Slot values are user data. */
   recipe?: BrowserAiRunRecipe
+  /** What an attached run leaves on its tab when it completes (WS8.J). The gateway forwards it only on an
+   * attached run and refuses it with `requireAttached` when attach is off. The controller never sends it under zero retention. */
+  tabMarkOnComplete?: BrowserTabMarkOnComplete
 }
 
 /** The saved recipe a browser AI run start names: `proc_` id, a version or a tag (not both),
@@ -118,6 +125,8 @@ function startFingerprint(sessionId: string, params: StartBrowserAiRunParams): s
     ...(params.recipe
       ? [[params.recipe.id, params.recipe.version ?? null, params.recipe.tag ?? null, Object.entries(params.recipe.slots ?? {}).sort()]]
       : []),
+    // Only a start that names a mark carries it, so a plain start's fingerprint is unchanged.
+    ...(params.tabMarkOnComplete !== undefined ? [params.tabMarkOnComplete] : []),
   ])
 }
 
@@ -195,6 +204,7 @@ export async function startBrowserAiRun(
         maxCostUsd: params.maxCostUsd,
         // Omitted when absent (JSON.stringify drops undefined), so a plain start's body is unchanged.
         recipe: params.recipe,
+        tabMarkOnComplete: params.tabMarkOnComplete,
       }),
       headers: idempotencyKey === undefined ? orgHeaders(orgId) : { ...orgHeaders(orgId), 'Idempotency-Key': idempotencyKey },
       signal,

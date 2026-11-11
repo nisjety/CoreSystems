@@ -253,6 +253,7 @@ fn browser_observation_serde_roundtrip() {
         }),
         screenshot_artifact_id: None,
         visual_observation_artifact_id: None,
+        pdf_artifact_id: None,
         evidence_delta_artifact_id: None,
         console_summary: vec![],
         network_summary: vec![],

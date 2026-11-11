@@ -11,8 +11,9 @@ import type {
   BrowserTabsResponse,
   BrowserTimelineEntry,
   BrowserSessionResponse,
+  BrowserStepBudget,
 } from '@/shared/api/browser-client'
-import { browserSessionAttachFromWire, isBrowserWireId } from '@/shared/api/browser-client'
+import { browserSessionAttachFromWire, browserStepBudgetFromWire, isBrowserWireId } from '@/shared/api/browser-client'
 import type {
   BrowserActionApprovalRequiredEvent,
   BrowserActionDecidedEvent,
@@ -69,6 +70,8 @@ export type BrowserSessionViewModel = {
   controlMode: BrowserControlMode
   /** Quarry's control epoch (WS9.I), when the projection carries one. */
   controlEpoch?: number | null
+  /** The run's step budget (Q2-WS9.H), when the projection carries a step cap. Counts only. */
+  stepBudget?: BrowserStepBudget | null
   devtoolsEvents: BrowserDevtoolsEvent[]
   devtoolsUrl?: string | null
   liveFrameStreamUrl?: string | null
@@ -116,6 +119,7 @@ export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessio
   const mode = preview.browserSession?.session.renderMode ?? 'readability_fallback'
   const observation = preview.browserSession?.observation ?? null
   const session = preview.browserSession?.session
+  const stepBudget = browserStepBudgetFromWire(session?.stepBudget)
   const frameUrl = resolveBrowserArtifactUrl(session?.frame?.url)
   const liveFrameStreamUrl = resolveBrowserArtifactUrl(session?.liveFrameStreamUrl)
   const liveFrameUrl = resolveBrowserArtifactUrl(session?.liveFrameUrl)
@@ -146,6 +150,7 @@ export function browserSessionFromPreview(preview: ScrapePreview): BrowserSessio
     host: hostnameOf(session?.url ?? preview.url),
     controlMode: session?.control?.mode ?? 'agent_control',
     ...(typeof session?.control?.epoch === 'number' ? { controlEpoch: session.control.epoch } : {}),
+    ...(stepBudget ? { stepBudget } : {}),
     devtoolsEvents: session?.devtools?.events ?? [],
     devtoolsUrl,
     liveFrameStreamUrl,

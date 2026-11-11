@@ -20,6 +20,10 @@ import {
   modelEntitlementPresentation,
 } from '@/shared/api/model-entitlement-refusals'
 import {
+  RESEARCH_RUN_ID_SHAPE,
+  RESEARCH_RUN_STATUS_WORDS,
+} from '@/shared/api/research-runs-client'
+import {
   isZdrCode,
   type Translate,
   type ZdrRefusalAction,
@@ -980,6 +984,21 @@ export function restoredConnectorSuggestion(value: unknown): ChatConnectorSugges
   return suggestion ? { ...suggestion, restored: true } : undefined
 }
 
+/**
+ * The research run a `research_run` frame puts on its answer (Q4-062b-sseid-c). A frame whose id is not a run id,
+ * or whose status is outside the closed words, names nothing this build can act on, so the turn keeps the run it
+ * had. A later frame for the same run overwrites its status; a frame for another run replaces it, since the newest
+ * run is the one the chip shows.
+ */
+export function researchRunAfterFrame(
+  current: ChatTurn['researchRun'],
+  frame: { researchRunId: string; status?: string },
+): ChatTurn['researchRun'] {
+  const status = RESEARCH_RUN_STATUS_WORDS.find((known) => known === frame.status)
+  if (!status || !RESEARCH_RUN_ID_SHAPE.test(frame.researchRunId)) return current
+  return { id: frame.researchRunId, status }
+}
+
 function visibleTurnContent(role: ChatTurn['role'], content: string): string {
   if (role !== 'user') return content
   const visible = splitInlinedAttachments(content).text
@@ -1095,6 +1114,8 @@ export function mergeServerTurnsWithCachedMetadata(
       costBasis: serverTurn.costBasis ?? cachedTurn.costBasis,
       timing: serverTurn.timing ?? cachedTurn.timing,
       verification: serverTurn.verification ?? cachedTurn.verification,
+      // Stream-only: the server's message carries no research run, so the cached one is kept for the session.
+      researchRun: serverTurn.researchRun ?? cachedTurn.researchRun,
       confidence: serverTurn.confidence ?? cachedTurn.confidence,
       reasoning: serverTurn.reasoning ?? cachedTurn.reasoning,
       citations: metadataArray(serverTurn.citations, cachedTurn.citations),

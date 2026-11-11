@@ -44,6 +44,8 @@ export type ScheduleItem = {
   nextRunAt?: string | null
   target: string
   config: Record<string, unknown>
+  /** Overlap skips Quarry counted for this schedule. 0 until a skip is recorded; absent on older gateways. */
+  skippedOverlapCount?: number
 }
 
 export type EvidenceTimeline = {
@@ -269,6 +271,25 @@ export function listIngestionRuns(signal?: AbortSignal) {
 
 export function listIngestionSchedules(signal?: AbortSignal) {
   return requestJson<ScheduleItem[]>('/api/ingestions/schedules', { signal })
+}
+
+/**
+ * One fire of a schedule, as `GET /api/ingestions/schedules/{id}/runs` normalizes it. `reason` is the
+ * run's terminal reason. A skipped fire reads `schedule_skipped`: its skip code (for example
+ * `skipped_zdr`) is recorded on the event, not on the run row.
+ */
+export type ScheduleRun = {
+  id: string
+  status: string
+  reason: string | null
+  /** When the fire was registered. A run has no separate start time. */
+  startedAt: string | null
+  finishedAt: string | null
+}
+
+/** The newest fires of one schedule, newest first. The gateway returns up to 10 by default and at most 20. */
+export function listScheduleRuns(id: string, signal?: AbortSignal) {
+  return requestJson<ScheduleRun[]>(`/api/ingestions/schedules/${encodeURIComponent(id)}/runs`, { signal })
 }
 
 /** What this installation can honour on the Schedules surface (WS15.S0). */

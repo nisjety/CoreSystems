@@ -1576,6 +1576,31 @@ impl ExecutionCore for ExecutionService {
             ),
             None => None,
         };
+        // QF-16: a browser_agent step may be offered a one-time-code fill from the one mail
+        // connection the person selected for this turn. Resolved here, where the turn's scope and
+        // the verified browser bearer both are, and carried on the validated grant. Dark behind
+        // EXECUTION_CORE_BROWSER_FILL_OTP; never for a ZDR or waived step.
+        let browser_grant = match (browser_grant, browser_bearer.as_ref()) {
+            (Some(grant), Some(browser_bearer))
+                if req.tool_name == "browser_agent" && crate::browser_agent::fill_otp_enabled() =>
+            {
+                let scope = req
+                    .connector_scope
+                    .as_ref()
+                    .map_or(&[][..], |scope| scope.connection_ids.as_slice());
+                let zdr = req.zdr || caller.zdr || caller.zdr_waiver.is_some() || grant.zdr();
+                let offer = crate::tool_bridge::resolve_fill_otp_offer(
+                    &req.org_id,
+                    Some(session_bearer.as_str()),
+                    browser_bearer.as_str(),
+                    scope,
+                    zdr,
+                )
+                .await;
+                Some(grant.with_fill_otp(offer))
+            }
+            (grant, _) => grant,
+        };
         let run_id = req.run_id.clone();
         let step_id = req.step_id.clone();
 

@@ -47,7 +47,7 @@ use serde_json::{json, Value};
 use crate::{
     audience_tokens::get_audience_token,
     config::AppState,
-    envelope::{error, ok},
+    envelope::{error, error_with_details, ok},
     middleware::{require_session, AuthenticatedUser},
     public_url::normalize_public_http_url,
     upstream::proxy_bearer_json,
@@ -66,7 +66,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         .route(
             "/api/v1/monitoring/schedules/{id}",
-            axum::routing::delete(delete_monitor),
+            axum::routing::delete(delete_monitor).patch(set_monitor_tag),
         )
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
@@ -112,6 +112,62 @@ fn validation(message: &str) -> Response {
 /// Forward an upstream `(status, body)` failure verbatim.
 fn forward(status: StatusCode, body: Value) -> Response {
     (status, Json(body)).into_response()
+}
+
+/// Longest monitor tag, in bytes (E3.5-6). The edge and control refuse more.
+const MAX_MONITOR_TAG_BYTES: usize = 32;
+
+/// 400 `validation_error` for a bad monitor tag, naming the field and the closed reason
+/// (`invalid_tag` or `tag_required`) as the edge does. Never echoes the tag.
+fn invalid_tag(reason: &'static str, message: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(error_with_details(
+            "validation_error",
+            message,
+            json!({ "field": "tag", "reason": reason }),
+        )),
+    )
+        .into_response()
+}
+
+/// Normalises an optional monitor `tag` the way the edge does (E3.5-6): trimmed and lowercased
+/// with ASCII folding only, then 1 to 32 bytes of `a-z`, `0-9`, `.`, `_` or `-` that start with a
+/// letter or a digit. Absent or blank is untagged (`Ok(None)`). Anything else is refused, never
+/// dropped to untagged.
+fn monitor_tag(raw: Option<&str>) -> Result<Option<String>, Response> {
+    let tag = raw.unwrap_or_default().trim().to_ascii_lowercase();
+    if tag.is_empty() {
+        return Ok(None);
+    }
+    let well_formed = tag.bytes().enumerate().all(|(at, byte)| {
+        byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || (at > 0 && matches!(byte, b'.' | b'_' | b'-'))
+    });
+    if tag.len() <= MAX_MONITOR_TAG_BYTES && well_formed {
+        return Ok(Some(tag));
+    }
+    Err(invalid_tag(
+        "invalid_tag",
+        "tag must be 1-32 of a-z 0-9 . _ -, starting with a letter or digit.",
+    ))
+}
+
+/// The SPA's view of one monitor (a schedule row). The edge's fields pass through as sent, and
+/// `tag` is always present: the row's string, or `null` when untagged (the edge leaves the key
+/// out of an untagged row).
+fn monitor_view(mut row: Value) -> Value {
+    let tag = row
+        .get("tag")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map_or(Value::Null, |tag| json!(tag));
+    if let Some(object) = row.as_object_mut() {
+        object.insert("tag".to_owned(), tag);
+    }
+    row
 }
 
 /// First trimmed non-empty string across `keys`.
@@ -344,6 +400,10 @@ pub(crate) struct CreateMonitorRequest {
     /// 5-field cron from this — free-form cron is intentionally not accepted.
     #[serde(default)]
     pub(crate) preset: Option<String>,
+    /// Optional operator label, one per monitor (E3.5-6), checked with the edge's grammar.
+    /// Absent or blank is untagged.
+    #[serde(default)]
+    pub(crate) tag: Option<String>,
 }
 
 /// `POST /api/v1/monitoring/schedules` — create a recurring change monitor. The
@@ -366,6 +426,15 @@ pub(crate) async fn create_monitor(
     if !matches!(preset, "hourly" | "daily" | "weekly") {
         return validation("preset must be one of hourly, daily, or weekly.");
     }
+    let tag = match monitor_tag(req.tag.as_deref()) {
+        Ok(tag) => tag,
+        Err(response) => return response,
+    };
+    // The edge gets `tag` only for a tagged monitor; an untagged create is sent as before.
+    let mut upstream_body = json!({ "preset": preset, "target_ref": target });
+    if let Some(tag) = tag {
+        upstream_body["tag"] = json!(tag);
+    }
 
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
@@ -373,7 +442,7 @@ pub(crate) async fn create_monitor(
         &state,
         Method::POST,
         "/v1/schedules",
-        Some(json!({ "preset": preset, "target_ref": target })),
+        Some(upstream_body),
         token.as_deref(),
         user.user_id.as_str(),
     )
@@ -381,23 +450,44 @@ pub(crate) async fn create_monitor(
     if !status.is_success() {
         return forward(status, body);
     }
-    (StatusCode::CREATED, Json(ok(unwrap_data(body)))).into_response()
+    (
+        StatusCode::CREATED,
+        Json(ok(monitor_view(unwrap_data(body)))),
+    )
+        .into_response()
+}
+
+/// Query of `GET /api/v1/monitoring/schedules`. `tag` keeps only the monitors with that tag.
+#[derive(Debug, Deserialize)]
+struct MonitorListQuery {
+    #[serde(default)]
+    tag: Option<String>,
 }
 
 /// `GET /api/v1/monitoring/schedules` — list the org's recurring change monitors
 /// (change_monitor schedules only; other ingestion schedules live under
-/// `/api/ingestions/schedules`).
+/// `/api/ingestions/schedules`). `?tag=` keeps only the monitors with that tag; a bad
+/// tag is refused here, never answered with an empty list.
 async fn list_monitors(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
+    Query(q): Query<MonitorListQuery>,
 ) -> Response {
+    let tag = match monitor_tag(q.tag.as_deref()) {
+        Ok(tag) => tag,
+        Err(response) => return response,
+    };
+    let path = match tag {
+        Some(tag) => format!("/v1/schedules?limit=100&tag={}", urlencoding(&tag)),
+        None => "/v1/schedules?limit=100".to_owned(),
+    };
     let cookie = cookie_header(&headers);
     let token = quarry_token(&state, &user, &cookie).await;
     let (status, body) = quarry_call(
         &state,
         Method::GET,
-        "/v1/schedules?limit=100",
+        &path,
         None,
         token.as_deref(),
         user.user_id.as_str(),
@@ -417,6 +507,7 @@ async fn list_monitors(
             rows.iter()
                 .filter(|s| s.get("target_kind").and_then(Value::as_str) == Some("change_monitor"))
                 .cloned()
+                .map(monitor_view)
                 .collect()
         })
         .unwrap_or_default();
@@ -446,6 +537,53 @@ pub(crate) async fn delete_monitor(
         return forward(status, body);
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// Body of `PATCH /api/v1/monitoring/schedules/{id}` (E3.5-6): the monitor tag to set, `""` to
+/// clear it. A body that names no `tag` is refused, so a PATCH never clears a tag by omission.
+#[derive(Debug, Deserialize)]
+struct MonitorTagPatch {
+    #[serde(default)]
+    tag: Option<String>,
+}
+
+/// `PATCH /api/v1/monitoring/schedules/:id` — set or clear a recurring monitor's tag (E3.5-6).
+/// The org is the session's, never the body's, and the edge answers 404 for another org's
+/// monitor. The answer is the monitor, as the edge sends it, with `tag` normalized.
+async fn set_monitor_tag(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<MonitorTagPatch>,
+) -> Response {
+    let Some(raw) = req.tag.as_deref() else {
+        return invalid_tag(
+            "tag_required",
+            "tag is required; send an empty string to clear it.",
+        );
+    };
+    let tag = match monitor_tag(Some(raw)) {
+        Ok(tag) => tag.unwrap_or_default(),
+        Err(response) => return response,
+    };
+
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+    let path = format!("/v1/schedules/{}", urlencoding(&id));
+    let (status, body) = quarry_call(
+        &state,
+        Method::PATCH,
+        &path,
+        Some(json!({ "tag": tag })),
+        token.as_deref(),
+        user.user_id.as_str(),
+    )
+    .await;
+    if !status.is_success() {
+        return forward(status, body);
+    }
+    (StatusCode::OK, Json(ok(monitor_view(unwrap_data(body))))).into_response()
 }
 
 #[derive(Debug, Deserialize)]

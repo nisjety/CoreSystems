@@ -2439,6 +2439,9 @@ fn event_run_id(ev: &proto::OrchestrationEvent) -> Option<&str> {
         // Tool retry (WS15 S3): run-scoped, ids and counts. Broadcast and replayed like the other run
         // events, and never persisted (`persist_browser_event` has no arm for it).
         orchestration_event::Event::ToolRetryScheduled(p) => Some(&p.run_id),
+        // Steer taken (QF-12, E3.3): run-scoped, ids and a count only. Broadcast and replayed like
+        // the other run events, and never persisted (`persist_browser_event` has no arm for it).
+        orchestration_event::Event::BrowserSteerTaken(p) => Some(&p.run_id),
     }
 }
 

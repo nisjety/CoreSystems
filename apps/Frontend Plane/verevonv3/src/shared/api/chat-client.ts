@@ -1139,6 +1139,15 @@ export type ChatResultReceiptEvent = {
   requestId?: string
 }
 /**
+ * The addressable research run a deep-research answer started (`research_run`, Q4-062b-sseid-c): its `rsr_` id
+ * and the run's status word, both as the frame sent them. Ids and words only. The status is not checked here:
+ * the turn keeps only the words this build knows (`researchRunAfterFrame`).
+ */
+export type ChatResearchRunEvent = {
+  researchRunId: string
+  status?: string
+}
+/**
  * What a Space's knowledge did for one turn (`knowledge` on `source_scope_applied`, WS18-S3): a mode and,
  * when a search ran this turn, its source count. A mode and a count, never content.
  */
@@ -1316,6 +1325,8 @@ export type ChatStreamHandlers = {
   onTurnTiming?: (event: ChatTurnTiming) => void
   /** What the gateway checked before it published the turn (`result_receipt`). */
   onResultReceipt?: (event: ChatResultReceiptEvent) => void
+  /** The research run a deep-research answer started, and its status (`research_run`). See `ChatResearchRunEvent`. */
+  onResearchRun?: (event: ChatResearchRunEvent) => void
   /** See `ChatSourceScopeAppliedEvent`. */
   onSourceScopeApplied?: (event: ChatSourceScopeAppliedEvent) => void
   /** See `ChatSearchProvenanceEvent`. */
@@ -2851,6 +2862,14 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
       // console warning on every checked turn.
       const receipt = objectValue(payload.receipt)
       if (receipt) handlers.onResultReceipt?.({ receipt, requestId: str(payload.request_id) })
+      break
+    }
+    case 'research_run': {
+      // The addressable research run this answer started (Q4-062b-sseid-c): its id and a status word. A frame
+      // without a run id names nothing and is dropped. Every status word is passed on, `cancelled` included;
+      // the turn keeps only the words this build knows, so an unknown one leaves its status as it was.
+      const researchRunId = str(payload.research_run_id)
+      if (researchRunId) handlers.onResearchRun?.({ researchRunId, status: str(payload.status) })
       break
     }
     case 'title': {

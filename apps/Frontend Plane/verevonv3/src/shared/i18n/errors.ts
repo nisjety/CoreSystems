@@ -249,6 +249,9 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   recipe_version_and_tag: { no: 'Oppgi en oppskriftsversjon eller en tagg, ikke begge.', en: 'Name a recipe version or a tag, not both.' },
   recipe_tag_invalid: { no: 'Oppskriftstaggen er ugyldig.', en: 'The recipe tag is invalid.' },
   recipe_slots_invalid: { no: 'Verdiene for oppskriften er ugyldige.', en: "The recipe's slot values are invalid." },
+  // Q2-WS8.J-b: the tab choice an attached AI run starts with (browser.rs start_ai_run).
+  browser_tab_mark_invalid: { no: 'Valget for fanen er ugyldig. Prøv igjen.', en: 'The choice for the tab is not valid. Try again.' },
+  browser_tab_mark_requires_attach: { no: 'Valget for fanen gjelder bare når agenten er koblet til nettleserøkten.', en: 'The tab choice only applies when the agent is attached to the browser session.' },
   browser_receipts_unavailable_zdr: { no: 'Handlingsloggen er ikke tilgjengelig for økter uten lagring.', en: 'The action log is not available for sessions without retention.' },
   invalid_browser_evidence_query: { no: 'Filteret for nettleserloggen er ugyldig.', en: 'The browser log filter is not valid.' },
   invalid_devtools_query: { no: 'Filteret for konsoll og nettverk er ugyldig.', en: 'The console and network filter is not valid.' },
@@ -318,6 +321,12 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   browser_tab_control_forbidden: {
     no: 'Bare personen som eier denne nettleserøkten kan endre hvem som holder en fane.',
     en: 'Only the person who owns this browser session can change who holds a tab.',
+  },
+  // Q2-WS8.I: a tab's epoch moved on (Quarry 409 `stale_tab_epoch`). Quarry's envelope carries it as code CONFLICT with
+  // this message, so BrowserChrome passes this row as the copy for that refusal.
+  stale_tab_epoch: {
+    no: 'Fanen ble endret et annet sted. Oppdatert; prøv igjen.',
+    en: 'The tab changed hands elsewhere. It has been refreshed; try again.',
   },
   // Q2-WS8.I: a paused browser agent takes no step until the person resumes it. No gateway file emits this code yet.
   browser_agent_paused: {

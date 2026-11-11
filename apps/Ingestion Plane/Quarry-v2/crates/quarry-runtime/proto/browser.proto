@@ -27,6 +27,17 @@ message AcquireGrantRequest {
   repeated string allowed_dialog_ids = 7;
   repeated string allowed_artifact_ids = 8;
   string parent_grant_id = 9;
+
+  // fill_otp approval binding (Q3-E3.1-b1-c, ADR-2a; tags 23-24 of F-t2-032's
+  // band). The mail connection the one-time code is read from: required, and
+  // matching ^[A-Za-z0-9_-]{1,128}$, when allowed_actions is ["fill_otp"];
+  // refused for any other grant. Stored verbatim, never logged. Dark behind
+  // BROWSER_BROKER_FILL_OTP_ENABLED.
+  string mail_connection_id = 23;
+  // The canonical https origin (scheme https, lowercase host, optional port,
+  // no path, query or fragment) the code may be typed into: required for a
+  // fill_otp approval and refused for any other grant.
+  string grant_origin = 24;
 }
 
 message AcquireGrantResponse {
@@ -42,6 +53,13 @@ message AcquireGrantResponse {
 
   // WS7.K (R-6: field 20 is the web-policy snapshot). See WebPolicy below.
   WebPolicy web_policy = 20;
+
+  // Q3-E3.1-b1-c: the mail connection a fill_otp approval is bound to; empty
+  // for every other grant.
+  string mail_connection_id = 23;
+  // Q3-E3.1-b1-c: the canonical https origin a fill_otp approval is bound to;
+  // empty for every other grant.
+  string grant_origin = 24;
 }
 
 // The org web-policy snapshot the broker stored on a grant (WS7.K). The broker
@@ -124,4 +142,13 @@ message ValidateGrantResponse {
   repeated string denied_domains = 51;
   google.protobuf.Timestamp absolute_expires_at = 52;
   string resource_id = 53;
+
+  // Q3-E3.1-b1-c: the mail connection a fill_otp approval is bound to; empty
+  // for every other grant. A consumer reads the one-time code only from this
+  // connection.
+  string mail_connection_id = 23;
+  // Q3-E3.1-b1-c: the canonical https origin a fill_otp approval is bound to;
+  // empty for every other grant. A consumer types the code only into a frame
+  // whose origin equals it.
+  string grant_origin = 24;
 }

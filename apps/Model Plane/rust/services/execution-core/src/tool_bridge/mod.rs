@@ -55,6 +55,10 @@ pub(crate) struct ValidatedBrowserGrant {
     // It can only tighten the run (see `PlanCeilings`).
     budget_max_steps: i32,
     budget_max_runtime_s: i32,
+    // QF-16: the one-time-code fill this step may offer, resolved at the gRPC boundary from the
+    // turn's connector scope and the verified browser bearer (`resolve_fill_otp_offer`). Never
+    // read from the tool JSON. `None` unless `EXECUTION_CORE_BROWSER_FILL_OTP` is on.
+    fill_otp: Option<browser_agent::FillOtpOffer>,
 }
 
 impl ValidatedBrowserGrant {
@@ -88,7 +92,22 @@ impl ValidatedBrowserGrant {
             read_only: response.read_only,
             budget_max_steps: response.budget_max_steps,
             budget_max_runtime_s: response.budget_max_runtime_s,
+            fill_otp: None,
         })
+    }
+
+    /// QF-16: the grant with the one-time-code fill the boundary resolved for this step. A ZDR
+    /// grant never carries one.
+    #[must_use]
+    pub(crate) fn with_fill_otp(mut self, offer: Option<browser_agent::FillOtpOffer>) -> Self {
+        self.fill_otp = offer.filter(|_| !self.zdr);
+        self
+    }
+
+    /// QF-16: the one-time-code fill this step may offer, if any.
+    #[must_use]
+    pub(crate) fn fill_otp(&self) -> Option<&browser_agent::FillOtpOffer> {
+        self.fill_otp.as_ref()
     }
 
     /// A grant as the broker would have validated it, for tests that need one
@@ -112,6 +131,7 @@ impl ValidatedBrowserGrant {
             read_only: false,
             budget_max_steps: 0,
             budget_max_runtime_s: 0,
+            fill_otp: None,
         }
     }
 
@@ -153,6 +173,81 @@ impl ValidatedBrowserGrant {
     #[must_use]
     pub(crate) fn read_only(&self) -> bool {
         self.read_only
+    }
+}
+
+/// QF-16: the most connections a turn's scope may name (`ConnectorScope`'s own bound). A longer
+/// scope is not read: no fill is offered.
+const MAX_FILL_OTP_SCOPE: usize = 8;
+/// QF-16: the longest connection label the approval card is shown.
+const MAX_MAIL_LABEL_CHARS: usize = 64;
+
+/// QF-16: the one-time-code fill a `browser_agent` step may offer, resolved from the turn's
+/// connector scope. The provider of each selected connection is read from integration-corev2's own
+/// connection record (the read `integration_tools` already makes for provider writes); exactly one
+/// `google` or `microsoft` connection is the mail connection. Zero, several, an unreadable
+/// connection, a scope over eight, a ZDR step or the switch off: `None` (fail closed). The label is
+/// the person's own, dropped when it looks like a mailbox address.
+pub(crate) async fn resolve_fill_otp_offer(
+    org_id: &str,
+    session_bearer: Option<&str>,
+    browser_bearer: &str,
+    connector_scope: &[String],
+    zdr: bool,
+) -> Option<browser_agent::FillOtpOffer> {
+    if zdr
+        || !browser_agent::fill_otp_enabled()
+        || browser_bearer.trim().is_empty()
+        || connector_scope.is_empty()
+        || connector_scope.len() > MAX_FILL_OTP_SCOPE
+    {
+        return None;
+    }
+    let client = crate::integration_tools::IntegrationActionsClient::from_env()?;
+    let mut mail: Option<browser_agent::FillOtpOffer> = None;
+    for connection_id in connector_scope {
+        let (provider_key, label) = match client
+            .connection_provider_and_label(org_id, connection_id, session_bearer)
+            .await
+        {
+            Ok(found) => found,
+            Err(_) => {
+                tracing::warn!("fill_otp not offered: a selected connection could not be read");
+                return None;
+            }
+        };
+        if !matches!(provider_key.as_str(), "google" | "microsoft") {
+            continue;
+        }
+        if mail.is_some() {
+            // Several mail connections: which one the person meant is not known.
+            return None;
+        }
+        mail = Some(browser_agent::FillOtpOffer {
+            mail_connection_id: connection_id.clone(),
+            mail_provider_key: provider_key,
+            mail_account_label: mail_label(&label),
+            browser_bearer: browser_bearer.to_owned(),
+        });
+    }
+    mail
+}
+
+/// The person's label for a mail connection as the approval card may show it: control characters
+/// dropped, trimmed, bounded, and empty when it looks like a mailbox address.
+fn mail_label(raw: &str) -> String {
+    let label: String = raw
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(MAX_MAIL_LABEL_CHARS)
+        .collect();
+    if label.contains('@') {
+        String::new()
+    } else {
+        label
     }
 }
 
@@ -824,8 +919,10 @@ struct BrowserDoActInput {
     action: BrowserMcpAction,
 }
 
-/// The Quarry action a `browser.act` input names. A dialog answer, an upload and a download are refused
-/// here: each needs an approval that only the person can give.
+/// The Quarry action a `browser.act` input names. A dialog answer, an upload, a download and a
+/// one-time-code fill (QF-16) are refused here: each needs an approval that only the person can give,
+/// and a Do run has no approval continuation that acquires one. A fill is offered only to a browser
+/// run's planner, under `EXECUTION_CORE_BROWSER_FILL_OTP` (see `browser_agent::gate_fill_otp`).
 fn browser_do_act(
     tool_input: &str,
 ) -> Result<crate::quarry_agent::AgentAction, browser_session::Refusal> {
@@ -841,7 +938,8 @@ fn browser_do_act(
         | AgentAction::UploadRef { .. }
         | AgentAction::FrameUploadRef { .. }
         | AgentAction::DownloadRef { .. }
-        | AgentAction::FrameDownloadRef { .. } => Err(ACT_NOT_AVAILABLE),
+        | AgentAction::FrameDownloadRef { .. }
+        | AgentAction::FillOtpRef { .. } => Err(ACT_NOT_AVAILABLE),
         action => Ok(action),
     }
 }
@@ -1250,6 +1348,14 @@ enum BrowserMcpAction {
         ref_id: String,
         approval_grant_id: String,
     },
+    /// QF-16: fill a one-time code into a top-frame field. There is no code, value or text field:
+    /// the enum's `deny_unknown_fields` refuses one, and Quarry reads the code itself.
+    FillOtpRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        approval_grant_id: String,
+    },
     /// E3.2-e2: list the run's tabs. A struct variant, not a unit one: serde's
     /// `deny_unknown_fields` does not reject extra keys on an internally tagged unit variant.
     TabList {},
@@ -1401,6 +1507,10 @@ impl BrowserMcpAction {
             }
             Self::TabSelect { tab_id } => Ok(BrowserMcpKind::Tabs(TabOp::Select(valid_tab_id(&tab_id)?))),
             Self::TabClose { tab_id } => Ok(BrowserMcpKind::Tabs(TabOp::Close(valid_tab_id(&tab_id)?))),
+            // QF-16: dark behind EXECUTION_CORE_BROWSER_FILL_OTP, refused before Quarry is asked.
+            Self::FillOtpRef { .. } if !browser_agent::fill_otp_enabled() => {
+                Err("invalid browser.act input: fill_otp_ref is not enabled".to_owned())
+            }
             other => Ok(BrowserMcpKind::Act(other.into_quarry_action()?)),
         }
     }
@@ -1632,6 +1742,21 @@ impl BrowserMcpAction {
                     snapshot_id,
                     generation,
                     frame_id,
+                    ref_id,
+                    approval_grant_id,
+                })
+            }
+            Self::FillOtpRef {
+                snapshot_id,
+                generation,
+                ref_id,
+                approval_grant_id,
+            } => {
+                validate_snapshot_target(&snapshot_id, &ref_id)?;
+                require_non_empty("fill_otp approval_grant_id", &approval_grant_id)?;
+                Ok(AgentAction::FillOtpRef {
+                    snapshot_id,
+                    generation,
                     ref_id,
                     approval_grant_id,
                 })
@@ -2281,6 +2406,12 @@ fn browser_plan_config_with(
         approval_redirect: ceilings.approval_redirect,
         steer: ceilings.steer,
         observation_quality: ceilings.observation_quality,
+        // QF-16: only what the boundary resolved, only with the switch on. The loop offers it to
+        // the planner only on a leased, non-ZDR run (`PlanConfig::fill_otp_offered`).
+        fill_otp: validated_grant
+            .fill_otp()
+            .filter(|_| browser_agent::fill_otp_enabled())
+            .cloned(),
     };
     browser_agent::validate_plan_config(&plan)?;
     Ok(plan)

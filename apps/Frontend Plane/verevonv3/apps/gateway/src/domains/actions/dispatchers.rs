@@ -4146,8 +4146,8 @@ pub(super) async fn dispatch_monitoring_check_now(
     owner_json_response_to_envelope("monitoring.check_now", user, status, payload)
 }
 
-// Reuses the real create_monitor so the SSRF guard and the hourly/daily/weekly
-// preset check stay in one place.
+// Reuses the real create_monitor so the SSRF guard, the hourly/daily/weekly
+// preset check and the monitor tag check stay in one place.
 pub(super) async fn dispatch_monitoring_create_monitor(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -4159,6 +4159,7 @@ pub(super) async fn dispatch_monitoring_create_monitor(
         return ticket_bad_request("monitoring.create_monitor requires a non-empty 'url'");
     }
     let preset = ticket_string(input, "preset");
+    let tag = ticket_string(input, "tag");
     let response = create_monitor(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
@@ -4166,6 +4167,7 @@ pub(super) async fn dispatch_monitoring_create_monitor(
         Json(CreateMonitorRequest {
             url: Some(url.to_owned()),
             preset: (!preset.is_empty()).then(|| preset.to_owned()),
+            tag: (!tag.is_empty()).then(|| tag.to_owned()),
         }),
     )
     .await;
@@ -5865,6 +5867,14 @@ pub(super) async fn dispatch_browser_run_start(
             Err(_) => return ticket_bad_request("browser_run.start 'recipe' must be {id, version?, tag?, slots?}"),
         },
     };
+    // WS8.J: the tab mark is a closed set the owner checks (browser_tab_mark_invalid); here only its type is read.
+    let tab_mark_on_complete = match input.get("tabMarkOnComplete") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(mark)) => Some(mark.to_owned()),
+        Some(_) => {
+            return ticket_bad_request("browser_run.start 'tabMarkOnComplete' must be a string")
+        }
+    };
     let body = StartAiRunBody {
         recipe,
         continue_in_tab: None,
@@ -5887,6 +5897,7 @@ pub(super) async fn dispatch_browser_run_start(
             .map(str::to_owned),
         require_approval: None,
         max_cost_usd: input.get("maxCostUsd").and_then(Value::as_f64),
+        tab_mark_on_complete,
     };
     let response = start_browser_ai_run(
         StateExtractor(state.clone()),

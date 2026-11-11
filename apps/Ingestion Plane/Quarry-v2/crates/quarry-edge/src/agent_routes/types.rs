@@ -358,6 +358,12 @@ pub struct BrowserSessionProjectionData {
     /// `webhook`, `api`). A label, never authority. Absent in a checkpoint projection.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_origin: Option<&'static str>,
+    /// Q2-WS9.H: the step cap that binds a person's steps on this run, so the browser header can show the
+    /// steps left (`step` is the steps taken so far). Absent when the run has no cap, when the cap does not
+    /// bind a person's steps (a person's own session is never capped), for an open-web session, and in a
+    /// checkpoint projection. Counts only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<u32>,
 }
 
 /// WS8.F: the live agent attachment as the owner projection shows it. Ids and words only.

@@ -682,6 +682,15 @@ message ExecuteStepRequest {
   // ExecuteStepRequest.thread_id (WS22-S2). A zero-retention step refuses a
   // non-empty list at the boundary.
   repeated SkillMount skill_mounts = 14;
+
+  // The connections the person selected for this turn (QF-16), the same shape
+  // as RunAgentRequest.connector_scope (field 23 there). Read only by a
+  // browser_agent step while EXECUTION_CORE_BROWSER_FILL_OTP is on: a run whose
+  // scope holds exactly one google or microsoft mail connection may be offered
+  // a one-time-code fill. The gateway writes it from the turn, never from the
+  // model's arguments. Absent or empty selects nothing; a zero-retention step
+  // ignores it.
+  ConnectorScope connector_scope = 15;
 }
 
 // RunAttachmentKind — what a staged run input is.

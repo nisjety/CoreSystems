@@ -187,6 +187,194 @@ pub(super) fn admit_step_expect(
     Ok(Some(expect))
 }
 
+/// WS10.S4: the most `EgressDecided` events with `decision: "block"` one step emits. The
+/// step's summary event counts every blocked request, so nothing is lost but the detail.
+const MAX_EGRESS_BLOCK_EVENTS: usize = 20;
+
+/// WS10.S4: the closed facts a step's run-trace events carry, read off its receipt before the
+/// receipt store takes it. Labels, counts and opaque ids only: never typed text, a selector,
+/// a URL or a failure message.
+struct StepTraceFacts {
+    receipt_id: String,
+    step: u32,
+    /// The action's serde tag (`click_ref`, `navigate`, ...), never its arguments.
+    action: &'static str,
+    outcome: &'static str,
+    error_code: Option<String>,
+    cost_micro_usd: u64,
+    initiated_by: Option<BrowserTimelineInitiator>,
+    control_epoch: Option<u64>,
+}
+
+impl StepTraceFacts {
+    fn of(receipt: &StepReceipt) -> Self {
+        let (outcome, error_code) = match &receipt.outcome {
+            StepOutcome::Completed { .. } => ("completed", None),
+            StepOutcome::Failed { error_code, .. } => ("failed", Some(error_code.clone())),
+            StepOutcome::Skipped { .. } => ("skipped", None),
+        };
+        Self {
+            receipt_id: receipt.receipt_id.clone(),
+            step: receipt.step,
+            action: browser_action_name(&receipt.action),
+            outcome,
+            error_code,
+            cost_micro_usd: receipt.cost_micro_usd,
+            initiated_by: receipt.initiated_by,
+            control_epoch: receipt.control_epoch,
+        }
+    }
+}
+
+/// WS10.S4: `scheme://host[:port]` of an http(s) URL, or `None` (no path, query, fragment or
+/// credentials ever ride on a trace event; the projection mapper reduces it again).
+fn trace_url_origin(raw: &str) -> Option<String> {
+    let parsed = Url::parse(raw.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let origin = parsed.origin();
+    origin.is_tuple().then(|| origin.ascii_serialization())
+}
+
+/// A trace payload without its `null` keys, so an absent fact is absent rather than `null`.
+fn without_nulls(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(map) = value.as_object_mut() {
+        map.retain(|_, v| !v.is_null());
+    }
+    value
+}
+
+/// WS10.S4: the run-trace events of one recorded step, emitted after its receipt was stored
+/// (or, on a run that keeps none, built): `StepReceiptRecorded`, then for a step with an
+/// observation one `EgressDecided` summary plus at most [`MAX_EGRESS_BLOCK_EVENTS`] blocked
+/// requests, then one `ArtifactRecorded` per stored screenshot, visual observation and
+/// evidence delta. Every event after the first names the receipt event as its cause. All go
+/// through `emit_for_zdr`, so a ZDR run's events reach only live subscribers.
+async fn emit_step_trace(
+    state: &AppState,
+    zdr: ZdrMode,
+    run_id: &RunKind,
+    facts: StepTraceFacts,
+    latency_ms: u64,
+    observation: Option<&BrowserObservation>,
+) {
+    let sink = &state.event_sink;
+    let step = facts.step;
+    let verified = observation.is_some_and(|obs| {
+        matches!(
+            obs.action_outcome.status,
+            quarry_core::contracts::ActionOutcomeStatus::Verified
+        )
+    });
+    let receipt_event = sink
+        .emit_for_zdr(
+            zdr,
+            run_id.clone(),
+            EventType::StepReceiptRecorded,
+            without_nulls(serde_json::json!({
+                "browser_run_id": run_id.to_string(),
+                "receipt_id": facts.receipt_id,
+                "step": step,
+                "action": facts.action,
+                "outcome": facts.outcome,
+                "latency_ms": latency_ms,
+                "error_code": facts.error_code,
+                "cost_micro_usd": facts.cost_micro_usd,
+                "url_origin": observation.and_then(|obs| trace_url_origin(&obs.url)),
+                "verified": verified,
+                "initiated_by": facts.initiated_by,
+                "control_epoch": facts.control_epoch,
+            })),
+            format!("{run_id}:step_receipt:{step}"),
+        )
+        .await;
+    let Some(obs) = observation else {
+        return;
+    };
+    let is_block = |receipt: &&BrowserEgressReceipt| {
+        matches!(
+            receipt.decision,
+            quarry_core::contracts::BrowserEgressDecision::Block
+        )
+    };
+    if !obs.egress_receipts.is_empty() {
+        let sequences = || obs.egress_receipts.iter().map(|r| r.sequence);
+        let from = sequences().min().unwrap_or(0);
+        let to = sequences().max().unwrap_or(0);
+        let blocked = obs.egress_receipts.iter().filter(is_block).count();
+        let allowed = obs.egress_receipts.len() - blocked;
+        sink.emit_for_zdr_caused(
+            zdr,
+            run_id.clone(),
+            EventType::EgressDecided,
+            serde_json::json!({
+                "decision": "summary",
+                "step": step,
+                "egress_seq_from": from,
+                "egress_seq_to": to,
+                "allowed": allowed,
+                "blocked": blocked,
+            }),
+            format!("{run_id}:egress:{step}:summary"),
+            receipt_event.clone(),
+        )
+        .await;
+        for receipt in obs
+            .egress_receipts
+            .iter()
+            .filter(is_block)
+            .take(MAX_EGRESS_BLOCK_EVENTS)
+        {
+            sink.emit_for_zdr_caused(
+                zdr,
+                run_id.clone(),
+                EventType::EgressDecided,
+                without_nulls(serde_json::json!({
+                    "decision": "block",
+                    "step": step,
+                    "policy": receipt.policy,
+                    "origin": trace_url_origin(&receipt.url),
+                    "tab_id": receipt.tab_id,
+                })),
+                format!("{run_id}:egress:{step}:block:{}", receipt.sequence),
+                receipt_event.clone(),
+            )
+            .await;
+        }
+    }
+    for (kind, artifact) in [
+        ("screenshot", obs.screenshot_artifact_id.as_ref()),
+        (
+            "visual_observation",
+            obs.visual_observation_artifact_id.as_ref(),
+        ),
+        ("evidence_delta", obs.evidence_delta_artifact_id.as_ref()),
+    ] {
+        let Some(artifact) = artifact else {
+            continue;
+        };
+        sink.emit_for_zdr_caused(
+            zdr,
+            run_id.clone(),
+            EventType::ArtifactRecorded,
+            serde_json::json!({
+                "step": step,
+                "artifact_id": artifact.to_string(),
+                "kind": kind,
+            }),
+            format!("{run_id}:artifact:{step}:{kind}"),
+            receipt_event.clone(),
+        )
+        .await;
+    }
+}
+
+/// The step's wall time in whole ms, for its `StepReceiptRecorded` event.
+fn elapsed_ms(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// `POST /v1/agent/runs/{run_id}/step` — execute one action, return the
 /// resulting observation. `ObservationRunner` emits `ActionStarted`/`ObservationReady`
 /// itself, keyed by the step key this lane reserved.
@@ -410,6 +598,7 @@ pub async fn step(
                 .cost_source(cost_source)
                 .typed_field(typed_kind)
                 .complete_maybe_metadata(metadata_only, receipt_action, Some(obs.clone()), cost_usd);
+            let trace_facts = StepTraceFacts::of(&receipt);
             if receipt_plan != super::human_browse::ReceiptPlan::Skip {
                 state
                     .receipts
@@ -417,6 +606,16 @@ pub async fn step(
                     .await
                     .map_err(|e| driver_err(&request_id, e))?;
             }
+            // WS10.S4: the step's trace events, once its receipt is recorded.
+            emit_step_trace(
+                &state,
+                entry.zdr,
+                &req.run_id,
+                trace_facts,
+                elapsed_ms(step_elapsed),
+                Some(&obs),
+            )
+            .await;
             (obs, cost_source)
         }
         Err(error) => {
@@ -440,6 +639,7 @@ pub async fn step(
                 .cost_source(failed_source)
                 .typed_field(typed_kind)
                 .fail_maybe_metadata(metadata_only, receipt_action, &error);
+            let trace_facts = StepTraceFacts::of(&receipt);
             let appended = if receipt_plan != super::human_browse::ReceiptPlan::Skip {
                 state.receipts.append(receipt).await
             } else {
@@ -448,6 +648,16 @@ pub async fn step(
             // D2: the spent key is saved whether or not its receipt was kept.
             checkpoint_failed_step(&state, &entry, &handle.live).await;
             appended.map_err(|e| driver_err(&request_id, e))?;
+            // WS10.S4: a failed step's receipt event (no observation, so no egress or artifact).
+            emit_step_trace(
+                &state,
+                entry.zdr,
+                &req.run_id,
+                trace_facts,
+                elapsed_ms(step_elapsed),
+                None,
+            )
+            .await;
             return Err(driver_err(&request_id, error));
         }
     };
@@ -617,21 +827,33 @@ pub(super) async fn execute_ws_action(
             if counts_budget {
                 budget_charge(&mut entry, true, cost_usd);
             }
+            // WS10.S4: the receipt is built on every path (its facts feed the trace events)
+            // and stored only when the plan keeps one.
+            let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
+                .org_id(org_id.clone())
+                .actor_id(actor_id.clone())
+                .initiator(admitted.initiator, admitted.control_epoch)
+                .agent(admitted.agent.clone())
+                .typed_field(typed_kind)
+                .complete_maybe_metadata(
+                    metadata_only,
+                    receipt_action.clone(),
+                    Some(observation.clone()),
+                    cost_usd,
+                );
+            let trace_facts = StepTraceFacts::of(&receipt);
             if receipt_plan != super::human_browse::ReceiptPlan::Skip {
-                let receipt = ReceiptBuilder::start(receipt_run_id.clone(), receipt_step)
-                    .org_id(org_id.clone())
-                    .actor_id(actor_id.clone())
-                    .initiator(admitted.initiator, admitted.control_epoch)
-                    .agent(admitted.agent.clone())
-                    .typed_field(typed_kind)
-                    .complete_maybe_metadata(
-                        metadata_only,
-                        receipt_action.clone(),
-                        Some(observation.clone()),
-                        cost_usd,
-                    );
                 state.receipts.append(receipt).await?;
             }
+            emit_step_trace(
+                state,
+                entry.zdr,
+                &req.run_id,
+                trace_facts,
+                elapsed_ms(step_elapsed),
+                Some(&observation),
+            )
+            .await;
             observation
         }
         Err(error) => {
@@ -644,19 +866,30 @@ pub(super) async fn execute_ws_action(
             }
             lane.ctx.last_egress_sequence = egress_cursor;
             let mut appended = Ok(());
+            let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
+                .org_id(org_id.clone())
+                .actor_id(actor_id.clone())
+                .initiator(admitted.initiator, admitted.control_epoch)
+                .agent(admitted.agent.clone())
+                .typed_field(typed_kind)
+                .fail_maybe_metadata(metadata_only, receipt_action, &error);
+            let trace_facts = StepTraceFacts::of(&receipt);
             if receipt_plan != super::human_browse::ReceiptPlan::Skip {
-                let receipt = ReceiptBuilder::start(receipt_run_id, receipt_step)
-                    .org_id(org_id.clone())
-                    .actor_id(actor_id.clone())
-                    .initiator(admitted.initiator, admitted.control_epoch)
-                    .agent(admitted.agent.clone())
-                    .typed_field(typed_kind)
-                    .fail_maybe_metadata(metadata_only, receipt_action, &error);
                 appended = state.receipts.append(receipt).await;
             }
             // D2: the spent key is saved whether or not its receipt was kept.
             checkpoint_failed_step(state, &entry, &handle.live).await;
             appended?;
+            // WS10.S4: as in `step`.
+            emit_step_trace(
+                state,
+                entry.zdr,
+                &req.run_id,
+                trace_facts,
+                elapsed_ms(step_elapsed),
+                None,
+            )
+            .await;
             return Err(error);
         }
     };

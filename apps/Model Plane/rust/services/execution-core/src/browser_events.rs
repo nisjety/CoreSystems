@@ -224,6 +224,23 @@ impl OrchestrationEventSink {
             _ => ApprovalOutcome::Denied(reason.to_owned()),
         }
     }
+
+    /// QF-12 (E3.3): publish `BrowserSteerTaken` — the run's loop took `taken`
+    /// queued steer messages, oldest first. A count only: no steer text rides
+    /// the event. Skipped for an empty run id or a zero count.
+    async fn publish_steer_taken(&self, run_id: &str, plan_id: &str, taken: u32) {
+        if run_id.is_empty() || taken == 0 {
+            return;
+        }
+        let event = orchestration_event::Event::BrowserSteerTaken(
+            orchestration_event::BrowserSteerTaken {
+                run_id: run_id.to_owned(),
+                plan_id: plan_id.to_owned(),
+                taken,
+            },
+        );
+        self.publish(run_id, event).await;
+    }
 }
 
 #[tonic::async_trait]
@@ -442,6 +459,17 @@ impl BrowserEventSink for OrchestrationEventSink {
             },
         );
         self.publish(run_id, event).await;
+    }
+
+    /// QF-12 (E3.3): the loop took `taken` queued steer messages; publish the
+    /// count-only `BrowserSteerTaken`. Never for a ZDR run (defensive: the loop
+    /// already takes no steer under ZDR).
+    async fn steer_taken(&self, config: &PlanConfig, taken: u32) {
+        if config.zdr {
+            return;
+        }
+        self.publish_steer_taken(&config.run_id, &config.plan_id, taken)
+            .await;
     }
 
     /// Phase 5 in-loop HITL gate: create a durable approval via the SAME

@@ -1967,6 +1967,11 @@ services:
       # Q4-E4.2-3h, OFF by default: a browser run whose input names a saved recipe replays that procedure step by step
       # with Quarry, under its own broker grant. Only the literal true turns it on.
       EXECUTION_CORE_RECIPE_RUNNER: ${EXECUTION_CORE_RECIPE_RUNNER:-false}
+      # QF-16, OFF by default: a leased, non-ZDR browser run whose turn selected exactly one google or
+      # microsoft mail connection may propose fill_otp; a person approves each use (Login) and the broker
+      # issues a single-use fill_otp child grant (needs BROWSER_BROKER_FILL_OTP_ENABLED and Quarry's
+      # QUARRY_EDGE__FILL_OTP). Only the literal true turns it on.
+      EXECUTION_CORE_BROWSER_FILL_OTP: ${EXECUTION_CORE_BROWSER_FILL_OTP:-false}
       # Data Plane v2 retrieval — backs the real knowledge_search agentic tool
       # (RAG over the org's ingested docs). DATAPLANE_INTERNAL_KEY is sent as
       # the x-api-key credential.

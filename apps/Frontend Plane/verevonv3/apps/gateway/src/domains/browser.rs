@@ -449,7 +449,18 @@ pub(crate) struct StartAiRunBody {
     /// Absent, the start body sent to Model Gateway is unchanged.
     #[serde(default)]
     pub(crate) recipe: Option<RecipeAsk>,
+    /// What the agent leaves on its tab when an attached run completes (WS8.J):
+    /// `none` closes it, `deliverable` (the server default) and `handoff` keep it
+    /// open for the person. It rides only on an attached run. A run that does not
+    /// attach drops it, unless `requireAttached` asked for an attachment (then 400
+    /// `browser_tab_mark_requires_attach`). Outside the closed set it is 400
+    /// `browser_tab_mark_invalid`.
+    #[serde(default)]
+    pub(crate) tab_mark_on_complete: Option<String>,
 }
+
+/// The tab marks an attached run may leave (WS8.J): the closed set Model Gateway checks.
+const TAB_MARKS_ON_COMPLETE: [&str; 3] = ["none", "deliverable", "handoff"];
 
 /// Most slots one recipe start may fill (Model Gateway's bound).
 const MAX_RECIPE_SLOTS: usize = 32;
@@ -2618,6 +2629,31 @@ async fn start_ai_run_with_switches(
     }
     // Recipe runs are unattached: the attach switch never binds one to the session.
     let attach_switch = attach_switch && body.recipe.is_none();
+    // WS8.J: the tab mark is a closed set, and only an attached run carries it.
+    // Refused before any Quarry or Model Gateway call. A run that does not attach
+    // carries no mark (the attach block below sets it only on an attached run).
+    if let Some(mark) = &body.tab_mark_on_complete {
+        if !TAB_MARKS_ON_COMPLETE.contains(&mark.as_str()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error(
+                    "browser_tab_mark_invalid",
+                    "The tab mark must be none, deliverable or handoff.",
+                )),
+            )
+                .into_response();
+        }
+        if body.require_attached && !attach_switch {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(error(
+                    "browser_tab_mark_requires_attach",
+                    "A tab mark applies only to a browser run that attaches to the session.",
+                )),
+            )
+                .into_response();
+        }
+    }
     if body.continue_in_tab.is_some()
         && (!body.require_attached || !body.assistant_interactive || body.allowed_domains.is_some())
     {
@@ -2830,6 +2866,10 @@ async fn start_ai_run_with_switches(
                 "expected_epoch": target.expected_epoch,
                 "expected_origin": target.expected_origin,
             });
+        }
+        // WS8.J: only an attached run sends its tab mark; a start that names none sends nothing.
+        if let Some(mark) = &body.tab_mark_on_complete {
+            request_body["tab_mark_on_complete"] = Value::String(mark.clone());
         }
     }
 
@@ -4607,7 +4647,7 @@ fn browser_response_from_owner_projection(projection: &Value, observation: Optio
         Some("closed")
     );
 
-    json!({
+    let mut response = json!({
         "session": {
             "id": run_id,
             "leaseId": projection.get("leaseId").cloned().unwrap_or(Value::Null),
@@ -4650,7 +4690,35 @@ fn browser_response_from_owner_projection(projection: &Value, observation: Optio
             "attach": session_attach_view(projection)
         },
         "observation": observation
-    })
+    });
+    if let Some(run_origin) = session_run_origin(projection) {
+        response["session"]["runOrigin"] = json!(run_origin);
+    }
+    if let Some(step_budget) = session_step_budget(projection) {
+        response["session"]["stepBudget"] = step_budget;
+    }
+    response
+}
+
+/// The run origin the SPA may see (WS10.S4): one of the five trace labels, copied only when Quarry
+/// names exactly one of them. It is a label for the trace, never authority, so any other word (or
+/// none) is dropped rather than guessed.
+fn session_run_origin(projection: &Value) -> Option<&str> {
+    match projection.get("runOrigin").and_then(Value::as_str) {
+        Some(origin @ ("user" | "agent" | "schedule" | "webhook" | "api")) => Some(origin),
+        _ => None,
+    }
+}
+
+/// The step budget the SPA may see (Q2-WS9.H): the steps taken and the run's step cap, copied only when
+/// Quarry names a positive cap. Counts only; no other field of the projection is copied here.
+fn session_step_budget(projection: &Value) -> Option<Value> {
+    let max = projection
+        .get("maxSteps")
+        .and_then(Value::as_u64)
+        .filter(|max| *max > 0)?;
+    let used = projection.get("step").and_then(Value::as_u64)?;
+    Some(json!({ "used": used, "max": max }))
 }
 
 /// The session's live attachment as the SPA may see it (Q2-WS8.I): `{ state, tabId, tabEpoch }`,
@@ -8797,7 +8865,7 @@ pub(crate) mod tests {
                     assistant_interactive: false,
                     plan_mode: None,
                     require_approval: None,
-                    max_cost_usd: None, recipe: None,
+                    max_cost_usd: None, recipe: None, tab_mark_on_complete: None,
                 }),
             )
             .await,
@@ -9477,7 +9545,7 @@ pub(crate) mod tests {
                 assistant_interactive: false,
                 plan_mode: None,
                 require_approval: None,
-                max_cost_usd: None, recipe: None,
+                max_cost_usd: None, recipe: None, tab_mark_on_complete: None,
             }
         }
 
@@ -10814,7 +10882,7 @@ pub(crate) mod tests {
             assistant_interactive: false,
             plan_mode: None,
             require_approval: Some(true),
-            max_cost_usd: None, recipe: None,
+            max_cost_usd: None, recipe: None, tab_mark_on_complete: None,
         };
 
         let request = build_ai_run_request(
@@ -10862,7 +10930,7 @@ pub(crate) mod tests {
             assistant_interactive: false,
             plan_mode: None,
             require_approval: None,
-            max_cost_usd: None, recipe: None,
+            max_cost_usd: None, recipe: None, tab_mark_on_complete: None,
         };
 
         let request = build_ai_run_request(
@@ -10913,7 +10981,7 @@ pub(crate) mod tests {
             assistant_interactive: false,
             plan_mode: None,
             require_approval: None,
-            max_cost_usd: None, recipe: None,
+            max_cost_usd: None, recipe: None, tab_mark_on_complete: None,
         };
 
         let request = build_ai_run_request(
@@ -10960,7 +11028,7 @@ pub(crate) mod tests {
                 assistant_interactive: false,
                 plan_mode: None,
                 require_approval: None,
-                max_cost_usd: None, recipe: None,
+                max_cost_usd: None, recipe: None, tab_mark_on_complete: None,
             };
 
             let request = build_ai_run_request(
@@ -10992,7 +11060,7 @@ pub(crate) mod tests {
             assistant_interactive: false,
             plan_mode: None,
             require_approval: None,
-            max_cost_usd: None, recipe: None,
+            max_cost_usd: None, recipe: None, tab_mark_on_complete: None,
         }
     }
 

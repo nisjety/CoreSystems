@@ -2130,7 +2130,10 @@ paths:
       description: >-
         Streams the run's user-facing events (agent.started, action.started, action.completed,
         action.failed, observation.ready, agent.completed, agent.expired, agent.budget_exhausted, agent.failed) in the
-        order of the run's trace. Each SSE `id:` is the event's per-run `seq` (dense, starting
+        order of the run's trace, and the browser trace events (WS10.S4): browser.session.opened, browser.session.closed,
+        browser.control, browser.tab, browser.receipt, browser.egress and browser.artifact. The browser events are agent
+        class and never reach the Ingestion bus (see CONTRACTS.md, "Agent run trace: browser events and run origin").
+        Each SSE `id:` is the event's per-run `seq` (dense, starting
         at 1 for an agent run). Resume with the `Last-Event-ID` header a reconnecting EventSource
         sends, or with `from_seq`; `from_seq` wins when both are present. The stream replays the
         run's in-memory replay ring after that seq, then tails the live channel with no gap and no
@@ -2179,6 +2182,476 @@ paths:
                 type: string
         '404':
           description: Run not found, or not owned by the caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+  /v1/agent/runs/{run_id}/browser-session:
+    get:
+      operationId: getAgentBrowserSession
+      summary: The owner browser-session projection of a run
+      description: >-
+        The projection the owner's browser shows for one run: its profile, current URL, control mode and epoch, tabs and
+        last observation, and the open-web and attachment fields where they apply. A live run is answered from the edge's
+        memory, with `live` true. A run the edge no longer holds is answered from its durable checkpoint, with `live` false,
+        an empty `tabs` list, `lastObservation` null, and `tabControl` and `attachAvailable` false. A ZDR run keeps no
+        checkpoint, so once the edge has released it the read is 404. Gate: none as a route. `grantKind` `human_browse`
+        marks a person's open-web run, which is admitted only while QUARRY_EDGE__HUMAN_BROWSE is on, and the attach fields
+        (`tabControl`, `attachAvailable` and `attach`) are dark while QUARRY_EDGE__ATTACH is off. Only the run's owner, the
+        actor that started it in its organisation, may read it; any other caller gets 404. The read writes nothing durable
+        and counts as activity for a live run's idle clock.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      responses:
+        '200':
+          description: The owner projection of the run
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/BrowserSessionProjectionData'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: The run id is not a run id (invalid agent run id)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '403':
+          description: An API-key token on a route that its key may not use (api_key_route_refused)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '404':
+          description: The edge holds no such run and no checkpoint for it, or the caller does not own it
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '502':
+          description: DRIVER_FAILED, when a driver or store call fails, for example the tab listing of a live run (a timeout answers 504)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+  /v1/agent/runs/{run_id}/browser-session/control:
+    post:
+      operationId: setAgentBrowserSessionControl
+      summary: Hand the run browser to the person, or back to the agent
+      description: >-
+        Sets who may drive the run's browser. `human_takeover` gives it to the person, so an action that an agent proposes is
+        refused with 409 USER_TOOK_OVER, and that refusal is enforced only while QUARRY_EDGE__TAKEOVER_ENFORCEMENT is on.
+        `agent_control` gives it back. Only a person may make the change: a service principal's token gets 403
+        control_transition_requires_human, and an API-key token is refused by the route fence (api_key_route_refused). The
+        change does not wait for an action that is still running. The control epoch
+        advances only on a real change, so a request for the mode the run already has answers 200 and changes nothing.
+        `expected_epoch`, when sent, makes the change a compare-and-set: while the run's epoch is another number, the answer
+        is 409 CONFLICT with `details.control_epoch` and `details.expected_epoch`. A real change on a run that is not ZDR
+        writes one control item on the owner timeline. Every real change emits a `browser.control` event on the run's trace,
+        and on a ZDR run that event reaches live subscribers only, with nothing durable written. A takeover pauses the run's
+        budget clock, and handing the browser back resumes it. The answer is the owner projection, as `GET .../browser-session`
+        gives it. Gate: none as a route. Only the run's owner may call it; any other caller, and a run the edge does not hold,
+        gets 404.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BrowserSessionControlRequest'
+      responses:
+        '200':
+          description: The owner projection, after the change
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/BrowserSessionProjectionData'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: The body is not JSON (the framework's plain-text rejection)
+        '403':
+          description: control_transition_requires_human for an agent's token, or api_key_route_refused for an API-key token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '404':
+          description: The edge holds no such run, or the caller does not own it
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '409':
+          description: CONFLICT when expected_epoch is not the run's control epoch (details carry control_epoch and expected_epoch)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '415':
+          description: The request is not sent as application/json (the framework's plain-text rejection)
+        '422':
+          description: The body is JSON but not a control request, for example an unknown mode (the framework's plain-text rejection)
+        '502':
+          description: DRIVER_FAILED, when the driver cannot list the tabs after the change, or the change cannot be recorded (a timeout answers 504)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+  /v1/agent/runs/{run_id}/browser-session/timeline:
+    get:
+      operationId: listAgentBrowserTimeline
+      summary: The owner browser timeline of a run, oldest first, one page at a time
+      description: >-
+        A bounded page of the run's owner timeline. It merges the run's step receipts, as `action` items, with Quarry's compact
+        audit records (`control`, `tab`, `tab_control`, `attach`, `devtools` and `lifecycle` items), and sorts them by
+        `occurredAt` and then `id`, oldest first. An item carries ids, classes, counts and words, never raw browser contents.
+        Action items are the run's step receipts: a step on a run that is not ZDR is recorded, and a person's step is recorded
+        as QUARRY_EDGE__HUMAN_RECEIPT_MODE says, where `none` records nothing. `limit` defaults to 50 and is clamped to 1 to 100.
+        `cursor` is the `id` of the last item of the previous page, and an id that the timeline does not hold is a 400.
+        `nextCursor` is null on the last page. Gate: none as a route. A ZDR run has no timeline, and the read is 409. Only the
+        run's owner may read it; any other caller gets 404.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      - name: cursor
+        in: query
+        required: false
+        description: The `id` of the last item of the previous page.
+        schema:
+          type: string
+      - name: limit
+        in: query
+        required: false
+        description: Items per page, clamped to 1 to 100. Default 50.
+        schema:
+          type: integer
+      responses:
+        '200':
+          description: One page of the timeline, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/BrowserTimelineData'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: The run id is not a run id, or the cursor is not an item on the timeline (browser timeline cursor is invalid)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '403':
+          description: An API-key token on a route that its key may not use (api_key_route_refused)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '404':
+          description: The edge holds no such run and no checkpoint for it, or the caller does not own it
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '409':
+          description: CONFLICT for a ZDR run (browser timeline is unavailable for a Zero Data Retention run)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '502':
+          description: DRIVER_FAILED, when the stored receipts or timeline events cannot be read (a timeout answers 504)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+  /v1/agent/runs/{run_id}/frame:
+    get:
+      operationId: getAgentLiveFrame
+      summary: One transient live frame of the run browser
+      description: >-
+        One frame of the run's current page, for live preview and human takeover. The frame is returned to the caller and
+        nothing else: no artifact, receipt, timeline item or checkpoint is written from it, whatever the run's posture, and the
+        evidence of a step comes from the observation that the step takes, not from a frame. `zdr` says whether the run is under
+        zero data retention. The request selects no tab, navigates nowhere and changes no control state. The selected driver must
+        produce full-fidelity frames, or the answer is 501 UNSUPPORTED, and that check comes before the run is looked up.
+        `format` is `jpeg` by default, or `png`. `quality`, `maxWidth`, `maxHeight`, `everyNthFrame` and `timeoutMs` are
+        clamped rather than refused, as their parameter descriptions say. `tabId` reads one of the run's tabs without selecting
+        it, and needs a driver that can pin a tab. Gate: none as a route; the scope header is read only while
+        QUARRY_EDGE__LIVE_VIEW_ONLY is on. Only the run's owner may read it; any other caller gets 404.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      - $ref: '#/components/parameters/LiveFrameTabId'
+      - $ref: '#/components/parameters/LiveFrameFormat'
+      - $ref: '#/components/parameters/LiveFrameQuality'
+      - $ref: '#/components/parameters/LiveFrameMaxWidth'
+      - $ref: '#/components/parameters/LiveFrameMaxHeight'
+      - $ref: '#/components/parameters/LiveFrameEveryNth'
+      - $ref: '#/components/parameters/LiveFrameTimeoutMs'
+      - $ref: '#/components/parameters/LiveScopeHeader'
+      responses:
+        '200':
+          description: One frame
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    $ref: '#/components/schemas/LiveFrameData'
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: A format other than jpeg, jpg or png, a scope value other than full or view_only, an empty tabId or one over 128 characters, or a tabId on a driver that cannot pin tabs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '403':
+          description: A view-only share of a ZDR run (live_view_only_zdr, while QUARRY_EDGE__LIVE_VIEW_ONLY is on), or an API-key token on a route that its key may not use (api_key_route_refused)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '404':
+          description: The edge holds no such run, or the caller does not own it; tab not found when tabId is not one of the run's tabs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '501':
+          description: UNSUPPORTED, when the selected driver cannot produce governed full-fidelity live frames
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '502':
+          description: DRIVER_FAILED, when the frame cannot be read (a timeout answers 504)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+  /v1/agent/runs/{run_id}/frames/stream:
+    get:
+      operationId: streamAgentLiveFrames
+      summary: Transient live frames of the run browser as Server-Sent Events
+      description: >-
+        A stream of transient frames of the run's current page, for live preview. Each `frame` event carries one frame, and its
+        SSE `id` is the frame's `sequence`, counted from 1. Frames are never persisted: the stream writes no artifact, receipt,
+        timeline item or checkpoint, and it is a read-only visual channel, since actions still go through `POST .../step`.
+        Without `tabId` the stream opens with one `live_view` event when the driver has a live-view reference. That event is the
+        same object as `GET .../live-view`, and under a view-only scope only a read-only kind is sent. Frames then come every
+        `intervalMs`. `maxFrames` ends the stream with `done` `max_frames` after that many frames. The stream ends with `done`
+        `shutdown` when the edge drains. A driver failure sends one `error` event, whose data is the error's text and not a wire
+        code, and then ends the stream. `agentCursor` appears only on a `tabId` stream of a tab that an agent holds through a live
+        attachment, which needs QUARRY_EDGE__ATTACH. Gate: none as a route, and the frame options and scope are those of
+        `GET .../frame`. The owner, gating, scope and option rules are checked before the stream opens, and only the run's owner
+        may open it; any other caller gets 404.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      - $ref: '#/components/parameters/LiveFrameTabId'
+      - $ref: '#/components/parameters/LiveFrameFormat'
+      - $ref: '#/components/parameters/LiveFrameQuality'
+      - $ref: '#/components/parameters/LiveFrameMaxWidth'
+      - $ref: '#/components/parameters/LiveFrameMaxHeight'
+      - $ref: '#/components/parameters/LiveFrameEveryNth'
+      - $ref: '#/components/parameters/LiveFrameTimeoutMs'
+      - $ref: '#/components/parameters/LiveFrameIntervalMs'
+      - $ref: '#/components/parameters/LiveFrameMaxFrames'
+      - $ref: '#/components/parameters/LiveScopeHeader'
+      responses:
+        '200':
+          description: >-
+            text/event-stream. Named events: live_view (data is a LiveViewRef, first, and only without tabId), frame (data is
+            LiveFrameStreamData, id is sequence), error (data is the error's text; the stream ends) and done (data is max_frames
+            or shutdown).
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        '400':
+          description: A format other than jpeg, jpg or png, a scope value other than full or view_only, an empty tabId or one over 128 characters, or a tabId on a driver that cannot pin tabs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '403':
+          description: A view-only share of a ZDR run (live_view_only_zdr, while QUARRY_EDGE__LIVE_VIEW_ONLY is on), or an API-key token on a route that its key may not use (api_key_route_refused)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '404':
+          description: The edge holds no such run, or the caller does not own it; tab not found when tabId is not one of the run's tabs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '501':
+          description: UNSUPPORTED, when the selected driver cannot produce governed full-fidelity live frames
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '502':
+          description: DRIVER_FAILED, when the tab cannot be looked up before the stream opens (a timeout answers 504)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+  /v1/agent/runs/{run_id}/frames/ws:
+    get:
+      operationId: connectAgentLiveFrameSocket
+      summary: Live frames and browser actions over a WebSocket (the GET answers 101)
+      description: >-
+        A WebSocket upgrade. OpenAPI cannot describe the messages, so they are set out here. The owner, gating, scope and query
+        rules are those of `GET .../frames/stream`. A refusal of them (400, 403, 404, 501 or 502) is a plain JSON answer, given
+        before the upgrade. A socket that names a `tabId` is view-only. Gate: none as a route. Once the socket is open, the server
+        sends JSON text messages, each with a `type`: `frame` (`sequence`, `mimeType`, `dataBase64` and `zdr`) every `intervalMs`;
+        `devtools` (`events`, the same objects as `GET .../devtools`, and `zdr`) when new events exist; `observation` (`observation`,
+        a BrowserObservation) as the answer to an action; `pong` as the answer to a ping; `error` (`code`, `message`, `retryable`,
+        and `details` when there are some) for a refused or failed message; and `done` (`reason` `max_frames` or `shutdown`) before
+        the server closes. A frame that cannot be read sends an `error` and closes the socket, and other errors leave it open.
+        The client may send `{"type":"action","action":{...},"instruction":"...","actor":"human"}`, where `action` is an action
+        object of `POST .../step`, `instruction` and `actor` are optional, and `actor` (`human` or `agent`) can only tighten who
+        the action is attributed to. The action runs as one step, through the same admission and refusals as `POST .../step`.
+        The client may send `{"type":"ping"}` to keep the socket alive, and transport pings are answered with pongs. On a view-only
+        socket every well-formed message other than a ping is refused with an `error` frame, with code `FORBIDDEN` and
+        `details.reason` `live_view_only`, and the socket stays open. Binary messages are ignored, and text that is not one of these messages
+        answers `BAD_REQUEST`. Frames are transient, as on `frames/stream`, and an action's receipt, timeline item and observation
+        follow the rules of a step.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      - $ref: '#/components/parameters/LiveFrameTabId'
+      - $ref: '#/components/parameters/LiveFrameFormat'
+      - $ref: '#/components/parameters/LiveFrameQuality'
+      - $ref: '#/components/parameters/LiveFrameMaxWidth'
+      - $ref: '#/components/parameters/LiveFrameMaxHeight'
+      - $ref: '#/components/parameters/LiveFrameEveryNth'
+      - $ref: '#/components/parameters/LiveFrameTimeoutMs'
+      - $ref: '#/components/parameters/LiveFrameIntervalMs'
+      - $ref: '#/components/parameters/LiveFrameMaxFrames'
+      - $ref: '#/components/parameters/LiveScopeHeader'
+      responses:
+        '101':
+          description: Switching Protocols. The socket is open and carries the JSON messages that the description sets out.
+        '400':
+          description: A format other than jpeg, jpg or png, a scope value other than full or view_only, an empty tabId or one over 128 characters, or a tabId on a driver that cannot pin tabs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '403':
+          description: A view-only share of a ZDR run (live_view_only_zdr, while QUARRY_EDGE__LIVE_VIEW_ONLY is on), or an API-key token on a route that its key may not use (api_key_route_refused)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '404':
+          description: The edge holds no such run, or the caller does not own it; tab not found when tabId is not one of the run's tabs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '501':
+          description: UNSUPPORTED, when the selected driver cannot produce governed full-fidelity live frames
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '502':
+          description: DRIVER_FAILED, when the tab cannot be looked up before the upgrade (a timeout answers 504)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+  /v1/agent/runs/{run_id}/live-view:
+    get:
+      operationId: getAgentLiveView
+      summary: The run live-view reference, read once; the App Shell asks again when it expires
+      description: >-
+        The run's live-view reference: the URL the App Shell renders, its `kind`, and when it expires as `expires_at`. It is the
+        object that the `live_view` event of the frame stream carries. `data` is null when the driver has no live-view reference.
+        A reference is not a frame and carries no frame bytes. When `expires_at` has passed, the App Shell asks again. Under a
+        view-only scope only a read-only kind, `hls` or `frames`, is answered: an `iframe` or `provider` reference, or one with no
+        kind, is answered as null. Gate: none as a route; the scope header is read only while QUARRY_EDGE__LIVE_VIEW_ONLY is on.
+        The read writes nothing. Only the run's owner may read it; any other caller gets 404.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      - $ref: '#/components/parameters/LiveScopeHeader'
+      responses:
+        '200':
+          description: The live-view reference, or null when the driver has none
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - data
+                - meta
+                properties:
+                  data:
+                    allOf:
+                    - $ref: '#/components/schemas/LiveViewRef'
+                    nullable: true
+                  meta:
+                    $ref: '#/components/schemas/ResponseMeta'
+        '400':
+          description: The scope header holds a value other than full or view_only
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '403':
+          description: A view-only share of a ZDR run (live_view_only_zdr, while QUARRY_EDGE__LIVE_VIEW_ONLY is on), or an API-key token on a route that its key may not use (api_key_route_refused)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '404':
+          description: The edge holds no such run, or the caller does not own it
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '502':
+          description: DRIVER_FAILED, when the driver cannot give the live-view reference (a timeout answers 504)
           content:
             application/json:
               schema:
@@ -5864,6 +6337,89 @@ components:
       schema:
         $ref: '#/components/schemas/AdvisoryIdentifier'
       description: ADVISORY. A short label the caller gave its agent. Recorded, never trusted. `agent_label` is accepted too.
+    LiveScopeHeader:
+      name: X-Quarry-Live-Scope
+      in: header
+      required: false
+      description: >-
+        `full` (the default) or `view_only`; `view-only` and `view` are read the same way, ignoring case. The header is read
+        only while QUARRY_EDGE__LIVE_VIEW_ONLY is on, and it is ignored while that switch is off. A view-only caller gets no
+        input and no interactive live-view reference, and a view-only share of a ZDR run is refused with 403. Any other value
+        is 400. The Verevon gateway sets it from its own route and strips a value that a client sends. A caller can only
+        narrow the scope with it, never widen it.
+      schema:
+        type: string
+    LiveFrameTabId:
+      name: tabId
+      in: query
+      required: false
+      description: >-
+        One of the run's tabs, read without being selected. The driver must be able to pin a tab. A tab the run does not hold
+        is 404. A WebSocket that names a tab is view-only.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    LiveFrameFormat:
+      name: format
+      in: query
+      required: false
+      description: '`jpeg` (also `jpg`), the default, or `png`. Any other value is 400.'
+      schema:
+        type: string
+        enum:
+        - jpeg
+        - jpg
+        - png
+    LiveFrameQuality:
+      name: quality
+      in: query
+      required: false
+      description: JPEG or PNG quality, clamped to 1 to 100. Default 65.
+      schema:
+        type: integer
+    LiveFrameMaxWidth:
+      name: maxWidth
+      in: query
+      required: false
+      description: Width of the frame, clamped to at least 320 and to the run's viewport width. Default the viewport width, which is 1280 when the lease names none.
+      schema:
+        type: integer
+    LiveFrameMaxHeight:
+      name: maxHeight
+      in: query
+      required: false
+      description: Height of the frame, clamped to at least 240 and to the run's viewport height. Default the viewport height, which is 800 when the lease names none.
+      schema:
+        type: integer
+    LiveFrameEveryNth:
+      name: everyNthFrame
+      in: query
+      required: false
+      description: The screencast's frame thinning, clamped to 1 to 10. Default 1.
+      schema:
+        type: integer
+    LiveFrameTimeoutMs:
+      name: timeoutMs
+      in: query
+      required: false
+      description: How long the driver may take to produce a frame, clamped to 100 to 5000 milliseconds. Default 1000.
+      schema:
+        type: integer
+    LiveFrameIntervalMs:
+      name: intervalMs
+      in: query
+      required: false
+      description: Milliseconds between frames, clamped to 75 to 2000. Default 250. Frame stream and WebSocket only.
+      schema:
+        type: integer
+    LiveFrameMaxFrames:
+      name: maxFrames
+      in: query
+      required: false
+      description: Frames before the stream or socket ends with done (max_frames). 0 or absent is no cap, and a larger value is capped at 7200. Frame stream and WebSocket only.
+      schema:
+        type: integer
   schemas:
     ParseWarning:
       type: object
@@ -7431,11 +7987,15 @@ components:
             yields `user` (or `agent` when the hint says so), a service token
             yields its hint or `api`. `run_id` and `agent` are kept only for a
             service token. The labels are stamped on the run's events and the
-            origin on the browser-session projection (`runOrigin`).
+            origin on the browser-session projection (`runOrigin`, one of the
+            five words: user, agent, schedule, webhook, api). See CONTRACTS.md,
+            "Agent run trace: browser events and run origin".
           properties:
             run_id:
               type: string
+              minLength: 1
               maxLength: 64
+              pattern: '^[A-Za-z0-9_-]{1,64}$'
               description: The caller's (Model Plane) run id, for correlation.
             origin:
               type: string
@@ -7450,13 +8010,19 @@ components:
               properties:
                 id:
                   type: string
+                  minLength: 1
                   maxLength: 64
+                  pattern: '^[A-Za-z0-9_-]{1,64}$'
                 role:
                   type: string
+                  minLength: 1
                   maxLength: 64
+                  pattern: '^[A-Za-z0-9_-]{1,64}$'
                 parent_id:
                   type: string
+                  minLength: 1
                   maxLength: 64
+                  pattern: '^[A-Za-z0-9_-]{1,64}$'
     BrowserDriverCapabilities:
       type: object
       description: Requested or selected execution capabilities. Every true value is an affirmative provider claim; omitted values are not inferred. Agent runs always require isolated_egress and security_evidence
@@ -7628,8 +8194,8 @@ components:
       - basis
       description: >-
         Which agent was behind an operation an agent initiated. Ids and classes only.
-        Only `principalId` of a `service_principal` basis is verified (it is the
-        calling token's signed service id); `aiRunId` and `label` are what the caller
+        Only `principalId` of a `service_principal` or `api_key` basis is verified (it is the
+        calling token's signed id); `aiRunId` and `label` are what the caller
         said, advisory, and never used to decide anything.
       properties:
         basis:
@@ -7637,13 +8203,15 @@ components:
           enum:
           - service_principal
           - user_session
+          - api_key
           description: >-
             `service_principal`: the call carried a service principal's own token.
             `user_session`: it carried a person's token with an `agent` hint, so the
-            token proves the person, not which agent.
+            token proves the person, not which agent. `api_key` (INNH-10): the call
+            carried an API key's own token, and `principalId` is that key's `apikey:` id.
         principalId:
           type: string
-          description: The signed service id of the caller. Present only for `service_principal`.
+          description: The signed service id of the caller, or the API key's `apikey:` id. Present only for `service_principal` and `api_key`.
         aiRunId:
           $ref: '#/components/schemas/AdvisoryIdentifier'
         label:
@@ -7791,6 +8359,451 @@ components:
               type: array
               items:
                 $ref: '#/components/schemas/AgentTab'
+    BrowserSessionProjectionData:
+      type: object
+      description: >-
+        The owner projection of a run (BrowserSessionProjectionData). A live run and a released run share this shape, and
+        `live` says which one it is. Keys are camelCase. A field that is absent, rather than false or null, is marked so.
+      required:
+      - runId
+      - leaseId
+      - profileId
+      - profileStorage
+      - profileScope
+      - viewport
+      - currentUrl
+      - step
+      - status
+      - live
+      - zdr
+      - controlMode
+      - controlEpoch
+      - executionTier
+      - tabs
+      - lastObservation
+      - tabControl
+      - attachAvailable
+      properties:
+        runId:
+          type: string
+        leaseId:
+          type: string
+        profileId:
+          type: string
+        profileStorage:
+          type: string
+          enum:
+          - persistent
+          - ephemeral
+        profileScope:
+          type: string
+          enum:
+          - ephemeral
+          - user_private
+          - org_shared
+          - run_scoped
+        viewport:
+          type: [object, 'null']
+          description: The run's viewport, or null when its lease names none.
+          properties:
+            width:
+              type: integer
+            height:
+              type: integer
+            device_scale_factor:
+              type: number
+            is_mobile:
+              type: boolean
+        currentUrl:
+          type: string
+          description: The run's current URL without userinfo, query or fragment. Empty when the run has none to show.
+        step:
+          type: integer
+          minimum: 0
+        status:
+          type: string
+          description: active for a live run; otherwise the checkpoint's status.
+          enum:
+          - active
+          - suspended
+          - expired
+          - closed
+        live:
+          type: boolean
+          description: Whether the edge holds the run in memory now.
+        zdr:
+          type: boolean
+        controlMode:
+          type: string
+          enum:
+          - agent_control
+          - human_takeover
+        controlEpoch:
+          type: integer
+          minimum: 0
+          description: Counts the real control changes, and it never goes down.
+        executionTier:
+          type: string
+          enum:
+          - chromium
+          - ephemeral_evidence
+        tabs:
+          type: array
+          description: The run's live tabs. Empty for a released run.
+          items:
+            $ref: '#/components/schemas/BrowserSessionTab'
+        lastObservation:
+          allOf:
+          - $ref: '#/components/schemas/BrowserObservation'
+          nullable: true
+          description: The run's last observation, or null before its first.
+        grantId:
+          type: string
+          description: >-
+            Owner-internal: the session grant that the run started with. The Verevon gateway reads it, and removes it before
+            the browser sees the projection.
+        profileRestore:
+          allOf:
+          - $ref: '#/components/schemas/ProfileRestoreSummary'
+          description: >-
+            What restoring the saved profile did, as counts only. Absent for a run without a saved profile, for a released run,
+            and until the first observation carries it.
+        grantKind:
+          type: string
+          enum:
+          - human_browse
+          description: Present only for a person's open-web run.
+        tabControl:
+          type: boolean
+          description: True while QUARRY_EDGE__ATTACH is on, and false in a released projection.
+        attachAvailable:
+          type: boolean
+          description: >-
+            True when an agent may attach now: the attach switch is on, the run is not ZDR, it holds a grant, the driver can
+            background, pin and egress-limit a tab, and no attachment is live.
+        attach:
+          $ref: '#/components/schemas/BrowserSessionAttach'
+        runOrigin:
+          type: string
+          enum:
+          - user
+          - agent
+          - schedule
+          - webhook
+          - api
+          description: Who started the run, as a label and never as authority. Absent for a released run and when the run has none.
+    BrowserSessionTab:
+      type: object
+      description: One tab of the owner projection.
+      required:
+      - tabId
+      - title
+      - url
+      - active
+      - tabEpoch
+      - holder
+      properties:
+        tabId:
+          type: string
+        title:
+          type: [string, 'null']
+        url:
+          type: [string, 'null']
+          description: The tab's URL without userinfo, query or fragment, or null when the tab has none to show.
+        active:
+          type: boolean
+          description: Whether this is the run's active tab.
+        tabEpoch:
+          type: integer
+          minimum: 0
+          description: The tab's holder epoch, which counts the changes of holder.
+        holder:
+          type: string
+          enum:
+          - human
+          - agent
+        openedBy:
+          $ref: '#/components/schemas/TabOpener'
+        mark:
+          type: string
+          enum:
+          - deliverable
+          - handoff
+          description: Set once an attachment has nominated the tab. Absent until then.
+        attachId:
+          type: string
+          description: >-
+            The attachment that the ledger records for this tab. It is kept after the attachment ends, so the projection's
+            `attach` is the signal that one is live.
+    BrowserSessionAttach:
+      type: object
+      description: >-
+        The live agent attachment (WS8.F). Present only while one is live. It carries ids and words only. Gated by
+        QUARRY_EDGE__ATTACH, which is off by default.
+      required:
+      - state
+      - attachId
+      - tabId
+      - tabEpoch
+      properties:
+        state:
+          type: string
+          enum:
+          - attached
+          description: The attachment's phase. A live attachment is attached.
+        attachId:
+          type: string
+        tabId:
+          type: string
+        tabEpoch:
+          type: integer
+          minimum: 0
+          description: The holder epoch of the attached tab.
+        grantId:
+          type: string
+          description: >-
+            Owner-internal: the attach grant's id. The Verevon gateway removes it before the browser sees the projection.
+    BrowserSessionControlRequest:
+      type: object
+      description: Who should drive the run's browser. Only a person may send it.
+      required:
+      - mode
+      properties:
+        mode:
+          type: string
+          enum:
+          - agent_control
+          - human_takeover
+          description: human_takeover hands the browser to the person, and agent_control hands it back.
+        expected_epoch:
+          type: integer
+          minimum: 0
+          description: Compare-and-set. The change is refused with 409 CONFLICT when the run's control epoch is not this number.
+    BrowserTimelineData:
+      type: object
+      required:
+      - items
+      - nextCursor
+      properties:
+        items:
+          type: array
+          description: One page of the owner timeline, oldest first.
+          items:
+            $ref: '#/components/schemas/BrowserTimelineItem'
+        nextCursor:
+          type: [string, 'null']
+          description: The id of the last item of this page, to pass as cursor. Null on the last page.
+    BrowserTimelineItem:
+      type: object
+      description: >-
+        One item of the owner timeline. kind says which of the other fields it carries, and the rest are absent. Most keys
+        are camelCase, but error_code, tab_id, active_tab_id, event_count and last_sequence are snake_case, as the edge writes
+        them. id is a receipt id for an action item, and a bevt_ id for the others.
+      required:
+      - id
+      - occurredAt
+      - kind
+      properties:
+        id:
+          type: string
+        occurredAt:
+          type: string
+          format: date-time
+        kind:
+          type: string
+          enum:
+          - action
+          - control
+          - tab
+          - devtools
+          - tab_control
+          - attach
+          - lifecycle
+        action:
+          type: string
+          description: The action's name, for example navigate or click_ref. Action items only.
+        outcome:
+          type: string
+          enum:
+          - completed
+          - failed
+          - skipped
+          description: Action items only.
+        error_code:
+          type: [string, 'null']
+          description: The error code of a failed step, or null. Always present on action items.
+        mode:
+          type: string
+          enum:
+          - agent_control
+          - human_takeover
+          description: Control items only.
+        operation:
+          type: string
+          enum:
+          - opened
+          - selected
+          - closed
+          description: Tab items only.
+        tab_id:
+          type: [string, 'null']
+          description: The tab of a tab item (null when it is not known), and the tab of a tab_control item.
+        active_tab_id:
+          type: [string, 'null']
+          description: Tab items only. The tab that was active after the change, or null.
+        holder:
+          type: string
+          enum:
+          - human
+          - agent
+          description: tab_control items only. Who holds the tab after the change.
+        state:
+          type: string
+          enum:
+          - attached
+          - released
+          - aborted
+          - revoked
+          - idle_released
+          - session_ended
+          - started
+          - closed
+          - expired
+          description: Attach items give how the attachment ended, and lifecycle items give started, closed or expired.
+        attachId:
+          type: string
+          description: Attach items only.
+        tabId:
+          type: string
+          description: Attach items only, when the attachment had a tab.
+        initiatedBy:
+          type: string
+          enum:
+          - human
+          - agent
+          - system
+          description: Who did it. Always present on control and tab_control items, and optional on the others.
+        agent:
+          $ref: '#/components/schemas/AgentIdentity'
+        controlEpoch:
+          type: integer
+          minimum: 0
+          description: The control epoch after the change. Always present on control and tab items, and optional on action items.
+        tabEpoch:
+          type: integer
+          minimum: 0
+          description: tab_control items only. The tab's epoch after the change.
+        event_count:
+          type: integer
+          minimum: 0
+          description: Devtools items only. The number of DevTools events in the window.
+        last_sequence:
+          type: integer
+          minimum: 0
+          description: Devtools items only. The sequence of the last of those events.
+    LiveFrameData:
+      type: object
+      description: One transient frame. The bytes are returned to the caller and are never stored.
+      required:
+      - mimeType
+      - dataBase64
+      - zdr
+      properties:
+        mimeType:
+          type: string
+          enum:
+          - image/jpeg
+          - image/png
+        dataBase64:
+          type: string
+          description: The frame's image bytes, base64 encoded. Not stored and not evidence.
+        zdr:
+          type: boolean
+          description: Whether the run is under zero data retention. A frame is never stored either way.
+    LiveFrameStreamData:
+      type: object
+      description: >-
+        The data of a frame event of the frame stream, whose SSE id is the sequence. The socket's frame message has the same
+        fields with a type, and it has no agentCursor.
+      required:
+      - sequence
+      - mimeType
+      - dataBase64
+      - zdr
+      properties:
+        sequence:
+          type: integer
+          minimum: 1
+          description: The frame's number in this stream, counted from 1.
+        mimeType:
+          type: string
+          enum:
+          - image/jpeg
+          - image/png
+        dataBase64:
+          type: string
+          description: The frame's image bytes, base64 encoded. Not stored and not evidence.
+        zdr:
+          type: boolean
+        agentCursor:
+          $ref: '#/components/schemas/LiveAgentCursorData'
+    LiveAgentCursorData:
+      type: object
+      description: >-
+        The pointer position of an agent in its attached tab, sampled with the frame. It is sent only on a tabId stream of
+        that tab, while the attachment is live.
+      required:
+      - x
+      - y
+      - viewportWidth
+      - viewportHeight
+      - sessionRunId
+      - tabId
+      - attachId
+      properties:
+        x:
+          type: integer
+          minimum: 0
+          description: Horizontal position in pixels, inside the viewport.
+        y:
+          type: integer
+          minimum: 0
+          description: Vertical position in pixels, inside the viewport.
+        viewportWidth:
+          type: integer
+          minimum: 1
+        viewportHeight:
+          type: integer
+          minimum: 1
+        sessionRunId:
+          type: string
+        tabId:
+          type: string
+        attachId:
+          type: string
+    LiveViewRef:
+      type: object
+      description: >-
+        The run's live-view reference (LiveViewRef): a URL that the App Shell renders, its kind, and when it expires. Its keys
+        are snake_case. It is the same object as the live_view event of the frame stream and the data of GET .../live-view.
+      required:
+      - url
+      properties:
+        url:
+          type: string
+          description: The URL that the App Shell renders.
+        kind:
+          type: string
+          enum:
+          - hls
+          - iframe
+          - provider
+          - frames
+          description: How to render the URL. Absent when the driver does not say, and the App Shell then infers it from the scheme.
+        expires_at:
+          type: string
+          format: date-time
+          description: When the URL expires and must be asked for again. Absent when it does not expire.
     AgentStepRequest:
       type: object
       required:
@@ -7982,6 +8995,10 @@ components:
         visual_observation_artifact_id:
           type: string
           nullable: true
+        pdf_artifact_id:
+          type: string
+          nullable: true
+          description: Id of the PDF artifact a `pdf` action stored for this step. Absent for any other action, under ZDR, when artifact persistence is absent, or when the page was withheld.
         evidence_delta_artifact_id:
           type: string
           nullable: true

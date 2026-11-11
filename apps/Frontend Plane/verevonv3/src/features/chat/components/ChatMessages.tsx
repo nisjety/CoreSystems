@@ -137,6 +137,7 @@ import { CrawlPlanFence } from './CrawlPlanFence'
 import { McpAppsForAnswer, mcpAppsEnabled } from './McpAppFrame'
 import { ChatTableTools, TableChart, createTableChartState } from './ChatTableTools'
 import { SettledTurnContent } from './SettledTurnFold'
+import { ResearchRunStatus } from './ResearchRunStatus'
 import { StepStrip, stepStripEnabled } from './StepStrip'
 import {
   domId,
@@ -345,6 +346,12 @@ export function MessageBlock(props: {
  * token, for one release. Exact string, as for `VITE_ALLOW_DEV_AUTH_BYPASS`.
  */
 const chatRenderLegacy = () => import.meta.env.VITE_CHAT_RENDER_LEGACY === 'true'
+
+/**
+ * `VITE_CHAT_RESEARCH_RUNS=true` shows the research run status chip, with Stop while the run runs, under a deep-research
+ * answer (Q4-062b). Exact string; default off.
+ */
+const chatResearchRuns = () => import.meta.env.VITE_CHAT_RESEARCH_RUNS === 'true'
 
 /**
  * The chat surface's node renderers.
@@ -977,6 +984,19 @@ export function AssistantMessage(props: {
             />
           </Show>
         </div>
+        {/* Q4-062b: the addressable research run of a deep-research answer. It sits beside the answer, not in its content,
+            so an export or print of the text leaves it out. A temporary chat and a foreign-origin or Support read-only
+            thread never show it (`crawlPlanCardAllowed`, QF-20 — the same signal the crawl-plan card reads). */}
+        <Show
+          when={
+            chatResearchRuns()
+            && !props.temporaryChat
+            && props.crawlPlanCardAllowed !== false
+            && props.message.researchRun
+          }
+        >
+          {(run) => <ResearchRunStatus run={run()} />}
+        </Show>
         {/* EP-10 S8: at most one connected-app suggestion per turn; the card hides itself in a Space or temporary chat. */}
         <Show when={props.connectorSuggestion ? props.message.connectorSuggestion : undefined}>
           {(suggestion) => (

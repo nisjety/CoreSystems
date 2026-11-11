@@ -15710,6 +15710,8 @@ fn orchestration_event_to_sse(event: &OrchestrationEvent) -> Option<Event> {
         orchestration_event::Event::RunParked(_) => "run_parked",
         orchestration_event::Event::RunResumed(_) => "run_resumed",
         orchestration_event::Event::ToolRetryScheduled(_) => "tool_retry_scheduled",
+        // QF-12 (E3.3): the loop took queued steer messages; a count only.
+        orchestration_event::Event::BrowserSteerTaken(_) => "browser_steer_taken",
         // The question events reach the chat stream as the user_question
         // ChatEvent (WS14-S4), not as a raw orchestration event. They get no named
         // arm so the SSE taxonomy generator, which counts named arms, stays in step.
@@ -15948,7 +15950,9 @@ fn orchestration_event_to_step_update(
         | Event::QuestionAnswered(_)
         | Event::RunUsageProgress(_)
         // A retry is a lifecycle notice on the chat stream, never a step (WS15 S3).
-        | Event::ToolRetryScheduled(_) => return None,
+        | Event::ToolRetryScheduled(_)
+        // A steer-taken count is for the run console's steer box, not a step (QF-12).
+        | Event::BrowserSteerTaken(_) => return None,
     };
     Some(crate::sse_events::ChatEvent::StepUpdate {
         id,
@@ -16156,6 +16160,12 @@ fn event_payload_value(event: &OrchestrationEvent) -> Option<Value> {
             object.insert("max_attempts".to_owned(), json!(payload.max_attempts));
             object.insert("wait_ms".to_owned(), json!(payload.wait_ms));
             object.insert("reason".to_owned(), json!(payload.reason));
+        }
+        // QF-12 (E3.3): ids and a count only; the steer text never rides the event.
+        orchestration_event::Event::BrowserSteerTaken(payload) => {
+            object.insert("run_id".to_owned(), json!(payload.run_id));
+            object.insert("plan_id".to_owned(), json!(payload.plan_id));
+            object.insert("taken".to_owned(), json!(payload.taken));
         }
         // Never forwarded raw (see the name map), so there is nothing to project.
         orchestration_event::Event::QuestionAsked(_)

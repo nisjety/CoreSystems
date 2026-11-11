@@ -395,6 +395,11 @@ fn classify_deterministic_risk(
     last_observation: Option<&BrowserObservation>,
     focus: Option<&BrowserSnapshotTarget>,
 ) -> Option<RiskCategory> {
+    // QF-16: a one-time-code fill completes a sign-in, whatever the page calls
+    // the field (plan E3.1 reuses Login rather than adding a category).
+    if action.action_type == ActionType::FillOtp {
+        return Some(RiskCategory::Login);
+    }
     // Cross-domain navigation: compare the target host of a `Goto` against
     // the host of the last page actually observed — NOT the allow-list
     // (`AgentPlan::is_domain_allowed`), which is a separate, unconditional

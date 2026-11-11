@@ -144,6 +144,16 @@ pub enum AgentAction {
         ref_id: String,
         approval_grant_id: String,
     },
+    /// QF-16 (Quarry E3.1-a, ADR-2a): fill a one-time code into an exact
+    /// top-frame input of the latest snapshot. No code or value field exists:
+    /// Quarry reads the code from the mail connection the single-use
+    /// `fill_otp` approval grant names. There is no frame variant.
+    FillOtpRef {
+        snapshot_id: String,
+        generation: u32,
+        ref_id: String,
+        approval_grant_id: String,
+    },
     Press {
         key: String,
     },
@@ -1430,6 +1440,20 @@ pub fn action_to_wire(action: &BrowserAction) -> AgentAction {
             },
             None => AgentAction::GetContent,
         },
+        // QF-16: the gate put the single-use approval grant id in `value`. A fill
+        // with no grant, no target or a child-frame target has no wire form (the
+        // gate refuses all three first), so it falls back to a read.
+        ActionType::FillOtp => match action.target.as_ref() {
+            Some(target) if target.frame_id.is_none() && !action.value.trim().is_empty() => {
+                AgentAction::FillOtpRef {
+                    snapshot_id: target.snapshot_id.clone(),
+                    generation: target.generation,
+                    ref_id: target.ref_id.clone(),
+                    approval_grant_id: action.value.clone(),
+                }
+            }
+            _ => AgentAction::GetContent,
+        },
         ActionType::WaitFor => match action.target.as_ref() {
             Some(target) => {
                 let timeout_ms = u32::try_from(action.max_wait_ms).unwrap_or(0);
@@ -1549,6 +1573,17 @@ pub fn browser_action_from_wire(action: &AgentAction) -> Option<BrowserAction> {
             ..loop_action(ActionType::Wait)
         },
         AgentAction::GetContent => loop_action(ActionType::Observe),
+        // QF-16: the approval grant id is not carried back: the loop form is
+        // judged on its target alone (a Login, see `classify_action_risk`).
+        AgentAction::FillOtpRef {
+            snapshot_id,
+            generation,
+            ref_id,
+            ..
+        } => BrowserAction {
+            target: target_ref(snapshot_id, *generation, None, ref_id),
+            ..loop_action(ActionType::FillOtp)
+        },
         _ => return None,
     })
 }

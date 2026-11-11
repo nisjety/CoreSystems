@@ -25,6 +25,10 @@
 //! reads), `observe` (the default: every check runs and is logged, the fire is
 //! allowed, nothing is paused), `enforce` (a skip reason denies the fire).
 //!
+//! At boot `main` runs [`boot_check`] on the same switch (WS15.S4f). `enforce`
+//! without a usable org-core URL and service token refuses to start in production,
+//! and logs an error elsewhere, because every scheduled fire would then be skipped.
+//!
 //! Authentication follows `run_page`: the shared runtime bearer token names the
 //! caller, and the `X-Quarry-Run-Sig` run binding ties the tenant to the request.
 //! The binding is signed over `org_id + "\n" + "schedule:" + schedule_id`, so a
@@ -103,18 +107,25 @@ struct PreflightConfig {
 
 static CONFIG: OnceLock<PreflightConfig> = OnceLock::new();
 
+/// The mode `QUARRY_EDGE__SCHEDULE_POSTURE` names. An unknown value is `observe` and
+/// logs a warning that names the switch, never the raw value. `main` reads it at boot
+/// (WS15.S4f) and the first preflight reads it again.
+pub fn mode_from_env() -> PostureMode {
+    let raw = std::env::var(ENV_SCHEDULE_POSTURE).unwrap_or_default();
+    PostureMode::parse(&raw).unwrap_or_else(|_| {
+        // The parse error echoes the raw value; log a closed label instead.
+        tracing::warn!(
+            error_class = "invalid_mode",
+            switch = ENV_SCHEDULE_POSTURE,
+            "schedule preflight: invalid mode; using observe"
+        );
+        PostureMode::Observe
+    })
+}
+
 fn config() -> &'static PreflightConfig {
     CONFIG.get_or_init(|| {
-        let raw = std::env::var(ENV_SCHEDULE_POSTURE).unwrap_or_default();
-        let mode = PostureMode::parse(&raw).unwrap_or_else(|_| {
-            // The parse error echoes the raw value; log a closed label instead.
-            tracing::warn!(
-                error_class = "invalid_mode",
-                switch = ENV_SCHEDULE_POSTURE,
-                "schedule preflight: invalid mode; using observe"
-            );
-            PostureMode::Observe
-        });
+        let mode = mode_from_env();
         let url = std::env::var(ENV_ORG_CORE_URL).unwrap_or_default();
         let token = std::env::var(ENV_ORG_CORE_SERVICE_TOKEN).unwrap_or_default();
         let posture: Option<Arc<dyn PostureSource>> = if url.trim().is_empty() || token.trim().is_empty() {
@@ -137,6 +148,56 @@ fn config() -> &'static PreflightConfig {
         tracing::info!(mode = mode.label(), posture_wired = posture.is_some(), "schedule preflight configured");
         PreflightConfig { mode, posture }
     })
+}
+
+// =============================================================================
+// Boot check (WS15.S4f)
+// =============================================================================
+
+/// Whether the org-core URL can be read from: non-blank, parseable, and `http` or
+/// `https`. Anything else makes every posture read `unknown`, so it counts as unset.
+fn org_core_url_usable(org_core_url: Option<&str>) -> bool {
+    org_core_url
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .and_then(|url| reqwest::Url::parse(url).ok())
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+/// Whether the posture read has what it needs: a usable org-core URL and a service
+/// token. The token arrives as a presence flag, so no caller can log its value here.
+pub fn posture_reads_configured(org_core_url: Option<&str>, token_present: bool) -> bool {
+    token_present && org_core_url_usable(org_core_url)
+}
+
+/// The boot check for the posture switch (WS15.S4f). Pure: `main` decides what a
+/// refusal means (production refuses to start, elsewhere it logs an error).
+///
+/// - `enforce` without a usable org-core URL or service token would skip every
+///   scheduled fire as `skipped_posture_unknown`. The error names the variables that
+///   are missing and never carries a value.
+/// - `observe` without them is `Ok`: the fires run, every posture reads `unknown`,
+///   and `main` logs that once.
+/// - `off` reads nothing, so it is always `Ok`.
+pub fn boot_check(
+    mode: PostureMode,
+    org_core_url: Option<&str>,
+    token_present: bool,
+) -> Result<(), String> {
+    if mode != PostureMode::Enforce || posture_reads_configured(org_core_url, token_present) {
+        return Ok(());
+    }
+    let mut missing = Vec::new();
+    if !org_core_url_usable(org_core_url) {
+        missing.push(ENV_ORG_CORE_URL);
+    }
+    if !token_present {
+        missing.push(ENV_ORG_CORE_SERVICE_TOKEN);
+    }
+    Err(format!(
+        "{ENV_SCHEDULE_POSTURE}=enforce needs usable {}: without them every scheduled fire is skipped as {SKIPPED_POSTURE_UNKNOWN}",
+        missing.join(" and ")
+    ))
 }
 
 // =============================================================================

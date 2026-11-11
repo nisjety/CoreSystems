@@ -59,6 +59,14 @@ services:
       # quarry_core::identity). 0 (default) keeps the legacy Quarry/2.0 string byte-for-byte; 1 moves
       # the edge, policy and HTTP/3 user agents to the one honest identity (ADR 5, D-W5-1). Dark by default.
       QUARRY_EDGE__UNIFIED_UA: "${QUARRY_EDGE_UNIFIED_UA:-0}"
+      # WS10.S5b: browser-run events onto the Model Plane run trace (mp.v1.trace.run.<id>) over
+      # the Model NATS with the publish-only principal. Empty URL (default) = no publisher; dev sets
+      # QUARRY_EDGE__MODEL_TRACE_NATS_URL=nats://model-nats:4222 explicitly. A URL without the
+      # password stops the boot. Enabling outside dev waits for the X-4 NATS credential review.
+      # ZDR runs are never published. The password comes from the secrets ledger, never this file.
+      QUARRY_EDGE__MODEL_TRACE_NATS_URL: ${QUARRY_EDGE__MODEL_TRACE_NATS_URL:-}
+      QUARRY_EDGE__MODEL_TRACE_NATS_USER: quarry-trace-producer
+      QUARRY_EDGE__MODEL_TRACE_NATS_PASSWORD: ${MODEL_QUARRY_TRACE_NATS_PASSWORD:-}
       # The browser driver is chosen at BUILD time, never by an env var, so
       # QUARRY_EDGE__BROWSER_PROVIDER / __BROWSERLESS_BASE_URL / __BROWSERLESS_TOKEN
       # are gone from here: EdgeConfig (crates/quarry-edge/src/config.rs) has no
@@ -1715,6 +1723,63 @@ services:
       timeout: 10s
       retries: 5
       start_period: 45s
+
+  # ==================== Security feed sync (quarry-edge URL reputation) ====================
+  # Default-off profile: a plain `up` never starts this service. Enable with:
+  #   docker compose --profile security-feeds up -d security-feed-sync
+  # Refreshes ./config/security-feeds/quarry-security.json, the file quarry-edge mounts
+  # read-only. The edge reloads it only when QUARRY_SECURITY_SNAPSHOT_WATCH_S is positive.
+  # Egress goes to the public feed hosts only (ingestion-net, no inter-plane bus).
+  security-feed-sync:
+    image: python:3.12.13-slim-bookworm
+    container_name: ingestion-security-feed-sync
+    profiles: ["security-feeds"]
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      URLHAUS_CSV_URL: "${URLHAUS_CSV_URL:-https://urlhaus.abuse.ch/downloads/csv_recent/}"
+      PHISHTANK_CSV_URL: "${PHISHTANK_CSV_URL:-}"
+      SECURITY_FEED_MAX_HOSTS: "${SECURITY_FEED_MAX_HOSTS:-250000}"
+      SECURITY_FEED_TIMEOUT_S: "${SECURITY_FEED_TIMEOUT_S:-30}"
+      # The interval floor is 600 s (feed terms). The loop below clamps to it; the script
+      # also refuses to refetch inside its own 600 s meta-sidecar window.
+      SECURITY_FEED_INTERVAL_S: "${SECURITY_FEED_INTERVAL_S:-900}"
+    # `$$` is compose's escape for a literal `$`: the shell below expands these at run time.
+    command:
+      - sh
+      - -c
+      - |
+        interval="$${SECURITY_FEED_INTERVAL_S:-900}"
+        case "$$interval" in
+          ''|*[!0-9]*|??????????*)
+            echo "security-feed-sync: SECURITY_FEED_INTERVAL_S must be 1-9 digits; using 900" >&2
+            interval=900 ;;
+        esac
+        if [ "$$interval" -lt 600 ]; then
+          echo "security-feed-sync: SECURITY_FEED_INTERVAL_S is below 600; using 600" >&2
+          interval=600
+        fi
+        while true; do
+          python /app/scripts/sync-security-feeds.py \
+            --output /feeds/quarry-security.json \
+            --meta-output /feeds/quarry-security.meta.json \
+            || echo "security-feed-sync: sync run exited non-zero" >&2
+          sleep "$$interval"
+        done
+    volumes:
+      - ./scripts/sync-security-feeds.py:/app/scripts/sync-security-feeds.py:ro
+      # The only read-write mount of the feed volume; quarry-edge mounts it read-only.
+      - ./config/security-feeds:/feeds
+    networks:
+      - ingestion-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # ==================== SearXNG (Quarry-v2 web search) ====================
   # Quarry-v2 owns its web-search dependency. quarry-edge's SmartRouter calls

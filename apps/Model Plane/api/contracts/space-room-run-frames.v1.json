@@ -22,7 +22,7 @@
     "subagent_stopped", "run_paused_for_approval", "run_resumed_after_approval", "approval_continuation_verified",
     "browser_action_dispatched", "browser_observation_received",
     "browser_run_paused", "browser_run_resumed", "browser_action_approval_required", "browser_action_decided",
-    "browser_attach_shared_jar", "question_asked", "question_answered"
+    "browser_attach_shared_jar", "browser_steer_taken", "question_asked", "question_answered"
   ],
   "default_for_unnamed_source_event": "drop",
   "builtin_tool_classes": {

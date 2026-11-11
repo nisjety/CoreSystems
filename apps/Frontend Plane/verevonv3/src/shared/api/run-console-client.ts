@@ -133,6 +133,17 @@ export type BrowserRunResumedEvent = {
   at?: string
 }
 
+/** QF-12 (E3.3): a browser run's loop took `taken` queued steer messages at a step
+ * boundary, oldest first. A count only: no ids and no text ride the event, so the
+ * steer strip marks its oldest `taken` queued entries delivered. Only a positive
+ * integer count is dispatched. */
+export type BrowserSteerTakenEvent = {
+  runId?: string
+  planId?: string
+  taken: number
+  at?: string
+}
+
 /** WS03 S8: the loop of a run parked at a round boundary (the run stays open and
  * resumable). Ids only: the gateway never broadcasts the park reason. Display
  * only; nothing acts on it. */
@@ -249,6 +260,7 @@ export type RunEventHandlers = {
   onBrowserObservation?: (event: BrowserObservationReceivedEvent) => void
   onBrowserRunPaused?: (event: BrowserRunPausedEvent) => void
   onBrowserRunResumed?: (event: BrowserRunResumedEvent) => void
+  onBrowserSteerTaken?: (event: BrowserSteerTakenEvent) => void
   onBrowserActionApprovalRequired?: (event: BrowserActionApprovalRequiredEvent) => void
   onBrowserActionDecided?: (event: BrowserActionDecidedEvent) => void
   onApprovalContinuationVerified?: (event: ApprovalContinuationVerifiedEvent) => void
@@ -436,6 +448,18 @@ function dispatch(event: SseEvent, handlers: RunEventHandlers): void {
         at: str(payload.at),
       })
       break
+    case 'browser_steer_taken': {
+      const taken = nonNegativeInt(payload.taken)
+      if (taken !== undefined && taken > 0) {
+        handlers.onBrowserSteerTaken?.({
+          runId: str(payload.run_id) ?? str(payload.runId),
+          planId: str(payload.plan_id) ?? str(payload.planId),
+          taken,
+          at: str(payload.at),
+        })
+      }
+      break
+    }
     case 'browser_action_approval_required':
       handlers.onBrowserActionApprovalRequired?.({
         runId: str(payload.run_id) ?? str(payload.runId),

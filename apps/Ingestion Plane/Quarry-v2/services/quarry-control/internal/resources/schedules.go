@@ -26,7 +26,9 @@ const EnvSchedulesRequireOrg = "QUARRY_CONTROL_SCHEDULES_REQUIRE_ORG"
 // another org, exactly as it answers for a missing row. The pause, unpause,
 // trigger and backfill aliases are mounted by MountScheduleAliases (cycle23.go).
 // The monitor tag (E3.5-6) rides create, PATCH /{id} and the ?tag= list filter.
-func MountSchedules(r chi.Router, db store.DB) {
+// WithScheduleNotices (WS15.S4d) makes a skipped fire notify the schedule's creator.
+func MountSchedules(r chi.Router, db store.DB, opts ...NoticeOption) {
+	notices := noticeConfigOf(opts)
 	s := db.Schedules()
 	r.Route("/v1/schedules", func(r chi.Router) {
 		r.Get("/", listSchedulesHandler(s))
@@ -42,7 +44,7 @@ func MountSchedules(r chi.Router, db store.DB) {
 	r.Get("/v1/internal/schedules/desired", desiredSchedulesHandler(s))
 	// The orchestrator's fire registration (WS15.S2). HMAC signed, like the rest
 	// of the internal surface.
-	r.Post("/v1/internal/schedules/{id}/runs", registerScheduledRun(db))
+	r.Post("/v1/internal/schedules/{id}/runs", registerScheduledRun(db, notices.scheduleSink))
 	// The orchestrator's runtime write (WS15.S4b): the latest and the next run and
 	// the overlap skip count. HMAC signed with the control-internal secret.
 	r.Put("/v1/internal/schedules/{id}/runtime", updateScheduleRuntime(db))

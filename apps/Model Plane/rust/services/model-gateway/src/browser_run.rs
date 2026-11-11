@@ -2574,6 +2574,9 @@ async fn browser_run_start_inner(
             attachments: Vec::new(),
             // Only code_interpreter steps mount skill bundles.
             skill_mounts: Vec::new(),
+            // BrowserRunStartRequest carries no turn connector selection, so a
+            // run started here is never offered a one-time-code fill (QF-16).
+            connector_scope: None,
         });
         let authorization = format!("Bearer {}", execution_bearer.as_str())
             .parse()

@@ -38,6 +38,11 @@ pub struct BrowserObservation {
     pub screenshot_artifact_id: Option<kinds::ArtifactKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visual_observation_artifact_id: Option<kinds::ArtifactKind>,
+    /// Q5-S1c: id of the PDF artifact a `pdf` action stored for this step, so
+    /// the caller can fetch it. `None` for any other action, under ZDR, when
+    /// artifact persistence is absent, or when the page was withheld.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf_artifact_id: Option<kinds::ArtifactKind>,
     /// Bounded DOM, visual, and redacted-network change evidence for this
     /// observation. Omitted under ZDR or when artifact persistence is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]

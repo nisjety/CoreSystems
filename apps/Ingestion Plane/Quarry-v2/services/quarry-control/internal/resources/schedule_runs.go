@@ -6,10 +6,12 @@ package resources
 // the fire is listed under GET /v1/schedules/{id}/runs and read like any job.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -17,8 +19,138 @@ import (
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/notify"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
+
+// EnvScheduleNotices is the switch for schedule failure and skip notices
+// (WS15.S4d). Unset or anything but a truthy value (1, true, yes, on) keeps them
+// off: no notice is sent for a failed, timed-out or skipped fire.
+const EnvScheduleNotices = "QUARRY_CONTROL__SCHEDULE_NOTICES"
+
+// ScheduleNoticesEnabled reports whether QUARRY_CONTROL__SCHEDULE_NOTICES is truthy.
+// Default false.
+func ScheduleNoticesEnabled(getenv func(string) string) bool {
+	switch strings.ToLower(strings.TrimSpace(getenv(EnvScheduleNotices))) {
+	case "true", "1", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// NoticeOption customises MountSchedules and MountEvents with the schedule notice
+// sink. Without it no schedule notice is sent.
+type NoticeOption func(*noticeConfig)
+
+// noticeConfig is what the NoticeOptions set. The zero value sends nothing.
+type noticeConfig struct {
+	scheduleSink notify.Sink
+}
+
+// WithScheduleNotices sends quarry.schedule_run_failed and
+// quarry.schedule_run_skipped notices to a schedule's creator through sink. The
+// caller passes it only when QUARRY_CONTROL__SCHEDULE_NOTICES is on; a nil sink
+// sends nothing.
+func WithScheduleNotices(sink notify.Sink) NoticeOption {
+	return func(into *noticeConfig) { into.scheduleSink = sink }
+}
+
+func noticeConfigOf(opts []NoticeOption) noticeConfig {
+	var cfg noticeConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg
+}
+
+// scheduleNoticeReasons is the closed vocabulary of the reason a schedule notice
+// carries: the orchestrator's ScheduledJobWF reasons and the two failure event
+// types. A reason outside it is replaced by the notice's fallback.
+var scheduleNoticeReasons = map[string]struct{}{
+	"preflight_denied": {},
+	"invalid_params":   {},
+	"child_failed":     {},
+	"child_timed_out":  {},
+	"run_failed":       {},
+	"run_timed_out":    {},
+}
+
+// closedNoticeReason returns reason when it is in the closed vocabulary, else fallback.
+func closedNoticeReason(reason, fallback string) string {
+	if _, ok := scheduleNoticeReasons[strings.TrimSpace(reason)]; ok {
+		return strings.TrimSpace(reason)
+	}
+	return fallback
+}
+
+// scheduleZdr reports the schedule's create-time ZDR stamp; an unstamped legacy row is standard.
+func scheduleZdr(s store.Schedule) bool {
+	return s.Zdr != nil && *s.Zdr
+}
+
+// sendScheduleNotice delivers one schedule notice to the schedule's creator.
+// Best-effort with a 5 s budget: a failure is logged and never returned, so a
+// notification-core outage cannot fail an event append or a fire registration.
+// A schedule without a creator is an honest skip. The payload holds ids, the kind
+// and a closed reason only, never the URL or target.
+func sendScheduleNotice(sink notify.Sink, sched store.Schedule, noticeType, idempotencyKey, runID, reason string) {
+	if sink == nil {
+		return
+	}
+	recipient := strings.TrimSpace(sched.CreatedBy)
+	if recipient == "" || strings.TrimSpace(sched.OrgID) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	payload := map[string]string{
+		"schedule_id":   string(sched.ID),
+		"schedule_kind": sched.TargetKind,
+		"reason":        reason,
+		"run_id":        runID,
+	}
+	if err := sink.NotifyScheduleRun(ctx, sched.OrgID, recipient, idempotencyKey, noticeType, scheduleZdr(sched), payload); err != nil {
+		log.Warn().Err(err).Str("schedule_id", string(sched.ID)).Str("type", noticeType).Msg("schedule notice delivery failed")
+	}
+}
+
+// notifyOnScheduleRun sends the quarry.schedule_run_failed notice for a run_failed
+// or run_timed_out event of a job a schedule fired (Job.ScheduleID set). The
+// schedule is loaded within the job's org and the notice goes to its creator. The
+// idempotency key is per job, so the wrapper's and the child's failure events of
+// one fire raise one notice.
+func notifyOnScheduleRun(db store.DB, sink notify.Sink, ev quarrycontracts.Event) {
+	if sink == nil {
+		return
+	}
+	if ev.Type != quarrycontracts.EvtRunFailed && ev.Type != quarrycontracts.EvtRunTimedOut {
+		return
+	}
+	var (
+		job   store.Job
+		found bool
+	)
+	switch {
+	case ev.JobID != nil:
+		job, found = db.Jobs().Get(*ev.JobID)
+	case ev.RunID != nil:
+		job, found = db.Jobs().GetByRunID(*ev.RunID)
+	}
+	if !found || job.ScheduleID == nil {
+		return
+	}
+	sched, ok := db.Schedules().GetByOrg(*job.ScheduleID, job.OrgID)
+	if !ok {
+		return
+	}
+	reason, _ := ev.Payload["reason"].(string)
+	runID := ""
+	if ev.RunID != nil {
+		runID = string(*ev.RunID)
+	}
+	sendScheduleNotice(sink, sched, notify.ScheduleRunFailedType, "sched-fail:"+string(job.ID), runID,
+		closedNoticeReason(reason, string(ev.Type)))
+}
 
 // EnvScheduledJobsEnabled is the kill switch for executable scrape, crawl and
 // batch schedules. Unset or any value other than "1" keeps them unmapped: the
@@ -87,7 +219,7 @@ type registerRunResult struct {
 // fire's job: running (a workflow starts it) or terminal skipped (the edge
 // denied the fire, and a schedule_skipped event records why). The schedule must
 // exist and be enabled; a disabled or unknown schedule is refused.
-func registerScheduledRun(db store.DB) http.HandlerFunc {
+func registerScheduledRun(db store.DB, sink notify.Sink) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := quarrycontracts.ID(chi.URLParam(r, "id"))
 		if err := id.MustKind(quarrycontracts.KindSchedule); err != nil {
@@ -167,7 +299,7 @@ func registerScheduledRun(db store.DB) http.HandlerFunc {
 		}
 
 		if in.Status == "skipped" {
-			writeScheduleSkipped(db, id, job.ID, runID, in.RunKey, in.Reason, now)
+			writeScheduleSkipped(db, sink, sched, job.ID, runID, in.RunKey, in.Reason, now)
 		}
 		httpx.WriteJSON(w, r, http.StatusCreated, registerRunResult{JobID: string(job.ID), Status: job.Status})
 	}
@@ -175,8 +307,11 @@ func registerScheduledRun(db store.DB) http.HandlerFunc {
 
 // writeScheduleSkipped records the schedule_skipped event of a denied fire. A
 // failed append is logged, not returned: the skipped job already exists and a
-// retry would only find it again.
-func writeScheduleSkipped(db store.DB, scheduleID, jobID, runID quarrycontracts.ID, runKey, reason string, now int64) {
+// retry would only find it again. After a successful append the schedule's
+// creator gets a quarry.schedule_run_skipped notice when sink is set (WS15.S4d);
+// the notice is best-effort and never fails the registration.
+func writeScheduleSkipped(db store.DB, sink notify.Sink, sched store.Schedule, jobID, runID quarrycontracts.ID, runKey, reason string, now int64) {
+	scheduleID := sched.ID
 	evt := quarrycontracts.Event{
 		EventID:        quarrycontracts.NewID(quarrycontracts.KindEvent),
 		RunID:          &runID,
@@ -189,7 +324,10 @@ func writeScheduleSkipped(db store.DB, scheduleID, jobID, runID quarrycontracts.
 	// The seq is assigned in the same transaction as the insert (D2-016).
 	if _, err := db.Events().AppendNext(evt); err != nil {
 		log.Warn().Str("schedule_id", string(scheduleID)).Msg("schedule_skipped event append failed")
+		return
 	}
+	sendScheduleNotice(sink, sched, notify.ScheduleRunSkippedType, evt.IdempotencyKey, string(runID),
+		closedNoticeReason(reason, "preflight_denied"))
 }
 
 // maxScheduleRuntimeBodyBytes caps the runtime write. The body holds three fields.

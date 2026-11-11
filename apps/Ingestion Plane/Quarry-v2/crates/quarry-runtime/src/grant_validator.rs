@@ -96,17 +96,18 @@ pub struct GrantValidation {
     /// Q3-E3.1-h2: the integration-corev2 mail connection a `fill_otp` approval grant is bound
     /// to (an opaque connection id, never a mailbox address). Empty on every other grant and
     /// from a broker that predates it; the edge refuses a `fill_otp_ref` whose approval leaves
-    /// it empty (`otp_binding_missing`). Never derived from the caller. The broker half is a
-    /// Model Plane ask (MP-ASKS, W3-E3.1-ab); the vendored gRPC proto does not carry it yet, so
-    /// the gRPC validator always yields an empty one.
+    /// it empty (`otp_binding_missing`). Never derived from the caller and never logged. The
+    /// broker stores it on the approval (Q3-E3.1-b1-c); the gRPC validator copies it from
+    /// `ValidateGrantResponse.mail_connection_id` (field 23) and the HTTP validator from the
+    /// JSON body.
     #[serde(default)]
     pub mail_connection_id: String,
     /// Q3-E3.1-h2: the https origin (scheme, host, port only) a `fill_otp` approval grant is
     /// bound to. Empty on every other grant and from a broker that predates it; the edge
     /// refuses a `fill_otp_ref` whose approval leaves it empty or names anything but an https
     /// origin (`otp_binding_missing`). The executor checks the frame and the top page against
-    /// it (E3.1-c). Never derived from the caller. Same broker ask and gRPC caveat as
-    /// `mail_connection_id`.
+    /// it (E3.1-c). Never derived from the caller and never logged. The gRPC validator copies
+    /// it from `ValidateGrantResponse.grant_origin` (field 24), as for `mail_connection_id`.
     #[serde(default)]
     pub grant_origin: String,
 }

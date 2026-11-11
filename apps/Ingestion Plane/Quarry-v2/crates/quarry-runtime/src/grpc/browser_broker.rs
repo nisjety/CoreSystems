@@ -349,12 +349,12 @@ pub(crate) fn validation_from_response(resp: ValidateGrantResponse) -> GrantVali
         key_id: String::new(),
         // WS7.K: the broker's snapshot (field 20), in the claim's shape. Unset is no grant layer.
         web_policy: resp.web_policy.map(web_policy_json),
-        // W4 OTP binding (Q3-E3.1-h2): the vendored `proto/browser.proto` carries neither the
-        // approved mail connection nor the approval origin yet (the Model Plane owner picks the
-        // field numbers, MP-ASKS). Until then both are empty and a `fill_otp` approval is
-        // refused `otp_binding_missing` (fail closed).
-        mail_connection_id: String::new(),
-        grant_origin: String::new(),
+        // W4 OTP binding (Q3-E3.1-b3-c): the broker's fill_otp approval binding (fields 23 and
+        // 24), copied verbatim and never logged. Empty for every other grant, and from a broker
+        // that predates them, in which case a `fill_otp` approval is refused
+        // `otp_binding_missing` (fail closed).
+        mail_connection_id: resp.mail_connection_id,
+        grant_origin: resp.grant_origin,
     }
 }
 

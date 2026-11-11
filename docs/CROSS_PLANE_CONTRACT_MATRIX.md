@@ -348,7 +348,7 @@ A claim is not a call. An issuer signs a claim onto a token that the consumer al
 | # | Claim | Issuer → consumer | Carried on | Value comes from | Consumer rule | State |
 |---|-------|-------------------|------------|------------------|---------------|-------|
 | C1 | `web_policy`: `v`, `rev`, and the optional `caps`, `robots_max`, `proxy_max` and `domains`; at most 2 KiB | auth-core → quarry-edge (`aud=quarry`) | User tokens; service tokens of the principals that hold a `webPolicyByAudience` tenant row for `quarry` (`execution-core`, `model-gateway`) | org-core `GET /internal/orgs/:orgId/web-policy` (scope `org:web-policy:read:any`, auth-core only) | Enforce the claim; a request may tighten it and never widen it. Staleness is about 345 s (300 s audience TTL plus 45 s resolver cache). | Built, dark: `WEB_POLICY_CLAIM_ENABLED` is off, so the claim reads `"rev": "0"` |
-| C2 | `web_policy`, as C1 | auth-core → browser-broker (`aud=browser-broker`; Model Plane) | User tokens | As C1 | The broker's token verifier must accept the claim unread until WS7.K reads it. Not verified in this lane. | Built, dark in auth-core; the broker side is not built |
+| C2 | `web_policy`, as C1 | auth-core → browser-broker (`aud=browser-broker`; Model Plane) | User tokens | As C1 | The broker's token verifier must accept the claim unread until WS7.K reads it. Not verified in this lane. | Built, dark in auth-core; the broker side is built in Q2-WS7.K-a to Q2-WS7.K-c and reads the claim only behind `BROWSER_BROKER_WEB_POLICY_SNAPSHOT` (off by default) |
 
 ## Known Violations (Migration Backlog)
 

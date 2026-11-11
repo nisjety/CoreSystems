@@ -802,10 +802,52 @@ pub(crate) struct RunGrant<'a> {
     pub(crate) ttl_seconds: i32,
 }
 
+/// QF-16: one single-use `fill_otp` approval to mint, a child of the run grant: the one host and
+/// frame it covers, the canonical https origin the code may be typed into, and the mail connection
+/// the code is read from. The broker refuses it under ZDR and while
+/// `BROWSER_BROKER_FILL_OTP_ENABLED` is off.
+#[derive(Clone, Copy)]
+pub(crate) struct FillOtpGrant<'a> {
+    pub(crate) org_id: &'a str,
+    /// The run grant the approval is bound to.
+    pub(crate) parent_grant_id: &'a str,
+    /// The broker's idempotency key for this one approval.
+    pub(crate) session_key: &'a str,
+    /// The host of `grant_origin`.
+    pub(crate) host: &'a str,
+    /// The target's frame id as Quarry reported it: one, or none.
+    pub(crate) frame_ids: &'a [String],
+    pub(crate) grant_origin: &'a str,
+    pub(crate) mail_connection_id: &'a str,
+}
+
+/// The connection id and origin are never printed.
+impl std::fmt::Debug for FillOtpGrant<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FillOtpGrant")
+            .field("org_id", &self.org_id)
+            .field("parent_grant_id", &self.parent_grant_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The sensitive action a one-time-code approval names (the broker's `grant.ActionFillOtp`).
+const FILL_OTP_ACTION: &str = "fill_otp";
+
 /// The BrowserBroker calls a Do browser session makes, under the user's delegated bearer. The
 /// production client is [`TonicBrowserBroker`]; tests substitute a fake.
 #[tonic::async_trait]
 pub(crate) trait BrowserBroker: Send + Sync {
+    /// QF-16: mint a single-use `fill_otp` approval under the run grant and return its id. The
+    /// default refuses, so a broker that does not implement it never issues one.
+    async fn acquire_fill_otp_grant(
+        &self,
+        _bearer: &str,
+        _grant: FillOtpGrant<'_>,
+    ) -> Result<String, BrokerError> {
+        Err(BrokerError::Refused)
+    }
+
     /// Mint a read-only run grant for one host and return its id.
     async fn acquire_run_grant(
         &self,
@@ -867,6 +909,33 @@ impl TonicBrowserBroker {
 
 #[tonic::async_trait]
 impl BrowserBroker for TonicBrowserBroker {
+    async fn acquire_fill_otp_grant(
+        &self,
+        bearer: &str,
+        grant: FillOtpGrant<'_>,
+    ) -> Result<String, BrokerError> {
+        let mut client = self.client()?;
+        let request = authorized(
+            AcquireGrantRequest {
+                session_key: grant.session_key.to_owned(),
+                mode: "cloud".to_owned(),
+                org_id: grant.org_id.to_owned(),
+                allowed_domains: vec![grant.host.to_owned()],
+                allowed_actions: vec![FILL_OTP_ACTION.to_owned()],
+                allowed_frame_ids: grant.frame_ids.to_vec(),
+                parent_grant_id: grant.parent_grant_id.to_owned(),
+                // A one-time-code fill is never offered to a ZDR run, and the broker refuses one.
+                zdr: false,
+                mail_connection_id: grant.mail_connection_id.to_owned(),
+                grant_origin: grant.grant_origin.to_owned(),
+                ..AcquireGrantRequest::default()
+            },
+            bearer,
+        )?;
+        let response = within(client.acquire_grant(request)).await?;
+        Ok(response.grant_id)
+    }
+
     async fn acquire_run_grant(
         &self,
         bearer: &str,

@@ -1457,6 +1457,8 @@ pub fn deny_reads_after_otp(obs: &mut quarry_core::contracts::BrowserObservation
         obs.screenshot_artifact_id.take(),
         obs.visual_observation_artifact_id.take(),
         obs.evidence_delta_artifact_id.take(),
+        // Q5-S1c: a withheld page never exposes its PDF either.
+        obs.pdf_artifact_id.take(),
     ]
     .into_iter()
     .flatten()
@@ -1540,6 +1542,7 @@ mod otp_read_denial_tests {
             }),
             screenshot_artifact_id: Some(Id::new()),
             visual_observation_artifact_id: Some(Id::new()),
+            pdf_artifact_id: None,
             evidence_delta_artifact_id: None,
             console_summary: vec![ConsoleLine {
                 level: "log".into(),

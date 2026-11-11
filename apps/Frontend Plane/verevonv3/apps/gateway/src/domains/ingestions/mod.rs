@@ -41,6 +41,10 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/ingestions/schedules",
             get(schedules::list_schedules).post(schedules::create_schedule),
         )
+        .route(
+            "/api/ingestions/schedules/{id}/runs",
+            get(schedules::list_schedule_runs),
+        )
         .route("/api/ingestions/actions", post(schedules::schedule_actions))
         .route(
             "/api/ingestions/sources",

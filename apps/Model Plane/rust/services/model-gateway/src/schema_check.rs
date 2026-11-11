@@ -2,21 +2,36 @@
 //!
 //! This is a port of Quarry's `quarry-core::json_schema` (the validator behind its
 //! `json` format), so the gateway's interim Model-proposed extract route and
-//! Quarry's own route accept and refuse the same documents. The shared behaviour
+//! Quarry's own route agree on the keywords listed below. The shared behaviour
 //! is pinned by `tests/fixtures/ai-extract/schema-corpus.json`.
 //!
-//! Supported keywords:
+//! Supported keywords, with the same issue codes as Quarry's validator (which has
+//! `const`, `anyOf` and `oneOf` since Q2-WS16.S4a):
 //!
 //! - `type` (a name or a list of names; `integer` accepts only whole JSON
 //!   integers, `number` accepts both)
-//! - `enum`, `required`, `properties`, `items`
+//! - `enum`, `const` (deep equality), `required`, `properties`, `items`
+//! - `anyOf` (at least one branch matches) and `oneOf` (exactly one does)
 //! - `minItems` / `maxItems` / `minLength` / `maxLength` (string length in chars)
 //! - `minimum` / `maximum` (inclusive)
 //! - `additionalProperties: false`
-//! - extensions Quarry's validator does not have: `const`, `anyOf`, `oneOf`
 //!
-//! Every other keyword is ignored, exactly as in Quarry. A non-object schema
-//! (`true`, `false`, a string) accepts everything.
+//! Each `anyOf` and `oneOf` branch is checked on its own and its issues are dropped, so the
+//! keyword reports one issue at the value's path. A `oneOf` with no match and one with several
+//! both give `one_of_mismatch`; the count of matching branches stays on the internal issue.
+//! Issues come in a fixed order (type, `enum`, `const`, `anyOf`, `oneOf`, then the checks for
+//! the value's kind, with properties in key order), so one schema and value always give the
+//! same list.
+//!
+//! Every other keyword is ignored, exactly as in Quarry. That includes `pattern`, `format` and
+//! `$ref`: Quarry's AI spec normaliser refuses the first two and inlines local `$ref`s before
+//! its validator runs. This route applies no keyword allowlist and no normalisation, so here
+//! they are not checked. A non-object schema (`true`, `false`, a string) accepts everything.
+//!
+//! The walk follows the schema's own nesting, one level per property, item and `anyOf` or
+//! `oneOf` branch. The validator sets no depth limit of its own, as in Quarry. Quarry's
+//! normaliser caps the nesting at 10 levels for its AI formats; this route applies no such
+//! cap, so the only limit on nesting here is the JSON parser's own.
 //!
 //! Issues carry a path and a code only. A value, and a property name the model
 //! invented, never appear in an issue: the issues are fed back to the model in

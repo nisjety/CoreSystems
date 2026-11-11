@@ -24,6 +24,7 @@ import { useNavigate } from '@solidjs/router'
 import { writePendingChatLaunch } from '@/features/chat/lib/pending-chat-launch'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { executeAction } from '@/shared/actions/action-client'
+import { clearDataStep } from '@/shared/actions/browser-profile-clear'
 import { leftWithRunControlsDisabled, runControlsDisabledNotice } from './browser-blocked'
 import { getAuthSession, getSessionContext } from '@/shared/api/auth-client'
 import {
@@ -976,7 +977,10 @@ export function KnowledgeComposer(props: {
     setBrowserProfileClearArmed(true)
     setBrowserProfileMutating(true)
     try {
-      const preview = await clearBrowserProfileData(id, profileId, { dryRun: true })
+      // The count-first preview: an unconfirmed step is a dry run. A parse failure throws
+      // here, before the request, and lands in the catch below with the same generic copy.
+      const clearAction = clearDataStep(profileId, false)
+      const preview = await clearBrowserProfileData(id, clearAction.profileId, { dryRun: clearAction.dryRun })
       setBrowserProfileClearCounts(preview.counts)
     } catch (reason) {
       setBrowserProfileClearArmed(false)
@@ -1003,7 +1007,10 @@ export function KnowledgeComposer(props: {
     setBrowserProfileMutating(true)
     setBrowserProfileError(null)
     try {
-      const cleared = await clearBrowserProfileData(id, profileId, { dryRun: false })
+      // The live clear: only this confirmed step sends dryRun false. A parse failure throws
+      // before the request and lands in the catch below, so nothing is sent.
+      const clearAction = clearDataStep(profileId, true)
+      const cleared = await clearBrowserProfileData(id, clearAction.profileId, { dryRun: clearAction.dryRun })
       setBrowserProfileProbe(null)
       setBrowserProfileClearNotice(
         cleared.cleared

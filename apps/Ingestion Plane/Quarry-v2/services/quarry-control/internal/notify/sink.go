@@ -31,13 +31,51 @@ const Audience = "notification-core"
 // ChangeDetectedType is the notification type notification-core allows this service to send.
 const ChangeDetectedType = "change_detected"
 
+// ScheduleRunFailedType is the notice a schedule's creator gets when a fire of a
+// scrape, crawl or batch schedule failed or timed out (WS15.S4d).
+const ScheduleRunFailedType = "quarry.schedule_run_failed"
+
+// ScheduleRunSkippedType is the notice a schedule's creator gets when a fire was
+// skipped because the edge denied it (WS15.S4d).
+const ScheduleRunSkippedType = "quarry.schedule_run_skipped"
+
 const intakePath = "/api/v1/notification-requests"
 
-// Sink delivers a single in-product notification for a detected change.
-// Implementations must be safe for concurrent use and idempotent on eventID
-// (so a replayed event batch doesn't create duplicate notifications).
+// scheduleNoticeText is the fixed display text of each schedule notice type. A
+// notice never carries text taken from the schedule, the job or the page.
+var scheduleNoticeText = map[string]struct{ title, body string }{
+	ScheduleRunFailedType: {
+		title: "Planlagt innhenting feilet",
+		body:  "En planlagt kjøring feilet. Åpne Innhenting for å se planen.",
+	},
+	ScheduleRunSkippedType: {
+		title: "Planlagt innhenting ble hoppet over",
+		body:  "En planlagt kjøring ble ikke startet. Åpne Innhenting for å se planen.",
+	},
+}
+
+// scheduleNoticeRefKeys are the reference keys a standard-retention schedule notice
+// may carry besides its title and body. notification-core accepts exactly these; a
+// URL or a schedule target is never one of them.
+var scheduleNoticeRefKeys = []string{"schedule_id", "schedule_kind", "reason", "run_id"}
+
+// maxScheduleNoticeRefLen bounds each reference value. Ids and closed reasons are
+// far shorter; a longer value is dropped rather than sent.
+const maxScheduleNoticeRefLen = 128
+
+// Sink delivers a single in-product notification for a detected change, or for a
+// failed or skipped schedule fire. Implementations must be safe for concurrent
+// use and idempotent on eventID (so a replayed event batch doesn't create
+// duplicate notifications).
 type Sink interface {
 	NotifyChange(ctx context.Context, orgID, recipientID, eventID string, payload map[string]any) error
+	// NotifyScheduleRun sends a quarry.schedule_run_failed or
+	// quarry.schedule_run_skipped notice to recipientID (the schedule's creator).
+	// eventID is the idempotency key. The payload is content-free: the sink sets a
+	// fixed title and body per type and keeps only schedule_id, schedule_kind,
+	// reason and run_id from payload. With zdr the notice is sent with retention
+	// mode zdr and the title alone.
+	NotifyScheduleRun(ctx context.Context, orgID, recipientID, eventID, noticeType string, zdr bool, payload map[string]string) error
 }
 
 // HTTPSink posts to notification-core's intake (POST /api/v1/notification-requests),
@@ -88,7 +126,67 @@ func (s *HTTPSink) NotifyChange(ctx context.Context, orgID, recipientID, eventID
 	if err != nil {
 		return err
 	}
+	return s.deliver(ctx, orgID, recipientID, body)
+}
 
+// NotifyScheduleRun creates a schedule failure or skip notice for recipientID in
+// orgID, signed with the same delegation as NotifyChange. idempotency_key =
+// eventID, so a replayed fire or event batch adds nothing.
+func (s *HTTPSink) NotifyScheduleRun(ctx context.Context, orgID, recipientID, eventID, noticeType string, zdr bool, payload map[string]string) error {
+	if len(s.secret) == 0 {
+		return errors.New("notification-core delegation secret is not configured")
+	}
+	orgID = strings.TrimSpace(orgID)
+	recipientID = strings.TrimSpace(recipientID)
+	eventID = strings.TrimSpace(eventID)
+	if orgID == "" || recipientID == "" || eventID == "" {
+		return errors.New("schedule notice needs an organization, a recipient and an event id")
+	}
+	if _, ok := scheduleNoticeText[noticeType]; !ok {
+		return fmt.Errorf("unknown schedule notice type %q", noticeType)
+	}
+	retentionMode := "standard"
+	if zdr {
+		retentionMode = "zdr"
+	}
+	body, err := json.Marshal(map[string]any{
+		"organization_id": orgID,
+		"idempotency_key": eventID,
+		"recipient":       map[string]string{"kind": "user", "id": recipientID},
+		"type":            noticeType,
+		"payload":         scheduleNoticePayload(noticeType, zdr, payload),
+		"source":          "quarry",
+		"retention_mode":  retentionMode,
+	})
+	if err != nil {
+		return err
+	}
+	return s.deliver(ctx, orgID, recipientID, body)
+}
+
+// scheduleNoticePayload builds the closed payload of a schedule notice: the fixed
+// title (and, outside ZDR, the fixed body and the bounded reference keys). Values
+// are strings only, as notification-core requires.
+func scheduleNoticePayload(noticeType string, zdr bool, refs map[string]string) map[string]any {
+	text := scheduleNoticeText[noticeType]
+	out := map[string]any{"title": text.title}
+	if zdr {
+		return out
+	}
+	out["body"] = text.body
+	for _, key := range scheduleNoticeRefKeys {
+		value := strings.TrimSpace(refs[key])
+		if value == "" || len(value) > maxScheduleNoticeRefLen {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+// deliver signs body as the quarry-control delegation for recipientID in orgID and
+// posts it to notification-core's intake. A non-2xx answer is an error.
+func (s *HTTPSink) deliver(ctx context.Context, orgID, recipientID string, body []byte) error {
 	timestamp := s.now().UTC().Format(time.RFC3339)
 	nonce, err := s.nonce()
 	if err != nil {

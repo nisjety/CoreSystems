@@ -278,6 +278,9 @@ pub(super) async fn finish_run(
     let usage_org = entry.org_id.clone();
     let usage_actor = entry.actor_id.clone();
     let session = entry.session.clone();
+    // WS10.S4: the step count and lifetime the terminal event carries (counts only).
+    let ended_steps = entry.summary.step;
+    let ended_duration_ms = now_ms().saturating_sub(handle.live.started_ms());
     // WS8.H: the lanes are named while the entry is held, and waited for once it is released.
     let mut lanes = lane_refs(&entry, &handle.live);
     // Q2-WS8.J: the attachment ended above is no longer live, so its lane is added here.
@@ -336,7 +339,13 @@ pub(super) async fn finish_run(
                     zdr,
                     rid.clone(),
                     EventType::AgentCompleted,
-                    serde_json::json!({}),
+                    // WS10.S4: the closed reason set the trace projection shows
+                    // (`closed|expired|failed|cancelled`); an owner's close is `closed`.
+                    serde_json::json!({
+                        "reason": "closed",
+                        "steps": ended_steps,
+                        "duration_ms": ended_duration_ms,
+                    }),
                     format!("{rid}:agent_completed"),
                 )
                 .await;

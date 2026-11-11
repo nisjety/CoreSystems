@@ -603,6 +603,7 @@ async fn execute_step(
         thread_id: String::new(),
         attachments: Vec::new(),
         skill_mounts: Vec::new(),
+        connector_scope: None,
     });
     insert_bearer(&mut request, "authorization", bearers.execution)?;
     insert_bearer(&mut request, "x-session-authorization", bearers.session)?;

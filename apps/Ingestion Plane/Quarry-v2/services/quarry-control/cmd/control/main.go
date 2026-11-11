@@ -69,6 +69,20 @@ func main() {
 		log.Info().Str("url", notifyURL).Msg("notification-core sink wired for change notifications")
 	}
 
+	// WS15.S4d (D17): schedule failure and skip notices to the schedule's creator,
+	// content-free and title-only under ZDR. OFF BY DEFAULT: they need
+	// QUARRY_CONTROL__SCHEDULE_NOTICES on AND the notification-core sink above.
+	var scheduleNoticeOpts []resources.NoticeOption
+	switch {
+	case !resources.ScheduleNoticesEnabled(os.Getenv):
+		log.Info().Msg("schedule notices are off (default): no notice for a failed or skipped schedule fire")
+	case notifySink == nil:
+		log.Warn().Msg("QUARRY_CONTROL__SCHEDULE_NOTICES is on but the notification-core sink is not configured - schedule notices stay off")
+	default:
+		scheduleNoticeOpts = append(scheduleNoticeOpts, resources.WithScheduleNotices(notifySink))
+		log.Warn().Msg("schedule notices are ON (QUARRY_CONTROL__SCHEDULE_NOTICES): failed and skipped fires notify the schedule's creator")
+	}
+
 	envName := strings.ToLower(strings.TrimSpace(os.Getenv("ENVIRONMENT")))
 	isProd := envName == "prod" || envName == "production"
 
@@ -222,9 +236,9 @@ func main() {
 		// legacy store internally.
 		resources.MountArtifacts(r, db)
 		resources.MountProfiles(r, db)
-		resources.MountSchedules(r, db)
+		resources.MountSchedules(r, db, scheduleNoticeOpts...)
 		resources.MountRestore(r, db)
-		resources.MountEvents(r, db, apiKey, notifySink)
+		resources.MountEvents(r, db, apiKey, notifySink, scheduleNoticeOpts...)
 		// INNH-5: the unscoped webhook CRUD and delivery routes are retired (410).
 		resources.MountWebhooksGone(r)
 		// INNH-5: the org-scoped subscription API. OFF BY DEFAULT: with the flag unset

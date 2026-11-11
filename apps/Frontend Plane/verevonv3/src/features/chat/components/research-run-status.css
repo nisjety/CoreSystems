@@ -1,0 +1,53 @@
+/*
+ * The research run status chip (Q4-062b): one compact row under a deep-research answer. It wraps at phone width rather
+ * than pushing the page sideways, and its Stop keeps a 44 px touch target. Colours come from the chat tokens, so it
+ * reads in both themes.
+ */
+
+.verevon-research-run {
+  box-sizing: border-box;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  max-width: 100%;
+  margin: 8px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+.verevon-research-run__label {
+  padding: 2px 10px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface-soft, var(--verevon-surface));
+  color: var(--verevon-text);
+  font-weight: 600;
+}
+
+.verevon-research-run__detail {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.verevon-research-run__stop {
+  min-height: var(--verevon-touch-target, 44px);
+  padding: 0 14px;
+  border: 1px solid var(--verevon-border-strong, var(--verevon-border));
+  border-radius: 8px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.verevon-research-run__stop:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.verevon-research-run__error {
+  flex-basis: 100%;
+  color: var(--verevon-danger, #b42318);
+}

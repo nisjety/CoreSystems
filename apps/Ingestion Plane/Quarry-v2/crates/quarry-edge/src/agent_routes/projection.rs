@@ -91,6 +91,17 @@ pub(super) fn live_browser_session_projection(
             })
             .collect::<Vec<_>>()
     };
+    // Q2-WS9.H: the step cap the header's budget counts against, shown only when it binds a person's own
+    // steps: the same rule the step gate applies. A person's session is never capped, so its
+    // `constraints.max_steps` binds no one and shows no budget. An open-web session takes no cap at all.
+    let person_steps_capped = super::human_browse::counts_against_step_budget(
+        StepInitiator::Human,
+        false,
+        entry.budget.as_ref(),
+    );
+    let max_steps = (person_steps_capped && entry.constraints.max_steps > 0)
+        .then_some(entry.constraints.max_steps)
+        .filter(|_| !entry.nav_policy.is_open_web());
     BrowserSessionProjectionData {
         run_id: entry.run_id.to_string(),
         lease_id: entry.lease.lease_id.to_string(),
@@ -126,6 +137,7 @@ pub(super) fn live_browser_session_projection(
         attach_available,
         attach,
         run_origin: Some(entry.origin.as_str()),
+        max_steps,
     }
 }
 
@@ -162,6 +174,7 @@ pub(super) fn checkpoint_browser_session_projection(
         attach_available: false,
         attach: None,
         run_origin: None,
+        max_steps: None,
     }
 }
 

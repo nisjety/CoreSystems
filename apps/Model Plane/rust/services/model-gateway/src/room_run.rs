@@ -243,6 +243,8 @@ pub const ROOM_EVENT_POLICY: &[(&str, Disposition)] = &[
     ("browser_action_approval_required", Disposition::Drop),
     ("browser_action_decided", Disposition::Drop),
     ("browser_attach_shared_jar", Disposition::Drop),
+    // QF-12 (E3.3): the owner's steer-taken count, owner-only like the rest of this family.
+    ("browser_steer_taken", Disposition::Drop),
     ("question_asked", Disposition::Drop),
     ("question_answered", Disposition::Drop),
 ];

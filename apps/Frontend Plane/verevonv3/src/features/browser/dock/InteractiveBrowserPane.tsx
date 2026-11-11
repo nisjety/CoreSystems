@@ -14,6 +14,7 @@ import {
   browserErrorMessage,
   keepAliveBrowserSession,
   listBrowserDownloads,
+  type BrowserStepBudget,
 } from '@/shared/api/browser-client'
 import {
   buildRegionAttachRequest,
@@ -83,6 +84,13 @@ function sameDownloads(a: readonly BrowserSessionDownload[], b: readonly Browser
 
 function activeTab(model: BrowserSessionViewModel | null) {
   return model?.tabs.find((tab) => tab.active) ?? null
+}
+
+// The header's step budget turns to the warning tone once this many steps or fewer remain (Q2-WS9.H).
+const STEP_BUDGET_WARNING_REMAINING = 2
+
+function stepBudgetTone(budget: BrowserStepBudget): 'normal' | 'warning' {
+  return budget.max - budget.used <= STEP_BUDGET_WARNING_REMAINING ? 'warning' : 'normal'
 }
 
 // The signed-in person acting as themselves in the active organisation, for the downloads drawer's send (the same
@@ -226,6 +234,11 @@ export function InteractiveBrowserPane(props: InteractiveBrowserPaneProps): JSX.
   // The projection is rebuilt on each preview change, so it is memoised: BrowserChrome reads one object
   // until the session really changes.
   const view = createMemo<BrowserSessionViewModel | null>(() => controller.view())
+  // The run's step budget (Q2-WS9.H), shown only while it names a real cap (a positive max).
+  const stepBudget = (): BrowserStepBudget | null => {
+    const budget = view()?.stepBudget
+    return budget && budget.max > 0 ? budget : null
+  }
 
   const [omniboxValue, setOmniboxValue] = createSignal('')
   const [query, setQuery] = createSignal<string | null>(null)
@@ -529,6 +542,16 @@ export function InteractiveBrowserPane(props: InteractiveBrowserPaneProps): JSX.
         <div class="verevon-browser-dock-pane__title">
           <Globe size={15} aria-hidden="true" />
           <strong>{tr('Nettleser', 'Browser')}</strong>
+          <Show when={stepBudget()}>
+            {(budget) => (
+              <span class="verevon-browser-dock-pane__budget" data-tone={stepBudgetTone(budget())}>
+                {tr(
+                  `Steg ${budget().used} av ${budget().max}`,
+                  `Step ${budget().used} of ${budget().max}`,
+                )}
+              </span>
+            )}
+          </Show>
         </div>
         <div class="verevon-browser-dock-pane__actions">
           <BrowserDockControls position={props.dockPosition} onPositionChange={props.onDockPositionChange} />

@@ -319,7 +319,8 @@ pub async fn new_tab(
                             },
                             &tabs,
                         );
-                        if let Err(record_error) = record_browser_timeline_event(
+                        // WS10.S4: the kept tab is traced as `BrowserTabChanged` as well.
+                        if let Err(record_error) = record_timeline_and_trace(
                             &state,
                             &entry,
                             &handle.live,
@@ -366,7 +367,8 @@ pub async fn new_tab(
         },
         &tabs,
     );
-    record_browser_timeline_event(
+    // WS10.S4: the timeline row and the `BrowserTabChanged` trace event.
+    record_timeline_and_trace(
         &state,
         &entry,
         &handle.live,
@@ -444,7 +446,8 @@ pub async fn select_tab(
         .await
         .map_err(|e| driver_err(&request_id, e))?;
     prune_tab_openers(&mut entry, &tabs);
-    record_browser_timeline_event(
+    // WS10.S4: the timeline row and the `BrowserTabChanged` trace event.
+    record_timeline_and_trace(
         &state,
         &entry,
         &handle.live,
@@ -523,7 +526,8 @@ pub async fn close_tab(
         .map_err(|e| driver_err(&request_id, e))?;
     entry.tab_origins.remove(&tab_id);
     prune_tab_openers(&mut entry, &tabs);
-    record_browser_timeline_event(
+    // WS10.S4: the timeline row and the `BrowserTabChanged` trace event.
+    record_timeline_and_trace(
         &state,
         &entry,
         &handle.live,

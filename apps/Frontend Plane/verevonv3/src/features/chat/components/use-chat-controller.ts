@@ -204,6 +204,7 @@ import {
   normalizeToolCall,
   queuedInputsForNewTurn,
   readBrowseWebPreference,
+  researchRunAfterFrame,
   searchCompletionDetail,
   searchQueryFromArgs,
   sendClientMessageId,
@@ -4693,6 +4694,14 @@ export function useChatController() {
         setState((s) => {
           const turn = s.turns.find((t) => t.id === assistantId)
           if (turn) turn.resultReceipt = receipt
+        })
+      },
+      // The research run a deep-research answer started (Q4-062b): its id and the latest status word. Shared with
+      // resume, which replays the frame; `researchRunAfterFrame` keeps the run it had for an unknown word.
+      onResearchRun: (event: Parameters<NonNullable<ChatStreamHandlers['onResearchRun']>>[0]) => {
+        setState((s) => {
+          const turn = s.turns.find((t) => t.id === assistantId)
+          if (turn) turn.researchRun = researchRunAfterFrame(turn.researchRun, event)
         })
       },
       // Both below are shared with resume for the same reason as the rest:

@@ -116,6 +116,26 @@ An open agent run has its own trace. Its events are numbered densely per run fro
 
 Flags: `QUARRY_EDGE__TRACE_RING_EVENTS` (default 512; `0` disables the ring, so a resume that missed events gets `replay_gap`) and `QUARRY_EDGE__TRACE_RING_MAX_BYTES` (default 1 MiB, must be at least 1). An unparsable value aborts boot.
 
+### Agent run trace: browser events and run origin (WS10.S4)
+
+The browser trace events are agent class (`is_agent_class`). Each reaches the run's SSE stream under the dotted name below (`is_user_facing_event`) and the run's replay ring. The Model Plane run trace gets only the rows of the default-deny projection in `quarry_runtime::trace_projection`, and a ZDR run projects nothing. The payloads carry ids, counts and words, never typed text, a full URL or a selector.
+
+| SSE name | Event type | Model Plane trace type | Payload keys |
+|---|---|---|---|
+| `browser.session.opened` | `BrowserSessionOpened` | `BROWSER_SESSION_OPENED` | Not emitted in this build. A run's open rides on `agent.started`, which the Model Plane trace maps to the same type. |
+| `browser.session.closed` | `BrowserSessionClosed` | `BROWSER_SESSION_CLOSED` | Not emitted in this build. A run's close rides on `agent.completed`, `agent.failed` or `agent.expired`. |
+| `browser.control` | `BrowserControlChanged` | `BROWSER_CONTROL_CHANGED` | `mode`, `initiated_by`, `control_epoch` |
+| `browser.tab` | `BrowserTabChanged` | `BROWSER_TAB_CHANGED` | `operation`, `tab_id`, `active_tab_id` |
+| `browser.receipt` | `StepReceiptRecorded` | `BROWSER_STEP_RECEIPT_RECORDED` | `browser_run_id`, `receipt_id`, `step`, `action` (the serde tag only), `outcome`, `latency_ms`, `error_code`, `cost_micro_usd`, `url_origin` (scheme and host only), `verified`, `initiated_by`, `control_epoch` |
+| `browser.egress` | `EgressDecided` | `BROWSER_EGRESS_DECIDED` | One summary per step (`decision` `summary`: `step`, `egress_seq_from`, `egress_seq_to`, `allowed`, `blocked`), then at most 20 blocks (`decision` `block`: `step`, `policy`, `origin` (scheme and host only), `tab_id`) |
+| `browser.artifact` | `ArtifactRecorded` | `BROWSER_ARTIFACT_RECORDED` | `step`, `artifact_id`, `kind` |
+
+- **The `trace` body of `POST /v1/agent/runs`.** Each value is 1 to 64 characters of letters, digits, `_` or `-`; an invalid value is dropped, never a 400. A user token yields origin `user`, or `agent` when the hint says `agent`: a person cannot claim to be a schedule, a webhook or an API caller. A service token yields its hint, or `api` without one. The hint is matched ignoring ASCII case. `run_id` and `agent` are kept only for a service token.
+- **Origin is a label, never authority.** `trace.origin`, `runOrigin` on the owner projection, and the `origin` and `agent` fields of these events say who said they started a run. Admission, the budget, the control model and the tab routes must not read them (`origin_is_not_authz`). Org and user come from the verified token only. No UI reads `runOrigin` yet, and a UI must not treat `user` as a person's authority.
+- **`runOrigin`.** The owner projection (`GET .../browser-session`) carries the run's origin as one of `user`, `agent`, `schedule`, `webhook` or `api`. It is absent on a checkpoint projection and when the run has none. The Verevon gateway copies it into `session.runOrigin` only when it is one of those five words, and the SPA accepts only those five words.
+- **`maxSteps`.** The owner projection carries the run's step cap (`constraints.max_steps`) as `maxSteps` only when the cap is above 0 and binds a person's steps on the run, which is the rule `counts_against_step_budget` applies: an agent-class run's cap binds everyone, and a person's own session is never capped. It is absent otherwise, for an open-web session, and on a checkpoint projection; `step` is the steps taken so far. Counts only. The Verevon gateway copies `{used: step, max: maxSteps}` into `session.stepBudget` only when `maxSteps` is a positive integer, and the SPA rebuilds it strictly (two non-negative safe integers, `used` clamped to `max`) for the browser header's step count.
+- **Agent-class events never reach the Ingestion bus.** The NATS JetStream publish withholds every agent-class event on both its run and aggregate subjects (D2-098), so none of them reaches the Ingestion bus. A ZDR run's events reach only the live stream and the ring: never NATS, the durable HTTP publisher or the Model Plane trace.
+
 ## 4. Webhook delivery: what a subscriber's endpoint receives (INNH-5, 2026-10-31)
 
 This section used to describe a `{delivery_id, signature, event}` wrapper signed with an "org webhook secret". Neither was ever built. What control sends is below; it is what `internal/dispatcher` does and what its tests pin. The subscription API that creates the endpoint's registration is the section "Webhook subscriptions" further down.

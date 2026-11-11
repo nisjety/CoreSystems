@@ -102,6 +102,13 @@ export type BrowserRenderMode = 'chromium' | 'dom_snapshot' | 'readability_fallb
 export type BrowserSessionStatus = 'live' | 'degraded' | 'closed'
 export type BrowserControlMode = 'agent_control' | 'human_takeover'
 export type BrowserActionActor = 'agent' | 'human'
+/**
+ * Who started a browser run, as Quarry's trace label `runOrigin` (WS10.S4). A label for the run's trace,
+ * never authority: no UI treats `user` as a person's authority, and no UI reads it yet.
+ */
+export type BrowserRunOrigin = 'user' | 'agent' | 'schedule' | 'webhook' | 'api'
+/** The five run-origin labels: the closed set `browserRunOriginFromWire` accepts. */
+const BROWSER_RUN_ORIGINS: readonly BrowserRunOrigin[] = ['user', 'agent', 'schedule', 'webhook', 'api']
 
 /**
  * Phase 3 continuation: one row of `GET /api/v1/browser/profiles` — a
@@ -297,6 +304,16 @@ export type BrowserSessionAttach = {
   tabEpoch?: number
 }
 
+/**
+ * The run's step budget (Q2-WS9.H) as Quarry's owner projection counts it: the steps taken (`used`) and the
+ * most the run may take (`max`). Counts only. Present only when the run's step cap binds a person's steps (an
+ * agent-class run); a person's own session is never capped, so it has no budget.
+ */
+export type BrowserStepBudget = {
+  used: number
+  max: number
+}
+
 export type BrowserSession = {
   capabilities: string[]
   frame?: BrowserFrame | null
@@ -323,6 +340,10 @@ export type BrowserSession = {
   tabsUrl?: string | null
   /** The agent attached to this session (Q2-WS8.I); null when none is attached. */
   attach?: BrowserSessionAttach | null
+  /** The run's step budget (Q2-WS9.H), rebuilt strictly; absent or null when no step cap binds the person's steps. Counts only. */
+  stepBudget?: BrowserStepBudget | null
+  /** Who started the run (Quarry's `runOrigin`, WS10.S4): one of the five labels, or absent. A label, never authority. */
+  runOrigin?: BrowserRunOrigin
   /** Client-hydrated compact activity from the actor-scoped Quarry timeline.
    * This is intentionally not supplied by the browser-session projection,
    * because it is a separately paginated owner resource. */
@@ -630,6 +651,9 @@ export function browserSessionFromOwnerProjection(value: unknown, expectedSessio
   const scope = raw.profileScope as BrowserProfileScope
   const tabs = Array.isArray(raw.tabs) ? raw.tabs.filter((item): item is BrowserTab => Boolean(item && typeof item === 'object' && typeof item.tabId === 'string' && typeof item.active === 'boolean')) : []
   const url = typeof raw.currentUrl === 'string' ? raw.currentUrl : ''
+  const runOrigin = browserRunOriginFromWire(raw.runOrigin)
+  // The owner GET forwards Quarry's raw projection, so the budget is read from its `step` and `maxSteps`.
+  const stepBudget = browserStepBudgetFromWire({ used: raw.step, max: raw.maxSteps })
   return {
     session: {
       id: expectedSessionId,
@@ -646,6 +670,8 @@ export function browserSessionFromOwnerProjection(value: unknown, expectedSessio
       capabilities: [],
       zdr: raw.zdr,
       attach: browserSessionAttachFromWire(raw.attach),
+      ...(runOrigin ? { runOrigin } : {}),
+      ...(stepBudget ? { stepBudget } : {}),
     },
     observation: raw.lastObservation && typeof raw.lastObservation === 'object' ? raw.lastObservation as BrowserObservation : null,
   }
@@ -765,6 +791,27 @@ export function browserSessionAttachFromWire(value: unknown): BrowserSessionAtta
     ...(isBrowserWireId(tabId) ? { tabId } : {}),
     ...(typeof tabEpoch === 'number' && Number.isSafeInteger(tabEpoch) && tabEpoch >= 0 ? { tabEpoch } : {}),
   }
+}
+
+/**
+ * The step budget rebuilt strictly (Q2-WS9.H): two non-negative safe integers. A `used` above `max` is
+ * clamped to `max`. Anything else is `null`, so no budget is shown and no count is guessed.
+ */
+export function browserStepBudgetFromWire(value: unknown): BrowserStepBudget | null {
+  const wire = recordOf(value)
+  const used = wire?.used
+  const max = wire?.max
+  if (typeof used !== 'number' || typeof max !== 'number') return null
+  if (!Number.isSafeInteger(used) || !Number.isSafeInteger(max) || used < 0 || max < 0) return null
+  return { used: Math.min(used, max), max }
+}
+
+/**
+ * A run origin rebuilt strictly (WS10.S4): exactly one of the five labels, case-sensitive and untrimmed.
+ * Anything else (absent, `null`, another word) is `undefined`, so no origin is ever guessed.
+ */
+export function browserRunOriginFromWire(value: unknown): BrowserRunOrigin | undefined {
+  return BROWSER_RUN_ORIGINS.find((origin) => origin === value)
 }
 
 /** The answer to one tab's control change (Q2-WS8.I): the tab, who holds it now, and its new epoch. */
@@ -1005,6 +1052,48 @@ export async function compileBrowserProcedure(
       signal,
     },
   )
+}
+
+/** A slot a saved recipe asks for: its name, and its kind (a typed text, or a secret a person supplies). */
+export type BrowserRecipeSlot = { name: string; kind: 'text' | 'secret' }
+
+/**
+ * One saved recipe in the list (Q4-E4.2-4a, `GET /api/v1/browser/recipes`): its metadata and its newest
+ * version number. The list carries no body. `slots` is what the browser panel needs before it can start a
+ * recipe; the gateway's list does not send it yet, so until it does the panel starts no run from the list.
+ */
+export type BrowserSavedRecipe = {
+  recipeId: string
+  name: string
+  description?: string
+  sourceRunId?: string
+  latestVersion: number
+  createdAt?: string
+  updatedAt?: string
+  slots?: BrowserRecipeSlot[]
+}
+
+/** One page of the saved recipes: `nextAfterId` is set while older recipes remain. */
+export type BrowserSavedRecipesResponse = {
+  recipes: BrowserSavedRecipe[]
+  nextAfterId?: string
+}
+
+/** The caller's saved recipes, one page at a time (Q4-E4.2-4a). Mounted only with `BROWSER_RECIPES` on. */
+export async function listBrowserRecipes(
+  orgId: string,
+  options?: { limit?: number; afterId?: string },
+  signal?: AbortSignal,
+): Promise<BrowserSavedRecipesResponse> {
+  const params = new URLSearchParams()
+  if (typeof options?.limit === 'number') params.set('limit', String(options.limit))
+  if (options?.afterId) params.set('afterId', options.afterId)
+  const query = params.toString()
+  return requestJson<BrowserSavedRecipesResponse>(`/api/v1/browser/recipes${query ? `?${query}` : ''}`, {
+    method: 'GET',
+    headers: orgHeaders(orgId),
+    signal,
+  })
 }
 
 export async function suggestBrowserAction(

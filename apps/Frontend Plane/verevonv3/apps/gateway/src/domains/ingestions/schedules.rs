@@ -1,12 +1,15 @@
-//! Ingestion schedules — `GET/POST /api/ingestions/schedules` and the schedule
+//! Ingestion schedules — `GET/POST /api/ingestions/schedules`, the run history of
+//! one schedule at `GET /api/ingestions/schedules/{id}/runs`, and the schedule
 //! lifecycle actions at `POST /api/ingestions/actions`.
 //!
 //! Port of verevonv2's `app/api/ingestions/schedules/route.ts` +
 //! `app/api/ingestions/actions/route.ts`. Schedules are normalized into the
 //! SPA's `ScheduleItem`; actions proxy quarry-control's schedule control verbs.
 
+use std::collections::HashMap;
+
 use axum::{
-    extract::{Extension, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
@@ -97,8 +100,105 @@ fn normalize_schedule(schedule: &Value) -> Value {
         "needsActivation": schedule.get("needs_activation").and_then(Value::as_bool).unwrap_or(false),
         "timezone": str_at(schedule, "timezone"),
         "overlapPolicy": str_at(schedule, "overlap_policy"),
+        "skippedOverlapCount": schedule.get("skipped_overlap_count").and_then(Value::as_u64).unwrap_or(0),
         "target": target,
         "config": config,
+    })
+}
+
+// ── Run history (WS15.S4e) ─────────────────────────────────────────────────
+
+/// The runs a request gets when it names no `limit`. The SPA reads only the newest run,
+/// so a short page is enough.
+const RUN_PAGE: u32 = 10;
+/// The most runs one request may ask the edge for.
+const MAX_RUN_PAGE: u32 = 20;
+/// The longest schedule id the gateway forwards. The edge mints `sch_` and a ULID, far shorter.
+const MAX_SCHEDULE_ID_CHARS: usize = 80;
+/// The terminal reason a skipped fire is registered with (control's `registerScheduledRun`).
+const SCHEDULE_SKIPPED: &str = "schedule_skipped";
+
+/// `GET /api/ingestions/schedules/{id}/runs?limit=` — the newest fires of one schedule, as the
+/// SPA reads them. The edge takes the org from the verified token, so no scoping header is sent.
+/// Each row is normalized to ids, status, reason and times: a fire's parameters (the schedule's
+/// target among them) never leave the gateway.
+pub(super) async fn list_schedule_runs(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(schedule_id) = valid_schedule_id(&id) else {
+        return validation("A schedule id is required.");
+    };
+    let cookie = cookie_header(&headers);
+    let token = quarry_token(&state, &user, &cookie).await;
+
+    let (status, body) = quarry_call(
+        &state,
+        Method::GET,
+        &schedule_runs_path(&schedule_id, &params),
+        None,
+        token.as_deref(),
+        &user.user_id,
+    )
+    .await;
+    if !status.is_success() {
+        return forward(status, body);
+    }
+
+    let runs: Vec<Value> = array_at(&unwrap_data(&body), "items")
+        .iter()
+        .map(run_view)
+        .collect();
+    okay(Value::Array(runs))
+}
+
+/// The edge path of one schedule's run list. `limit` is clamped to 1..=20 (default 10), and the
+/// id is percent-encoded so it cannot change the path. `cursor` is not forwarded: the SPA reads
+/// one page.
+fn schedule_runs_path(schedule_id: &str, params: &HashMap<String, String>) -> String {
+    let limit = params
+        .get("limit")
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .map(|v| v.clamp(1, MAX_RUN_PAGE))
+        .unwrap_or(RUN_PAGE);
+    format!(
+        "/v1/schedules/{}/runs?limit={limit}",
+        urlencoding::encode(schedule_id)
+    )
+}
+
+/// A schedule id as the edge mints it (`sch_` and a ULID): ASCII letters, digits and `_`. Anything
+/// else is refused before a token is minted or a call is made.
+fn valid_schedule_id(raw: &str) -> Option<String> {
+    let id = raw.trim();
+    let well_formed = !id.is_empty()
+        && id.len() <= MAX_SCHEDULE_ID_CHARS
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    well_formed.then(|| id.to_owned())
+}
+
+/// One fire, normalized to the five fields the SPA reads. The specific skip code is recorded on the
+/// `schedule_skipped` event, not on the run row, so a skipped fire reads its registration reason.
+/// Quarry's job insert writes neither `terminal_reason` nor `finished_at`, so a skipped row that
+/// lacks them takes the reason and its finish time (`created_at`, the registration instant) from its
+/// own registration. `startedAt` is `created_at` too: a run row has no start time of its own.
+fn run_view(run: &Value) -> Value {
+    let status = str_at(run, "status");
+    let mut reason = first_str(run, &["terminal_reason"]);
+    let mut finished_at = first_str(run, &["finished_at"]);
+    if status == "skipped" {
+        reason = reason.or_else(|| Some(SCHEDULE_SKIPPED.to_owned()));
+        finished_at = finished_at.or_else(|| first_str(run, &["created_at"]));
+    }
+    json!({
+        "id": str_at(run, "id"),
+        "status": status,
+        "reason": reason,
+        "startedAt": str_or_null(run, "created_at"),
+        "finishedAt": finished_at,
     })
 }
 

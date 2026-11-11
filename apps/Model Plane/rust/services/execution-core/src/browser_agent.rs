@@ -172,6 +172,12 @@ pub enum ActionType {
     Select,
     Back,
     WaitFor,
+    /// QF-16: put a one-time sign-in code from the person's connected mailbox
+    /// into the top-frame field `target` names. Proposed only when
+    /// `PlanConfig::fill_otp` is set; never carries a code (Quarry reads it).
+    /// Each use is approved by a person and runs under a single-use broker
+    /// grant, whose id the gate puts in `value` just before dispatch.
+    FillOtp,
 }
 
 impl ActionType {
@@ -188,6 +194,7 @@ impl ActionType {
             Self::Select => "select",
             Self::Back => "back",
             Self::WaitFor => "wait_for",
+            Self::FillOtp => "fill_otp",
         }
     }
 }
@@ -591,6 +598,10 @@ pub trait BrowserEventSink: Send + Sync {
         _tab_id: &str,
     ) {
     }
+    /// QF-12 (E3.3): the loop took `taken` queued steer messages at a step
+    /// boundary, oldest first. A count only, never the text; never called for
+    /// a ZDR run (a ZDR run takes no steer). The default records nothing.
+    async fn steer_taken(&self, _config: &PlanConfig, _taken: u32) {}
 }
 
 #[derive(Debug, Clone, Default)]
@@ -709,6 +720,72 @@ pub struct PlanConfig {
     /// (`QUARRY_BROWSER_AGENT_OBSERVATION_QUALITY`, default off). Set by the tool
     /// bridge from the process environment, never read in the loop.
     pub observation_quality: bool,
+    /// QF-16: the one mail connection a `fill_otp` step may read a one-time
+    /// code from, and the person's browser bearer the step's single-use broker
+    /// grant is asked for with. `Some` only while `EXECUTION_CORE_BROWSER_FILL_OTP`
+    /// is on, for a leased (not attached), non-ZDR run whose turn selected exactly
+    /// one google or microsoft mail connection. `None` keeps the verb away from
+    /// the planner and refuses one it sends anyway.
+    pub fill_otp: Option<FillOtpOffer>,
+}
+
+/// QF-16: what a run needs to offer the planner a `fill_otp` step. Its `Debug`
+/// prints the connection id and provider only: never the bearer, never the
+/// person's label.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct FillOtpOffer {
+    /// The integration-corev2 connection id (1 to 128 of `[A-Za-z0-9_-]`).
+    pub mail_connection_id: String,
+    /// The provider the connection resolved to: `google` or `microsoft`.
+    pub mail_provider_key: String,
+    /// The person's label for the connection, never a mailbox address (empty
+    /// when the label looked like one).
+    pub mail_account_label: String,
+    /// The run's verified `aud=browser-broker` bearer, used only to ask
+    /// BrowserBroker for the single-use `fill_otp` child grant.
+    pub browser_bearer: String,
+}
+
+impl std::fmt::Debug for FillOtpOffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FillOtpOffer")
+            .field("mail_connection_id", &self.mail_connection_id)
+            .field("mail_provider_key", &self.mail_provider_key)
+            .field("mail_account_label", &"<redacted>")
+            .field("browser_bearer", &"<redacted>")
+            .finish()
+    }
+}
+
+/// QF-16: the switch that lets a browser run fill a one-time code from the
+/// person's mailbox. Only the literal `true` turns it on; the default is off.
+/// Read where the step is admitted (gRPC) and by the tool bridge.
+pub const FILL_OTP_ENV: &str = "EXECUTION_CORE_BROWSER_FILL_OTP";
+
+/// Whether `value` (an env value) turns the one-time-code fill on.
+#[must_use]
+pub fn fill_otp_enabled_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// Whether the one-time-code fill is on in this process.
+#[must_use]
+pub fn fill_otp_enabled() -> bool {
+    fill_otp_enabled_from(std::env::var(FILL_OTP_ENV).ok().as_deref())
+}
+
+/// QF-16: the step failure every refused one-time-code fill carries (denied,
+/// not offered, a non-https page, a child-frame target, no grant).
+pub const OTP_NOT_ALLOWED: &str = "otp_not_allowed";
+const OTP_NOT_ALLOWED_ADVICE: &str =
+    "the one-time code cannot be filled here; ask the person to enter it, or report the task blocked";
+
+impl PlanConfig {
+    /// QF-16: whether the planner may propose `fill_otp` on this run.
+    #[must_use]
+    pub fn fill_otp_offered(&self) -> bool {
+        self.fill_otp.is_some() && !self.zdr && self.attach.is_none()
+    }
 }
 
 /// E3.3-f: the switch for steering a live browser run. execution-core's pause and
@@ -893,6 +970,46 @@ pub struct AgentPlan {
     /// with each call. Set at launch while `EXECUTION_CORE_PLANNER_RUN_ENV` is on;
     /// `None` for an attached run and with the switch off.
     run_environment: Option<String>,
+    /// QF-16: the frame facts of the latest Quarry snapshot a `fill_otp` gate
+    /// needs (each target's own frame id as Quarry reported it, the root frame
+    /// and its origin). Kept only while `fill_otp` is offered; ids and an origin,
+    /// never page text.
+    otp_frames: Option<OtpSnapshotFrames>,
+}
+
+/// QF-16: what the `fill_otp` gate reads of the snapshot a target came from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct OtpSnapshotFrames {
+    snapshot_id: String,
+    generation: u32,
+    /// The frame with no parent, when Quarry reported frames.
+    root_frame_id: Option<String>,
+    /// That frame's origin, as Quarry reported it.
+    root_origin: Option<String>,
+    /// `(ref_id, frame_id)` of every target, the frame id as Quarry sent it
+    /// (the root id included, unlike `BrowserSnapshotTarget::frame_id`).
+    targets: Vec<(String, Option<String>)>,
+}
+
+impl OtpSnapshotFrames {
+    fn of(wire: &crate::quarry_agent::WireObservation) -> Option<Self> {
+        let snapshot = wire.snapshot.as_ref()?;
+        let root = snapshot
+            .frames
+            .iter()
+            .find(|frame| frame.parent_frame_id.is_none());
+        Some(Self {
+            snapshot_id: snapshot.snapshot_id.clone(),
+            generation: snapshot.generation,
+            root_frame_id: root.map(|frame| frame.frame_id.clone()),
+            root_origin: root.and_then(|frame| frame.origin.clone()),
+            targets: snapshot
+                .targets
+                .iter()
+                .map(|target| (target.ref_id.clone(), target.frame_id.clone()))
+                .collect(),
+        })
+    }
 }
 
 impl AgentPlan {
@@ -920,6 +1037,15 @@ impl AgentPlan {
             final_answer: None,
             steer_pending: Vec::new(),
             run_environment: None,
+            otp_frames: None,
+        }
+    }
+
+    /// QF-16: keep the frame facts of `wire` for the `fill_otp` gate, only while
+    /// the verb is offered on this run.
+    fn note_otp_frames(&mut self, wire: &crate::quarry_agent::WireObservation) {
+        if self.config.fill_otp_offered() {
+            self.otp_frames = OtpSnapshotFrames::of(wire);
         }
     }
 
@@ -1566,19 +1692,23 @@ pub async fn run_browser_agent_loop(
                     sink.action_dispatched(&plan.config, &action).await;
                 }
                 let wire_action = crate::quarry_agent::action_to_wire(&action);
+                // QF-16: a one-time-code fill rides a single-use approval grant,
+                // so it is sent once and never replayed.
+                let recover = planner.is_some() && action.action_type != ActionType::FillOtp;
                 match dispatch_step(
                     client,
                     &run,
                     &plan.config,
                     &constraints,
                     wire_action,
-                    planner.is_some(),
+                    recover,
                     planner.and_then(|p| p.step_expect(&action)),
                 )
                 .await
                 {
                     Ok(wire_obs) => {
                         plan.failures.record_success();
+                        plan.note_otp_frames(&wire_obs);
                         if let Some(p) = planner {
                             p.note_wire_observation(&action, &wire_obs);
                         }
@@ -1775,6 +1905,7 @@ pub async fn run_browser_agent_loop(
                                 .await
                                 {
                                     Ok(wire_obs) => {
+                                        plan.note_otp_frames(&wire_obs);
                                         let obs = crate::quarry_agent::observation_from_wire(
                                             &wire_obs,
                                             &action.action_id,
@@ -2651,6 +2782,11 @@ async fn gate_risky_action(
     action: BrowserAction,
     sink: Option<&dyn BrowserEventSink>,
 ) -> PlanStepResult {
+    // QF-16: a one-time-code fill has a gate of its own: a Login approval that
+    // names the origins and the mail connection, then a single-use broker grant.
+    if action.action_type == ActionType::FillOtp {
+        return gate_fill_otp(plan, last_observation, action, sink).await;
+    }
     let focus = plan.focus_hint.clone();
     let Some(category) = classify_action_risk_with_focus(&action, last_observation, focus.as_ref())
     else {
@@ -2718,6 +2854,234 @@ async fn gate_risky_action(
     }
 }
 
+/// QF-16: the gate of a proposed `fill_otp`. The model proposes a target; a
+/// person approves this one use under a Login approval that names the asking
+/// origins and the mail connection; then BrowserBroker issues a single-use
+/// `fill_otp` child of the run grant, bound to one frame, the page's https
+/// origin and the mail connection, under the person's own browser bearer. Its
+/// id rides the action (in `value`) to Quarry, which reads the code itself.
+///
+/// A fill that was not offered, a page that is not a canonical https origin, a
+/// target outside the top frame or off the latest snapshot, a denial, and a
+/// broker refusal all fail the step `otp_not_allowed` with no grant asked for or
+/// used; the planner is told and plans again. A timed-out approval aborts the
+/// run as every other gate does. No code value exists here to send or log.
+async fn gate_fill_otp(
+    plan: &mut AgentPlan,
+    last_observation: Option<&BrowserObservation>,
+    mut action: BrowserAction,
+    sink: Option<&dyn BrowserEventSink>,
+) -> PlanStepResult {
+    // Nothing the planner wrote rides along: the code is Quarry's to read.
+    action.value.clear();
+    let Some(offer) = plan
+        .config
+        .fill_otp
+        .clone()
+        .filter(|_| plan.config.fill_otp_offered())
+    else {
+        return otp_not_allowed(plan);
+    };
+    let Some(binding) = otp_binding(plan, last_observation, &action) else {
+        return otp_not_allowed(plan);
+    };
+
+    let reason = if action.reason.is_empty() {
+        "fill a one-time sign-in code from the connected mailbox into this page".to_owned()
+    } else {
+        format!(
+            "fill a one-time sign-in code from the connected mailbox into this page (model: {})",
+            action.reason
+        )
+    };
+    let detail = RiskyActionDetail {
+        action_id: action.action_id.clone(),
+        action_type: ActionType::FillOtp.as_str().to_owned(),
+        url: last_observation
+            .map(|observation| observation.page_url.clone())
+            .unwrap_or_default(),
+        selector: String::new(),
+        risk_category: RiskCategory::Login,
+        reason,
+        otp: Some(OtpApprovalContext {
+            top_origin: binding.top_origin.clone(),
+            frame_origin: binding.frame_origin.clone(),
+            mail_provider_key: offer.mail_provider_key.clone(),
+            mail_account_label: offer.mail_account_label.clone(),
+        }),
+    };
+    match request_approval(&plan.config, &detail, sink).await {
+        ApprovalOutcome::Granted => {}
+        // E3.2-c: a redirect replans exactly as it does for any other gate.
+        ApprovalOutcome::Redirect(text) if plan.accept_redirect(&action, &text) => {
+            plan.status = PlanStatus::Executing;
+            return PlanStepResult::Rejected;
+        }
+        ApprovalOutcome::Denied(_) | ApprovalOutcome::Redirect(_) => {
+            return otp_not_allowed(plan);
+        }
+        ApprovalOutcome::TimedOut => {
+            plan.status = PlanStatus::Aborted;
+            return PlanStepResult::Aborted {
+                reason: "browser action approval timed out".to_owned(),
+                abort_reason: BrowserAbortReason::ApprovalTimedOut,
+            };
+        }
+    }
+
+    use crate::browser_session::BrowserBroker as _;
+    let session_key = otp_session_key(&plan.config.plan_id, &action.action_id);
+    let grant = crate::browser_session::FillOtpGrant {
+        org_id: &plan.config.org_id,
+        parent_grant_id: &plan.config.grant_id,
+        session_key: &session_key,
+        host: &binding.host,
+        frame_ids: &binding.frame_ids,
+        grant_origin: &binding.top_origin,
+        mail_connection_id: &offer.mail_connection_id,
+    };
+    match crate::browser_session::production_broker()
+        .acquire_fill_otp_grant(&offer.browser_bearer, grant)
+        .await
+    {
+        Ok(approval_grant_id) if !approval_grant_id.trim().is_empty() => {
+            action.value = approval_grant_id;
+            PlanStepResult::Action(action)
+        }
+        Ok(_) => otp_not_allowed(plan),
+        Err(error) => {
+            warn!(
+                plan_id = %plan.config.plan_id,
+                error = ?error,
+                "fill_otp approval grant refused by the broker"
+            );
+            otp_not_allowed(plan)
+        }
+    }
+}
+
+/// QF-16: the origins and frame a `fill_otp` approval and its grant are bound to.
+struct OtpBinding {
+    /// Canonical https origin of the page (scheme, lowercase host, a port only
+    /// when it is not 443).
+    top_origin: String,
+    /// Origin of the frame that holds the field: the top frame's, equal to
+    /// `top_origin` (Quarry fills only in the top frame).
+    frame_origin: String,
+    /// The host of `top_origin`, the one domain the grant names.
+    host: String,
+    /// The target's frame id as Quarry reported it: one id, or none when Quarry
+    /// gave the target none.
+    frame_ids: Vec<String>,
+}
+
+/// QF-16: the binding of a proposed fill, or `None` when it may not be offered:
+/// no successful page, a page that is not a canonical https origin or not on
+/// the plan's domains, a target that is not on the latest snapshot or sits in a
+/// child frame, or a top frame whose origin is not the page's.
+fn otp_binding(
+    plan: &AgentPlan,
+    last_observation: Option<&BrowserObservation>,
+    action: &BrowserAction,
+) -> Option<OtpBinding> {
+    let observation =
+        last_observation.filter(|observation| observation.status == ObservationStatus::Success)?;
+    let target = action.target.as_ref()?;
+    // Quarry's `fill_otp_ref` has no frame variant: a child-frame target fails.
+    if target.frame_id.is_some() {
+        return None;
+    }
+    if observation.dom_snapshot_ref != target.snapshot_id
+        || observation.snapshot_generation != Some(target.generation)
+    {
+        return None;
+    }
+    let frames = plan.otp_frames.as_ref()?;
+    if frames.snapshot_id != target.snapshot_id || frames.generation != target.generation {
+        return None;
+    }
+    let (_, frame_id) = frames
+        .targets
+        .iter()
+        .find(|(ref_id, _)| *ref_id == target.ref_id)?;
+    if frame_id.is_some() && *frame_id != frames.root_frame_id {
+        return None;
+    }
+    if !plan.is_domain_allowed(&observation.page_url) {
+        return None;
+    }
+    let (top_origin, host) = canonical_https_origin(&observation.page_url)?;
+    let frame_origin = match frames.root_origin.as_deref() {
+        Some(origin) => canonical_https_origin(origin)?.0,
+        None => top_origin.clone(),
+    };
+    if frame_origin != top_origin {
+        return None;
+    }
+    Some(OtpBinding {
+        top_origin,
+        frame_origin,
+        host,
+        frame_ids: frame_id.iter().cloned().collect(),
+    })
+}
+
+/// QF-16: `(origin, host)` of an https URL in the canonical form BrowserBroker
+/// checks: `https://` + a lowercase DNS host (no IP literal, no trailing dot) +
+/// a port only when it is not 443, with no user info. `None` for anything else.
+fn canonical_https_origin(url: &str) -> Option<(String, String)> {
+    let parsed = reqwest::Url::parse(url.trim()).ok()?;
+    if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some()
+    {
+        return None;
+    }
+    let host = parsed.domain()?.to_ascii_lowercase();
+    if host.is_empty() || host.ends_with('.') {
+        return None;
+    }
+    let origin = match parsed.port() {
+        Some(port) => format!("https://{host}:{port}"),
+        None => format!("https://{host}"),
+    };
+    Some((origin, host))
+}
+
+/// QF-16: the broker's idempotency key for one fill: the plan and the action,
+/// kept to printable id characters and bounded.
+fn otp_session_key(plan_id: &str, action_id: &str) -> String {
+    format!("fill_otp:{plan_id}:{action_id}")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-' | '.'))
+        .take(200)
+        .collect()
+}
+
+/// QF-16: a refused one-time-code fill is a recoverable step failure the
+/// planner is told about, counted like an admission rejection. Nothing reaches
+/// Quarry.
+fn otp_not_allowed(plan: &mut AgentPlan) -> PlanStepResult {
+    warn!(
+        plan_id = %plan.config.plan_id,
+        kind = OTP_NOT_ALLOWED,
+        "one-time-code fill refused before Quarry"
+    );
+    let verdict = plan.failures.record(ActionFailure {
+        step: plan.current_step,
+        action_type: ActionType::FillOtp.as_str(),
+        kind: OTP_NOT_ALLOWED,
+        advice: OTP_NOT_ALLOWED_ADVICE,
+    });
+    if let FailureVerdict::Stop(reason) = verdict {
+        plan.status = PlanStatus::Failed;
+        return PlanStepResult::Stopped {
+            reason,
+            kind: BrowserFailureKind::RepeatedFailure,
+        };
+    }
+    plan.status = PlanStatus::Executing;
+    PlanStepResult::Rejected
+}
+
 /// Route a gate request to the sink, failing CLOSED when none is wired. In
 /// production `execute_step`'s gRPC handler always constructs a real sink
 /// (`grpc.rs`); `None` is only reachable from a caller (e.g. a unit test)
@@ -2780,7 +3144,12 @@ async fn wait_out_pause_or_cancel(
                         sink.run_resumed(&plan.config).await;
                     }
                 }
-                take_steer_texts(plan, state);
+                let taken = take_steer_texts(plan, state);
+                if taken > 0 {
+                    if let Some(sink) = sink {
+                        sink.steer_taken(&plan.config, taken).await;
+                    }
+                }
                 return None;
             }
         }
@@ -2793,14 +3162,19 @@ async fn wait_out_pause_or_cancel(
 /// is left alone. It is text and nothing else: a pending approval is decided by the
 /// approval gate, never by this, and the allowed domains are the plan's alone. At most
 /// `MAX_QUEUED_MESSAGES` are kept (the newest win).
-fn take_steer_texts(plan: &mut AgentPlan, state: &crate::state::StateStore) {
+///
+/// QF-12: returns how many queued messages were taken off the run's queue (0 when
+/// nothing was taken or the queue was left alone), so the caller can publish the
+/// count-only `BrowserSteerTaken` event.
+fn take_steer_texts(plan: &mut AgentPlan, state: &crate::state::StateStore) -> u32 {
     if !plan.config.steer || !plan.planner_active || plan.config.zdr {
-        return;
+        return 0;
     }
     let taken = state.take_steer(&plan.config.run_id);
     if taken.is_empty() {
-        return;
+        return 0;
     }
+    let count = u32::try_from(taken.len()).unwrap_or(u32::MAX);
     for text in taken {
         if let Some(text) = bound_steer_text(&text) {
             plan.steer_pending.push(text);
@@ -2816,6 +3190,7 @@ fn take_steer_texts(plan: &mut AgentPlan, state: &crate::state::StateStore) {
         messages = plan.steer_pending.len(),
         "steer text taken at the step boundary"
     );
+    count
 }
 
 /// In-memory plan store for tracking active browser-agent plans.

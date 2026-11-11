@@ -21,7 +21,7 @@ import {
 } from '@/shared/api/browser-client'
 import { changeBrowserControl, STALE_CONTROL_COPY } from '@/features/browser/dock/browser-control'
 import { gatewayBaseUrl } from '@/shared/api/config'
-import { createAiRunStartKeyring, startBrowserAiRun } from '@/shared/api/browser-run-client'
+import { createAiRunStartKeyring, startBrowserAiRun, type BrowserTabMarkOnComplete } from '@/shared/api/browser-run-client'
 import { streamRunEvents } from '@/shared/api/run-console-client'
 import { decideApproval as decideApprovalRequest, listApprovals, type ApprovalDecision } from '@/shared/api/orchestration-client'
 import {
@@ -77,6 +77,12 @@ export type BrowserSessionControllerOptions = {
   tr?: (noText: string, enText: string) => string
 }
 
+/** The person's choices for one AI browser run (WS8.J). */
+export type BrowserAiRunStartOptions = {
+  /** "Keep the agent's tab open when done". Omitted: the server default, which keeps the tab open. */
+  keepTabOpen?: boolean
+}
+
 export type BrowserSessionController = {
   /** The preview that carries the session (null when no session is open). */
   preview: () => ScrapePreview | null
@@ -103,7 +109,8 @@ export type BrowserSessionController = {
   refreshTimeline: (sessionId?: string) => Promise<void>
   /** Applies an observation pushed over the session socket. */
   applySocketObservation: (observation: BrowserObservation, session?: BrowserSession) => void
-  startAiRun: (goal: string) => Promise<void>
+  /** Starts the capped AI loop. `startOptions.keepTabOpen` is the person's choice for the agent's tab when done. */
+  startAiRun: (goal: string, startOptions?: BrowserAiRunStartOptions) => Promise<void>
   pauseAiRun: () => void
   resumeAiRun: () => void
   stopAiRun: () => void
@@ -118,6 +125,19 @@ const TIMELINE_LIMIT = 100
 const VIEWPORT = { width: 1280, height: 800 }
 
 const passThrough = (_noText: string, enText: string) => enText
+
+/**
+ * The tab mark the person's choice sends (WS8.J). Undefined when there is no choice, and always under zero
+ * retention, where attach is refused and so no mark is sent.
+ */
+function tabMarkOnCompleteFor(
+  startOptions: BrowserAiRunStartOptions | undefined,
+  zdr: boolean,
+): BrowserTabMarkOnComplete | undefined {
+  const keepTabOpen = startOptions?.keepTabOpen
+  if (zdr || keepTabOpen === undefined) return undefined
+  return keepTabOpen ? 'deliverable' : 'none'
+}
 
 export function createBrowserSessionController(
   options: BrowserSessionControllerOptions,
@@ -387,7 +407,7 @@ export function createBrowserSessionController(
   const pauseAiRun = () => loop.requestPause()
   const resumeAiRun = () => loop.requestResume()
 
-  const startAiRun = async (goal: string): Promise<void> => {
+  const startAiRun = async (goal: string, startOptions?: BrowserAiRunStartOptions): Promise<void> => {
     const id = orgIdNow()
     const sessionId = currentSessionId()
     if (!id || !sessionId) return
@@ -401,7 +421,13 @@ export function createBrowserSessionController(
     aiRunAbort = abort
     let dispatchCount = 0
     try {
-      const startParams = { goal, maxSteps: BROWSER_AI_LOOP_MAX_STEPS }
+      const tabMarkOnComplete = tabMarkOnCompleteFor(startOptions, options.zdr())
+      // Named only when the person has a choice, so a plain start's request is unchanged.
+      const startParams = {
+        goal,
+        maxSteps: BROWSER_AI_LOOP_MAX_STEPS,
+        ...(tabMarkOnComplete ? { tabMarkOnComplete } : {}),
+      }
       let run: Awaited<ReturnType<typeof startBrowserAiRun>>
       try {
         run = await startBrowserAiRun(id, sessionId, startParams, abort.signal, {

@@ -62,7 +62,15 @@ import type {
   BrowserTab,
   CreatableBrowserProfileScope,
 } from '@/shared/api/browser-client'
-import { streamBrowserEvents } from '@/shared/api/browser-client'
+import {
+  browserErrorMessage,
+  controlBrowserTab,
+  getBrowserSession,
+  stopBrowserAttach,
+  streamBrowserEvents,
+} from '@/shared/api/browser-client'
+import { ApiError } from '@/shared/api/http'
+import { getSession } from '@/shared/session/session-store'
 import { browserActionTarget, type BrowserActionTarget } from './browser-action-target'
 import type { ApprovalDecision } from '@/shared/api/orchestration-client'
 import { ERROR_COPY } from '@/shared/i18n/errors'
@@ -233,6 +241,27 @@ function browserKeyFromKeyboardEvent(event: KeyboardEvent): string | null {
   return event.key
 }
 
+/**
+ * Quarry's compare-and-set refusal on a tab's epoch (Q2-WS8.I, 409). The gateway passes Quarry's envelope through,
+ * which carries it as code CONFLICT with this message, so the message is read as well as a typed code.
+ */
+function isStaleTabEpoch(reason: unknown): boolean {
+  return reason instanceof ApiError
+    && reason.status === 409
+    && (reason.code === 'stale_tab_epoch' || reason.message === 'stale_tab_epoch')
+}
+
+/** Copy for a tab change or a Stop agent refused for a reason that has no row of its own in errors.ts. */
+const TAB_CHANGE_FALLBACK = {
+  no: 'Kunne ikke endre hvem som styrer fanen. Prøv igjen.',
+  en: 'Could not change who controls the tab. Try again.',
+}
+const STOP_AGENT_FALLBACK = {
+  no: 'Kunne ikke stoppe agenten. Prøv igjen.',
+  en: 'Could not stop the agent. Try again.',
+}
+
+type TabControlAction = 'take_over' | 'give_back'
 type DevtoolsTab = 'console' | 'dom' | 'network' | 'vision' | 'egress'
 type BrowserWheelAction = Extract<BrowserAction, { type: 'mouse_wheel' }>
 type LiveFrameStreamPayload = {
@@ -606,6 +635,10 @@ export function BrowserChrome(props: {
   const [liveFrameTick, setLiveFrameTick] = createSignal(0)
   const [actionTarget, setActionTarget] = createSignal<BrowserActionTarget | null>(null)
   const [frameAspectMatches, setFrameAspectMatches] = createSignal(false)
+  // Q2-WS8.I per-tab control and Stop agent: one change at a time, its refusal, and the take-over notice's tab.
+  const [tabActionPending, setTabActionPending] = createSignal(false)
+  const [tabActionError, setTabActionError] = createSignal<string | null>(null)
+  const [takeOverTabId, setTakeOverTabId] = createSignal<string | null>(null)
   // Tab context menu (WS9 tab strip, behind VITE_BROWSER_TAB_MENU=true).
   const [tabMenu, setTabMenu] = createSignal<{ tabId: string } | null>(null)
   const tabMenuEnabled = () => import.meta.env.VITE_BROWSER_TAB_MENU === 'true'
@@ -909,8 +942,83 @@ export function BrowserChrome(props: {
    */
   const approvalTakeOver = () =>
     browserControlModeDisabled() || humanTakeoverActive() ? undefined : toggleBrowserControlMode
+  // Q2-WS8.I: the owner's per-tab control and Stop agent. The org is the active one in the session store, as the
+  // evidence panels read it. The calls are the REST routes: the action registry has no gateway executor for them.
+  const currentOrgId = () => getSession().activeOrg?.id ?? ''
+  const activeTabId = () => session().tabs.find((tab) => tab.active)?.tabId ?? null
+  const attachLive = () => session().attach?.state === 'attached'
+  // The per-tab control of an agent-opened tab, from its holder. Absent without the tab_control capability.
+  const tabControlFor = (tab: BrowserTab): TabControlAction | null => {
+    if (tab.openedBy !== 'agent' || !session().capabilities.includes('tab_control')) return null
+    if (tab.holder === 'agent') return 'take_over'
+    return tab.holder === 'human' && Boolean(tab.attachId) && attachLive() ? 'give_back' : null
+  }
+  const tabControlCopy = (action: TabControlAction) => action === 'take_over'
+    ? { text: i18n.tr('Ta over', 'Take over'), hint: i18n.tr('Ta over fanen fra agenten', 'Take over this tab from the agent') }
+    : { text: i18n.tr('Gi tilbake', 'Give back'), hint: i18n.tr('Gi fanen tilbake til agenten', 'Give this tab back to the agent') }
+  const tabMarkLabel = (mark: 'deliverable' | 'handoff') =>
+    mark === 'deliverable' ? i18n.tr('Levert', 'Delivered') : i18n.tr('Overlevert', 'Handed off')
+  // Typing into a tab an agent holds is the person's take-over (implicit in Quarry, ADR-3); the notice says so.
+  const noteTakeOverFromKeystroke = () => {
+    const tab = session().tabs.find((item) => item.active)
+    if (tab?.holder === 'agent' && session().capabilities.includes('tab_control')) setTakeOverTabId(tab.tabId)
+  }
+  const takeOverNoticeVisible = () => takeOverTabId() !== null && takeOverTabId() === activeTabId()
+  // Stop agent (Q2-WS8.I): an entry in the tab menu while a live attached agent exists.
+  const stopAgentMenuEntry = () => attachLive() && session().capabilities.includes('attach')
+    ? { label: i18n.tr('Stopp agenten', 'Stop agent'), disabled: controlsDisabled() || tabActionPending() }
+    : null
+  // The projection Quarry reports now goes to the host through its socket-observation channel, which applies the
+  // session and keeps its capabilities. A host without that channel takes the change on its next update.
+  const refreshBrowserProjection = async (orgId: string, sessionId: string) => {
+    const onObservation = props.onBrowserSocketObservation
+    if (!onObservation) return
+    const response = await getBrowserSession(orgId, sessionId)
+    const observation = response.observation ?? session().observation
+    if (observation) onObservation(observation, response.session)
+  }
+  // One change at a time. A refused change says why (errors.ts); a stale tab epoch also refetches the projection, so
+  // the chip shows who holds the tab now. A change that went through keeps its success when the refresh fails.
+  const runTabChange = async (
+    change: (orgId: string, sessionId: string) => Promise<unknown>,
+    fallback: { no: string; en: string },
+  ) => {
+    const sessionId = session().sessionId
+    const orgId = currentOrgId()
+    if (!sessionId || !orgId || tabActionPending()) return
+    setTabActionPending(true)
+    setTabActionError(null)
+    let changed = false
+    try {
+      await change(orgId, sessionId)
+      changed = true
+      setTakeOverTabId(null)
+      await refreshBrowserProjection(orgId, sessionId)
+    } catch (reason) {
+      if (!changed) {
+        const stale = isStaleTabEpoch(reason)
+        if (stale) await refreshBrowserProjection(orgId, sessionId).catch(() => undefined)
+        setTabActionError(browserErrorMessage(reason, i18n.tr, stale ? ERROR_COPY.stale_tab_epoch : fallback))
+      } else {
+        setTabActionError(browserErrorMessage(reason, i18n.tr))
+      }
+    } finally {
+      setTabActionPending(false)
+    }
+  }
+  const changeTabHolder = (tabId: string, holder: 'human' | 'agent') => {
+    const tab = session().tabs.find((item) => item.tabId === tabId)
+    if (!tab) return Promise.resolve()
+    // Compare-and-set on the tab epoch the person saw: a tab that changed hands since is refused (409).
+    return runTabChange((orgId, sessionId) => controlBrowserTab(orgId, sessionId, tabId, holder, tab.tabEpoch), TAB_CHANGE_FALLBACK)
+  }
+  const stopAgent = () => attachLive()
+    ? runTabChange((orgId, sessionId) => stopBrowserAttach(orgId, sessionId), STOP_AGENT_FALLBACK)
+    : Promise.resolve()
   const runAction = (action: BrowserAction) => {
     if (controlsDisabled()) return
+    // Typing (press, type) into an agent-held tab is the person's take-over: the notice shows before the key goes.
+    if (action.type === 'press' || action.type === 'type') noteTakeOverFromKeystroke()
     if (!(action.type === 'navigate' && props.browserNavigationError && props.onBrowserAction) && sendBrowserWsAction(action)) return
     props.onBrowserAction?.(action)
   }
@@ -1480,6 +1588,7 @@ export function BrowserChrome(props: {
       controlsDisabled: controlsDisabled(),
       hasCloseHandler: Boolean(props.onBrowserCloseTab),
       outsideUrl: tabOutsideUrl(tab),
+      stopAgent: stopAgentMenuEntry(),
     })
   }
   // Runs a chosen tab-menu item. The action is parsed through the contract before any handler sees it, and
@@ -1503,6 +1612,8 @@ export function BrowserChrome(props: {
       void prepareNewTabNavigation()
     } else if (action.type === 'browser.tab.close') {
       void props.onBrowserCloseTab?.(action.tabId)
+    } else if (action.type === 'browser.attach.stop') {
+      void stopAgent()
     }
     return true
   }
@@ -1556,6 +1667,15 @@ export function BrowserChrome(props: {
         document.removeEventListener('pointerdown', onPointerDown, true)
         document.removeEventListener('keydown', onKeyDown)
       }
+    },
+  )
+
+  // The take-over notice and a tab error belong to the tab they were raised on.
+  createEffect(
+    () => activeTabId(),
+    () => {
+      setTakeOverTabId(null)
+      setTabActionError(null)
     },
   )
 
@@ -1613,6 +1733,13 @@ export function BrowserChrome(props: {
                     <span class="knowledge-browser-tab__dot" data-status={session().status} aria-hidden="true" />
                     <Show when={!props.personalBrowsing}><span class="knowledge-browser-tab__mode">Live</span></Show>
                     <strong class="knowledge-browser-tab__label">{liveTabLabel(tab)}</strong>
+                    <Show when={tab.mark}>
+                      {(mark) => (
+                        <span class="knowledge-browser-tab__mode" data-mark={mark()} title={tabMarkLabel(mark())}>
+                          {tabMarkLabel(mark())}
+                        </span>
+                      )}
+                    </Show>
                   </button>
                   <Show when={tab.openedBy === 'agent' && !tab.active}>
                     <button
@@ -1628,6 +1755,20 @@ export function BrowserChrome(props: {
                     >
                       Vis
                     </button>
+                  </Show>
+                  <Show when={tabControlFor(tab)}>
+                    {(action) => (
+                      <button
+                        type="button"
+                        class="knowledge-browser-tab__reveal"
+                        aria-label={tabControlCopy(action()).hint}
+                        title={tabControlCopy(action()).hint}
+                        disabled={controlsDisabled() || tabActionPending()}
+                        onClick={() => void changeTabHolder(tab.tabId, action() === 'take_over' ? 'human' : 'agent')}
+                      >
+                        {tabControlCopy(action()).text}
+                      </button>
+                    )}
                   </Show>
                   </>
                 )}
@@ -2538,6 +2679,19 @@ export function BrowserChrome(props: {
           continueDisabled={assistantBrowser.taskBusy?.()}
           onChangeMode={cannotGiveAgentControl() ? undefined : (mode, expectedEpoch) => props.onBrowserControlMode?.(mode, expectedEpoch)}
         />
+      </Show>
+      <Show when={isLive() && takeOverNoticeVisible()}>
+        <p class="knowledge-browser-takeover-notice" role="status" aria-live="polite">
+          <Hand class="size-3" aria-hidden="true" />
+          <span>{i18n.tr('Du tar over', 'You are taking over')}</span>
+        </p>
+      </Show>
+      <Show when={isLive() && tabActionError()}>
+        {(message) => (
+          <p class="knowledge-browser-takeover-notice knowledge-browser-takeover-notice--error" role="alert">
+            {message()}
+          </p>
+        )}
       </Show>
       <Show when={isLive()}>
         <BrowserBlockedNotice

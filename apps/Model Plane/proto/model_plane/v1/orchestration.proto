@@ -1709,6 +1709,10 @@ message OrchestrationEvent {
     // user's browser session and reuses the owner's shared cookie jar. Ids only:
     // no URL, no title.
     BrowserAttachSharedJar browser_attach_shared_jar = 30;
+    // Steer at the pause boundary (build plan 3.3 E3.3, tag 31 — additive).
+    // A browser run's loop took queued user steer messages into its next
+    // round. A count only: the steer text never rides this event.
+    BrowserSteerTaken browser_steer_taken = 31;
   }
 
   message PlanTransitioned {
@@ -1872,6 +1876,19 @@ message OrchestrationEvent {
     string session_run_id = 4;
     // Identifier of the browser tab the delegate attached to.
     string tab_id = 5;
+  }
+
+  // A browser run's loop took queued user steer messages at a round
+  // boundary (build plan 3.3 E3.3, tag 31). Lets the client mark its oldest
+  // queued steers delivered, FIFO. Never emitted for a ZDR run (a ZDR run
+  // takes no steer). A count only: no steer text ever rides this event.
+  message BrowserSteerTaken {
+    // Run this browser session belongs to (stream key).
+    string run_id = 1;
+    // Plan the browser run belongs to.
+    string plan_id = 2;
+    // Number of queued steer messages the loop took, oldest first.
+    uint32 taken = 3;
   }
 
   // A browser action was classified risky (login, checkout, posting a form,

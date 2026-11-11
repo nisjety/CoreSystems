@@ -953,9 +953,11 @@ const monitoringCheckNowInput = z.object({
 })
 
 // The gateway accepts only the fixed cadences; Quarry derives the cron from them.
+// `tag` is the optional operator label, one per monitor: lowercase, the edge's grammar.
 const monitoringCreateMonitorInput = z.object({
   url: z.string().url(),
   preset: z.enum(['hourly', 'daily', 'weekly']).optional(),
+  tag: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,31}$/).optional(),
 })
 
 const monitoringDeleteMonitorInput = z.object({
@@ -2205,6 +2207,11 @@ const browserRunStartInput = z.object({
   // runs are unattached, so the owner refuses it with requireAttached (recipe_attach_unsupported).
   // Slot values are user data, never logged.
   recipe: browserRunRecipeInput.optional(),
+  // What an attached run leaves on the agent's tab when it completes (WS8.J): `none` closes it, while
+  // `deliverable` (the server default when absent) and `handoff` keep it open for the person. Only an
+  // attached run takes it: the owner drops it on a run that does not attach, and refuses it with
+  // requireAttached when attach is off (browser_tab_mark_requires_attach).
+  tabMarkOnComplete: z.enum(['none', 'deliverable', 'handoff']).optional(),
 })
 
 const browserRunControlInput = z.object({
