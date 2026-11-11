@@ -266,6 +266,34 @@ message GetGoalTurnForJudgeResponse {
   bool found = 5;
 }
 
+// Read the names and closed statuses of the tool calls one run reserved, for the completion judge's
+// evidence. Only model-gateway may read it, for a run of its own org. A run that is not persistent
+// (zero-retention or waived) is refused; no row of such a run is ever read.
+message ListRunToolCallsForJudgeRequest {
+  // The org the run belongs to; must match the caller's org.
+  string org_id = 1;
+  // The run whose tool calls to list.
+  string run_id = 2;
+}
+
+// One tool call of a run as the judge may cite it: its ids and its status, never its arguments,
+// digests or results.
+message JudgeToolCall {
+  // The ledger's action id for the call.
+  string action_id = 1;
+  // Canonical tool name the call was reserved under.
+  string tool = 2;
+  // "reserved", "completed", "failed", "not_run" or "unknown_outcome".
+  string status = 3;
+}
+
+// The tool calls a run reserved, in reservation order (ties by action id), at most 200. A run that
+// kept no ledger rows answers an empty list; an empty list is not proof that no tool ran.
+message ListRunToolCallsForJudgeResponse {
+  // One entry per ledger row of the run, in reservation order.
+  repeated JudgeToolCall calls = 1;
+}
+
 // EP-7 S1. The thread goal store, hosted by session-core. Off unless
 // SESSION_CORE_THREAD_GOALS_ENABLED is the literal `true`; while off every RPC
 // answers `unavailable` `thread_goals_disabled`. Every RPC refuses a
@@ -307,4 +335,7 @@ service ThreadGoalService {
   // EP-7 S6. Read the unattended turn of one scheduled fire for the completion judge (model-gateway
   // only). Like RecordGoalVerdict it checks the org, not an owner.
   rpc GetGoalTurnForJudge(GetGoalTurnForJudgeRequest) returns (GetGoalTurnForJudgeResponse);
+  // Read the names and statuses of the tool calls one run reserved, for the completion judge's
+  // evidence (model-gateway only). Checks the org, not an owner; refuses a run that is not persistent.
+  rpc ListRunToolCallsForJudge(ListRunToolCallsForJudgeRequest) returns (ListRunToolCallsForJudgeResponse);
 }

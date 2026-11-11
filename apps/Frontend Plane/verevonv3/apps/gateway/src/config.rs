@@ -238,6 +238,14 @@ pub(crate) struct SpaceFeatureFlags {
     /// Read once in `build_state`, and only the literal `true` turns it on: unlike the other Space flags
     /// it never defaults on in development, so every other value leaves the follow-up as it was.
     pub(crate) append_retrieval: bool,
+    /// `SPACE_THREAD_SCOPE_RESOLVE` (D2-461): a chat turn on an existing thread that omits `space_ref`
+    /// resolves the thread's Space from Session Core (owner-bound by-id lookup) and continues the scoped
+    /// decision path, or is refused with a typed error; it never falls through to an organisation-wide
+    /// search. Read once in `build_state`, and only the literal `true` turns it on, never by default in
+    /// development. Off, a turn with no `space_ref` is untouched. A rollout control, never an
+    /// authorization input: Control signs the decision and the Model Plane service enforces it. The
+    /// lookup stores nothing, so Zero Data Retention callers are unaffected.
+    pub(crate) thread_scope_resolve: bool,
     /// `GATEWAY_SPACE_MEMORY_UI` (EP-8 S7): the Space memory routes (`GET /api/v1/spaces/{space_ref}/memory`,
     /// `DELETE .../memory/{memory_id}`). Only the literal `true` turns it on, never by default in development.
     /// Off answers 404 `feature_unavailable`. A rollout control, never an authorization input: Control's
@@ -537,6 +545,7 @@ impl SpaceFeatureFlags {
             mention_records_api: space_flag("SPACE_MENTION_RECORDS_API"),
             approval_scopes: space_flag("SPACE_APPROVAL_SCOPES_ENABLED"),
             append_retrieval: env::var("GATEWAY_SPACE_APPEND_RETRIEVAL").is_ok_and(|value| value == "true"),
+            thread_scope_resolve: env::var("SPACE_THREAD_SCOPE_RESOLVE").is_ok_and(|value| value == "true"),
             memory_ui: env::var("GATEWAY_SPACE_MEMORY_UI").is_ok_and(|value| value == "true"),
             agent_version_pinning: env::var("AGENT_VERSION_PINNING").is_ok_and(|value| value == "true"),
             chat_locale_hint: space_flag("CHAT_LOCALE_HINT"),

@@ -9650,7 +9650,30 @@ impl SessionCore for SessionService {
                     return Ok(Response::new(skill_write_skipped("origin_requires_person")));
                 };
                 match req.scope.as_str() {
-                    "" | "org" => ("org", String::new(), "accepted", req.enabled),
+                    "" | "org" => {
+                        // An org-wide skill is enabled for everyone in the org, so under
+                        // SKILL_ORG_ADMIN_CHECK only a person holding the org admin role in
+                        // the verified credential may write one, the rule capability-core's
+                        // registry_apis applies to a human org write. Session Core decides
+                        // it; the BFF does not. Only the typed reason is logged, no skill text.
+                        if crate::auth::skill_org_admin_check_enabled(
+                            std::env::var(crate::auth::SKILL_ORG_ADMIN_CHECK_ENV)
+                                .ok()
+                                .as_deref(),
+                        ) && !caller.is_org_admin()
+                        {
+                            info!(
+                                org_id = %req.org_id,
+                                actor = %caller.principal_id(),
+                                reason = "org_scope_requires_admin",
+                                "agent skill org write skipped"
+                            );
+                            return Ok(Response::new(skill_write_skipped(
+                                "org_scope_requires_admin",
+                            )));
+                        }
+                        ("org", String::new(), "accepted", req.enabled)
+                    }
                     "user" => {
                         if !req.owner_user_id.is_empty() {
                             caller.authorize_user(&req.owner_user_id)?;

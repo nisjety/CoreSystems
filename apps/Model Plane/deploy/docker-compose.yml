@@ -258,6 +258,13 @@ services:
       MODEL_GATEWAY_POLICY_EFFECTIVE: ${MODEL_GATEWAY_POLICY_EFFECTIVE:-false}
       # W4-BYO-6: a turn may name one of the user's customer-gateway model connections (text-only, never zero retention). Literal true only.
       MODEL_GATEWAY_BYO_GATEWAY: ${MODEL_GATEWAY_BYO_GATEWAY:-false}
+      # WS18-S2 (D2-460): graph grounding forwards the Space read decision on a scoped turn and never reaches the
+      # organisation-wide graph without one. The Data Plane graph endpoint refuses a Space decision today (403), so a
+      # scoped turn loses graph entities until it enforces one. Off by default; only the literal `true`.
+      MODEL_GATEWAY_GRAPH_SPACE_SCOPE: ${MODEL_GATEWAY_GRAPH_SPACE_SCOPE:-false}
+      # D2-698: the per-run cost and token caps take the smaller of the request cap and the org ceiling, so a caller can
+      # only tighten the org limit. Off, a request cap replaces the org ceiling. Off by default; only the literal `true`.
+      MODEL_GATEWAY_CAP_MIN: ${MODEL_GATEWAY_CAP_MIN:-false}
       # W4-PL-1 (F-t3-059): the switch capability-core also reads. On, a plugin registered through this gateway needs a
       # git_commit SHA or archive sha256 pin, or it is refused. Off by default; only the literal `true` enables it.
       PLUGIN_LOADER_ENABLED: ${PLUGIN_LOADER_ENABLED:-false}
@@ -1284,6 +1291,9 @@ services:
       APPROVAL_AUDIT_EVENTS_ENABLED: ${APPROVAL_AUDIT_EVENTS_ENABLED:-false}
       # EP-10 S4: the owner's edit of a pending approval before it is decided. Only the literal true.
       APPROVAL_EDIT_ENABLED: ${APPROVAL_EDIT_ENABLED:-false}
+      # D2-1149: refuse an approval create or decide from a waived run's credential before any metadata is
+      # stored (DEC-32). Off by default; only the literal true turns it on.
+      APPROVAL_WAIVER_REFUSE: ${APPROVAL_WAIVER_REFUSE:-false}
       # WS03-S8: park a crashed run instead of ending it (needs park recovery and the fold store on). Off by
       # default and owner-gated: the executor half is not built, so the worker parks nothing yet.
       SESSION_CORE_CRASH_PARK_ENABLED: ${SESSION_CORE_CRASH_PARK_ENABLED:-false}
@@ -1304,6 +1314,9 @@ services:
       SESSION_RUN_ORIGIN_INHERIT: ${SESSION_RUN_ORIGIN_INHERIT:-false}
       # EP-12 S4: admit the api_key principal on its closed method list. Only the literal true.
       SESSION_CORE_API_KEY_PRINCIPAL: ${SESSION_CORE_API_KEY_PRINCIPAL:-false}
+      # D2-509: a person writing an org-wide skill (UpsertAgentSkill, origin user, scope org) must hold the org admin role;
+      # a non-admin gets the typed skip org_scope_requires_admin. Only the literal true turns it on.
+      SKILL_ORG_ADMIN_CHECK: ${SKILL_ORG_ADMIN_CHECK:-false}
       # EP-14 S7: the request inspector read (GetRequestSnapshot). Only the literal true.
       SESSION_CORE_REQUEST_INSPECTOR_READ: ${SESSION_CORE_REQUEST_INSPECTOR_READ:-false}
       # EP-3 S2: the ArtifactRevisionService store. Only the literal true.
@@ -2072,6 +2085,11 @@ services:
       # per-run overlay writes (workspace_edit, workspace_put). cap.workspace.read and cap.workspace.write stay
       # unattested until then. ZDR and non-Space runs never get them; plan mode refuses the writes.
       WORKSPACE_TOOLS: ${WORKSPACE_TOOLS:-off}
+      # D2-769: the owner document listing (knowledge_list_documents) cannot be narrowed to a Space, so with this on a
+      # Space-scoped Do run is refused it with a typed error before any Data Plane call. Off by default (today's
+      # organisation-wide listing); only the literal `true`. Switch it on before MODEL_ACTION_ADMISSION=table in any
+      # Space-capable deployment.
+      OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-false}
       # WS26-S7: Do-mode tool results ask model-gateway ScreenContent for the same tighten-only verdict chat gets. Off by
       # default; only the literal `true`. A refused, slow or mismatched answer keeps the local verdict; ZDR runs never ask.
       CONTENT_SAFETY_SCREEN_RPC: ${CONTENT_SAFETY_SCREEN_RPC:-false}
@@ -2250,6 +2268,11 @@ services:
       # EP-7 S6: a goal-bound scheduled fire asks model-gateway for the goal's completion judge once the fire completes.
       # Off, such a fire is not judged. Needs MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED on model-gateway. Only the literal true.
       ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED: ${ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED:-false}
+      # D2-481: memory consolidation's writes ask session-core's content policy (CheckMemoryWrite) before
+      # letta-bridge indexes them; a refused entry is skipped, an unreachable policy writes nothing, and a
+      # zero-data-retention or unattested run is refused. Only the literal true; needs
+      # session:memory-controls:read on this principal and CONTENT_WRITE_POLICY on session-core.
+      MEMORY_GATE_ORCHESTRATOR_WRITES: ${MEMORY_GATE_ORCHESTRATOR_WRITES:-false}
       LETTA_BRIDGE_AUTH_AUDIENCE: ${LETTA_BRIDGE_AUTH_AUDIENCE:-letta-bridge}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
@@ -2446,6 +2469,10 @@ services:
       # EP-11 S7 /learn: a person's request to distil one thread into a skill proposal. Off unless
       # exactly true; it also needs LEARNING_REVIEW_ENABLED and a review counter (else budget_unavailable).
       LEARN_COMMAND_ENABLED: ${LEARN_COMMAND_ENABLED:-false}
+      # D2-480: user, org and global memory writes through /api/v1/memory ask session-core's content
+      # policy (CheckMemoryWrite) before the INSERT or UPDATE; delete is never gated. Only the literal
+      # true; also set CONTENT_WRITE_POLICY on session-core, as the policy itself is off while that is off.
+      MEMORY_GATE_CAPABILITY_WRITES: ${MEMORY_GATE_CAPABILITY_WRITES:-false}
       # EP-11 S2: GET /api/v1/skills/{id}/versions (404 while off). Only the literal true; set it
       # together with SKILL_VERSIONS_API on session-core.
       SKILL_VERSIONS_API: ${SKILL_VERSIONS_API:-false}
@@ -2458,6 +2485,9 @@ services:
       # EP-11 S8: import a skill from a SKILL.md or a zip (needs SKILL_BUNDLES_ENABLED and SKILL_DRAFT_PUBLISH). Keep off until
       # D2-379/D2-383 are fixed. Only the literal true.
       SKILL_IMPORT_ENABLED: ${SKILL_IMPORT_ENABLED:-false}
+      # D3-956: changing or deleting an org-scoped skill needs an org admin (verified scope admin, org:admin or :admin), not any member.
+      # Off keeps today's member access. Only the literal true enables it.
+      SKILL_ORG_OWNER_CHECK: ${SKILL_ORG_OWNER_CHECK:-false}
       # EP-11 S9: only the literal `true` turns it on.
       SKILL_SPACE_SCOPE: ${SKILL_SPACE_SCOPE:-false}
       # F-t3-059 (W4-PL-1): plugin supply-chain pins. Only the literal `true` enables them. Off, plugin registration stays

@@ -119,6 +119,13 @@ async fn stream_agent_ui(
     {
         return (status, body).into_response();
     }
+    // D2-461: same server-side Space resolution for a follow-up with no `space_ref` as native chat;
+    // a no-op unless SPACE_THREAD_SCOPE_RESOLVE is `true`.
+    if let Err((status, body)) =
+        crate::domains::spaces::resolve_thread_space_ref(&state, &user, &headers, &mut body).await
+    {
+        return (status, body).into_response();
+    }
     if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context_for_wake(
         &state,
         &user,

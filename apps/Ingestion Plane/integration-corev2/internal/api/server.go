@@ -1368,6 +1368,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 	registerCustomerGatewayRoutes(app, cfg, customerGatewayModelPlaneAuth, bearerOnlyAuth, rateLimited)
 	registerZDRAcknowledgementRoutes(app, cfg, bearerOnlyAuth, rateLimited)
 	registerCredentialBindingRoutes(app, cfg, bearerOnlyAuth, rateLimited)
+	registerCustomRESTConnectorRoutes(app, cfg, bearerOnlyAuth, rateLimited)
 	registerCredentialRefRoutes(app, cfg, rateLimited)
 
 	app.Get("/internal/gdpr/export", internalAuth, func(c *fiber.Ctx) error {

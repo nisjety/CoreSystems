@@ -7,7 +7,7 @@
 //!
 //! The precedence is the one `budget.rs` applies: a cap on the request is used
 //! where it sets one, and the org's configured ceiling fills whatever the request
-//! left unset. Only metered calls count toward the token cap, as cost-core counts
+//! left unset. With `MODEL_GATEWAY_CAP_MIN` on, both apply and the smaller wins. Only metered calls count toward the token cap, as cost-core counts
 //! them, and a subscription call adds no spend, so a subscription turn is never
 //! warned or stopped.
 
@@ -56,6 +56,31 @@ impl RunCeiling {
         org_usd: Option<f64>,
         org_tokens: Option<i64>,
     ) -> Self {
+        Self::resolve_with(request_usd, request_tokens, org_usd, org_tokens, false)
+    }
+
+    /// The ceiling for a turn under the per-run cap rule (D2-698). With `cap_min`
+    /// on (`MODEL_GATEWAY_CAP_MIN`), a cap on the request can only tighten the
+    /// org's ceiling: the smaller of the two applies, and a dimension only one of
+    /// them sets takes that one. With it off this is `resolve` exactly. A cap that
+    /// is not positive is no cap on either side.
+    #[must_use]
+    pub fn resolve_with(
+        request_usd: Option<f64>,
+        request_tokens: Option<u32>,
+        org_usd: Option<f64>,
+        org_tokens: Option<i64>,
+        cap_min: bool,
+    ) -> Self {
+        if cap_min {
+            let usd = crate::budget::min_cap(positive_usd(request_usd), positive_usd(org_usd));
+            let request_tokens = request_tokens.filter(|cap| *cap > 0).map(u64::from);
+            let org_tokens = org_tokens
+                .and_then(|cap| u64::try_from(cap).ok())
+                .filter(|cap| *cap > 0);
+            let tokens = crate::budget::min_cap(request_tokens, org_tokens);
+            return Self { usd, tokens };
+        }
         let usd = positive_usd(request_usd).or_else(|| positive_usd(org_usd));
         let tokens = request_tokens
             .filter(|cap| *cap > 0)

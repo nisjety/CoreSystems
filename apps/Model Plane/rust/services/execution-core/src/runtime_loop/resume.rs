@@ -536,6 +536,27 @@ pub(crate) fn offered_snapshot(
     })
 }
 
+/// Adds a coordinator run's complete offer to a pause's snapshot (`coordinator_tools`), beside the narrowed
+/// `tools` the loop offered itself. Only the definitions are kept, the same three fields as `tools`. The authority
+/// digest does not cover it: a continuation only ever narrows `tools` from it, never widens them.
+pub(crate) fn with_coordinator_offer(
+    snapshot: &mut serde_json::Value,
+    complete: &[pb::ToolDefinition],
+) {
+    snapshot["coordinator_tools"] = serde_json::Value::Array(
+        complete
+            .iter()
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters_json": tool.parameters_json,
+                })
+            })
+            .collect(),
+    );
+}
+
 /// The authority a consume handed back, as the loop's own type, so its digest
 /// can be recomputed and compared with the one the snapshot carried.
 pub(crate) fn authority_from_proto(snapshot: &pb::ApprovedAuthority) -> Authority {
@@ -1160,6 +1181,9 @@ pub(crate) struct Consumed {
     pub step_id: String,
     /// The offered tools, from the snapshot.
     pub tools: Vec<pb::ToolDefinition>,
+    /// A coordinator run's complete offer, from the snapshot; empty when the pause kept none (every other run, and
+    /// a coordinator paused before the snapshot carried it).
+    pub coordinator_tools: Vec<pb::ToolDefinition>,
     /// The permission mode the run was offered under, from the snapshot.
     pub mode: String,
     /// The authority the pause retained.
@@ -2686,6 +2710,7 @@ mod tests {
             tool_input_json: PAUSED_INPUT.to_owned(),
             step_id: PAUSED_STEP.to_owned(),
             tools: tool_defs(),
+            coordinator_tools: Vec::new(),
             mode: "ask".to_owned(),
             snapshot_authority: authority.clone(),
             snapshot_digest: authority.digest(),

@@ -21805,6 +21805,13 @@ mod user_profile_route_tests {
             unused()
         }
 
+        async fn check_memory_write(
+            &self,
+            _: TonicRequest<pb::CheckMemoryWriteRequest>,
+        ) -> Result<TonicResponse<pb::CheckMemoryWriteResponse>, Status> {
+            unused()
+        }
+
         async fn get_memory_controls(
             &self,
             _: TonicRequest<pb::GetMemoryControlsRequest>,

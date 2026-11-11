@@ -31,6 +31,7 @@ const (
 	MemoryService_SetUserProfile_FullMethodName     = "/model_plane.v1.MemoryService/SetUserProfile"
 	MemoryService_RebuildUserProfile_FullMethodName = "/model_plane.v1.MemoryService/RebuildUserProfile"
 	MemoryService_EraseAgentMemory_FullMethodName   = "/model_plane.v1.MemoryService/EraseAgentMemory"
+	MemoryService_CheckMemoryWrite_FullMethodName   = "/model_plane.v1.MemoryService/CheckMemoryWrite"
 )
 
 // MemoryServiceClient is the client API for MemoryService service.
@@ -96,6 +97,16 @@ type MemoryServiceClient interface {
 	// Open to a ZDR caller too: erasure only removes. Not gated by
 	// SESSION_AGENT_MEMORY_ENABLED, so rows written while it was on are erased too.
 	EraseAgentMemory(ctx context.Context, in *EraseAgentMemoryRequest, opts ...grpc.CallOption) (*EraseAgentMemoryResponse, error)
+	// Ask the one memory content policy (injection, hidden characters, credential
+	// shapes, org-scope origin and size) whether a write of this content to this
+	// scope by this origin would be allowed. It writes and stores nothing, and the
+	// content is never logged: a refusal is counted and logged with the rule, the
+	// origin and a content hash only. For a writer that stores agent_memory rows
+	// itself (capability-core's /api/v1/memory proxy) and must ask before its
+	// INSERT or UPDATE. Authorized like GetMemoryControls (the
+	// session:memory-controls:read scope for a service caller). An allow is also
+	// the answer while the policy mode is off.
+	CheckMemoryWrite(ctx context.Context, in *CheckMemoryWriteRequest, opts ...grpc.CallOption) (*CheckMemoryWriteResponse, error)
 }
 
 type memoryServiceClient struct {
@@ -226,6 +237,16 @@ func (c *memoryServiceClient) EraseAgentMemory(ctx context.Context, in *EraseAge
 	return out, nil
 }
 
+func (c *memoryServiceClient) CheckMemoryWrite(ctx context.Context, in *CheckMemoryWriteRequest, opts ...grpc.CallOption) (*CheckMemoryWriteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CheckMemoryWriteResponse)
+	err := c.cc.Invoke(ctx, MemoryService_CheckMemoryWrite_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MemoryServiceServer is the server API for MemoryService service.
 // All implementations must embed UnimplementedMemoryServiceServer
 // for forward compatibility.
@@ -289,6 +310,16 @@ type MemoryServiceServer interface {
 	// Open to a ZDR caller too: erasure only removes. Not gated by
 	// SESSION_AGENT_MEMORY_ENABLED, so rows written while it was on are erased too.
 	EraseAgentMemory(context.Context, *EraseAgentMemoryRequest) (*EraseAgentMemoryResponse, error)
+	// Ask the one memory content policy (injection, hidden characters, credential
+	// shapes, org-scope origin and size) whether a write of this content to this
+	// scope by this origin would be allowed. It writes and stores nothing, and the
+	// content is never logged: a refusal is counted and logged with the rule, the
+	// origin and a content hash only. For a writer that stores agent_memory rows
+	// itself (capability-core's /api/v1/memory proxy) and must ask before its
+	// INSERT or UPDATE. Authorized like GetMemoryControls (the
+	// session:memory-controls:read scope for a service caller). An allow is also
+	// the answer while the policy mode is off.
+	CheckMemoryWrite(context.Context, *CheckMemoryWriteRequest) (*CheckMemoryWriteResponse, error)
 	mustEmbedUnimplementedMemoryServiceServer()
 }
 
@@ -334,6 +365,9 @@ func (UnimplementedMemoryServiceServer) RebuildUserProfile(context.Context, *Reb
 }
 func (UnimplementedMemoryServiceServer) EraseAgentMemory(context.Context, *EraseAgentMemoryRequest) (*EraseAgentMemoryResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method EraseAgentMemory not implemented")
+}
+func (UnimplementedMemoryServiceServer) CheckMemoryWrite(context.Context, *CheckMemoryWriteRequest) (*CheckMemoryWriteResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CheckMemoryWrite not implemented")
 }
 func (UnimplementedMemoryServiceServer) mustEmbedUnimplementedMemoryServiceServer() {}
 func (UnimplementedMemoryServiceServer) testEmbeddedByValue()                       {}
@@ -572,6 +606,24 @@ func _MemoryService_EraseAgentMemory_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _MemoryService_CheckMemoryWrite_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CheckMemoryWriteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(MemoryServiceServer).CheckMemoryWrite(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: MemoryService_CheckMemoryWrite_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(MemoryServiceServer).CheckMemoryWrite(ctx, req.(*CheckMemoryWriteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // MemoryService_ServiceDesc is the grpc.ServiceDesc for MemoryService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -626,6 +678,10 @@ var MemoryService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "EraseAgentMemory",
 			Handler:    _MemoryService_EraseAgentMemory_Handler,
+		},
+		{
+			MethodName: "CheckMemoryWrite",
+			Handler:    _MemoryService_CheckMemoryWrite_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

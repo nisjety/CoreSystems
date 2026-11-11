@@ -1205,6 +1205,11 @@ message ApprovedAuthority {
   // A digest of the authority fields (mp_contracts::loop_fold::Authority::digest).
   // A continuation recomputes it and refuses a snapshot that does not match.
   string digest = 10;
+  // A coordinator run's complete offer (RunAgentRequest.coordinator), the tools it was offered
+  // before coordinator mode narrowed `tools`. Empty for every other run and for a pause whose
+  // snapshot would not fit with it. A continuation recomputes the coordinator's narrowing from
+  // it; it never widens `tools`, and it is not covered by `digest`.
+  repeated ApprovedTool coordinator_tools = 11;
 }
 
 // One offered tool, with the definition the model was given.

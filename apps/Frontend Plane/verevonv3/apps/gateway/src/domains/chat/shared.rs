@@ -420,6 +420,30 @@ pub(crate) async fn browser_token(
     .await
 }
 
+/// The interactive `aud=browser-broker` token for the continuation of a skipped site (EP-1 S2, D3-647).
+/// Model Plane forwards it to execution-core, which uses it only to release the page the run held for
+/// the person. It is minted under the same conditions the turn that opened the page was: the agent
+/// browser's Do switch is on and the turn keeps content (not ZDR). Best-effort like `browser_token`: a
+/// missing credential leaves the continuation without it, and model-gateway refuses that continuation
+/// (the SPA then falls back to the plain resume).
+pub(crate) async fn skipped_site_browser_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    zdr: bool,
+) -> Option<String> {
+    if zdr || !browser_do_enabled() {
+        return None;
+    }
+    get_model_service_token(
+        state,
+        &user.user_id,
+        &cookie_header(headers),
+        ModelServiceAudience::BrowserBroker,
+    )
+    .await
+}
+
 async fn required_token(
     state: &AppState,
     user: &AuthenticatedUser,

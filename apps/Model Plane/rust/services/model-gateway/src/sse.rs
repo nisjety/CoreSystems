@@ -2682,11 +2682,12 @@ pub async fn invoke_stream_sse(
     // budget gate above resolves them. The tracker exists only when a switch acts on it, and its
     // frames carry the ceiling only with the progress stream they ride on.
     let run_ceiling = crate::sse_events::run_ceiling::CeilingTracker::for_turn(
-        crate::sse_events::run_ceiling::RunCeiling::resolve(
+        crate::sse_events::run_ceiling::RunCeiling::resolve_with(
             normalized.max_cost_usd,
             normalized.max_tokens,
             org_limits.max_cost_usd,
             org_limits.max_tokens,
+            cap_min_switch(),
         ),
         run_ceiling_warn_switch() && usage_progress_switch(),
         run_ceiling_enforce_switch(),
@@ -11237,8 +11238,9 @@ async fn judge_sources(
 
 /// The evidence the goal judge may cite for a settled run (EP-7 S3): the knowledge search that
 /// grounded the answer, and each round's tool-call count. Ids and counts only. The run's response
-/// names no tool calls, so none are named here; the answer excerpt is the only content the judge reads
-/// besides the goal itself.
+/// names no tool calls, so none are named here; the caller adds the run's named tool calls, read by
+/// run id (`thread_goal::run_tool_call_evidence`). The answer excerpt is the only content the judge
+/// reads besides the goal itself.
 fn goal_judge_evidence(response: &RunAgentResponse) -> Vec<crate::goal_judge::EvidenceLine> {
     let mut evidence = Vec::new();
     if response.grounded {
@@ -14871,7 +14873,21 @@ fn agentic_run_stream(
                         zdr,
                         ..Default::default()
                     };
-                    let evidence = goal_judge_evidence(&response);
+                    // The run's tool calls, by name and status, read by run id; this block already
+                    // excludes ZDR and waived turns, so no such run is read.
+                    let mut evidence = crate::thread_goal::run_tool_call_evidence(
+                        &state,
+                        &org_id,
+                        &run.run_id,
+                        zdr || retention_class.is_some(),
+                    )
+                    .await;
+                    for line in goal_judge_evidence(&response) {
+                        if !evidence.iter().any(|kept| kept.id == line.id) {
+                            evidence.push(line);
+                        }
+                    }
+                    evidence.truncate(crate::goal_judge::MAX_EVIDENCE_LINES);
                     if let Some(frame) = judge_settled_goal_turn(
                         &state,
                         &inference_bearer,
@@ -15395,6 +15411,12 @@ fn run_ceiling_warn_switch() -> bool {
 
 fn run_ceiling_enforce_switch() -> bool {
     crate::sse_events::run_ceiling::enforce_enabled(&|key| std::env::var(key).ok())
+}
+
+/// The per-run cap rule switch (D2-698) as this process's environment states it: on, a request cap
+/// can only tighten the org ceiling. The gate in `budget.rs` reads the same variable.
+fn cap_min_switch() -> bool {
+    crate::budget::cap_min_enabled(&|key| std::env::var(key).ok())
 }
 
 /// The turn's usage as one meter: every call of the tool phase, the overhead calls beside the
@@ -20571,6 +20593,11 @@ mod zdr_provenance_tests {
 pub(crate) struct ContinueRunRequest {
     pub approval_id: String,
     pub claim_token: String,
+    /// "Skip this site" (EP-1 S2, D3-647): the approval named is a DENIED `browser_human_assist`
+    /// pause, and the run continues with the paused call answered as skipped
+    /// ([`continue_skipped_site`]). Absent is `false`, and every other body is the committed one.
+    #[serde(default)]
+    pub skipped: bool,
 }
 
 /// The two checks that need nothing but the switch and the caller's credential, so
@@ -21510,6 +21537,228 @@ fn connected_payload(
     payload
 }
 
+// ---- The skipped site (EP-1 S2, D3-647): "Skip this site" on a held browser page, through the one
+// `/continue` route. The approval it names is DENIED, so it is never consumed: nothing is spent, and
+// the executor releases the page and continues the run with the paused call answered as skipped.
+
+/// The checks a skipped site's continuation makes before anything is launched, as a pure function so
+/// each refusal is testable: the route is on and the turn keeps state ([`continue_turn_gate`]), the
+/// run has not ended, and the approval is this run's DENIED `browser_human_assist` pause, one the
+/// durable loop owns (`continuation_mode` `loop`, which only a run with no Space and no pinned route
+/// pauses with, so the route a `/continue` states is the run's own). A granted, pending or
+/// expired approval is not a skip, and a consumed one never is.
+fn skipped_preflight(
+    enabled: bool,
+    run_status: &str,
+    approval_matches_run: bool,
+    approval_denied_help_pause: bool,
+    continuation_mode: &str,
+    approval_consumed: bool,
+    persistent: bool,
+) -> Result<(), (StatusCode, &'static str)> {
+    continue_turn_gate(enabled, persistent)?;
+    if matches!(run_status, "completed" | "failed" | "cancelled") {
+        return Err((StatusCode::CONFLICT, "not_resumable"));
+    }
+    if !approval_matches_run {
+        return Err((StatusCode::NOT_FOUND, "approval_not_found"));
+    }
+    if !approval_denied_help_pause {
+        return Err((StatusCode::CONFLICT, "approval_not_resumable"));
+    }
+    if approval_consumed {
+        return Err((StatusCode::CONFLICT, "continuation_already_consumed"));
+    }
+    if continuation_mode != "loop" {
+        return Err((StatusCode::CONFLICT, "not_resumable"));
+    }
+    Ok(())
+}
+
+/// The `/continue` of a skipped site (EP-1 S2, D3-647), called by [`continue_run`] for a body that
+/// says `skipped`. The approval it names is the person's DENIAL of a `browser_human_assist` pause
+/// ("Skip this site"), so, unlike every other continuation, it is neither granted nor consumed:
+/// nothing is spent (`NotSpent`), and the executor reads the approval itself, releases the page the
+/// run held for the person and continues the run with the paused call answered by
+/// `browser_site_skipped`. The run's browser bearer is forwarded with it (only the executor's own
+/// help switch lets it act on it); without one the executor cannot release the page, so the
+/// continuation is refused here as `missing_bearer`. The person's reason is neither read nor
+/// logged: only the approval's state and cause are.
+#[allow(clippy::too_many_arguments)]
+async fn continue_skipped_site(
+    state: AppState,
+    claims: Claims,
+    model_bearer: VerifiedModelBearer,
+    inference_bearer: VerifiedInferenceBearer,
+    execution_bearer: Option<Extension<VerifiedExecutionBearer>>,
+    data_plane_bearer: Option<Extension<VerifiedBearer>>,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    browser_bearer: Option<Extension<VerifiedBrowserBearer>>,
+    run_id: String,
+    req: ContinueRunRequest,
+) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
+    let (
+        Some(Extension(execution_bearer)),
+        Some(Extension(data_plane_bearer)),
+        Some(Extension(browser_bearer)),
+    ) = (execution_bearer, data_plane_bearer, browser_bearer)
+    else {
+        return Err(continue_error(StatusCode::UNAUTHORIZED, "missing_bearer"));
+    };
+    crate::session_flow::require_durable_run_owner_with_token(
+        &state,
+        &run_id,
+        &claims.org_id,
+        &claims.user_id,
+        model_bearer.as_str(),
+    )
+    .await
+    .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?;
+    // The org's agent-run pause, read after the owner check and before the run or the approval is read.
+    crate::org_agent_policy::ensure_not_paused(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        &claims.org_id,
+        capability_bearer
+            .as_deref()
+            .map_or("", VerifiedCapabilityBearer::as_str),
+    )
+    .await
+    .map_err(continue_policy_error)?;
+
+    let detail = state
+        .run_client
+        .clone()
+        .get_run(
+            authenticated_session_request(
+                mp_contracts::model_plane::v1::GetRunRequest {
+                    run_id: run_id.clone(),
+                },
+                &model_bearer,
+            )
+            .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?,
+        )
+        .await
+        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?
+        .into_inner();
+    let approval = state
+        .orchestration_client
+        .clone()
+        .get_approval(
+            authenticated_session_request(
+                mp_contracts::model_plane::v1::GetApprovalRequest {
+                    approval_id: req.approval_id.clone(),
+                    // Scoped to the verified org, never a client value.
+                    org_id: claims.org_id.clone(),
+                    ..Default::default()
+                },
+                &model_bearer,
+            )
+            .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?,
+        )
+        .await
+        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?
+        .into_inner()
+        .approval;
+    let denied = mp_contracts::model_plane::v1::ApprovalState::Denied as i32;
+    let help_pause = mp_contracts::approval_cause::CauseCode::BrowserHumanAssist.as_str();
+    let (matches_run, denied_help_pause, mode, consumed) = match approval.as_ref() {
+        Some(approval) => (
+            approval.run_id == run_id,
+            approval.state == denied
+                && approval
+                    .cause
+                    .as_ref()
+                    .is_some_and(|cause| cause.code == help_pause),
+            approval.continuation_mode.clone(),
+            approval.consumed_at.is_some(),
+        ),
+        None => (false, false, String::new(), false),
+    };
+    skipped_preflight(
+        mp_contracts::loop_fold::continue_after_approval_enabled(),
+        &detail.status,
+        matches_run,
+        denied_help_pause,
+        &mode,
+        consumed,
+        continue_turn_is_persistent(&claims),
+    )
+    .map_err(|(status, code)| continue_error(status, code))?;
+
+    // A request that can never be sent is refused before the run is launched, as a continuation's is.
+    if let Err(error) = run_agent_request_is_buildable(
+        &execution_bearer,
+        &data_plane_bearer,
+        &model_bearer,
+        &inference_bearer,
+    ) {
+        tracing::warn!(%error, run_id = %run_id, "skipped-site continuation refused: its RunAgent request cannot be built");
+        return Ok(unbuildable_continuation_stream(&run_id));
+    }
+    tracing::info!(run_id = %run_id, "the person skipped the site; continuing the run");
+
+    let run = crate::session_flow::SessionRun {
+        thread_id: detail.thread_id.clone(),
+        run_id: run_id.clone(),
+        org_id: claims.org_id.clone(),
+        already_started: true,
+        terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+    };
+    let resume = continue_resume(
+        &req.approval_id,
+        &req.claim_token,
+        resume_mode_for(true, false, false),
+    );
+    Ok(agentic_run_stream(
+        state,
+        run,
+        new_ulid(),
+        claims.org_id.clone(),
+        claims.user_id.clone(),
+        String::new(),
+        detail.goal,
+        Vec::new(),
+        Vec::new(),
+        false,
+        None,
+        0,
+        CONTINUE_PERMISSION_MODE.to_owned(),
+        false,
+        // Never an execute turn: its authority is the run's own.
+        false,
+        // Nor an approve-then-execute turn: it names no plan.
+        None,
+        execution_bearer,
+        data_plane_bearer,
+        model_bearer,
+        inference_bearer,
+        String::new(),
+        // Never Space-scoped: the pause's approval is `loop`, which a Space run never has.
+        None,
+        None,
+        // The run's browser bearer, so the executor can release the page the person skipped.
+        Some(browser_bearer),
+        AgentRoute::default(),
+        None,
+        Some(resume),
+        // Nothing was consumed: the denied approval stays as it is.
+        approval_spend_for(false),
+        None,
+        Vec::new(),
+        Vec::new(),
+        0,
+        Vec::new(),
+        None,
+        String::new(),
+        None,
+        None,
+        false,
+    ))
+}
+
 /// `POST /v1/orchestration/runs/{run_id}/continue` (build plan WS03 S3): continue a
 /// run that paused for a granted approval, as a fresh segment of the SAME run.
 ///
@@ -21535,6 +21784,9 @@ pub(crate) async fn continue_run(
     execution_bearer: Option<Extension<VerifiedExecutionBearer>>,
     data_plane_bearer: Option<Extension<VerifiedBearer>>,
     capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    // The run's browser bearer, read only for a skipped site (EP-1 S2, D3-647); every other
+    // continuation never forwards one (WS21-S2).
+    browser_bearer: Option<Extension<VerifiedBrowserBearer>>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
     axum::Json(req): axum::Json<ContinueRunRequest>,
 ) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
@@ -21553,6 +21805,22 @@ pub(crate) async fn continue_run(
     let parking = req.approval_id.is_empty() && mp_contracts::loop_fold::loop_parking_enabled();
     if (!parking && req.approval_id.trim().is_empty()) || req.claim_token.trim().is_empty() {
         return Err(continue_error(StatusCode::BAD_REQUEST, "continue_incomplete"));
+    }
+    // "Skip this site" (EP-1 S2, D3-647): a DENIED help pause spends nothing and has its own checks.
+    if req.skipped && !parking {
+        return continue_skipped_site(
+            state,
+            claims,
+            model_bearer,
+            inference_bearer,
+            execution_bearer,
+            data_plane_bearer,
+            capability_bearer,
+            browser_bearer,
+            run_id,
+            req,
+        )
+        .await;
     }
     let (Some(Extension(execution_bearer)), Some(Extension(data_plane_bearer))) =
         (execution_bearer, data_plane_bearer)

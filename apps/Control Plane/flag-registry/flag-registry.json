@@ -80,6 +80,17 @@
       ]
     },
     {
+      "name": "APPROVAL_WAIVER_REFUSE",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "D2-1149: an approval create or decide from a waived run's credential is refused before any approval metadata is stored (DEC-32: waived counts as ZDR for new stores). Off keeps today's behaviour. Only the literal true.",
+      "declarations": [
+        { "service": "session-core", "env": "APPROVAL_WAIVER_REFUSE", "default": "false" }
+      ]
+    },
+    {
       "name": "AZURE_ANTHROPIC_ZDR_CONFIRMED",
       "kind": "switch",
       "owner": "model-plane",
@@ -500,6 +511,28 @@
       ]
     },
     {
+      "name": "MEMORY_GATE_CAPABILITY_WRITES",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "D2-480: capability-core user, org and global memory saves ask session-core CheckMemoryWrite before the INSERT (updates when content changes). Refused 403, unreachable 503; delete never gated. Policy per CONTENT_WRITE_POLICY. Only true.",
+      "declarations": [
+        { "service": "capability-core", "env": "MEMORY_GATE_CAPABILITY_WRITES", "default": "false" }
+      ]
+    },
+    {
+      "name": "MEMORY_GATE_ORCHESTRATOR_WRITES",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "D2-481: consolidated memory entries ask session-core CheckMemoryWrite before letta-bridge IndexMemory; refused entries skipped and counted, unreachable writes nothing, ZDR or unattested refused first. Only the literal true.",
+      "declarations": [
+        { "service": "orchestrator-core", "env": "MEMORY_GATE_ORCHESTRATOR_WRITES", "default": "false" }
+      ]
+    },
+    {
       "name": "MEMORY_GROUNDING_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -532,6 +565,18 @@
       "codeDefault": "false",
       "declarations": [
         { "service": "model-gateway", "env": "MODEL_GATEWAY_CACHE_STABLE_PROMPT_ORDER", "default": "" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_CAP_MIN",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "D2-698 per-run cost and token caps: the smaller of the request cap and the org ceiling applies, so a caller can only tighten the org limit. Off, a request cap replaces the org ceiling. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_CAP_MIN", "default": "false" }
       ]
     },
     {
@@ -605,6 +650,18 @@
       "codeDefault": "false",
       "declarations": [
         { "service": "model-gateway", "env": "MODEL_GATEWAY_GOAL_UNATTENDED_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_GRAPH_SPACE_SCOPE",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS18-S2: graph grounding forwards the Space read decision on a scoped turn and never reaches the org-wide graph without one (scoped turns lose graph entities until Data Plane enforces it). Off, unchanged. Only the literal true.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_GRAPH_SPACE_SCOPE", "default": "false" }
       ]
     },
     {
@@ -808,6 +865,18 @@
       ]
     },
     {
+      "name": "OWNER_LIST_SPACE_REFUSE",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "D2-769: a Space-scoped Do run is refused knowledge_list_documents with a typed error before any Data Plane call. Off, the listing stays org-wide. Enable before MODEL_ACTION_ADMISSION=table with Spaces. Only the literal true.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "execution-core", "env": "OWNER_LIST_SPACE_REFUSE", "default": "false" }
+      ]
+    },
+    {
       "name": "PLUGIN_LOADER_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -947,6 +1016,38 @@
       "declarations": [
         { "service": "model-gateway", "env": "SKILL_BUNDLE_MOUNT_ENABLED", "default": "false" }
       ]
+    },
+    {
+      "name": "SKILL_ORG_ADMIN_CHECK",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "D2-509: Session Core requires the org admin role (verified admin, org:admin or :admin scope) for a person writing an org-wide skill; others get the typed skip org_scope_requires_admin. Off keeps today. Only the literal true.",
+      "declarations": [
+        { "service": "session-core", "env": "SKILL_ORG_ADMIN_CHECK", "default": "false" }
+      ]
+    },
+    {
+      "name": "SKILL_ORG_OWNER_CHECK",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "D3-956: Capability Core requires an org admin (verified scope admin, org:admin or :admin) to change or delete an org-scoped skill, not any member of the org. Off keeps today's member access. Only the literal true enables it.",
+      "declarations": [
+        { "service": "capability-core", "env": "SKILL_ORG_OWNER_CHECK", "default": "false" }
+      ]
+    },
+    {
+      "name": "SPACE_THREAD_SCOPE_RESOLVE",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "D2-461: a follow-up turn on an existing thread without space_ref resolves the thread's Space server-side and mints the scoped decision, or refuses typed; never an org-wide search. Off, unchanged. Only the literal true.",
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
       "name": "SUBAGENT_TYPED_RESULTS_ENABLED",

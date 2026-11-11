@@ -76,6 +76,17 @@ service MemoryService {
   // Open to a ZDR caller too: erasure only removes. Not gated by
   // SESSION_AGENT_MEMORY_ENABLED, so rows written while it was on are erased too.
   rpc EraseAgentMemory(EraseAgentMemoryRequest) returns (EraseAgentMemoryResponse);
+
+  // Ask the one memory content policy (injection, hidden characters, credential
+  // shapes, org-scope origin and size) whether a write of this content to this
+  // scope by this origin would be allowed. It writes and stores nothing, and the
+  // content is never logged: a refusal is counted and logged with the rule, the
+  // origin and a content hash only. For a writer that stores agent_memory rows
+  // itself (capability-core's /api/v1/memory proxy) and must ask before its
+  // INSERT or UPDATE. Authorized like GetMemoryControls (the
+  // session:memory-controls:read scope for a service caller). An allow is also
+  // the answer while the policy mode is off.
+  rpc CheckMemoryWrite(CheckMemoryWriteRequest) returns (CheckMemoryWriteResponse);
 }
 
 message SearchMemoryRequest {
@@ -569,4 +580,35 @@ message EraseAgentMemoryRequest {
 message EraseAgentMemoryResponse {
   // How many durable agent rows were erased. Zero when the agent had none.
   uint64 erased = 1;
+}
+
+// Request to check one memory write against the content policy.
+message CheckMemoryWriteRequest {
+  // Tenant context.
+  string org_id = 1;
+
+  // The person the write is for. Must be the caller when the caller is a user.
+  string user_id = 2;
+
+  // The text that would be stored. Never logged or kept by the check.
+  string content = 3;
+
+  // The scope the row would be written to: "user", "org" or "global".
+  string scope = 4;
+
+  // Who asked for the write: "user", "model_tool", "delegation" or "workflow".
+  // Empty and unknown values are read as "model_tool", which earns no rights
+  // that belong to the person alone (org-wide memory).
+  string origin = 5;
+}
+
+// The content policy's verdict on one memory write.
+message CheckMemoryWriteResponse {
+  // True when the write may go ahead.
+  bool allowed = 1;
+
+  // The rule that refused it, one of the closed tokens "injection_marker",
+  // "hidden_characters", "secret_like", "scope_not_permitted" or "too_long".
+  // Empty when allowed. Names the rule only, never the content.
+  string refusal_code = 2;
 }

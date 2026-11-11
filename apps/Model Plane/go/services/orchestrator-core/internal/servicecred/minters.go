@@ -59,6 +59,21 @@ var DefaultScopes = map[string][]string{
 	AudienceModelGateway:   {"model:goal_judge"},
 }
 
+// ScopeSessionMemoryControlsRead is the session-core scope CheckMemoryWrite asks
+// of a service caller. It is not in [DefaultScopes]: orchestrator-core requests
+// it only while MEMORY_GATE_ORCHESTRATOR_WRITES is on, so an unchanged
+// deployment keeps asking for exactly the scopes it always did.
+const ScopeSessionMemoryControlsRead = "session:memory-controls:read"
+
+// SessionCoreScopesWithMemoryGate is the session-core scope request that adds
+// [ScopeSessionMemoryControlsRead] to the default one. It returns a fresh slice.
+func SessionCoreScopesWithMemoryGate() []string {
+	base := DefaultScopes[AudienceSessionCore]
+	scopes := make([]string, 0, len(base)+1)
+	scopes = append(scopes, base...)
+	return append(scopes, ScopeSessionMemoryControlsRead)
+}
+
 // mintPathOverrides names the audiences whose token route is not
 // /api/{audience}/internal-token. auth-core mints the Model Plane gateway's token
 // on its Model Plane controller, which is the only route that accepts that audience.

@@ -1546,9 +1546,27 @@ async fn execute_step_inner(
     } else if crate::web_tools::is_crawl_tool(tool_name) {
         execute_web_crawl_tool(tool_name, tool_input, org_id).await
     } else if tool_name == crate::runtime_loop::owner_reads::TOOL_NAME {
+        // The run's Space: the sandbox context carries it exactly; a run that holds a Space retrieval
+        // decision (or the withheld marker) is Space-scoped without it, so it is refused as well
+        // rather than listed organisation-wide (D2-769). The agent loop refuses on its own
+        // `space_id` before it dispatches; this covers every other caller.
+        let space_id = sandbox.map_or_else(
+            || {
+                if matches!(
+                    space_retrieval,
+                    crate::knowledge_tools::SpaceRetrieval::Organisation
+                ) {
+                    ""
+                } else {
+                    "space-scoped"
+                }
+            },
+            |sandbox| sandbox.space_id,
+        );
         crate::runtime_loop::owner_reads::execute(
             tool_input,
             org_id,
+            space_id,
             crate::runtime_loop::owner_reads::admission_table(),
             zdr || waived,
             data_plane_bearer,

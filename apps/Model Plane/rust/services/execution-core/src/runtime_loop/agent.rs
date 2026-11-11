@@ -369,6 +369,41 @@ struct CoordinatorOffer {
     allowlist: BTreeSet<String>,
 }
 
+/// Whether a resumed run is a coordinator again: its pause kept the complete offer (`complete_kept`), and the
+/// deployment still has coordinator mode on for a run that keeps state. The resume request states no coordinator flag
+/// (a continuation's request is placeholders), so the snapshot is the evidence, as `coordinator_applies` is for a
+/// fresh run. Off, or a zero-retention or waived run, the resumed run keeps the narrowed offer it paused with.
+#[must_use]
+fn coordinator_resumes(zdr: bool, waived: bool, switch_on: bool, complete_kept: bool) -> bool {
+    switch_on && complete_kept && !zdr && !waived
+}
+
+/// The narrowed offer a resumed coordinator runs under: `keeps` (that is, `coordinator_keeps` over the registry's
+/// declared view) applied to the complete offer the pause kept, so the resumed run is offered exactly what a fresh
+/// coordinator run would be. It is also held to the narrowed offer the pause retained (`stored`): a resume never
+/// widens the pause's authority, whatever the complete offer holds. `None` when the complete offer does not contain
+/// every tool the pause offered, which is a snapshot that does not agree with itself: the caller keeps the stored
+/// narrowed offer and the run is not a coordinator again.
+#[must_use]
+fn narrow_resumed_coordinator(
+    complete: &[pb::ToolDefinition],
+    stored: &[pb::ToolDefinition],
+    keeps: impl Fn(&str) -> bool,
+) -> Option<Vec<pb::ToolDefinition>> {
+    let held: BTreeSet<&str> = complete.iter().map(|tool| tool.name.as_str()).collect();
+    if !stored.iter().all(|tool| held.contains(tool.name.as_str())) {
+        return None;
+    }
+    let offered: BTreeSet<&str> = stored.iter().map(|tool| tool.name.as_str()).collect();
+    Some(
+        complete
+            .iter()
+            .filter(|tool| offered.contains(tool.name.as_str()) && keeps(&tool.name))
+            .cloned()
+            .collect(),
+    )
+}
+
 /// Whether this offered set holds both a connected-account tool and a web or browser tool: the
 /// only case in which the routing question exists.
 #[must_use]
@@ -2190,10 +2225,13 @@ async fn run_agent_with_route_parkable(
             return Err(tonic::Status::invalid_argument("resume_incomplete"));
         }
         (None, Some(resume)) => {
-            // EP-1 S2 (D3-647): a denied help pause ("Skip this site") releases the held page
-            // before the consume refuses the denied approval, so the page does not wait out its
-            // grant. Nothing else changes for the request.
-            release_skipped_site(
+            // EP-1 S2 (D3-647): a denied help pause ("Skip this site") releases the held page, and the
+            // run continues with the paused call answered by the skipped-site closer, so the model
+            // reads `browser_site_skipped` and looks elsewhere. A denied approval is never consumed.
+            // Any other continuation (and a denied approval that holds no page for a person, the
+            // switch off, a ZDR, waived or Space run) goes to the consume exactly as before, which
+            // refuses a denied approval.
+            let skipped = release_skipped_site(
                 &session_channel,
                 session_bearer.as_deref(),
                 browser_bearer.as_deref(),
@@ -2203,16 +2241,19 @@ async fn run_agent_with_route_parkable(
                 &route,
             )
             .await;
-            Some(
-                begin_continuation(
-                    &session_channel,
-                    session_bearer.as_deref(),
-                    &req,
-                    resume,
-                    &route,
-                )
-                .await?,
-            )
+            match skipped {
+                Some(skipped) => Some(skipped_continuation(&req, skipped, &tools)),
+                None => Some(
+                    begin_continuation(
+                        &session_channel,
+                        session_bearer.as_deref(),
+                        &req,
+                        resume,
+                        &route,
+                    )
+                    .await?,
+                ),
+            }
         }
         (None, None) => None,
     };
@@ -2280,7 +2321,47 @@ async fn run_agent_with_route_parkable(
     // admits, and keeps its complete offer for the subagents it starts (`LoopContext.coordinator`). It narrows after
     // every addition above, so an added tool is held to it too, and after the agent allowlist, which the delegates
     // keep. The run is not derivable, so it never parks: a park resume derives the wider base set.
-    let coordinator = if resumed.is_none()
+    //
+    // A coordinator resumed from a pause (a browser help or takeover pause, or an approval) takes the complete offer
+    // its snapshot kept and recomputes the same narrowing from it, so its delegates are not narrowed along with it
+    // (`coordinator_resumes`, `narrow_resumed_coordinator`). A snapshot without the complete offer (a pause from
+    // before it was kept, or one that did not fit) resumes as before, under the narrowed offer it paused with.
+    let resumed_coordinator = resumed.as_ref().and_then(|segment| {
+        if !coordinator_resumes(
+            req.zdr,
+            route.is_waived(),
+            coordinator_mode_enabled(),
+            !segment.coordinator_tools.is_empty(),
+        ) {
+            return None;
+        }
+        let (org_id, run_id) = (req.org_id.as_str(), req.run_id.as_str());
+        let narrowed =
+            narrow_resumed_coordinator(&segment.coordinator_tools, &tools, |name| {
+                let declared = crate::permission::run_view(org_id, run_id, name);
+                coordinator_keeps(name, declared.as_ref())
+            });
+        if narrowed.is_none() {
+            warn!(
+                run_id = %req.run_id,
+                "run_agent: a resumed coordinator's complete offer does not hold its paused tools; resuming under the paused offer"
+            );
+        }
+        narrowed.map(|narrowed| (narrowed, segment.coordinator_tools.clone()))
+    });
+    let coordinator = if let Some((narrowed, complete)) = resumed_coordinator {
+        info!(
+            run_id = %req.run_id,
+            offered = narrowed.len(),
+            withheld = complete.len().saturating_sub(narrowed.len()),
+            "run_agent: resumed coordinator run offered its read and delegation tools only"
+        );
+        tools = narrowed;
+        Some(CoordinatorOffer {
+            allowlist: complete.iter().map(|tool| tool.name.clone()).collect(),
+            tools: complete,
+        })
+    } else if resumed.is_none()
         && coordinator_applies(&req, route.is_waived(), coordinator_mode_enabled())
     {
         let complete = tools.clone();
@@ -2864,6 +2945,18 @@ enum RoundSeed {
     /// at a round boundary, so there is no open round: the loop starts its next round with an
     /// inference, after the fence, from the fold's history and counters.
     Parked(Box<super::park::ParkSeed>),
+    /// "Skip this site" (EP-1 S2, D3-647): the paused browser call, proposed as if by the model, with
+    /// the slot that already answers it with the skipped-site closer. The call is never dispatched:
+    /// its slot is `Resolved`, so the model's next round reads `browser_site_skipped` as that call's
+    /// tool result. There is no release and no fold of the pause to restore, so the loop starts a
+    /// fresh conversation from the run's goal (as a stage-1 segment does) and the fold writer stays
+    /// off for it, as it does for a segment.
+    Skipped {
+        /// The round the model "made": the paused call, with no arguments.
+        response: pb::InferResponse,
+        /// One slot per call of `response`: the paused call, resolved with the closer.
+        slots: Vec<super::resume::SeedSlot>,
+    },
 }
 
 /// What a round loop reads once, when it starts, to decide at each stop whether it may park
@@ -3361,15 +3454,24 @@ async fn run_rounds(
     // A park resume (WS03 S8-6) re-enters in place too: it is not a stage-1 segment, and its
     // writer is the seeded one. It has no open round, so nothing of its first round is seeded.
     let in_place = matches!(seed, Some(RoundSeed::InPlace(_) | RoundSeed::Parked(_)));
+    // A skipped site's continuation (EP-1 S2, D3-647) holds no release and restores no fold, and its
+    // fold writer is off like a stage-1 segment's: the pause's fold is not this loop's to rewrite.
+    let skipped_site = matches!(seed, Some(RoundSeed::Skipped { .. }));
     // What the loop starts from, as the park decision reads it (WS03 S8-A).
     let seed_kind = match &seed {
         None => super::park::SeedKind::Fresh,
-        Some(RoundSeed::Segment(_)) => super::park::SeedKind::Segment,
+        Some(RoundSeed::Segment(_) | RoundSeed::Skipped { .. }) => super::park::SeedKind::Segment,
         Some(RoundSeed::InPlace(_)) => super::park::SeedKind::InPlace,
         Some(RoundSeed::Parked(_)) => super::park::SeedKind::Parked,
     };
+    // The slots of a skipped site's seeded round (see `RoundSeed::Skipped`); none for any other seed.
+    let mut skipped_slots: Option<Vec<super::resume::SeedSlot>> = None;
     let (mut seeded_round, mut restored, mut parked) = match seed {
         Some(RoundSeed::Segment(round)) => (Some(round), None, None),
+        Some(RoundSeed::Skipped { response, slots }) => {
+            skipped_slots = Some(slots);
+            (Some(response), None, None)
+        }
         // `resume::restore` builds one slot per call; a seed that does not is not one this
         // loop understands, and nothing has run.
         Some(RoundSeed::InPlace(restored)) if !restored.is_consistent() => {
@@ -3386,7 +3488,8 @@ async fn run_rounds(
     // What each call of the restored round does when the loop re-enters it, one slot per call.
     let mut restored_slots = restored
         .as_mut()
-        .map(|restored| std::mem::take(&mut restored.slots));
+        .map(|restored| std::mem::take(&mut restored.slots))
+        .or(skipped_slots);
     let req = ctx.req;
     // The run's Zero-Data-Retention flag, threaded through every inference round
     // (so inference-core's prompt cache skips durable read/write) and onto each
@@ -3522,7 +3625,7 @@ async fn run_rounds(
         &ctx.route,
         ctx.effect_ledger,
         ctx.depth,
-        ctx.release.is_some(),
+        ctx.release.is_some() || skipped_site,
         in_place,
     );
     let seeded_at = restored
@@ -4941,6 +5044,16 @@ async fn run_rounds(
                     } else {
                         None
                     };
+                    // The owner document listing cannot be narrowed to a Space, so a Space-scoped run is
+                    // refused before the call is dispatched or reserved (D2-769, `OWNER_LIST_SPACE_REFUSE`).
+                    // Fail closed on the run's own `space_id`, whether or not it holds a sandbox bearer.
+                    if call.name == runtime_loop::owner_reads::TOOL_NAME
+                        && runtime_loop::owner_reads::space_refused(&req.space_id)
+                    {
+                        return Some(runtime_loop::StepOutcome::failed(
+                            "knowledge_list_documents is not available in a Space-scoped run",
+                        ));
+                    }
                     // Effect ledger (build plan WS03 S5): an effectful call is reserved
                     // before it can run and finalized after, so a loop that dies in
                     // between leaves a row that says the effect may have happened. A
@@ -5655,7 +5768,13 @@ async fn run_rounds(
                     ctx.permission_wire,
                     &ctx.allowlist,
                 );
-                Some(super::resume::offered_snapshot(&ctx.tools, &authority))
+                let mut snapshot = super::resume::offered_snapshot(&ctx.tools, &authority);
+                // A coordinator's pause keeps its complete offer beside the narrowed one, so a resume can
+                // recompute the narrowing and its delegates still take the whole offer.
+                if let Some(coordinator) = ctx.coordinator.as_ref() {
+                    super::resume::with_coordinator_offer(&mut snapshot, &coordinator.tools);
+                }
+                Some(snapshot)
             } else {
                 None
             };
@@ -9562,6 +9681,23 @@ async fn pause_for_approval(
             .map_err(|_| tonic::Status::internal("could not encode continuation descriptor"))?;
         // Refused before the pause is raised: a pause that the approval store
         // would reject for size is never created. Closed token only.
+        //
+        // A coordinator's complete offer rides in the snapshot only while it fits: without it the pause is the
+        // narrowed-only snapshot every coordinator pause was before, so adding it never refuses a pause that fit.
+        if continuation_descriptor_json.len() > super::resume::MAX_SNAPSHOT_BYTES {
+            let dropped = descriptor["offered"]
+                .as_object_mut()
+                .is_some_and(|offered| offered.remove("coordinator_tools").is_some());
+            if dropped {
+                info!(
+                    run_id = %req.run_id,
+                    "run_agent: a coordinator pause's complete offer did not fit the snapshot and was left out"
+                );
+                continuation_descriptor_json = serde_json::to_string(&descriptor).map_err(|_| {
+                    tonic::Status::internal("could not encode continuation descriptor")
+                })?;
+            }
+        }
         if continuation_descriptor_json.len() > super::resume::MAX_SNAPSHOT_BYTES {
             return Err(tonic::Status::failed_precondition(
                 "approval_snapshot_too_large",
@@ -10112,6 +10248,9 @@ struct Continuation {
     /// The offered tools, from the retained snapshot. A request's tools are
     /// never used for a continuation.
     tools: Vec<pb::ToolDefinition>,
+    /// A coordinator run's complete offer, from the snapshot (empty when the pause kept none). The loop recomputes
+    /// the coordinator's narrowing from it (`resume_coordinator`).
+    coordinator_tools: Vec<pb::ToolDefinition>,
     /// The permission mode the run was offered under, from the snapshot.
     mode: String,
     /// The authority the segment runs under: the pause's, narrowed by what the
@@ -10213,6 +10352,16 @@ async fn consume_for_resume(
             parameters_json: t.parameters_json.clone(),
         })
         .collect();
+    // A coordinator run's complete offer, when the pause kept one (empty otherwise).
+    let coordinator_tools: Vec<pb::ToolDefinition> = snapshot
+        .coordinator_tools
+        .iter()
+        .map(|t| pb::ToolDefinition {
+            name: t.name.clone(),
+            description: t.description.clone(),
+            parameters_json: t.parameters_json.clone(),
+        })
+        .collect();
     // The authority the segment runs under: the pause's, narrowed by what the
     // request states and refused if it widens (closed token, nothing has run).
     let effective = super::resume::effective_authority(
@@ -10230,6 +10379,7 @@ async fn consume_for_resume(
         tool_input_json: consumed.tool_input_json,
         step_id: consumed.step_id,
         tools,
+        coordinator_tools,
         mode: snapshot.mode.clone(),
         snapshot_authority: super::resume::authority_from_proto(snapshot),
         snapshot_digest: snapshot.digest.clone(),
@@ -10297,6 +10447,7 @@ fn build_segment(
             ..Default::default()
         }),
         tools: consumed.tools,
+        coordinator_tools: consumed.coordinator_tools,
         mode: consumed.mode,
         effective: consumed.effective,
     })
@@ -10357,6 +10508,7 @@ async fn restore_continuation(
             goal: req.goal.clone(),
             seed: RoundSeed::InPlace(Box::new(restored)),
             tools: consumed.tools.clone(),
+            coordinator_tools: consumed.coordinator_tools.clone(),
             mode: consumed.mode.clone(),
             effective: consumed.effective.clone(),
         })),
@@ -10474,6 +10626,8 @@ fn park_continuation(
         goal: req.goal.clone(),
         seed: RoundSeed::Parked(Box::new(seed)),
         tools,
+        // A coordinator run is not derivable, so it never parks: a park resume holds no complete offer.
+        coordinator_tools: Vec::new(),
         mode: fold.authority.mode.clone(),
         effective,
     })
@@ -10658,12 +10812,12 @@ async fn released_hand_back_note(ctx: &LoopContext<'_>) -> Option<String> {
 }
 
 /// "Skip this site" (EP-1 S2, D3-647): a continue naming a DENIED `browser_human_assist` approval of
-/// this run releases the page the run held for the person, and returns the closer the model reads
-/// (`browser_site_skipped`). Only the approval's own state and cause are read: the person's reason is
+/// this run releases the page the run held for the person, and returns the skipped site with the closer
+/// the model reads (`browser_site_skipped`). Only the approval's own state and cause are read: the person's reason is
 /// neither read nor logged. `None`, with nothing changed, when the help switch is off, the run is
-/// zero-retention, waived, Space-scoped or holds no browser bearer, the approval cannot be read, or it
-/// is not a denied help pause of this run. The consume that follows refuses a denied approval exactly
-/// as it did before.
+/// zero-retention, waived, Space-scoped or holds no browser bearer, the approval cannot be read, it
+/// is not a denied help pause of this run, or the run holds no page for a person (a replay of the same
+/// skip finds none). The consume that follows then refuses a denied approval exactly as it did before.
 async fn release_skipped_site(
     session_channel: &Channel,
     session_bearer: Option<&str>,
@@ -10672,7 +10826,7 @@ async fn release_skipped_site(
     req: &pb::RunAgentRequest,
     resume: &pb::AgentResume,
     route: &crate::agent_route::ModelRoute,
-) -> Option<String> {
+) -> Option<SkippedSite> {
     if !crate::browser_session::human_assist_enabled()
         || req.zdr
         || route.is_waived()
@@ -10718,14 +10872,81 @@ async fn release_skipped_site(
         quarry.as_ref(),
         tool,
     )
-    .await;
-    if closer.is_some() {
-        info!(
-            run_id = %req.run_id,
-            "run_agent: the person skipped the site; its page was released"
-        );
+    .await?;
+    info!(
+        run_id = %req.run_id,
+        "run_agent: the person skipped the site; its page was released"
+    );
+    // Only the first continue of a skip gets here: the release ends the hold, so a replay finds no
+    // page held for a person and returns `None` above, and the run is never continued twice.
+    Some(SkippedSite {
+        tool: tool.to_owned(),
+        step_id: approval.step_id.clone(),
+        closer,
+    })
+}
+
+/// A site the person skipped, released by [`release_skipped_site`]: the paused call, the step it was
+/// paused on and what the model reads in its place. Ids, a tool name and the closer text only: the
+/// person's reason is never read into it.
+struct SkippedSite {
+    /// The browser tool whose `browser_human_assist` pause the person denied.
+    tool: String,
+    /// The step the denied approval gated; the continuation's step prefix is derived from it.
+    step_id: String,
+    /// The `browser_site_skipped` text the model reads as that call's tool result.
+    closer: String,
+}
+
+/// The continuation of a skipped site (EP-1 S2, D3-647): a fresh loop from the run's goal whose
+/// first round is the paused call, already answered with the closer, so the model's next round reads
+/// `browser_site_skipped` as that call's tool result and looks elsewhere. It holds no release and
+/// runs nothing: a denied approval is never consumed, and the call is never dispatched.
+///
+/// It runs under the tools this request offers and the authority this request states (the
+/// `/continue` placeholders: mode `ask`, no rung, no floor), not under the pause's snapshot, which
+/// only a consume hands back. A run with a Space or a pinned route is never one that pauses for a
+/// `/continue` (its approval is cold), so the route is the default one, as a stage-1 segment's.
+fn skipped_continuation(
+    req: &pb::RunAgentRequest,
+    skipped: SkippedSite,
+    tools: &[pb::ToolDefinition],
+) -> Continuation {
+    let segment = super::resume::next_segment_no(&skipped.step_id);
+    let names: BTreeSet<String> = tools.iter().map(|tool| tool.name.clone()).collect();
+    let mode = mode_wire(resolve_mode(&req.mode)).to_owned();
+    let effective = super::resume::offered_authority(req, &mode, &names);
+    let call = pb::ToolCall {
+        id: "skipped".to_owned(),
+        name: skipped.tool.clone(),
+        arguments_json: "{}".to_owned(),
+    };
+    let slot = super::resume::SeedSlot::Resolved {
+        step_id: skipped.step_id,
+        name: skipped.tool,
+        output: String::new(),
+        error: Some(skipped.closer),
+        passed_prepass: false,
+    };
+    Continuation {
+        release: None,
+        step_prefix: format!("s{segment}."),
+        goal: req.goal.clone(),
+        seed: RoundSeed::Skipped {
+            response: pb::InferResponse {
+                content: "Continuing after the person skipped this site.".to_owned(),
+                tool_calls: vec![call],
+                stop_reason: "tool_use".to_owned(),
+                ..Default::default()
+            },
+            slots: vec![slot],
+        },
+        tools: tools.to_vec(),
+        // A coordinator run is not one that pauses for a `/continue` here: no complete offer is kept.
+        coordinator_tools: Vec::new(),
+        mode,
+        effective,
     }
-    closer
 }
 
 /// The tool of a denied `browser_human_assist` approval of `run_id`, `None` for any other approval.
@@ -10937,6 +11158,7 @@ mod browser_hand_back {
                 tool_input_json: "{}".to_owned(),
                 step_id: paused_step.clone(),
                 tools: Vec::new(),
+                coordinator_tools: Vec::new(),
                 mode: "ask".to_owned(),
                 snapshot_authority: authority.clone(),
                 snapshot_digest: String::new(),
@@ -18030,6 +18252,7 @@ mod tests {
                 parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
             }],
             digest: authority.digest(),
+            coordinator_tools: Vec::new(),
         }
     }
 
@@ -18771,6 +18994,7 @@ mod tests {
                 parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
             }],
             digest: authority.digest(),
+            coordinator_tools: Vec::new(),
         }
     }
 
@@ -27580,6 +27804,7 @@ mod tests {
             segment: runtime_loop::resume::next_segment_no(&step_id),
             step_id,
             tools,
+            coordinator_tools: Vec::new(),
             mode: snapshot.mode.clone(),
             snapshot_digest: snapshot.digest(),
             snapshot_authority: snapshot.clone(),
@@ -27771,6 +27996,7 @@ mod tests {
                     })
                     .collect(),
                 digest: authority.digest(),
+                coordinator_tools: Vec::new(),
             }),
             ..Default::default()
         }

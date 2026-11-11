@@ -306,6 +306,27 @@ impl ThreadGoalService for ThreadGoalGrpc {
         record_metrics("get_goal_turn_for_judge", started, result.is_ok());
         result
     }
+
+    async fn list_run_tool_calls_for_judge(
+        &self,
+        request: Request<pb::ListRunToolCallsForJudgeRequest>,
+    ) -> Result<Response<pb::ListRunToolCallsForJudgeResponse>, Status> {
+        let started = Instant::now();
+        let result = async {
+            let caller = identity(&request)?;
+            refuse_retention_exempt(&caller)?;
+            authorize_operation(&caller, "session:read")?;
+            if !thread_goals_enabled() {
+                return Err(Status::unavailable(DISABLED));
+            }
+            list_run_tool_calls_for_judge(&self.pool, &caller, request.into_inner())
+                .await
+                .map(Response::new)
+        }
+        .await;
+        record_metrics("list_run_tool_calls_for_judge", started, result.is_ok());
+        result
+    }
 }
 
 /// A zero-retention or waived credential never reaches the store (defence in depth: the gateway
@@ -1453,6 +1474,71 @@ pub(crate) async fn get_goal_turn_for_judge(
         outcome,
         answer: answer.map(|(text,)| text).unwrap_or_default(),
         found: true,
+    })
+}
+
+/// The most tool calls one judge read answers. The judge cites at most a handful of evidence lines,
+/// so the read is cut here and no more rows than that leave session-core.
+const JUDGE_TOOL_CALLS_MAX: i64 = 200;
+
+/// The tool calls one run reserved, as the completion judge may cite them: action id, tool name and
+/// status, in reservation order. Only model-gateway reads it, for a run of its own org; a run of
+/// another org is `not_found`. A run that is not `persistent` (zero-retention or waived) is refused
+/// with the closed durable-mutation refusal and none of its rows is selected, and a row a
+/// zero-retention call wrote is left out. No argument, digest, result or receipt is selected.
+pub(crate) async fn list_run_tool_calls_for_judge(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    req: pb::ListRunToolCallsForJudgeRequest,
+) -> Result<pb::ListRunToolCallsForJudgeResponse, Status> {
+    refuse_non_judge(caller)?;
+    let org_id = req.org_id.trim();
+    let run_id = req.run_id.trim();
+    if org_id.is_empty() || run_id.is_empty() {
+        return Err(Status::invalid_argument("org_id and run_id are required"));
+    }
+    caller.authorize_org(org_id)?;
+    let retention: Option<String> =
+        sqlx::query_scalar("SELECT retention_class FROM runs WHERE id = $1 AND org_id = $2")
+            .bind(run_id)
+            .bind(org_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(internal)?;
+    match retention.as_deref() {
+        None => return Err(Status::not_found("run not found")),
+        Some("persistent") => {}
+        Some(_) => {
+            return Err(
+                mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::FailedPrecondition),
+            )
+        }
+    }
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT i.action_id, i.tool, i.status
+         FROM session_tool_audit_intents i
+         JOIN runs r ON r.id = i.run_id
+         WHERE i.run_id = $1 AND r.org_id = $2 AND r.retention_class = 'persistent'
+           AND NOT i.zdr
+         ORDER BY i.reserved_at, i.action_id
+         LIMIT $3",
+    )
+    .bind(run_id)
+    .bind(org_id)
+    .bind(JUDGE_TOOL_CALLS_MAX)
+    .fetch_all(pool)
+    .await
+    .map_err(internal)?;
+    Ok(pb::ListRunToolCallsForJudgeResponse {
+        calls: rows
+            .into_iter()
+            .map(|(action_id, tool, status)| pb::JudgeToolCall {
+                action_id,
+                tool,
+                status,
+            })
+            .collect(),
     })
 }
 

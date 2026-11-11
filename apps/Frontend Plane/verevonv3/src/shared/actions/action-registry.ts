@@ -2106,11 +2106,21 @@ const chatQueueInvocationInput = z.object({
 // approvalId is absent for the park form (WS03 S8): the continue of a run the executor
 // parked, which has no approval. A present approvalId is never blank; the empty approval
 // id on the wire is the client's to write for the park form, never a caller's input.
-const chatRunContinueInput = z.object({
-  runId: z.string().min(1),
-  approvalId: z.string().min(1).optional(),
-  claimToken: z.string().min(1),
-})
+//
+// skipped is the skipped-site form ("Skip this site", EP-1 S2, D3-647): the approval named is the
+// person's DENIAL of a browser help pause, which spends nothing, and the run continues with that call
+// answered as skipped. It needs an approvalId, and is never part of the park form.
+const chatRunContinueInput = z
+  .object({
+    runId: z.string().min(1),
+    approvalId: z.string().min(1).optional(),
+    claimToken: z.string().min(1),
+    skipped: z.boolean().optional(),
+  })
+  .refine((input) => input.skipped !== true || input.approvalId !== undefined, {
+    message: 'a skipped site names the denied approval',
+    path: ['approvalId'],
+  })
 
 // The person's answer to a question a run put to them (build plan WS14 S3), or a skip. A
 // question is its own store with its own owner-only answer, never an approval: an answer is

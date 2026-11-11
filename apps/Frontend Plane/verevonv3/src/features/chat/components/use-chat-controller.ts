@@ -81,6 +81,7 @@ import {
 import {
   cancelRun,
   continueRun,
+  continueSkippedRun,
   decideApproval,
   answerQuestion as answerRunQuestion,
   listApprovals,
@@ -93,6 +94,7 @@ import {
   type PlanStepEdit,
 } from '@/shared/api/orchestration-client'
 import { runBrowserGiveBack, type BrowserGiveBackOutcome } from '@/features/chat/lib/browser-give-back'
+import { isSkippableHelpPause, runBrowserSkip } from '@/features/chat/lib/browser-skip'
 import { getRun, listRuns } from '@/shared/api/runs-client'
 import { getRunProofBundle } from '@/shared/api/run-console-client'
 import {
@@ -3425,7 +3427,11 @@ export function useChatController() {
     decision: ApprovalDecision,
   ) => {
     if (isForeignOriginThread(state.threadId)) return
-    const runId = state.turns.find((turn) => turn.id === turnId)?.runId
+    const decidedTurn = state.turns.find((turn) => turn.id === turnId)
+    const runId = decidedTurn?.runId
+    // "Skip this site" (EP-1 S2, D3-647): declining a browser help pause. Read before the card is dropped.
+    const skipsSite = decision === 'reject'
+      && isSkippableHelpPause(decidedTurn?.pendingApprovals?.find((approval) => approval.id === approvalId))
     invalidateApprovalRefresh(turnId)
     // Optimistically drop the decided approval so the card resolves instantly.
     setState((s) => {
@@ -3434,6 +3440,17 @@ export function useChatController() {
     })
     try {
       await decideApproval(approvalId, decision)
+      // A skipped site continues the run under chat.run.continue, so the held page is released and
+      // the agent reads that the site was skipped. A denial is never consumed, so a refused continue
+      // spends nothing and falls through to the plain resume below.
+      if (runId && skipsSite) {
+        const continued = await runBrowserSkip(runId, approvalId, {
+          continueSkippedRun: (skippedRunId, skippedApprovalId, claimToken, onEvent) =>
+            continueSkippedRun(skippedRunId, skippedApprovalId, claimToken, onEvent),
+          newClaimToken: () => createId('claim'),
+        })
+        if (continued) return
+      }
       // Recording the decision unblocks execution-core; resume advances the run
       // (the denial, if any, is recorded so the agent routes around the tool).
       if (runId) await resumeRun(runId)

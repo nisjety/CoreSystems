@@ -71,13 +71,27 @@ type SkillsHandler struct {
 	// importEnabled is SKILL_IMPORT_ENABLED (EP-11 S8, with bundles and drafts): on, the listing says so
 	// and the Skills page offers an import; off, every body is as it was.
 	importEnabled bool
+	// orgOwnerCheck is SKILL_ORG_OWNER_CHECK (D3-956): on, changing or deleting an org-scoped
+	// skill needs an org admin, as a user-scoped skill needs its owner or an admin; off, an org
+	// skill stays open to every member of the org as it was.
+	orgOwnerCheck bool
 }
 
 // NewSkillsHandler constructs the handler.
 func NewSkillsHandler(pool registryDatabase) *SkillsHandler {
 	return &SkillsHandler{pool: pool, lintMode: skilllint.ModeFromLookup(os.Getenv), versionsAPI: SkillVersionsAPIFromLookup(os.Getenv),
 		authoredKinds: AuthoredKindsFromLookup(os.Getenv), draftPublish: DraftPublishFromLookup(os.Getenv),
-		bundleRetention: skillbundle.RetentionFromLookup(os.Getenv), importEnabled: SkillImportFromLookup(os.Getenv)}
+		bundleRetention: skillbundle.RetentionFromLookup(os.Getenv), importEnabled: SkillImportFromLookup(os.Getenv),
+		orgOwnerCheck: SkillOrgOwnerCheckFromLookup(os.Getenv)}
+}
+
+const skillOrgOwnerCheckEnv = "SKILL_ORG_OWNER_CHECK"
+
+// SkillOrgOwnerCheckFromLookup reads SKILL_ORG_OWNER_CHECK strictly: only the literal "true" makes a
+// change to an org-scoped skill need an org admin, so a typo or a stray "1" leaves it open to every
+// member as before.
+func SkillOrgOwnerCheckFromLookup(lookup func(string) string) bool {
+	return lookup(skillOrgOwnerCheckEnv) == "true"
 }
 
 const draftPublishEnv = "SKILL_DRAFT_PUBLISH"
@@ -441,9 +455,11 @@ var errSkillNotCallersToChange = errors.New("only the skill owner or an org admi
 
 // ensureSkillCallerMayChange runs inside the mutation's transaction, before its statement. It
 // locks the skill's row and reads its scope and owner, so the statement that follows cannot
-// race a change to either. An org-scoped skill stays open to every member, as it always was.
+// race a change to either. An org-scoped skill stays open to every member while orgOwnerCheck
+// (SKILL_ORG_OWNER_CHECK) is off, as it always was; on, it needs an org admin (a workload
+// identity with an admin scope is the admin path), and any other caller gets 403.
 // A skill that is not there passes: the statement then changes nothing and the caller gets 404.
-func ensureSkillCallerMayChange(ctx context.Context, tx registryDatabase, id, orgID, callerID string, isAdmin bool) error {
+func ensureSkillCallerMayChange(ctx context.Context, tx registryDatabase, id, orgID, callerID string, isAdmin, orgOwnerCheck bool) error {
 	rows, err := tx.Query(ctx, `
 		SELECT scope, owner_user_id FROM agent_skills
 		WHERE id=$1 AND org_id=$2 FOR UPDATE
@@ -463,6 +479,14 @@ func ensureSkillCallerMayChange(ctx context.Context, tx registryDatabase, id, or
 	// it; none can be verified yet, so it is refused whatever the caller holds.
 	if scope == spaceSkillScope {
 		return errSpaceSkillDecisionRequired
+	}
+	if scope == "org" && orgOwnerCheck {
+		// D3-956: an org skill is org-wide, so a member who does not hold the admin role may not
+		// change it by calling the service directly. Fail closed.
+		if isAdmin {
+			return nil
+		}
+		return errSkillNotCallersToChange
 	}
 	isOwner := ownerUserID != "" && ownerUserID == callerID
 	if scope == "org" || isAdmin || isOwner {
@@ -809,7 +833,7 @@ func (h *SkillsHandler) update(w http.ResponseWriter, r *http.Request, id string
 	err := h.mutateSkill(r, "", "", func(tx registryDatabase) error {
 		// A user-owned skill changes only for its owner or an admin. The check takes the row
 		// lock before the statement below, so the check and the write see the same skill.
-		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, callerID, isAdmin); err != nil {
+		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, callerID, isAdmin, h.orgOwnerCheck); err != nil {
 			return err
 		}
 		if lintPatch {
@@ -920,7 +944,7 @@ func (h *SkillsHandler) delete(w http.ResponseWriter, r *http.Request, id string
 	orgID := verifiedOrganizationID(r)
 	var result pgconn.CommandTag
 	err := h.mutateSkill(r, "", "", func(tx registryDatabase) error {
-		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, verifiedActorID(r), verifiedIsAdmin(r)); err != nil {
+		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, verifiedActorID(r), verifiedIsAdmin(r), h.orgOwnerCheck); err != nil {
 			return err
 		}
 		var err error
@@ -1071,8 +1095,8 @@ func writeSkillDraftError(w http.ResponseWriter, err error, findings []skilllint
 
 // lockAcceptedSkill runs the owner-or-admin check (which takes the row lock) and refuses a skill
 // that is absent or not accepted.
-func lockAcceptedSkill(r *http.Request, tx registryDatabase, id, orgID string) error {
-	if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, verifiedActorID(r), verifiedIsAdmin(r)); err != nil {
+func lockAcceptedSkill(r *http.Request, tx registryDatabase, id, orgID string, orgOwnerCheck bool) error {
+	if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, verifiedActorID(r), verifiedIsAdmin(r), orgOwnerCheck); err != nil {
 		return err
 	}
 	var accepted bool
@@ -1107,7 +1131,7 @@ func (h *SkillsHandler) publish(w http.ResponseWriter, r *http.Request) {
 	var version int32
 	var findings []skilllint.Finding
 	err := h.mutateSkill(r, "", "draft_published", func(tx registryDatabase) error {
-		if err := lockAcceptedSkill(r, tx, id, orgID); err != nil {
+		if err := lockAcceptedSkill(r, tx, id, orgID, h.orgOwnerCheck); err != nil {
 			return err
 		}
 		var raw []byte
@@ -1180,7 +1204,7 @@ func (h *SkillsHandler) discardDraft(w http.ResponseWriter, r *http.Request) {
 	}
 	orgID := verifiedOrganizationID(r)
 	err := h.mutateSkill(r, "", "draft_discarded", func(tx registryDatabase) error {
-		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, verifiedActorID(r), verifiedIsAdmin(r)); err != nil {
+		if err := ensureSkillCallerMayChange(r.Context(), tx, id, orgID, verifiedActorID(r), verifiedIsAdmin(r), h.orgOwnerCheck); err != nil {
 			return err
 		}
 		result, err := tx.Exec(r.Context(), discardDraftSQL, id, orgID)
@@ -1224,7 +1248,7 @@ func (h *SkillsHandler) restore(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	bundleRestored := false
 	err = h.mutateSkill(r, "", "draft_restored_from:v"+strconv.Itoa(version), func(tx registryDatabase) error {
-		if err := lockAcceptedSkill(r, tx, id, orgID); err != nil {
+		if err := lockAcceptedSkill(r, tx, id, orgID, h.orgOwnerCheck); err != nil {
 			return err
 		}
 		var body []byte
@@ -1765,22 +1789,26 @@ func (h *MCPHandler) WithMCPServiceToken(token string) *MCPHandler {
 }
 
 type mcpServerRow struct {
-	ID                  string    `json:"id"`
-	OrgID               string    `json:"org_id"`
-	Name                string    `json:"name"`
-	Description         string    `json:"description"`
-	EndpointURL         string    `json:"endpoint_url"`
-	Transport           string    `json:"transport"`
-	AuthKind            string    `json:"auth_kind"`
-	ConfigJSON          any       `json:"-"`
-	ToolAllowlist       []string  `json:"tool_allowlist"`
-	SecretConfigured    bool      `json:"secret_configured"`
-	ConfigurationState  string    `json:"configuration_state"`
-	ConfigurationReason string    `json:"configuration_reason,omitempty"`
-	Scope               string    `json:"scope"`
-	Enabled             bool      `json:"enabled"`
-	RolloutState        string    `json:"rollout_state"`
-	RiskLevel           string    `json:"risk_level"`
+	ID                  string   `json:"id"`
+	OrgID               string   `json:"org_id"`
+	Name                string   `json:"name"`
+	Description         string   `json:"description"`
+	EndpointURL         string   `json:"endpoint_url"`
+	Transport           string   `json:"transport"`
+	AuthKind            string   `json:"auth_kind"`
+	ConfigJSON          any      `json:"-"`
+	ToolAllowlist       []string `json:"tool_allowlist"`
+	SecretConfigured    bool     `json:"secret_configured"`
+	ConfigurationState  string   `json:"configuration_state"`
+	ConfigurationReason string   `json:"configuration_reason,omitempty"`
+	Scope               string   `json:"scope"`
+	Enabled             bool     `json:"enabled"`
+	RolloutState        string   `json:"rollout_state"`
+	RiskLevel           string   `json:"risk_level"`
+	// AuthBindingID is the integration-corev2 credential binding that a static-bearer server redeems per call
+	// (W4-CC-5). It is the id parsed from the stored secret_ref and nothing else from config_json: never a token,
+	// and omitted for every other server.
+	AuthBindingID string `json:"auth_binding_id,omitempty"`
 	// AnnotationTrusted reports whether the registrant chose to believe this
 	// server's read-only annotations (see mcpServerConfig.AnnotationTrust).
 	AnnotationTrusted bool      `json:"annotation_trusted"`
@@ -2247,8 +2275,27 @@ func validMCPRiskLevel(value string) bool {
 	return value == "low" || value == "medium" || value == "high"
 }
 
+// mcpCredentialBindingSecretRefPrefix is where the gateway records the credential binding of a static-bearer server:
+// mcp_credential_ref.rs secret_ref_for writes secret://integration-corev2/credential-bindings/<binding id>.
+const mcpCredentialBindingSecretRefPrefix = "secret://integration-corev2/credential-bindings/"
+
+// mcpCredentialBindingIDPattern is the grammar of such a binding id, the one the gateway accepts (its binding_id_valid):
+// the cb_ prefix, then letters, digits and _ - . :, at most 128 bytes in all.
+var mcpCredentialBindingIDPattern = regexp.MustCompile(`^cb_[A-Za-z0-9_.:-]{0,125}$`)
+
+// authBindingIDFromSecretRef returns the integration-corev2 credential binding that a stored secret_ref names. Any
+// other reference, such as an OAuth token row or an external vault, names no binding and yields "".
+func authBindingIDFromSecretRef(secretRef string) string {
+	id, found := strings.CutPrefix(secretRef, mcpCredentialBindingSecretRefPrefix)
+	if !found || !mcpCredentialBindingIDPattern.MatchString(id) {
+		return ""
+	}
+	return id
+}
+
 func hydrateMCPServerView(server *mcpServerRow) {
 	server.ToolAllowlist = []string{}
+	server.AuthBindingID = ""
 	server.ConfigurationState = "invalid"
 	server.ConfigurationReason = "invalid_registry_record"
 	config, err := decodeStoredMCPConfig(server.ConfigJSON)
@@ -2268,6 +2315,7 @@ func hydrateMCPServerView(server *mcpServerRow) {
 	server.ToolAllowlist = append([]string(nil), config.ToolAllowlist...)
 	server.SecretConfigured = config.SecretRef != ""
 	server.AnnotationTrusted = config.annotationsTrusted()
+	server.AuthBindingID = authBindingIDFromSecretRef(config.SecretRef)
 	server.ConfigurationState = "valid"
 	server.ConfigurationReason = ""
 }

@@ -124,6 +124,18 @@ async fn invoke_chat_json(
     {
         return (status, body);
     }
+    // D2-461: a follow-up on an existing thread with no `space_ref` gets the thread's Space resolved
+    // server-side first; a no-op unless SPACE_THREAD_SCOPE_RESOLVE is `true`.
+    if let Err((status, body)) = crate::domains::spaces::resolve_thread_space_ref(
+        &state,
+        &user,
+        &headers,
+        &mut outbound_body,
+    )
+    .await
+    {
+        return (status, body);
+    }
     if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context(
         &state,
         &user,
@@ -197,6 +209,18 @@ pub(crate) async fn queue_invocation_input(
     let token = shared::model_token(&state, &user, &headers).await;
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     let mut outbound_body = body;
+    // D2-461: same server-side Space resolution as the send path (a no-op unless
+    // SPACE_THREAD_SCOPE_RESOLVE is `true`).
+    if let Err((status, body)) = crate::domains::spaces::resolve_thread_space_ref(
+        &state,
+        &user,
+        &headers,
+        &mut outbound_body,
+    )
+    .await
+    {
+        return (status, body).into_response();
+    }
     if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context(
         &state,
         &user,

@@ -1035,7 +1035,20 @@ Runbook, before `ZDR_ACKNOWLEDGEMENT_ENABLED=true` in any environment:
 2. OD-LEGAL signs off the text version, or the owner decides to ship the draft.
 3. Waived runs must skip the derived background jobs (memory indexing, dreaming, learning review) before the text that says they are skipped is shown to a user (D-B).
 
-## Unified-service replacement
+### Customer-gateway connections (W4-BYO)
+
+An organisation admin registers their own OpenAI-compatible endpoint. The API key is sealed in this service and never leaves it. The connection is never zero retention (its ZDR assessment is always `not_supported`).
+
+| Env | Default | Meaning |
+|---|---|---|
+| `CUSTOMER_GATEWAY_CONNECTIONS_ENABLED` | `false` | Mounts the customer-gateway routes (only the literal `true` turns it on). Off, none of them exist (404). |
+
+Routes, all under `/api/v1/model-connections/customer-gateway`. They are bearer-only and for an organisation owner or admin (403 `org_admin_required` otherwise); the internal API key cannot reach them:
+
+- `POST`: registers a gateway (`name`, `base_url`, `api_key`, `model_ids`). The key is sealed against the connection id and is not returned.
+- `GET`: the caller's organisation's live gateways. Each item carries `id`, `name`, `model_ids`, `base_url` (the host only, never the path or query) and `created_at`. It never carries the key or any sealed value.
+- `DELETE`: body `{"connection_id": "<id>"}` (1 to 128 characters: letters, digits, `-`, `_`, `.`). Removes the gateway and clears its sealed key in one transaction, ends any live ZDR acknowledgement, and writes one content-free `model_connection.customer_gateway_deleted` audit row (connection id and organisation id). A connection outside the caller's organisation, or one that is not a customer gateway, is a 404.
+
 
 The old unified-service profile and real-time features are split by ownership:
 

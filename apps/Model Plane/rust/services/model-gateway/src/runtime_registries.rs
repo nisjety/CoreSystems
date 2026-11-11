@@ -165,7 +165,8 @@ pub struct McpRegistry {
     /// tool listing does not re-post an unchanged tool (WS05-S2).
     observed: ObservationLedger,
     /// The integration-corev2 credential binding a static-bearer server redeems for each call, keyed by
-    /// (org, `server_id`). W4-CC-5: in memory like the rest of this registry, and never the token itself.
+    /// (org, `server_id`). W4-CC-5: in memory like the rest of this registry, and never the token itself. Each
+    /// hydration sets it from the binding capability-core projects, so a restarted gateway recovers it.
     credential_bindings: Arc<DashMap<(String, String), String>>,
 }
 
@@ -181,8 +182,8 @@ impl McpRegistry {
         }
     }
 
-    /// Record the credential binding a static-bearer server redeems for each call (W4-CC-5). Dropped by
-    /// [`Self::remove`] with the server it names.
+    /// Record the credential binding a static-bearer server redeems for each call (W4-CC-5). Dropped with the
+    /// server it names: by [`Self::remove`], or by [`Self::replace_org`] once an answer no longer lists that server.
     pub fn set_credential_binding(&self, org_id: &str, server_id: &str, binding_id: &str) {
         self.credential_bindings.insert(
             (org_id.to_owned(), server_id.to_owned()),
@@ -196,6 +197,12 @@ impl McpRegistry {
         self.credential_bindings
             .get(&(org_id.to_owned(), server_id.to_owned()))
             .map(|entry| entry.value().clone())
+    }
+
+    /// Forget a server's credential binding, when the record that names the server no longer names one.
+    pub fn clear_credential_binding(&self, org_id: &str, server_id: &str) {
+        self.credential_bindings
+            .remove(&(org_id.to_owned(), server_id.to_owned()));
     }
 
     /// A cached server's record, for a call path that needs its URL. A copy: the registry keeps its own.
@@ -277,6 +284,10 @@ impl McpRegistry {
         // A catalog with no server behind it is never kept, whatever removed the server.
         self.catalog
             .retain(|key, _| key.0 != org_id || incoming.contains_key(&key.1));
+        // Nor is a credential binding. A server the answer keeps has its binding set by the caller,
+        // before this merge, so only the bindings of servers it no longer lists are dropped here.
+        self.credential_bindings
+            .retain(|key, _| key.0 != org_id || incoming.contains_key(&key.1));
         gone
     }
 
@@ -356,16 +367,23 @@ struct CatalogMcpServer {
     owner_user_id: String,
     #[serde(default)]
     shared_with: Vec<String>,
+    /// The integration-corev2 credential binding of a static-bearer server (W4-CC-5), as capability-core projects
+    /// it: the id its stored `secret_ref` names, never a token and never another config field. Empty for every other
+    /// server. Read only while `MCP_SECRET_REF_AUTH_ENABLED` is on (see [`catalog_mcp_parts`]).
+    #[serde(default)]
+    auth_binding_id: String,
 }
 
 /// Convert the capability-core public projection into the gateway's execution
-/// record and its durable ownership sidecar. The projection intentionally does
-/// not contain an operational token; OAuth credentials are resolved through
-/// capability-core's encrypted token endpoint at dispatch time.
+/// record, its durable ownership sidecar and, for a static-bearer server, the
+/// credential binding its calls redeem. The projection intentionally does not
+/// contain an operational token; OAuth credentials are resolved through
+/// capability-core's encrypted token endpoint at dispatch time, and a stored
+/// bearer is redeemed from its binding for each call.
 fn catalog_mcp_parts(
     current_org_id: &str,
     raw: CatalogMcpServer,
-) -> Result<(McpServer, crate::ownership::Ownership), String> {
+) -> Result<(McpServer, crate::ownership::Ownership, Option<String>), String> {
     let server_id = raw.id.trim();
     if server_id.is_empty() {
         return Err("catalog MCP record has no id".to_owned());
@@ -424,7 +442,21 @@ fn catalog_mcp_parts(
             "catalog MCP record belongs to org '{row_org_id}', not '{current_org_id}'"
         ));
     }
-    Ok((server, ownership))
+    // The credential binding of a static-bearer server (W4-CC-5). A restarted gateway holds none in memory, so it
+    // reads the id capability-core projects, and only while MCP_SECRET_REF_AUTH_ENABLED is on. A record that
+    // names a malformed binding is refused, not listed without its credential.
+    let credential_binding = if crate::mcp_credential_ref::enabled() {
+        match raw.auth_binding_id.trim() {
+            "" => None,
+            binding if crate::mcp_credential_ref::binding_id_valid(binding) => {
+                Some(binding.to_owned())
+            }
+            _ => return Err("catalog MCP record names a malformed credential binding".to_owned()),
+        }
+    } else {
+        None
+    };
+    Ok((server, ownership, credential_binding))
 }
 
 /// Drop everything the replica holds for one tenant's MCP servers: the registry, the
@@ -442,10 +474,10 @@ fn clear_org_mcp_cache(
 /// Refresh one tenant's MCP cache from capability-core using a verified
 /// capability bearer.
 ///
-/// * A successful, parsed answer replaces the tenant's registry, ownership projection
-///   and discovery catalog, as a merge ([`McpRegistry::replace_org`]): a server in both
-///   the old and the new answer is never missing, and keeps its discovered catalog while
-///   its config is unchanged.
+/// * A successful, parsed answer replaces the tenant's registry, ownership projection,
+///   credential bindings and discovery catalog, as a merge ([`McpRegistry::replace_org`]):
+///   a server in both the old and the new answer is never missing, and keeps its discovered
+///   catalog while its config is unchanged.
 /// * A registry that cannot answer fails CLOSED: an unreachable registry, a 5xx or other
 ///   unexpected status, a body that is not the projection, or no registry address clears
 ///   the tenant's cache, so an admin's revocation is not undone by an outage that leaves a
@@ -516,13 +548,15 @@ pub async fn hydrate_mcp_registry(
 
     let mut servers = Vec::with_capacity(payload.servers.len());
     let mut ownership_entries = Vec::with_capacity(payload.servers.len());
+    let mut credential_bindings = Vec::with_capacity(payload.servers.len());
     for raw in payload.servers {
         match catalog_mcp_parts(org_id, raw) {
-            Ok((server, resource_ownership)) => {
+            Ok((server, resource_ownership, credential_binding)) => {
                 // Reuse the exact write-time validation, but never let one
                 // malformed legacy row poison the rest of the tenant cache.
                 let mut checked = server.clone();
                 if validate_mcp_server(org_id, &mut checked).is_ok() {
+                    credential_bindings.push((checked.server_id.clone(), credential_binding));
                     servers.push(checked.clone());
                     ownership_entries.push((checked.server_id, resource_ownership));
                 } else {
@@ -533,8 +567,25 @@ pub async fn hydrate_mcp_registry(
         }
     }
     let count = servers.len();
+    apply_credential_bindings(reg, org_id, credential_bindings);
     apply_mcp_projection(reg, ownership, org_id, servers, ownership_entries);
     Ok(count)
+}
+
+/// Make one tenant's credential bindings the registry's answer: a server whose record names
+/// a binding has that binding, and a server whose record names none loses any binding it
+/// held. It runs before the merge, so a binding is in place before the row that needs it.
+fn apply_credential_bindings(
+    reg: &McpRegistry,
+    org_id: &str,
+    bindings: Vec<(String, Option<String>)>,
+) {
+    for (server_id, binding) in bindings {
+        match binding {
+            Some(binding_id) => reg.set_credential_binding(org_id, &server_id, &binding_id),
+            None => reg.clear_credential_binding(org_id, &server_id),
+        }
+    }
 }
 
 /// Make one tenant's MCP cache the registry's answer, as a merge and never as
@@ -1552,7 +1603,7 @@ mod mcp_hydration_tests {
 
     #[test]
     fn catalog_projection_restores_owner_and_shares_without_credentials() {
-        let (server, ownership) = catalog_mcp_parts(
+        let (server, ownership, _) = catalog_mcp_parts(
             "org-1",
             CatalogMcpServer {
                 id: "mcp-1".to_owned(),
@@ -1565,6 +1616,7 @@ mod mcp_hydration_tests {
                 scope: "user".to_owned(),
                 owner_user_id: "alice".to_owned(),
                 shared_with: vec!["bob".to_owned(), "alice".to_owned(), "".to_owned()],
+                auth_binding_id: String::new(),
             },
         )
         .expect("valid catalog projection");
@@ -1593,6 +1645,7 @@ mod mcp_hydration_tests {
             scope: "org".to_owned(),
             owner_user_id: String::new(),
             shared_with: vec![],
+            auth_binding_id: String::new(),
         }
     }
 

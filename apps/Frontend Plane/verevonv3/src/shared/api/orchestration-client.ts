@@ -1,5 +1,6 @@
 import type { z } from 'zod'
 import {
+  getActionDescriptor,
   type integrationsConnectorPoliciesOutput,
   integrationsSetConnectorPolicyInput,
   orchestrationDecideApprovalInput,
@@ -638,6 +639,55 @@ export async function continueParkedRun(
       // Snake_case on the wire, and the approval id is present and exactly empty: the BFF body
       // has no absent-key form.
       body: JSON.stringify({ approval_id: '', claim_token: claimToken }),
+      signal,
+    },
+    onEvent,
+    (err) => {
+      connError = err
+    },
+  )
+
+  if (connError) throw connError
+}
+
+/**
+ * Continue a run whose browser help pause the person DENIED ("Skip this site", EP-1 S2, D3-647).
+ * The approval named is the denial, so nothing is spent: the body is the committed one plus
+ * `skipped: true`, and the gateway relays the continuation as SSE like `continueRun`. The executor
+ * releases the page the run held for the person and continues the run with the paused call answered
+ * as skipped, so the model looks elsewhere. The claim token is checked against the `chat.run.continue`
+ * action contract first, as every continue's is.
+ *
+ * Rejects as `continueRun` does when the gateway refuses before a stream opens (for example 409
+ * `approval_not_resumable` for an approval that is not a denied help pause, or 401 when no browser
+ * credential could be minted). Nothing was spent in any of those cases, so the caller may fall back
+ * to the plain resume; read the frames with `chatRunContinueFrameRefusalOf` and
+ * `chatRunContinueUnflaggedRefusalOf` as for `continueRun`.
+ */
+export async function continueSkippedRun(
+  runId: string,
+  approvalId: string,
+  claimToken: string,
+  onEvent: (event: SseEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const checked = getActionDescriptor('chat.run.continue')?.inputSchema.safeParse({
+    runId,
+    approvalId,
+    claimToken,
+    skipped: true,
+  })
+  if (!checked?.success) {
+    throw new ApiError('Ugyldig fortsettelse.', 400, 'invalid_run_continue')
+  }
+  let connError: unknown
+
+  await readSseStream(
+    `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/continue`,
+    {
+      method: 'POST',
+      // Snake_case on the wire: the BFF body rejects unknown fields outright.
+      body: JSON.stringify({ approval_id: approvalId, claim_token: claimToken, skipped: true }),
       signal,
     },
     onEvent,

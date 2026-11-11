@@ -241,7 +241,7 @@ fn approval_cause_not_persisted_under_zdr() {
     );
     let create = body_of(&grpc, "fn create_approval(");
     assert!(
-        create.contains("new_approval_metadata(&req, caller.zdr())"),
+        create.contains("new_approval_metadata(&req, approval_write_is_content_free(&caller))"),
         "create_approval must build the stored metadata from the caller's posture"
     );
 }
@@ -255,7 +255,7 @@ fn approval_audit_not_emitted_under_zdr() {
     let grpc = production("../session-core/src/orchestration_grpc.rs");
     assert_before(
         body_of(&grpc, "fn decide_approval("),
-        "refuse_zdr_continuation(&caller)?;",
+        "refuse_zdr_or_waived_approval_caller(&caller)?;",
         "store::decide_approval_recorded(",
         "a zero-retention decision is refused before the decision row and its audit row are written",
     );
@@ -291,7 +291,7 @@ fn approval_scope_grant_under_zdr_refused() {
     let grpc = production("../session-core/src/orchestration_grpc.rs");
     assert_before(
         body_of(&grpc, "fn decide_approval("),
-        "refuse_zdr_continuation(&caller)?;",
+        "refuse_zdr_or_waived_approval_caller(&caller)?;",
         "store::decide_approval_recorded(",
         "session-core refuses a zero-retention decision before the grant is written",
     );

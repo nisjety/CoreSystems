@@ -27,8 +27,8 @@ use std::time::Duration;
 use mp_contracts::model_plane::v1::{
     thread_goal_service_client::ThreadGoalServiceClient, BindGoalTurnRunRequest,
     ClaimGoalTurnRequest, ClaimGoalTurnResponse, GetGoalTurnForJudgeRequest,
-    GetGoalTurnForJudgeResponse, InferRequest, RecordGoalVerdictRequest, RunUsage,
-    SettleGoalTurnRequest, ThreadGoal,
+    GetGoalTurnForJudgeResponse, InferRequest, JudgeToolCall, ListRunToolCallsForJudgeRequest,
+    RecordGoalVerdictRequest, RunUsage, SettleGoalTurnRequest, ThreadGoal,
 };
 use tonic::transport::Channel;
 
@@ -775,6 +775,77 @@ pub(crate) async fn read_goal_turn_for_judge(
         .get_goal_turn_for_judge(request)
         .await
         .map(tonic::Response::into_inner)
+}
+
+/// `ListRunToolCallsForJudge` under the judge's read token: the names and statuses of the tool calls
+/// one run reserved. The status is session-core's, and the caller decides what a failure costs.
+/// Nothing is logged here, so no ids leave the call.
+pub(crate) async fn read_run_tool_calls_for_judge(
+    mut client: ThreadGoalServiceClient<Channel>,
+    token: &str,
+    org_id: &str,
+    run_id: &str,
+) -> Result<Vec<JudgeToolCall>, tonic::Status> {
+    let authorization = format!("Bearer {token}")
+        .parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>()
+        .map_err(|_| tonic::Status::internal("goal judge read token is not forwardable"))?;
+    let mut request = tonic::Request::new(ListRunToolCallsForJudgeRequest {
+        org_id: org_id.to_owned(),
+        run_id: run_id.to_owned(),
+    });
+    request
+        .metadata_mut()
+        .insert("authorization", authorization);
+    client
+        .list_run_tool_calls_for_judge(request)
+        .await
+        .map(|response| response.into_inner().calls)
+}
+
+/// The tool-call evidence the judge may cite for `run_id` (`tool:<name>:<status>`), read with the judge
+/// read token. A zero-retention or waived run is never read: `zdr` is the turn's retention and a
+/// session-core refusal covers the rest. Best-effort: a failed mint or read is logged by its code, with
+/// no content, and offers no evidence, so a `met` verdict the judge could only have cited from these
+/// lines is downgraded to `unsure` as it was before this read existed.
+pub(crate) async fn run_tool_call_evidence(
+    state: &AppState,
+    org_id: &str,
+    run_id: &str,
+    zdr: bool,
+) -> Vec<EvidenceLine> {
+    if zdr || run_id.trim().is_empty() {
+        return Vec::new();
+    }
+    let Some(provider) = state.goal_verdict_tokens.as_ref() else {
+        return Vec::new();
+    };
+    let token = match provider.read_token(org_id).await {
+        Ok(token) => token,
+        Err(error) => {
+            tracing::warn!(%error, "goal judge read token was not minted; the judge has no tool-call evidence");
+            return Vec::new();
+        }
+    };
+    tool_call_evidence_for_run(state, &token, org_id, run_id).await
+}
+
+/// The tool-call evidence of `run_id` under an already minted judge read token (the unattended judge
+/// route mints one for its goal read). Best-effort as [`run_tool_call_evidence`] is.
+pub(crate) async fn tool_call_evidence_for_run(
+    state: &AppState,
+    token: &str,
+    org_id: &str,
+    run_id: &str,
+) -> Vec<EvidenceLine> {
+    match read_run_tool_calls_for_judge(state.thread_goal_client.clone(), token, org_id, run_id)
+        .await
+    {
+        Ok(calls) => crate::goal_judge::tool_call_evidence(&calls),
+        Err(status) => {
+            tracing::warn!(code = ?status.code(), "goal judge tool-call read failed; the judge has no tool-call evidence");
+            Vec::new()
+        }
+    }
 }
 
 /// One settled goal turn to judge (EP-7 S3, S6): the route the judge request copies, the model the turn

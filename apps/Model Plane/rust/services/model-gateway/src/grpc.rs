@@ -4149,6 +4149,14 @@ mod tests {
             ))
         }
 
+        async fn check_memory_write(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::CheckMemoryWriteRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::CheckMemoryWriteResponse>, Status>
+        {
+            Err(Status::unimplemented("check_memory_write not needed in test"))
+        }
+
         async fn get_memory_controls(
             &self,
             _: Request<mp_contracts::model_plane::v1::GetMemoryControlsRequest>,

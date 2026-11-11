@@ -436,12 +436,27 @@ pub(crate) async fn judge_goal_turn_route(
             json!({}),
         ));
     }
-    // The fire's run and closed outcome are the evidence the judge may cite. The run's tool-step ids are
-    // not readable without its action ids, so the judge cites the run it judges.
-    let evidence = vec![EvidenceLine {
+    // The fire's run and closed outcome are the evidence the judge may cite, and so are the names and
+    // statuses of the run's tool calls (`tool:<name>:<status>`), read by run id with the same read
+    // token as the goal. The scheduled lane denies ZDR and the goal read refuses a waived run, so no
+    // such run is read.
+    let mut evidence = vec![EvidenceLine {
         id: format!("run:{}", body.run_id),
         line: format!("scheduled_run outcome={}", read.outcome),
     }];
+    for line in crate::thread_goal::tool_call_evidence_for_run(
+        &state,
+        &read_token,
+        &body.org_id,
+        &body.run_id,
+    )
+    .await
+    {
+        if !evidence.iter().any(|kept| kept.id == line.id) {
+            evidence.push(line);
+        }
+    }
+    evidence.truncate(crate::goal_judge::MAX_EVIDENCE_LINES);
     let request_id = format!("goal-judge-{}", body.run_id);
     // The scheduled lane names no model of its own, so the judge runs on the auxiliary model with no
     // route floors. The scheduled lane denies ZDR, so the judge is never zero-retention.

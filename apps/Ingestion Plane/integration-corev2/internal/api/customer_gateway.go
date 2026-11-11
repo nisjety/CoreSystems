@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
@@ -29,6 +32,7 @@ import (
 // Audit event types written by the customer-gateway routes. Content-free.
 const (
 	auditEventGatewayCreated   = "model_connection.customer_gateway_created"
+	auditEventGatewayDeleted   = "model_connection.customer_gateway_deleted"
 	auditEventGatewayRequested = "customer_gateway_inference.requested"
 	auditEventGatewayCompleted = "customer_gateway_inference.completed"
 	auditEventGatewayFailed    = "customer_gateway_inference.failed"
@@ -45,6 +49,12 @@ type customerGatewayCreateBody struct {
 	BaseURL  string   `json:"base_url"`
 	APIKey   string   `json:"api_key"`
 	ModelIDs []string `json:"model_ids"`
+}
+
+// customerGatewayDeleteBody names the connection to remove. It travels in the JSON body of the
+// DELETE, as the BFF sends it.
+type customerGatewayDeleteBody struct {
+	ConnectionID string `json:"connection_id"`
 }
 
 type customerGatewayInferBody struct {
@@ -85,6 +95,14 @@ func registerCustomerGatewayRoutes(
 
 	app.Post(customerGatewayCreatePath, chainHandlers(rateLimited, bearerOnly, func(c *fiber.Ctx) error {
 		return customerGatewayCreate(c, cfg, broker)
+	})...)
+
+	app.Get(customerGatewayCreatePath, chainHandlers(rateLimited, bearerOnly, func(c *fiber.Ctx) error {
+		return customerGatewayList(c, cfg)
+	})...)
+
+	app.Delete(customerGatewayCreatePath, chainHandlers(rateLimited, bearerOnly, func(c *fiber.Ctx) error {
+		return customerGatewayDelete(c, cfg)
 	})...)
 
 	app.Post(customerGatewayInferPath, chainHandlers(rateLimited, modelPlaneAuth, func(c *fiber.Ctx) error {
@@ -278,6 +296,139 @@ func customerGatewayCreate(c *fiber.Ctx, cfg ServerConfig, broker *customergatew
 			"digest":     zdrRecord.Digest,
 		},
 	}})
+}
+
+// customerGatewayAdminPrincipal returns the verified org admin or owner making the call. When it
+// returns false, the refusal is already written and the returned error is the handler's result.
+func customerGatewayAdminPrincipal(c *fiber.Ctx, action string) (auth.Principal, bool, error) {
+	principal, ok := auth.PrincipalFromContext(c)
+	if !ok || auth.IsInternalCall(c) || strings.TrimSpace(principal.OrganizationID) == "" || strings.TrimSpace(principal.UserID) == "" {
+		return auth.Principal{}, false, apiError(c, fiber.StatusUnauthorized, "unauthorized", "A verified user is required.")
+	}
+	if !zdrHasOrgAdminRole(principal.Role) {
+		return auth.Principal{}, false, apiError(c, fiber.StatusForbidden, "org_admin_required", "Only an organisation owner or admin can "+action+".")
+	}
+	return principal, true, nil
+}
+
+// customerGatewayList returns the caller's organisation's live gateways. Metadata only: the id, the
+// name, the model ids, the host of the base URL and the creation time. The base URL's path, query
+// and any credentials in it, and every sealed value, are never returned.
+func customerGatewayList(c *fiber.Ctx, cfg ServerConfig) error {
+	principal, ok, err := customerGatewayAdminPrincipal(c, "list customer gateways")
+	if !ok {
+		return err
+	}
+	if cfg.Repo == nil {
+		return apiError(c, fiber.StatusServiceUnavailable, "repository_unavailable", "The connection store is unavailable.")
+	}
+	connections, err := cfg.Repo.ListConnections(c.UserContext(), store.ConnectionFilter{
+		OrganizationID: principal.OrganizationID,
+		ProviderKey:    customergateway.ProviderKey,
+		ConnectorType:  customergateway.ConnectorType,
+	})
+	if err != nil {
+		return apiError(c, fiber.StatusServiceUnavailable, "repository_unavailable", "The connection store is unavailable.")
+	}
+	sort.SliceStable(connections, func(i, j int) bool { return connections[i].CreatedAt.After(connections[j].CreatedAt) })
+	items := make([]fiber.Map, 0, len(connections))
+	for _, connection := range connections {
+		if !customergateway.IsGatewayConnection(connection) || connection.OrganizationID != principal.OrganizationID {
+			continue
+		}
+		modelIDs := customergateway.ModelIDsFromContext(connection.ProviderContext)
+		if modelIDs == nil {
+			modelIDs = []string{}
+		}
+		items = append(items, fiber.Map{
+			"id":         connection.ID,
+			"name":       connection.DisplayName,
+			"model_ids":  modelIDs,
+			"base_url":   customerGatewayHostOf(connection.ProviderContext[customergateway.ContextBaseURL]),
+			"created_at": connection.CreatedAt.UTC().Format(time.RFC3339),
+		})
+	}
+	return success(c, fiber.Map{"connections": items})
+}
+
+// customerGatewayHostOf returns only the host (and port) of a stored base URL.
+func customerGatewayHostOf(baseURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return ""
+	}
+	return parsed.Host
+}
+
+// validCustomerGatewayConnectionID reports whether id is 1 to 128 bytes of letters, digits, '-',
+// '_' and '.'.
+func validCustomerGatewayConnectionID(id string) bool {
+	if len(id) < 1 || len(id) > 128 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		b := id[i]
+		switch {
+		case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9', b == '-', b == '_', b == '.':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// customerGatewayDelete removes one of the caller's organisation's gateways. The connection and its
+// sealed key go together (the store's delete clears the sealed values), any live ZDR acknowledgement
+// ends in the same transaction, and one content-free audit row carries the connection id and the
+// organisation id. A connection outside the caller's organisation is a 404.
+func customerGatewayDelete(c *fiber.Ctx, cfg ServerConfig) error {
+	principal, ok, err := customerGatewayAdminPrincipal(c, "remove a customer gateway")
+	if !ok {
+		return err
+	}
+	var body customerGatewayDeleteBody
+	if err := json.Unmarshal(c.Body(), &body); err != nil {
+		return apiError(c, fiber.StatusBadRequest, "invalid_body", "Request body is invalid.")
+	}
+	connectionID := strings.TrimSpace(body.ConnectionID)
+	if !validCustomerGatewayConnectionID(connectionID) {
+		return apiError(c, fiber.StatusBadRequest, "invalid_connection_id", "connection_id must be 1 to 128 characters: letters, digits, '-', '_' or '.'.")
+	}
+	if cfg.Repo == nil {
+		return apiError(c, fiber.StatusServiceUnavailable, "repository_unavailable", "The connection store is unavailable.")
+	}
+	connection, err := cfg.Repo.GetConnection(c.UserContext(), connectionID)
+	if err != nil {
+		return customerGatewayError(c, cfg, err)
+	}
+	if !customergateway.IsGatewayConnection(connection) || connection.OrganizationID != principal.OrganizationID {
+		return customerGatewayError(c, cfg, store.ErrNotFound)
+	}
+	if err := withAuditTransaction(c.UserContext(), cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+		deleted, deleteErr := tx.MarkConnectionDeleted(c.UserContext(), connection.ID)
+		if deleteErr != nil {
+			return deleteErr
+		}
+		connection = deleted
+		if _, err := store.RevokeAcknowledgementsOnRemoval(c.UserContext(), tx, connection.ID, time.Time{}); err != nil {
+			return err
+		}
+		return persist(store.AuditEvent{
+			ID:             auditMutationID(c.UserContext(), "customer-gateway-deleted", connection.ID),
+			OrganizationID: connection.OrganizationID,
+			UserID:         principal.UserID,
+			ConnectionID:   connection.ID,
+			EventType:      auditEventGatewayDeleted,
+			ProviderKey:    connection.ProviderKey,
+		})
+	}); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return customerGatewayError(c, cfg, err)
+		}
+		return apiError(c, fiber.StatusServiceUnavailable, "connection_persist_failed", "Could not remove the gateway safely.")
+	}
+	publishIntegrationEvent(c.UserContext(), cfg, integrationEventConnUpd, connection, map[string]any{"change": "customer_gateway_deleted"})
+	return success(c, fiber.Map{"connection_id": connection.ID, "deleted": true})
 }
 
 // applyCustomerGatewayZDR records the fixed assessment of a customer gateway: not_supported, on no

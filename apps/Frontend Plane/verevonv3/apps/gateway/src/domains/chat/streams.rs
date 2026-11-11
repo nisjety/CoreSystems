@@ -154,6 +154,19 @@ async fn stream_chat(
     {
         return (status, body).into_response();
     }
+    // D2-461: a follow-up on an existing thread with no `space_ref` gets the thread's Space resolved
+    // server-side first, so the injector below mints the scoped decision. A no-op unless
+    // SPACE_THREAD_SCOPE_RESOLVE is `true`.
+    if let Err((status, body)) = crate::domains::spaces::resolve_thread_space_ref(
+        &state,
+        &user,
+        &headers,
+        &mut outbound_body,
+    )
+    .await
+    {
+        return (status, body).into_response();
+    }
     if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context_for_wake(
         &state,
         &user,

@@ -442,6 +442,22 @@ fn approval_edit_enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_EDIT_ENV).ok().as_deref())
 }
 
+/// Refuse an approval create or decide from a waived run's credential (D2-1149, DEC-32). Off by
+/// default: only the literal `true` enables it, and with it off a waived caller creates and decides
+/// approvals exactly as before.
+const APPROVAL_WAIVER_REFUSE_ENV: &str = "APPROVAL_WAIVER_REFUSE";
+
+fn approval_waiver_refuse_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_WAIVER_REFUSE_ENV).ok().as_deref())
+}
+
+/// Whether an approval write by `caller` stores no content: the caller is zero-retention, or it is a
+/// waived run's credential with the waiver refusal on. A waived credential has `zdr()` false but
+/// counts as ZDR for every new durable store (DEC-32), so it must not leave approval metadata.
+fn approval_write_is_content_free(caller: &VerifiedIdentity) -> bool {
+    caller.zdr() || (approval_waiver_refuse_enabled() && caller.zdr_waiver().is_some())
+}
+
 /// The largest `patch_json` an edit may carry: the body cap plus room for the recipients and the
 /// subject. A larger patch could never pass the edit contract.
 const MAX_EDIT_PATCH_BYTES: usize = 64 * 1024;
@@ -1026,20 +1042,25 @@ fn approved_authority(offered_json: &str) -> Option<proto::ApprovedAuthority> {
                 .collect()
         })
         .unwrap_or_default();
-    let tools: Vec<proto::ApprovedTool> = value
-        .get("tools")
-        .and_then(JsonValue::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .map(|tool| proto::ApprovedTool {
-                    name: text(tool, "name"),
-                    description: text(tool, "description"),
-                    parameters_json: text(tool, "parameters_json"),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let tools_of = |key: &str| -> Vec<proto::ApprovedTool> {
+        value
+            .get(key)
+            .and_then(JsonValue::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|tool| proto::ApprovedTool {
+                        name: text(tool, "name"),
+                        description: text(tool, "description"),
+                        parameters_json: text(tool, "parameters_json"),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let tools = tools_of("tools");
+    // A coordinator run's complete offer, when its pause kept one (absent for every other run).
+    let coordinator_tools = tools_of("coordinator_tools");
     Some(proto::ApprovedAuthority {
         mode: text(authority, "mode"),
         plan_mode: authority
@@ -1062,6 +1083,7 @@ fn approved_authority(offered_json: &str) -> Option<proto::ApprovedAuthority> {
         tool_names,
         tools,
         digest: text(authority, "digest"),
+        coordinator_tools,
     })
 }
 
@@ -1523,10 +1545,11 @@ pub(crate) fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
 /// stored as `unclassified_gate` (and logged, because it means a creator is newer than
 /// this service), the scope options are the code's own, and every field is bounded. A
 /// zero-retention credential stores none, so nothing of an approval's cause outlives a
-/// ZDR caller; an approval with no stated cause is stored exactly as before.
+/// ZDR caller; an approval with no stated cause is stored exactly as before. `durable_forbidden` is
+/// true for a ZDR caller or a waived one with the waiver refusal on (D2-1149, DEC-32).
 fn new_approval_metadata(
     req: &proto::CreateApprovalRequest,
-    zdr: bool,
+    durable_forbidden: bool,
 ) -> (JsonValue, Option<&'static str>) {
     let mut metadata_map = serde_json::Map::new();
     if !req.reason.is_empty() {
@@ -1536,7 +1559,7 @@ fn new_approval_metadata(
         metadata_map.insert("step_id".to_owned(), JsonValue::String(req.step_id.clone()));
     }
     let mut stored_code = None;
-    if let Some(cause) = req.cause.clone().filter(|_| !zdr) {
+    if let Some(cause) = req.cause.clone().filter(|_| !durable_forbidden) {
         let (cause, known) = approval_cause::normalized(cause);
         if !known {
             warn!(
@@ -2565,6 +2588,27 @@ fn refuse_zdr_or_waived_question_caller(caller: &VerifiedIdentity) -> Result<(),
         return Err(Refusal::WAIVER_ROUTE_MISMATCH.grpc_status(tonic::Code::PermissionDenied));
     }
     Ok(())
+}
+
+/// The waiver gate of `CreateApproval`. A ZDR credential still creates its approval (the pause must
+/// work, and its metadata carries no cause), so only a waived credential is refused here, and only
+/// with `APPROVAL_WAIVER_REFUSE` on. Decided before any lookup, so a refused call reads and writes
+/// nothing.
+#[allow(clippy::result_large_err)]
+fn refuse_waived_approval_caller(caller: &VerifiedIdentity) -> Result<(), Status> {
+    if approval_waiver_refuse_enabled() && caller.zdr_waiver().is_some() {
+        return Err(Refusal::WAIVER_ROUTE_MISMATCH.grpc_status(tonic::Code::PermissionDenied));
+    }
+    Ok(())
+}
+
+/// The ZDR and waiver gate of `DecideApproval`. A decision writes `metadata.decision` and its audit
+/// row, so a ZDR credential never reaches it, and a waived one does not either with
+/// `APPROVAL_WAIVER_REFUSE` on (DEC-32). Decided before any lookup or write.
+#[allow(clippy::result_large_err)]
+fn refuse_zdr_or_waived_approval_caller(caller: &VerifiedIdentity) -> Result<(), Status> {
+    retention_receipt::refuse_zdr_continuation(caller)?;
+    refuse_waived_approval_caller(caller)
 }
 
 /// The wire form of an approval preview (EP-10-S1). The revision is always 0: an edit grants in
@@ -3898,6 +3942,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         let result: Result<Response<proto::CreateApprovalResponse>, Status> = async {
             let caller = identity(&request)?;
             authorize_operation(&caller, "orchestration:write")?;
+            refuse_waived_approval_caller(&caller)?;
             let mut req = request.into_inner();
             if req.run_id.is_empty() {
                 return Err(Status::invalid_argument("run_id is required"));
@@ -3937,7 +3982,8 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             } else {
                 None
             };
-            let (mut metadata, cause_code) = new_approval_metadata(&req, caller.zdr());
+            let (mut metadata, cause_code) =
+                new_approval_metadata(&req, approval_write_is_content_free(&caller));
             // The typed card (build plan WS10 S1): checked here, never trusted. The resume class is
             // the server's own: a descriptor makes it an action continuation, nothing else can.
             if let Some(card) = crate::space::approvals::card_from_request(
@@ -4630,7 +4676,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         let started = Instant::now();
         let result: Result<Response<proto::DecideApprovalResponse>, Status> = async {
             let caller = identity(&request)?;
-            retention_receipt::refuse_zdr_continuation(&caller)?;
+            refuse_zdr_or_waived_approval_caller(&caller)?;
             authorize_operation(&caller, "approval:decide")?;
             let mut req = request.into_inner();
             if req.approval_id.is_empty() {
@@ -10486,7 +10532,9 @@ mod approval_edit_tests {
         let edit_gate = body.find("refuse_zdr_or_waived_question_caller(&caller)?;").expect("gate");
         let member = body.find("authorize_member_decide(").expect("member lookup");
         assert!(edit_gate < member, "the waived refusal comes before the member lookup");
-        let zdr = body.find("refuse_zdr_continuation(&caller)?;").expect("zdr gate");
+        let zdr = body
+            .find("refuse_zdr_or_waived_approval_caller(&caller)?;")
+            .expect("zdr gate");
         assert!(zdr < edit_gate);
     }
 

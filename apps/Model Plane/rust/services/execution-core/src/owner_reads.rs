@@ -55,6 +55,25 @@ pub fn admission_table() -> bool {
     crate::control_http_client::env_value("MODEL_ACTION_ADMISSION").as_deref() == Some("table")
 }
 
+/// Whether this deployment refuses the listing on a Space-scoped run (`OWNER_LIST_SPACE_REFUSE`).
+/// Strict: only the literal `true` switches it on, so the listing keeps its organisation-wide
+/// reach everywhere else. Dark by default (D2-769).
+#[must_use]
+pub fn space_refuse_enabled() -> bool {
+    crate::control_http_client::env_value("OWNER_LIST_SPACE_REFUSE").as_deref() == Some("true")
+}
+
+/// Whether a call on a run in `space_id` is refused because the run is Space-scoped. The Data Plane
+/// listing takes no Space argument, so it would answer with the whole organisation's titles; a
+/// Space-scoped run therefore gets no listing at all rather than a wider one than its retrieval.
+#[must_use]
+pub fn space_refused(space_id: &str) -> bool {
+    !space_id.trim().is_empty() && space_refuse_enabled()
+}
+
+/// The typed refusal a Space-scoped run receives in place of the listing.
+const SPACE_REFUSAL: &str = "knowledge_list_documents is not available in a Space-scoped run";
+
 /// The definition offered to the model.
 #[must_use]
 pub fn tool_def() -> ToolDefinition {
@@ -174,11 +193,15 @@ fn tool_error(message: String) -> ToolExecution {
     }
 }
 
-/// Runs the Do-loop read. The switch and retention checks come first, then the arguments, the run's
-/// org and the bearer; each refusal is a typed tool error returned before any RPC.
+/// Runs the Do-loop read. The switch and retention checks come first, then the Space refusal, then
+/// the arguments, the run's org and the bearer; each refusal is a typed tool error returned before
+/// any RPC. `space_id` is the run's Space (empty for a run outside one): with
+/// `OWNER_LIST_SPACE_REFUSE=true` a Space-scoped run is refused, fail closed, because the listing
+/// cannot be narrowed to the Space.
 pub async fn execute(
     tool_input: &str,
     org_id: &str,
+    space_id: &str,
     admission_table: bool,
     retention_bound: bool,
     data_plane_bearer: Option<&str>,
@@ -187,6 +210,9 @@ pub async fn execute(
         return tool_error(format!(
             "{TOOL_NAME} is not available on this run: the owner document listing needs MODEL_ACTION_ADMISSION=table and a run that is not retention-bound"
         ));
+    }
+    if space_refused(space_id) {
+        return tool_error(SPACE_REFUSAL.to_owned());
     }
     let args = match parse_input(tool_input) {
         Ok(args) => args,
@@ -338,31 +364,32 @@ mod tests {
 
     #[tokio::test]
     async fn refusals_are_tool_errors_returned_before_any_rpc() {
-        let off = execute("{}", "org-a", false, false, Some("token")).await;
+        let off = execute("{}", "org-a", "", false, false, Some("token")).await;
         assert!(off
             .error
             .as_deref()
             .is_some_and(|error| error.contains("MODEL_ACTION_ADMISSION=table")));
-        assert!(execute("{}", "org-a", true, true, Some("token"))
+        assert!(execute("{}", "org-a", "", true, true, Some("token"))
             .await
             .error
             .is_some());
-        let no_bearer = execute("{}", "org-a", true, false, None).await;
+        let no_bearer = execute("{}", "org-a", "", true, false, None).await;
         assert!(no_bearer
             .error
             .as_deref()
             .is_some_and(|error| error.contains("verified user credential")));
-        let padded = execute("{}", "org-a", true, false, Some(" token")).await;
+        let padded = execute("{}", "org-a", "", true, false, Some(" token")).await;
         assert!(padded
             .error
             .as_deref()
             .is_some_and(|error| error.contains("verified user credential")));
-        let no_org = execute("{}", "  ", true, false, Some("token")).await;
+        let no_org = execute("{}", "  ", "", true, false, Some("token")).await;
         assert!(no_org
             .error
             .as_deref()
             .is_some_and(|error| error.contains("run org_id")));
-        let bad_input = execute(r#"{"limit":99}"#, "org-a", true, false, Some("token")).await;
+        let bad_input =
+            execute(r#"{"limit":99}"#, "org-a", "", true, false, Some("token")).await;
         assert!(bad_input
             .error
             .as_deref()

@@ -12484,6 +12484,16 @@ impl mpv1::memory_service_server::MemoryService for MockMemory {
         Err(Status::unimplemented("health not needed in test"))
     }
 
+    async fn check_memory_write(
+        &self,
+        _: TReq<mpv1::CheckMemoryWriteRequest>,
+    ) -> Result<Response<mpv1::CheckMemoryWriteResponse>, Status> {
+        Ok(Response::new(mpv1::CheckMemoryWriteResponse {
+            allowed: true,
+            refusal_code: String::new(),
+        }))
+    }
+
     async fn get_memory_controls(
         &self,
         _: TReq<mpv1::GetMemoryControlsRequest>,

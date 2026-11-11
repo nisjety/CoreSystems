@@ -53,12 +53,12 @@ use crate::{
     domains::chat::shared::{
         data_plane_token, delegated_auth_unavailable, invalid_chat_request, model_token,
         proxy_model_json_with_data_plane, proxy_model_json_with_session, required_execution_token,
-        required_inference_token, required_session_token,
+        required_inference_token, required_session_token, skipped_site_browser_token,
     },
     envelope::error,
     middleware::{require_session, AuthenticatedUser},
     rate_limit::rate_limit_middleware,
-    upstream::{authorized_org_id, proxy_sse_stream_with_data_plane},
+    upstream::{authorized_org_id, proxy_sse_stream_with_browser, proxy_sse_stream_with_data_plane},
 };
 
 pub(crate) fn router(state: AppState) -> Router<AppState> {
@@ -824,11 +824,17 @@ pub(crate) async fn resume_run(
 pub(crate) struct ContinueRunBody {
     approval_id: String,
     claim_token: String,
+    /// "Skip this site" (EP-1 S2, D3-647): the approval is the person's DENIAL of a browser help
+    /// pause, and the run continues with that call answered as skipped. Absent is `false`, and the
+    /// body is then exactly the one it always was.
+    #[serde(default)]
+    skipped: bool,
 }
 
 /// `None` when either identifier is blank. Otherwise the upstream body is rebuilt
-/// from the two fields alone, so nothing else a client sent is forwarded. The
-/// claim token is forwarded as sent: trimming it would change the credential.
+/// from the two fields alone (and the skipped-site marker, only when it is set), so nothing
+/// else a client sent is forwarded. The claim token is forwarded as sent: trimming it would
+/// change the credential.
 ///
 /// The one exception (WS03 S8-A) is the PARK form, the resume of a run the executor
 /// parked, which has no approval: with `park_form` on (`AppState::continue_park_form`),
@@ -841,10 +847,16 @@ fn continue_upstream_body(body: &ContinueRunBody, park_form: bool) -> Option<Val
     if (!park && body.approval_id.trim().is_empty()) || body.claim_token.trim().is_empty() {
         return None;
     }
-    Some(serde_json::json!({
+    let mut upstream = serde_json::json!({
         "approval_id": body.approval_id,
         "claim_token": body.claim_token,
-    }))
+    });
+    // The skipped-site form names a DENIED approval, so it never has the park form's empty id. It is
+    // forwarded only when asked for: any other body is byte-identical to before.
+    if body.skipped && !park {
+        upstream["skipped"] = serde_json::json!(true);
+    }
+    Some(upstream)
 }
 
 /// The refusals model-gateway's continue route answers before any stream opens,
@@ -961,6 +973,34 @@ pub(crate) async fn continue_run(
         state.model_gateway_url,
         enc(&run_id)
     );
+    // "Skip this site" (EP-1 S2, D3-647) is the one continuation that carries a browser credential: the
+    // executor needs it to release the page the run held for the person. It is minted for that body
+    // alone, under the conditions the turn that opened the page was, and forwarded as the browser
+    // bearer; every other continuation is relayed exactly as before.
+    if body.skipped && upstream_body.get("skipped").is_some() {
+        let browser = skipped_site_browser_token(&state, &user, &headers, zdr).await;
+        return proxy_sse_stream_with_browser(
+            &state,
+            Method::POST,
+            &url,
+            Some(upstream_body),
+            model.as_deref(),
+            data_plane.as_deref(),
+            None,
+            Some(&inference),
+            Some(&execution),
+            None,
+            Some(&session),
+            None,
+            None,
+            browser.as_deref(),
+            None,
+            Some((&user.user_id, org_id.as_str())),
+            zdr,
+            CONTINUE_RELAYED_ERRORS,
+        )
+        .await;
+    }
     proxy_sse_stream_with_data_plane(
         &state,
         Method::POST,
@@ -1514,6 +1554,7 @@ mod tests {
         let body = ContinueRunBody {
             approval_id: "apr-1".to_owned(),
             claim_token: "claim-1".to_owned(),
+            skipped: false,
         };
         assert_eq!(
             continue_upstream_body(&body, false),
@@ -1532,6 +1573,7 @@ mod tests {
             let body = ContinueRunBody {
                 approval_id: approval_id.to_owned(),
                 claim_token: claim_token.to_owned(),
+                skipped: false,
             };
             assert_eq!(
                 continue_upstream_body(&body, false),
@@ -1557,6 +1599,7 @@ mod tests {
         ContinueRunBody {
             approval_id: approval_id.to_owned(),
             claim_token: claim_token.to_owned(),
+            skipped: false,
         }
     }
 
@@ -1887,6 +1930,7 @@ mod tests {
             Json(ContinueRunBody {
                 approval_id: "apr-1".to_owned(),
                 claim_token: "claim-1".to_owned(),
+                skipped: false,
             }),
         )
         .await

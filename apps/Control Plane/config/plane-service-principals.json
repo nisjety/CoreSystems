@@ -403,6 +403,7 @@
       "memory:read",
       "memory:write",
       "model:goal_judge",
+      "session:memory-controls:read",
       "session:runs:system-owner",
       "session:write"
     ],
@@ -422,6 +423,7 @@
         "model:goal_judge"
       ],
       "session-core": [
+        "session:memory-controls:read",
         "session:runs:system-owner",
         "session:write"
       ]

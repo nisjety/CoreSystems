@@ -13,8 +13,8 @@ use crate::{
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1::{
     memory_service_server::{MemoryService, MemoryServiceServer},
-    DeleteMemoryRequest, DeleteMemoryResponse, EraseAgentMemoryRequest, EraseAgentMemoryResponse,
-    GetMemoryControlsRequest,
+    CheckMemoryWriteRequest, CheckMemoryWriteResponse, DeleteMemoryRequest, DeleteMemoryResponse,
+    EraseAgentMemoryRequest, EraseAgentMemoryResponse, GetMemoryControlsRequest,
     GetMemoryControlsResponse, GetUserProfileRequest, IndexMemoryRequest, IndexMemoryResponse,
     ListMemoryRequest, ListMemoryResponse, MemoryControls, MemoryEntry, MemoryHealthRequest,
     MemoryHealthResponse, MemoryState, RebuildUserProfileRequest, ResetMemoryRequest,
@@ -1322,6 +1322,53 @@ impl MemoryService for MemoryGrpc {
         let controls = memory_controls_view(&self.pool, caller.zdr(), org_id, user_id).await?;
         Ok(Response::new(GetMemoryControlsResponse {
             controls: Some(controls),
+        }))
+    }
+
+    /// Asks the content policy about one write and stores nothing (WS26-S4,
+    /// D2-480). A writer that stores `agent_memory` rows itself asks here before
+    /// its INSERT or UPDATE, so the proxy is not a path around the gate that every
+    /// other writer passes. The content is read, never logged: a refusal is
+    /// counted and logged by [`write_policy::gate`] with the rule, the origin and
+    /// a hash only. Authorized like `get_memory_controls`; a ZDR or waived caller
+    /// is not refused because nothing is written or kept, and the writer refuses
+    /// a ZDR run itself before it asks.
+    async fn check_memory_write(
+        &self,
+        request: Request<CheckMemoryWriteRequest>,
+    ) -> Result<Response<CheckMemoryWriteResponse>, Status> {
+        let caller = identity(&request)?;
+        let req = request.into_inner();
+        if req.org_id.trim().is_empty() {
+            return Err(Status::invalid_argument("org_id is required"));
+        }
+        if req.user_id.trim().is_empty() {
+            return Err(Status::invalid_argument("user_id is required"));
+        }
+        if req.scope.trim().is_empty() {
+            return Err(Status::invalid_argument("scope is required"));
+        }
+        authorize_user_memory_preflight(
+            &caller,
+            req.org_id.trim(),
+            req.user_id.trim(),
+            MEMORY_CONTROLS_READ_SCOPE,
+        )?;
+        let verdict = write_policy::gate(
+            write_policy::Mode::configured(),
+            &req.content,
+            req.scope.trim(),
+            write_policy::Origin::from_wire(&req.origin),
+        );
+        Ok(Response::new(match verdict {
+            Ok(()) => CheckMemoryWriteResponse {
+                allowed: true,
+                refusal_code: String::new(),
+            },
+            Err(code) => CheckMemoryWriteResponse {
+                allowed: false,
+                refusal_code: code.as_str().to_owned(),
+            },
         }))
     }
 

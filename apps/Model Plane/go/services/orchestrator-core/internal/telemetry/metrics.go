@@ -35,6 +35,12 @@ var EvaluatorOptimizerRunsTotal metric.Int64Counter
 // all evaluator-optimizer runs.
 var EvaluatorOptimizerRoundsTotal metric.Int64Counter
 
+// MemoryWriteGateEntriesTotal counts consolidated-memory entries that went
+// through Session Core's content gate (MEMORY_GATE_ORCHESTRATOR_WRITES),
+// labelled by outcome (allowed, refused) and rule (the closed refusal token, or
+// "none" when allowed). It never carries content.
+var MemoryWriteGateEntriesTotal metric.Int64Counter
+
 func init() {
 	m := otel.Meter(MeterName)
 
@@ -72,6 +78,12 @@ func init() {
 	if EvaluatorOptimizerRoundsTotal, err = m.Int64Counter(
 		"orchestrator_core_evaluator_optimizer_rounds_total",
 		metric.WithDescription("Total generator-judge rounds executed across evaluator-optimizer runs."),
+	); err != nil {
+		panic(err)
+	}
+	if MemoryWriteGateEntriesTotal, err = m.Int64Counter(
+		"orchestrator_core_memory_write_gate_entries_total",
+		metric.WithDescription("Total consolidated-memory entries checked by Session Core's content gate, labelled by outcome and rule."),
 	); err != nil {
 		panic(err)
 	}

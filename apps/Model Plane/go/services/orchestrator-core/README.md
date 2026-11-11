@@ -68,7 +68,7 @@ All activities are **fully implemented** with typed gRPC proto clients. There ar
 |---|---|---|
 | `QueryMemoryEntriesActivity` | `mpv1.NewMemoryServiceClient` (letta-bridge) | `SearchMemory` with optional `Since` filter |
 | `SummarizeMemoryActivity` | local helper `summarizeMemoryEntries` | Groups by `ThreadID`; truncates each summary to 512 chars |
-| `WriteConsolidatedMemoryActivity` | `mpv1.NewMemoryServiceClient` (letta-bridge) | Calls `IndexMemory` per consolidated entry |
+| `WriteConsolidatedMemoryActivity` | `mpv1.NewMemoryServiceClient` (letta-bridge) | Calls `IndexMemory` per consolidated entry; with `MEMORY_GATE_ORCHESTRATOR_WRITES=true` each entry first passes session-core's `CheckMemoryWrite` (refused entries skipped, ZDR or unattested refused) |
 
 ### Skill promotion
 

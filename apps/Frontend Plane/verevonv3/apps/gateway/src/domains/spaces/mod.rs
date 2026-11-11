@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
     Json, Router,
@@ -80,6 +80,88 @@ const FORGED_SPACE_AUTHORITY_FIELDS: &[&str] = &[
 /// from [`FORGED_SPACE_AUTHORITY_FIELDS`] because that list also cleans action inputs, where
 /// `participants` is a real field (`spaces.open_dm`).
 const FORGED_WAKE_FIELDS: &[&str] = &["wake", "wake_context", "turn_origin", "participants"];
+
+/// D2-461: a follow-up turn on an existing thread that omits `space_ref` gets the thread's Space
+/// resolved here, server-side, so [`inject_personal_thread_context`] mints the scoped decision instead
+/// of the turn retrieving organisation-wide. Must run immediately before
+/// [`inject_personal_thread_context`] / [`inject_personal_thread_context_for_wake`], which is the call
+/// that consumes the `space_ref` this sets (it takes no `HeaderMap`, so the Session Core lookup lives
+/// in this separate step). Gated by `SPACE_THREAD_SCOPE_RESOLVE` (`SpaceFeatureFlags::thread_scope_resolve`,
+/// default off): off, or with a `space_ref` / `spaceRef` already in the body, or with no `thread_id`,
+/// the body is left untouched. The browser's own selection always wins and is never replaced.
+///
+/// A thread in a Space sets `space_ref` to that Space; a thread with no Space is unchanged. A thread the
+/// caller cannot see answers 403 `space_thread_not_visible` and a failed lookup 503
+/// `space_thread_scope_unavailable`: neither ever falls through to an organisation-wide search. The
+/// lookup stores nothing (a Zero Data Retention caller is no different) and only the `thread_id` is
+/// logged, never content. The answer is a routing fact, never an authorization: Control still signs the
+/// decision and the Model Plane service enforces it.
+pub(crate) async fn resolve_thread_space_ref(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    body: &mut Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if !state.space_features.thread_scope_resolve {
+        return Ok(());
+    }
+    let Some(object) = body.as_object_mut() else {
+        return Ok(());
+    };
+    let has_selection = |object: &Map<String, Value>, key: &str| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+    };
+    if has_selection(object, "space_ref") || has_selection(object, "spaceRef") {
+        return Ok(());
+    }
+    let Some(thread_id) = object
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|thread_id| !thread_id.is_empty())
+        .map(str::to_owned)
+    else {
+        return Ok(());
+    };
+    match human_posts::space_scope_for_thread(state, user, headers, &thread_id).await {
+        Ok(human_posts::SpaceThreadScope::Space(space_ref)) => {
+            // An empty or malformed browser spelling is dropped by the injector either way; replace
+            // both so the resolved value is the only selection it sees.
+            object.remove("spaceRef");
+            object.insert("space_ref".to_owned(), Value::String(space_ref));
+            Ok(())
+        }
+        Ok(human_posts::SpaceThreadScope::NoSpace) => Ok(()),
+        Ok(human_posts::SpaceThreadScope::NotVisible) => {
+            tracing::warn!(thread_id = %thread_id, "thread space scope: thread not visible to caller");
+            Err((
+                StatusCode::FORBIDDEN,
+                Json(error(
+                    "space_thread_not_visible",
+                    "This conversation is not available to you.",
+                )),
+            ))
+        }
+        Err((status, _)) => {
+            tracing::warn!(
+                thread_id = %thread_id,
+                upstream_status = status.as_u16(),
+                "thread space scope: lookup failed"
+            );
+            Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "space_thread_scope_unavailable",
+                    "The conversation's Space could not be determined. Try again.",
+                )),
+            ))
+        }
+    }
+}
 
 /// Turns an untrusted personal-Space selection into a Control-issued thread
 /// creation/append context. The browser may choose only `space_ref`; all

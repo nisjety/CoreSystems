@@ -1266,6 +1266,175 @@ func (x *GetGoalTurnForJudgeResponse) GetFound() bool {
 	return false
 }
 
+// Read the names and closed statuses of the tool calls one run reserved, for the completion judge's
+// evidence. Only model-gateway may read it, for a run of its own org. A run that is not persistent
+// (zero-retention or waived) is refused; no row of such a run is ever read.
+type ListRunToolCallsForJudgeRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The org the run belongs to; must match the caller's org.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The run whose tool calls to list.
+	RunId         string `protobuf:"bytes,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListRunToolCallsForJudgeRequest) Reset() {
+	*x = ListRunToolCallsForJudgeRequest{}
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListRunToolCallsForJudgeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListRunToolCallsForJudgeRequest) ProtoMessage() {}
+
+func (x *ListRunToolCallsForJudgeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListRunToolCallsForJudgeRequest.ProtoReflect.Descriptor instead.
+func (*ListRunToolCallsForJudgeRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *ListRunToolCallsForJudgeRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *ListRunToolCallsForJudgeRequest) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+// One tool call of a run as the judge may cite it: its ids and its status, never its arguments,
+// digests or results.
+type JudgeToolCall struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The ledger's action id for the call.
+	ActionId string `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
+	// Canonical tool name the call was reserved under.
+	Tool string `protobuf:"bytes,2,opt,name=tool,proto3" json:"tool,omitempty"`
+	// "reserved", "completed", "failed", "not_run" or "unknown_outcome".
+	Status        string `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *JudgeToolCall) Reset() {
+	*x = JudgeToolCall{}
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *JudgeToolCall) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*JudgeToolCall) ProtoMessage() {}
+
+func (x *JudgeToolCall) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use JudgeToolCall.ProtoReflect.Descriptor instead.
+func (*JudgeToolCall) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *JudgeToolCall) GetActionId() string {
+	if x != nil {
+		return x.ActionId
+	}
+	return ""
+}
+
+func (x *JudgeToolCall) GetTool() string {
+	if x != nil {
+		return x.Tool
+	}
+	return ""
+}
+
+func (x *JudgeToolCall) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+// The tool calls a run reserved, in reservation order (ties by action id), at most 200. A run that
+// kept no ledger rows answers an empty list; an empty list is not proof that no tool ran.
+type ListRunToolCallsForJudgeResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// One entry per ledger row of the run, in reservation order.
+	Calls         []*JudgeToolCall `protobuf:"bytes,1,rep,name=calls,proto3" json:"calls,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListRunToolCallsForJudgeResponse) Reset() {
+	*x = ListRunToolCallsForJudgeResponse{}
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListRunToolCallsForJudgeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListRunToolCallsForJudgeResponse) ProtoMessage() {}
+
+func (x *ListRunToolCallsForJudgeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_goals_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListRunToolCallsForJudgeResponse.ProtoReflect.Descriptor instead.
+func (*ListRunToolCallsForJudgeResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_goals_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ListRunToolCallsForJudgeResponse) GetCalls() []*JudgeToolCall {
+	if x != nil {
+		return x.Calls
+	}
+	return nil
+}
+
 var File_model_plane_v1_thread_goals_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_thread_goals_proto_rawDesc = "" +
@@ -1375,7 +1544,16 @@ const file_model_plane_v1_thread_goals_proto_rawDesc = "" +
 	"\aturn_no\x18\x02 \x01(\rR\x06turnNo\x12\x18\n" +
 	"\aoutcome\x18\x03 \x01(\tR\aoutcome\x12\x16\n" +
 	"\x06answer\x18\x04 \x01(\tR\x06answer\x12\x14\n" +
-	"\x05found\x18\x05 \x01(\bR\x05found2\x9c\x06\n" +
+	"\x05found\x18\x05 \x01(\bR\x05found\"O\n" +
+	"\x1fListRunToolCallsForJudgeRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x15\n" +
+	"\x06run_id\x18\x02 \x01(\tR\x05runId\"X\n" +
+	"\rJudgeToolCall\x12\x1b\n" +
+	"\taction_id\x18\x01 \x01(\tR\bactionId\x12\x12\n" +
+	"\x04tool\x18\x02 \x01(\tR\x04tool\x12\x16\n" +
+	"\x06status\x18\x03 \x01(\tR\x06status\"W\n" +
+	" ListRunToolCallsForJudgeResponse\x123\n" +
+	"\x05calls\x18\x01 \x03(\v2\x1d.model_plane.v1.JudgeToolCallR\x05calls2\x9b\a\n" +
 	"\x11ThreadGoalService\x12Y\n" +
 	"\rSetThreadGoal\x12$.model_plane.v1.SetThreadGoalRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12Y\n" +
 	"\rGetThreadGoal\x12$.model_plane.v1.GetThreadGoalRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12_\n" +
@@ -1384,7 +1562,8 @@ const file_model_plane_v1_thread_goals_proto_rawDesc = "" +
 	"\x0fBindGoalTurnRun\x12&.model_plane.v1.BindGoalTurnRunRequest\x1a'.model_plane.v1.BindGoalTurnRunResponse\x12[\n" +
 	"\x0eSettleGoalTurn\x12%.model_plane.v1.SettleGoalTurnRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12a\n" +
 	"\x11RecordGoalVerdict\x12(.model_plane.v1.RecordGoalVerdictRequest\x1a\".model_plane.v1.ThreadGoalResponse\x12n\n" +
-	"\x13GetGoalTurnForJudge\x12*.model_plane.v1.GetGoalTurnForJudgeRequest\x1a+.model_plane.v1.GetGoalTurnForJudgeResponseB\xb8\x01\n" +
+	"\x13GetGoalTurnForJudge\x12*.model_plane.v1.GetGoalTurnForJudgeRequest\x1a+.model_plane.v1.GetGoalTurnForJudgeResponse\x12}\n" +
+	"\x18ListRunToolCallsForJudge\x12/.model_plane.v1.ListRunToolCallsForJudgeRequest\x1a0.model_plane.v1.ListRunToolCallsForJudgeResponseB\xb8\x01\n" +
 	"\x12com.model_plane.v1B\x10ThreadGoalsProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -1399,49 +1578,55 @@ func file_model_plane_v1_thread_goals_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_thread_goals_proto_rawDescData
 }
 
-var file_model_plane_v1_thread_goals_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_model_plane_v1_thread_goals_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_model_plane_v1_thread_goals_proto_goTypes = []any{
-	(*ThreadGoal)(nil),                  // 0: model_plane.v1.ThreadGoal
-	(*SetThreadGoalRequest)(nil),        // 1: model_plane.v1.SetThreadGoalRequest
-	(*GetThreadGoalRequest)(nil),        // 2: model_plane.v1.GetThreadGoalRequest
-	(*UpdateThreadGoalRequest)(nil),     // 3: model_plane.v1.UpdateThreadGoalRequest
-	(*ThreadGoalResponse)(nil),          // 4: model_plane.v1.ThreadGoalResponse
-	(*ClaimGoalTurnRequest)(nil),        // 5: model_plane.v1.ClaimGoalTurnRequest
-	(*ClaimGoalTurnResponse)(nil),       // 6: model_plane.v1.ClaimGoalTurnResponse
-	(*BindGoalTurnRunRequest)(nil),      // 7: model_plane.v1.BindGoalTurnRunRequest
-	(*BindGoalTurnRunResponse)(nil),     // 8: model_plane.v1.BindGoalTurnRunResponse
-	(*SettleGoalTurnRequest)(nil),       // 9: model_plane.v1.SettleGoalTurnRequest
-	(*RecordGoalVerdictRequest)(nil),    // 10: model_plane.v1.RecordGoalVerdictRequest
-	(*GetGoalTurnForJudgeRequest)(nil),  // 11: model_plane.v1.GetGoalTurnForJudgeRequest
-	(*GetGoalTurnForJudgeResponse)(nil), // 12: model_plane.v1.GetGoalTurnForJudgeResponse
-	(*timestamppb.Timestamp)(nil),       // 13: google.protobuf.Timestamp
+	(*ThreadGoal)(nil),                       // 0: model_plane.v1.ThreadGoal
+	(*SetThreadGoalRequest)(nil),             // 1: model_plane.v1.SetThreadGoalRequest
+	(*GetThreadGoalRequest)(nil),             // 2: model_plane.v1.GetThreadGoalRequest
+	(*UpdateThreadGoalRequest)(nil),          // 3: model_plane.v1.UpdateThreadGoalRequest
+	(*ThreadGoalResponse)(nil),               // 4: model_plane.v1.ThreadGoalResponse
+	(*ClaimGoalTurnRequest)(nil),             // 5: model_plane.v1.ClaimGoalTurnRequest
+	(*ClaimGoalTurnResponse)(nil),            // 6: model_plane.v1.ClaimGoalTurnResponse
+	(*BindGoalTurnRunRequest)(nil),           // 7: model_plane.v1.BindGoalTurnRunRequest
+	(*BindGoalTurnRunResponse)(nil),          // 8: model_plane.v1.BindGoalTurnRunResponse
+	(*SettleGoalTurnRequest)(nil),            // 9: model_plane.v1.SettleGoalTurnRequest
+	(*RecordGoalVerdictRequest)(nil),         // 10: model_plane.v1.RecordGoalVerdictRequest
+	(*GetGoalTurnForJudgeRequest)(nil),       // 11: model_plane.v1.GetGoalTurnForJudgeRequest
+	(*GetGoalTurnForJudgeResponse)(nil),      // 12: model_plane.v1.GetGoalTurnForJudgeResponse
+	(*ListRunToolCallsForJudgeRequest)(nil),  // 13: model_plane.v1.ListRunToolCallsForJudgeRequest
+	(*JudgeToolCall)(nil),                    // 14: model_plane.v1.JudgeToolCall
+	(*ListRunToolCallsForJudgeResponse)(nil), // 15: model_plane.v1.ListRunToolCallsForJudgeResponse
+	(*timestamppb.Timestamp)(nil),            // 16: google.protobuf.Timestamp
 }
 var file_model_plane_v1_thread_goals_proto_depIdxs = []int32{
-	13, // 0: model_plane.v1.ThreadGoal.created_at:type_name -> google.protobuf.Timestamp
-	13, // 1: model_plane.v1.ThreadGoal.updated_at:type_name -> google.protobuf.Timestamp
+	16, // 0: model_plane.v1.ThreadGoal.created_at:type_name -> google.protobuf.Timestamp
+	16, // 1: model_plane.v1.ThreadGoal.updated_at:type_name -> google.protobuf.Timestamp
 	0,  // 2: model_plane.v1.ThreadGoalResponse.goal:type_name -> model_plane.v1.ThreadGoal
 	0,  // 3: model_plane.v1.GetGoalTurnForJudgeResponse.goal:type_name -> model_plane.v1.ThreadGoal
-	1,  // 4: model_plane.v1.ThreadGoalService.SetThreadGoal:input_type -> model_plane.v1.SetThreadGoalRequest
-	2,  // 5: model_plane.v1.ThreadGoalService.GetThreadGoal:input_type -> model_plane.v1.GetThreadGoalRequest
-	3,  // 6: model_plane.v1.ThreadGoalService.UpdateThreadGoal:input_type -> model_plane.v1.UpdateThreadGoalRequest
-	5,  // 7: model_plane.v1.ThreadGoalService.ClaimGoalTurn:input_type -> model_plane.v1.ClaimGoalTurnRequest
-	7,  // 8: model_plane.v1.ThreadGoalService.BindGoalTurnRun:input_type -> model_plane.v1.BindGoalTurnRunRequest
-	9,  // 9: model_plane.v1.ThreadGoalService.SettleGoalTurn:input_type -> model_plane.v1.SettleGoalTurnRequest
-	10, // 10: model_plane.v1.ThreadGoalService.RecordGoalVerdict:input_type -> model_plane.v1.RecordGoalVerdictRequest
-	11, // 11: model_plane.v1.ThreadGoalService.GetGoalTurnForJudge:input_type -> model_plane.v1.GetGoalTurnForJudgeRequest
-	4,  // 12: model_plane.v1.ThreadGoalService.SetThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
-	4,  // 13: model_plane.v1.ThreadGoalService.GetThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
-	4,  // 14: model_plane.v1.ThreadGoalService.UpdateThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
-	6,  // 15: model_plane.v1.ThreadGoalService.ClaimGoalTurn:output_type -> model_plane.v1.ClaimGoalTurnResponse
-	8,  // 16: model_plane.v1.ThreadGoalService.BindGoalTurnRun:output_type -> model_plane.v1.BindGoalTurnRunResponse
-	4,  // 17: model_plane.v1.ThreadGoalService.SettleGoalTurn:output_type -> model_plane.v1.ThreadGoalResponse
-	4,  // 18: model_plane.v1.ThreadGoalService.RecordGoalVerdict:output_type -> model_plane.v1.ThreadGoalResponse
-	12, // 19: model_plane.v1.ThreadGoalService.GetGoalTurnForJudge:output_type -> model_plane.v1.GetGoalTurnForJudgeResponse
-	12, // [12:20] is the sub-list for method output_type
-	4,  // [4:12] is the sub-list for method input_type
-	4,  // [4:4] is the sub-list for extension type_name
-	4,  // [4:4] is the sub-list for extension extendee
-	0,  // [0:4] is the sub-list for field type_name
+	14, // 4: model_plane.v1.ListRunToolCallsForJudgeResponse.calls:type_name -> model_plane.v1.JudgeToolCall
+	1,  // 5: model_plane.v1.ThreadGoalService.SetThreadGoal:input_type -> model_plane.v1.SetThreadGoalRequest
+	2,  // 6: model_plane.v1.ThreadGoalService.GetThreadGoal:input_type -> model_plane.v1.GetThreadGoalRequest
+	3,  // 7: model_plane.v1.ThreadGoalService.UpdateThreadGoal:input_type -> model_plane.v1.UpdateThreadGoalRequest
+	5,  // 8: model_plane.v1.ThreadGoalService.ClaimGoalTurn:input_type -> model_plane.v1.ClaimGoalTurnRequest
+	7,  // 9: model_plane.v1.ThreadGoalService.BindGoalTurnRun:input_type -> model_plane.v1.BindGoalTurnRunRequest
+	9,  // 10: model_plane.v1.ThreadGoalService.SettleGoalTurn:input_type -> model_plane.v1.SettleGoalTurnRequest
+	10, // 11: model_plane.v1.ThreadGoalService.RecordGoalVerdict:input_type -> model_plane.v1.RecordGoalVerdictRequest
+	11, // 12: model_plane.v1.ThreadGoalService.GetGoalTurnForJudge:input_type -> model_plane.v1.GetGoalTurnForJudgeRequest
+	13, // 13: model_plane.v1.ThreadGoalService.ListRunToolCallsForJudge:input_type -> model_plane.v1.ListRunToolCallsForJudgeRequest
+	4,  // 14: model_plane.v1.ThreadGoalService.SetThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
+	4,  // 15: model_plane.v1.ThreadGoalService.GetThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
+	4,  // 16: model_plane.v1.ThreadGoalService.UpdateThreadGoal:output_type -> model_plane.v1.ThreadGoalResponse
+	6,  // 17: model_plane.v1.ThreadGoalService.ClaimGoalTurn:output_type -> model_plane.v1.ClaimGoalTurnResponse
+	8,  // 18: model_plane.v1.ThreadGoalService.BindGoalTurnRun:output_type -> model_plane.v1.BindGoalTurnRunResponse
+	4,  // 19: model_plane.v1.ThreadGoalService.SettleGoalTurn:output_type -> model_plane.v1.ThreadGoalResponse
+	4,  // 20: model_plane.v1.ThreadGoalService.RecordGoalVerdict:output_type -> model_plane.v1.ThreadGoalResponse
+	12, // 21: model_plane.v1.ThreadGoalService.GetGoalTurnForJudge:output_type -> model_plane.v1.GetGoalTurnForJudgeResponse
+	15, // 22: model_plane.v1.ThreadGoalService.ListRunToolCallsForJudge:output_type -> model_plane.v1.ListRunToolCallsForJudgeResponse
+	14, // [14:23] is the sub-list for method output_type
+	5,  // [5:14] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_thread_goals_proto_init() }
@@ -1455,7 +1640,7 @@ func file_model_plane_v1_thread_goals_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_thread_goals_proto_rawDesc), len(file_model_plane_v1_thread_goals_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   13,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

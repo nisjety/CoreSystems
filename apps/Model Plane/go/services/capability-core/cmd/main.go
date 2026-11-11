@@ -354,7 +354,10 @@ func main() {
 	// E3.6-8: the document_pii catalogue key is behind DOCUMENT_PII_POLICY (off by default).
 	api.NewSafetyHandler(pool).WithPublisher(recPub).
 		WithDocumentPIIPolicy(api.DocumentPIIPolicyFromLookup(os.Getenv)).Register(protectedMux)
-	api.NewMemoryHandler(pool, runClient).WithMemoryControls(memoryClient).Register(protectedMux)
+	// D2-480: user, org and global memory writes ask Session Core's content policy before the
+	// INSERT or UPDATE. Off unless MEMORY_GATE_CAPABILITY_WRITES is exactly true.
+	api.NewMemoryHandler(pool, runClient).WithMemoryControls(memoryClient).
+		WithContentGate(api.MemoryGateCapabilityWritesFromLookup(os.Getenv)).Register(protectedMux)
 	// EP-11 S7 /learn: off unless LEARN_COMMAND_ENABLED is exactly true and the learning review is on.
 	// Without a learner (a backend not dialled) the switched-on route answers 503.
 	learnOn := api.LearnCommandAPIFromLookup(os.Getenv) && learningReviewEnabled()
