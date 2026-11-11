@@ -669,6 +669,20 @@ fn vision_catalogue_request(provider_hint: &str) -> mp_contracts::model_plane::v
     }
 }
 
+/// The speed tier a turn's model calls carry for `model`: `priority` when the catalogue lists that exact
+/// model with `priority_tier` set, and `""` (no choice) otherwise. A Verevon mode is not a catalogue entry,
+/// so no record declares the tier for it and it gets none.
+fn speed_tier_for_model(
+    models: &[mp_contracts::model_plane::v1::ModelInfo],
+    model: &str,
+) -> &'static str {
+    if models.iter().any(|listed| listed.id == model && listed.priority_tier) {
+        crate::pricing::SERVICE_TIER_PRIORITY
+    } else {
+        ""
+    }
+}
+
 fn error_stream(
     request_id: &str,
     code: &str,
@@ -3009,6 +3023,35 @@ pub async fn invoke_stream_sse(
         let (images, bytes) = image_parts.summary();
         tracing::info!(request_id = %request_id, images, bytes, "images ride as parts of the turn");
     }
+    // The speed tier the person asked for (`speed: "priority"`), decided once for the whole turn and carried by
+    // every model call of it (`latency_levers::speed_tier`). It needs the operator's lever on, a turn that keeps
+    // data (a zero-retention turn returns before the rounds and names no tier), and a picked model whose catalogue
+    // record declares the tier. Anything else is no choice: the request is what it was before the field existed.
+    let turn_speed_tier: &'static str = if state.latency_levers.speed_tier
+        && !effective_zdr
+        && req.speed.as_deref().map(str::trim) == Some(crate::pricing::SERVICE_TIER_PRIORITY)
+    {
+        match state
+            .inference_client
+            .clone()
+            .list_models(authenticated_inference_request(
+                mp_contracts::model_plane::v1::ListModelsRequest {
+                    provider: provider_hint.clone(),
+                    ..Default::default()
+                },
+                &inference_bearer,
+            ))
+            .await
+        {
+            Ok(listed) => speed_tier_for_model(&listed.into_inner().models, &model),
+            Err(error) => {
+                tracing::warn!(%error, request_id = %request_id, "model catalogue unavailable; the turn carries no speed tier");
+                ""
+            }
+        }
+    } else {
+        ""
+    };
     // The attachments a Do run carries: judged and hashed here, before any run exists, so a
     // refusal leaves no run behind. Empty (and nothing is read) with the switch off.
     let do_attachments = if carries_do_attachments && !req.attachments.is_empty() {
@@ -4887,6 +4930,7 @@ pub async fn invoke_stream_sse(
                 &staged,
                 &image_parts,
                 rounds_tiers,
+                turn_speed_tier,
             )
             .await;
             seq = sink.sync_cursor(seq).await;
@@ -5026,6 +5070,7 @@ pub async fn invoke_stream_sse(
             thinking_budget_tokens: thinking_plan.budget_tokens,
             reasoning_effort: thinking_plan.effort_wire(),
             prompt_tiers: answer_tiers,
+            speed_tier: turn_speed_tier.to_owned(),
             cache_scope_key,
             ..Default::default()
         };
@@ -5707,6 +5752,8 @@ pub async fn invoke_stream_sse(
                         output: i64::from(output_tokens),
                         cache_read: i64::from(cache_read_tokens),
                         cache_write: i64::from(cache_creation_tokens),
+                        // A stream carries no service tier: the answer is priced at its list price.
+                        priority: false,
                     });
                     // The route note rides the final chunk, so the answer's routing is read with its call (WS27-S7).
                     let answer_routing = crate::tool_loop::route_shift(chunk.route_note.as_ref());
@@ -9933,6 +9980,7 @@ async fn run_infer_fallback(
                 output: i64::from(output_tokens),
                 cache_read: i64::from(cache_read_tokens),
                 cache_write: i64::from(cache_creation_tokens),
+                priority: resp.service_tier_used == crate::pricing::SERVICE_TIER_PRIORITY,
             };
             let turn =
                 turn_usage(&state.pricing, tool_usage, &[], Some(answer_usage.clone())).await;
@@ -15303,10 +15351,16 @@ async fn turn_usage(
     let rates = pricing.snapshot().await;
     let mut meter = crate::usage_meter::UsageMeter::default();
     for call in tool_calls.iter().chain(overhead) {
-        meter.record(call, &rates.priced(call.basis, &call.model, call.legs()));
+        meter.record(
+            call,
+            &rates.priced_at_tier(call.basis, &call.model, call.legs(), call.priority),
+        );
     }
     match answer {
-        Some(call) => meter.record(&call, &rates.priced(call.basis, &call.model, call.legs())),
+        Some(call) => meter.record(
+            &call,
+            &rates.priced_at_tier(call.basis, &call.model, call.legs(), call.priority),
+        ),
         None => meter.snapshot(),
     }
 }
@@ -15630,6 +15684,7 @@ impl AgentRunUsage {
             output: call_tokens(tokens.output),
             cache_read: call_tokens(tokens.cache_read),
             cache_write: call_tokens(tokens.cache_write),
+            priority: false,
         }
     }
 
@@ -15650,7 +15705,9 @@ impl AgentRunUsage {
             reported.since(self.reported),
         );
         self.reported = self.reported.at_least(reported);
-        let priced = self.rates.priced(call.basis, &call.model, call.legs());
+        let priced = self
+            .rates
+            .priced_at_tier(call.basis, &call.model, call.legs(), call.priority);
         crate::sse_events::ChatEvent::UsageProgress {
             phase: crate::usage_meter::CallPhase::AgentRound,
             snapshot: self.meter.record(&call, &priced),
@@ -15692,7 +15749,9 @@ impl AgentRunUsage {
         let mut unpriced_calls = 0u32;
         for leg in agent_usage_legs(usage) {
             let call = self.call(&leg.provider_used, &leg.model_used, RunTokens::of_leg(&leg));
-            let priced = self.rates.priced(call.basis, &call.model, call.legs());
+            let priced = self
+                .rates
+                .priced_at_tier(call.basis, &call.model, call.legs(), call.priority);
             let snapshot = meter.record(&call, &priced);
             if snapshot.unpriced_calls > unpriced_calls {
                 unpriced_calls = snapshot.unpriced_calls;
@@ -17694,6 +17753,7 @@ mod tests {
             output,
             cache_read: 0,
             cache_write: 0,
+            priority: false,
         }
     }
 

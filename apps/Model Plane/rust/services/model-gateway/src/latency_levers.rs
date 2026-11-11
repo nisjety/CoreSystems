@@ -18,6 +18,8 @@
 //! (`MODEL_GATEWAY_FINER_REVIEW_BATCHES=0` turns it off). The code reads an
 //! empty value as off, but the compose file's `:-1` fills an empty value in
 //! with `1`, so in a deployment only an explicit `0` turns either one off.
+//! The third opt-in lever, [`LatencyLevers::speed_tier`], is off in the compose
+//! file (`MODEL_GATEWAY_SPEED_TIER:-false`), so only an explicit on word turns it on.
 //!
 //! The values are read once per process ([`LatencyLevers::from_env`]) and
 //! carried on `AppState`, so a turn never changes its mind part-way. Tests set
@@ -60,6 +62,9 @@ pub const DATED_POST_SECTION_ONLY_ENV: &str = "MODEL_GATEWAY_DATED_POST_SECTION_
 /// Switch for [`LatencyLevers::finer_review_batches`]. Opt-in: only an
 /// explicit on word turns it on.
 pub const FINER_REVIEW_BATCHES_ENV: &str = "MODEL_GATEWAY_FINER_REVIEW_BATCHES";
+
+/// Switch for [`LatencyLevers::speed_tier`]. Opt-in: only an explicit on word turns it on.
+pub const SPEED_TIER_ENV: &str = "MODEL_GATEWAY_SPEED_TIER";
 
 /// Which latency levers are in force. The default is every lever that is on by
 /// default on ([`Self::ALL_ON`]); an opt-in lever stays off until enabled.
@@ -185,11 +190,19 @@ pub struct LatencyLevers {
     /// concurrent batches is still capped at four. Off: the batch count and
     /// the split are those of every other review, byte for byte.
     pub finer_review_batches: bool,
+    /// OPT-IN, off by default (`MODEL_GATEWAY_SPEED_TIER`, empty or unset means off).
+    /// A chat turn that asks for the priority speed tier (`speed: "priority"`) sends
+    /// `InferRequest.speed_tier` on every model call of the turn, tool rounds
+    /// included, but only where the picked model's catalogue record declares the
+    /// tier (`ModelInfo.priority_tier`). A priced call served on that tier is
+    /// multiplied by `PRIORITY_TIER_COST_MULTIPLIER` (`pricing`). Off: no call of a
+    /// turn names a tier, and every request is what it was before this lever existed.
+    pub speed_tier: bool,
 }
 
 impl LatencyLevers {
     /// Every lever that is on by default on: the default. The opt-in
-    /// [`Self::dated_post_section_only`] and [`Self::finer_review_batches`] are NOT part of it — a test that wants
+    /// [`Self::dated_post_section_only`], [`Self::finer_review_batches`] and [`Self::speed_tier`] are NOT part of it — a test that wants
     /// section-only output says so (`LatencyLevers { dated_post_section_only:
     /// true, ..LatencyLevers::ALL_ON }`), so every existing use of this set
     /// keeps sending the requests it always did.
@@ -205,6 +218,7 @@ impl LatencyLevers {
         list_item_segments: true,
         dated_post_section_only: false,
         finer_review_batches: false,
+        speed_tier: false,
     };
 
     /// Every lever off: the requests the gateway sent before any of them.
@@ -220,9 +234,10 @@ impl LatencyLevers {
         list_item_segments: false,
         dated_post_section_only: false,
         finer_review_batches: false,
+        speed_tier: false,
     };
 
-    /// The operator's settings, from the eleven flag values.
+    /// The operator's settings, from the twelve flag values.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn parse(
@@ -237,6 +252,7 @@ impl LatencyLevers {
         list_item_segments: Option<&str>,
         dated_post_section_only: Option<&str>,
         finer_review_batches: Option<&str>,
+        speed_tier: Option<&str>,
     ) -> Self {
         Self {
             sole_note_prefetch: switched_on(sole_note_prefetch),
@@ -250,6 +266,7 @@ impl LatencyLevers {
             list_item_segments: switched_on(list_item_segments),
             dated_post_section_only: switched_on_explicitly(dated_post_section_only),
             finer_review_batches: switched_on_explicitly(finer_review_batches),
+            speed_tier: switched_on_explicitly(speed_tier),
         }
     }
 
@@ -272,6 +289,7 @@ impl LatencyLevers {
                 read(LIST_ITEM_SEGMENTS_ENV).as_deref(),
                 read(DATED_POST_SECTION_ONLY_ENV).as_deref(),
                 read(FINER_REVIEW_BATCHES_ENV).as_deref(),
+                read(SPEED_TIER_ENV).as_deref(),
             );
             tracing::info!(
                 sole_note_prefetch = levers.sole_note_prefetch,
@@ -285,6 +303,7 @@ impl LatencyLevers {
                 list_item_segments = levers.list_item_segments,
                 dated_post_section_only = levers.dated_post_section_only,
                 finer_review_batches = levers.finer_review_batches,
+                speed_tier = levers.speed_tier,
                 "latency levers"
             );
             levers
@@ -333,14 +352,14 @@ mod tests {
     fn every_lever_is_on_unless_switched_off() {
         assert_eq!(LatencyLevers::default(), LatencyLevers::ALL_ON);
         assert_eq!(
-            LatencyLevers::parse(None, None, None, None, None, None, None, None, None, None, None),
+            LatencyLevers::parse(None, None, None, None, None, None, None, None, None, None, None, None),
             LatencyLevers::ALL_ON
         );
         // The nine default-on levers; the opt-in tenth is left unset here and
         // has its own test below.
         for on in ["", "1", "on", "true", "yes", "enabled", "sometimes"] {
             assert_eq!(
-                LatencyLevers::parse(Some(on), Some(on), Some(on), Some(on), Some(on), Some(on), Some(on), Some(on), Some(on), None, None),
+                LatencyLevers::parse(Some(on), Some(on), Some(on), Some(on), Some(on), Some(on), Some(on), Some(on), Some(on), None, None, None),
                 LatencyLevers::ALL_ON,
                 "{on:?}"
             );
@@ -349,7 +368,7 @@ mod tests {
             "0", "off", "false", "no", "disabled", " OFF ", "False", "No\n",
         ] {
             assert_eq!(
-                LatencyLevers::parse(Some(off), Some(off), Some(off), Some(off), Some(off), Some(off), Some(off), Some(off), Some(off), Some(off), None),
+                LatencyLevers::parse(Some(off), Some(off), Some(off), Some(off), Some(off), Some(off), Some(off), Some(off), Some(off), Some(off), None, None),
                 LatencyLevers::ALL_OFF,
                 "{off:?}"
             );
@@ -367,19 +386,19 @@ mod tests {
         assert!(!LatencyLevers::ALL_OFF.dated_post_section_only);
         for off in [None, Some(""), Some("  "), Some("0"), Some("off"), Some("false"), Some("no"), Some("disabled"), Some("sometimes"), Some("2")] {
             assert_eq!(
-                LatencyLevers::parse(None, None, None, None, None, None, None, None, None, off, None),
+                LatencyLevers::parse(None, None, None, None, None, None, None, None, None, off, None, None),
                 LatencyLevers::ALL_ON,
                 "{off:?}"
             );
         }
         for on in ["1", "on", "true", "yes", "enabled", " ON ", "True", "YES\n"] {
             assert_eq!(
-                LatencyLevers::parse(None, None, None, None, None, None, None, None, None, Some(on), None),
+                LatencyLevers::parse(None, None, None, None, None, None, None, None, None, Some(on), None, None),
                 LatencyLevers { dated_post_section_only: true, ..LatencyLevers::ALL_ON },
                 "{on:?}"
             );
             assert_eq!(
-                LatencyLevers::parse(Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some(on), None),
+                LatencyLevers::parse(Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some(on), None, None),
                 LatencyLevers { dated_post_section_only: true, ..LatencyLevers::ALL_OFF },
                 "{on:?}: it does not depend on the other nine"
             );
@@ -396,24 +415,24 @@ mod tests {
         assert!(!LatencyLevers::ALL_OFF.finer_review_batches);
         for off in [None, Some(""), Some("  "), Some("0"), Some("off"), Some("false"), Some("no"), Some("disabled"), Some("sometimes"), Some("2")] {
             assert_eq!(
-                LatencyLevers::parse(None, None, None, None, None, None, None, None, None, None, off),
+                LatencyLevers::parse(None, None, None, None, None, None, None, None, None, None, off, None),
                 LatencyLevers::ALL_ON,
                 "{off:?}"
             );
         }
         for on in ["1", "on", "true", "yes", "enabled", " ON ", "True", "YES\n"] {
             assert_eq!(
-                LatencyLevers::parse(None, None, None, None, None, None, None, None, None, None, Some(on)),
+                LatencyLevers::parse(None, None, None, None, None, None, None, None, None, None, Some(on), None),
                 LatencyLevers { finer_review_batches: true, ..LatencyLevers::ALL_ON },
                 "{on:?}"
             );
             assert_eq!(
-                LatencyLevers::parse(Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some(on)),
+                LatencyLevers::parse(Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some("0"), Some(on), None),
                 LatencyLevers { finer_review_batches: true, ..LatencyLevers::ALL_OFF },
                 "{on:?}: it does not depend on the others"
             );
             assert_eq!(
-                LatencyLevers::parse(None, None, None, None, None, None, None, None, None, Some(on), Some(on)),
+                LatencyLevers::parse(None, None, None, None, None, None, None, None, None, Some(on), Some(on), None),
                 LatencyLevers { dated_post_section_only: true, finer_review_batches: true, ..LatencyLevers::ALL_ON },
                 "{on:?}: nor does the section-only lever depend on it"
             );
@@ -423,63 +442,63 @@ mod tests {
     #[test]
     fn each_switch_turns_off_only_its_own_lever() {
         assert_eq!(
-            LatencyLevers::parse(Some("0"), None, None, None, None, None, None, None, None, None, None),
+            LatencyLevers::parse(Some("0"), None, None, None, None, None, None, None, None, None, None, None),
             LatencyLevers {
                 sole_note_prefetch: false,
                 ..LatencyLevers::ALL_ON
             }
         );
         assert_eq!(
-            LatencyLevers::parse(None, Some("off"), None, None, None, None, None, None, None, None, None),
+            LatencyLevers::parse(None, Some("off"), None, None, None, None, None, None, None, None, None, None),
             LatencyLevers {
                 recheck_proposes_edits: false,
                 ..LatencyLevers::ALL_ON
             }
         );
         assert_eq!(
-            LatencyLevers::parse(None, None, Some("disabled"), None, None, None, None, None, None, None, None),
+            LatencyLevers::parse(None, None, Some("disabled"), None, None, None, None, None, None, None, None, None),
             LatencyLevers {
                 balanced_review_batches: false,
                 ..LatencyLevers::ALL_ON
             }
         );
         assert_eq!(
-            LatencyLevers::parse(None, None, None, Some("0"), None, None, None, None, None, None, None),
+            LatencyLevers::parse(None, None, None, Some("0"), None, None, None, None, None, None, None, None),
             LatencyLevers {
                 revision_review_reuse: false,
                 ..LatencyLevers::ALL_ON
             }
         );
         assert_eq!(
-            LatencyLevers::parse(None, None, None, None, Some("0"), None, None, None, None, None, None),
+            LatencyLevers::parse(None, None, None, None, Some("0"), None, None, None, None, None, None, None),
             LatencyLevers {
                 revision_framing_guard: false,
                 ..LatencyLevers::ALL_ON
             }
         );
         assert_eq!(
-            LatencyLevers::parse(None, None, None, None, None, Some("0"), None, None, None, None, None),
+            LatencyLevers::parse(None, None, None, None, None, Some("0"), None, None, None, None, None, None),
             LatencyLevers {
                 in_turn_scoped_recheck: false,
                 ..LatencyLevers::ALL_ON
             }
         );
         assert_eq!(
-            LatencyLevers::parse(None, None, None, None, None, None, Some("0"), None, None, None, None),
+            LatencyLevers::parse(None, None, None, None, None, None, Some("0"), None, None, None, None, None),
             LatencyLevers {
                 tiny_candidate_skips_propose_edits: false,
                 ..LatencyLevers::ALL_ON
             }
         );
         assert_eq!(
-            LatencyLevers::parse(None, None, None, None, None, None, None, Some("0"), None, None, None),
+            LatencyLevers::parse(None, None, None, None, None, None, None, Some("0"), None, None, None, None),
             LatencyLevers {
                 targeted_source_repair: false,
                 ..LatencyLevers::ALL_ON
             }
         );
         assert_eq!(
-            LatencyLevers::parse(None, None, None, None, None, None, None, None, Some("0"), None, None),
+            LatencyLevers::parse(None, None, None, None, None, None, None, None, Some("0"), None, None, None),
             LatencyLevers {
                 list_item_segments: false,
                 ..LatencyLevers::ALL_ON
@@ -505,6 +524,7 @@ mod tests {
             read(LIST_ITEM_SEGMENTS_ENV).as_deref(),
             read(DATED_POST_SECTION_ONLY_ENV).as_deref(),
             read(FINER_REVIEW_BATCHES_ENV).as_deref(),
+            read(SPEED_TIER_ENV).as_deref(),
         );
         assert_eq!(LatencyLevers::from_env(), expected);
         assert_eq!(LatencyLevers::from_env(), LatencyLevers::from_env());

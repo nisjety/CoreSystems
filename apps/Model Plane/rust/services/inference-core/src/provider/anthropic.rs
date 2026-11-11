@@ -1401,6 +1401,7 @@ fn parse_response(request_id: &str, json: &serde_json::Value) -> InferResponse {
         cache_read_input_tokens: cache_read_input_tokens(&json["usage"]),
         cache_creation_input_tokens: cache_creation_input_tokens(&json["usage"]),
         provider_timing: None,
+        service_tier_used: String::new(),
     }
 }
 
@@ -1524,6 +1525,7 @@ impl ProviderRouter for AnthropicProvider {
                     max_output_tokens: record.max_output_tokens,
                     lifecycle: record.lifecycle,
                     successor: record.successor,
+                    priority_tier: record.priority_tier,
                 }
             })
             .collect()

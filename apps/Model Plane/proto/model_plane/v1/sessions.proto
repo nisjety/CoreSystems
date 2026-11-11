@@ -2486,3 +2486,38 @@ message ThreadReferenceOutlineItem {
   // When the turn was written.
   google.protobuf.Timestamp created_at = 4;
 }
+
+// --- Promote-on-use durable counter (W5-093-b) ---
+
+// PromoteOnUseService: the durable per-org counter behind execution-core's promote-on-use trigger. A
+// separate service, as ThreadReferenceService is, so that SessionCore and every mock of it stay
+// source-compatible. The counter stores a hash of the normalised URL, never the URL, and execution-core
+// calls it only when PROMOTE_ON_USE_DURABLE is on.
+service PromoteOnUseService {
+  // Count one grounded use of a page by (org, user, url hash) and say whether this use is the one that
+  // reaches the threshold. `fire` is true exactly once per key: the use that takes the count to the
+  // threshold while the key has no promotion recorded; the promotion is recorded in the same statement.
+  // Refused to a zero-retention or waived credential (failed_precondition), to a service credential
+  // without `session:promote:write`, and for another org or, for a user credential, another user.
+  rpc IncrementPromoteUse(IncrementPromoteUseRequest) returns (IncrementPromoteUseResponse);
+}
+
+// One grounded use of a page to count.
+message IncrementPromoteUseRequest {
+  // The organisation the use belongs to. Must be the caller's.
+  string org_id = 1;
+  // The user the use belongs to. For a user credential, must be the caller.
+  string user_id = 2;
+  // SHA-256 of the normalised URL: exactly 32 bytes. The URL itself is never sent or stored.
+  bytes url_hash = 3;
+  // The count at which `fire` turns true. Must be at least 1.
+  uint32 threshold = 4;
+}
+
+// The counter after one use.
+message IncrementPromoteUseResponse {
+  // The use count for the key, this use included.
+  uint32 count = 1;
+  // True when this use reached the threshold and no promotion was recorded before. True at most once per key.
+  bool fire = 2;
+}

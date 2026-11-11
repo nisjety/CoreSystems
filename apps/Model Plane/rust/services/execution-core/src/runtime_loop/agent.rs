@@ -2563,6 +2563,13 @@ async fn run_agent_with_route_parkable(
         Some(note) if success => format!("{final_answer}\n\n{note}"),
         _ => final_answer,
     };
+    // Promote-on-use (PROMOTE_ON_USE_SIGNAL=cited): the run's fetched pages are counted now, for the
+    // ones this answer cites. A failed run counts nothing. A no-op when nothing was recorded.
+    crate::promote_on_use::settle_run(
+        &req.run_id,
+        success.then_some(final_answer.as_str()),
+        crate::promote_on_use::durable_session(Some(&session_channel), session_bearer.as_deref()),
+    );
 
     let finalized = finalize(
         state,
@@ -3823,6 +3830,8 @@ async fn run_rounds(
             // meaning without a subscription connection. `false` is also what
             // this loop sent before the field existed.
             prefer_priority_service_tier: false,
+            // No speed tier on the governed loop: the priority choice stays with the flag above.
+            speed_tier: String::new(),
             // Which leading messages a provider may cache across rounds and runs.
             // Counts only; inference-core reads it behind its own switch.
             prompt_tiers: prompt_tier_plan(req.run_context.as_ref(), &messages),
@@ -4845,6 +4854,22 @@ async fn run_rounds(
                 })
                 .collect();
 
+            // W5-097-a: the shadow action reviewer reads the person's last turns of the history as it
+            // stands at the start of the round (the tool results of the round are not in it yet, and
+            // are filtered out of it besides). The root loop only: a delegated child's goal is text the
+            // parent model wrote, not a person's turn. A retention-bound run or one pinned to the
+            // ChatGPT subscription is never reviewed, and with the switch off nothing is read.
+            let shadow_review_on = ctx.depth == 0
+                && !zdr
+                && !ctx.route.is_waived()
+                && !ctx.route.is_pinned()
+                && crate::hook::shadow_reviewer::shadow_reviewer_enabled();
+            let shadow_turns = if shadow_review_on {
+                crate::hook::shadow_reviewer::user_turns(&messages)
+            } else {
+                Vec::new()
+            };
+            let shadow_turns = &shadow_turns;
             // A connected-app read in this round counts as a flagged one for the egress calls of
             // the same round: those start before any result of the round is seen (WS23-S3).
             let read_in_round = slots.iter().any(|slot| {
@@ -5179,6 +5204,28 @@ async fn run_rounds(
                     }) {
                         Some(hand_back_observed(look))
                     } else {
+                        // W5-097-a: the shadow action reviewer. Fire and forget, observe only: it
+                        // returns nothing, and nothing below reads it. Only when the call is about
+                        // to be dispatched, once per call (not once per retry attempt).
+                        if shadow_review_on {
+                            if let Some(shadow) = crate::hook::shadow_reviewer::ShadowInput::new(
+                                &req.run_id,
+                                &req.org_id,
+                                &call.name,
+                                &call.arguments_json,
+                                shadow_turns.clone(),
+                                runtime_loop::effect::effect_class_for_run(
+                                    &run_gate,
+                                    &call.name,
+                                    &call.arguments_json,
+                                ),
+                                zdr || ctx.route.is_waived(),
+                                ctx.inference_channel.clone(),
+                                ctx.inference_bearer,
+                            ) {
+                                crate::hook::shadow_reviewer::spawn_shadow_review(shadow);
+                            }
+                        }
                         Some(
                         runtime_loop::retry::run_attempts(
                             || {

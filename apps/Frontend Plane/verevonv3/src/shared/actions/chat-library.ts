@@ -82,3 +82,20 @@ export function parseChatLibraryOperation<T extends ChatLibraryActionType>(
   if (!parsed.success || parsed.data.type !== type) throw new ChatLibraryContractError(type)
   return parsed.data as ChatLibraryOperation<T>
 }
+
+/**
+ * The one grant the share dialog makes: an org member as a viewer. The library.share input checks it, so a
+ * grant the contract refuses is never sent. Returns the document id and the member id the share client takes.
+ */
+export function parseChatLibraryUserViewerShare(
+  documentId: string,
+  principalId: string,
+): { documentId: string; principalId: string } {
+  const share = parseChatLibraryOperation('library.share', {
+    documentId,
+    grants: [{ principalType: 'user', principalId, role: 'viewer' }],
+  })
+  const [grant] = share.grants
+  if (!grant) throw new ChatLibraryContractError('library.share')
+  return { documentId: share.documentId, principalId: grant.principalId }
+}

@@ -1,0 +1,492 @@
+/* The model council on the Agents playground (F-t3-092, W5-092-b): two to four models answer one question with no tools, and
+   one synthesis reads where they agree and disagree. It is portalled above the playground, and it keeps to the theme's
+   surface, border and text tokens, so light and dark read the same. The warning ink is the AA accent ink of each theme. */
+
+.verevon-model-council-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--verevon-z-modal, 50);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgb(15 23 42 / 35%);
+}
+
+.verevon-model-council {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: min(1120px, 100%);
+  max-height: min(92vh, 960px);
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--verevon-border);
+  border-radius: 16px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+  box-shadow: 0 16px 48px rgb(0 0 0 / 20%);
+}
+
+.verevon-model-council__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--verevon-border);
+}
+
+.verevon-model-council__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.verevon-model-council__lede {
+  margin: 4px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.verevon-model-council__close {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--verevon-text-soft);
+  cursor: pointer;
+}
+
+.verevon-model-council__close:hover,
+.verevon-model-council__close:focus-visible {
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-model-council__body {
+  flex: 1;
+  min-height: 0;
+  padding: 20px 22px 22px;
+  overflow-y: auto;
+}
+
+.verevon-model-council__models {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.verevon-model-council__legend {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 0;
+  color: var(--verevon-text-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.verevon-model-council__count {
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.verevon-model-council__groups {
+  display: grid;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.verevon-model-council__group-label {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.verevon-model-council__options {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr));
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.verevon-model-council__option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 48px;
+  padding: 8px 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 9px;
+  background: var(--verevon-surface);
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.verevon-model-council__option:hover {
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-model-council__option[data-selected="true"] {
+  border-color: var(--verevon-text);
+}
+
+.verevon-model-council__option[data-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.verevon-model-council__option-text {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+}
+
+.verevon-model-council__option-name,
+.verevon-model-council__option-id,
+.verevon-model-council__card-name,
+.verevon-model-council__card-provider {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verevon-model-council__option-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.verevon-model-council__option-id {
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-model-council__badge {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text-soft);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.verevon-model-council__allow {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 9px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.verevon-model-council__field {
+  margin-top: 20px;
+}
+
+.verevon-model-council__label {
+  display: block;
+  color: var(--verevon-text-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.verevon-model-council__textarea {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  min-height: 88px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--verevon-border-strong);
+  border-radius: 9px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.verevon-model-council__counter {
+  margin: 6px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  text-align: right;
+}
+
+.verevon-model-council__counter[data-over="true"] {
+  color: var(--verevon-accent-ink);
+}
+
+.verevon-model-council__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.verevon-model-council__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 16px;
+  border: 1px solid var(--verevon-border-strong);
+  border-radius: 9px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.verevon-model-council__button--primary {
+  border-color: var(--verevon-text);
+  background: var(--verevon-text);
+  color: var(--verevon-surface);
+}
+
+.verevon-model-council__button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.verevon-model-council__hint,
+.verevon-model-council__busy-note {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.verevon-model-council__spinner {
+  flex: none;
+  animation: verevon-model-council-spin 900ms linear infinite;
+}
+
+@keyframes verevon-model-council-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .verevon-model-council__spinner {
+    animation: none;
+  }
+}
+
+.verevon-model-council__estimate {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-model-council__estimate-title,
+.verevon-model-council__total,
+.verevon-model-council__answers-total {
+  margin: 0;
+  color: var(--verevon-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.verevon-model-council__total {
+  margin-top: 8px;
+}
+
+.verevon-model-council__list {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--verevon-text-soft);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.verevon-model-council__note,
+.verevon-model-council__dropped {
+  margin: 8px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.verevon-model-council__alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 16px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--verevon-accent-ink);
+  border-radius: 9px;
+  background: var(--verevon-surface);
+  color: var(--verevon-accent-ink);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.verevon-model-council__answers {
+  display: grid;
+  gap: 20px;
+  margin-top: 24px;
+  min-width: 0;
+}
+
+.verevon-model-council__cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(230px, 100%), 1fr));
+  gap: 12px;
+}
+
+.verevon-model-council__card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+}
+
+.verevon-model-council__card-name {
+  margin: 0;
+  color: var(--verevon-text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.verevon-model-council__card-provider {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-model-council__answer,
+.verevon-model-council__text {
+  margin: 12px 0 0;
+  color: var(--verevon-text);
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.verevon-model-council__missing {
+  margin: 12px 0 0;
+  color: var(--verevon-accent-ink);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.verevon-model-council__usage {
+  margin: auto 0 0;
+  padding-top: 12px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-model-council__synthesis {
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-model-council__synthesis-title {
+  margin: 0;
+  color: var(--verevon-text);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.verevon-model-council__synthesis-model {
+  color: var(--verevon-text-muted);
+  font-weight: 500;
+}
+
+.verevon-model-council__status {
+  margin: 12px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.verevon-model-council__status[data-tone="alert"] {
+  color: var(--verevon-accent-ink);
+}
+
+.verevon-model-council__columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.verevon-model-council__column-title {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.verevon-model-council__column-empty {
+  margin: 8px 0 0;
+  color: var(--verevon-text-muted);
+  font-size: 13px;
+}
+
+.verevon-model-council__column-list {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--verevon-text-soft);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.verevon-model-council__claim {
+  margin: 0;
+  color: var(--verevon-text);
+  font-weight: 600;
+}
+
+.verevon-model-council__positions {
+  display: grid;
+  gap: 2px;
+  margin: 4px 0 0;
+  padding: 0 0 0 12px;
+  list-style: none;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}

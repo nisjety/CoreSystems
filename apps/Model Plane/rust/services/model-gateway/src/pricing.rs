@@ -43,6 +43,48 @@ const SUBSCRIPTION_PROVIDERS: [&str; 3] = [
     "chatgpt-codex",
 ];
 
+/// The service tier a provider reports on `InferResponse.service_tier_used` when it served the call on its
+/// priority tier.
+pub const SERVICE_TIER_PRIORITY: &str = "priority";
+
+/// The cost basis note a call carries when it was served on the priority tier (see [`Priced::note`]).
+pub const PRIORITY_NOTE: &str = "priority";
+
+/// The environment variable that sets the list-price multiplier of a call served on the priority tier.
+pub const PRIORITY_TIER_COST_MULTIPLIER_ENV: &str = "PRIORITY_TIER_COST_MULTIPLIER";
+
+/// The multiplier used when the variable is unset, empty or not a number.
+const PRIORITY_TIER_COST_MULTIPLIER_DEFAULT: f64 = 2.0;
+
+/// The bounds the multiplier is clamped to: a priority call is never priced below its list price and never
+/// above five times it.
+const PRIORITY_TIER_COST_MULTIPLIER_MIN: f64 = 1.0;
+const PRIORITY_TIER_COST_MULTIPLIER_MAX: f64 = 5.0;
+
+/// The multiplier a value of [`PRIORITY_TIER_COST_MULTIPLIER_ENV`] gives: the number, clamped to 1 through 5,
+/// or 2.0 when the value is unset, empty or not a finite number.
+#[must_use]
+pub fn priority_tier_cost_multiplier_from(value: Option<&str>) -> f64 {
+    value
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .filter(|parsed| parsed.is_finite())
+        .unwrap_or(PRIORITY_TIER_COST_MULTIPLIER_DEFAULT)
+        .clamp(
+            PRIORITY_TIER_COST_MULTIPLIER_MIN,
+            PRIORITY_TIER_COST_MULTIPLIER_MAX,
+        )
+}
+
+/// The priority-tier multiplier of this process, read once from the environment.
+#[must_use]
+pub fn priority_tier_cost_multiplier() -> f64 {
+    static MULTIPLIER: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *MULTIPLIER.get_or_init(|| {
+        let raw = std::env::var(PRIORITY_TIER_COST_MULTIPLIER_ENV).ok();
+        priority_tier_cost_multiplier_from(raw.as_deref())
+    })
+}
+
 /// How a call's `cost_usd` was established. It travels beside the cost on
 /// the `usage` SSE event and the `USAGE_ENVELOPE`, so a reader can tell a
 /// call that cost nothing per token from a free one.
@@ -165,6 +207,9 @@ pub struct Priced {
     pub usd: Option<f64>,
     pub by_category: Option<CategoryCost>,
     pub source: PriceSource,
+    /// The cost basis note: [`PRIORITY_NOTE`] when the call was served on the priority tier and has a
+    /// price (a metered price with the multiplier applied, or a subscription's known zero). `None` otherwise.
+    pub note: Option<&'static str>,
 }
 
 impl Priced {
@@ -172,6 +217,7 @@ impl Priced {
         usd: Some(0.0),
         by_category: None,
         source: PriceSource::Subscription,
+        note: None,
     };
 
     const fn unpriced(source: PriceSource) -> Self {
@@ -179,6 +225,7 @@ impl Priced {
             usd: None,
             by_category: None,
             source,
+            note: None,
         }
     }
 }
@@ -331,12 +378,29 @@ impl PricingCache {
     /// rate, and a write at the input rate unless the model bills cache writes
     /// (GPT-5.6 and later).
     pub async fn priced(&self, basis: CostBasis, model: &str, legs: TokenLegs) -> Priced {
+        self.priced_at_tier(basis, model, legs, false).await
+    }
+
+    /// [`Self::priced`] for a call that may have been served on the priority tier (`priority`, from its
+    /// `service_tier_used`). A metered call on that tier is priced at its list price times
+    /// [`priority_tier_cost_multiplier`] and carries [`PRIORITY_NOTE`]. A subscription call has no list price
+    /// to multiply, so it keeps its zero and carries the note.
+    pub async fn priced_at_tier(
+        &self,
+        basis: CostBasis,
+        model: &str,
+        legs: TokenLegs,
+        priority: bool,
+    ) -> Priced {
         if basis == CostBasis::Subscription {
-            return Priced::SUBSCRIPTION;
+            return Priced {
+                note: priority.then_some(PRIORITY_NOTE),
+                ..Priced::SUBSCRIPTION
+            };
         }
         self.ensure_fresh().await;
         let inner = self.inner.read().await;
-        price(&inner.rates, model, legs)
+        price(&inner.rates, model, legs, priority)
     }
 
     /// The catalogue as of now, for a caller that prices from a synchronous
@@ -446,10 +510,25 @@ impl RateSnapshot {
     /// [`PricingCache::priced`] against this snapshot.
     #[must_use]
     pub fn priced(&self, basis: CostBasis, model: &str, legs: TokenLegs) -> Priced {
+        self.priced_at_tier(basis, model, legs, false)
+    }
+
+    /// [`Self::priced_at_tier`] against this snapshot.
+    #[must_use]
+    pub fn priced_at_tier(
+        &self,
+        basis: CostBasis,
+        model: &str,
+        legs: TokenLegs,
+        priority: bool,
+    ) -> Priced {
         if basis == CostBasis::Subscription {
-            return Priced::SUBSCRIPTION;
+            return Priced {
+                note: priority.then_some(PRIORITY_NOTE),
+                ..Priced::SUBSCRIPTION
+            };
         }
-        price(&self.rates, model, legs)
+        price(&self.rates, model, legs, priority)
     }
 
     /// The list price of a model the catalogue names: under its own key, or under a
@@ -476,13 +555,17 @@ impl RateSnapshot {
 
 /// Price a metered call against the catalogue. The `default` row prices
 /// nothing: a model only it matches has an unknown price.
-fn price(rates: &[Rate], model: &str, legs: TokenLegs) -> Priced {
+fn price(rates: &[Rate], model: &str, legs: TokenLegs, priority: bool) -> Priced {
     let (rate, source) = match lookup(rates, model) {
         None => return Priced::unpriced(PriceSource::Unavailable),
         Some(Lookup::Default) => return Priced::unpriced(PriceSource::Default),
         Some(Lookup::Exact(rate)) => (rate, PriceSource::Exact),
         Some(Lookup::Prefix(rate)) => (rate, PriceSource::Prefix),
     };
+    // A call served on the priority tier is priced at the list price times the multiplier. Every cache leg
+    // is priced off the same input rate, so the multiplier reaches each part of the cost.
+    let multiplied = priority.then(|| at_multiplier(rate, priority_tier_cost_multiplier()));
+    let rate = multiplied.as_ref().unwrap_or(rate);
     let cache = cache_rates(model);
     Priced {
         usd: Some(cost_from_rate(
@@ -495,6 +578,17 @@ fn price(rates: &[Rate], model: &str, legs: TokenLegs) -> Priced {
         )),
         by_category: Some(cost_categories(rate, cache, legs)),
         source,
+        note: priority.then_some(PRIORITY_NOTE),
+    }
+}
+
+/// `rate` with both list prices multiplied by `multiplier`. The model key and currency are kept.
+fn at_multiplier(rate: &Rate, multiplier: f64) -> Rate {
+    Rate {
+        model: rate.model.clone(),
+        input_per_million: rate.input_per_million * multiplier,
+        output_per_million: rate.output_per_million * multiplier,
+        currency: rate.currency.clone(),
     }
 }
 

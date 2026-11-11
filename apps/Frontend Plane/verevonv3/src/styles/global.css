@@ -24114,6 +24114,37 @@ body.verevon-chat-canvas-resizing * {
   font: inherit;
 }
 
+/* Teach mode (F-t3-081): "Save these steps as a skill" under the run's browser, after a give-back. */
+.verevon-chat-run-teach {
+  display: grid;
+  gap: 8px;
+}
+
+.verevon-chat-run-teach__form {
+  display: grid;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--verevon-e-subtle) 30%, transparent);
+  border-radius: 10px;
+  background: var(--verevon-surface-soft);
+  font-size: 12px;
+}
+
+.verevon-chat-run-teach__form label {
+  display: grid;
+  gap: 4px;
+}
+
+.verevon-chat-run-teach__form textarea {
+  resize: vertical;
+}
+
+.verevon-chat-run-teach__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .verevon-chat-run-panel__body {
   display: flex;
   min-height: 0;

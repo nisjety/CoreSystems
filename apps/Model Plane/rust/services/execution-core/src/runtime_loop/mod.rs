@@ -1725,7 +1725,9 @@ async fn execute_step_inner(
     // Phase 8 promote-on-use (default OFF — PROMOTE_ON_USE_ENABLED): count a
     // successful web_fetch as a grounded use of its URL; the trigger promotes
     // the live page into the durable KB past a threshold. Fire-and-forget —
-    // never alters the tool result.
+    // never alters the tool result. A ZDR, waived or Space-scoped run is never
+    // counted (`PromoteContext`); under PROMOTE_ON_USE_SIGNAL=cited this only
+    // records a candidate that the run's end counts if the answer cites it.
     if matches!(tool_name, WEB_FETCH_TOOL | QUARRY_MCP_WEB_READ_TOOL) && exec.error.is_none() {
         if let Some(url) = serde_json::from_str::<serde_json::Value>(tool_input)
             .ok()
@@ -1740,7 +1742,29 @@ async fn execute_step_inner(
                     .map(str::to_owned)
             })
         {
-            crate::promote_on_use::maybe_promote(org_id, user_id, &url).await;
+            let promote_ctx = crate::promote_on_use::PromoteContext {
+                zdr,
+                waived,
+                space_scoped: sandbox.is_some()
+                    || !matches!(
+                        space_retrieval,
+                        crate::knowledge_tools::SpaceRetrieval::Organisation
+                    ),
+                cited: false,
+            };
+            // The durable counter (PROMOTE_ON_USE_DURABLE) counts through session-core with the run's
+            // own credential; `None` when it is off, and then the in-memory counter is used.
+            let durable =
+                crate::promote_on_use::durable_session(session_channel.as_ref(), session_bearer);
+            crate::promote_on_use::observe_fetch(
+                run_id,
+                org_id,
+                user_id,
+                &url,
+                promote_ctx,
+                durable.as_ref(),
+            )
+            .await;
         }
     }
     if let Some(error) = exec.error {

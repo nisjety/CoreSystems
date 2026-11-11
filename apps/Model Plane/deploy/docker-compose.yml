@@ -500,6 +500,10 @@ services:
       MODEL_GATEWAY_THREAD_EXPORT: ${MODEL_GATEWAY_THREAD_EXPORT:-false}
       # F-t3-069: side chat, a read-only question about one thread's transcript (POST /v1/threads/:id/side-chat). Answered, never stored. Only the literal true.
       MODEL_GATEWAY_SIDE_CHAT_ENABLED: ${MODEL_GATEWAY_SIDE_CHAT_ENABLED:-false}
+      # F-t3-098: reasoning translation, POST /v1/ai/reasoning-translate translates one shown text to nb or en. Answered, never stored, never fed back to the model; refused on a ZDR or waived turn. Only the literal true.
+      MODEL_GATEWAY_REASONING_TRANSLATE_ENABLED: ${MODEL_GATEWAY_REASONING_TRANSLATE_ENABLED:-false}
+      # F-t3-098: the model that route runs on. Blank, it runs on the title-class side-task model.
+      MODEL_GATEWAY_TRANSLATE_MODEL: ${MODEL_GATEWAY_TRANSLATE_MODEL:-}
       # F-t3-081: teach mode, POST /v1/teach/skill-draft drafts one disabled skill proposal from a run's takeover steps (Quarry's procedure draft, read as the caller). Needs QUARRY_TEACH_MODE_ENABLED on the Ingestion Plane edge. Only the literal true.
       MODEL_GATEWAY_TEACH_MODE_ENABLED: ${MODEL_GATEWAY_TEACH_MODE_ENABLED:-false}
       # F-t3-093 (b): a data-source catalogue in the chat tool guidance, listing only the sources this turn's tools reach, with use-when and cost hints. Only the literal true.
@@ -665,6 +669,12 @@ services:
       # 4,000 to 4,600 reasoning tokens (53 to 61 s) while its neighbours
       # finished in 11 to 13 s. At most four batches still run together.
       MODEL_GATEWAY_FINER_REVIEW_BATCHES: ${MODEL_GATEWAY_FINER_REVIEW_BATCHES:-1}
+      # OFF by default (W5-095-b, the chat Fast chip). A chat turn that asks for the priority speed tier
+      # (`speed: "priority"`) sends it on every model call of the turn, tool rounds included, but only where the
+      # picked model's catalogue record declares the tier. A priced call served on that tier is multiplied by
+      # PRIORITY_TIER_COST_MULTIPLIER (default 2.0, clamped to 1 through 5), so the choice costs more. Only an
+      # explicit 1/on/true/yes/enabled turns it on. The frontend chip also needs VITE_CHAT_SPEED_TIER=true.
+      MODEL_GATEWAY_SPEED_TIER: ${MODEL_GATEWAY_SPEED_TIER:-false}
       # WS16.S1, OFF by default: whose POST /v1/ai/chat calls publish a USAGE_ENVELOPE to cost-core.
       # off (nobody), service (a service principal such as service:quarry-edge, outside ZDR), all
       # (users too, which changes user accounting). Anything else is off. The build plan's default
@@ -1501,6 +1511,11 @@ services:
       # subscription models in the catalog, so the composer follows the server
       # instead of hard-coding the provider. OFF by default.
       AGENTIC_SUBSCRIPTION_ENABLED: ${AGENTIC_SUBSCRIPTION_ENABLED:-false}
+      # F-t3-095: the speed tier is a choice of its own, not Quick's. Off, Quick still selects the priority tier on
+      # the subscription route. On, a request takes the priority tier with `speed_tier`, and only where the model
+      # record declares it, so Quick no longer implies priority. Priority is billed higher; only the literal true
+      # enables the split.
+      INFERENCE_SPEED_TIER_SPLIT: ${INFERENCE_SPEED_TIER_SPLIT:-false}
       INFERENCE_MAX_RETRIES: ${INFERENCE_MAX_RETRIES:-3}
       INFERENCE_CACHE_TTL_SECS: ${INFERENCE_CACHE_TTL_SECS:-300}
       # Verevon intent layer — turns the verevon-budget/-balance/-genius modes into
@@ -1866,6 +1881,11 @@ services:
       # tools only after tool_search reveals them. Off, every run is offered its whole catalogue, as before.
       EXECUTION_DEFERRED_TOOL_INDEX_ENABLED: ${EXECUTION_DEFERRED_TOOL_INDEX_ENABLED:-false}
       EXECUTION_DEFERRED_TOOL_INDEX_THRESHOLD: ${EXECUTION_DEFERRED_TOOL_INDEX_THRESHOLD:-40}
+      # W5-097-a: the shadow action reviewer in the Do loop. Off by default; only the literal true turns it on. On, a
+      # Do run's effectful tool call (write, provider write, browser act, sandbox write) is also shown to one tool-free
+      # inference that returns a verdict, which is only counted and logged. The verdict never reaches the permission
+      # engine, the hooks or the approval flow. A zero-retention or waived run is never reviewed.
+      EXECUTION_SHADOW_REVIEWER: ${EXECUTION_SHADOW_REVIEWER:-false}
       # EP-11 S3 for Do runs. A RunAgent run records the skill versions it
       # injected, and reattach_skill reads the pinned version when the skill has
       # changed mid-run. Never for a zero-retention or waived run. Only the literal

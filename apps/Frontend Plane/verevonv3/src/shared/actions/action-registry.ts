@@ -740,6 +740,21 @@ const learningLearnFromThreadInput = z.object({
   note: z.string().trim().max(500).optional(),
 })
 
+// Teach mode (F-t3-081): one run the person drove or took over in the browser, the skill's name, and an
+// optional hint of at most 500 characters that the draft reads as data. The run id is bounded as the
+// gateway bounds it; whose run it is comes from the verified session, never from here.
+const learningTeachFromRunInput = z.object({
+  runId: z.string().trim().min(1).max(64),
+  name: z.string().trim().min(1).max(64),
+  goalHint: z.string().trim().max(500).optional(),
+})
+
+// The answer to a teach: the proposal's id and the review state it starts in (`proposed`).
+const learningTeachFromRunOutput = z.object({
+  skill_id: z.string().min(1),
+  review_state: z.string(),
+})
+
 // A skill the person saves from one of their own answers (EP-11 S1). The name, description and
 // content are bounded as the server bounds them, and the owner and the organisation come from the
 // verified session, never from here.
@@ -1796,6 +1811,8 @@ const orgSetAgentPolicyInput = z
         mode_cap: z.enum(['lockdown', 'read_only', 'ask_first', 'auto']).optional(),
         rung_cap: z.enum(['read_only', 'workspace_write', 'danger_full_access']).optional(),
         lockdown: z.boolean().optional(),
+        // F-t3-083: the organization's agents-paused switch, held by capability-core under `agents.paused`.
+        'agents.paused': z.boolean().optional(),
         'ext.mcp_servers': orgAgentPolicyAllowListInput.optional(),
         mcp_tool_approval: z.enum(['approved_only', 'trust_annotations']).optional(),
       })
@@ -4100,6 +4117,17 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: learningLearnFromThreadInput,
     outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'learning.teach_skill_from_run',
+    label: 'Save these steps as a skill',
+    description: 'Save the steps the caller took in one browser run, after they gave the browser back, as a disabled skill proposal in the caller\'s learning inbox. The name and the optional hint are the caller\'s text, bounded here as the server bounds them. The owner is the verified session. Nothing is used until they accept it. Hidden and refused in a temporary chat, and refused for an organization that keeps no content (zero data retention). Never model-executable: a model does not decide what Verevon learns.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: learningTeachFromRunInput,
+    outputSchema: learningTeachFromRunOutput,
   },
   {
     id: 'skills.save_from_message',

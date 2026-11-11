@@ -156,6 +156,14 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     ("agent_mode", Treatment::Honored),
     ("verbosity", Treatment::Honored),
     ("effort", Treatment::Honored),
+    // The speed tier is a subscription route's choice (`InferRequest.speed_tier`), and a ZDR turn never runs
+    // on a subscription route (`subscription_connection_id` above), so no ZDR call names a tier.
+    (
+        "speed",
+        Treatment::Inert(
+            "the priority tier is served only on a subscription route, which a ZDR turn refuses, so no ZDR call names a speed tier",
+        ),
+    ),
     ("features", Treatment::PerMember),
     (
         "idempotency_key",
@@ -312,6 +320,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         agent_mode: _,
         verbosity: _,
         effort: _,
+        speed: _,
         features: _,
         idempotency_key: _,
         attachments: _,
@@ -377,6 +386,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "agent_mode",
         "verbosity",
         "effort",
+        "speed",
         "features",
         "idempotency_key",
         "attachments",

@@ -85,6 +85,7 @@ import { registerChatCommands } from '@/features/command/chat-commands'
 import { commandPaletteEnabled } from '@/features/command/command-registry'
 import { dockedNodesFor, selectDockedTrays } from '../lib/composer-trays'
 import { deriveStreamActivity, streamActivityLabel } from '@/features/chat/lib/stream-activity'
+import { latestAnswerRunId, useSupportRunContext } from '@/features/chat/lib/support-run-context'
 import { chatSurfaceClaimsFocus, isChatSurfaceAvailable, type ChatSurfaceAvailability } from '../lib/chat-surfaces'
 import { isWorkStep } from './chat-normalizers'
 import type { ChatTab } from './chat-types'
@@ -181,6 +182,8 @@ export default function ChatPage() {
     setImageMode,
     planMode,
     setPlanMode,
+    speedTier,
+    setSpeedTier,
     approveTurnPlan,
     rejectTurnPlan,
     planApprovalPending,
@@ -271,6 +274,13 @@ export default function ChatPage() {
     }
   })
   const artifactTemporary = () => temporaryChat() || isActiveThreadTemporary()
+  // The run on screen, for the feedback widget's problem report (VITE_REPORT_PROBLEM). A temporary or zero-retention chat
+  // offers none. With the switch off nothing is read and nothing is published.
+  useSupportRunContext({
+    orgId: () => session.activeOrg?.id ?? null,
+    runId: () => latestAnswerRunId(state.turns),
+    temporary: artifactTemporary,
+  })
   // EP-14 S2, behind `VITE_CHAT_TRANSCRIPT_DENSITY`. The level the transcript shows and the rules it applies. With the
   // switch off the rules change nothing, so the transcript renders as it did.
   const transcriptDensity = createTranscriptDensity()
@@ -538,6 +548,12 @@ export default function ChatPage() {
     setInput(draft)
     focusComposer()
   }
+  // A widget's quoted passage (EP-4 W4-IO-2) goes in front of the draft, so the text the person has typed is kept. Like a
+  // follow-up chip, it only sets the draft and does not move the focus.
+  const quoteIntoDraft = (text: string) => {
+    const quote = `> ${text}\n\n`
+    setInput((current) => quote + current)
+  }
 
   // One set of callbacks for the keydown hook and the command palette (chat-commands), so both run the same action.
   const chatShortcutActions: UseChatShortcutsOptions = {
@@ -682,6 +698,8 @@ export default function ChatPage() {
         onSubmit={submitFromComposer}
         onTemporaryChatChange={setTemporaryFromComposer}
         planMode={planMode()}
+        speedTier={speedTier()}
+        onSpeedTierChange={setSpeedTier}
         agentModeCap={agentModeCap()}
         // WS14 S2a: the third pill, shown only while an approved plan is waiting to
         // run on this thread. The controller owns whether it is selected.
@@ -1473,6 +1491,7 @@ export default function ChatPage() {
         settledFold={row().settledFold}
         settledFoldChoices={settledFoldChoices}
         onSelectFollowUp={setInput}
+        onQuoteSelection={quoteIntoDraft}
         onViewSteps={() => setActiveTab('steps')}
         onViewAttachments={(attachmentId) => {
           setSelectedAttachmentId(attachmentId)

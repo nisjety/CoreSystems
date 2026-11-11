@@ -10319,6 +10319,134 @@ func (x *ThreadReferenceOutlineItem) GetCreatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+// One grounded use of a page to count.
+type IncrementPromoteUseRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The organisation the use belongs to. Must be the caller's.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The user the use belongs to. For a user credential, must be the caller.
+	UserId string `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	// SHA-256 of the normalised URL: exactly 32 bytes. The URL itself is never sent or stored.
+	UrlHash []byte `protobuf:"bytes,3,opt,name=url_hash,json=urlHash,proto3" json:"url_hash,omitempty"`
+	// The count at which `fire` turns true. Must be at least 1.
+	Threshold     uint32 `protobuf:"varint,4,opt,name=threshold,proto3" json:"threshold,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IncrementPromoteUseRequest) Reset() {
+	*x = IncrementPromoteUseRequest{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[114]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IncrementPromoteUseRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IncrementPromoteUseRequest) ProtoMessage() {}
+
+func (x *IncrementPromoteUseRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[114]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IncrementPromoteUseRequest.ProtoReflect.Descriptor instead.
+func (*IncrementPromoteUseRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{114}
+}
+
+func (x *IncrementPromoteUseRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *IncrementPromoteUseRequest) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *IncrementPromoteUseRequest) GetUrlHash() []byte {
+	if x != nil {
+		return x.UrlHash
+	}
+	return nil
+}
+
+func (x *IncrementPromoteUseRequest) GetThreshold() uint32 {
+	if x != nil {
+		return x.Threshold
+	}
+	return 0
+}
+
+// The counter after one use.
+type IncrementPromoteUseResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The use count for the key, this use included.
+	Count uint32 `protobuf:"varint,1,opt,name=count,proto3" json:"count,omitempty"`
+	// True when this use reached the threshold and no promotion was recorded before. True at most once per key.
+	Fire          bool `protobuf:"varint,2,opt,name=fire,proto3" json:"fire,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *IncrementPromoteUseResponse) Reset() {
+	*x = IncrementPromoteUseResponse{}
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[115]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *IncrementPromoteUseResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*IncrementPromoteUseResponse) ProtoMessage() {}
+
+func (x *IncrementPromoteUseResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_sessions_proto_msgTypes[115]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use IncrementPromoteUseResponse.ProtoReflect.Descriptor instead.
+func (*IncrementPromoteUseResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_sessions_proto_rawDescGZIP(), []int{115}
+}
+
+func (x *IncrementPromoteUseResponse) GetCount() uint32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+func (x *IncrementPromoteUseResponse) GetFire() bool {
+	if x != nil {
+		return x.Fire
+	}
+	return false
+}
+
 var File_model_plane_v1_sessions_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_sessions_proto_rawDesc = "" +
@@ -11169,7 +11297,15 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\n" +
 	"first_line\x18\x03 \x01(\tR\tfirstLine\x129\n" +
 	"\n" +
-	"created_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt*\x8f\x02\n" +
+	"created_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\x85\x01\n" +
+	"\x1aIncrementPromoteUseRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x19\n" +
+	"\burl_hash\x18\x03 \x01(\fR\aurlHash\x12\x1c\n" +
+	"\tthreshold\x18\x04 \x01(\rR\tthreshold\"G\n" +
+	"\x1bIncrementPromoteUseResponse\x12\x14\n" +
+	"\x05count\x18\x01 \x01(\rR\x05count\x12\x12\n" +
+	"\x04fire\x18\x02 \x01(\bR\x04fire*\x8f\x02\n" +
 	"\x10ManagedRunSource\x12\"\n" +
 	"\x1eMANAGED_RUN_SOURCE_UNSPECIFIED\x10\x00\x12%\n" +
 	"!MANAGED_RUN_SOURCE_GATEWAY_DIRECT\x10\x01\x12&\n" +
@@ -11258,7 +11394,9 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\n" +
 	"ForkThread\x12!.model_plane.v1.ForkThreadRequest\x1a\".model_plane.v1.ForkThreadResponse2\x91\x01\n" +
 	"\x16ThreadReferenceService\x12w\n" +
-	"\x16ReadThreadForReference\x12-.model_plane.v1.ReadThreadForReferenceRequest\x1a..model_plane.v1.ReadThreadForReferenceResponseB\xb5\x01\n" +
+	"\x16ReadThreadForReference\x12-.model_plane.v1.ReadThreadForReferenceRequest\x1a..model_plane.v1.ReadThreadForReferenceResponse2\x85\x01\n" +
+	"\x13PromoteOnUseService\x12n\n" +
+	"\x13IncrementPromoteUse\x12*.model_plane.v1.IncrementPromoteUseRequest\x1a+.model_plane.v1.IncrementPromoteUseResponseB\xb5\x01\n" +
 	"\x12com.model_plane.v1B\rSessionsProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -11274,7 +11412,7 @@ func file_model_plane_v1_sessions_proto_rawDescGZIP() []byte {
 }
 
 var file_model_plane_v1_sessions_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_model_plane_v1_sessions_proto_msgTypes = make([]protoimpl.MessageInfo, 114)
+var file_model_plane_v1_sessions_proto_msgTypes = make([]protoimpl.MessageInfo, 116)
 var file_model_plane_v1_sessions_proto_goTypes = []any{
 	(ManagedRunSource)(0),                        // 0: model_plane.v1.ManagedRunSource
 	(TerminalOutcome)(0),                         // 1: model_plane.v1.TerminalOutcome
@@ -11396,77 +11534,79 @@ var file_model_plane_v1_sessions_proto_goTypes = []any{
 	(*ReadThreadForReferenceResponse)(nil),       // 117: model_plane.v1.ReadThreadForReferenceResponse
 	(*ThreadReferenceMessage)(nil),               // 118: model_plane.v1.ThreadReferenceMessage
 	(*ThreadReferenceOutlineItem)(nil),           // 119: model_plane.v1.ThreadReferenceOutlineItem
-	(*structpb.Struct)(nil),                      // 120: google.protobuf.Struct
-	(*timestamppb.Timestamp)(nil),                // 121: google.protobuf.Timestamp
-	(AttentionState)(0),                          // 122: model_plane.v1.AttentionState
-	(AutonomyRung)(0),                            // 123: model_plane.v1.AutonomyRung
-	(*RunContextStatus)(nil),                     // 124: model_plane.v1.RunContextStatus
-	(*Event)(nil),                                // 125: model_plane.v1.Event
+	(*IncrementPromoteUseRequest)(nil),           // 120: model_plane.v1.IncrementPromoteUseRequest
+	(*IncrementPromoteUseResponse)(nil),          // 121: model_plane.v1.IncrementPromoteUseResponse
+	(*structpb.Struct)(nil),                      // 122: google.protobuf.Struct
+	(*timestamppb.Timestamp)(nil),                // 123: google.protobuf.Timestamp
+	(AttentionState)(0),                          // 124: model_plane.v1.AttentionState
+	(AutonomyRung)(0),                            // 125: model_plane.v1.AutonomyRung
+	(*RunContextStatus)(nil),                     // 126: model_plane.v1.RunContextStatus
+	(*Event)(nil),                                // 127: model_plane.v1.Event
 }
 var file_model_plane_v1_sessions_proto_depIdxs = []int32{
-	120, // 0: model_plane.v1.CreateThreadRequest.metadata:type_name -> google.protobuf.Struct
-	121, // 1: model_plane.v1.CreateThreadResponse.created_at:type_name -> google.protobuf.Timestamp
-	120, // 2: model_plane.v1.AppendMessageRequest.metadata:type_name -> google.protobuf.Struct
+	122, // 0: model_plane.v1.CreateThreadRequest.metadata:type_name -> google.protobuf.Struct
+	123, // 1: model_plane.v1.CreateThreadResponse.created_at:type_name -> google.protobuf.Timestamp
+	122, // 2: model_plane.v1.AppendMessageRequest.metadata:type_name -> google.protobuf.Struct
 	8,   // 3: model_plane.v1.AppendMessageRequest.mentions:type_name -> model_plane.v1.MentionInput
 	55,  // 4: model_plane.v1.AppendMessageRequest.entry:type_name -> model_plane.v1.MessageEntry
 	9,   // 5: model_plane.v1.AppendMessageResponse.mentions:type_name -> model_plane.v1.MentionRef
-	121, // 6: model_plane.v1.StartRunResponse.created_at:type_name -> google.protobuf.Timestamp
+	123, // 6: model_plane.v1.StartRunResponse.created_at:type_name -> google.protobuf.Timestamp
 	0,   // 7: model_plane.v1.StartManagedRunRequest.terminal_source:type_name -> model_plane.v1.ManagedRunSource
 	10,  // 8: model_plane.v1.StartManagedRunRequest.wake:type_name -> model_plane.v1.RunWakeContext
 	20,  // 9: model_plane.v1.StartManagedRunRequest.agent_version_pin:type_name -> model_plane.v1.AgentVersionPin
-	121, // 10: model_plane.v1.StartManagedRunResponse.created_at:type_name -> google.protobuf.Timestamp
+	123, // 10: model_plane.v1.StartManagedRunResponse.created_at:type_name -> google.protobuf.Timestamp
 	0,   // 11: model_plane.v1.RecordTerminalOutcomeRequest.source:type_name -> model_plane.v1.ManagedRunSource
 	1,   // 12: model_plane.v1.RecordTerminalOutcomeRequest.outcome:type_name -> model_plane.v1.TerminalOutcome
 	0,   // 13: model_plane.v1.RecordTerminalOutcomeResponse.source:type_name -> model_plane.v1.ManagedRunSource
-	121, // 14: model_plane.v1.RecordTerminalOutcomeResponse.applied_at:type_name -> google.protobuf.Timestamp
+	123, // 14: model_plane.v1.RecordTerminalOutcomeResponse.applied_at:type_name -> google.protobuf.Timestamp
 	0,   // 15: model_plane.v1.HeartbeatManagedRunRequest.source:type_name -> model_plane.v1.ManagedRunSource
-	121, // 16: model_plane.v1.HeartbeatManagedRunResponse.renewed_until:type_name -> google.protobuf.Timestamp
-	120, // 17: model_plane.v1.CompleteDirectRunWithMessageRequest.metadata:type_name -> google.protobuf.Struct
+	123, // 16: model_plane.v1.HeartbeatManagedRunResponse.renewed_until:type_name -> google.protobuf.Timestamp
+	122, // 17: model_plane.v1.CompleteDirectRunWithMessageRequest.metadata:type_name -> google.protobuf.Struct
 	24,  // 18: model_plane.v1.CompleteDirectRunWithMessageResponse.receipt:type_name -> model_plane.v1.RecordTerminalOutcomeResponse
-	121, // 19: model_plane.v1.SaveCheckpointResponse.saved_at:type_name -> google.protobuf.Timestamp
+	123, // 19: model_plane.v1.SaveCheckpointResponse.saved_at:type_name -> google.protobuf.Timestamp
 	42,  // 20: model_plane.v1.GetContextAssemblyResponse.segments:type_name -> model_plane.v1.ContextSegment
 	50,  // 21: model_plane.v1.ListAgentSkillsResponse.skills:type_name -> model_plane.v1.AgentSkill
-	120, // 22: model_plane.v1.SessionMessage.metadata:type_name -> google.protobuf.Struct
-	121, // 23: model_plane.v1.SessionMessage.created_at:type_name -> google.protobuf.Timestamp
+	122, // 22: model_plane.v1.SessionMessage.metadata:type_name -> google.protobuf.Struct
+	123, // 23: model_plane.v1.SessionMessage.created_at:type_name -> google.protobuf.Timestamp
 	9,   // 24: model_plane.v1.SessionMessage.mentions:type_name -> model_plane.v1.MentionRef
 	55,  // 25: model_plane.v1.SessionMessage.entry:type_name -> model_plane.v1.MessageEntry
-	121, // 26: model_plane.v1.SessionMessage.revised_at:type_name -> google.protobuf.Timestamp
+	123, // 26: model_plane.v1.SessionMessage.revised_at:type_name -> google.protobuf.Timestamp
 	53,  // 27: model_plane.v1.ListConversationResponse.messages:type_name -> model_plane.v1.SessionMessage
 	56,  // 28: model_plane.v1.MessageEntry.link_previews:type_name -> model_plane.v1.LinkPreview
-	121, // 29: model_plane.v1.LinkPreview.fetched_at:type_name -> google.protobuf.Timestamp
-	121, // 30: model_plane.v1.ReviseMessageResponse.revised_at:type_name -> google.protobuf.Timestamp
+	123, // 29: model_plane.v1.LinkPreview.fetched_at:type_name -> google.protobuf.Timestamp
+	123, // 30: model_plane.v1.ReviseMessageResponse.revised_at:type_name -> google.protobuf.Timestamp
 	2,   // 31: model_plane.v1.ListThreadsRequest.archived:type_name -> model_plane.v1.ArchiveFilter
-	121, // 32: model_plane.v1.ThreadSummary.created_at:type_name -> google.protobuf.Timestamp
-	121, // 33: model_plane.v1.ThreadSummary.updated_at:type_name -> google.protobuf.Timestamp
-	121, // 34: model_plane.v1.ThreadSummary.latest_run_updated_at:type_name -> google.protobuf.Timestamp
-	121, // 35: model_plane.v1.ThreadSummary.archived_at:type_name -> google.protobuf.Timestamp
-	121, // 36: model_plane.v1.ThreadSummary.last_read_at:type_name -> google.protobuf.Timestamp
-	122, // 37: model_plane.v1.ThreadSummary.attention_state:type_name -> model_plane.v1.AttentionState
-	121, // 38: model_plane.v1.ThreadSummary.attention_since:type_name -> google.protobuf.Timestamp
+	123, // 32: model_plane.v1.ThreadSummary.created_at:type_name -> google.protobuf.Timestamp
+	123, // 33: model_plane.v1.ThreadSummary.updated_at:type_name -> google.protobuf.Timestamp
+	123, // 34: model_plane.v1.ThreadSummary.latest_run_updated_at:type_name -> google.protobuf.Timestamp
+	123, // 35: model_plane.v1.ThreadSummary.archived_at:type_name -> google.protobuf.Timestamp
+	123, // 36: model_plane.v1.ThreadSummary.last_read_at:type_name -> google.protobuf.Timestamp
+	124, // 37: model_plane.v1.ThreadSummary.attention_state:type_name -> model_plane.v1.AttentionState
+	123, // 38: model_plane.v1.ThreadSummary.attention_since:type_name -> google.protobuf.Timestamp
 	62,  // 39: model_plane.v1.ListThreadsResponse.threads:type_name -> model_plane.v1.ThreadSummary
-	121, // 40: model_plane.v1.ArchiveThreadResponse.archived_at:type_name -> google.protobuf.Timestamp
-	123, // 41: model_plane.v1.SetRunModeRequest.granted_rung:type_name -> model_plane.v1.AutonomyRung
-	123, // 42: model_plane.v1.SetRunModeResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
+	123, // 40: model_plane.v1.ArchiveThreadResponse.archived_at:type_name -> google.protobuf.Timestamp
+	125, // 41: model_plane.v1.SetRunModeRequest.granted_rung:type_name -> model_plane.v1.AutonomyRung
+	125, // 42: model_plane.v1.SetRunModeResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
 	86,  // 43: model_plane.v1.CountWaivedRunsResponse.counts:type_name -> model_plane.v1.WaivedRunCount
-	121, // 44: model_plane.v1.WaivedRunCount.last_used_at:type_name -> google.protobuf.Timestamp
-	123, // 45: model_plane.v1.GetThreadGrantResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
-	121, // 46: model_plane.v1.GetThreadGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
-	123, // 47: model_plane.v1.BindGrantToRunResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
-	124, // 48: model_plane.v1.RecordRunContextRequest.status:type_name -> model_plane.v1.RunContextStatus
-	121, // 49: model_plane.v1.SaveLoopCheckpointRequest.park_until:type_name -> google.protobuf.Timestamp
+	123, // 44: model_plane.v1.WaivedRunCount.last_used_at:type_name -> google.protobuf.Timestamp
+	125, // 45: model_plane.v1.GetThreadGrantResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
+	123, // 46: model_plane.v1.GetThreadGrantResponse.expires_at:type_name -> google.protobuf.Timestamp
+	125, // 47: model_plane.v1.BindGrantToRunResponse.granted_rung:type_name -> model_plane.v1.AutonomyRung
+	126, // 48: model_plane.v1.RecordRunContextRequest.status:type_name -> model_plane.v1.RunContextStatus
+	123, // 49: model_plane.v1.SaveLoopCheckpointRequest.park_until:type_name -> google.protobuf.Timestamp
 	100, // 50: model_plane.v1.ListToolActionsResponse.actions:type_name -> model_plane.v1.ToolActionState
 	3,   // 51: model_plane.v1.SearchMessagesRequest.purpose:type_name -> model_plane.v1.SearchPurpose
 	2,   // 52: model_plane.v1.SearchMessagesRequest.archived:type_name -> model_plane.v1.ArchiveFilter
-	121, // 53: model_plane.v1.SearchHit.created_at:type_name -> google.protobuf.Timestamp
+	123, // 53: model_plane.v1.SearchHit.created_at:type_name -> google.protobuf.Timestamp
 	103, // 54: model_plane.v1.SearchMessagesResponse.hits:type_name -> model_plane.v1.SearchHit
 	4,   // 55: model_plane.v1.DecideSkillProposalRequest.decision:type_name -> model_plane.v1.SkillDecision
-	121, // 56: model_plane.v1.LearningLedgerEntry.created_at:type_name -> google.protobuf.Timestamp
+	123, // 56: model_plane.v1.LearningLedgerEntry.created_at:type_name -> google.protobuf.Timestamp
 	110, // 57: model_plane.v1.ListLearningLedgerResponse.entries:type_name -> model_plane.v1.LearningLedgerEntry
 	5,   // 58: model_plane.v1.ReadThreadForReferenceRequest.mode:type_name -> model_plane.v1.ThreadReferenceMode
 	118, // 59: model_plane.v1.ReadThreadForReferenceResponse.messages:type_name -> model_plane.v1.ThreadReferenceMessage
 	119, // 60: model_plane.v1.ReadThreadForReferenceResponse.outline:type_name -> model_plane.v1.ThreadReferenceOutlineItem
-	121, // 61: model_plane.v1.ThreadReferenceMessage.created_at:type_name -> google.protobuf.Timestamp
-	121, // 62: model_plane.v1.ThreadReferenceOutlineItem.created_at:type_name -> google.protobuf.Timestamp
+	123, // 61: model_plane.v1.ThreadReferenceMessage.created_at:type_name -> google.protobuf.Timestamp
+	123, // 62: model_plane.v1.ThreadReferenceOutlineItem.created_at:type_name -> google.protobuf.Timestamp
 	6,   // 63: model_plane.v1.SessionCore.CreateThread:input_type -> model_plane.v1.CreateThreadRequest
 	11,  // 64: model_plane.v1.SessionCore.AppendMessage:input_type -> model_plane.v1.AppendMessageRequest
 	13,  // 65: model_plane.v1.SessionCore.StartRun:input_type -> model_plane.v1.StartRunRequest
@@ -11517,58 +11657,60 @@ var file_model_plane_v1_sessions_proto_depIdxs = []int32{
 	59,  // 110: model_plane.v1.MessageRevisionService.ResolveMessageTarget:input_type -> model_plane.v1.ResolveMessageTargetRequest
 	114, // 111: model_plane.v1.ThreadForkService.ForkThread:input_type -> model_plane.v1.ForkThreadRequest
 	116, // 112: model_plane.v1.ThreadReferenceService.ReadThreadForReference:input_type -> model_plane.v1.ReadThreadForReferenceRequest
-	7,   // 113: model_plane.v1.SessionCore.CreateThread:output_type -> model_plane.v1.CreateThreadResponse
-	12,  // 114: model_plane.v1.SessionCore.AppendMessage:output_type -> model_plane.v1.AppendMessageResponse
-	14,  // 115: model_plane.v1.SessionCore.StartRun:output_type -> model_plane.v1.StartRunResponse
-	14,  // 116: model_plane.v1.SessionCore.StartScheduledRun:output_type -> model_plane.v1.StartRunResponse
-	17,  // 117: model_plane.v1.SessionCore.PrepareScheduledRunThread:output_type -> model_plane.v1.PrepareScheduledRunThreadResponse
-	19,  // 118: model_plane.v1.SessionCore.PrepareUserOwnedThread:output_type -> model_plane.v1.PrepareUserOwnedThreadResponse
-	32,  // 119: model_plane.v1.SessionCore.CompleteStep:output_type -> model_plane.v1.CompleteStepResponse
-	34,  // 120: model_plane.v1.SessionCore.ReserveToolAction:output_type -> model_plane.v1.ReserveToolActionResponse
-	36,  // 121: model_plane.v1.SessionCore.FinalizeToolAction:output_type -> model_plane.v1.FinalizeToolActionResponse
-	38,  // 122: model_plane.v1.SessionCore.SaveCheckpoint:output_type -> model_plane.v1.SaveCheckpointResponse
-	94,  // 123: model_plane.v1.SessionCore.SaveLoopCheckpoint:output_type -> model_plane.v1.SaveLoopCheckpointResponse
-	96,  // 124: model_plane.v1.SessionCore.ClaimLoopCheckpoint:output_type -> model_plane.v1.ClaimLoopCheckpointResponse
-	98,  // 125: model_plane.v1.SessionCore.CloseLoopCheckpoint:output_type -> model_plane.v1.CloseLoopCheckpointResponse
-	101, // 126: model_plane.v1.SessionCore.ListToolActions:output_type -> model_plane.v1.ListToolActionsResponse
-	125, // 127: model_plane.v1.SessionCore.ReplayThread:output_type -> model_plane.v1.Event
-	41,  // 128: model_plane.v1.SessionCore.GetContextAssembly:output_type -> model_plane.v1.GetContextAssemblyResponse
-	44,  // 129: model_plane.v1.SessionCore.CompactNow:output_type -> model_plane.v1.CompactNowResponse
-	48,  // 130: model_plane.v1.SessionCore.UpsertAgentSkill:output_type -> model_plane.v1.UpsertAgentSkillResponse
-	51,  // 131: model_plane.v1.SessionCore.ListAgentSkills:output_type -> model_plane.v1.ListAgentSkillsResponse
-	46,  // 132: model_plane.v1.SessionCore.SetAgentSkillEnabled:output_type -> model_plane.v1.SetAgentSkillEnabledResponse
-	54,  // 133: model_plane.v1.SessionCore.ListConversation:output_type -> model_plane.v1.ListConversationResponse
-	63,  // 134: model_plane.v1.SessionCore.ListThreads:output_type -> model_plane.v1.ListThreadsResponse
-	65,  // 135: model_plane.v1.SessionCore.UpdateThreadPresentation:output_type -> model_plane.v1.UpdateThreadPresentationResponse
-	67,  // 136: model_plane.v1.SessionCore.ArchiveThread:output_type -> model_plane.v1.ArchiveThreadResponse
-	69,  // 137: model_plane.v1.SessionCore.ArchiveThreads:output_type -> model_plane.v1.ArchiveThreadsResponse
-	71,  // 138: model_plane.v1.SessionCore.DeleteThread:output_type -> model_plane.v1.DeleteThreadResponse
-	73,  // 139: model_plane.v1.SessionCore.DeleteThreads:output_type -> model_plane.v1.DeleteThreadsResponse
-	75,  // 140: model_plane.v1.SessionCore.DeleteSpaceThreads:output_type -> model_plane.v1.DeleteSpaceThreadsResponse
-	77,  // 141: model_plane.v1.SessionCore.SetRunMode:output_type -> model_plane.v1.SetRunModeResponse
-	79,  // 142: model_plane.v1.SessionCore.ClaimScheduledStep:output_type -> model_plane.v1.ClaimScheduledStepResponse
-	81,  // 143: model_plane.v1.SessionCore.RecordScheduledStepReceipt:output_type -> model_plane.v1.RecordScheduledStepReceiptResponse
-	92,  // 144: model_plane.v1.SessionCore.RecordRunContext:output_type -> model_plane.v1.RecordRunContextResponse
-	83,  // 145: model_plane.v1.SessionCore.RecordScheduledRunResult:output_type -> model_plane.v1.RecordScheduledRunResultResponse
-	22,  // 146: model_plane.v1.ManagedRunLifecycle.StartManagedRun:output_type -> model_plane.v1.StartManagedRunResponse
-	24,  // 147: model_plane.v1.ManagedRunLifecycle.RecordTerminalOutcome:output_type -> model_plane.v1.RecordTerminalOutcomeResponse
-	28,  // 148: model_plane.v1.ManagedRunLifecycle.HeartbeatManagedRun:output_type -> model_plane.v1.HeartbeatManagedRunResponse
-	26,  // 149: model_plane.v1.ManagedRunLifecycle.RecordRunOutput:output_type -> model_plane.v1.RecordRunOutputResponse
-	30,  // 150: model_plane.v1.ManagedRunLifecycle.CompleteDirectRunWithMessage:output_type -> model_plane.v1.CompleteDirectRunWithMessageResponse
-	85,  // 151: model_plane.v1.SessionRetentionService.CountWaivedRuns:output_type -> model_plane.v1.CountWaivedRunsResponse
-	88,  // 152: model_plane.v1.ThreadAutonomy.GetThreadGrant:output_type -> model_plane.v1.GetThreadGrantResponse
-	90,  // 153: model_plane.v1.ThreadAutonomy.BindGrantToRun:output_type -> model_plane.v1.BindGrantToRunResponse
-	104, // 154: model_plane.v1.MessageSearch.SearchMessages:output_type -> model_plane.v1.SearchMessagesResponse
-	113, // 155: model_plane.v1.MessageTreeService.SetActiveLeaf:output_type -> model_plane.v1.SetActiveLeafResponse
-	106, // 156: model_plane.v1.LearningGovernanceService.DecideSkillProposal:output_type -> model_plane.v1.DecideSkillProposalResponse
-	108, // 157: model_plane.v1.LearningGovernanceService.UndoLearningEntry:output_type -> model_plane.v1.UndoLearningEntryResponse
-	111, // 158: model_plane.v1.LearningGovernanceService.ListLearningLedger:output_type -> model_plane.v1.ListLearningLedgerResponse
-	58,  // 159: model_plane.v1.MessageRevisionService.ReviseMessage:output_type -> model_plane.v1.ReviseMessageResponse
-	60,  // 160: model_plane.v1.MessageRevisionService.ResolveMessageTarget:output_type -> model_plane.v1.ResolveMessageTargetResponse
-	115, // 161: model_plane.v1.ThreadForkService.ForkThread:output_type -> model_plane.v1.ForkThreadResponse
-	117, // 162: model_plane.v1.ThreadReferenceService.ReadThreadForReference:output_type -> model_plane.v1.ReadThreadForReferenceResponse
-	113, // [113:163] is the sub-list for method output_type
-	63,  // [63:113] is the sub-list for method input_type
+	120, // 113: model_plane.v1.PromoteOnUseService.IncrementPromoteUse:input_type -> model_plane.v1.IncrementPromoteUseRequest
+	7,   // 114: model_plane.v1.SessionCore.CreateThread:output_type -> model_plane.v1.CreateThreadResponse
+	12,  // 115: model_plane.v1.SessionCore.AppendMessage:output_type -> model_plane.v1.AppendMessageResponse
+	14,  // 116: model_plane.v1.SessionCore.StartRun:output_type -> model_plane.v1.StartRunResponse
+	14,  // 117: model_plane.v1.SessionCore.StartScheduledRun:output_type -> model_plane.v1.StartRunResponse
+	17,  // 118: model_plane.v1.SessionCore.PrepareScheduledRunThread:output_type -> model_plane.v1.PrepareScheduledRunThreadResponse
+	19,  // 119: model_plane.v1.SessionCore.PrepareUserOwnedThread:output_type -> model_plane.v1.PrepareUserOwnedThreadResponse
+	32,  // 120: model_plane.v1.SessionCore.CompleteStep:output_type -> model_plane.v1.CompleteStepResponse
+	34,  // 121: model_plane.v1.SessionCore.ReserveToolAction:output_type -> model_plane.v1.ReserveToolActionResponse
+	36,  // 122: model_plane.v1.SessionCore.FinalizeToolAction:output_type -> model_plane.v1.FinalizeToolActionResponse
+	38,  // 123: model_plane.v1.SessionCore.SaveCheckpoint:output_type -> model_plane.v1.SaveCheckpointResponse
+	94,  // 124: model_plane.v1.SessionCore.SaveLoopCheckpoint:output_type -> model_plane.v1.SaveLoopCheckpointResponse
+	96,  // 125: model_plane.v1.SessionCore.ClaimLoopCheckpoint:output_type -> model_plane.v1.ClaimLoopCheckpointResponse
+	98,  // 126: model_plane.v1.SessionCore.CloseLoopCheckpoint:output_type -> model_plane.v1.CloseLoopCheckpointResponse
+	101, // 127: model_plane.v1.SessionCore.ListToolActions:output_type -> model_plane.v1.ListToolActionsResponse
+	127, // 128: model_plane.v1.SessionCore.ReplayThread:output_type -> model_plane.v1.Event
+	41,  // 129: model_plane.v1.SessionCore.GetContextAssembly:output_type -> model_plane.v1.GetContextAssemblyResponse
+	44,  // 130: model_plane.v1.SessionCore.CompactNow:output_type -> model_plane.v1.CompactNowResponse
+	48,  // 131: model_plane.v1.SessionCore.UpsertAgentSkill:output_type -> model_plane.v1.UpsertAgentSkillResponse
+	51,  // 132: model_plane.v1.SessionCore.ListAgentSkills:output_type -> model_plane.v1.ListAgentSkillsResponse
+	46,  // 133: model_plane.v1.SessionCore.SetAgentSkillEnabled:output_type -> model_plane.v1.SetAgentSkillEnabledResponse
+	54,  // 134: model_plane.v1.SessionCore.ListConversation:output_type -> model_plane.v1.ListConversationResponse
+	63,  // 135: model_plane.v1.SessionCore.ListThreads:output_type -> model_plane.v1.ListThreadsResponse
+	65,  // 136: model_plane.v1.SessionCore.UpdateThreadPresentation:output_type -> model_plane.v1.UpdateThreadPresentationResponse
+	67,  // 137: model_plane.v1.SessionCore.ArchiveThread:output_type -> model_plane.v1.ArchiveThreadResponse
+	69,  // 138: model_plane.v1.SessionCore.ArchiveThreads:output_type -> model_plane.v1.ArchiveThreadsResponse
+	71,  // 139: model_plane.v1.SessionCore.DeleteThread:output_type -> model_plane.v1.DeleteThreadResponse
+	73,  // 140: model_plane.v1.SessionCore.DeleteThreads:output_type -> model_plane.v1.DeleteThreadsResponse
+	75,  // 141: model_plane.v1.SessionCore.DeleteSpaceThreads:output_type -> model_plane.v1.DeleteSpaceThreadsResponse
+	77,  // 142: model_plane.v1.SessionCore.SetRunMode:output_type -> model_plane.v1.SetRunModeResponse
+	79,  // 143: model_plane.v1.SessionCore.ClaimScheduledStep:output_type -> model_plane.v1.ClaimScheduledStepResponse
+	81,  // 144: model_plane.v1.SessionCore.RecordScheduledStepReceipt:output_type -> model_plane.v1.RecordScheduledStepReceiptResponse
+	92,  // 145: model_plane.v1.SessionCore.RecordRunContext:output_type -> model_plane.v1.RecordRunContextResponse
+	83,  // 146: model_plane.v1.SessionCore.RecordScheduledRunResult:output_type -> model_plane.v1.RecordScheduledRunResultResponse
+	22,  // 147: model_plane.v1.ManagedRunLifecycle.StartManagedRun:output_type -> model_plane.v1.StartManagedRunResponse
+	24,  // 148: model_plane.v1.ManagedRunLifecycle.RecordTerminalOutcome:output_type -> model_plane.v1.RecordTerminalOutcomeResponse
+	28,  // 149: model_plane.v1.ManagedRunLifecycle.HeartbeatManagedRun:output_type -> model_plane.v1.HeartbeatManagedRunResponse
+	26,  // 150: model_plane.v1.ManagedRunLifecycle.RecordRunOutput:output_type -> model_plane.v1.RecordRunOutputResponse
+	30,  // 151: model_plane.v1.ManagedRunLifecycle.CompleteDirectRunWithMessage:output_type -> model_plane.v1.CompleteDirectRunWithMessageResponse
+	85,  // 152: model_plane.v1.SessionRetentionService.CountWaivedRuns:output_type -> model_plane.v1.CountWaivedRunsResponse
+	88,  // 153: model_plane.v1.ThreadAutonomy.GetThreadGrant:output_type -> model_plane.v1.GetThreadGrantResponse
+	90,  // 154: model_plane.v1.ThreadAutonomy.BindGrantToRun:output_type -> model_plane.v1.BindGrantToRunResponse
+	104, // 155: model_plane.v1.MessageSearch.SearchMessages:output_type -> model_plane.v1.SearchMessagesResponse
+	113, // 156: model_plane.v1.MessageTreeService.SetActiveLeaf:output_type -> model_plane.v1.SetActiveLeafResponse
+	106, // 157: model_plane.v1.LearningGovernanceService.DecideSkillProposal:output_type -> model_plane.v1.DecideSkillProposalResponse
+	108, // 158: model_plane.v1.LearningGovernanceService.UndoLearningEntry:output_type -> model_plane.v1.UndoLearningEntryResponse
+	111, // 159: model_plane.v1.LearningGovernanceService.ListLearningLedger:output_type -> model_plane.v1.ListLearningLedgerResponse
+	58,  // 160: model_plane.v1.MessageRevisionService.ReviseMessage:output_type -> model_plane.v1.ReviseMessageResponse
+	60,  // 161: model_plane.v1.MessageRevisionService.ResolveMessageTarget:output_type -> model_plane.v1.ResolveMessageTargetResponse
+	115, // 162: model_plane.v1.ThreadForkService.ForkThread:output_type -> model_plane.v1.ForkThreadResponse
+	117, // 163: model_plane.v1.ThreadReferenceService.ReadThreadForReference:output_type -> model_plane.v1.ReadThreadForReferenceResponse
+	121, // 164: model_plane.v1.PromoteOnUseService.IncrementPromoteUse:output_type -> model_plane.v1.IncrementPromoteUseResponse
+	114, // [114:165] is the sub-list for method output_type
+	63,  // [63:114] is the sub-list for method input_type
 	63,  // [63:63] is the sub-list for extension type_name
 	63,  // [63:63] is the sub-list for extension extendee
 	0,   // [0:63] is the sub-list for field type_name
@@ -11590,9 +11732,9 @@ func file_model_plane_v1_sessions_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_sessions_proto_rawDesc), len(file_model_plane_v1_sessions_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   114,
+			NumMessages:   116,
 			NumExtensions: 0,
-			NumServices:   10,
+			NumServices:   11,
 		},
 		GoTypes:           file_model_plane_v1_sessions_proto_goTypes,
 		DependencyIndexes: file_model_plane_v1_sessions_proto_depIdxs,

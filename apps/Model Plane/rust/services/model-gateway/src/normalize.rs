@@ -683,6 +683,7 @@ mod tests {
         InvokeRequest {
             wake_context: None,
             effort: None,
+            speed: None,
             pinned_message_ids: Vec::new(),
             regenerated: false,
             edited_resubmit: false,

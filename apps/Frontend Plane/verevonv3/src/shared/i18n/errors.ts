@@ -747,6 +747,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Lagrede AI-forslag krever at organisasjonen bruker gjennomgang av AI i support. En administrator kan slå det på i innstillingene.',
     en: 'Saved AI proposals need the organization to use AI review in support. An administrator can turn it on in the settings.',
   },
+  council_unavailable: {
+    no: 'Modellrådet er midlertidig utilgjengelig. Prøv igjen om litt.',
+    en: 'The model council is temporarily unavailable. Try again shortly.',
+  },
   zdr_ai_proposal_forbidden: {
     no: 'AI-forslag lagres ikke, fordi organisasjonen har Zero Data Retention slått på.',
     en: 'AI proposals are not kept, because the organization has Zero Data Retention turned on.',

@@ -10,9 +10,9 @@
 //! The chat composer offers the tool only on a persistent turn: not zero-retention, not waived, not conversation-only and
 //! not a customer-gateway turn ([`composer_offers`]). The tool loop then admits it only on a turn that rides no
 //! subscription route, since an image is metered API spend. It reads the org's capability policy for [`CAPABILITY_ID`]
-//! once per turn, with the person's own capability bearer ([`policy_admits`]). A policy that withholds the tool (`never`,
-//! or `ask`, which the Ask loop cannot answer for) withholds it, and so does a policy that cannot be read. The org's web
-//! switch does not bind the tool: image generation is not public web access.
+//! with the person's own capability bearer, and reuses that read for a minute per org and person ([`policy_admits`]). A
+//! policy that withholds the tool (`never`, or `ask`, which the Ask loop cannot answer for) withholds it, and so does a
+//! policy that cannot be read. The org's web switch does not bind the tool: image generation is not public web access.
 //!
 //! # Limits and money
 //!
@@ -30,7 +30,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use mp_contracts::model_plane::v1::{
@@ -85,6 +85,13 @@ const IMAGE_MODEL_UNAVAILABLE: &str = "image_model_unavailable";
 
 /// The longest a policy read may take on the turn's critical path. A slower answer withholds the tool.
 const POLICY_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long one person's answer is reused before capability-core is asked again, so a turn costs at most one policy read
+/// a minute per person. The connected-app read keeps its level for the same time.
+const POLICY_TTL: Duration = Duration::from_secs(60);
+
+/// Most people whose answer is remembered at once. Past it the remembered answers are dropped and read again.
+const POLICY_CACHE_MAX: usize = 4096;
 
 /// The artifact title, in characters.
 const TITLE_CHARS: usize = 200;
@@ -172,13 +179,73 @@ pub fn tool_definition() -> ToolDefinition {
     }
 }
 
+/// An answer read for one person in one org, and when it was read.
+#[derive(Debug, Clone, Copy)]
+struct CachedAdmission {
+    read_at: Instant,
+    admitted: bool,
+}
+
+/// Org and person -> the answer read for them. The tool-policy list holds the org's rows and that person's own rows,
+/// never another person's, so an answer is kept per person within the org, as the connected-app read keeps its level.
+type AdmissionCache = HashMap<(String, String), CachedAdmission>;
+
+/// The answers remembered for [`POLICY_TTL`]. Only an answer is kept: a read that failed is never remembered.
+static ADMISSIONS: LazyLock<Mutex<AdmissionCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn admissions() -> MutexGuard<'static, AdmissionCache> {
+    ADMISSIONS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The answer remembered for this person when it is younger than [`POLICY_TTL`].
+fn cached_admission(cache: &AdmissionCache, key: &(String, String), now: Instant) -> Option<bool> {
+    cache
+        .get(key)
+        .filter(|cached| now.saturating_duration_since(cached.read_at) < POLICY_TTL)
+        .map(|cached| cached.admitted)
+}
+
+/// Remember an answer. Expired entries go first; a cache still full of live ones is emptied, so it stays bounded.
+fn remember_admission(
+    cache: &mut AdmissionCache,
+    key: (String, String),
+    admitted: bool,
+    now: Instant,
+) {
+    if cache.len() >= POLICY_CACHE_MAX {
+        cache.retain(|_, cached| now.saturating_duration_since(cached.read_at) < POLICY_TTL);
+        if cache.len() >= POLICY_CACHE_MAX {
+            cache.clear();
+        }
+    }
+    cache.insert(
+        key,
+        CachedAdmission {
+            read_at: now,
+            admitted,
+        },
+    );
+}
+
 /// Whether the org's capability policy admits the tool for this person. capability-core's tool-policy list for
-/// [`CAPABILITY_ID`] is read with the person's own capability bearer. A list that cannot be read withholds the tool, as does
-/// any list that [`admits`] refuses.
-pub async fn policy_admits(state: &AppState, capability_bearer: Option<&str>) -> bool {
+/// [`CAPABILITY_ID`] is read with the person's own capability bearer, and an answer from it is reused for [`POLICY_TTL`]
+/// per org and person. A call with no bearer, a list that cannot be read and a body that is not the list withhold the
+/// tool without being remembered, so the next turn asks again. A list that [`admits`] refuses withholds it, and that
+/// answer is remembered.
+pub async fn policy_admits(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    capability_bearer: Option<&str>,
+) -> bool {
     let Some(bearer) = capability_bearer.filter(|bearer| !bearer.trim().is_empty()) else {
         return false;
     };
+    let key = (org_id.to_owned(), user_id.to_owned());
+    let remembered = cached_admission(&admissions(), &key, Instant::now());
+    if let Some(admitted) = remembered {
+        return admitted;
+    }
     let url = format!(
         "{}/api/v1/tool-policies?capability_id={CAPABILITY_ID}",
         state.capability_core_base_url
@@ -196,30 +263,39 @@ pub async fn policy_admits(state: &AppState, capability_bearer: Option<&str>) ->
     if !response.status().is_success() {
         return false;
     }
-    match response.json::<Value>().await {
-        Ok(body) => admits(&body),
-        Err(_) => false,
-    }
-}
-
-/// The tool-policy list's answer for [`CAPABILITY_ID`]. A list that does not enforce its policies admits the tool. An
-/// enforced list admits it while every row on the capability allows it, so `never` and `ask` withhold it, and so does a
-/// level this build does not know. A body of any other shape withholds it.
-#[must_use]
-pub fn admits(body: &Value) -> bool {
-    let (Some(enforced), Some(policies)) = (
-        body.get("enforced").and_then(Value::as_bool),
-        body.get("policies").and_then(Value::as_array),
-    ) else {
+    let Some(admitted) = response
+        .json::<Value>()
+        .await
+        .ok()
+        .and_then(|body| admits(&body))
+    else {
         return false;
     };
+    remember_admission(&mut admissions(), key, admitted, Instant::now());
+    admitted
+}
+
+/// The tool-policy list's answer for [`CAPABILITY_ID`]: `Some(true)` admits the tool, `Some(false)` withholds it, and
+/// `None` is a body that is not the list, which is no answer at all. A list that does not enforce its policies admits the
+/// tool. An enforced list admits it while every row on the capability allows it, so `never` and `ask` withhold it, and so
+/// does a level this build does not know.
+#[must_use]
+pub fn admits(body: &Value) -> Option<bool> {
+    let (enforced, policies) = (
+        body.get("enforced").and_then(Value::as_bool)?,
+        body.get("policies").and_then(Value::as_array)?,
+    );
     if !enforced {
-        return true;
+        return Some(true);
     }
-    policies
-        .iter()
-        .filter(|policy| policy.get("capability_id").and_then(Value::as_str) == Some(CAPABILITY_ID))
-        .all(|policy| policy.get("decision").and_then(Value::as_str) == Some("allow"))
+    Some(
+        policies
+            .iter()
+            .filter(|policy| {
+                policy.get("capability_id").and_then(Value::as_str) == Some(CAPABILITY_ID)
+            })
+            .all(|policy| policy.get("decision").and_then(Value::as_str) == Some("allow")),
+    )
 }
 
 /// The images one turn has asked for: one provider call at a time, and a count of the calls begun.

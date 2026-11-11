@@ -97,6 +97,17 @@ impl PromptCache {
         // distinct from every level, and a request with none hashes one constant
         // byte, so legacy callers still share entries with each other.
         hasher.update(&[req.reasoning_effort.map_or(0, |level| level as u8 + 1)]);
+        // The priority tier is billed higher and echoed on the response (`service_tier_used`), so a
+        // call that asks for it must not share an entry with one that does not. Hashed only when it
+        // is asked for, so every other call keeps the key it had.
+        if req.prefer_priority_service_tier {
+            hasher.update(b"prefer_priority_service_tier");
+        }
+        if !req.speed_tier.is_empty() {
+            hasher.update(b"speed_tier");
+            hasher.update(&(req.speed_tier.len() as u64).to_le_bytes());
+            hasher.update(req.speed_tier.as_bytes());
+        }
         // Response-shaping fields — a tool/schema change must miss the cache.
         for tool in &req.tools {
             hasher.update(tool.name.as_bytes());

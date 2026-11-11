@@ -26,6 +26,7 @@ use mp_contracts::model_plane::v1::{
     message_search_server::MessageSearchServer,
     message_tree_service_server::MessageTreeServiceServer,
     orchestration_core_service_server::OrchestrationCoreServiceServer,
+    promote_on_use_service_server::{PromoteOnUseService, PromoteOnUseServiceServer},
     run_question_consume_service_server::RunQuestionConsumeServiceServer,
     routing_policy_server::RoutingPolicyServer,
     run_ledger_service_server::RunLedgerServiceServer,
@@ -882,6 +883,16 @@ async fn authorize_thread_deletion_owner(
     }
 }
 
+/// What [`delete_thread_rows`] removed that the caller acts on after its commit: the `agent_memory`
+/// rows whose semantic twins must follow, and the ids of the thread's share snapshots, whose Control
+/// grants are removed (or logged) once their rows are gone.
+pub(crate) struct ErasedThreadRows {
+    /// The erased `agent_memory` rows, for the semantic propagation after the commit.
+    pub(crate) memories: Vec<crate::memory_erasure::ErasedMemory>,
+    /// The thread's snapshot ids, read before their rows went. Empty while the grants switch is off.
+    pub(crate) snapshot_ids: Vec<String>,
+}
+
 /// Delete every durable row owned by one thread while `tx` holds the caller's
 /// transaction. The order is explicit because the original schema predates
 /// this operation and most foreign keys do not have `ON DELETE CASCADE`.
@@ -897,11 +908,12 @@ async fn authorize_thread_deletion_owner(
 /// semantic twin on letta-bridge keyed by the same id, and once the durable row
 /// is gone there is nothing left in Postgres to find that twin by. The caller
 /// propagates after commit — see [`crate::memory_erasure`] for why this is not
-/// done inside the transaction.
+/// done inside the transaction. The share snapshot ids come back the same way:
+/// their Control grants are removed after the commit, never inside it.
 pub(crate) async fn delete_thread_rows(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     thread_id: &str,
-) -> Result<Vec<crate::memory_erasure::ErasedMemory>, Status> {
+) -> Result<ErasedThreadRows, Status> {
     // Captured before the row is gone; `owner` is the user_id the semantic copy
     // was tagged with (memory_grpc::index_memory).
     let erased_memories: Vec<crate::memory_erasure::ErasedMemory> =
@@ -915,6 +927,18 @@ pub(crate) async fn delete_thread_rows(
         .into_iter()
         .map(|(memory_id, owner)| crate::memory_erasure::ErasedMemory { memory_id, owner })
         .collect();
+
+    // EP-12 S14 / W4-SH-4: a snapshot's Control view grants are removed by the caller after the commit,
+    // so the ids are read here, before their rows go. Read only while the grants switch is on.
+    let snapshot_ids: Vec<String> = if crate::thread_shares::snapshot_grants_enabled() {
+        sqlx::query_scalar("SELECT id FROM thread_share_snapshots WHERE thread_id = $1")
+            .bind(thread_id)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+    } else {
+        Vec::new()
+    };
 
     // Direct thread evidence and content-bearing side ledgers.
     for query in [
@@ -1043,7 +1067,10 @@ pub(crate) async fn delete_thread_rows(
             .map_err(|error| Status::internal(error.to_string()))?;
     }
 
-    Ok(erased_memories)
+    Ok(ErasedThreadRows {
+        memories: erased_memories,
+        snapshot_ids,
+    })
 }
 
 /// Require that `thread_id` is owned by EXACTLY `owner` in the caller's org.
@@ -10986,6 +11013,11 @@ impl SessionCore for SessionService {
         let result = async {
             let caller = identity(&request)?;
             authorize_owner_housekeeping(&caller, "session:write")?;
+            // The owner's delegated credential is read before the request is consumed, because Control's
+            // grant cleanup needs it. Held as a result, so a missing one never stops the erase.
+            let grants = crate::thread_shares::snapshot_grants_enabled().then(|| {
+                crate::thread_shares::erase_grant_session(self.auth.as_ref(), &request, &caller)
+            });
             let req = request.into_inner();
             if req.org_id.trim().is_empty() || req.thread_id.trim().is_empty() {
                 return Err(Status::invalid_argument(
@@ -11024,7 +11056,10 @@ impl SessionCore for SessionService {
             if owner_org != req.org_id || owner_user != caller_owner {
                 return Err(Status::permission_denied("thread owner required"));
             }
-            let erased_memories = delete_thread_rows(&mut tx, &req.thread_id).await?;
+            let ErasedThreadRows {
+                memories: erased_memories,
+                snapshot_ids,
+            } = delete_thread_rows(&mut tx, &req.thread_id).await?;
             let deleted = sqlx::query("DELETE FROM threads WHERE id = $1 AND org_id = $2")
                 .bind(&req.thread_id)
                 .bind(&req.org_id)
@@ -11045,6 +11080,14 @@ impl SessionCore for SessionService {
             // Best-effort by necessity, but never silent.
             self.propagate_semantic_erasure("delete_thread", &req.org_id, &erased_memories)
                 .await;
+            // After the commit, and never failing the delete: see `revoke_erased_snapshot_grants`.
+            crate::thread_shares::revoke_erased_snapshot_grants(
+                grants,
+                &caller,
+                caller_owner,
+                &snapshot_ids,
+            )
+            .await;
 
             Ok(Response::new(pb::DeleteThreadResponse {
                 thread_id: req.thread_id,
@@ -11064,6 +11107,11 @@ impl SessionCore for SessionService {
         let result = async {
             let caller = identity(&request)?;
             authorize_owner_housekeeping(&caller, "session:write")?;
+            // The owner's delegated credential is read before the request is consumed, because Control's
+            // grant cleanup needs it. Held as a result, so a missing one never stops the erase.
+            let grants = crate::thread_shares::snapshot_grants_enabled().then(|| {
+                crate::thread_shares::erase_grant_session(self.auth.as_ref(), &request, &caller)
+            });
             let req = request.into_inner();
             if req.org_id.trim().is_empty() || req.user_id.trim().is_empty() {
                 return Err(Status::invalid_argument("org_id and user_id are required"));
@@ -11096,8 +11144,11 @@ impl SessionCore for SessionService {
                 .map_err(crate::gdpr::ErasureHoldError::into_status)?;
 
             let mut erased_memories: Vec<crate::memory_erasure::ErasedMemory> = Vec::new();
+            let mut snapshot_ids: Vec<String> = Vec::new();
             for (thread_id,) in &thread_ids {
-                erased_memories.extend(delete_thread_rows(&mut tx, thread_id).await?);
+                let erased = delete_thread_rows(&mut tx, thread_id).await?;
+                erased_memories.extend(erased.memories);
+                snapshot_ids.extend(erased.snapshot_ids);
                 sqlx::query("DELETE FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3")
                     .bind(thread_id)
                     .bind(&req.org_id)
@@ -11112,6 +11163,14 @@ impl SessionCore for SessionService {
 
             self.propagate_semantic_erasure("delete_threads", &req.org_id, &erased_memories)
                 .await;
+            // After the commit, and never failing the delete: see `revoke_erased_snapshot_grants`.
+            crate::thread_shares::revoke_erased_snapshot_grants(
+                grants,
+                &caller,
+                &req.user_id,
+                &snapshot_ids,
+            )
+            .await;
 
             Ok(Response::new(pb::DeleteThreadsResponse {
                 deleted_count: u32::try_from(thread_ids.len()).unwrap_or(u32::MAX),
@@ -12516,6 +12575,7 @@ pub async fn serve(
     let thread_reference_pool = pool.clone();
     let thread_goal_pool = pool.clone();
     let event_trigger_pool = pool.clone();
+    let promote_use_pool = pool.clone();
     let thread_share_pool = pool.clone();
     let skill_version_pool = pool.clone();
 
@@ -12632,6 +12692,11 @@ pub async fn serve(
             crate::event_triggers::EventTriggerGrpc { pool: event_trigger_pool },
             auth.clone(),
         ))
+        // W5-093-b: the durable promote-on-use counter; execution-core calls it only when PROMOTE_ON_USE_DURABLE is on.
+        .add_service(PromoteOnUseServiceServer::with_interceptor(
+            PromoteOnUseGrpc { pool: promote_use_pool },
+            auth.clone(),
+        ))
         // EP-11 S2: reads of immutable skill versions; answers `unavailable` until its switch is on.
         .add_service(SkillVersionServiceServer::with_interceptor(
             crate::skill_versions::SkillVersionGrpc { pool: skill_version_pool },
@@ -12723,6 +12788,86 @@ impl SessionRetentionService for SessionRetentionGrpc {
         }
         .await;
         record_metrics("count_waived_runs", started, result.is_ok());
+        result
+    }
+}
+
+/// The service scope a service principal needs to count a promote-on-use for a user. A run's own
+/// (user-bound) credential needs no scope: it may count only its own user's uses in its own org.
+pub const PROMOTE_USE_WRITE_SCOPE: &str = "session:promote:write";
+
+/// The longest threshold the counter accepts; a threshold above it is a caller error, not a count.
+const MAX_PROMOTE_THRESHOLD: u32 = 1_000_000;
+
+/// One grounded use, counted in a single statement. The first use inserts the row; later uses add one. `promoted_at`
+/// is stamped in the same statement that takes the count to the threshold, and only while it is still null, so
+/// the stamp happens at most once per key. `fire` is "this statement stamped it": `promoted_at` then equals
+/// `updated_at`, both being this transaction's `now()`, while an earlier stamp is an earlier time.
+const INCREMENT_PROMOTE_USE_SQL: &str =
+    "INSERT INTO promote_use_counts (org_id, user_id, url_hash, count, promoted_at, updated_at)
+     VALUES ($1, $2, $3, 1, CASE WHEN 1 >= $4 THEN now() END, now())
+     ON CONFLICT (org_id, user_id, url_hash) DO UPDATE SET
+         count = promote_use_counts.count + 1,
+         promoted_at = CASE
+             WHEN promote_use_counts.promoted_at IS NULL AND promote_use_counts.count + 1 >= $4
+                 THEN now()
+             ELSE promote_use_counts.promoted_at
+         END,
+         updated_at = now()
+     RETURNING count, (promoted_at IS NOT NULL AND promoted_at = updated_at)";
+
+/// `PromoteOnUseService`: the durable promote-on-use counter. It stays beside `SessionCore`, so that trait
+/// and its mocks are unchanged. It stores the hash of a URL, never the URL.
+pub struct PromoteOnUseGrpc {
+    pool: PgPool,
+}
+
+#[tonic::async_trait]
+impl PromoteOnUseService for PromoteOnUseGrpc {
+    async fn increment_promote_use(
+        &self,
+        request: Request<pb::IncrementPromoteUseRequest>,
+    ) -> Result<Response<pb::IncrementPromoteUseResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::IncrementPromoteUseResponse>, Status> = async {
+            let caller = identity(&request)?;
+            // A zero-retention credential is refused here (a write scope is not a `:read`), and a waived one
+            // below: neither may leave a row behind.
+            authorize_operation(&caller, PROMOTE_USE_WRITE_SCOPE)?;
+            if caller.zdr() || caller.zdr_waiver().is_some() {
+                return Err(Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::FailedPrecondition));
+            }
+            let req = request.into_inner();
+            caller.authorize_org(&req.org_id)?;
+            if req.user_id.trim().is_empty() || req.user_id.chars().count() > 256 {
+                return Err(Status::invalid_argument("user_id is required"));
+            }
+            // A user credential counts only its own uses; a service principal holding the scope names the user.
+            if !caller.is_service() {
+                caller.authorize_user(&req.user_id)?;
+            }
+            if req.url_hash.len() != 32 {
+                return Err(Status::invalid_argument("url_hash must be a 32-byte SHA-256"));
+            }
+            if req.threshold == 0 || req.threshold > MAX_PROMOTE_THRESHOLD {
+                return Err(Status::invalid_argument("threshold out of range"));
+            }
+            let (count, fire): (i32, bool) = sqlx::query_as(INCREMENT_PROMOTE_USE_SQL)
+                .bind(&req.org_id)
+                .bind(&req.user_id)
+                .bind(&req.url_hash)
+                .bind(i32::try_from(req.threshold).unwrap_or(i32::MAX))
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            Ok(Response::new(pb::IncrementPromoteUseResponse {
+                count: u32::try_from(count).unwrap_or(0),
+                fire,
+            }))
+        }
+        .await;
+        record_metrics("increment_promote_use", started, result.is_ok());
         result
     }
 }

@@ -45,6 +45,17 @@ const [mismatch, setMismatch] = createSignal(false)
 /** True when the gateway's minimum contract is above this bundle's and the policy allows a notice. */
 export const clientContractMismatch = mismatch
 
+const [revision, setRevision] = createSignal<string | null>(null)
+
+/**
+ * The revision the gateway last reported in its client config, or null before the first check, when it reports none,
+ * and in a dev build. A problem report's "app build" section sends this value and nothing else about the build.
+ */
+export const clientRevision = revision
+
+/** A revision a report may carry: a short token such as a commit id or a build label. Anything else is not reported. */
+const REVISION_PATTERN = /^[A-Za-z0-9._+-]{1,64}$/
+
 const [environment, setEnvironment] = createSignal<ClientEnvironment | null>(null)
 
 /** The environment the gateway last reported, or null when it reports none (switch off, or not asked yet). */
@@ -115,6 +126,7 @@ export function checkClientContract(options: { force?: boolean } = {}): Promise<
       const config = clientConfigFrom(await res.json())
       if (config === null) return
       setEnvironment(config.environment ?? null)
+      setRevision(REVISION_PATTERN.test(config.revision) ? config.revision : null)
       const action = contractAction(config, {
         registered: hasUnsavedWorkProbes(),
         dirty: hasUnsavedWork(),

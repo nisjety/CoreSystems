@@ -438,6 +438,12 @@ pub const FEATURES: &[Feature] = &[
         key: "teach_mode",
         label: "saving a run's steps as a skill",
     },
+    // W5-098-b (F-t3-098): translating a reasoning text sends the person's own conversation text to a model. A ZDR or
+    // waived caller is refused before any model call: a ZDR turn is never translated.
+    Feature {
+        key: "reasoning_translation",
+        label: "translating a reasoning text",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

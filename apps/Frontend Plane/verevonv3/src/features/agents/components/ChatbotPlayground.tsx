@@ -1,3 +1,4 @@
+import { createSignal, Show } from 'solid-js'
 import {
   Box,
   ChevronDown,
@@ -24,6 +25,7 @@ import type { ChatbotAddOnId } from '@/features/agents/lib/agent-roles'
 import type { SupportIntegrationStatus } from '@/features/agents/lib/use-chatbot-support-status'
 import { ToggleSwitch } from '@/features/agents/components/ChatbotStudioCards'
 import { DesignPreviewBadge } from '@/features/agents/components/DesignPreviewBadge'
+import { ModelCouncilPanel, modelCouncilEnabled } from '@/features/agents/components/ModelCouncilPanel'
 import {
   PlaygroundAccordion,
   SettingInput,
@@ -74,6 +76,7 @@ function PlaygroundSettingsPanel(props: {
 }) {
   const i18n = useI18n()
   const actionEnabled = () => props.visibleAddOns.has('subscription-action')
+  const [councilOpen, setCouncilOpen] = createSignal(false)
 
   return (
     <section class="verevon-sidebar-type verevon-panel flex h-[660px] min-h-0 flex-col overflow-hidden text-[#1D1D1F] xl:h-full dark:text-[#F7F8F8]">
@@ -99,10 +102,20 @@ function PlaygroundSettingsPanel(props: {
             </div>
             <div class="mt-3 flex h-11 items-center justify-between rounded-[9px] border border-[#E8E8EA] bg-white px-3 dark:border-[#2A2C31] dark:bg-[#15161A]">
               <span class="text-[13px] font-medium text-[#67686D] dark:text-[#D7DCE4]">{i18n.tr('Sammenlign AI-modeller', 'Compare AI models')}</span>
-              {/* Phase 4 honesty sweep: model comparison has no backend yet. */}
-              <Button size="xs" shape="rounded" disabled>
-                {i18n.tr('Sammenlign', 'Compare')}
-              </Button>
+              {/* Phase 4 honesty sweep: model comparison has no backend yet, so the button stays disabled unless
+                  VITE_MODEL_COUNCIL is the literal "true", which opens the council panel (F-t3-092). */}
+              <Show
+                when={modelCouncilEnabled()}
+                fallback={(
+                  <Button size="xs" shape="rounded" disabled>
+                    {i18n.tr('Sammenlign', 'Compare')}
+                  </Button>
+                )}
+              >
+                <Button size="xs" shape="rounded" aria-haspopup="dialog" onClick={() => setCouncilOpen(true)}>
+                  {i18n.tr('Sammenlign', 'Compare')}
+                </Button>
+              </Show>
             </div>
           </PlaygroundAccordion>
 
@@ -231,6 +244,9 @@ Voice & Tone:
             />
           </PlaygroundAccordion>
         </div>
+        <Show when={councilOpen()}>
+          <ModelCouncilPanel onClose={() => setCouncilOpen(false)} />
+        </Show>
       </div>
     </section>
   )

@@ -32,8 +32,12 @@
 //!
 //! Revoking sets `revoked_at` and deletes the body and its digest in the same statement; a revoked
 //! snapshot reads as not found to everyone. A snapshot is erased with its thread (`ON DELETE
-//! CASCADE` and `delete_thread_rows`) and with the org purge. The switch is [`ENABLED_ENV`],
-//! default off; while it is off every RPC answers `unavailable` `thread_shares_disabled`.
+//! CASCADE` and `delete_thread_rows`) and with the org purge. With [`GRANTS_ENABLED_ENV`] on, a
+//! thread delete also removes the Control grants of the snapshots it erased, after its commit, when
+//! the request carries the owner's delegated credential (see [`revoke_erased_snapshot_grants`]). The
+//! org purge and the retention sweeper hold no such credential, so they log each snapshot id with a
+//! code instead, and the Space erase discards the ids. The switch is [`ENABLED_ENV`], default off;
+//! while it is off every RPC answers `unavailable` `thread_shares_disabled`.
 
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1::{self as pb, thread_share_service_server::ThreadShareService};
@@ -76,6 +80,15 @@ pub(crate) const GRANTS_UNCONFIGURED_CODE: &str = "snapshot_grants_unconfigured"
 pub(crate) const GRANTS_UNAVAILABLE_CODE: &str = "snapshot_grants_unavailable";
 pub(crate) const GRANTS_CLEANUP_FAILED_CODE: &str = "snapshot_grants_cleanup_failed";
 pub(crate) const GRANTEE_NOT_IN_ORGANIZATION_CODE: &str = "grantee_not_in_organization";
+
+/// The log codes an erase writes against a snapshot whose Control grants it could not remove. They
+/// are logged, never answered to a caller.
+pub(crate) const GRANTS_REFUSED_CODE: &str = "snapshot_grants_refused";
+pub(crate) const GRANTS_MALFORMED_CODE: &str = "snapshot_grants_malformed";
+pub(crate) const GRANTS_CREDENTIAL_REJECTED_CODE: &str = "snapshot_grants_credential_rejected";
+/// No owner credential is at hand: the org purge, the retention sweeper, or a thread delete whose
+/// request carries no delegated Data Plane credential.
+pub(crate) const GRANTS_NO_CREDENTIAL_CODE: &str = "snapshot_grants_no_delegated_credential";
 
 /// The ZDR feature key a snapshot refusal names (`zdr-refusals.json`, EP-12 S3).
 pub(crate) const ZDR_FEATURE: &str = "conversation_share";
@@ -896,6 +909,109 @@ pub(crate) async fn revoke_snapshot_and_grants(
         ));
     }
     Ok(revoked)
+}
+
+/// The Control client an erase uses, read from the environment once, on first use.
+fn erase_control_client() -> Option<&'static ControlGrantsClient> {
+    static CLIENT: std::sync::OnceLock<Option<ControlGrantsClient>> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(ControlGrantsClient::from_env).as_ref()
+}
+
+/// The owner's Control session for an erase that deletes snapshot rows, from the delegated credential
+/// on `request`. It is taken before the request is consumed and held as a result, so a missing client
+/// or credential never stops the erase; the reason comes back as a log code, not a status.
+pub(crate) fn erase_grant_session<T>(
+    auth: Option<&JwtVerifier>,
+    request: &Request<T>,
+    caller: &VerifiedIdentity,
+) -> Result<GrantSession, &'static str> {
+    let client = erase_control_client().ok_or(GRANTS_UNCONFIGURED_CODE)?;
+    let auth = auth.ok_or(GRANTS_UNCONFIGURED_CODE)?;
+    let bearer = auth
+        .delegated_data_plane_bearer(request, caller)
+        .map_err(|_| GRANTS_CREDENTIAL_REJECTED_CODE)?
+        .ok_or(GRANTS_NO_CREDENTIAL_CODE)?;
+    Ok(GrantSession {
+        client: client.clone(),
+        bearer,
+    })
+}
+
+/// The log code for a failed Control grant call. Control's message is not logged: a category is
+/// enough to tell the causes apart, and a message can carry detail.
+fn grant_failure_code(error: &ControlGrantsError) -> &'static str {
+    match error {
+        ControlGrantsError::NotConfigured => GRANTS_UNCONFIGURED_CODE,
+        ControlGrantsError::Transport(_) => GRANTS_UNAVAILABLE_CODE,
+        ControlGrantsError::Refused { .. } => GRANTS_REFUSED_CODE,
+        ControlGrantsError::Malformed => GRANTS_MALFORMED_CODE,
+    }
+}
+
+/// Delete every Control grant on one snapshot whose row an erase has removed: list them, then delete
+/// each, with the owner's own credential. The first failure comes back as its log code.
+async fn remove_snapshot_grants(
+    session: &GrantSession,
+    caller: &VerifiedIdentity,
+    owner: &str,
+    snapshot_id: &str,
+) -> Result<(), &'static str> {
+    let who = session.delegation(caller, owner);
+    let grants = session
+        .client
+        .list(&who, snapshot_id)
+        .await
+        .map_err(|error| grant_failure_code(&error))?;
+    for grant in grants {
+        session
+            .client
+            .revoke(&who, snapshot_id, &grant.grantee_user_id)
+            .await
+            .map_err(|error| grant_failure_code(&error))?;
+    }
+    Ok(())
+}
+
+/// Remove the Control grants of the snapshots an owner erase has just deleted, once the erase has
+/// committed. `session` is `None` while [`GRANTS_ENABLED_ENV`] is off, and then nothing runs. A
+/// snapshot whose grants cannot be removed is logged by id and code, and the erase carries on: the
+/// erase has already happened, and the read path refuses a snapshot whose row is gone. When Control
+/// cannot be reached, the snapshots after the failing one are logged as not removed without being
+/// tried, so an outage cannot hold the erase for one timeout per snapshot.
+pub(crate) async fn revoke_erased_snapshot_grants(
+    session: Option<Result<GrantSession, &'static str>>,
+    caller: &VerifiedIdentity,
+    owner: &str,
+    snapshot_ids: &[String],
+) {
+    let Some(session) = session else {
+        return;
+    };
+    for (index, snapshot_id) in snapshot_ids.iter().enumerate() {
+        let outcome = match &session {
+            Ok(session) => remove_snapshot_grants(session, caller, owner, snapshot_id).await,
+            Err(code) => Err(*code),
+        };
+        if let Err(code) = outcome {
+            log_snapshot_grants_not_removed(std::slice::from_ref(snapshot_id), code);
+            if code == GRANTS_UNAVAILABLE_CODE {
+                log_snapshot_grants_not_removed(&snapshot_ids[index + 1..], code);
+                return;
+            }
+        }
+    }
+}
+
+/// Log, for each snapshot id, that its Control grants were not removed. The id and the code are all
+/// that is logged, never content.
+pub(crate) fn log_snapshot_grants_not_removed(snapshot_ids: &[String], code: &str) {
+    for snapshot_id in snapshot_ids {
+        tracing::warn!(
+            snapshot_id = %snapshot_id,
+            code,
+            "a snapshot's Control grants were not removed; the erase carried on"
+        );
+    }
 }
 
 /// One snapshot row without its body.

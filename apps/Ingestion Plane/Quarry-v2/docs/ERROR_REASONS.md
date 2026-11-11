@@ -380,3 +380,14 @@ Browser errors: 400 `BAD_REQUEST` with `details.reason` `page_emulation_failed`,
 | 501 | `UNSUPPORTED` | `profile_clear_data_disabled` (`env`) | `QUARRY_EDGE__PROFILE_CLEAR_DATA` is off | ask the operator |
 
 A 200 with `dry_run: true` (the default) changes nothing. A ZDR organization is not refused: the route only erases what is stored.
+
+## Teach mode: `GET /v1/agent/runs/{run_id}/procedure-draft` (F-t3-081, dark)
+
+The redacted procedure draft of a run's human steps (`docs/openapi.yaml`, `getAgentProcedureDraft`). It is off unless the edge runs with `QUARRY_TEACH_MODE_ENABLED` set to the literal `true`. The switch is read before the run is looked up, so while it is off every run id gets the same answer. A ZDR run keeps no receipts, so it has no draft.
+
+| status and code | `details.reason` | meaning | what a caller does |
+|---|---|---|---|
+| 404 `NOT_FOUND` | `teach_mode_disabled` | `QUARRY_TEACH_MODE_ENABLED` is not the literal `true` on this edge (the default) | none: the operator turns the switch on |
+| 409 `CONFLICT` | `zdr_not_supported` | the run is under Zero Data Retention, or the caller's token carries the ZDR floor; with the floor, every run id gets this answer, so it reveals nothing about which runs exist | none: a ZDR run gives no draft |
+
+A run the caller does not own, or one that does not exist, is a plain 404 with no `details.reason` (the message is `agent run not found`). The route only reads.

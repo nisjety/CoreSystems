@@ -9,17 +9,18 @@ import (
 )
 
 // The trigger dry run (EP-7, F-t3-047, slice W4-F T6) asks the wake gate one question about one stored webhook event: would
-// a fire of this trigger wake, and why. It takes the gate's own decision from Evaluate, reads the event through the source the
-// gate reads, and holds the payload in memory for that one evaluation. Its result carries no payload, no field value and no
-// part of the event: a verdict, one fixed reason token and the names of the rules the event satisfied. It records no fire,
-// starts nothing and asks Control nothing.
+// a fire of this trigger wake, and why. The event must belong to the trigger's connection (the event-to-connection binding of
+// W4-T6), so the dry run checks that first. Then it takes the gate's own decision from Evaluate, reads the event through the
+// source the gate reads, and holds the payload in memory for that one evaluation. Its result carries no payload, no field
+// value and no part of the event: a verdict, one fixed reason token and the names of the rules the event satisfied. It records
+// no fire, starts nothing and asks Control nothing.
 
 // DryRunNoWakeFilter is the reason a dry run gives for a trigger with no wake filter. The gate does not run for such a
-// trigger, so the dry run reads no payload and the trigger wakes.
+// trigger, so the dry run evaluates no payload and the trigger wakes. The event is still read for its connection check.
 const DryRunNoWakeFilter = "no_wake_filter"
 
 // DryRunFilterOutsideSchema is the reason a dry run gives for a stored filter the closed schema does not allow. The gate
-// closes for such a filter, and the dry run reads no payload, because the gate parses the filter before it reads.
+// closes for such a filter, so the dry run evaluates no rule. The event is still read for its connection check.
 const DryRunFilterOutsideSchema = "filter_outside_schema"
 
 // dryRuleEventTypes names the event_types rule in the matched list of a dry run.
@@ -41,24 +42,33 @@ type DryRunResult struct {
 	Matched   []string
 }
 
-// DryRunWakeGate evaluates a trigger's stored wake filter over one webhook event of orgID and reports the result. A trigger
-// with no filter, and a filter the closed schema does not allow, read no payload. Any other filter reads the event through
-// source, as the gate does, and an error from that read means the event could not be read now. The caller reports that
-// error and nothing else; no part of the event is ever returned or logged here.
-func DryRunWakeGate(ctx context.Context, source WebhookEventSource, orgID, webhookEventID string, wakeFilter json.RawMessage) (DryRunResult, error) {
-	if len(wakeFilter) == 0 {
-		return DryRunResult{WouldWake: true, Reason: DryRunNoWakeFilter, Matched: []string{}}, nil
-	}
-	filter, err := ParseWakeFilter(wakeFilter)
-	if err != nil {
-		return DryRunResult{WouldWake: false, Reason: DryRunFilterOutsideSchema, Matched: []string{}}, nil
-	}
+// ErrDryRunEventNotOfTrigger is what DryRunWakeGate returns when the stored event does not belong to the trigger's connection:
+// it has no connection id, or one that differs from the trigger's. The caller answers it with the same not-found shape a
+// missing trigger gets, so the answer says nothing about the event: not that it exists, and not which connection it belongs to.
+var ErrDryRunEventNotOfTrigger = errors.New("webhook event is not from the trigger's connection")
+
+// DryRunWakeGate evaluates a trigger's stored wake filter over one webhook event of orgID and reports the result. The event
+// must belong to triggerConnectionID, or the answer is ErrDryRunEventNotOfTrigger and no verdict. That check needs the event,
+// so every trigger reads it through source, as the gate does for a filtered fire. A trigger with no filter, and a filter the
+// closed schema does not allow, then evaluate no payload. An error from the read means the event could not be read now. The
+// caller reports that error and nothing else; no part of the event is ever returned or logged here.
+func DryRunWakeGate(ctx context.Context, source WebhookEventSource, orgID, triggerConnectionID, webhookEventID string, wakeFilter json.RawMessage) (DryRunResult, error) {
 	if source == nil {
 		return DryRunResult{}, errors.New("wake gate has no webhook event source")
 	}
 	event, err := source.FetchWebhookEvent(ctx, orgID, webhookEventID)
 	if err != nil {
 		return DryRunResult{}, err
+	}
+	if event.ConnectionID == "" || event.ConnectionID != triggerConnectionID {
+		return DryRunResult{}, ErrDryRunEventNotOfTrigger
+	}
+	if len(wakeFilter) == 0 {
+		return DryRunResult{WouldWake: true, Reason: DryRunNoWakeFilter, Matched: []string{}}, nil
+	}
+	filter, err := ParseWakeFilter(wakeFilter)
+	if err != nil {
+		return DryRunResult{WouldWake: false, Reason: DryRunFilterOutsideSchema, Matched: []string{}}, nil
 	}
 	payload := event.view()
 	wouldWake, reason := Evaluate(filter, payload)

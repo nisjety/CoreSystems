@@ -18,10 +18,12 @@ import (
 )
 
 // The trigger dry run (EP-7, F-t3-047, slice W4-F T6) answers one question about one stored webhook event: would a fire of
-// this trigger wake, and why. The caller must be the trigger's member, in the trigger's org. The answer is the wake gate's own
-// decision (eventtrigger.DryRunWakeGate) and carries no payload, no field value and no record of the event. Nothing is
-// written, no fire is recorded and Control is not asked. The route is mounted only while EVENT_TRIGGER_WAKE_GATE_ENABLED is
-// the literal true (cmd/main.go); otherwise the path answers 404.
+// this trigger wake, and why. The caller must be the trigger's member, in the trigger's org. The event must have come from the
+// trigger's own connection (the event-to-connection binding of W4-T6). An event from another connection, or one with no
+// connection recorded, answers as a missing event trigger does, so the answer confirms nothing about that event. The answer
+// is the wake gate's own decision (eventtrigger.DryRunWakeGate) and carries no payload, no field value and no record of the
+// event. Nothing is written, no fire is recorded and Control is not asked. The route is mounted only while
+// EVENT_TRIGGER_WAKE_GATE_ENABLED is the literal true (cmd/main.go); otherwise the path answers 404.
 
 // eventTriggerRoutePrefix is the path the dry run is mounted under. The full path is this, the trigger id, then the tail.
 const eventTriggerRoutePrefix = "/api/v1/event-triggers/"
@@ -90,7 +92,8 @@ type eventTriggerDryRunData struct {
 }
 
 // dryRun makes one dry run for the verified member of the trigger. The refusals come in this order, and each one is decided
-// before any payload is read: the caller's identity and posture, the body, the member, then the per-trigger limit.
+// before any payload is read: the caller's identity and posture, the body, the member, then the per-trigger limit. The event is
+// read after them, and it gets a verdict only when it belongs to the trigger's connection.
 func (h *EventTriggerDryRunHandler) dryRun(w http.ResponseWriter, r *http.Request, triggerID string) {
 	principal, ok := authctx.PrincipalFromContext(r.Context())
 	if !ok || principal.OrganizationID == "" || principal.ActorID == "" {
@@ -127,12 +130,12 @@ func (h *EventTriggerDryRunHandler) dryRun(w http.ResponseWriter, r *http.Reques
 		writeTypedError(w, http.StatusBadRequest, "invalid_request", "webhook_event_id is required and is at most 128 characters")
 		return
 	}
-	var memberID string
+	var memberID, connectionID string
 	var wakeFilter json.RawMessage
 	err := h.db.QueryRow(r.Context(), `
-		SELECT member_user_id, wake_filter
+		SELECT member_user_id, connection_id, wake_filter
 		FROM event_triggers
-		WHERE id = $1 AND org_id = $2`, triggerID, principal.OrganizationID).Scan(&memberID, &wakeFilter)
+		WHERE id = $1 AND org_id = $2`, triggerID, principal.OrganizationID).Scan(&memberID, &connectionID, &wakeFilter)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeTypedError(w, http.StatusNotFound, "event_trigger_not_found", "the event trigger was not found")
 		return
@@ -152,7 +155,13 @@ func (h *EventTriggerDryRunHandler) dryRun(w http.ResponseWriter, r *http.Reques
 			"this trigger has been dry run too often in the last minute")
 		return
 	}
-	result, err := eventtrigger.DryRunWakeGate(r.Context(), h.source, principal.OrganizationID, webhookEventID, wakeFilter)
+	result, err := eventtrigger.DryRunWakeGate(r.Context(), h.source, principal.OrganizationID, connectionID, webhookEventID, wakeFilter)
+	// An event of another connection, or one with no connection recorded, answers as a missing trigger does, so the answer
+	// neither confirms the event nor names its connection.
+	if errors.Is(err, eventtrigger.ErrDryRunEventNotOfTrigger) {
+		writeTypedError(w, http.StatusNotFound, "event_trigger_not_found", "the event trigger was not found")
+		return
+	}
 	if err != nil {
 		slog.Warn("event trigger dry run could not read the webhook event", "trigger_id", triggerID, "error", err)
 		writeTypedError(w, http.StatusServiceUnavailable, "wake_payload_unavailable", "the webhook event could not be read now")

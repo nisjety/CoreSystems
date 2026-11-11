@@ -299,10 +299,10 @@ func (r *PostgresRepository) InsertWebhookEvent(ctx context.Context, event Webho
 		return fmt.Errorf("marshal webhook payload: %w", err)
 	}
 	commandTag, err := r.pool.Exec(ctx, `
-		INSERT INTO integration_webhook_events (id, organization_id, provider_key, event_type, signature_hash, payload, received_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		INSERT INTO integration_webhook_events (id, organization_id, provider_key, event_type, signature_hash, payload, received_at, connection_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,NULLIF($8::text, ''))
 		ON CONFLICT (id) DO NOTHING
-	`, event.ID, event.OrganizationID, event.ProviderKey, event.EventType, event.SignatureHash, payload, event.ReceivedAt)
+	`, event.ID, event.OrganizationID, event.ProviderKey, event.EventType, event.SignatureHash, payload, event.ReceivedAt, event.ConnectionID)
 	if err != nil {
 		return fmt.Errorf("insert webhook event: %w", err)
 	}
@@ -316,12 +316,12 @@ func (r *PostgresRepository) GetWebhookEvent(ctx context.Context, organizationID
 	var event WebhookEvent
 	var payload []byte
 	err := r.pool.QueryRow(ctx, `
-		SELECT id, organization_id, provider_key, event_type, signature_hash, payload, received_at
+		SELECT id, organization_id, provider_key, event_type, signature_hash, payload, received_at, COALESCE(connection_id, '')
 		FROM integration_webhook_events
 		WHERE id = $1 AND ($2 = '' OR organization_id = $2)
 	`, id, organizationID).Scan(
 		&event.ID, &event.OrganizationID, &event.ProviderKey, &event.EventType,
-		&event.SignatureHash, &payload, &event.ReceivedAt,
+		&event.SignatureHash, &payload, &event.ReceivedAt, &event.ConnectionID,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

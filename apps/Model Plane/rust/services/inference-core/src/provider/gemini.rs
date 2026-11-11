@@ -242,6 +242,7 @@ impl ProviderRouter for GeminiProvider {
                     max_output_tokens: record.max_output_tokens,
                     lifecycle: record.lifecycle,
                     successor: record.successor,
+                    priority_tier: record.priority_tier,
                 }
             })
             .collect()

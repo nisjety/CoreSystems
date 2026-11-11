@@ -1287,6 +1287,48 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Envelope_Error'
+  /v1/agent/runs/{run_id}/procedure-draft:
+    get:
+      operationId: getAgentProcedureDraft
+      summary: Redacted draft of a run's human steps (F-t3-081). Off unless QUARRY_TEACH_MODE_ENABLED is the literal true.
+      description: >-
+        Teach mode, dark: while QUARRY_TEACH_MODE_ENABLED is not the literal true (the default is
+        off) the route answers 404 with details.reason teach_mode_disabled, whatever the run id.
+        The draft is what a person did on a run they drove or took over, in step order. Each
+        completed human step that names one of the six verbs is kept. A typed or selected value
+        becomes a placeholder, {{param_<n>}}, and params names each placeholder with its kind
+        (text, secret or choice). Typed text, screenshots and full URLs never leave: a navigation
+        keeps its host only. An element is named only by a short hint (role, accessible name or
+        selector, at most 200 characters, never a URL). A draft keeps at most 100 steps and sets
+        truncated when the run holds more. The route only reads. Nothing is replayed here: a
+        procedure is compiled from receipts by POST /v1/agent/runs/{run_id}/procedure. A ZDR run
+        keeps no receipts to draft from, so it answers 409 with details.reason zdr_not_supported,
+        and so does every run id for a caller whose token carries the ZDR floor. A run the caller
+        does not own, or one that does not exist, is the plain 404, authorized as the receipts
+        route is.
+      tags:
+      - agent
+      parameters:
+      - $ref: '#/components/parameters/AgentRunId'
+      responses:
+        '200':
+          description: The run's redacted procedure draft
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_ProcedureDraft'
+        '404':
+          description: Teach mode is off (details.reason teach_mode_disabled), or the run is not found or not owned by the caller (no reason)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
+        '409':
+          description: The run is under Zero Data Retention, or the caller's token carries the ZDR floor (details.reason zdr_not_supported)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Envelope_Error'
   /v1/agent/procedures/replay-check:
     post:
       operationId: checkAgentProcedureReplay
@@ -7753,6 +7795,106 @@ components:
         data:
           type: object
           additionalProperties: true
+    Envelope_ProcedureDraft:
+      type: object
+      required:
+      - request_id
+      - success
+      - data
+      properties:
+        request_id:
+          type: string
+        success:
+          type: boolean
+        data:
+          $ref: '#/components/schemas/ProcedureDraft'
+    ProcedureDraft:
+      type: object
+      description: The redacted draft of one run's completed human steps. It holds no typed text, screenshot or full URL. An element is named only by a short hint, at most 200 characters and never a URL.
+      required:
+      - run_id
+      - steps
+      - params
+      - truncated
+      properties:
+        run_id:
+          type: string
+        steps:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ProcedureDraftStep'
+        params:
+          type: array
+          description: The values the caller supplies at replay, in the order their placeholders first appear in steps.
+          items:
+            $ref: '#/components/schemas/ProcedureDraftParam'
+        truncated:
+          type: boolean
+          description: True when the run holds more human steps than the draft keeps (100).
+    ProcedureDraftStep:
+      type: object
+      required:
+      - index
+      - action
+      - target
+      - url_host
+      - parameter
+      properties:
+        index:
+          type: integer
+          minimum: 1
+          description: The step's place in the draft, counted from 1.
+        action:
+          type: string
+          enum:
+          - navigate
+          - click
+          - type
+          - select
+          - scroll
+          - submit
+        target:
+          $ref: '#/components/schemas/ProcedureDraftTarget'
+        url_host:
+          type: [string, 'null']
+          description: The host a navigation went to, never a path, query or port. Null when the receipt keeps no page address.
+        parameter:
+          type: [string, 'null']
+          description: The placeholder that replaces a typed or selected value, param_<n>. Null for a step that carried no value.
+    ProcedureDraftTarget:
+      type: object
+      description: What the step acted on, as its receipt recorded it. Each field is null when the receipt does not record it.
+      required:
+      - role
+      - name
+      - selector_hint
+      properties:
+        role:
+          type: [string, 'null']
+          description: The element's ARIA role.
+        name:
+          type: [string, 'null']
+          description: The element's accessible name, label or visible text.
+        selector_hint:
+          type: [string, 'null']
+          description: A selector or test id the receipt recorded, as a hint for a replay.
+    ProcedureDraftParam:
+      type: object
+      required:
+      - name
+      - kind
+      properties:
+        name:
+          type: string
+          description: The placeholder's name, param_<n>, counted from 1 in step order.
+        kind:
+          type: string
+          enum:
+          - text
+          - secret
+          - choice
+          description: text is typed text, secret a password or one-time code (supplied at replay, never stored), choice an option picked from a list.
     Envelope_ClosedRun:
       type: object
       required:

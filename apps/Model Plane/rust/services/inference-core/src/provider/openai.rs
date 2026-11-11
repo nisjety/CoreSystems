@@ -944,6 +944,7 @@ impl ProviderRouter for OpenAiProvider {
             cache_creation_input_tokens,
             // Stamped by the fallback chain, not the raw adapter.
             provider_timing: None,
+            service_tier_used: String::new(),
         })
     }
 
@@ -1274,6 +1275,7 @@ impl ProviderRouter for OpenAiProvider {
                     max_output_tokens: record.max_output_tokens,
                     lifecycle: record.lifecycle,
                     successor: record.successor,
+                    priority_tier: record.priority_tier,
                 }
             })
             .chain(self.embedding_models.iter().map(|id| ModelInfo {

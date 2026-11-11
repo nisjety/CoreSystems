@@ -506,6 +506,8 @@ services:
       VITE_CHAT_SNAPSHOTS: ${VITE_CHAT_SNAPSHOTS:-false}
       # WS08-S4: images ride as parts. Flip together with the gateway's CHAT_VISION_AS_PARTS_ENABLED.
       VITE_CHAT_VISION_AS_PARTS_ENABLED: ${VITE_CHAT_VISION_AS_PARTS_ENABLED:-false}
+      # W5-094-b: the Knowledge wiki proposal review (accept or reject). Only the literal `true`; off, no tab is offered.
+      VITE_WIKI_PROPOSALS_REVIEW: ${VITE_WIKI_PROPOSALS_REVIEW:-false}
     healthcheck:
       # An open TCP socket can still belong to a stalled Vite event loop.
       # Assert that same-origin HTTP and the BFF proxy actually respond.

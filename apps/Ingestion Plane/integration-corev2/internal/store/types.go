@@ -140,9 +140,13 @@ type SyncEvent struct {
 	CreatedAt time.Time      `json:"createdAt"`
 }
 
+// WebhookEvent is one stored provider webhook. ConnectionID is the provider connection the delivery was bound to when ingest
+// knew it, the Meta family and Slack callbacks it resolves. It is empty for every other provider and for events stored before
+// migration 0016, and an event with no connection id is bound to no connection.
 type WebhookEvent struct {
 	ID             string         `json:"id"`
 	OrganizationID string         `json:"organizationId,omitempty"`
+	ConnectionID   string         `json:"connectionId,omitempty"`
 	ProviderKey    string         `json:"providerKey"`
 	EventType      string         `json:"eventType"`
 	SignatureHash  string         `json:"signatureHash,omitempty"`

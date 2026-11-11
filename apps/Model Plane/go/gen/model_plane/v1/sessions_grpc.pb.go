@@ -3055,3 +3055,125 @@ var ThreadReferenceService_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "model_plane/v1/sessions.proto",
 }
+
+const (
+	PromoteOnUseService_IncrementPromoteUse_FullMethodName = "/model_plane.v1.PromoteOnUseService/IncrementPromoteUse"
+)
+
+// PromoteOnUseServiceClient is the client API for PromoteOnUseService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// PromoteOnUseService: the durable per-org counter behind execution-core's promote-on-use trigger. A
+// separate service, as ThreadReferenceService is, so that SessionCore and every mock of it stay
+// source-compatible. The counter stores a hash of the normalised URL, never the URL, and execution-core
+// calls it only when PROMOTE_ON_USE_DURABLE is on.
+type PromoteOnUseServiceClient interface {
+	// Count one grounded use of a page by (org, user, url hash) and say whether this use is the one that
+	// reaches the threshold. `fire` is true exactly once per key: the use that takes the count to the
+	// threshold while the key has no promotion recorded; the promotion is recorded in the same statement.
+	// Refused to a zero-retention or waived credential (failed_precondition), to a service credential
+	// without `session:promote:write`, and for another org or, for a user credential, another user.
+	IncrementPromoteUse(ctx context.Context, in *IncrementPromoteUseRequest, opts ...grpc.CallOption) (*IncrementPromoteUseResponse, error)
+}
+
+type promoteOnUseServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewPromoteOnUseServiceClient(cc grpc.ClientConnInterface) PromoteOnUseServiceClient {
+	return &promoteOnUseServiceClient{cc}
+}
+
+func (c *promoteOnUseServiceClient) IncrementPromoteUse(ctx context.Context, in *IncrementPromoteUseRequest, opts ...grpc.CallOption) (*IncrementPromoteUseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IncrementPromoteUseResponse)
+	err := c.cc.Invoke(ctx, PromoteOnUseService_IncrementPromoteUse_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// PromoteOnUseServiceServer is the server API for PromoteOnUseService service.
+// All implementations must embed UnimplementedPromoteOnUseServiceServer
+// for forward compatibility.
+//
+// PromoteOnUseService: the durable per-org counter behind execution-core's promote-on-use trigger. A
+// separate service, as ThreadReferenceService is, so that SessionCore and every mock of it stay
+// source-compatible. The counter stores a hash of the normalised URL, never the URL, and execution-core
+// calls it only when PROMOTE_ON_USE_DURABLE is on.
+type PromoteOnUseServiceServer interface {
+	// Count one grounded use of a page by (org, user, url hash) and say whether this use is the one that
+	// reaches the threshold. `fire` is true exactly once per key: the use that takes the count to the
+	// threshold while the key has no promotion recorded; the promotion is recorded in the same statement.
+	// Refused to a zero-retention or waived credential (failed_precondition), to a service credential
+	// without `session:promote:write`, and for another org or, for a user credential, another user.
+	IncrementPromoteUse(context.Context, *IncrementPromoteUseRequest) (*IncrementPromoteUseResponse, error)
+	mustEmbedUnimplementedPromoteOnUseServiceServer()
+}
+
+// UnimplementedPromoteOnUseServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedPromoteOnUseServiceServer struct{}
+
+func (UnimplementedPromoteOnUseServiceServer) IncrementPromoteUse(context.Context, *IncrementPromoteUseRequest) (*IncrementPromoteUseResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method IncrementPromoteUse not implemented")
+}
+func (UnimplementedPromoteOnUseServiceServer) mustEmbedUnimplementedPromoteOnUseServiceServer() {}
+func (UnimplementedPromoteOnUseServiceServer) testEmbeddedByValue()                             {}
+
+// UnsafePromoteOnUseServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to PromoteOnUseServiceServer will
+// result in compilation errors.
+type UnsafePromoteOnUseServiceServer interface {
+	mustEmbedUnimplementedPromoteOnUseServiceServer()
+}
+
+func RegisterPromoteOnUseServiceServer(s grpc.ServiceRegistrar, srv PromoteOnUseServiceServer) {
+	// If the following call panics, it indicates UnimplementedPromoteOnUseServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&PromoteOnUseService_ServiceDesc, srv)
+}
+
+func _PromoteOnUseService_IncrementPromoteUse_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IncrementPromoteUseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PromoteOnUseServiceServer).IncrementPromoteUse(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PromoteOnUseService_IncrementPromoteUse_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PromoteOnUseServiceServer).IncrementPromoteUse(ctx, req.(*IncrementPromoteUseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// PromoteOnUseService_ServiceDesc is the grpc.ServiceDesc for PromoteOnUseService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var PromoteOnUseService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.PromoteOnUseService",
+	HandlerType: (*PromoteOnUseServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "IncrementPromoteUse",
+			Handler:    _PromoteOnUseService_IncrementPromoteUse_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/sessions.proto",
+}

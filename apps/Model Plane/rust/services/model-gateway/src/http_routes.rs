@@ -377,6 +377,8 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         .merge(crate::review_run_routes::router())
         // A read-only question about one thread's transcript (F-t3-069); 404 `side_chat_disabled` while its switch is off.
         .merge(crate::side_chat_routes::router())
+        // A reader's translation of one shown text (F-t3-098); 404 `reasoning_translate_disabled` while its switch is off, refused under ZDR.
+        .merge(crate::reasoning_translate_routes::router())
         // The model council (F-t3-092): one question to two to four models, then a synthesis; 404 `model_council_disabled` while its switch is off.
         .merge(crate::council_routes::router())
         // Teach mode (F-t3-081): a disabled skill proposal drafted from one run's takeover steps; 404 `teach_mode_disabled` while its switch is off.
@@ -11705,6 +11707,12 @@ pub struct InvokeRequest {
     /// a client selects an effort, never a raw budget. See `crate::thinking`.
     #[serde(default)]
     pub effort: Option<String>,
+    /// The speed tier the composer's Fast chip asks for: `standard` or `priority`. Read only while
+    /// `MODEL_GATEWAY_SPEED_TIER` is on, and then honoured only as `priority` on a model whose catalogue
+    /// record declares the tier (`sse::speed_tier_for_model`). Any other value, and an absent one, is no
+    /// choice. It carries no content, so zero retention does not change it.
+    #[serde(default)]
+    pub speed: Option<String>,
     /// Opt-in rich SSE event families the client understands (chat-parity §2:
     /// "reasoning", "tools", "citations", "artifacts", "steps", "usage"). EMPTY
     /// → plain stream (connected/chunk/done/error only); protects profile:"chat".
@@ -13715,6 +13723,10 @@ struct ModelDescriptor {
     /// out when no sourced record names one, so an unknown model serves the JSON it served before.
     #[serde(skip_serializing_if = "String::is_empty")]
     successor: String,
+    /// Whether a chat turn may ask for the priority service tier on this model (`speed_tier`).
+    /// Left out while false, so a model without the tier serves the JSON it served before.
+    #[serde(skip_serializing_if = "is_false")]
+    priority_tier: bool,
     /// The catalogue's list price for a chat model, behind
     /// `MODEL_GATEWAY_CATALOGUE_PRICES`. Left out when there is none, so a deploy
     /// with the switch off serves the same JSON as before.
@@ -13857,6 +13869,7 @@ async fn list_models(
                 max_output_tokens: known_tokens(m.max_output_tokens),
                 lifecycle: m.lifecycle,
                 successor: m.successor,
+                priority_tier: m.priority_tier,
                 price,
                 data_use: m.data_use.map(|data_use| DataUseDescriptor {
                     trains_on_inputs: data_use.trains_on_inputs,
@@ -18959,6 +18972,7 @@ mod run_owner_publish_tests {
             max_output_tokens: None,
             lifecycle: String::new(),
             successor: String::new(),
+            priority_tier: false,
             price: None,
             data_use: None,
         }

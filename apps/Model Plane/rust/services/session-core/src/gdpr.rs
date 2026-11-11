@@ -166,6 +166,9 @@ pub struct PurgeSummary {
     /// Event trigger records (W4-F T1), the member's configuration of connector-event wakes. They name
     /// no thread or run; counted here so the erasure proof names the table.
     pub event_triggers: u64,
+    /// Durable promote-on-use counters (W5-093-b): ids, a URL hash and a count. They hold no page
+    /// address; counted here so the erasure proof names the table.
+    pub promote_use_counts: u64,
     pub events: u64,
     pub run_trace_events: u64,
     /// Request snapshots and their system/tool blobs (EP-14 S6).
@@ -226,6 +229,7 @@ impl PurgeSummary {
             + self.tasks
             + self.cron_schedules
             + self.event_triggers
+            + self.promote_use_counts
             + self.events
             + self.run_trace_events
             + self.run_request_snapshots
@@ -615,7 +619,16 @@ pub async fn purge_organization_data(
         .await?
         .rows_affected();
 
-    // Thread share snapshots (EP-12 S14) go before their threads, for the same reasons.
+    // Thread share snapshots (EP-12 S14) go before their threads, for the same reasons. With the grants
+    // switch on, their ids are read first, so the Control grants left behind can be named after the commit.
+    let snapshot_ids: Vec<String> = if crate::thread_shares::snapshot_grants_enabled() {
+        sqlx::query_scalar("SELECT id FROM thread_share_snapshots WHERE org_id = $1")
+            .bind(org_id)
+            .fetch_all(&mut *tx)
+            .await?
+    } else {
+        Vec::new()
+    };
     summary.thread_share_snapshots =
         sqlx::query("DELETE FROM thread_share_snapshots WHERE org_id = $1")
             .bind(org_id)
@@ -683,6 +696,13 @@ pub async fn purge_organization_data(
     // Event trigger records (W4-F T1): the org's rows, deleted before runs and threads so a later
     // reference from a run or thread cannot strand one. Nothing else in the purge reads them.
     summary.event_triggers = sqlx::query("DELETE FROM event_triggers WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    // Durable promote-on-use counters (W5-093-b): the org's rows. Nothing else in the purge reads them.
+    summary.promote_use_counts = sqlx::query("DELETE FROM promote_use_counts WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
@@ -850,6 +870,13 @@ pub async fn purge_organization_data(
 
     tx.commit().await?;
 
+    // The purge holds no owner credential, and Control grants a view only to a verified end user, so
+    // the grants of these snapshots stay in Control. Each is named by id and code, never content.
+    crate::thread_shares::log_snapshot_grants_not_removed(
+        &snapshot_ids,
+        crate::thread_shares::GRANTS_NO_CREDENTIAL_CODE,
+    );
+
     // After the commit, deliberately. The durable rows are the source of truth
     // for existence; a degraded semantic tier must not roll back an erasure
     // that Postgres has already honoured. What it must not do either is let the
@@ -882,11 +909,35 @@ pub async fn purge_organization_data(
 pub struct UserErasure {
     pub org_id: String,
     pub user_id: String,
+    /// Which `subject_type` the event carried.
+    pub kind: UserErasureKind,
 }
 
-/// Decode the fan-out payload as a per-user erasure. `Ok(None)` for every other subject type
-/// (`user_anonymize` included: it keeps the records and removes the identity, so neither the Space
-/// rows nor the standing profile are erased by it here).
+/// Which per-user `subject_type` an erasure event carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserErasureKind {
+    /// `subject_type: "user"`: the person's Space memory sources, standing profile and personal
+    /// memory are erased.
+    Erase,
+    /// `subject_type: "user_anonymize"`: the records are kept and the identity removed. Session-core
+    /// keeps the Space memory rows, but the standing profile and the person's own personal memory
+    /// are content about the person, so they are removed as for [`UserErasureKind::Erase`].
+    Anonymize,
+}
+
+impl UserErasureKind {
+    /// The stable label written to the content-free audit row.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Erase => "user",
+            Self::Anonymize => "user_anonymize",
+        }
+    }
+}
+
+/// Decode the fan-out payload as a per-user erasure. `Ok(None)` for every other subject type.
+/// `user_anonymize` is a user erasure here ([`UserErasureKind::Anonymize`]): the caller erases the
+/// standing profile and personal memory for it, and leaves the Space rows alone.
 ///
 /// # Errors
 ///
@@ -895,9 +946,11 @@ pub struct UserErasure {
 pub fn parse_user_erasure_event(payload: &[u8]) -> Result<Option<UserErasure>, ErasureEventError> {
     let wire: ErasureEventWire =
         serde_json::from_slice(payload).map_err(|e| ErasureEventError::Decode(e.to_string()))?;
-    if wire.subject_type.as_deref().unwrap_or_default() != "user" {
-        return Ok(None);
-    }
+    let kind = match wire.subject_type.as_deref().unwrap_or_default() {
+        "user" => UserErasureKind::Erase,
+        "user_anonymize" => UserErasureKind::Anonymize,
+        _ => return Ok(None),
+    };
     let org_id = wire.org_id.unwrap_or_default().trim().to_owned();
     if org_id.is_empty() {
         return Err(ErasureEventError::MissingOrgId);
@@ -909,7 +962,19 @@ pub fn parse_user_erasure_event(payload: &[u8]) -> Result<Option<UserErasure>, E
     if user_id.is_empty() || user_id.len() > MAX_ID_LEN {
         return Err(ErasureEventError::MissingSubjectId);
     }
-    Ok(Some(UserErasure { org_id, user_id }))
+    Ok(Some(UserErasure { org_id, user_id, kind }))
+}
+
+/// Asks the legal-hold gate about the organization, before a per-user erasure touches any store. A
+/// hold that covers the organization, or a check that cannot be answered, refuses with
+/// [`ErasureHoldError`], so a held organization erases nothing: not the Space rows, not the profile,
+/// not the personal memory. The consumer runs this first and naks with a delay on a refusal.
+///
+/// # Errors
+///
+/// Returns [`ErasureHoldError`] when a hold covers the organization or cannot be ruled out.
+pub async fn ensure_user_erasure_not_held(org_id: &str) -> Result<(), ErasureHoldError> {
+    erasure_hold_gate().ensure_not_held(org_id, &[]).await
 }
 
 /// What erasing one person does to one Space row, pure. `links` are the row's `source_links`;
@@ -1069,8 +1134,10 @@ impl UserErasureSummary {
 
 /// Erases one person's standing profile and their own personal memory, in one transaction, then the
 /// semantic copies of that memory (EP-8 S4). It is the per-user counterpart of the organization purge
-/// for a `subject_type: "user"` event, called after [`erase_user_space_memory_sources`]. It never
-/// touches another member's rows or the organization's.
+/// for a `subject_type: "user"` or `"user_anonymize"` event, called after
+/// [`ensure_user_erasure_not_held`] has cleared the organization (and, for `user`, after
+/// [`erase_user_space_memory_sources`]). It never touches another member's rows or the
+/// organization's. It writes one content-free `memory_control_events` row (`event = 'erased'`).
 ///
 /// Scope: the person's `scope = 'user'` rows that have no session and are owned by them. Org-owned
 /// rows and the thread-bound rows of their threads are not erased here.
@@ -1103,6 +1170,24 @@ pub async fn erase_user_personal_data(
     pool: &Pool,
     org_id: &str,
     user_id: &str,
+    letta: Option<&crate::letta_adapter::LettaMemoryAdapter>,
+) -> anyhow::Result<UserErasureSummary> {
+    erase_user_personal_data_for(pool, org_id, user_id, UserErasureKind::Erase, letta).await
+}
+
+/// [`erase_user_personal_data`] for either per-user event kind. `user_anonymize` removes the same two
+/// stores (the standing profile and the person's own personal memory) as `user`. Each call writes one
+/// content-free `memory_control_events` row in the erasing transaction: the kind, the number of
+/// profile rows and personal memories deleted, never any content or id list.
+///
+/// # Errors
+///
+/// As [`erase_user_personal_data`].
+pub async fn erase_user_personal_data_for(
+    pool: &Pool,
+    org_id: &str,
+    user_id: &str,
+    kind: UserErasureKind,
     letta: Option<&crate::letta_adapter::LettaMemoryAdapter>,
 ) -> anyhow::Result<UserErasureSummary> {
     // EP-9 C4: asked before the transaction opens, so a refusal touches nothing and the redelivery
@@ -1140,6 +1225,22 @@ pub async fn erase_user_personal_data(
     .execute(&mut *tx)
     .await?;
     let user_profiles = crate::user_profile::delete_in_tx(&mut tx, org_id, user_id).await?;
+    // The audit record of this erasure: counts only, never the erased text or an id list. Written in
+    // the erasing transaction, so a rolled-back erasure leaves no row claiming it happened.
+    sqlx::query(
+        "INSERT INTO memory_control_events (id, org_id, user_id, event, actor, detail) \
+         VALUES ($1, $2, $3, 'erased', $4, jsonb_build_object( \
+           'kind', $5::text, 'user_profiles', $6::bigint, 'personal_memory', $7::bigint))",
+    )
+    .bind(mp_ids::new_ulid())
+    .bind(org_id)
+    .bind(user_id)
+    .bind("gdpr-erasure")
+    .bind(kind.as_str())
+    .bind(i64::try_from(user_profiles).unwrap_or(i64::MAX))
+    .bind(i64::try_from(erased.len()).unwrap_or(i64::MAX))
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
 
     // After the commit, deliberately: the durable rows are the source of truth for existence, and a
@@ -1441,6 +1542,7 @@ mod tests {
             tasks: 1,
             cron_schedules: 1,
             event_triggers: 1,
+            promote_use_counts: 1,
             events: 1,
             run_trace_events: 1,
             run_request_snapshots: 1,
@@ -1473,7 +1575,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            39,
+            40,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );
@@ -1668,9 +1770,25 @@ mod tests {
         .unwrap();
         assert_eq!(
             parse_user_erasure_event(&user).unwrap(),
-            Some(UserErasure { org_id: "org_1".to_owned(), user_id: "user_1".to_owned() })
+            Some(UserErasure {
+                org_id: "org_1".to_owned(),
+                user_id: "user_1".to_owned(),
+                kind: UserErasureKind::Erase,
+            })
         );
-        for subject_type in ["organization", "user_anonymize", "other"] {
+        let anonymize = serde_json::to_vec(&serde_json::json!({
+            "subject_type": "user_anonymize", "subject_id": "user_1", "org_id": "org_1",
+        }))
+        .unwrap();
+        assert_eq!(
+            parse_user_erasure_event(&anonymize).unwrap(),
+            Some(UserErasure {
+                org_id: "org_1".to_owned(),
+                user_id: "user_1".to_owned(),
+                kind: UserErasureKind::Anonymize,
+            })
+        );
+        for subject_type in ["organization", "other"] {
             let payload = serde_json::to_vec(&serde_json::json!({
                 "subject_type": subject_type, "subject_id": "org_1", "org_id": "org_1",
             }))

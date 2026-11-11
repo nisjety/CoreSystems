@@ -88,6 +88,8 @@ interface ImportMetaEnv {
 	readonly VITE_CHAT_LIMIT_NOTICES?: string;
 	/** "true" lets two bare Escape presses within 600 ms stop the streaming chat answer (F-t3-077). Default off. */
 	readonly VITE_CHAT_DOUBLE_ESCAPE_STOP?: string;
+	/** "true" shows the Fast chip under the composer on a model that declares the priority tier, so the turn asks for speed priority (W5-095-b). Default off. */
+	readonly VITE_CHAT_SPEED_TIER?: string;
 	/** "true" mounts the catalogue overlay editor (hide, order, aliases) on the router-policy page (F-t3-065). Default off. */
 	readonly VITE_CATALOGUE_OVERLAY?: string;
 	/** "true" offers importing a conversation export as a new conversation, beside the export on the latest answer (EP-12 S15). Default off. */
@@ -120,6 +122,14 @@ interface ImportMetaEnv {
 	readonly VITE_CUSTOM_CONNECTORS?: string;
 	/** "true" offers Review on a text artifact in a chat: one read-only review of the revision on screen, shown as a card below it. Never offered in a temporary chat. Default off (F-t3-086, W5-086-b). */
 	readonly VITE_REVIEW_RUN?: string;
+	/** "true" offers Compare models on the Agents playground: two to four catalogue models answer one question with no tools, after the cost is shown (F-t3-092, W5-092-b). Default off. */
+	readonly VITE_MODEL_COUNCIL?: string;
+	/** "true" offers "Save these steps as a skill" after a browser give-back in a live run, for a turn that keeps content (F-t3-081, W5-081-d). Default off. */
+	readonly VITE_TEACH_MODE?: string;
+	/** "true" offers Translate on a turn's reasoning in the Details popover, for a turn that keeps content and reasoning in the other language from the reader's (F-t3-098, W5-098-c). Default off. */
+	readonly VITE_REASONING_TRANSLATE?: string;
+	/** "true" offers a Problem mode in the feedback widget: the person ticks which content-free diagnostics go with the note (recent error ids, the app build, the chat run; never a transcript). Default off (W5-096-a). */
+	readonly VITE_REPORT_PROBLEM?: string;
 }
 
 interface ImportMeta {

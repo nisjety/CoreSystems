@@ -240,6 +240,7 @@ export const MODEL_ACCESS: Readonly<Record<ActionId, ModelAccessEntry>> = {
   'learning.reject_skill': exempt('agent_cannot_self_govern', 'context_write'),
   'learning.undo': exempt('agent_cannot_self_govern', 'destructive'),
   'learning.learn_from_thread': exempt('agent_cannot_self_govern', 'context_write'),
+  'learning.teach_skill_from_run': exempt('agent_cannot_self_govern', 'context_write'),
   'skills.save_from_message': exempt('agent_cannot_self_govern', 'context_write'),
   'skills.versions.list': exempt('no_owner_executor', 'read'),
   'skills.draft.save': exempt('agent_cannot_self_govern', 'context_write'),

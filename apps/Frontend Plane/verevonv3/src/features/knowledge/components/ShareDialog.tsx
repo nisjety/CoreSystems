@@ -5,6 +5,8 @@ import { Button } from '@/shared/ui/Button'
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
 import { isGateOpen } from '@/shared/context/ownership-gate'
 import { translateApiError, useI18n } from '@/shared/i18n'
+import { ChatLibraryContractError, parseChatLibraryUserViewerShare } from '@/shared/actions/chat-library'
+import { getComposerCapabilities } from '@/shared/api/chat-client'
 import {
   listDocumentShares,
   revokeDocumentShare,
@@ -47,11 +49,23 @@ export function ShareDialog(props: {
     setBusy(true)
     setErrorMessage('')
     try {
-      await shareDocument(props.docId, target)
+      // W5-080-a: behind the gateway's artifact-promote switch (read the way the composer reads it, and off on any
+      // failure), the grant is checked by the library.share contract before it is sent. Off, the share is sent as before.
+      const contractOn = (await getComposerCapabilities()).artifactPromote
+      if (contractOn) {
+        const share = parseChatLibraryUserViewerShare(props.docId, target)
+        await shareDocument(share.documentId, share.principalId)
+      } else {
+        await shareDocument(props.docId, target)
+      }
       setSubject('')
       await refetch()
     } catch (error) {
-      setErrorMessage(translateApiError(error, i18n.tr, { no: 'Dokumentet kunne ikke deles.', en: 'The document could not be shared.' }))
+      setErrorMessage(
+        error instanceof ChatLibraryContractError
+          ? i18n.tr('Forespørselen ble ikke sendt, fordi den ikke er gyldig.', 'The request was not sent because it is not valid.')
+          : translateApiError(error, i18n.tr, { no: 'Dokumentet kunne ikke deles.', en: 'The document could not be shared.' }),
+      )
     } finally {
       setBusy(false)
     }

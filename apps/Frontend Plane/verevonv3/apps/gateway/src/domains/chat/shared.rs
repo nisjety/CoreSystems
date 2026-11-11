@@ -569,6 +569,7 @@ pub(crate) async fn proxy_model_json(
         None,
         None,
         None,
+        None,
         user,
     )
     .await
@@ -602,6 +603,7 @@ pub(crate) async fn proxy_model_json_with_data_plane(
         execution_bearer,
         cost_bearer,
         session_bearer,
+        None,
         None,
         None,
         user,
@@ -642,6 +644,7 @@ pub(crate) async fn proxy_model_json_with_data_plane_request_timeout(
         session_bearer,
         sandbox_bearer,
         request_timeout,
+        None,
         user,
     )
     .await
@@ -664,6 +667,7 @@ pub(crate) async fn proxy_model_json_with_capability(
         bearer_token,
         None,
         capability_bearer,
+        None,
         None,
         None,
         None,
@@ -701,6 +705,7 @@ pub(crate) async fn proxy_model_json_with_sandbox(
         None,
         sandbox_bearer,
         None,
+        None,
         user,
     )
     .await
@@ -727,6 +732,7 @@ pub(crate) async fn proxy_model_json_with_session(
         None,
         None,
         session_bearer,
+        None,
         None,
         None,
         user,
@@ -767,6 +773,7 @@ pub(crate) async fn proxy_model_json_with_session_and_capability(
         session_bearer,
         None,
         None,
+        None,
         user,
     )
     .await
@@ -795,6 +802,7 @@ pub(crate) async fn proxy_model_json_with_inference(
         None,
         None,
         None,
+        None,
         user,
     )
     .await
@@ -817,6 +825,9 @@ pub(crate) async fn proxy_model_json_with_delegations(
     // switched on (see `sandbox_token`).
     sandbox_bearer: Option<&str>,
     request_timeout: Option<Duration>,
+    // Teach mode's `aud=quarry` bearer (F-t3-081), forwarded as `x-quarry-authorization`. Only the
+    // teach draft presents it.
+    quarry_bearer: Option<&str>,
     user: &AuthenticatedUser,
 ) -> (StatusCode, Json<Value>) {
     let org_id = crate::upstream::authorized_org_id(state, user).await;
@@ -866,6 +877,9 @@ pub(crate) async fn proxy_model_json_with_delegations(
     }
     if let Some(value) = sandbox_bearer.and_then(data_plane_authorization_value) {
         req = req.header("x-sandbox-authorization", value);
+    }
+    if let Some(value) = quarry_bearer.and_then(data_plane_authorization_value) {
+        req = req.header("x-quarry-authorization", value);
     }
 
     if let Some(b) = body {

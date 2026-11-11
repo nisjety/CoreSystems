@@ -44,6 +44,10 @@ pub const METRIC_LABELS: &[&str] = &[
     "to",
     // Built-in tool name, with every `mcp__*` name collapsed to the `mcp__` bucket.
     "tool",
+    // The shadow action reviewer's verdict token (`consistent`, `would_escalate`, `would_deny`,
+    // `unavailable`) and the effect class of the reviewed call (`write`, `external`).
+    "verdict",
+    "tool_class",
 ];
 
 /// Field names a span attribute, a span event attribute or a JSON log field may carry (F-t3-075).
@@ -128,6 +132,8 @@ pub const TRACE_FIELDS: &[&str] = &[
     "source",
     "surface",
     "to",
+    "verdict",
+    "tool_class",
     // Names tracing-opentelemetry and tracing-log add to spans and events: a source location, a
     // thread, a timing. None of them carries request data.
     "code.filepath",

@@ -1,5 +1,6 @@
 import { gatewayBaseUrl } from './config'
 import { ApiError, type ApiErrorHints } from './api-error'
+import { recordFailedResponse } from './support-correlation'
 
 export { ApiError, clientError, hasErrorCode, type ApiErrorHints } from './api-error'
 
@@ -94,10 +95,18 @@ export function extractError(
  * hints, plus the `Retry-After` header (whole seconds) when the body carried no
  * retry hint of its own. One place, so `requestJson`, `requestForm` and the SSE
  * client cannot drift apart on which fields survive.
+ *
+ * The failure is also kept in the support-correlation ring (its `x-request-id`,
+ * status, code and masked route, never the body), so a problem report can name
+ * the requests that failed.
  */
-export function apiErrorFromResponse(body: unknown, response: Pick<Response, 'status' | 'headers'>): ApiError {
+export function apiErrorFromResponse(
+  body: unknown,
+  response: Pick<Response, 'status' | 'headers' | 'url'>,
+): ApiError {
   const { code, message, hints } = extractError(body, response.status)
   const retryAfterSeconds = hints.retryAfterSeconds ?? boundedSeconds(response.headers?.get('Retry-After'))
+  recordFailedResponse(response, code)
   return new ApiError(message, response.status, code, { ...hints, retryAfterSeconds })
 }
 

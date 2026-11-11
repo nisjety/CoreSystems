@@ -46,8 +46,8 @@ use super::dispatchers::{
     dispatch_knowledge_summarize_products,
     dispatch_leads_create_list, dispatch_leads_delete_list,
     dispatch_learning_accept_skill, dispatch_learning_learn_from_thread,
-    dispatch_learning_reject_skill, dispatch_learning_undo,
-    dispatch_mcp_delete_server,
+    dispatch_learning_reject_skill, dispatch_learning_teach_skill_from_run,
+    dispatch_learning_undo, dispatch_mcp_delete_server,
     dispatch_mcp_share_server, dispatch_membership_invite_member,
     dispatch_membership_remove_member, dispatch_membership_update_member_role,
     dispatch_memory_delete, dispatch_memory_remember, dispatch_memory_reset,
@@ -360,6 +360,9 @@ pub(super) async fn execute_action(
         "learning.undo" => dispatch_learning_undo(&state, &user, &headers, &body.input).await,
         "learning.learn_from_thread" => {
             dispatch_learning_learn_from_thread(&state, &user, &headers, &body.input).await
+        }
+        "learning.teach_skill_from_run" => {
+            dispatch_learning_teach_skill_from_run(&state, &user, &headers, &body.input).await
         }
         "settings.update_me" => dispatch_settings_update_me(&state, &user, &body.input).await,
         "settings.update_preferences" => {

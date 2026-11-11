@@ -6937,6 +6937,7 @@ pub(crate) fn metered_call(
         output: i64::from(response.output_tokens),
         cache_read: i64::from(response.cache_read_input_tokens),
         cache_write: i64::from(response.cache_creation_input_tokens),
+        priority: response.service_tier_used == crate::pricing::SERVICE_TIER_PRIORITY,
     }
 }
 
@@ -6993,7 +6994,7 @@ pub(crate) async fn stream_call_usage(
     }
     let priced = state
         .pricing
-        .priced(call.basis, &call.model, call.legs())
+        .priced_at_tier(call.basis, &call.model, call.legs(), call.priority)
         .await;
     sink.record_call(call, &priced, routing).await;
 }
@@ -8931,6 +8932,7 @@ pub async fn run_tool_rounds_for_model(
         &crate::turn_attachments::ValidatedAttachments::none(),
         images,
         prompt_tiers,
+        "",
     )
     .await
 }
@@ -8977,6 +8979,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     attachments: &crate::turn_attachments::ValidatedAttachments,
     images: &crate::vision::parts::ImageParts,
     prompt_tiers: Option<PromptTierPlan>,
+    // The speed tier every model call of the turn carries (`InferRequest.speed_tier`): `priority`, or `""`
+    // for no choice. The caller decides it once for the turn (`sse::invoke_stream_sse`); the rounds carry it.
+    speed_tier: &str,
 ) -> Result<ToolRounds, &'static str> {
     // Resolved ONCE for the whole turn rather than per call: the entitlement is a
     // property of the turn, and a value re-derived per round is a value that can
@@ -9053,15 +9058,15 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     );
     let tools = crate::thread_reference_tools::tools_for_turn(tools, thread_refs_offered);
     // The image tool (W4-IMG-3) was offered by the chat composer on a persistent turn. The org's capability policy has the
-    // last word, read once per turn with the person's own capability bearer, and the run's image budget is held only for a
-    // tool that is admitted. A subscription turn is never admitted: an image is metered API spend, which a subscription
-    // turn does not carry. A turn the composer did not offer it reads nothing and holds nothing.
+    // last word, read with the person's own capability bearer and reused for a minute per org and person, and the run's
+    // image budget is held only for a tool that is admitted. A subscription turn is never admitted: an image is metered API
+    // spend, which a subscription turn does not carry. A turn the composer did not offer it reads nothing and holds nothing.
     let image_admitted = crate::image_tool::enabled()
         && crate::image_tool::offers(&tools)
         && !zdr
         && data_plane_mode.is_none()
         && subscription_connection_id.trim().is_empty()
-        && crate::image_tool::policy_admits(state, capability_bearer).await;
+        && crate::image_tool::policy_admits(state, org_id, user_id, capability_bearer).await;
     let _image_turn = crate::image_tool::hold_turn(run_id, image_admitted);
     let tools = crate::image_tool::tools_for_turn(tools, image_admitted);
     let connector_turn = connector_turn.filter(|_| connector_offered);
@@ -9431,6 +9436,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                     thinking_budget_tokens: 0,
                     reasoning_effort: 0,
                     prefer_priority_service_tier: priority_project_author,
+                    // The turn's speed tier rides every round, as it rides the answer (`latency_levers`).
+                    // `prefer_priority_service_tier` above still asks for the legacy priority tier on its own.
+                    speed_tier: speed_tier.to_owned(),
                     request_id: request_id.to_owned(),
                     org_id: org_id.to_owned(),
                     model: model.to_owned(),
@@ -9748,7 +9756,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                 model: resolved_model.clone().unwrap_or_else(|| model.to_owned()),
                 provider_hint: provider_hint.to_owned(), subscription_connection_id: subscription_connection_id.to_owned(),
                 messages: review_messages.clone(),
-                max_tokens: TOOL_ROUND_TOKENS, temperature: 0.2, zdr, min_privacy_tier, ..Default::default() };
+                max_tokens: TOOL_ROUND_TOKENS, temperature: 0.2, zdr, min_privacy_tier, speed_tier: speed_tier.to_owned(), ..Default::default() };
             // The nearer of this check's own allowance and the shared phase
             // deadline. What is left of it when the check starts goes into the
             // check's timing, since it decides whether a slow review still fits.

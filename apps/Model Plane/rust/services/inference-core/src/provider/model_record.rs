@@ -48,6 +48,10 @@ pub struct RecordLimits {
     /// The model the vendor names as this model's replacement. Set only on a deprecated
     /// row whose cited vendor page names one. Nothing switches to it.
     pub successor: Option<&'static str>,
+    /// Whether the model is served on the subscription broker's priority service tier when a
+    /// call asks for it. Set only for a model that `PRIORITY_TIER` lists. Every other model,
+    /// and a model with no row, is false.
+    pub priority_tier: bool,
 }
 
 struct Row {
@@ -71,6 +75,7 @@ const fn row(
             max_output_tokens,
             lifecycle: Some(lifecycle),
             successor: None,
+            priority_tier: false,
         },
     }
 }
@@ -92,6 +97,7 @@ const fn deprecated_row(
             max_output_tokens,
             lifecycle: Some(Lifecycle::Deprecated),
             successor: Some(successor),
+            priority_tier: false,
         },
     }
 }
@@ -182,6 +188,26 @@ pub fn declared_record(family: Family, model: &str) -> Option<RecordLimits> {
         .map(|entry| entry.limits)
 }
 
+/// The models the Codex adapter serves on its priority service tier, as its own list has always
+/// stated them. It is not a vendor limit: no vendor page is cited for it, so a listed model
+/// carries no token numbers and no lifecycle, and only the tier is declared.
+const PRIORITY_TIER: &[(Family, &str)] = &[
+    (Family::Codex, "gpt-6-astra"),
+    (Family::Codex, "gpt-5.6-sol"),
+    (Family::Codex, "gpt-5.6-terra"),
+    (Family::Codex, "gpt-5.6-luna"),
+    (Family::Codex, "gpt-5.5"),
+];
+
+/// Whether `PRIORITY_TIER` lists `model` under `family`. The match is exact, as the adapter's
+/// own list was, so a model is promoted only when its id is spelled as the list spells it.
+#[must_use]
+pub fn priority_tier_listed(family: Family, model: &str) -> bool {
+    PRIORITY_TIER
+        .iter()
+        .any(|(listed, id)| *listed == family && *id == model)
+}
+
 /// A retired model id and the model the request rewrite answers it with.
 struct Retired {
     family: Family,
@@ -235,7 +261,8 @@ pub fn retired_successor(family: Family, model: &str) -> Option<&'static str> {
 /// What a provider advertises for `model`: the declared record, with each token limit
 /// lowered to the provider's own ceiling when that ceiling is lower. A zero ceiling
 /// declares none. A deployment name resolves to its base model through `aliases`
-/// first, as it does for the effort table.
+/// first, as it does for the effort table. A model that `PRIORITY_TIER` lists keeps
+/// its `priority_tier` even with no row; its limits stay unknown.
 #[must_use]
 pub fn advertised(
     family: Family,
@@ -244,14 +271,20 @@ pub fn advertised(
     ceiling_context_tokens: u32,
     ceiling_output_tokens: u32,
 ) -> RecordLimits {
-    let Some(declared) = declared_record(family, &aliases.base_model(model)) else {
-        return RecordLimits::default();
+    let base = aliases.base_model(model);
+    let priority_tier = priority_tier_listed(family, &base);
+    let Some(declared) = declared_record(family, &base) else {
+        return RecordLimits {
+            priority_tier,
+            ..RecordLimits::default()
+        };
     };
     RecordLimits {
         context_window_tokens: bounded(declared.context_window_tokens, ceiling_context_tokens),
         max_output_tokens: bounded(declared.max_output_tokens, ceiling_output_tokens),
         lifecycle: declared.lifecycle,
         successor: declared.successor,
+        priority_tier,
     }
 }
 

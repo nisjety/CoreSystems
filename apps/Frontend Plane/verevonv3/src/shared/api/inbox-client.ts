@@ -667,6 +667,32 @@ export interface SubmitFeedbackInput {
   // "/inbox?view=mine"). Best-effort context only -- see
   // conversation-core-go's FeedbackInput.PageURL.
   pageUrl?: string
+  // Content-free diagnostics the person ticked in a problem report. Absent
+  // unless a section was ticked; a transcript is never part of it.
+  diagnostics?: FeedbackDiagnostics
+}
+
+/**
+ * The content-free diagnostics a problem report carries (VITE_REPORT_PROBLEM).
+ * Each part is present only when its section was ticked. On the wire the body
+ * keeps its snake_case keys.
+ */
+export interface FeedbackDiagnostics {
+  /** The `x-request-id`s of recent failed requests, oldest first. An empty list means the section was ticked and none had one. */
+  requestIds?: readonly string[]
+  /** The client-config revision of this app build. */
+  build?: string
+  /** The chat run the person had open, for a chat that keeps content. */
+  runId?: string
+}
+
+/** The wire form of {@link FeedbackDiagnostics}: snake_case keys, and only the parts that were set. */
+function feedbackDiagnosticsWire(diagnostics: FeedbackDiagnostics): Record<string, unknown> {
+  return {
+    request_ids: diagnostics.requestIds === undefined ? undefined : [...diagnostics.requestIds],
+    build: diagnostics.build,
+    run_id: diagnostics.runId,
+  }
 }
 
 export async function submitFeedback(orgId: string, input: SubmitFeedbackInput): Promise<void> {
@@ -680,6 +706,7 @@ export async function submitFeedback(orgId: string, input: SubmitFeedbackInput):
       from_name: input.fromName,
       from_email: input.fromEmail,
       page_url: input.pageUrl,
+      ...(input.diagnostics ? { diagnostics: feedbackDiagnosticsWire(input.diagnostics) } : {}),
       idempotency_key: crypto.randomUUID(),
     }),
     headers: orgHeaders(orgId),

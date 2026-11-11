@@ -106,6 +106,8 @@ impl From<provider::ModelInfo> for pb::ModelInfo {
                 .unwrap_or_default(),
             // Set only on a deprecated model whose cited vendor page names a replacement.
             successor: model.successor.map(str::to_owned).unwrap_or_default(),
+            // Whether a call can ask for the priority service tier on this model (`speed_tier`).
+            priority_tier: model.priority_tier,
             // Set only for a deployment whose zero-retention attestation is in force, the one
             // data-use statement a verified source makes today. Unset is "not stated", never "no".
             data_use,
@@ -1285,6 +1287,7 @@ fn infer_response_to_wire(
             timing.into()
         }),
         route_note: route_note.map(Into::into),
+        service_tier_used: result.service_tier_used,
         tool_calls: result
             .tool_calls
             .into_iter()
@@ -1385,6 +1388,7 @@ fn to_internal_request(
         thinking_budget_tokens: req.thinking_budget_tokens,
         reasoning_effort: effort_from_wire(req.reasoning_effort)?,
         prefer_priority_service_tier: req.prefer_priority_service_tier,
+        speed_tier: req.speed_tier.clone(),
         request_id: req.request_id.clone(),
         provider_hint: req.provider_hint.clone(),
         model: req.model.clone(),

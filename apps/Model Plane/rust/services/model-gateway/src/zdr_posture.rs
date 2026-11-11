@@ -840,6 +840,7 @@ pub(crate) mod tests {
             ("http_routes.rs", "ai_video_generate"),
             ("review_run_routes.rs", "review_run_with"),
             ("side_chat_routes.rs", "side_chat_with"),
+            ("reasoning_translate_routes.rs", "reasoning_translate_with"),
             ("council_routes.rs", "council_with"),
             ("teach_routes.rs", "post_teach_skill_draft"),
             ("assistant_navigation.rs", "start_navigation"),
@@ -1100,6 +1101,11 @@ pub(crate) mod tests {
                 "side_chat_routes.rs",
                 "side_chat_with",
                 "the request's route, plain (zdr_or_refuse); read-only, nothing stored",
+            ),
+            (
+                "reasoning_translate_routes.rs",
+                "reasoning_translate_with",
+                "the request's route, plain (zdr_or_refuse); a ZDR turn is refused with reasoning_translation before this call, so the call only runs persistent; nothing stored",
             ),
             (
                 "council_routes.rs",

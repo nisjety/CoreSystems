@@ -54,6 +54,20 @@ pub(crate) const AI_AUDIO_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 /// transport refuses such a body with 413 before the handler runs.
 const REVIEW_BODY_LIMIT_BYTES: usize = 96 * 1024;
 
+/// Request body ceiling for the council route (F-t3-092). A question of the most Model Gateway takes (4,000 characters),
+/// escaped as JSON, with at most four model ids, fits well inside it. A larger body is refused before the handler runs.
+const COUNCIL_BODY_LIMIT_BYTES: usize = 32 * 1024;
+
+/// The council's own ceiling per upstream call (F-t3-092). A run is up to five model calls: four members in parallel, then
+/// one synthesis that reads their answers. The shared client's 25-second ceiling would cut most runs short, so this route
+/// asks for longer. The estimate makes no model call and finishes well inside it.
+const COUNCIL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Request body ceiling for the reasoning translation route (F-t3-098). A text of the most Model Gateway takes (12,000
+/// characters, up to four bytes each) fits with its locale and JSON framing. A larger body is refused with 413 before the
+/// handler runs.
+const REASONING_TRANSLATE_BODY_LIMIT_BYTES: usize = 64 * 1024;
+
 pub(crate) fn router(state: AppState) -> Router<AppState> {
     routes().route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
@@ -82,6 +96,15 @@ fn routes() -> Router<AppState> {
         .route(
             "/api/v1/ai/review",
             post(proxy_review_run).layer(DefaultBodyLimit::max(REVIEW_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/api/v1/ai/council",
+            post(proxy_council).layer(DefaultBodyLimit::max(COUNCIL_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/api/v1/ai/translate",
+            post(proxy_reasoning_translate)
+                .layer(DefaultBodyLimit::max(REASONING_TRANSLATE_BODY_LIMIT_BYTES)),
         )
 }
 
@@ -413,6 +436,272 @@ async fn review_run_answer(
                 "The review is temporarily unavailable.",
             )),
         ),
+    }
+}
+
+/// The translation the browser asks for (F-t3-098): the text and the language it is to be read in, and nothing else. An
+/// unknown field is refused, so a caller cannot name a posture, a model or a switch: the zero-retention flag comes from
+/// the request's header and the organisation's standing posture, never from the body. The text and the locale are Model
+/// Gateway's to check, and its typed refusals pass through.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReasoningTranslateRequest {
+    text: String,
+    target_locale: String,
+}
+
+/// `POST /api/v1/ai/translate`: a reader's translation of one shown text (F-t3-098). Proxies to Model Gateway's
+/// `/v1/ai/reasoning-translate`, which checks the input, makes one model call with no tools and stores nothing. The
+/// translation is for the reader's screen only: it is marked `no-store`, and it is never sent back to the model or
+/// appended to a thread. The zero-retention posture is the request's header flag or the organisation's standing posture,
+/// and only ever raised; Model Gateway never translates a zero-retention turn and refuses it with a typed `zdr_*` answer,
+/// which passes through. While the model's switch (`MODEL_GATEWAY_REASONING_TRANSLATE_ENABLED`) is off, the route answers
+/// 404 `reasoning_translate_disabled`, which passes through.
+async fn proxy_reasoning_translate(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(request): Json<ReasoningTranslateRequest>,
+) -> Response {
+    let (status, Json(body)) = reasoning_translate_answer(&state, &user, &headers, request).await;
+    (status, [(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
+}
+
+async fn reasoning_translate_answer(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    request: ReasoningTranslateRequest,
+) -> (StatusCode, Json<Value>) {
+    let token = match shared::model_token(state, user, headers).await {
+        Some(token) if !token.trim().is_empty() => token,
+        _ => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "delegated_auth_unavailable",
+                    "Model authentication is temporarily unavailable",
+                )),
+            )
+        }
+    };
+    let inference_token = match shared::required_inference_token(state, user, headers).await {
+        Ok(token) if !token.trim().is_empty() => token,
+        Ok(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "delegated_auth_unavailable",
+                    "Inference authentication is temporarily unavailable",
+                )),
+            )
+        }
+        Err(detail) => return shared::delegated_auth_unavailable(detail),
+    };
+    // A one-way raise, as on every model route: the header's flag or the organisation's posture makes the turn
+    // zero-retention, and Model Gateway then refuses to translate it. The body names only the fields the route reads.
+    let mut body = json!({
+        "text": request.text,
+        "target_locale": request.target_locale,
+        "zdr": request_zdr(headers, None),
+    });
+    shared::apply_org_zdr_posture(state, user, &mut body).await;
+    let url = format!("{}/v1/ai/reasoning-translate", state.model_gateway_url);
+    let (status, Json(response)) = shared::proxy_model_json_with_inference(
+        state,
+        Method::POST,
+        &url,
+        Some(body),
+        Some(&token),
+        Some(&inference_token),
+        user,
+    )
+    .await;
+    if status.is_success() {
+        return match response.pointer("/data/text").and_then(Value::as_str) {
+            Some(text) => (StatusCode::OK, Json(json!({ "data": { "text": text } }))),
+            None => (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "invalid_model_response",
+                    "The translation returned an invalid response",
+                )),
+            ),
+        };
+    }
+    let code = response
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    match status {
+        // Upstream authentication describes a delegated credential, not the caller's browser session.
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "delegated_auth_unavailable",
+                "Model authentication is temporarily unavailable",
+            )),
+        ),
+        // The route's own typed refusals (its switch and its input limits) pass through as sent, and so does a typed
+        // zero-retention refusal, which tells the caller why nothing was translated.
+        StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::PAYLOAD_TOO_LARGE
+            if code.starts_with("reasoning_translate_") =>
+        {
+            (status, Json(response))
+        }
+        StatusCode::PRECONDITION_FAILED if code.starts_with("zdr_") => (status, Json(response)),
+        _ => (
+            status,
+            Json(error(
+                "reasoning_translate_unavailable",
+                "The translation is temporarily unavailable.",
+            )),
+        ),
+    }
+}
+
+/// The council the browser asks for (F-t3-092): one question and the models to ask it, with the flags that frame the run.
+/// An unknown field is refused, so a caller cannot name a posture: the zero-retention flag comes from the request's header
+/// and the organisation's standing posture, never from the body. The question, the models and the limits are Model
+/// Gateway's to check, and its typed refusals pass through.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CouncilRequest {
+    question: String,
+    models: Vec<String>,
+    #[serde(default)]
+    synthesizer_model: Option<String>,
+    #[serde(default)]
+    allow_subscription: bool,
+    #[serde(default)]
+    estimate_only: bool,
+}
+
+/// `POST /api/v1/ai/council`: one question answered by two to four models at once, then one synthesis of where they agree
+/// and disagree (F-t3-092). Proxies to Model Gateway's `/v1/ai/council`, which checks the input, gives the models no tools
+/// and stores nothing. With `estimate_only` it answers the list-price estimate of the run and makes no model call, so the
+/// cost is shown before anything is asked. The answer is marked `no-store`. The zero-retention posture is the request's
+/// header flag or the organisation's standing posture, and only ever raised. While the model's switch
+/// (`MODEL_GATEWAY_MODEL_COUNCIL_ENABLED`) is off, the route answers 404 `model_council_disabled`, which passes through.
+async fn proxy_council(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(request): Json<CouncilRequest>,
+) -> Response {
+    let (status, Json(body)) = council_answer(&state, &user, &headers, request).await;
+    (status, [(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
+}
+
+async fn council_answer(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    request: CouncilRequest,
+) -> (StatusCode, Json<Value>) {
+    let token = match shared::model_token(state, user, headers).await {
+        Some(token) if !token.trim().is_empty() => token,
+        _ => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "delegated_auth_unavailable",
+                    "Model authentication is temporarily unavailable",
+                )),
+            )
+        }
+    };
+    let inference_token = match shared::required_inference_token(state, user, headers).await {
+        Ok(token) if !token.trim().is_empty() => token,
+        Ok(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "delegated_auth_unavailable",
+                    "Inference authentication is temporarily unavailable",
+                )),
+            )
+        }
+        Err(detail) => return shared::delegated_auth_unavailable(detail),
+    };
+    // A one-way raise, as on every model route. The body names only the fields the council reads.
+    let mut body = json!({
+        "question": request.question,
+        "models": request.models,
+        "allow_subscription": request.allow_subscription,
+        "estimate_only": request.estimate_only,
+        "zdr": request_zdr(headers, None),
+    });
+    if let Some(synthesizer) = request.synthesizer_model {
+        body["synthesizer_model"] = Value::String(synthesizer);
+    }
+    shared::apply_org_zdr_posture(state, user, &mut body).await;
+    let url = format!("{}/v1/ai/council", state.model_gateway_url);
+    let (status, Json(response)) = shared::proxy_model_json_with_delegations(
+        state,
+        Method::POST,
+        &url,
+        Some(body),
+        Some(&token),
+        None,
+        None,
+        Some(&inference_token),
+        None,
+        None,
+        None,
+        None,
+        Some(COUNCIL_REQUEST_TIMEOUT),
+        None,
+        user,
+    )
+    .await;
+    if status.is_success() {
+        return match response.get("data").filter(|data| data.is_object()) {
+            Some(data) => (StatusCode::OK, Json(json!({ "data": data }))),
+            None => (
+                StatusCode::BAD_GATEWAY,
+                Json(error(
+                    "invalid_model_response",
+                    "The council returned an invalid response",
+                )),
+            ),
+        };
+    }
+    let code = response
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if council_refusal_passes(status, &code) {
+        return (status, Json(response));
+    }
+    match status {
+        // Upstream authentication describes a delegated credential, not the caller's browser session.
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "delegated_auth_unavailable",
+                "Model authentication is temporarily unavailable",
+            )),
+        ),
+        _ => (
+            status,
+            Json(error(
+                "council_unavailable",
+                "The model council is temporarily unavailable.",
+            )),
+        ),
+    }
+}
+
+/// Whether an upstream refusal is the council's own typed answer, which passes through as sent: its switch, its input
+/// limits, a zero-retention precondition, a model the caller may not use, or an entitlement the gateway cannot read.
+fn council_refusal_passes(status: StatusCode, code: &str) -> bool {
+    match code {
+        "model_entitlement_unavailable" => true,
+        "model_council_disabled" | "model_not_entitled" => status.is_client_error(),
+        _ => status.is_client_error() && (code.starts_with("council_") || code.starts_with("zdr_")),
     }
 }
 

@@ -101,7 +101,13 @@ import { buildPromptSuggestions, type PromptSuggestion } from '../lib/prompt-sug
 import { readerPolishOn } from '../lib/reader-polish'
 import { listConversations, type LiveTicket } from '@/shared/api/inbox-client'
 import { listNotifications, type Notification } from '@/shared/api/notifications-client'
-import { MIN_PLAN_JUSTIFICATION_CHARS } from '@/shared/api/chat-client'
+import { MIN_PLAN_JUSTIFICATION_CHARS, translateText } from '@/shared/api/chat-client'
+import {
+  REASONING_TRANSLATE_MAX_CHARS,
+  reasoningTranslateChars,
+  reasoningTranslateLocaleOf,
+  type ReasoningTranslateLocale,
+} from '@/shared/actions/chat-reasoning-translate'
 import { answerProcessingNote } from '@/shared/api/privacy-tier'
 import { correctMemory, deleteMemory, listMemories, rememberMemory } from '@/shared/api/memory-client'
 import { memberSkillAuthoring } from '@/shared/api/skills-client'
@@ -184,6 +190,7 @@ import {
 import type { VersionBadge } from '@/features/chat/lib/chat-versions'
 import type { HiddenTurn, RewindPlan, ServerVersionBadge } from '@/features/chat/lib/chat-versions-server'
 import './rewind-branch.css'
+import './reasoning-translate.css'
 import { streamActivityLabel, type StreamActivity, type Translator } from '@/features/chat/lib/stream-activity'
 import { imageRefusalText, narrate } from '@/shared/activity/narration'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
@@ -282,6 +289,8 @@ export function MessageBlock(props: {
   onRejectPlan?: (planId: string, reason: string) => void
   planApproval?: PlanApprovalStatus
   onSelectFollowUp?: (text: string) => void
+  /** Puts a widget's quoted passage in front of the composer's draft (EP-4 W4-IO-2). Absent, a widget quotes nothing. */
+  onQuoteSelection?: (text: string) => void
   onViewSteps: () => void
   onViewAttachments?: (attachmentId: string) => void
   /** n/N badge for this turn's exchange versions — only ever set on the trailing assistant turn. */
@@ -619,6 +628,8 @@ export function AssistantMessage(props: {
   onRejectPlan?: (planId: string, reason: string) => void
   planApproval?: PlanApprovalStatus
   onSelectFollowUp?: (text: string) => void
+  /** See `MessageBlock`'s doc: a widget's quoted passage goes in front of the composer's draft (EP-4 W4-IO-2). */
+  onQuoteSelection?: (text: string) => void
   onViewSteps: () => void
   onViewAttachments?: (attachmentId: string) => void
   version?: VersionBadge | null
@@ -952,7 +963,7 @@ export function AssistantMessage(props: {
           {/* The one surface where a ```widget fence may run (EP-4 S1): `InlineWidgetSurface`.
               A Space thread shown here is room content (D2), so it keeps the code block. */}
           <InlineWidgetSurface value={inlineWidgetsEnabled() && !props.spaceScoped ? 'live' : 'inert'}>
-            <InlineWidgetAnswer onSelectFollowUp={props.onSelectFollowUp}>
+            <InlineWidgetAnswer onSelectFollowUp={props.onSelectFollowUp} onQuoteSelection={props.onQuoteSelection}>
               <SettledTurnContent
                 fold={props.settledFold}
                 turnId={props.message.id}
@@ -1287,7 +1298,7 @@ export function AssistantMessage(props: {
               ]}
             />
             <MessageMetricsBadge message={props.message} />
-            <ReasoningPopover message={props.message} />
+            <ReasoningPopover message={props.message} temporaryChat={props.temporaryChat} />
           </div>
           <Show when={processingNote()}>
             {(note) => (
@@ -2186,11 +2197,95 @@ function routedLabel(decision: ChatRoutingDecision | undefined, tr: (noText: str
     .join(' · ')
 }
 
-export function ReasoningPopover(props: { message: ChatTurn }) {
+/**
+ * `VITE_REASONING_TRANSLATE=true` offers Translate on a turn's reasoning in the Details popover (F-t3-098, W5-098-c).
+ * Unset, or any value but `true` (the default), no reasoning is offered for translation. Exact string, as the other chat switches.
+ */
+export const reasoningTranslateEnabled = () => import.meta.env.VITE_REASONING_TRANSLATE === 'true'
+
+/**
+ * Function words common in Norwegian Bokmål and rare in English. The words with æ, ø or å are left out on purpose: a
+ * string literal holding those letters must sit inside `i18n.tr`, and these are not copy.
+ */
+const NORWEGIAN_FUNCTION_WORDS: ReadonlySet<string> = new Set([
+  'og', 'er', 'det', 'som', 'ikke', 'jeg', 'vi', 'har', 'kan', 'skal', 'men', 'ved', 'eller', 'dette', 'disse',
+  'hvis', 'meg', 'deg', 'seg', 'til', 'fra', 'med', 'av', 'om', 'en', 'et', 'den', 'de', 'var',
+  'hva', 'ble', 'blir', 'hvordan',
+])
+
+/** Function words common in English and rare in Norwegian Bokmål. */
+const ENGLISH_FUNCTION_WORDS: ReadonlySet<string> = new Set([
+  'the', 'and', 'is', 'are', 'was', 'were', 'be', 'of', 'that', 'this', 'these', 'with', 'it', 'not', 'we', 'you',
+  'they', 'their', 'there', 'will', 'should', 'can', 'have', 'has', 'do', 'does', 'what', 'which', 'when', 'how',
+  'from', 'or', 'an', 'a', 'if', 'so', 'on', 'in',
+])
+
+/**
+ * The language a reasoning text is most likely in, `no` or `en`, from its function words; `undefined` when none of them
+ * tells the two apart. A cheap guess that only decides whether a translation is offered, so a text it cannot tell is not
+ * offered one.
+ */
+export function likelyReasoningLanguage(text: string): 'no' | 'en' | undefined {
+  let norwegian = 0
+  let english = 0
+  for (const word of text.toLowerCase().match(/\p{L}+/gu) ?? []) {
+    if (NORWEGIAN_FUNCTION_WORDS.has(word)) norwegian += 1
+    else if (ENGLISH_FUNCTION_WORDS.has(word)) english += 1
+  }
+  if (norwegian === english) return undefined
+  return norwegian > english ? 'no' : 'en'
+}
+
+/** A translation the popover holds: the reasoning it answers, the locale it reads in, and the text. */
+type ReasoningTranslation = { source: string; target: ReasoningTranslateLocale; text: string }
+
+export function ReasoningPopover(props: { message: ChatTurn; temporaryChat?: boolean }) {
   const i18n = useI18n()
   const [open, setOpen] = createSignal(false)
   const [tab, setTab] = createSignal('general')
   let ref!: HTMLDivElement
+  // F-t3-098 (W5-098-c): the reader's translation of the reasoning. It lives in these signals only, never in the turn, a
+  // history cache, the composer or a request context, and it is dropped with the popover.
+  const [translation, setTranslation] = createSignal<ReasoningTranslation | null>(null)
+  const [showOriginal, setShowOriginal] = createSignal(false)
+  const [translating, setTranslating] = createSignal(false)
+  const [translateFailure, setTranslateFailure] = createSignal<'failed' | 'unavailable' | null>(null)
+  // Offered on a settled turn that keeps its content, when the text fits the route and reads in the other language from the reader's.
+  const translatable = createMemo(() => {
+    if (!reasoningTranslateEnabled() || props.temporaryChat || props.message.streaming) return false
+    const text = props.message.reasoning ?? ''
+    if (text.trim() === '' || reasoningTranslateChars(text) > REASONING_TRANSLATE_MAX_CHARS) return false
+    const language = likelyReasoningLanguage(text)
+    return language !== undefined && language !== i18n.locale()
+  })
+  // The held translation, while it still answers the reasoning on screen in the reader's current locale.
+  const heldTranslation = createMemo(() => {
+    const held = translation()
+    if (held === null || held.source !== props.message.reasoning) return null
+    return held.target === reasoningTranslateLocaleOf(i18n.locale()) ? held : null
+  })
+  const showingTranslation = () => heldTranslation() !== null && !showOriginal()
+  /** Asks the route for the reasoning's translation. A result for text the turn no longer shows is dropped. */
+  const translateReasoning = async () => {
+    const source = props.message.reasoning ?? ''
+    if (translating() || source.trim() === '') return
+    const target = reasoningTranslateLocaleOf(i18n.locale())
+    setTranslating(true)
+    setTranslateFailure(null)
+    try {
+      const text = await translateText(source, target)
+      if (text === null) {
+        setTranslateFailure('unavailable')
+      } else if (source === props.message.reasoning) {
+        setTranslation({ source, target, text })
+        setShowOriginal(false)
+      }
+    } catch {
+      setTranslateFailure('failed')
+    } finally {
+      setTranslating(false)
+    }
+  }
   const model = createMemo(() => props.message.modelUsed ?? props.message.model)
   const routed = createMemo(() => routedLabel(props.message.routingDecision, (noText, enText) => i18n.tr(noText, enText)))
   const hasMetrics = createMemo(() => Boolean(
@@ -2266,7 +2361,41 @@ export function ReasoningPopover(props: { message: ChatTurn }) {
             </Show>
             <Switch>
               <Match when={tab() === 'insight'}>
-                <p class="verevon-chat-reasoning-popover__copy">{props.message.reasoning}</p>
+                <p
+                  class="verevon-chat-reasoning-popover__copy"
+                  lang={showingTranslation() ? reasoningTranslateLocaleOf(i18n.locale()) : undefined}
+                >
+                  {showingTranslation() ? heldTranslation()?.text : props.message.reasoning}
+                </p>
+                <Show when={translatable() || heldTranslation() !== null || translateFailure() !== null}>
+                  <div class="verevon-chat-reasoning-translate">
+                    <Show when={heldTranslation() !== null}>
+                      <button type="button" onClick={() => setShowOriginal((value) => !value)}>
+                        {showOriginal() ? i18n.tr('Vis oversettelse', 'Show translation') : i18n.tr('Vis original', 'Show original')}
+                      </button>
+                      <Show when={showingTranslation()}>
+                        <span class="verevon-chat-reasoning-translate__note">
+                          {i18n.tr('Maskinoversettelse. Lagres ikke.', 'Machine translation. Not saved.')}
+                        </span>
+                      </Show>
+                    </Show>
+                    <Show when={heldTranslation() === null && translatable() && translateFailure() !== 'unavailable'}>
+                      <button type="button" disabled={translating()} onClick={() => void translateReasoning()}>
+                        {translating() ? i18n.tr('Oversetter…', 'Translating…') : i18n.tr('Oversett', 'Translate')}
+                      </button>
+                    </Show>
+                    <Show when={translateFailure() === 'unavailable'}>
+                      <span class="verevon-chat-reasoning-translate__note">
+                        {i18n.tr('Oversettelse er ikke tilgjengelig akkurat nå.', 'Translation is not available right now.')}
+                      </span>
+                    </Show>
+                    <Show when={translateFailure() === 'failed'}>
+                      <span class="verevon-chat-reasoning-translate__note" role="alert">
+                        {i18n.tr('Kunne ikke oversette. Prøv igjen.', 'Could not translate. Try again.')}
+                      </span>
+                    </Show>
+                  </div>
+                </Show>
               </Match>
               <Match when={tab() === 'tools'}>
                 <div class="verevon-chat-reasoning-popover__stack">

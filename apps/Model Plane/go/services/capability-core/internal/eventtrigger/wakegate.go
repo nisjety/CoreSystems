@@ -266,12 +266,14 @@ type WebhookEventSource interface {
 	FetchWebhookEvent(ctx context.Context, orgID, webhookEventID string) (WebhookEventRecord, error)
 }
 
-// WebhookEventRecord is the part of integration-corev2's stored webhook event the gate reads: the provider, the event type
-// and the provider's JSON body. The body is untrusted data.
+// WebhookEventRecord is the part of integration-corev2's stored webhook event the gate reads: the provider, the event type,
+// the connection the delivery was bound to (empty when none is recorded) and the provider's JSON body. The body is untrusted
+// data.
 type WebhookEventRecord struct {
-	ProviderKey string         `json:"providerKey"`
-	EventType   string         `json:"eventType"`
-	Payload     map[string]any `json:"payload"`
+	ProviderKey  string         `json:"providerKey"`
+	EventType    string         `json:"eventType"`
+	ConnectionID string         `json:"connectionId"`
+	Payload      map[string]any `json:"payload"`
 }
 
 // view is the map Evaluate reads: the provider body, with the event's own eventType and providerKey set over it under their

@@ -62,6 +62,10 @@ pub struct CallUsage {
     pub output: i64,
     pub cache_read: i64,
     pub cache_write: i64,
+    /// Served on the priority tier (`InferResponse.service_tier_used`), so a metered price is multiplied
+    /// by the priority-tier multiplier (`pricing::priority_tier_cost_multiplier`). `false` for every call
+    /// the provider did not serve on that tier.
+    pub priority: bool,
 }
 
 impl CallUsage {
@@ -204,6 +208,7 @@ mod tests {
             output,
             cache_read: read,
             cache_write: write,
+            priority: false,
         }
     }
 
@@ -217,6 +222,7 @@ mod tests {
                 output_usd: usd / 2.0,
             }),
             source: PriceSource::Exact,
+            note: None,
         }
     }
 
@@ -225,6 +231,7 @@ mod tests {
             usd: None,
             by_category: None,
             source: PriceSource::Default,
+            note: None,
         }
     }
 
@@ -279,11 +286,13 @@ mod tests {
                 usd: Some(0.1),
                 by_category: None,
                 source: PriceSource::Exact,
+                note: None,
             },
             Priced {
                 usd: Some(f64::NAN),
                 by_category: priced(0.1).by_category,
                 source: PriceSource::Exact,
+                note: None,
             },
         ] {
             let mut meter = UsageMeter::default();
@@ -301,6 +310,7 @@ mod tests {
             usd: Some(0.0),
             by_category: None,
             source: PriceSource::Subscription,
+            note: None,
         };
         let only = meter.record(
             &call(CostBasis::Subscription, 1_800, 120, 1_024, 256),
@@ -338,6 +348,7 @@ mod tests {
                 usd: Some(0.0),
                 by_category: None,
                 source: PriceSource::Subscription,
+                note: None,
             },
         );
         let got = meter.record(&call(CostBasis::Metered, 10, 1, 0, 0), &unpriced());

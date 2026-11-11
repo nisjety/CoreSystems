@@ -314,6 +314,14 @@ message InferRequest {
   // is refused. Model Plane never receives the gateway's address or key. A customer gateway is never zero
   // data retention, so a ZDR call that names one is refused. Empty names no connection.
   string model_connection_id = 24;
+
+  // The speed tier this call asks for: "" (no choice, the default), "standard" or "priority". Read
+  // only when INFERENCE_SPEED_TIER_SPLIT is the literal true, and only by the subscription adapter,
+  // which serves "priority" when the model's record declares it (ModelInfo.priority_tier). Speed is
+  // separate from reasoning effort, so a quick turn never implies priority. A value other than
+  // "priority" does not ask for it, though the legacy prefer_priority_service_tier flag still does.
+  // It carries no content, so Zero Data Retention does not change it.
+  string speed_tier = 25;
 }
 
 // InferImagePart — one image attached to a message of an InferRequest. Bytes
@@ -473,6 +481,12 @@ message InferResponse {
   // layer routed it under a budget posture. Absent for a pinned model or while
   // INFERENCE_ROUTE_NOTE is off.
   RouteNote route_note = 15;
+
+  // The service tier this call was sent to the subscription broker on: "priority" when the priority
+  // tier went upstream, empty when none did or the serving provider does not report one. It states
+  // what was requested of the provider, never a guarantee the provider billed that tier. It carries
+  // no content, so Zero Data Retention does not change it.
+  string service_tier_used = 16;
 }
 
 // InferChunk — a single chunk in a streaming inference response.
@@ -767,6 +781,11 @@ message ModelInfo {
   // whose cited vendor page names one; empty means no sourced record names a replacement
   // (F-t3-073). Display only: nothing switches to it, and a thread stays on the model it pinned.
   string successor = 13;
+
+  // Whether this model is served on the priority service tier when a call asks for it with
+  // InferRequest.speed_tier. False when the model's record does not declare the tier, so a caller
+  // must not offer the choice for it. Advertised whatever INFERENCE_SPEED_TIER_SPLIT says.
+  bool priority_tier = 14;
 }
 
 // ProviderDataUse — the data-handling statements a provider makes for one model (EP-9 C5).

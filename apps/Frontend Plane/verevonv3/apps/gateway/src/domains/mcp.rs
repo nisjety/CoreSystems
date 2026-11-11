@@ -595,6 +595,7 @@ async fn post_mcp_app_tool_call(
         Some(session.as_str()),
         None,
         None,
+        None,
         &user,
     )
     .await;

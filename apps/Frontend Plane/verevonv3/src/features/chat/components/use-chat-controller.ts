@@ -471,6 +471,9 @@ export function useChatController() {
   }
   const [imageMode, setImageMode] = createSignal(false)
   const [planMode, setPlanModeRaw] = createSignal(false)
+  // The Fast chip's speed choice (W5-095-b): `priority` asks for the priority tier on the turns sent while it is on.
+  // Session-only, like the plan toggle, and read at send time, so a later flip cannot change a turn already sent.
+  const [speedTier, setSpeedTier] = createSignal<'standard' | 'priority'>('standard')
   // WS14 S2a, "Run the approved plan". `threadGrant` is the client's pointer to
   // the grant the Model Plane holds for a thread, set when a plan is approved;
   // `executeArmed` says the NEXT send is the turn that runs it. Both are
@@ -4049,6 +4052,9 @@ export function useChatController() {
             ? { approvedPlanId: options.approvedPlanId }
             : {}),
           effort: options.effort,
+          // The Fast chip's speed (W5-095-b): `standard` unless the chip sent `priority`. Present only while the
+          // chip flag is on, so a build without it sends the body it always did.
+          ...(import.meta.env.VITE_CHAT_SPEED_TIER === 'true' ? { speed: options.speed ?? 'standard' } : {}),
           verbosity: options.tone,
           zdr: options.zdr,
           regenerated: options.regenerated,
@@ -4450,6 +4456,7 @@ export function useChatController() {
       modelConnectionId: payload.modelConnectionId,
       zdr: payload.zdr,
       effort: payload.effort,
+      speed: payload.speed,
       tone: payload.tone,
       // Carried only when the selected catalog model attests a tier; the wire
       // body omits it otherwise (see buildChatWireBody).
@@ -5860,6 +5867,8 @@ export function useChatController() {
     imageMode,
     setImageMode,
     planMode,
+    speedTier,
+    setSpeedTier,
     approveTurnPlan,
     pendingQuestion,
     parkedTurnId,

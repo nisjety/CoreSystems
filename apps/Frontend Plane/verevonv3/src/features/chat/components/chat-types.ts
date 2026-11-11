@@ -795,6 +795,11 @@ export type SendOptions = {
   /** Reasoning effort from the composer's response-mode selector. */
   effort?: EffortProfile | EffortLevel
   /**
+   * The Fast chip's speed choice (W5-095-b): `priority` asks the gateway for the priority service tier on this
+   * turn, which it honours only on a model that declares the tier. `standard` (the default) is no choice.
+   */
+  speed?: 'standard' | 'priority'
+  /**
    * Response-style dial from composer settings — how much prose the answer
    * spends, independent of `effort`'s thinking budget.
    */

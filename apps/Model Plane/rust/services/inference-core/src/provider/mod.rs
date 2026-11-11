@@ -167,6 +167,11 @@ pub struct InferRequest {
     /// Optional speed tier for supported subscription models. It does not
     /// select a provider or reduce the requested reasoning effort.
     pub prefer_priority_service_tier: bool,
+    /// The speed tier this call asks for: empty (no choice), `"standard"` or `"priority"`. Read
+    /// only by the Codex adapter, and only behind `INFERENCE_SPEED_TIER_SPLIT`. It is never a
+    /// reasoning effort. A value other than `"priority"` does not ask for the tier, though the
+    /// legacy `prefer_priority_service_tier` flag still does.
+    pub speed_tier: String,
     /// Opaque Integration Core connection id for a user-owned subscription.
     /// This is a routing reference, never a ChatGPT OAuth credential. It is
     /// included in the prompt-cache scope so two connections cannot share a
@@ -412,6 +417,9 @@ pub struct InferResponse {
     /// upstream phase durations (see [`ProviderTiming::upstream`]) or a usage
     /// report to pass on, which is all the chain keeps from it.
     pub provider_timing: Option<ProviderTiming>,
+    /// The service tier the call was sent to the subscription broker on: `"priority"` when the
+    /// priority tier went upstream, empty when none did or the serving adapter does not report one.
+    pub service_tier_used: String,
 }
 
 /// A single streaming chunk.
@@ -529,6 +537,9 @@ pub struct ModelInfo {
     /// The model the vendor names as this one's replacement. `None` unless a sourced row for
     /// a deprecated model names one. Display only: nothing switches to it.
     pub successor: Option<&'static str>,
+    /// Whether a call can ask for the priority service tier on this model (`speed_tier`). False
+    /// unless the model's record declares it (see [`model_record::RecordLimits::priority_tier`]).
+    pub priority_tier: bool,
 }
 
 /// Introspectable feature flags for a provider.

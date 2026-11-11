@@ -47,6 +47,10 @@ import {
   type ReviewRunInput,
   type ReviewTarget,
 } from '@/shared/actions/chat-review'
+import {
+  parseReasoningTranslateInput,
+  type ReasoningTranslateLocale,
+} from '@/shared/actions/chat-reasoning-translate'
 import type { ThreadGoalStatus } from './thread-goal-client'
 
 // ── Wide research (EP-2 S8) ─────────────────────────────────────────────────
@@ -395,6 +399,12 @@ export type ChatInvokeRequest = {
    * model's catalogue entry lists (`modelEffortLevels`) is ever sent.
    */
   effort?: EffortProfile | EffortLevel
+  /**
+   * The Fast chip's speed choice (W5-095-b): `priority` asks the gateway for the priority service tier on this
+   * turn, which it honours only on a model that declares the tier (`priorityTier`). `standard` is no choice.
+   * Sent only when the composer carries one, so a body without it is byte-identical to before.
+   */
+  speed?: 'standard' | 'priority'
   /**
    * Response-style dial, orthogonal to `effort`: how much prose the answer
    * spends, not how hard the model thinks.
@@ -1745,6 +1755,11 @@ export type ModelInfo = {
    */
   effortLevels?: EffortLevel[]
   /**
+   * The model's record declares the priority service tier (`priority_tier` on `/v1/models`). The composer offers the
+   * Fast chip only for such a model. `undefined` when the record declares none.
+   */
+  priorityTier?: boolean
+  /**
    * Context window in tokens (`context_window_tokens` on `/v1/models`). `undefined` when the
    * catalogue has no sourced record for the model, so no window is claimed.
    */
@@ -2343,6 +2358,9 @@ export function buildChatWireBody(input: ChatInvokeRequest): Record<string, unkn
     ...(request.effort && request.effort !== 'standard'
       ? { effort: request.effort }
       : {}),
+    // The Fast chip's speed choice (W5-095-b): present only when the composer carries one (the chip flag on),
+    // so every other body is byte-identical to what it was before the field existed.
+    ...(request.speed ? { speed: request.speed } : {}),
     // Same shape as `effort` above, and for the same reason: the gateway reads
     // an absent verbosity as "no directive", so `balanced` is omitted rather
     // than sent as a no-op on every turn.
@@ -3878,6 +3896,32 @@ export async function runReview(input: ReviewRunInput): Promise<ReviewCard | nul
   const card = normalizeReviewCard(objectValue(objectValue(raw)?.data)?.run)
   if (!card) throw new ApiError('The review did not return a card.', 502, 'review_no_card')
   return card
+}
+
+/**
+ * Translates one shown text into the reader's language (F-t3-098, W5-098-c): `POST /api/v1/ai/translate`. The text and
+ * the target are checked against the action contract before anything is sent, and a request the contract refuses rejects
+ * with a `ReasoningTranslateContractError`, with nothing sent. The answer is for the reader's screen only: nothing is
+ * stored, and the caller holds it in a component signal, never in the turn, a history cache or a composer. Resolves to
+ * `null` while the gateway's reasoning-translation switch is off (404) and for a zero-retention turn (412). Other refusals
+ * reject with the server's typed `ApiError`, such as `delegated_auth_unavailable` while the model's credentials are down.
+ */
+export async function translateText(text: string, targetLocale: ReasoningTranslateLocale): Promise<string | null> {
+  const request = parseReasoningTranslateInput({ text, targetLocale })
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>('/api/v1/ai/translate', {
+      method: 'POST',
+      body: JSON.stringify({ text: request.text, target_locale: request.targetLocale }),
+    })
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 404 || error.status === 412)) return null
+    throw error
+  }
+  // `requestJson` has already unwrapped the gateway's `{ data }` envelope, so the translation is read from `raw` itself.
+  const translated = str(objectValue(raw)?.text)?.trim()
+  if (!translated) throw new ApiError('The translation did not return text.', 502, 'reasoning_translate_no_output')
+  return translated
 }
 
 export async function getThreadContext(
@@ -5490,6 +5534,7 @@ export async function listModelCatalogue(): Promise<ModelCatalogue> {
         residency: str(item.residency),
         cheap: readBool(item.cheap) ?? readBool(item.is_cheap),
         effortLevels: normalizeEffortLevels(item.effort_levels ?? item.effortLevels),
+        priorityTier: readBool(item.priority_tier) ?? readBool(item.priorityTier),
         contextWindowTokens: normalizeTokenCount(item.context_window_tokens),
         maxOutputTokens: normalizeTokenCount(item.max_output_tokens),
         lifecycle: normalizeLifecycle(item.lifecycle),

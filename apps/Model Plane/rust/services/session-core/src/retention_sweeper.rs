@@ -619,9 +619,17 @@ async fn delete_thread(
     }
     tx.commit().await?;
 
+    // The sweeper holds no owner credential, so the Control grants of the erased snapshots stay; each
+    // is named by id and code, after the commit.
+    crate::thread_shares::log_snapshot_grants_not_removed(
+        &erased.snapshot_ids,
+        crate::thread_shares::GRANTS_NO_CREDENTIAL_CODE,
+    );
+
     // After the commit, never inside it: a degraded tier must not hold or undo a
     // delete Postgres already made, and the erased memory ids exist nowhere else now.
-    let semantic = crate::memory_erasure::erase_semantic_copies(erasure.letta, org_id, &erased).await;
+    let semantic =
+        crate::memory_erasure::erase_semantic_copies(erasure.letta, org_id, &erased.memories).await;
     let workspace = erasure.workspaces.erase(org_id, thread_id).await;
     Ok(Some((semantic, workspace)))
 }

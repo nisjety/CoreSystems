@@ -2611,12 +2611,14 @@ mod tests {
                 output: 100,
                 cache_read: 200,
                 cache_write: 0,
+                priority: false,
             };
             let priced = match basis {
                 CostBasis::Subscription => Priced {
                     usd: Some(0.0),
                     by_category: None,
                     source: PriceSource::Subscription,
+                    note: None,
                 },
                 CostBasis::Metered => Priced {
                     usd,
@@ -2627,6 +2629,7 @@ mod tests {
                         output_usd: 0.0,
                     }),
                     source: if usd.is_some() { PriceSource::Exact } else { PriceSource::Default },
+                    note: None,
                 },
             };
             total = meter.record(&call, &priced);
@@ -2744,6 +2747,7 @@ mod tests {
                 output: 100,
                 cache_read: 0,
                 cache_write: 0,
+                priority: false,
             };
             let priced = crate::pricing::Priced {
                 usd: Some(0.25),
@@ -2754,6 +2758,7 @@ mod tests {
                     output_usd: 0.0,
                 }),
                 source: crate::pricing::PriceSource::Exact,
+                note: None,
             };
             sink.record_call(&call, &priced, None).await;
             sink.record_call(&call, &priced, None).await;
@@ -2795,6 +2800,7 @@ mod tests {
             output: 100,
             cache_read: 0,
             cache_write: 0,
+            priority: false,
         };
         let priced = crate::pricing::Priced {
             usd: Some(0.1),
@@ -2805,6 +2811,7 @@ mod tests {
                 output_usd: 0.0,
             }),
             source: crate::pricing::PriceSource::Exact,
+            note: None,
         };
         sink.record_call(&call, &priced, None).await;
         assert!(
@@ -2860,6 +2867,7 @@ mod tests {
             output: 200,
             cache_read: 500,
             cache_write: 0,
+            priority: false,
         };
         assert_eq!(
             metered_tokens(&call(crate::pricing::CostBasis::Metered)),

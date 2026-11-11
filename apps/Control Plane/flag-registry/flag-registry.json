@@ -285,6 +285,17 @@
       ]
     },
     {
+      "name": "EXECUTION_SHADOW_REVIEWER",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "W5-097-a: the shadow action reviewer in the Do loop. Before an effectful tool call is dispatched, one tool-free inference reads the person's last user turns and the proposed call and returns a verdict, which is only counted and logged. It is never read by the permission engine, the hooks or the approval flow, and a zero-retention or waived run is never reviewed. Only the literal true turns it on. Promotion to a tighten-only check needs an ADR.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_SHADOW_REVIEWER", "default": "false" }
+      ]
+    },
+    {
       "name": "FEEDBACK_SKILL_VERSIONS",
       "kind": "switch",
       "owner": "model-plane",
@@ -359,6 +370,17 @@
       "purpose": "W4-BYO-3: the per-organisation overlay (hide, order and role candidates; narrow-only, no aliases, nothing that adds a model). inference-core reads it from session-core (cached 120 s, 1000 orgs) and applies it to the model listing after the platform overlay and to the verevon-role resolver ahead of the platform role table; entitlement and the ZDR, privacy and residency floors still apply. Only the literal true enables it; off, a stored overlay is ignored. Needs SESSION_ORG_ROUTING_OVERLAY on session-core.",
       "declarations": [
         { "service": "inference-core", "env": "INFERENCE_ORG_OVERLAY", "default": "false" }
+      ]
+    },
+    {
+      "name": "INFERENCE_SPEED_TIER_SPLIT",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Speed tier is its own choice, not Quick's. On, a request takes priority with speed_tier only where the model record declares it. Off, Quick selects priority as before. Only the literal true enables it.",
+      "declarations": [
+        { "service": "inference-core", "env": "INFERENCE_SPEED_TIER_SPLIT", "default": "false" }
       ]
     },
     {
@@ -595,6 +617,18 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_REASONING_TRANSLATE_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "F-t3-098 reasoning translation: a reader's translation of one shown text to nb or en, answered and never stored or fed back to the model (POST /v1/ai/reasoning-translate). A ZDR or waived turn is refused. Off, the route is a 404. Only the literal true turns it on.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_REASONING_TRANSLATE_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_REVIEW_RUN_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -626,6 +660,18 @@
       "codeDefault": "false",
       "declarations": [
         { "service": "model-gateway", "env": "MODEL_GATEWAY_SIDE_CHAT_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "MODEL_GATEWAY_SPEED_TIER",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Chat Fast chip: a turn that asks for speed priority sends the priority tier on each model call where the model declares it, priced with PRIORITY_TIER_COST_MULTIPLIER. Off, no call names a tier.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_SPEED_TIER", "default": "false" }
       ]
     },
     {
@@ -734,12 +780,31 @@
       "codePath": "apps/Model Plane/go/services/sandbox-manager/internal/process/sweeper.go"
     },
     {
+      "name": "PROMOTE_ON_USE_DURABLE",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "Keeps the promote-on-use counter in session-core, per org, user and URL hash, so it survives restarts, instead of in execution-core memory. Only the exact lowercase value true enables it. A failed count never promotes. Has no effect unless PROMOTE_ON_USE_ENABLED is true.",
+      "codePath": "apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs"
+    },
+    {
       "name": "PROMOTE_ON_USE_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
       "source": "code",
       "default": "false",
       "purpose": "Counts promote-on-use candidates and logs them. Only the exact lowercase value true enables it.",
+      "codePath": "apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs"
+    },
+    {
+      "name": "PROMOTE_ON_USE_SIGNAL",
+      "kind": "choice",
+      "owner": "model-plane",
+      "source": "code",
+      "default": "fetch",
+      "values": ["fetch", "cited"],
+      "purpose": "Which grounded use promote-on-use counts. fetch counts each successful page fetch. cited counts a fetched page only when the run's final answer cites its URL. Only the exact value cited selects it. Has no effect unless PROMOTE_ON_USE_ENABLED is true.",
       "codePath": "apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs"
     },
     {
@@ -900,6 +965,16 @@
       "orgOverridable": true,
       "purpose": "F-t3-098 reader polish: the answer text size, a dyslexia-friendly font and transcript spacing. Off, nothing is written and the transcript renders as before. Only the literal true turns it on.",
       "codePath": "apps/Frontend Plane/verevonv3/src/features/chat/lib/reader-polish.ts"
+    },
+    {
+      "name": "VITE_CHAT_SPEED_TIER",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "Chat Fast chip: shown only on a model that declares the priority tier, and the turn then asks for speed priority. Off, the composer shows no chip and sends no speed. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts"
     },
     {
       "name": "VITE_SHELL_TOASTS",

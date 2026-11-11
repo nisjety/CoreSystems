@@ -534,6 +534,8 @@ export type DashboardComposerSubmitPayload = {
 	 * popover) while no product surface ever wrote it.
 	 */
 	effort?: Exclude<EffortProfile, "standard"> | EffortLevel;
+	/** The Fast chip's speed (W5-095-b), present only while the chip is on and set to priority. */
+	speed?: 'priority';
 };
 
 type PanelPosition = {
@@ -1018,6 +1020,9 @@ export function DashboardComposer(props: {
 	onMessageChange: (value: string) => void;
 	onPlanModeChange?: (value: boolean) => void;
 	planMode?: boolean;
+	/** The Fast chip's speed choice (W5-095-b): `priority` asks for the priority tier on this turn. */
+	speedTier?: 'standard' | 'priority';
+	onSpeedTierChange?: (value: 'standard' | 'priority') => void;
 	/**
 	 * The strictest agent mode the organisation allows (WS25-S11), read from the org agent policy. Present only
 	 * where that policy is on: the picker then offers this mode and every stricter one, and no other.
@@ -1531,6 +1536,16 @@ export function DashboardComposer(props: {
 	// tier a turn sends comes from `resolveTurnPrivacyTier`, which does not
 	// read `undefined` from a catalogue that has not loaded yet.
 	const selectedPrivacyTier = createMemo(() => selectedCatalogModel()?.privacyTier);
+	// The Fast chip (W5-095-b): behind VITE_CHAT_SPEED_TIER, and only on a model whose catalogue record declares the
+	// priority tier. A zero-retention turn runs no subscription route, the only route that serves the tier, so it
+	// shows no chip. Off, the composer shows no chip and sends no speed.
+	const speedChipShown = createMemo(
+		() =>
+			import.meta.env.VITE_CHAT_SPEED_TIER === "true" &&
+			selectedCatalogModel()?.priorityTier === true &&
+			!zeroRetentionTurn(),
+	);
+	const speedPriority = () => props.speedTier === "priority";
 	const selectedSubscriptionRoute = createMemo(() => {
 		const connection = activeSubscriptionConnection();
 		// Catalog loading is independent of connection ownership. A delayed
@@ -3136,6 +3151,8 @@ export function DashboardComposer(props: {
 		// The mode chosen for this send, read before the tier lookup may wait. Not sent in a conversation-only
 		// turn, which runs no agent.
 		const submittedAgentMode = conversationOnly() ? undefined : agentMode();
+		// The Fast chip's choice, read before the tier lookup may wait. Carried only while the chip is shown and on.
+		const submittedSpeed = speedChipShown() && speedPriority() ? ("priority" as const) : undefined;
 
 		// Pending from here, so the composer is inert (and a second Enter is
 		// refused) while the tier lookup waits.
@@ -3161,6 +3178,8 @@ export function DashboardComposer(props: {
 			if (submittedContextRefs.length > 0) payload.contextRefs = submittedContextRefs;
 			// Omitted when nothing was picked, like `connectorScope` above.
 			if (submittedAgentMode !== undefined) payload.agentMode = submittedAgentMode;
+			// Omitted unless the chip is shown and on, so a plain send stays byte-identical on the wire.
+			if (submittedSpeed) payload.speed = submittedSpeed;
 			// Omitted unless the text has a mention; a conversation-only turn reads no page.
 			if (submittedBrowserContext && !submittedConversationOnly) payload.browserContext = submittedBrowserContext;
 			if (submittedConversationOnly) {
@@ -4476,6 +4495,21 @@ export function DashboardComposer(props: {
 								>
 									<ImagePlus class="size-4" />
 									{i18n.tr("Bilde", "Image")}
+								</button>
+							</Show>
+							<Show when={props.onSpeedTierChange && speedChipShown()}>
+								<button
+									type="button"
+									aria-pressed={speedPriority() ? "true" : "false"}
+									aria-label={i18n.tr("Fast: prioritert tjeneste", "Fast: priority tier")}
+									title={i18n.tr(
+										"Prioritert tjeneste for dette svaret: raskere, men dyrere",
+										"Priority tier for this answer: faster, but costs more",
+									)}
+									onClick={() => props.onSpeedTierChange?.(speedPriority() ? "standard" : "priority")}
+									class={composerImageButtonClass(speedPriority())}
+								>
+									{i18n.tr("Fast", "Fast")}
 								</button>
 							</Show>
 						</div>

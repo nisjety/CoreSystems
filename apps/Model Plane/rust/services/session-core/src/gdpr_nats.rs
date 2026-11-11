@@ -159,22 +159,33 @@ async fn handle_message(
     let Some(erasure) = parse_erasure_event(payload).map_err(|e| anyhow::anyhow!(e.to_string()))?
     else {
         // EP-8 S7 and S4: a per-user erasure drops that person's part of Space memory, then their
-        // standing profile and personal memory. It never purges the organization.
+        // standing profile and personal memory. It never purges the organization. A user_anonymize
+        // event keeps the Space rows (records, not identity) and removes the profile and personal
+        // memory.
         if let Some(user) =
             crate::gdpr::parse_user_erasure_event(payload).map_err(|e| anyhow::anyhow!(e.to_string()))?
         {
-            let space =
-                crate::gdpr::erase_user_space_memory_sources(pool, &user.org_id, &user.user_id).await?;
-            info!(
-                org_id = %user.org_id,
-                deleted = space.deleted,
-                narrowed = space.narrowed,
-                "GDPR user erasure: Space memory sources dropped"
-            );
-            // A legal hold refuses with ErasureHoldError, which the consumer maps to a delayed nak.
-            let personal =
-                crate::gdpr::erase_user_personal_data(pool, &user.org_id, &user.user_id, letta)
-                    .await?;
+            // The legal-hold check comes first: a held organization erases nothing, so no store is
+            // touched before a refusal. It maps to a delayed nak in the consumer.
+            crate::gdpr::ensure_user_erasure_not_held(&user.org_id).await?;
+            if user.kind == crate::gdpr::UserErasureKind::Erase {
+                let space =
+                    crate::gdpr::erase_user_space_memory_sources(pool, &user.org_id, &user.user_id).await?;
+                info!(
+                    org_id = %user.org_id,
+                    deleted = space.deleted,
+                    narrowed = space.narrowed,
+                    "GDPR user erasure: Space memory sources dropped"
+                );
+            }
+            let personal = crate::gdpr::erase_user_personal_data_for(
+                pool,
+                &user.org_id,
+                &user.user_id,
+                user.kind,
+                letta,
+            )
+            .await?;
             info!(
                 org_id = %user.org_id,
                 user_profiles = personal.user_profiles,

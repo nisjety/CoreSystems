@@ -400,8 +400,15 @@ type InferRequest struct {
 	// is refused. Model Plane never receives the gateway's address or key. A customer gateway is never zero
 	// data retention, so a ZDR call that names one is refused. Empty names no connection.
 	ModelConnectionId string `protobuf:"bytes,24,opt,name=model_connection_id,json=modelConnectionId,proto3" json:"model_connection_id,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// The speed tier this call asks for: "" (no choice, the default), "standard" or "priority". Read
+	// only when INFERENCE_SPEED_TIER_SPLIT is the literal true, and only by the subscription adapter,
+	// which serves "priority" when the model's record declares it (ModelInfo.priority_tier). Speed is
+	// separate from reasoning effort, so a quick turn never implies priority. A value other than
+	// "priority" does not ask for it, though the legacy prefer_priority_service_tier flag still does.
+	// It carries no content, so Zero Data Retention does not change it.
+	SpeedTier     string `protobuf:"bytes,25,opt,name=speed_tier,json=speedTier,proto3" json:"speed_tier,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *InferRequest) Reset() {
@@ -598,6 +605,13 @@ func (x *InferRequest) GetRoleFallbackModel() string {
 func (x *InferRequest) GetModelConnectionId() string {
 	if x != nil {
 		return x.ModelConnectionId
+	}
+	return ""
+}
+
+func (x *InferRequest) GetSpeedTier() string {
+	if x != nil {
+		return x.SpeedTier
 	}
 	return ""
 }
@@ -1075,9 +1089,14 @@ type InferResponse struct {
 	// What the budget did to how this call was routed (WS27-S7), when the intent
 	// layer routed it under a budget posture. Absent for a pinned model or while
 	// INFERENCE_ROUTE_NOTE is off.
-	RouteNote     *RouteNote `protobuf:"bytes,15,opt,name=route_note,json=routeNote,proto3" json:"route_note,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	RouteNote *RouteNote `protobuf:"bytes,15,opt,name=route_note,json=routeNote,proto3" json:"route_note,omitempty"`
+	// The service tier this call was sent to the subscription broker on: "priority" when the priority
+	// tier went upstream, empty when none did or the serving provider does not report one. It states
+	// what was requested of the provider, never a guarantee the provider billed that tier. It carries
+	// no content, so Zero Data Retention does not change it.
+	ServiceTierUsed string `protobuf:"bytes,16,opt,name=service_tier_used,json=serviceTierUsed,proto3" json:"service_tier_used,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *InferResponse) Reset() {
@@ -1213,6 +1232,13 @@ func (x *InferResponse) GetRouteNote() *RouteNote {
 		return x.RouteNote
 	}
 	return nil
+}
+
+func (x *InferResponse) GetServiceTierUsed() string {
+	if x != nil {
+		return x.ServiceTierUsed
+	}
+	return ""
 }
 
 // InferChunk — a single chunk in a streaming inference response.
@@ -1999,7 +2025,11 @@ type ModelInfo struct {
 	// The model the vendor names as this one's replacement. Set only on a deprecated model
 	// whose cited vendor page names one; empty means no sourced record names a replacement
 	// (F-t3-073). Display only: nothing switches to it, and a thread stays on the model it pinned.
-	Successor     string `protobuf:"bytes,13,opt,name=successor,proto3" json:"successor,omitempty"`
+	Successor string `protobuf:"bytes,13,opt,name=successor,proto3" json:"successor,omitempty"`
+	// Whether this model is served on the priority service tier when a call asks for it with
+	// InferRequest.speed_tier. False when the model's record does not declare the tier, so a caller
+	// must not offer the choice for it. Advertised whatever INFERENCE_SPEED_TIER_SPLIT says.
+	PriorityTier  bool `protobuf:"varint,14,opt,name=priority_tier,json=priorityTier,proto3" json:"priority_tier,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2123,6 +2153,13 @@ func (x *ModelInfo) GetSuccessor() string {
 		return x.Successor
 	}
 	return ""
+}
+
+func (x *ModelInfo) GetPriorityTier() bool {
+	if x != nil {
+		return x.PriorityTier
+	}
+	return false
 }
 
 // ProviderDataUse — the data-handling statements a provider makes for one model (EP-9 C5).
@@ -6469,7 +6506,7 @@ var File_model_plane_v1_inference_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\n" +
-	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\xe4\b\n" +
+	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\x83\t\n" +
 	"\fInferRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -6499,7 +6536,9 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\apurpose\x18\x15 \x01(\x0e2\x1c.model_plane.v1.InferPurposeR\apurpose\x12\x15\n" +
 	"\x06run_id\x18\x16 \x01(\tR\x05runId\x12.\n" +
 	"\x13role_fallback_model\x18\x17 \x01(\tR\x11roleFallbackModel\x12.\n" +
-	"\x13model_connection_id\x18\x18 \x01(\tR\x11modelConnectionId\"f\n" +
+	"\x13model_connection_id\x18\x18 \x01(\tR\x11modelConnectionId\x12\x1d\n" +
+	"\n" +
+	"speed_tier\x18\x19 \x01(\tR\tspeedTier\"f\n" +
 	"\x0eInferImagePart\x12#\n" +
 	"\rmessage_index\x18\x01 \x01(\rR\fmessageIndex\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12\x1b\n" +
@@ -6525,7 +6564,7 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"tokenCount\x12!\n" +
 	"\fmean_logprob\x18\x02 \x01(\x01R\vmeanLogprob\x12*\n" +
 	"\x11claim_token_count\x18\x03 \x01(\rR\x0fclaimTokenCount\x12,\n" +
-	"\x12claim_mean_logprob\x18\x04 \x01(\x01R\x10claimMeanLogprob\"\xc0\x05\n" +
+	"\x12claim_mean_logprob\x18\x04 \x01(\x01R\x10claimMeanLogprob\"\xec\x05\n" +
 	"\rInferResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x18\n" +
@@ -6547,7 +6586,8 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x12compaction_summary\x18\r \x01(\tR\x11compactionSummary\x12G\n" +
 	"\x0fprovider_timing\x18\x0e \x01(\v2\x1e.model_plane.v1.ProviderTimingR\x0eproviderTiming\x128\n" +
 	"\n" +
-	"route_note\x18\x0f \x01(\v2\x19.model_plane.v1.RouteNoteR\trouteNote\"\xbd\x05\n" +
+	"route_note\x18\x0f \x01(\v2\x19.model_plane.v1.RouteNoteR\trouteNote\x12*\n" +
+	"\x11service_tier_used\x18\x10 \x01(\tR\x0fserviceTierUsed\"\xbd\x05\n" +
 	"\n" +
 	"InferChunk\x12\x1d\n" +
 	"\n" +
@@ -6622,7 +6662,7 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\rprovider_used\x18\x04 \x01(\tR\fproviderUsed\"K\n" +
 	"\x11ListModelsRequest\x12\x1a\n" +
 	"\bmodality\x18\x01 \x01(\tR\bmodality\x12\x1a\n" +
-	"\bprovider\x18\x02 \x01(\tR\bprovider\"\xe8\x03\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\"\x8d\x04\n" +
 	"\tModelInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x1a\n" +
@@ -6637,7 +6677,8 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	" \x01(\rR\x0fmaxOutputTokens\x12\x1c\n" +
 	"\tlifecycle\x18\v \x01(\tR\tlifecycle\x12:\n" +
 	"\bdata_use\x18\f \x01(\v2\x1f.model_plane.v1.ProviderDataUseR\adataUse\x12\x1c\n" +
-	"\tsuccessor\x18\r \x01(\tR\tsuccessor\"\xf2\x01\n" +
+	"\tsuccessor\x18\r \x01(\tR\tsuccessor\x12#\n" +
+	"\rpriority_tier\x18\x0e \x01(\bR\fpriorityTier\"\xf2\x01\n" +
 	"\x0fProviderDataUse\x12-\n" +
 	"\x10trains_on_inputs\x18\x01 \x01(\bH\x00R\x0etrainsOnInputs\x88\x01\x01\x12*\n" +
 	"\x0eretention_days\x18\x02 \x01(\x05H\x01R\rretentionDays\x88\x01\x01\x12&\n" +

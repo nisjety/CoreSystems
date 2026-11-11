@@ -1145,6 +1145,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			event := store.WebhookEvent{
 				ID:             item.eventID,
 				OrganizationID: item.organizationID,
+				ConnectionID:   item.connectionID,
 				ProviderKey:    normalized.ProviderKey,
 				EventType:      normalized.EventType,
 				SignatureHash:  normalized.SignatureHash,

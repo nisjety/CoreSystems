@@ -399,6 +399,7 @@ impl InferenceCore for MockOk {
             cache_creation_input_tokens: 0,
             provider_timing: None,
             route_note: None,
+            service_tier_used: String::new(),
         });
         // A private repair or source-review report must prove it bypassed
         // the response cache; a scripted planned round answering either
@@ -977,6 +978,7 @@ impl InferenceCore for MockStreamDown {
             cache_creation_input_tokens: 0,
             provider_timing: None,
             route_note: None,
+            service_tier_used: String::new(),
         }))
     }
 

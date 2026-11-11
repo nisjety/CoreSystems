@@ -442,6 +442,7 @@ async fn side_chat_reply(
         Some(&session_token),
         None,
         None,
+        None,
         user,
     )
     .await;

@@ -1,7 +1,7 @@
 {
   "_comment": "Routes the edge registers that neither docs/openapi.yaml nor docs/openapi-internal.yaml describes, each with the reason. A new route must be documented in one of those files or added here with a reason; an entry that becomes documented or stops existing must be removed (scripts/tests/openapi-route-coverage.test.mjs).",
   "route_registrations": 127,
-  "route_registrations_note": "Re-pinned by D-B3-openapi-sdk (D2-003) from 86 to 108: the W2 .route(...) registrations are documented or allowlisted; three internal routes were added and six documented routes removed from the allowlist. OPENAPI-INTERNAL (decision 3.13): the eight /v1/internal/* routes are documented in docs/openapi-internal.yaml and left this list; the count is unchanged. W5-S4 (F-t2-068): POST /v1/profiles/:id/clear-data is documented in docs/openapi.yaml and re-pinned from 120 to 121. W5-081-a (F-t3-081): GET /v1/agent/runs/{run_id}/procedure-draft is allowlisted (dark behind QUARRY_TEACH_MODE_ENABLED) and the pin reads the working-tree count, 127. HEAD registered 126 against the 121 pin, so the pin was already behind before this route.",
+  "route_registrations_note": "Re-pinned by D-B3-openapi-sdk (D2-003) from 86 to 108: the W2 .route(...) registrations are documented or allowlisted; three internal routes were added and six documented routes removed from the allowlist. OPENAPI-INTERNAL (decision 3.13): the eight /v1/internal/* routes are documented in docs/openapi-internal.yaml and left this list; the count is unchanged. W5-S4 (F-t2-068): POST /v1/profiles/:id/clear-data is documented in docs/openapi.yaml and re-pinned from 120 to 121. W5-081-a (F-t3-081): GET /v1/agent/runs/{run_id}/procedure-draft is allowlisted (dark behind QUARRY_TEACH_MODE_ENABLED) and the pin reads the working-tree count, 127. HEAD registered 126 against the 121 pin, so the pin was already behind before this route. FU-16 (teach-mode docs): GET /v1/agent/runs/{run_id}/procedure-draft is now documented in docs/openapi.yaml and left this list; no route was added, so the count is unchanged.",
   "routes": [
     {
       "path": "/graphql",
@@ -82,10 +82,6 @@
     {
       "path": "/version",
       "reason": "Public route not yet described in openapi.yaml; allowlisted so a new undocumented route cannot slip in unnoticed, to be documented in a follow-up."
-    },
-    {
-      "path": "/v1/agent/runs/{}/procedure-draft",
-      "reason": "F-t3-081 Teach mode: the redacted procedure draft of a run's human steps. Dark behind QUARRY_TEACH_MODE_ENABLED (404 teach_mode_disabled while it is off). Its ZDR row is agent_procedure_draft in docs/ZDR_MATRIX.md. Not yet described in openapi.yaml; document it there when the teach surface ships."
     }
   ]
 }

@@ -44,6 +44,8 @@ import type {
   RunPausedForApprovalEvent,
 } from '@/shared/api/run-console-client'
 import { getRun } from '@/shared/api/runs-client'
+import { teachSkillFromRun } from '@/shared/api/learning-client'
+import { ApiError } from '@/shared/api/http'
 import {
   CHAT_RUN_SCREENSHOT_NOTES,
   applyBrowserAction,
@@ -65,6 +67,10 @@ import {
   type ChatRunWatchState,
 } from '@/features/chat/lib/chat-run-watch'
 import { useI18n, translateApiError } from '@/shared/i18n'
+import { Button } from '@/shared/ui/Button'
+import { VerevonField } from '@/shared/ui/verevon/VerevonField'
+import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
+import { VerevonTextarea } from '@/shared/ui/verevon/VerevonTextarea'
 import { isSafeLinkHref } from '../lib/safe-href'
 import { RunNotifyButton } from './RunNotifyButton'
 import { RunCostMeter } from './RunCostMeter'
@@ -102,6 +108,48 @@ export const chatBrowserTakeoverEnabled = () => import.meta.env.VITE_CHAT_BROWSE
  * person's own words to the agent; execution-core holds the model to the same cap.
  */
 export const GIVE_BACK_NOTE_MAX_CHARS = 500
+
+/**
+ * Teach mode (F-t3-081): "Save these steps as a skill" after a give-back in a run the person took over. Off by
+ * default. The server keeps its own switch too (`MODEL_GATEWAY_TEACH_MODE_ENABLED`), and refuses a zero-retention turn.
+ */
+export const teachModeEnabled = () => import.meta.env.VITE_TEACH_MODE === 'true'
+
+/** The longest hint the person may give a taught skill's draft, as the teach route bounds it. */
+const TEACH_HINT_MAX_CHARS = 500
+
+/** The copy for the typed refusals a teach draft names (F-t3-081). Any other refusal gets the generic copy. */
+const TEACH_REFUSAL_COPY: Readonly<Record<string, { no: string; en: string }>> = {
+  teach_name_taken: {
+    no: 'Det finnes allerede en ferdighet med dette navnet.',
+    en: 'A skill with this name already exists.',
+  },
+  teach_name_invalid: {
+    no: 'Navnet må bestå av små bokstaver og tall, med bindestrek mellom ordene, og være høyst 64 tegn.',
+    en: 'The name must be lowercase letters and digits with hyphens between words, at most 64 characters.',
+  },
+  teach_run_not_teachable: {
+    no: 'Denne kjøringen kan ikke brukes til å lage en ferdighet.',
+    en: 'This run cannot be turned into a skill.',
+  },
+  teach_no_steps: {
+    no: 'Kjøringen har ingen steg å lære av.',
+    en: 'The run has no steps to learn from.',
+  },
+}
+
+/** What a failed save says: the zero-retention refusal, a named refusal, or the generic copy. Never the gateway's text. */
+function teachFailureMessage(failure: unknown, tr: (noText: string, enText: string) => string): string {
+  if (failure instanceof ApiError && failure.feature === 'teach_mode') {
+    return tr('Ferdigheter kan ikke lagres med null datalagring.', 'A skill cannot be saved with zero data retention.')
+  }
+  const copy = failure instanceof ApiError && failure.code ? TEACH_REFUSAL_COPY[failure.code] : undefined
+  if (copy) return tr(copy.no, copy.en)
+  return translateApiError(failure, tr, {
+    no: 'Forslaget kunne ikke lagres. Prøv igjen.',
+    en: 'The proposal could not be saved. Try again.',
+  })
+}
 
 function isTerminalRunStatus(status?: string): boolean {
   return TERMINAL_RUN_STATUSES.has((status ?? '').trim().toLowerCase())
@@ -212,6 +260,99 @@ function ChatRunEvidenceFallback(props: {
         )}
       </Show>
     </div>
+  )
+}
+
+/**
+ * Teach mode (F-t3-081): saves the steps the person took in this run as a skill proposal. The panel mounts it only
+ * after a give-back in a run they took over (see `teachRunId`), so a new run starts with an empty form. The proposal
+ * waits in the learning inbox and is used only once the owner accepts it there.
+ */
+function SaveRunAsSkill(props: { runId: string }) {
+  const i18n = useI18n()
+  const [open, setOpen] = createSignal(false)
+  const [name, setName] = createSignal('')
+  const [hint, setHint] = createSignal('')
+  const [pending, setPending] = createSignal(false)
+  const [failure, setFailure] = createSignal<string | null>(null)
+  const [saved, setSaved] = createSignal(false)
+
+  const save = async (event: SubmitEvent) => {
+    event.preventDefault()
+    const skillName = name().trim()
+    if (!skillName || pending()) return
+    setPending(true)
+    setFailure(null)
+    try {
+      await teachSkillFromRun(props.runId, { name: skillName, goalHint: hint().trim() })
+      setSaved(true)
+      setOpen(false)
+    } catch (error) {
+      setFailure(teachFailureMessage(error, i18n.tr))
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <section class="verevon-chat-run-teach" aria-label={i18n.tr('Lagre som ferdighet', 'Save as a skill')}>
+      <Show
+        when={!saved()}
+        fallback={(
+          <p class="verevon-chat-run-teach__done" role="status">
+            {i18n.tr('Forslag opprettet — gjennomgå det i', 'Proposal created — review it in the')}{' '}
+            <a href="/settings/learning" link>{i18n.tr('læringsinnboksen', 'learning inbox')}</a>.
+          </p>
+        )}
+      >
+        <Show
+          when={open()}
+          fallback={(
+            <Button variant="secondary" size="sm" onClick={() => setOpen(true)}>
+              {i18n.tr('Lagre disse stegene som en ferdighet', 'Save these steps as a skill')}
+            </Button>
+          )}
+        >
+          <form class="verevon-chat-run-teach__form" onSubmit={(event) => void save(event)}>
+            <VerevonField label={i18n.tr('Navn på ferdigheten', 'Skill name')}>
+              <VerevonInput
+                type="text"
+                required
+                maxlength={64}
+                pattern="[a-z0-9]+(-[a-z0-9]+)*"
+                title={i18n.tr(
+                  'Små bokstaver og tall, med bindestrek mellom ordene',
+                  'Lowercase letters and digits, with hyphens between words',
+                )}
+                value={name()}
+                disabled={pending()}
+                onInput={(event) => setName(event.currentTarget.value)}
+              />
+            </VerevonField>
+            <VerevonField label={i18n.tr('Hint', 'Hint')} optionalLabel={i18n.tr('valgfritt', 'optional')}>
+              <VerevonTextarea
+                rows={2}
+                maxlength={TEACH_HINT_MAX_CHARS}
+                value={hint()}
+                disabled={pending()}
+                onInput={(event) => setHint(event.currentTarget.value)}
+              />
+            </VerevonField>
+            <Show when={failure()}>
+              {(message) => <p class="verevon-chat-run-panel__control-error" role="alert">{message()}</p>}
+            </Show>
+            <div class="verevon-chat-run-teach__actions">
+              <Button type="submit" variant="primary" size="sm" disabled={pending() || name().trim().length === 0}>
+                {i18n.tr('Send forslaget', 'Send the proposal')}
+              </Button>
+              <Button variant="ghost" size="sm" disabled={pending()} onClick={() => setOpen(false)}>
+                {i18n.tr('Avbryt', 'Cancel')}
+              </Button>
+            </div>
+          </form>
+        </Show>
+      </Show>
+    </section>
   )
 }
 
@@ -504,6 +645,9 @@ export function ChatLiveRunPanel(props: {
   const [takeoverPending, setTakeoverPending] = createSignal(false)
   /** The person's hand-back note (EP-1 S3), kept until the give-back is accepted. */
   const [giveBackNote, setGiveBackNote] = createSignal('')
+  /** The runs the person took the browser over in, and gave it back in, as Quarry confirmed them (F-t3-081 teach mode). */
+  const [takenOverRun, setTakenOverRun] = createSignal<string | null>(null)
+  const [givenBackRun, setGivenBackRun] = createSignal<string | null>(null)
   /** Take over and Give back are offered only with the switch on, for a non-ZDR turn, in an org. */
   const takeover = () => chatBrowserTakeoverEnabled() && !zdr() && Boolean(props.orgId?.trim())
   /** The note field shows only while the person holds the turn's browser. */
@@ -535,7 +679,11 @@ export function ChatLiveRunPanel(props: {
         setControlError(i18n.tr(STALE_CONTROL_COPY.no, STALE_CONTROL_COPY.en))
         return
       }
+      if (mode === 'human_takeover' && control?.mode === 'human_takeover') {
+        setTakenOverRun(currentRunId)
+      }
       if (mode === 'agent_control') {
+        setGivenBackRun(currentRunId)
         const note = giveBackNote().trim().slice(0, GIVE_BACK_NOTE_MAX_CHARS)
         setGiveBackNote('')
         props.onBrowserGiveBack?.(currentRunId, note)
@@ -606,6 +754,16 @@ export function ChatLiveRunPanel(props: {
     const selected = expandedStep()
     if (selected === null) return null
     return steps().find((step) => step.step === selected) ?? null
+  }
+  /**
+   * The watched run, when "Save these steps as a skill" is offered (F-t3-081): teach mode is on, the person took the
+   * browser over in this run and has given it back, and the turn keeps content. A zero-retention or temporary turn
+   * never offers it, and a new run offers it only after its own takeover and give-back.
+   */
+  const teachRunId = (): string | null => {
+    const current = props.runId?.trim()
+    if (!current || !teachModeEnabled() || zdr()) return null
+    return takenOverRun() === current && givenBackRun() === current ? current : null
   }
 
   return (
@@ -723,6 +881,10 @@ export function ChatLiveRunPanel(props: {
               </Show>
               <Show when={controlError()}>
                 {(message) => <p class="verevon-chat-run-panel__control-error" role="alert">{message()}</p>}
+              </Show>
+              {/* F-t3-081 teach mode: after a give-back in a run the person took over, save those steps as a skill. */}
+              <Show when={teachRunId()}>
+                {(taughtRunId) => <SaveRunAsSkill runId={taughtRunId()} />}
               </Show>
               {/* EP-1 W4-P4: the Terminal and Files tabs for the kinds this run used. Nothing mounts without one, or while the panel is hidden. */}
               <Show when={computerTabsShown() && !props.hidden}>

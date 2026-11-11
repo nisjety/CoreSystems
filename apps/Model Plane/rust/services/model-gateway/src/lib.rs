@@ -94,6 +94,7 @@ pub mod role_routing;
 pub mod room_run;
 pub mod readiness;
 pub mod recall_conversations;
+pub mod reasoning_translate_routes;
 pub mod relevance;
 pub mod relevance_calibration;
 pub mod result_validation;

@@ -439,6 +439,24 @@ function modelEntitlementStreamPresentation(
 }
 
 /**
+ * An organisation that has paused agent runs (F-t3-083) refused the Do turn before any model ran, so nothing was run or
+ * saved and what streamed is not the answer. A refusal, not an outage. The same turn would be refused the same way until
+ * an administrator resumes agent runs, so no retry is offered and the words say that plain chat still works. The words
+ * are the SPA's own, in the reader's language; the server's text is English and is never shown.
+ */
+function agentsPausedStreamPresentation(tr: Translate): StreamFailurePresentation {
+  return {
+    message: tr(
+      'Organisasjonen har satt agentkjøringer på pause. Vanlig chat fungerer som før. Ingenting ble kjørt.',
+      'Your organisation has paused agent runs. Plain chat works as before. Nothing was run.',
+    ),
+    unsaved: true,
+    unavailable: false,
+    action: 'none',
+  }
+}
+
+/**
  * The words for a refusal by the server's attachment contract. Nothing was sent
  * to a model, so each says what to change, not to retry.
  */
@@ -556,7 +574,9 @@ function limitStreamPresentation(
  * the refusals of the turn that runs an approved plan (WS14 S2a): the server holds
  * no live grant for the thread, or the capability is switched off on this
  * deployment. Nothing ran, a retry cannot help, so each says so in words and
- * offers none. `prompt_too_long`,
+ * offers none. `org_agents_paused` is the organisation's agent-run pause
+ * (F-t3-083): a Do turn refused before any model ran, so nothing was run, the
+ * words say plain chat still works, and no retry is offered. `prompt_too_long`,
  * `inference_stream_error` and `model_plane_unavailable` are translated too;
  * the last one's server text is raw transport detail and is never shown.
  * With VITE_CHAT_LIMIT_NOTICES on, `budget_exceeded`, `quota_exceeded`, `run_ceiling_reached` and `rate_limited` are
@@ -572,6 +592,8 @@ export function streamFailurePresentation(
   // server's text for them is English operator wording, never shown.
   if (code !== undefined && isZdrCode(code)) return zdrStreamPresentation(code, tr, details.feature)
   if (isModelEntitlementCode(code)) return modelEntitlementStreamPresentation(code, tr)
+  // The organisation's agent-run pause (F-t3-083): a refusal before any model ran, typed on the stream's error frame.
+  if (code === 'org_agents_paused') return agentsPausedStreamPresentation(tr)
   const server = serverMessage.trim()
   const now = details.now ?? Date.now()
   if (isLimitCode(code) && chatLimitNoticesEnabled()) return limitStreamPresentation(code, details, now, tr)

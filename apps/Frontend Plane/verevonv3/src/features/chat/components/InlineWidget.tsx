@@ -48,10 +48,12 @@ export type InlineWidgetSurfaceKind = 'live' | 'inert'
  */
 export const InlineWidgetSurface = createContext<InlineWidgetSurfaceKind>('inert')
 
-/** What one assistant answer gives its widgets: the follow-up handler and the budget they share. */
+/** What one assistant answer gives its widgets: the follow-up and quote handlers and the budget they share. */
 type InlineWidgetAnswerScope = {
   /** Read when a follow-up arrives: a turn without the handler stages nothing. */
   followUpHandler: () => ((text: string) => void) | undefined
+  /** Read when a quote arrives (EP-4 W4-IO-2): a turn without it stages no quote, so a quote never replaces the draft. */
+  quoteHandler: () => ((text: string) => void) | undefined
   followupBudget: TokenBucket
 }
 
@@ -61,10 +63,18 @@ const InlineWidgetAnswerContext = createContext<InlineWidgetAnswerScope | null>(
  * Wraps one assistant answer, so its widgets' staged follow-ups go through the
  * answer's own follow-up handler (the one its follow-up chips use) and share one
  * budget. Without it a widget stages nothing.
+ *
+ * A quoted passage goes through `onQuoteSelection` instead (EP-4 W4-IO-2): that handler puts the quote in front of
+ * the composer's draft, where the follow-up handler replaces it. Without it a widget quotes nothing.
  */
-export function InlineWidgetAnswer(props: { onSelectFollowUp?: (text: string) => void; children: JSX.Element }): JSX.Element {
+export function InlineWidgetAnswer(props: {
+  onSelectFollowUp?: (text: string) => void
+  onQuoteSelection?: (text: string) => void
+  children: JSX.Element
+}): JSX.Element {
   const scope: InlineWidgetAnswerScope = {
     followUpHandler: () => props.onSelectFollowUp,
+    quoteHandler: () => props.onQuoteSelection,
     followupBudget: createAnswerFollowupBudget(),
   }
   return <InlineWidgetAnswerContext value={scope}>{props.children}</InlineWidgetAnswerContext>
@@ -176,8 +186,8 @@ function InlineWidgetFrame(props: { source: string; fallback: JSX.Element }): JS
           setStagedFollowup(action.text)
           return
         case 'stage_selection':
-          // The quote reaches the composer only through the answer's handler, as a follow-up does: no handler, no chip.
-          if (!selectionOn || !answer?.followUpHandler()) return
+          // The quote reaches the composer only through the quote handler, which prefixes the draft: no handler, no chip.
+          if (!selectionOn || !answer?.quoteHandler()) return
           setStagedSelection(action.text)
           return
         case 'confirm_link':
@@ -208,11 +218,11 @@ function InlineWidgetFrame(props: { source: string; fallback: JSX.Element }): JS
     answer?.followUpHandler()?.(text)
   }
   const clearSelection = () => setStagedSelection(null)
-  // The quote goes into the composer through the answer's follow-up handler, the way a follow-up chip does: the
-  // person's click stages it and nothing here sends it, so the person sends it as an ordinary turn.
+  // The quote goes into the composer through the answer's quote handler, which puts it in front of the draft rather than
+  // replacing it: the person's click stages it and nothing here sends it, so the person sends it as an ordinary turn.
   const quoteSelection = (text: string) => {
     clearSelection()
-    answer?.followUpHandler()?.(`> ${text}\n\n`)
+    answer?.quoteHandler()?.(text)
   }
 
   return (
