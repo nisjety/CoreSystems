@@ -144,6 +144,11 @@ export type ChatEventPayloads = {
     request_id: string
     sub_queries: unknown[]
   }
+  /** Rust variants: ResearchRun. */
+  research_run: {
+    research_run_id: string
+    status: string
+  }
   /** Rust variants: ResultReceipt. */
   result_receipt: {
     receipt: Record<string, unknown>

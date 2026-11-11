@@ -95,6 +95,13 @@
       "format": "uint64",
       "minimum": 0
     },
+    "no_egress": {
+      "description": "Q3-E3.8.8w: `true` serves the page from the organization's stored capture in the Data\nPlane and opens no connection to the page's host. Absent and `false` are the same request.\nAccepted only while `ScrapeLimits::no_egress_enabled`; refused under zero data retention\nby the edge, and never with a capture, an action or a page emulation.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "only_main_content": {
       "type": [
         "boolean",

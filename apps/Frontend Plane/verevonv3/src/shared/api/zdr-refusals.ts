@@ -81,7 +81,7 @@ export type Translate = (noText: string, enText: string) => string
 type Copy = { readonly no: string; readonly en: string }
 
 /** The sha256 of `./contracts/zdr-refusals.json`. Changing the golden changes this too. */
-export const ZDR_REFUSALS_CONTRACT_SHA256 = 'ae4473ce0a3ddd3d6d104aad3f90509014da63b60e2db27766983956708437d7'
+export const ZDR_REFUSALS_CONTRACT_SHA256 = 'ff743796aa9c006d5afee9e511762a9a2df7e69a844aee4954d4353f1305c53f'
 
 export type ZdrRefusalText = {
   /** Norwegian. A feature refusal names the feature with `{feature}`. */

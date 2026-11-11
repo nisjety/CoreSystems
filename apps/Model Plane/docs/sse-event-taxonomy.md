@@ -36,6 +36,7 @@ asserted, not just reported.
 | `queued_input` | — (control) | `ChatEvent::QueuedInputReceipted` | ✅ |
 | `reasoning_delta` | `reasoning` | `ChatEvent::ReasoningDelta` | ✅ |
 | `research_plan` | — (control) | `ChatEvent::ResearchPlan` | ✅ |
+| `research_run` | — (control) | `ChatEvent::ResearchRun` | ✅ |
 | `result_receipt` | `usage` | `ChatEvent::ResultReceipt` | ✅ |
 | `retrieval_notice` | — (control) | `ChatEvent::RetrievalNotice` | ✅ |
 | `retry_scheduled` | `steps` | `ChatEvent::RetryScheduled` | ✅ |
@@ -109,3 +110,4 @@ the wire but not written yet.
 | `question_answered` | 28 | not yet |
 | `run_usage_progress` | 29 | not yet |
 | `browser_attach_shared_jar` | 30 | ✅ |
+| `browser_steer_taken` | 31 | ✅ |

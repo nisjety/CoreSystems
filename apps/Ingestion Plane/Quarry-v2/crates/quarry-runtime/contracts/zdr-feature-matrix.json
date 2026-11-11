@@ -77,6 +77,26 @@
       "treatment": "refused"
     },
     {
+      "basis": "same route as scrape: scrape_with refuses a profile_id under ZDR with 400 profile_zdr_forbidden, by the request's zdr flag or the token's ZDR floor, before any profile is read or any page fetched, and refuses ingest with 400 profile_ingest_forbidden; profile_guard::precheck refuses a service principal with 403, an API key is refused with 403 api_key_profile_refused, profile_guard::authorize decides the owner check (it denies a non-owner only under QUARRY_EDGE__PROFILE_OWNER_ENFORCE=enforce), and scrape_with answers 404 for a profile the organization does not hold (a scrape never creates one). The restore is read-only, so nothing is written back to the profile, and a pinned scrape is never cached (it takes the browser plan, which both cache gates refuse) or ingested",
+      "detail": {
+        "code": "BAD_REQUEST",
+        "feature": "persistent_profile"
+      },
+      "enforced_by": [
+        "routes::tests::a_pinned_scrape_is_refused_under_zdr_before_any_fetch",
+        "routes::tests::a_pinned_scrape_with_ingest_is_refused_and_nothing_is_ingested",
+        "routes::tests::a_service_principal_or_api_key_cannot_pin_a_profile",
+        "routes::tests::the_stream_route_refuses_a_profile_id_while_the_pin_is_on"
+      ],
+      "id": "scrape_profile_pin",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [],
+      "status": "enforced",
+      "treatment": "refused"
+    },
+    {
       "basis": "routes::refuse_durable_job_under_zdr: the job record and per-page results would be retained",
       "detail": {
         "code": "FORBIDDEN",
@@ -147,21 +167,21 @@
       "treatment": "honored"
     },
     {
-      "basis": "search_routes::suggest calls the Model Plane and never reads the token's ZDR floor",
+      "basis": "search_routes::suggest (dark behind QUARRY_EDGE__SEARCH_SUGGEST) reads the token's ZDR floor (effective_zdr) after the switch check and, under ZDR, answers an empty 200 before any Model Plane call, because the Model Plane hop carries no ZDR posture (ADR-4, the INNH-8 /v1/answer precedent); the route's contract is always 200 so the UI degrades instead of seeing a refusal; the skip is logged as the row id only, never the query",
       "detail": {
-        "warning": "the partial query is sent to the Model Plane without the ZDR posture"
+        "warning": "no suggestions under ZDR: the partial query never leaves Quarry"
       },
       "enforced_by": [
-        "zdr_gap_rows::gap_rows_currently_violate_search_suggest"
+        "zdr_gap_rows::a_zdr_caller_gets_no_suggestions_and_the_model_plane_sees_no_request"
       ],
       "id": "search_suggest",
-      "issue": "unassigned: forward the posture, or refuse under ZDR",
+      "issue": null,
       "log": "log_unverified",
       "log_canary": null,
       "routes": [
         "/v1/search/suggest"
       ],
-      "status": "gap",
+      "status": "enforced",
       "treatment": "degraded"
     },
     {
@@ -319,6 +339,7 @@
       "routes": [
         "/v1/sources",
         "/v1/sources/{id}",
+        "/v1/sources/{id}/definition",
         "/v1/snapshots",
         "/v1/{kind}/jobs",
         "/v1/request-queues",
@@ -701,7 +722,50 @@
       "treatment": "inert"
     },
     {
-      "basis": "agent_routes::hit_test::hit_test_point (E3.3-h, dark behind QUARRY_EDGE__HIT_TEST: 403 hit_test_disabled when off, and 501 unsupported when on until the driver trait gains its point method) reads DOM.getNodeForLocation and the partial accessibility tree, maps the hit to the person's lane's last observed @e ref, and answers the run's zdr flag with it. The AX name it returns is page text the same caller's observation already carries under ZDR; no backend node id or frame id is on the wire. Nothing is stored, so ZDR has nothing to suppress and the route is not refused",
+      "basis": "no route of its own: every agent run route emits through EventSink. The Model Plane run-trace publisher (WS10.S5, quarry-runtime model_trace_publisher, present only when QUARRY_EDGE__MODEL_TRACE_NATS_URL is set) is reached only from the durable emit path for a run opened with trace labels whose model_run_id is set and whose ZDR posture is off; emit_ephemeral and a ZDR emit_for_zdr never reach it, ModelTracePublisher::try_enqueue refuses a ZDR context again, and trace_projection::to_model_envelope returns nothing for a ZDR run, so a ZDR run sends no NATS message on mp.v1.trace.run.*. session-core refuses an envelope with zdr true as well. Nothing is returned to the caller: the refusal is silent, the run itself proceeds",
+      "detail": {
+        "code": "FORBIDDEN",
+        "feature": "browser_trace_publish"
+      },
+      "enforced_by": [],
+      "id": "browser_trace_publish",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [],
+      "status": "enforced",
+      "treatment": "refused"
+    },
+    {
+      "basis": "same routes as agent_run_surface (events/stream): EventSink keeps the newest events of an open run in a bounded in-process ring (RingLimits) for a resuming subscriber of the same live run; close_run drops it and it is never persisted or forwarded, so a ZDR run's events live only as long as the run",
+      "detail": {
+        "reason": "an in-memory replay ring per open run, dropped when the run closes; nothing durable is written"
+      },
+      "enforced_by": [],
+      "id": "browser_trace_replay",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "same route as agent_run_surface (egress-receipts): agent_policy_gate::egress_policy, live_egress_policy and attachment_egress_policy set BrowserEgressPolicy::with_host_only_receipts from the run's ZDR posture (WS7.G, D2-U34-5); the chromiumoxide request guard (the session and tab policies in force), the proxy receipt sync and the governed download receipt, and the runtime's pinned egress proxy (browser_egress_proxy::record_receipt) then write scheme://host[:port] with no path. A non-ZDR run keeps scheme://host[:port]/path; the query is never kept in either posture",
+      "detail": {
+        "warning": "a ZDR run's browser egress receipts keep the host only (scheme://host[:port]), never the path"
+      },
+      "enforced_by": [],
+      "id": "browser_egress_receipts",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [],
+      "status": "enforced",
+      "treatment": "degraded"
+    },
+    {
+      "basis": "agent_routes::hit_test::hit_test_point (E3.3-h, dark behind QUARRY_EDGE__HIT_TEST: 403 hit_test_disabled when off, and 200 when on, through BrowserDriver::point_hit) reads DOM.getNodeForLocation and the partial accessibility tree, maps the hit to the person's lane's last observed @e ref, and answers the run's zdr flag with it. The AX name it returns is page text the same caller's observation already carries under ZDR; no backend node id or frame id is on the wire. Nothing is stored, so ZDR has nothing to suppress and the route is not refused",
       "detail": {
         "reason": "a read-only point lookup on the caller's own live run; it writes no receipt, timeline row, artifact or cache entry, and logs no page text"
       },
@@ -717,6 +781,39 @@
       ],
       "status": "enforced",
       "treatment": "inert"
+    },
+    {
+      "basis": "agent_routes::downloads::list_run_downloads (Q3-E3.4-7a, dark behind QUARRY_EDGE__DOWNLOADS: 403 downloads_disabled when off) lists the run's admitted downloads from the caller's own receipts and the tenant-scoped artifact store. It writes nothing; the answer names the artifact id, type, size and digest, never a URL or a file name. A ZDR run stores no download (the step is refused under ZDR), so there is nothing to list",
+      "detail": {
+        "reason": "reads downloads a ZDR run never admitted; a ZDR caller or run gets an empty list without any receipt or artifact read"
+      },
+      "enforced_by": [],
+      "id": "agent_downloads_list",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/agent/runs/{run_id}/downloads"
+      ],
+      "status": "enforced",
+      "treatment": "inert"
+    },
+    {
+      "basis": "agent_routes::downloads::send_download_to_knowledge (Q3-E3.4-7a, dark behind QUARRY_EDGE__DOWNLOADS and QUARRY_EDGE__DOWNLOAD_HANDOFF) persists a download's text to Data Plane, a durable write, so a ZDR token floor or a ZDR run is refused with download_handoff_zdr_refused (403) before any receipt or byte is read; the ingest request builder and the transport repeat the guard. The org and user come from the verified claim only",
+      "detail": {
+        "code": "FORBIDDEN",
+        "feature": "download_handoff"
+      },
+      "enforced_by": [],
+      "id": "agent_download_handoff",
+      "issue": null,
+      "log": "log_unverified",
+      "log_canary": null,
+      "routes": [
+        "/v1/agent/runs/{run_id}/downloads/{artifact_id}/knowledge"
+      ],
+      "status": "enforced",
+      "treatment": "refused"
     },
     {
       "basis": "fleet_routes keep fleets in the process (new_fleet_state)",
@@ -888,7 +985,8 @@
         "/v1/internal/queues/{queue_name}/enqueue",
         "/v1/internal/queues/{queue_name}/enqueue_batch",
         "/v1/internal/queues/{queue_name}/pop",
-        "/v1/internal/queues/{queue_name}/ack"
+        "/v1/internal/queues/{queue_name}/ack",
+        "/v1/internal/queues/{queue_name}/seen"
       ],
       "status": "enforced",
       "treatment": "inert"

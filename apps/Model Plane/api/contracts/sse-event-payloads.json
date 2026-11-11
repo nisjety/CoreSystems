@@ -692,6 +692,26 @@
         }
       }
     },
+    "research_run": {
+      "family": null,
+      "variants": [
+        "ResearchRun"
+      ],
+      "keys": {
+        "research_run_id": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        },
+        "status": {
+          "types": [
+            "string"
+          ],
+          "presence": "always"
+        }
+      }
+    },
     "result_receipt": {
       "family": "usage",
       "variants": [

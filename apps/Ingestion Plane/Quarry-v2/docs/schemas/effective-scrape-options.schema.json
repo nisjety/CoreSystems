@@ -79,6 +79,10 @@
       "format": "uint",
       "minimum": 0
     },
+    "no_egress": {
+      "description": "Q3-E3.8.8w: `true` when the page was served from the organization's stored capture and\nno connection was opened to its host. Absent for the default request.",
+      "type": "boolean"
+    },
     "only_main_content": {
       "type": "boolean"
     },
@@ -95,8 +99,7 @@
     },
     "profile_pinned": {
       "description": "E4.4-b: `true` when the scrape ran with a pinned stored browser profile. The id itself\nis never echoed. Absent for the default request.",
-      "type": "boolean",
-      "default": false
+      "type": "boolean"
     },
     "redact_pii": {
       "description": "E3.6-5: `on` when the returned text went through the PII scanner, `off` (the default)\nwhen it did not. Always reported, so a caller can see what was applied.",
@@ -255,6 +258,10 @@
               "type": "null"
             }
           ]
+        },
+        "send_accept_language": {
+          "description": "E4.4-a2: whether the page also sends `Accept-Language` derived from `locale`\n([`accept_language_for`]). Set by the scrape check only, never by the caller: true only\nwhile `QUARRY_EDGE__PAGE_ACCEPT_LANGUAGE` is on and a locale is set.",
+          "type": "boolean"
         },
         "timezone": {
           "description": "An IANA name, `Europe/Oslo`.",

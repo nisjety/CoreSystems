@@ -256,6 +256,26 @@
     {
       "key": "skill_authoring",
       "label_en": "saving or editing skills"
+    },
+    {
+      "key": "durable_crawl",
+      "label_en": "durable crawls and batches"
+    },
+    {
+      "key": "browser_profile",
+      "label_en": "saved browser profiles"
+    },
+    {
+      "key": "session_resume",
+      "label_en": "resuming a saved browser session"
+    },
+    {
+      "key": "page_screenshot",
+      "label_en": "page screenshots"
+    },
+    {
+      "key": "browser_page_context",
+      "label_en": "attached browser tabs and page regions"
     }
   ],
   "generated_by": "mp-contracts zdr_refusal tests (MP_UPDATE_GOLDEN=1)",
