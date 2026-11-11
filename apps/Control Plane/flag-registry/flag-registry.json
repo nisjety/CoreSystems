@@ -329,6 +329,17 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_BROWSER_PAGE_CONTEXT_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "QF-10: chat turns read BFF-verified browser_tab_refs and browser_regions as untrusted browser-scraped context and region image parts. Literal true only; ZDR or waived turns are refused.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_BROWSER_PAGE_CONTEXT_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_BROWSER_RECIPE",
       "kind": "switch",
       "owner": "model-plane",

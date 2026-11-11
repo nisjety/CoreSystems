@@ -26,7 +26,12 @@ use crate::domains::browser::{
     RenameProfileBody, RestoreProbeBody, StartAiRunBody, SuggestActionBody, TabActorQuery,
     Viewport as BrowserViewport,
 };
+use crate::domains::browser::{
+    control_tab as control_browser_tab, stop_attach as stop_browser_attach,
+    TabControlBody as BrowserTabControlBody,
+};
 use crate::domains::browser_consent::{list_consent, revoke_consent};
+use crate::domains::chat::research_runs::cancel_research_run;
 use crate::domains::chat::documents::upload_chat_document;
 use crate::domains::chat::history::{
     clear_threads as clear_chat_threads, delete_thread as delete_chat_thread,
@@ -5448,6 +5453,48 @@ pub(super) async fn dispatch_chat_cancel_invocation(
     owner_json_response_to_envelope("chat.cancel_invocation", user, status, payload)
 }
 
+/// The action surface's answer to `chat.research_run.cancel` while `CHAT_RESEARCH_RUNS` is off. The
+/// research-run routes are not mounted then (404), so the action answers 404 as well.
+fn chat_research_runs_unavailable() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(error(
+            "chat_research_runs_unavailable",
+            "research runs are not enabled on this gateway",
+        )),
+    )
+        .into_response()
+}
+
+/// `chat.research_run.cancel` with `{ researchRunId }` (Q4-062b-bff-c, QF-28): the person's Stop on
+/// the research card. Calls the same handler `POST /api/v1/chat/research-runs/{id}/cancel` mounts, so
+/// the `rsr_` ULID check (400 `invalid_research_run_id`), the org-scope 403 and the Model Gateway
+/// relay under the user's own bearers are identical; the run's owner decides that the run is the
+/// caller's (another owner's run reads as not found). The result is `{ id, stopRequested }`.
+pub(super) async fn dispatch_chat_cancel_research_run(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    if !state.space_features.chat_research_runs {
+        return chat_research_runs_unavailable();
+    }
+    let research_run_id = ticket_string(input, "researchRunId");
+    if research_run_id.is_empty() {
+        return ticket_bad_request("chat.research_run.cancel requires a non-empty 'researchRunId'");
+    }
+    let response = cancel_research_run(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(research_run_id.to_owned()),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("chat.research_run.cancel", user, status, payload)
+}
+
 pub(super) async fn dispatch_chat_queue_invocation_input(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -6517,6 +6564,74 @@ pub(super) async fn dispatch_browser_close_tab(
     .await;
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("browser_tab.close", user, status, payload)
+}
+
+/// `browser_tab.control` with `{ sessionId, tabId, holder, expectedEpoch? }` (Q2-WS8.I-b, QF-28):
+/// the owner's Take over / Give back of one tab. Calls the same `control_tab` handler the REST
+/// route mounts, so the BROWSER_AI_RUN_ATTACH_SESSION switch (409 `browser_attach_unavailable`
+/// while off), the owner-projection gate, the ZDR refusal and the tab-epoch compare-and-set are
+/// identical. `holder` is the closed `human | agent` set; any other word is refused here.
+pub(super) async fn dispatch_browser_control_tab(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let session_id = ticket_string(input, "sessionId");
+    let tab_id = ticket_string(input, "tabId");
+    if session_id.is_empty() || tab_id.is_empty() {
+        return ticket_bad_request("browser_tab.control requires 'sessionId' and 'tabId'");
+    }
+    let mut body = serde_json::Map::new();
+    if let Some(holder) = input.get("holder") {
+        body.insert("holder".to_owned(), holder.clone());
+    }
+    if let Some(expected_epoch) = input.get("expectedEpoch") {
+        body.insert("expectedEpoch".to_owned(), expected_epoch.clone());
+    }
+    let body: BrowserTabControlBody = match serde_json::from_value(Value::Object(body)) {
+        Ok(body) => body,
+        Err(_) => {
+            return ticket_bad_request(
+                "browser_tab.control requires 'holder' (human or agent) and an optional non-negative integer 'expectedEpoch'",
+            )
+        }
+    };
+    let response = control_browser_tab(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor((session_id.to_owned(), tab_id.to_owned())),
+        Json(body),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("browser_tab.control", user, status, payload)
+}
+
+/// `browser_attach.stop` with `{ sessionId }` (Q2-WS8.I-b, QF-28): the owner's Stop agent. Calls
+/// the same `stop_attach` handler the REST route mounts, so the BROWSER_AI_RUN_ATTACH_SESSION
+/// switch, the owner-projection gate, the ZDR refusal, the grant revoke and the Quarry abort are
+/// identical. The result is `{ stopped: true }`; the grant id never reaches the caller.
+pub(super) async fn dispatch_browser_stop_attach(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let session_id = ticket_string(input, "sessionId");
+    if session_id.is_empty() {
+        return ticket_bad_request("browser_attach.stop requires a non-empty 'sessionId'");
+    }
+    let response = stop_browser_attach(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        PathExtractor(session_id.to_owned()),
+    )
+    .await;
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("browser_attach.stop", user, status, payload)
 }
 
 // The owner-side gate this reuses is the actor==Agent && mode==HumanTakeover

@@ -64,7 +64,7 @@ describe('AI format refusals and status copy (INNH-1)', () => {
   })
 
   it('maps a schema keyword refusal to a sentence the person can act on', () => {
-    expect(playgroundErrorMessage(refusal('formats[0].schema', 'schema_keyword_not_supported'), tr, fallback)).toContain('$ref')
+    expect(playgroundErrorMessage(refusal('formats[0].schema', 'schema_keyword_not_supported'), tr, fallback)).toContain('pattern')
   })
 
   it('gives every AI status code copy and says so when a code is new', () => {

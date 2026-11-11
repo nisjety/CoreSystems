@@ -23,9 +23,11 @@ name: Quarry-v2 eval Tier C (live providers, capped spend)
 #   (lab/evals/usage_meters.json). It does not stop a run part way through. The job timeout
 #   bounds the time. The real limit on provider spend is the capped credential's own limit at the
 #   provider, and that must be set before the first run.
-# - The gate fails closed: no snapshot, a metered quantity with no price, an unreadable price
-#   table, or an invalid cap all fail it. Nothing in this repository writes the snapshot yet, so
-#   the gate fails until a producer exists. That is intended.
+# - The gate fails closed: no snapshot, an empty snapshot, a metered quantity with no price, an
+#   unreadable price table, or an invalid cap all fail it. quarry-eval writes the snapshot now,
+#   but it records no WS6.C meter, so the file is always {"metrics":{}}. The release matrix reads
+#   that as not_measured, not as a measured zero, so the gate fails with the cap set. The cap is
+#   not a spend control until a meter source exists (owner decision D-E3967-2).
 # - The provider sessions that quarry-provider-matrix opens are not WS6.C meters, so the cap does
 #   not see them.
 #

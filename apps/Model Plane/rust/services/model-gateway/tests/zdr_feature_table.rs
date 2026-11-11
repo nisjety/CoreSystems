@@ -400,6 +400,20 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
         // EP-3 S5: a ZDR turn carrying context references is refused before any network call.
         ("context_refs", with("context_refs", json!([{"kind": "document", "id": "doc-1"}])), refused("context_references")),
         ("context_refs", with("context_refs", json!([])), None),
+        // QF-10: attached browser tabs and regions are page content; a ZDR turn carrying either is refused.
+        (
+            "browser_tab_refs",
+            with("browser_tab_refs", json!([{"session_id": "bs_1", "tab_id": "tab-1"}])),
+            refused("browser_page_context"),
+        ),
+        ("browser_tab_refs", with("browser_tab_refs", json!([])), None),
+        (
+            "browser_regions",
+            with("browser_regions", json!([{"session_id": "bs_1", "tab_id": "tab-1"}])),
+            refused("browser_page_context"),
+        ),
+        ("browser_regions", with("browser_regions", Value::Null), None),
+        ("browser_context_verified", with("browser_context_verified", json!(true)), None),
         // EP-7 S1 and S4: a goal is user content in a durable store, and a pump-sent turn continues one.
         ("goal_id", with("goal_id", json!("goal_1")), refused("thread_goal")),
         ("goal_id", with("goal_id", Value::Null), None),

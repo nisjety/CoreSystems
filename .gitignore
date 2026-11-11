@@ -232,6 +232,10 @@ apps/Frontend Plane/agenci/
 *.mov
 apps/Data Plane v2/tools/migrator/migrator
 
+# Quarry-v2 eval run output (Q3-E3.9.6p): quarry-eval writes this usage snapshot on every
+# fixture run. It is local output and is never committed.
+apps/Ingestion Plane/Quarry-v2/lab/evals/usage_meters.json
+
 # ──────────────────────────────────────────────────────────────────────
 # Deployment credentials. These must never be tracked, wherever they land.
 # ──────────────────────────────────────────────────────────────────────

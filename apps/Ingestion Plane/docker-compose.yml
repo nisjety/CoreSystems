@@ -30,7 +30,12 @@ services:
       QUARRY_EDGE__DRAIN_DEADLINE_S: "${QUARRY_EDGE_DRAIN_DEADLINE_S:-30}"
       # Local rollout switch for owner-authorized browser-agent attachment.
       QUARRY_EDGE__ATTACH: "${QUARRY_EDGE_ATTACH:-off}"
+      # WS8.F: an attachment with no activity for this many seconds is released (1 or more; 180 by default).
+      QUARRY_EDGE__ATTACH_IDLE_TTL_S: "${QUARRY_EDGE_ATTACH_IDLE_TTL_S:-180}"
       QUARRY_EDGE__HUMAN_BROWSE: "${QUARRY_EDGE_HUMAN_BROWSE:-off}"
+      # WS8.B: how a person's step is recorded on a non-ZDR run: metadata (the default: redacted action,
+      # no observation), full (dev and procedure recording) or none (no receipt). ZDR runs write nothing.
+      QUARRY_EDGE__HUMAN_RECEIPT_MODE: "${QUARRY_EDGE_HUMAN_RECEIPT_MODE:-metadata}"
       # /v1/scrape request contract (docs/CONTRACTS.md 9.1): unknown keys are
       # ignored with a warning (lenient) until strict is chosen, either now or from
       # a date; the inline cap is per field; 0 disables the new option keys.
@@ -48,7 +53,30 @@ services:
       # (docs/RUNBOOKS.md, robots.txt gate). An unreachable robots.txt counts as disallow.
       QUARRY_EDGE__CRAWL_ROBOTS: "${QUARRY_EDGE_CRAWL_ROBOTS:-observe}"
       QUARRY_EDGE__ROBOTS_UNREACHABLE: "${QUARRY_EDGE_ROBOTS_UNREACHABLE:-disallow}"
+      # WS14.S3: crawl scope mode (off, observe, enforce). observe is the default: scope and count, drop nothing.
+      QUARRY_EDGE__CRAWL_SCOPE_MODE: "${QUARRY_EDGE_CRAWL_SCOPE_MODE:-observe}"
+      # WS14.S6: /v1/crawl request validation (lenient, strict). lenient is the default: an unknown key only warns.
+      QUARRY_EDGE__CRAWL_REQUEST_VALIDATION: "${QUARRY_EDGE_CRAWL_REQUEST_VALIDATION:-lenient}"
+      # WS14.S5: the most URLs one POST /v1/batch may carry (1 to 10000). The gateway keeps its own cap of 200.
+      QUARRY_EDGE__CRAWL_BATCH_MAX_URLS: "${QUARRY_EDGE_CRAWL_BATCH_MAX_URLS:-500}"
       QUARRY_EDGE__SCRAPE_CAPTURE_INLINE_MAX_BYTES: "${QUARRY_EDGE_SCRAPE_CAPTURE_INLINE_MAX_BYTES:-6291456}"
+      # WS13.6: tile-and-stitch a full-page screenshot (on, 1, true). off (default) crops at the single-capture limit.
+      QUARRY_EDGE__SCRAPE_STITCH: "${QUARRY_EDGE_SCRAPE_STITCH:-off}"
+      # WS7.C: web-policy enforcement for the scrape family (off, observe or enforce). enforce is the default.
+      # observe runs as off and only counts the would-be denials; off applies the invariants and the ZDR floor alone.
+      QUARRY_EDGE__WEB_POLICY_ENFORCEMENT: "${QUARRY_EDGE_WEB_POLICY_ENFORCEMENT:-enforce}"
+      # WS7.J: what the token's web_policy claim does on its own (off, observe or enforce). observe is the
+      # default: the claim is shadow only, counted and never refused.
+      QUARRY_EDGE__WEB_POLICY_CLAIM_ENFORCEMENT: "${QUARRY_EDGE_WEB_POLICY_CLAIM_ENFORCEMENT:-observe}"
+      # WS7.J: 1 or 0 (true or false). 1 refuses a token without the claim (403 policy_unreadable) only when
+      # WEB_POLICY_ENFORCEMENT and WEB_POLICY_CLAIM_ENFORCEMENT are both enforce; otherwise the refusal is only
+      # counted. 0 is the default. Turn it on only after auth-core mints the claim.
+      QUARRY_EDGE__WEB_POLICY_REQUIRE_CLAIM: "${QUARRY_EDGE_WEB_POLICY_REQUIRE_CLAIM:-0}"
+      # WS7.G 6b: the durable-job policy snapshot (off, observe or enforce). off is the default.
+      QUARRY_EDGE__WEB_POLICY_SNAPSHOT: "${QUARRY_EDGE_WEB_POLICY_SNAPSHOT:-off}"
+      # QUARRY_EDGE__WEB_POLICY_FINAL_URL_CHECK is not passed on purpose: its default is 1 when ENVIRONMENT is
+      # dev, development, local or test, and 0 elsewhere. This file defaults ENVIRONMENT to dev and the
+      # production overlay sets production, so one literal would change one of them (docs/RUNBOOKS.md).
       # Caps on live runs and the sweeper that releases idle ones (docs/RUNBOOKS.md,
       # "Run caps and the run sweeper"). The caps are live from the first deploy; the
       # sweeper starts in dry run, so it only logs would_expire. Review the log for a
@@ -140,6 +168,16 @@ services:
       # quarry-edge billing-core credential (QUARRY_BILLING_CORE_SERVICE_TOKEN, mirrored).
       QUARRY_EDGE__BILLING_CORE_URL: ${QUARRY_EDGE__BILLING_CORE_URL:-}
       QUARRY_EDGE__BILLING_CORE_TOKEN: ${QUARRY_BILLING_CORE_SERVICE_TOKEN:-}
+      # WS6.D-s: the organization limits source (static reads nothing; billing_core reads billing-core's limits
+      # with the two BILLING_CORE settings above) and what the resolver does when its source cannot answer:
+      # floor (the default), open or closed.
+      QUARRY_EDGE__LIMITS_SOURCE: "${QUARRY_EDGE_LIMITS_SOURCE:-static}"
+      QUARRY_EDGE__LIMITS_FAIL_MODE: "${QUARRY_EDGE_LIMITS_FAIL_MODE:-floor}"
+      # billing_core only: seconds a read is served from cache without asking billing-core (at least 1), the
+      # stale window in seconds past that (0 turns the stale serve off), and the connect and request timeout in ms (at least 100).
+      QUARRY_EDGE__LIMITS_CACHE_TTL_S: "${QUARRY_EDGE_LIMITS_CACHE_TTL_S:-30}"
+      QUARRY_EDGE__LIMITS_STALE_WINDOW_S: "${QUARRY_EDGE_LIMITS_STALE_WINDOW_S:-300}"
+      QUARRY_EDGE__LIMITS_TIMEOUT_MS: "${QUARRY_EDGE_LIMITS_TIMEOUT_MS:-2000}"
       # WS15.S4a: fire-time schedule preflight (ZDR posture + entitlement). off | observe | enforce;
       # observe (default) runs every check and logs it, allows the fire and pauses nothing. The
       # posture read is org-core GET /internal/orgs/:org/retention-posture with the quarry-edge
@@ -212,6 +250,9 @@ services:
       # grant_boot.rs). Every check is made with a broker token minted for the run's
       # organization from that credential.
       QUARRY_EDGE__BROWSER_GRANT_VALIDATOR_GRPC_URL: ${QUARRY_EDGE_BROWSER_GRANT_VALIDATOR_GRPC_URL:-}
+      # WS6.E: whether a grant's budget claim binds the run it backs (ignore or enforce). ignore is the
+      # default: the claim is read and carried, and changes nothing. enforce only after the broker deploys.
+      QUARRY_EDGE__GRANT_BUDGET_CLAIM: "${QUARRY_EDGE_GRANT_BUDGET_CLAIM:-ignore}"
       # Chromium keeps its sandbox: the seccomp profile above lets it build one
       # in a container. 1 is an explicit local opt-out (old kernels, WSL2 without
       # user namespaces); the edge refuses to launch with it in production.
@@ -451,6 +492,11 @@ services:
       QUARRY_JOB_BACKLOG_DEFAULT: ${QUARRY_JOB_BACKLOG_DEFAULT:-200}
       QUARRY_JOB_BACKLOG_TTL: ${QUARRY_JOB_BACKLOG_TTL:-24h}
       QUARRY_JOB_CLAIM_LEASE: ${QUARRY_JOB_CLAIM_LEASE:-60s}
+      # Plan ceilings on the params.admission cap and backlog_cap that the edge stamps from an organization's
+      # plan (positive integers). They take effect only with QUARRY_JOB_ADMISSION=on. Each must not be below
+      # its default (QUARRY_JOB_CAP_DEFAULT, QUARRY_JOB_BACKLOG_DEFAULT), or control refuses to boot.
+      QUARRY_JOB_CAP_MAX: "${QUARRY_JOB_CAP_MAX:-50}"
+      QUARRY_JOB_BACKLOG_MAX: "${QUARRY_JOB_BACKLOG_MAX:-10000}"
       # W2: deliver the one in-product change notification to notification-core
       # (Application Plane) over the shared inter-plane-bus network.
       NOTIFICATION_CORE_URL: ${NOTIFICATION_CORE_URL:-http://notification-core:3140}
@@ -472,6 +518,10 @@ services:
       # The token must equal the quarry-edge QUARRY_EDGE_INTERNAL_TOKEN. Set both when enabling.
       QUARRY_EDGE_URL: ${QUARRY_EDGE_URL:-}
       QUARRY_EDGE_INTERNAL_TOKEN: ${QUARRY_EDGE_INTERNAL_TOKEN:-}
+      # WS14.S7b: audit-core URL, e.g. http://audit-core:8187. Unset: robots.txt-ignoring jobs get 503.
+      AUDIT_CORE_URL: ${QUARRY_CONTROL_AUDIT_CORE_URL:-}
+      # WS14.S7b: matches the quarry-control row of Control Plane AUDIT_CORE_SERVICE_CREDENTIALS. Both or neither.
+      AUDIT_CORE_SERVICE_TOKEN: ${QUARRY_CONTROL_AUDIT_CORE_SERVICE_TOKEN:-}
     entrypoint:
       - /bin/sh
       - -ec

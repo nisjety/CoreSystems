@@ -18,8 +18,10 @@
 //!
 //! The closed reason set also holds `skipped_overlap` (written by the
 //! orchestrator's reconcile, never by this route), `skipped_kind_disabled` and
-//! `skipped_disabled` (answered when the caller sends the schedule's kind or
-//! enabled state; today's orchestrator sends neither, so they stay latent).
+//! `skipped_disabled`. The first is answered when the caller sends a kind the
+//! edge does not run; the orchestrator sends `target_kind` (since Q2-WS15.S4a),
+//! so the check runs for its fires. The second is answered when the caller sends
+//! `enabled: false`; no caller sends `enabled` yet, so it stays latent.
 //!
 //! `QUARRY_EDGE__SCHEDULE_POSTURE` picks the mode: `off` (the S2 answer, no
 //! reads), `observe` (the default: every check runs and is logged, the fire is
@@ -241,7 +243,8 @@ const SCHEDULE_KINDS: [&str; 4] = ["scrape", "crawl", "batch", "change_monitor"]
 // =============================================================================
 
 /// The fire-time question: which schedule, and which tenant it belongs to.
-/// `target_kind` and `enabled` are optional; today's orchestrator sends neither.
+/// `target_kind` and `enabled` are optional. The orchestrator sends `target_kind`
+/// (the schedule's kind, since Q2-WS15.S4a) and leaves `enabled` out.
 #[derive(Debug, Deserialize)]
 pub struct PreflightRequest {
     pub schedule_id: String,

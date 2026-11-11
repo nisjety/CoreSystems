@@ -3423,6 +3423,7 @@ paths:
         on (default off).
         To cancel, use DELETE /v1/crawl/{job_id} or DELETE /v1/batch/{job_id} (WS15.L2). Crawl and batch jobs are
         refused under zero data retention, so there is no such job to read here under ZDR.
+        The wait and resume query parameters are honoured only with QUARRY_EDGE__JOB_CONTROL on (see the JobWait and JobResume parameters).
       parameters:
         - name: job_id
           in: path
@@ -3430,9 +3431,12 @@ paths:
           schema:
             type: string
             pattern: '^job_'
+        - $ref: '#/components/parameters/JobWait'
+        - $ref: '#/components/parameters/JobResume'
       responses:
         '200':
-          description: The job status document.
+          description: >-
+            The job status document. A waited read answers it once the job is terminal.
           content:
             application/json:
               schema:
@@ -3440,12 +3444,31 @@ paths:
                 properties:
                   data:
                     $ref: '#/components/schemas/JobStatusView'
+        '400':
+          description: >-
+            A wait that is not a whole number, an empty resume, a resume with no wait or with wait=0, a resume token that
+            is not valid, or a token for another job. error.code is BAD_REQUEST, and the message names which.
+        '403':
+          description: >-
+            A caller under zero data retention asked for a wait above 0, with QUARRY_EDGE__JOB_CONTROL on. error.code is
+            FORBIDDEN (`waiting on a job is not available under zero data retention`). Nothing is read from control.
         '404':
           description: Not found for this organization, or not a job id.
         '408':
           description: >-
-            The route deadline (60 s by default) passed before the status was read. The body is empty, with no
-            error envelope. The x-request-id header is still echoed.
+            Two cases. With a wait, the wait ran out before the job reached a terminal status: the body is the
+            processing_continues envelope (error.code TIMEOUT, retryable), and the response carries a Retry-After header
+            of 1 second. Without a wait, the route deadline (60 s by default) passed before the status was read: the body
+            is empty, with no error envelope, and the x-request-id header is still echoed.
+          headers:
+            Retry-After:
+              description: Seconds to wait before a resume. Always 1 on the processing_continues envelope.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingContinuesEnvelope'
   /v1/crawl/ongoing:
     get:
       operationId: list_ongoing_crawls
@@ -3461,7 +3484,9 @@ paths:
     get:
       operationId: get_crawl_status
       summary: Status document of a crawl (WS15.L1)
-      description: A batch id on this path answers 404 (kind mismatch).
+      description: >-
+        A batch id on this path answers 404 (kind mismatch). The wait and resume query parameters work as they do on
+        GET /v1/jobs/{job_id}, and are honoured only with QUARRY_EDGE__JOB_CONTROL on.
       parameters:
         - name: job_id
           in: path
@@ -3469,9 +3494,12 @@ paths:
           schema:
             type: string
             pattern: '^job_'
+        - $ref: '#/components/parameters/JobWait'
+        - $ref: '#/components/parameters/JobResume'
       responses:
         '200':
-          description: The crawl status document.
+          description: >-
+            The crawl status document. A waited read answers it once the job is terminal.
           content:
             application/json:
               schema:
@@ -3479,8 +3507,31 @@ paths:
                 properties:
                   data:
                     $ref: '#/components/schemas/JobStatusView'
+        '400':
+          description: >-
+            A wait that is not a whole number, an empty resume, a resume with no wait or with wait=0, a resume token that
+            is not valid, or a token for another job. error.code is BAD_REQUEST, and the message names which.
+        '403':
+          description: >-
+            A caller under zero data retention asked for a wait above 0, with QUARRY_EDGE__JOB_CONTROL on. error.code is
+            FORBIDDEN (`waiting on a job is not available under zero data retention`). Nothing is read from control.
         '404':
           description: Not found, a foreign id, or a job of another kind.
+        '408':
+          description: >-
+            Two cases. With a wait, the wait ran out before the job reached a terminal status: the body is the
+            processing_continues envelope (error.code TIMEOUT, retryable), and the response carries a Retry-After header
+            of 1 second. Without a wait, the route deadline (60 s by default) passed before the status was read: the body
+            is empty, with no error envelope, and the x-request-id header is still echoed.
+          headers:
+            Retry-After:
+              description: Seconds to wait before a resume. Always 1 on the processing_continues envelope.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingContinuesEnvelope'
     delete:
       operationId: cancel_crawl
       summary: Cancel a crawl (WS15.L2)
@@ -3743,6 +3794,9 @@ paths:
     get:
       operationId: get_batch_status
       summary: Status document of a batch (WS15.L1)
+      description: >-
+        The wait and resume query parameters work as they do on GET /v1/jobs/{job_id}, and are honoured only with
+        QUARRY_EDGE__JOB_CONTROL on.
       parameters:
         - name: job_id
           in: path
@@ -3750,9 +3804,12 @@ paths:
           schema:
             type: string
             pattern: '^job_'
+        - $ref: '#/components/parameters/JobWait'
+        - $ref: '#/components/parameters/JobResume'
       responses:
         '200':
-          description: The batch status document.
+          description: >-
+            The batch status document. A waited read answers it once the job is terminal.
           content:
             application/json:
               schema:
@@ -3760,8 +3817,31 @@ paths:
                 properties:
                   data:
                     $ref: '#/components/schemas/JobStatusView'
+        '400':
+          description: >-
+            A wait that is not a whole number, an empty resume, a resume with no wait or with wait=0, a resume token that
+            is not valid, or a token for another job. error.code is BAD_REQUEST, and the message names which.
+        '403':
+          description: >-
+            A caller under zero data retention asked for a wait above 0, with QUARRY_EDGE__JOB_CONTROL on. error.code is
+            FORBIDDEN (`waiting on a job is not available under zero data retention`). Nothing is read from control.
         '404':
           description: Not found, a foreign id, or a job of another kind.
+        '408':
+          description: >-
+            Two cases. With a wait, the wait ran out before the job reached a terminal status: the body is the
+            processing_continues envelope (error.code TIMEOUT, retryable), and the response carries a Retry-After header
+            of 1 second. Without a wait, the route deadline (60 s by default) passed before the status was read: the body
+            is empty, with no error envelope, and the x-request-id header is still echoed.
+          headers:
+            Retry-After:
+              description: Seconds to wait before a resume. Always 1 on the processing_continues envelope.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingContinuesEnvelope'
     delete:
       operationId: cancel_batch
       summary: Cancel a batch (WS15.L2)
@@ -6288,6 +6368,38 @@ components:
       schema:
         type: string
         maxLength: 128
+    JobWait:
+      name: wait
+      in: query
+      required: false
+      description: >-
+        Whole seconds to wait for the job to reach a terminal status, polled from control every 2 s. A job that is
+        terminal before or during the wait answers 200 with the status document. 0 (the default) is a plain read. A
+        value above 25 is clamped to 25, which stays below the 60 s route deadline. Honoured only with
+        QUARRY_EDGE__JOB_CONTROL on; with the flag off the parameter is ignored and the read is the plain status read.
+        With the flag on, a value that is not a whole number is a 400 (BAD_REQUEST, `wait must be a whole number of
+        seconds`). With the flag on, a caller under zero data retention is refused a wait above 0 with 403 (FORBIDDEN),
+        because the durable path a wait stands on is refused under ZDR; a plain read is unchanged. When the wait runs
+        out before the job is terminal, the answer is the 408 processing_continues envelope.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    JobResume:
+      name: resume
+      in: query
+      required: false
+      description: >-
+        The resume_token of an earlier 408 processing_continues, sent back exactly as it came, to keep waiting on the
+        same job. Honoured only with QUARRY_EDGE__JOB_CONTROL on, like wait. A token names the job it was issued for:
+        a token for another job is a 400 (`resume token is for another job`), and a value that is not a token is a 400
+        (`resume token is not valid`). An empty value is a 400 (`resume must carry the resume_token of a 408`), and so
+        is a resume with no wait or with wait=0 (`resume needs a wait of at least 1 second`). The token records the
+        job's progress when the 408 was sent, so the next 408 says in its details whether the job moved since. The
+        token is not a credential and holds no URL or content.
+      schema:
+        type: string
+        minLength: 1
     WebhookSubscriptionId:
       name: subscription_id
       in: path
@@ -6755,11 +6867,27 @@ components:
           - paused
           - deleted
         created_at:
-          type: string
-          format: date-time
+          description: >-
+            Control writes this as Unix milliseconds. GET /v1/sources answers it as an RFC 3339 string, while the
+            single-source read and the create, tag and definition routes pass control's milliseconds through, so a
+            client accepts either.
+          oneOf:
+          - type: string
+            format: date-time
+          - type: integer
+            format: int64
+            description: Unix milliseconds
         updated_at:
-          type: string
-          format: date-time
+          description: >-
+            Control writes this as Unix milliseconds. GET /v1/sources answers it as an RFC 3339 string, while the
+            single-source read and the create, tag and definition routes pass control's milliseconds through, so a
+            client accepts either.
+          oneOf:
+          - type: string
+            format: date-time
+          - type: integer
+            format: int64
+            description: Unix milliseconds
         config:
           description: >-
             Free-form per-source configuration. A saved job definition (E4.1-6) sits at config.definition, in the
@@ -7096,6 +7224,89 @@ components:
           type: string
         credits:
           $ref: '#/components/schemas/JobCredits'
+    ProcessingContinuesEnvelope:
+      type: object
+      description: >-
+        The 408 of a job read that waited (wait, with QUARRY_EDGE__JOB_CONTROL on) and ran out before the job reached a
+        terminal status. It is the typed error envelope of the job routes, with data null. The HTTP status is 408 where
+        TIMEOUT is 504 everywhere else, so a client keys on the HTTP 408 and on error.details.reason. Send
+        error.details.resume_token back as the resume query value to keep waiting. A resumed wait still waits for a
+        terminal status or the deadline; it does not return early on progress.
+      required:
+      - data
+      - meta
+      - error
+      properties:
+        data:
+          type: [object, 'null']
+          description: Null on an error envelope.
+        meta:
+          $ref: '#/components/schemas/ResponseMeta'
+        error:
+          type: object
+          required:
+          - code
+          - message
+          - retryable
+          - details
+          properties:
+            code:
+              type: string
+              enum:
+              - TIMEOUT
+            message:
+              type: string
+            retryable:
+              type: boolean
+            details:
+              type: object
+              required:
+              - reason
+              - job_id
+              - status
+              - phase
+              - counts
+              - progressed
+              - waited_s
+              - retry_after_seconds
+              - resume_token
+              properties:
+                reason:
+                  type: string
+                  enum:
+                  - processing_continues
+                job_id:
+                  type: string
+                status:
+                  type: string
+                phase:
+                  type: string
+                counts:
+                  type: object
+                  description: Completed, failed, blocked and retried counts when the wait ran out.
+                  properties:
+                    completed:
+                      type: integer
+                    failed:
+                      type: integer
+                    blocked:
+                      type: integer
+                    retried:
+                      type: integer
+                progressed:
+                  type: [boolean, 'null']
+                  description: >-
+                    Null when the request carried no resume token. Otherwise true when the job moved since the token was
+                    issued (its status, phase, counts or control sequence), false when it did not.
+                waited_s:
+                  type: integer
+                  description: The wait asked for, after the 25 s cap.
+                retry_after_seconds:
+                  type: integer
+                  description: Always 1, the same as the Retry-After header.
+                resume_token:
+                  type: string
+                  description: URL-safe base64 of the progress token without padding. Send it back unchanged as resume.
     RequestQueueSummary:
       type: object
       required:
@@ -12726,6 +12937,14 @@ components:
         canonical:
           type: string
           nullable: true
+        fetched_url:
+          type: string
+          format: uri
+          description: >-
+            The URL actually fetched when the public-URL rewrite (QUARRY_RUNTIME__URL_REWRITE, default off) replaced the
+            requested one, for example a Google Docs export or a raw GitHub file. Present only in that case, and never
+            null. requested stays the URL the caller sent, and remains the identity of the run, its events and its cache
+            entry.
     OutputFormats:
       type: object
       properties:

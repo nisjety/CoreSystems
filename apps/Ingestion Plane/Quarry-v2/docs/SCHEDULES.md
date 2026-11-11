@@ -83,7 +83,7 @@ The switch is `QUARRY_SCHEDULED_JOBS_ENABLED` on control, default `0` (compose s
 Each fire runs the wrapper `ScheduledJobWF`, in this order:
 
 1. **Preflight.** The orchestrator calls `POST /v1/internal/schedules/preflight` on the edge, with the runtime bearer token and `X-Quarry-Run-Sig` over `org_id` and `schedule:<id>`. Only network errors, timeouts and 5xx answers are retried, under the default activity policy (5 attempts, 1 s to 1 min back-off). If the call still fails, the fire ends with an error before any job exists, and `pause_on_failure` sees it.
-2. **Denied.** On `allow: false` the wrapper registers a terminal job: status `skipped`, `terminal_reason: schedule_skipped`, and one `schedule_skipped` event carrying the reason. The fire returns no error, so `pause_on_failure` does not count it.
+2. **Denied.** On `allow: false` the wrapper registers a terminal job: status `skipped`, `terminal_reason` set to the skip code (for example `skipped_zdr`), and one `schedule_skipped` event carrying the reason. The fire returns no error, so `pause_on_failure` does not count it.
 3. **Allowed.** The wrapper registers a running job with origin `{type: "schedule", actor: <schedule id>}`. Control dedupes that registration on `sched:<id>:<run key>`, where the run key is the fire's run id.
 4. **Child.** The matching job workflow (`ScrapeJobWF`, `CrawlJobWF` or `BatchJobWF`) runs as `quarry-job-<jobID>`, with the same input builders the dispatcher uses.
 5. **Failure.** A child error writes `run_failed` with reason `child_failed`, or `run_timed_out` with `child_timed_out` for a Temporal timeout. A child that cannot start writes `run_failed` with `invalid_params`. The payload carries `schedule_id`, `org_id`, `created_by` and the reason, never a URL. The error is returned, so `pause_on_failure` sees it.
@@ -163,7 +163,7 @@ The checks run in this order, and the first reason wins:
 
 | Reason | Written by | Where it shows | Outcome |
 | --- | --- | --- | --- |
-| `skipped_zdr`, `skipped_posture_unknown`, `skipped_no_entitlement` | The edge's preflight, returned to the orchestrator, which writes the job | Job `skipped` with `terminal_reason: schedule_skipped`; event `schedule_skipped` | Fire skipped. Under `enforce`, `skipped_zdr` also pauses the schedule |
+| `skipped_zdr`, `skipped_posture_unknown`, `skipped_no_entitlement` | The edge's preflight, returned to the orchestrator, which writes the job | Job `skipped` with `terminal_reason` set to the code; event `schedule_skipped` | Fire skipped. Under `enforce`, `skipped_zdr` also pauses the schedule |
 | `skipped_disabled`, `skipped_kind_disabled` | The edge's preflight | As above | Latent (see Fire-time posture) |
 | `preflight_denied` | The orchestrator, when the edge denies without a reason | As above | Fire skipped |
 | `skipped_zdr` | Control's ZDR-event consumer, under `enforce` | Event `schedule_skipped`, with no run and no job | Schedule paused. No fire |

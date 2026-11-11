@@ -109,7 +109,10 @@ pub(super) async fn get_research_run(
 
 /// `POST /api/v1/chat/research-runs/{id}/cancel`: asks the live stream of a research run the caller
 /// owns to stop. Answered 202; the stream then ends the run as `cancelled`.
-pub(super) async fn cancel_research_run(
+///
+/// The generic action surface's `chat.research_run.cancel` (QF-28) calls this same handler, so the id
+/// check, the org-scope refusal and the upstream relay are identical on both paths.
+pub(crate) async fn cancel_research_run(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,

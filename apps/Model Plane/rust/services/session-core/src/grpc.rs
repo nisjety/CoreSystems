@@ -13145,22 +13145,29 @@ const LEDGER_MAX_LIMIT: i64 = 200;
 /// on), never as a skill that would be injected; an older snapshot predates the
 /// other kinds and so is a skill. A row never changes kind, so the conflict arm
 /// leaves it alone; settings are restored like the text.
+///
+/// QF-19: url_patterns (0116) are restored too. Snapshots carry them from 0117 on;
+/// an older snapshot has no `url_patterns` key, so the conflict arm keeps the row's
+/// current patterns for it instead of wiping them, and a deleted skill recreated
+/// from one comes back with '[]'. The patterns were validated when written, so a
+/// restore does not validate them again.
 const RESTORE_SKILL_SQL: &str = "INSERT INTO agent_skills
         (id, org_id, name, description, content, trigger_keywords, trigger_file_patterns,
          tool_restrictions, enabled, origin, scope, owner_user_id, shared_with, review_state,
          source_run_id, source_thread_id, proposal_reason, created_at, updated_at,
-         kind, settings)
+         kind, settings, url_patterns)
      SELECT r.id, r.org_id, r.name, r.description, r.content, r.trigger_keywords,
             r.trigger_file_patterns, r.tool_restrictions, r.enabled, r.origin, r.scope,
             r.owner_user_id, r.shared_with, r.review_state, r.source_run_id,
             r.source_thread_id, r.proposal_reason, now(), now(),
-            COALESCE(r.kind, 'skill'), COALESCE(r.settings, '{}'::jsonb)
+            COALESCE(r.kind, 'skill'), COALESCE(r.settings, '{}'::jsonb),
+            COALESCE(r.url_patterns, '[]'::jsonb)
      FROM jsonb_to_record($1::jsonb) AS r(
             id text, org_id text, name text, description text, content text,
             trigger_keywords jsonb, trigger_file_patterns jsonb, tool_restrictions jsonb,
             enabled boolean, origin text, scope text, owner_user_id text, shared_with jsonb,
             review_state text, source_run_id text, source_thread_id text, proposal_reason text,
-            kind text, settings jsonb)
+            kind text, settings jsonb, url_patterns jsonb)
      ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          description = EXCLUDED.description,
@@ -13178,6 +13185,8 @@ const RESTORE_SKILL_SQL: &str = "INSERT INTO agent_skills
          source_thread_id = EXCLUDED.source_thread_id,
          proposal_reason = EXCLUDED.proposal_reason,
          settings = EXCLUDED.settings,
+         url_patterns = CASE WHEN $1::jsonb ? 'url_patterns'
+             THEN EXCLUDED.url_patterns ELSE agent_skills.url_patterns END,
          updated_at = now()
      WHERE agent_skills.org_id = EXCLUDED.org_id";
 
@@ -20888,11 +20897,19 @@ mod tests {
         assert!(snapshot.contains("'kind', s.kind,"));
         assert!(snapshot.contains("'settings', s.settings"));
         assert!(super::RESTORE_SKILL_SQL.contains("COALESCE(r.kind, 'skill')"));
-        assert!(super::RESTORE_SKILL_SQL.contains("kind text, settings jsonb)"));
+        assert!(super::RESTORE_SKILL_SQL.contains("kind text, settings jsonb, url_patterns jsonb)"));
+        // QF-19: an undo keeps the skill's url_patterns (0117 puts them in the snapshot).
+        assert!(super::RESTORE_SKILL_SQL.contains("COALESCE(r.url_patterns, '[]'::jsonb)"));
+        let patterns = include_str!("../migrations/0117_skill_revision_url_patterns.sql");
+        assert!(patterns.contains("'url_patterns', s.url_patterns"));
         let conflict = &super::RESTORE_SKILL_SQL[super::RESTORE_SKILL_SQL
             .find("ON CONFLICT (id) DO UPDATE SET")
             .expect("the conflict arm")..];
         assert!(!conflict.contains("kind ="), "a row never changes kind");
+        assert!(
+            conflict.contains("url_patterns = CASE WHEN $1::jsonb ? 'url_patterns'"),
+            "a snapshot from before 0117 must not wipe the row's patterns"
+        );
     }
 
     /// EP-11 S6: after 0109 a skill's digest is still the sha256 of 0108's body with the

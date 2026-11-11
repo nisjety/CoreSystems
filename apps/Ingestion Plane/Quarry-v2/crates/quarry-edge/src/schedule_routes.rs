@@ -766,6 +766,7 @@ pub async fn pause_schedule(
     Path(id): Path<String>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
+    let id = parse_schedule_id(&request_id, &id)?;
     let path = format!("/v1/schedules/{id}/pause");
     let summary = forward_json::<(), serde_json::Value>(
         &state,
@@ -783,12 +784,15 @@ pub async fn pause_schedule(
 /// Zero Data Retention (`skipped_zdr`). Called by the schedule preflight under
 /// `QUARRY_EDGE__SCHEDULE_POSTURE=enforce`, with no user token: the org comes
 /// from the preflight's run-bound body, and the call is the same signed control
-/// forward `pause_schedule` makes. Unpause stays refused for a ZDR caller.
+/// forward `pause_schedule` makes. The id is checked before the path is built, as the handlers
+/// check theirs (a malformed id is a 400 and no control call). Unpause stays refused for a ZDR
+/// caller.
 pub(crate) async fn pause_for_posture(
     state: &AppState,
     schedule_id: &str,
     org_id: &str,
 ) -> Result<(), QuarryError> {
+    let schedule_id = check_schedule_id(schedule_id)?;
     let path = format!("/v1/schedules/{schedule_id}/pause");
     forward_json::<(), serde_json::Value>(state, reqwest::Method::POST, &path, org_id, None)
         .await
@@ -809,6 +813,7 @@ pub async fn unpause_schedule(
         "schedules",
         "unpause",
     )?;
+    let id = parse_schedule_id(&request_id, &id)?;
     let path = format!("/v1/schedules/{id}/unpause");
     let summary = forward_json::<(), serde_json::Value>(
         &state,
@@ -837,6 +842,7 @@ pub async fn trigger_schedule(
         "schedules",
         "trigger",
     )?;
+    let id = parse_schedule_id(&request_id, &id)?;
     // WS15.S3a: a usable caller key is forwarded in place of a minted one (the public convention:
     // an invalid value is ignored, as if no key were sent). Control refuses a repeat of a key it holds.
     let idempotency_key = crate::handoff::idempotency_key_from_request(&headers);
@@ -871,6 +877,7 @@ pub async fn backfill_schedule(
         "schedules",
         "backfill",
     )?;
+    let id = parse_schedule_id(&request_id, &id)?;
     if req.end_at <= req.start_at {
         return Err(err_response(
             &request_id,
@@ -949,6 +956,7 @@ pub async fn delete_schedule(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
+    let id = parse_schedule_id(&request_id, &id)?;
     let path = format!("/v1/schedules/{id}");
     // DELETE returns no body — use forward_json with `serde_json::Value`
     // and ignore the parsed result.
@@ -970,13 +978,14 @@ fn parse_schedule_id(
     request_id: &str,
     raw: &str,
 ) -> Result<quarry_core::ids::kinds::ScheduleKind, (StatusCode, Json<Envelope<()>>)> {
+    check_schedule_id(raw).map_err(|e| err_response(request_id, e))
+}
+
+/// The check [`parse_schedule_id`] makes, with the bare error, for a caller that is not a handler
+/// and answers with a [`QuarryError`] (the posture pause, which the preflight spawns).
+fn check_schedule_id(raw: &str) -> Result<quarry_core::ids::kinds::ScheduleKind, QuarryError> {
     raw.parse::<quarry_core::ids::kinds::ScheduleKind>()
-        .map_err(|_| {
-            err_response(
-                request_id,
-                QuarryError::new(ErrorCode::BadRequest, "invalid schedule id"),
-            )
-        })
+        .map_err(|_| QuarryError::new(ErrorCode::BadRequest, "invalid schedule id"))
 }
 
 /// Parses a request id from a path segment (`req_` and a ULID), with the same 400 shape as a

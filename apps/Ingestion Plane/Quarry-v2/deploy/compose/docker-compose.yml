@@ -119,6 +119,10 @@ services:
       QUARRY_EDGE__SEMANTIC_RERANK: "${QUARRY_EDGE_SEMANTIC_RERANK:-0}"
       # ADR-6 (owner ruling 2026-10-28): scrape-time actions default off; see the Ingestion compose.
       QUARRY_EDGE__SCRAPE_ACTIONS: "${QUARRY_EDGE_SCRAPE_ACTIONS:-off}"
+      # WS13.4b: scrape-time captures (screenshot, pdf). Only on enables them; off (the default) refuses the formats.
+      QUARRY_EDGE__SCRAPE_CAPTURE: "${QUARRY_EDGE_SCRAPE_CAPTURE:-off}"
+      # WS13.4b: the ZDR inline cap for one capture, in bytes (6 MiB by default, 16 MiB at most).
+      QUARRY_EDGE__SCRAPE_CAPTURE_INLINE_MAX_BYTES: "${QUARRY_EDGE_SCRAPE_CAPTURE_INLINE_MAX_BYTES:-6291456}"
       # SmartRouter web-search primary. Quarry-v2 owns its searxng (defined
       # below) so this dev stack does web search self-contained — no reliance
       # on a searxng started by another plane / the root mega-stack.

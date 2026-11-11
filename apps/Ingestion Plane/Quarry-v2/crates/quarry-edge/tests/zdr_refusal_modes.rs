@@ -176,15 +176,27 @@ async fn control_plane() -> MockServer {
     let control = MockServer::start().await;
     for (verb, route) in [
         ("POST", "/v1/schedules"),
-        ("POST", "/v1/schedules/sched-1/pause"),
-        ("POST", "/v1/schedules/sched-1/unpause"),
-        ("POST", "/v1/schedules/sched-1/trigger"),
-        ("POST", "/v1/schedules/sched-1/backfill"),
-        ("DELETE", "/v1/schedules/sched-1"),
+        ("POST", "/v1/schedules/sch_01ARZ3NDEKTSV4RRFFQ69G5FAV/pause"),
+        (
+            "POST",
+            "/v1/schedules/sch_01ARZ3NDEKTSV4RRFFQ69G5FAV/unpause",
+        ),
+        (
+            "POST",
+            "/v1/schedules/sch_01ARZ3NDEKTSV4RRFFQ69G5FAV/trigger",
+        ),
+        (
+            "POST",
+            "/v1/schedules/sch_01ARZ3NDEKTSV4RRFFQ69G5FAV/backfill",
+        ),
+        ("DELETE", "/v1/schedules/sch_01ARZ3NDEKTSV4RRFFQ69G5FAV"),
     ] {
         Mock::given(method(verb))
             .and(path(route))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": "sched-1" })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({ "id": "sch_01ARZ3NDEKTSV4RRFFQ69G5FAV" })),
+            )
             .mount(&control)
             .await;
     }
@@ -235,17 +247,35 @@ async fn durable_writes(
         (
             "schedules",
             "unpause",
-            harness.post(token, "/v1/schedules/sched-1/unpause", json!({})).await,
+            harness
+                .post(
+                    token,
+                    "/v1/schedules/sch_01ARZ3NDEKTSV4RRFFQ69G5FAV/unpause",
+                    json!({}),
+                )
+                .await,
         ),
         (
             "schedules",
             "trigger",
-            harness.post(token, "/v1/schedules/sched-1/trigger", json!({})).await,
+            harness
+                .post(
+                    token,
+                    "/v1/schedules/sch_01ARZ3NDEKTSV4RRFFQ69G5FAV/trigger",
+                    json!({}),
+                )
+                .await,
         ),
         (
             "schedules",
             "backfill",
-            harness.post(token, "/v1/schedules/sched-1/backfill", backfill).await,
+            harness
+                .post(
+                    token,
+                    "/v1/schedules/sch_01ARZ3NDEKTSV4RRFFQ69G5FAV/backfill",
+                    backfill,
+                )
+                .await,
         ),
         (
             "profiles",
@@ -402,10 +432,17 @@ async fn observe_mode_serves_a_zdr_org_as_before_and_logs_one_content_free_event
         harness.get(&user_in_zdr_org(), "/v1/schedules").await,
         harness.get(&user_in_zdr_org(), "/v1/profiles").await,
         harness
-            .post(&user_in_zdr_org(), "/v1/schedules/sched-1/pause", json!({}))
+            .post(
+                &user_in_zdr_org(),
+                "/v1/schedules/sch_01ARZ3NDEKTSV4RRFFQ69G5FAV/pause",
+                json!({}),
+            )
             .await,
         harness
-            .delete(&user_in_zdr_org(), "/v1/schedules/sched-1")
+            .delete(
+                &user_in_zdr_org(),
+                "/v1/schedules/sch_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            )
             .await,
         harness
             .post(
@@ -654,10 +691,16 @@ async fn enforced_zdr_org_can_still_wind_down() {
     let listed = harness.get(&zdr, "/v1/schedules").await;
     assert_eq!(listed.status().as_u16(), 200, "schedule list");
     let paused = harness
-        .post(&zdr, "/v1/schedules/sched-1/pause", json!({}))
+        .post(
+            &zdr,
+            "/v1/schedules/sch_01ARZ3NDEKTSV4RRFFQ69G5FAV/pause",
+            json!({}),
+        )
         .await;
     assert_eq!(paused.status().as_u16(), 200, "schedule pause");
-    let deleted = harness.delete(&zdr, "/v1/schedules/sched-1").await;
+    let deleted = harness
+        .delete(&zdr, "/v1/schedules/sch_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        .await;
     assert_eq!(deleted.status().as_u16(), 204, "schedule delete");
 
     let profile_list = harness.get(&zdr, "/v1/profiles").await;

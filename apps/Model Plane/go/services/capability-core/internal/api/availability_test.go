@@ -92,12 +92,18 @@ func TestGenericGlobalHealthAttestorCannotAttestOwnerActionTicket(t *testing.T) 
 	}
 }
 
-// The two ids added for knowledge_search and web_search/web_fetch. Each one is
-// executed inside execution-core's own tool loop (migration 0008 records
-// config_json.owner_service = execution-core) and execution-core probes the
-// real dependency before it attests — the bar cap.memory.* and cap.agent.spawn
-// already passed.
-var executionOwnedDependencyBackedCapabilityIDs = []string{"cap.retrieval.query", "cap.tool.http"}
+// The ids added for knowledge_search, web_search/web_fetch and the QF-17 crawl
+// tools. Each one is executed inside execution-core's own tool loop (migrations
+// 0008 and 0031 record config_json.owner_service = execution-core) and
+// execution-core probes the real dependency before it attests — the bar
+// cap.memory.* and cap.agent.spawn already passed.
+var executionOwnedDependencyBackedCapabilityIDs = []string{
+	"cap.retrieval.query",
+	"cap.tool.http",
+	"cap.web.crawl",
+	"cap.web.map",
+	"cap.web.batch",
+}
 
 func executionCoreGlobalHealthPrincipal() authctx.Principal {
 	return authctx.Principal{
@@ -168,11 +174,11 @@ func TestGenericGlobalHealthAllowlistIsExactlyTheExecutionOwnedRuntimes(t *testi
 	t.Parallel()
 
 	want := map[string]struct{}{
-		"cap.command.sandbox":    {},
-		"cap.command.shell":      {},
-		"cap.memory.search":      {},
-		"cap.memory.index":       {},
-		"cap.agent.spawn":        {},
+		"cap.command.sandbox": {},
+		"cap.command.shell":   {},
+		"cap.memory.search":   {},
+		"cap.memory.index":    {},
+		"cap.agent.spawn":     {},
 		// WS21-S5a: execution-core owns the Do-loop BrowserSession and attests it
 		// only when its own browser-broker and Quarry probes answer ready.
 		"cap.browser.observe":    {},
@@ -181,6 +187,9 @@ func TestGenericGlobalHealthAllowlistIsExactlyTheExecutionOwnedRuntimes(t *testi
 		"cap.tool.http":          {},
 		"cap.workspace.read":     {},
 		"cap.workspace.write":    {},
+		"cap.web.batch":          {},
+		"cap.web.crawl":          {},
+		"cap.web.map":            {},
 	}
 	for capabilityID := range want {
 		if _, present := genericGlobalHealthCapabilityIDs[capabilityID]; !present {
@@ -227,6 +236,9 @@ func TestExecutionCoreAttestationForRetrievalAndWebIsAcceptedAndAudited(t *testi
 	}{
 		{capabilityID: "cap.retrieval.query", risk: models.RiskLow},
 		{capabilityID: "cap.tool.http", risk: models.RiskMedium},
+		{capabilityID: "cap.web.crawl", risk: models.RiskMedium},
+		{capabilityID: "cap.web.map", risk: models.RiskLow},
+		{capabilityID: "cap.web.batch", risk: models.RiskMedium},
 	} {
 		test := test
 		t.Run(test.capabilityID, func(t *testing.T) {

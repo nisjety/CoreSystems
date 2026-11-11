@@ -492,7 +492,8 @@ async fn attach_run_inner(
             },
             &tabs,
         );
-        record_browser_timeline_event(
+        // QF-32 (WS10.S4): the timeline row and the `BrowserTabChanged` trace event, as tabs.rs.
+        record_timeline_and_trace(
             &state,
             &entry,
             &handle.live,
@@ -1202,6 +1203,8 @@ pub(super) async fn delegate_step(
         };
         attached && held
     }));
+    // QF-32: the step's wall time, for its `StepReceiptRecorded` event (as in `step`).
+    let step_started = std::time::Instant::now();
     let step_result = runner.execute(&req, &pinned, &mut lane.ctx).await;
     // W3-E3.1-e / CW-3: the observation of a delivered page is withheld before the landing
     // check, the receipt and the checkpoint see it (the runner already withheld what it stores).
@@ -1215,6 +1218,7 @@ pub(super) async fn delegate_step(
     } else {
         step_result
     };
+    let step_elapsed = step_started.elapsed();
     lane.ctx.live_attach_id = None;
     lane.ctx.live_attach_valid = None;
     let mut entry = handle.entry.lock().await;
@@ -1246,12 +1250,23 @@ pub(super) async fn delegate_step(
                 receipt_action,
                 &QuarryError::new(ErrorCode::NotFound, "attach_released_during_step"),
             );
+        let trace_facts = super::step::StepTraceFacts::of(&receipt);
         if let Err(error) = state.receipts.append(receipt).await {
             // zdr-log-ok: a ZDR run has no delegate (attach is refused for it); the store error text is what an operator needs
             tracing::warn!(%error, "could not record the receipt of a delegate step whose attachment ended");
         }
         // D2: the spent key is saved (skipped when the run itself closed).
         checkpoint_failed_step(state, &entry, &handle.live).await;
+        // QF-32 (WS10.S4): the failed receipt's trace event, with no observation.
+        super::step::emit_step_trace(
+            state,
+            entry.zdr,
+            &req.run_id,
+            trace_facts,
+            super::step::elapsed_ms(step_elapsed),
+            None,
+        )
+        .await;
         return Err(not_found());
     }
     // The landed page is checked before the receipt and the checkpoint (T4b-1), against the
@@ -1293,11 +1308,22 @@ pub(super) async fn delegate_step(
                 .tab(Some(tab_id.clone()), Some(attach_id.clone()))
                 .typed_field(typed_kind)
                 .complete(receipt_action, Some(observation.clone()), cost_usd);
+            let trace_facts = super::step::StepTraceFacts::of(&receipt);
             state
                 .receipts
                 .append(receipt)
                 .await
                 .map_err(|error| driver_err(request_id, error))?;
+            // QF-32 (WS10.S4): the step's trace events, once its receipt is recorded, as in `step`.
+            super::step::emit_step_trace(
+                state,
+                entry.zdr,
+                &req.run_id,
+                trace_facts,
+                super::step::elapsed_ms(step_elapsed),
+                Some(&observation),
+            )
+            .await;
             observation
         }
         Err(error) => {
@@ -1314,10 +1340,22 @@ pub(super) async fn delegate_step(
                 .tab(Some(tab_id.clone()), Some(attach_id.clone()))
                 .typed_field(typed_kind)
                 .fail(receipt_action, &error);
+            let trace_facts = super::step::StepTraceFacts::of(&receipt);
             let appended = state.receipts.append(receipt).await;
             // D2: the spent key is saved whether or not its receipt was kept.
             checkpoint_failed_step(state, &entry, &handle.live).await;
             appended.map_err(|error| driver_err(request_id, error))?;
+            // QF-32 (WS10.S4): a failed step's receipt event (no observation, so no egress or
+            // artifact), as in `step`.
+            super::step::emit_step_trace(
+                state,
+                entry.zdr,
+                &req.run_id,
+                trace_facts,
+                super::step::elapsed_ms(step_elapsed),
+                None,
+            )
+            .await;
             return Err(driver_err(request_id, error));
         }
     };

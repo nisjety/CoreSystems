@@ -83,6 +83,31 @@ func closedNoticeReason(reason, fallback string) string {
 	return fallback
 }
 
+// scheduleSkipReasons is the closed vocabulary of the skip code a skipped fire keeps
+// as its job's terminal_reason: the edge preflight's reasons (quarry-edge
+// schedule_preflight.rs, SKIP_REASONS), skipped_overlap from the orchestrator's
+// runtime sync, and preflight_denied, which the orchestrator sends when the edge
+// denies a fire without a reason.
+var scheduleSkipReasons = map[string]struct{}{
+	"skipped_zdr":             {},
+	"skipped_posture_unknown": {},
+	"skipped_no_entitlement":  {},
+	"skipped_overlap":         {},
+	"skipped_disabled":        {},
+	"skipped_kind_disabled":   {},
+	"preflight_denied":        {},
+}
+
+// closedSkipReason returns reason when it is in the closed skip vocabulary, else the
+// generic schedule_skipped. The job row takes the code only, never a raw string, so
+// no params or URL can be stored as its terminal reason.
+func closedSkipReason(reason string) string {
+	if _, ok := scheduleSkipReasons[strings.TrimSpace(reason)]; ok {
+		return strings.TrimSpace(reason)
+	}
+	return string(quarrycontracts.EvtScheduleSkipped)
+}
+
 // scheduleZdr reports the schedule's create-time ZDR stamp; an unstamped legacy row is standard.
 func scheduleZdr(s store.Schedule) bool {
 	return s.Zdr != nil && *s.Zdr
@@ -283,7 +308,7 @@ func registerScheduledRun(db store.DB, sink notify.Sink) http.HandlerFunc {
 		runID := quarrycontracts.ID(in.RunID)
 		if in.Status == "skipped" {
 			job.Status = "skipped"
-			job.TerminalReason = "schedule_skipped"
+			job.TerminalReason = closedSkipReason(in.Reason)
 			job.FinishedAt = &now
 		} else {
 			job.RunID = &runID

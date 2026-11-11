@@ -11728,6 +11728,25 @@ pub struct InvokeRequest {
     /// with the `context_references` feature whatever the switch says.
     #[serde(default, alias = "contextRefs")]
     pub context_refs: Option<serde_json::Value>,
+    /// QF-10 (E3.3) — the in-app browser tabs the person `@`-mentioned, as the BFF gateway
+    /// re-resolved them (`[{session_id, tab_id, label, title, target, ...}]`, at most eight). Kept as
+    /// raw JSON and read only while `MODEL_GATEWAY_BROWSER_PAGE_CONTEXT_ENABLED` is on and
+    /// `browser_context_verified` is `true` ([`crate::browser_page_context::resolve`]), so a body
+    /// carrying it parses exactly as before with the switch off. Classified browser-scraped; grants
+    /// nothing. A ZDR or waived turn carrying any is refused with the `browser_page_context` feature.
+    #[serde(default, alias = "browserTabRefs")]
+    pub browser_tab_refs: Option<serde_json::Value>,
+    /// QF-10 (E3.3) — page regions the person drew and attached, as the BFF gateway verified their
+    /// attach tokens (`[{session_id, tab_id, region, image}]`, at most four). Read under the same
+    /// switch and marker as `browser_tab_refs`; each screenshot rides as an image part of the user
+    /// turn and is never stored. Refused on a ZDR or waived turn like `browser_tab_refs`.
+    #[serde(default, alias = "browserRegions")]
+    pub browser_regions: Option<serde_json::Value>,
+    /// QF-10 — `true` only when the BFF gateway verified the browser tab refs and regions this body
+    /// carries (it strips any client copy first). Without it both fields are dropped unread: Model
+    /// Plane never trusts a client trust class (MP-ASKS W3-E3.3-d).
+    #[serde(default, alias = "browserContextVerified")]
+    pub browser_context_verified: Option<bool>,
     /// Wave 3 EP-5 S7 — the brand deck template the person picked: a skill id, never a name the
     /// model chose (decision D5). Kept as raw JSON and read only while `SKILL_DECK_TEMPLATES_ENABLED`
     /// is on ([`crate::deck_templates::requested`]), so a body carrying it parses exactly as before

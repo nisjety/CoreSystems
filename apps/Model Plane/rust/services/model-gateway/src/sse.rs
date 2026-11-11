@@ -2398,6 +2398,35 @@ pub async fn invoke_stream_sse(
             return error_stream(&request_id, code, message, false);
         }
     };
+    // QF-10 (E3.3): the browser tabs and page regions the BFF verified for this turn, checked before any
+    // run or model call. A ZDR or waived turn carrying either is refused whatever the switch says; with the
+    // switch off, or without the BFF's `browser_context_verified` marker, the fields are never read.
+    let browser_page_context = match crate::browser_page_context::resolve(
+        crate::browser_page_context::enabled(),
+        &req,
+        &crate::browser_page_context::TurnFacts {
+            zdr: turn_posture.zdr(),
+            waived: turn_posture.is_waived(),
+            agentic: features.iter().any(|feature| feature == "agentic"),
+            diverted: req.deep_research || req.generate_image,
+        },
+    ) {
+        Ok(context) => context,
+        Err(crate::browser_page_context::BrowserPageContextRefusal::Zdr) => {
+            return zdr_refusal_stream(
+                &request_id,
+                crate::browser_page_context::BrowserPageContextRefusal::zdr_refusal(),
+            );
+        }
+        Err(crate::browser_page_context::BrowserPageContextRefusal::Typed { code, message, .. }) => {
+            return error_stream(&request_id, code, message, false);
+        }
+    };
+    if let Some(context) = browser_page_context.as_ref() {
+        // Counts and sizes only: the context is page content.
+        let (tabs, regions, bytes) = context.summary();
+        tracing::info!(request_id = %request_id, tabs, regions, bytes, "browser page context rides the turn");
+    }
     let attachment_policy = crate::attachment_policy::AttachmentPolicy::from_env();
     // A waiver names one connection. Deep research, image generation and a vision turn (AnalyzeImage)
     // call the platform chain, which a waived turn must never reach, so they are refused before any run.
@@ -3063,9 +3092,14 @@ pub async fn invoke_stream_sse(
     // Not knowing is the caller's to weigh: an Ask turn falls back to the vision diversion, a
     // Do turn goes on and inference-core refuses a round no provider can serve
     // (`vision_unsupported`) rather than dropping the image.
-    let picked_model_reads_images = if crate::vision::parts::has_images(&req.attachments)
-        && !effective_zdr
-        && ((wants_image_parts && !agentic_requested) || carries_do_attachments)
+    // QF-10: browser region screenshots ride only as parts, so the catalogue is asked for them too.
+    let browser_regions_ride = browser_page_context
+        .as_ref()
+        .is_some_and(crate::browser_page_context::BrowserPageContext::has_regions);
+    let picked_model_reads_images = if !effective_zdr
+        && ((crate::vision::parts::has_images(&req.attachments)
+            && ((wants_image_parts && !agentic_requested) || carries_do_attachments))
+            || (browser_regions_ride && crate::vision::parts::enabled() && !agentic_requested))
     {
         match state
             .inference_client
@@ -3093,7 +3127,7 @@ pub async fn invoke_stream_sse(
         && !agentic_requested
         && !effective_zdr
         && picked_model_reads_images.unwrap_or(false);
-    let image_parts = match crate::vision::parts::admit(
+    let mut image_parts = match crate::vision::parts::admit(
         wants_image_parts,
         agentic_requested && !carries_do_attachments,
         effective_zdr,
@@ -3103,6 +3137,20 @@ pub async fn invoke_stream_sse(
         Ok(image_parts) => image_parts,
         Err(refusal) => return error_stream(&request_id, refusal.code, &refusal.message, false),
     };
+    // QF-10: each verified browser region's screenshot is an image part of the user turn, after any
+    // attached images. A route whose model reads no images (or with image parts switched off) is refused
+    // rather than answered without the regions the person attached.
+    if let Some(context) = browser_page_context.as_ref().filter(|context| context.has_regions()) {
+        if !crate::vision::parts::enabled() || picked_model_reads_images != Some(true) {
+            return error_stream(
+                &request_id,
+                crate::browser_page_context::UNSUPPORTED_CODE,
+                crate::browser_page_context::REGIONS_NEED_VISION_MESSAGE,
+                false,
+            );
+        }
+        image_parts.push_browser_regions(context.region_images());
+    }
     if !image_parts.is_empty() {
         let (images, bytes) = image_parts.summary();
         tracing::info!(request_id = %request_id, images, bytes, "images ride as parts of the turn");
@@ -4280,6 +4328,14 @@ pub async fn invoke_stream_sse(
             .collect(),
         None => Vec::new(),
     };
+    // QF-10: the browser page context block goes just before the turn's user message, after the standing
+    // head, so the cached prefix and its plan are unchanged. It is a prompt message only: nothing stores it.
+    if let Some(block) = browser_page_context
+        .as_ref()
+        .and_then(crate::browser_page_context::BrowserPageContext::context_block)
+    {
+        crate::browser_page_context::insert_before_user_turn(&mut messages, block, composed_head.len());
+    }
     // The images belong to the user turn this prompt ends with; from here the prompt only grows.
     let image_parts = image_parts.bind(&messages);
     // The files reach the model only through `code_interpreter`. A turn that stages files but offers no

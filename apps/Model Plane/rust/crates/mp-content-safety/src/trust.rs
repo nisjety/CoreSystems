@@ -53,6 +53,11 @@ const TOOL_TRUST: &[(&str, TrustClass)] = &[
     ("browser.observe", TrustClass::BrowserScraped),
     ("browser.act", TrustClass::BrowserScraped),
     ("browser.console", TrustClass::BrowserScraped),
+    // QF-10 (E3.3): the gateway-verified browser page context a person attaches to a chat turn: a
+    // tab ref (label, title and target of an open tab) and a region (a screenshot crop and its
+    // selection). Both are page content the person did not write, and neither grants an action.
+    ("browser_tab_ref", TrustClass::BrowserScraped),
+    ("browser_region_attachment", TrustClass::BrowserScraped),
     ("read_provider_action", TrustClass::ConnectorContent),
     ("execute_provider_action", TrustClass::ConnectorContent),
     ("recall_conversations", TrustClass::PriorConversation),
@@ -160,6 +165,18 @@ mod tests {
         }
         // The Do loop's open (WS21-S5a) reads the page back, so it is page content too.
         assert_eq!(TrustClass::classify("browser.open"), TrustClass::BrowserScraped);
+    }
+
+    // QF-10: a chat turn's attached tab refs and regions are page content, framed untrusted.
+    #[test]
+    fn trust_class_browser_page_context_is_browser_scraped() {
+        for name in ["browser_tab_ref", "browser_region_attachment"] {
+            let class = TrustClass::classify(name);
+            assert_eq!(class, TrustClass::BrowserScraped, "{name}");
+            assert_eq!(class.label(), "browser-scraped", "{name}");
+            assert!(class.is_external_content(), "{name}");
+            assert!(class.framing().expect("framed").contains("UNTRUSTED"), "{name}");
+        }
     }
 
     // WS11.S7: the one list behind the web-taint guard. execution-core (latch) and session-core

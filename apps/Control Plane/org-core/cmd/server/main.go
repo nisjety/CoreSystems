@@ -16,15 +16,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/browsersites"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/config"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/database"
 	grpcserver "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/grpc"
 	httpserver "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/http"
 	metricsserver "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/metrics"
-	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/browsersites"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/modelentitlement"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/nats"
 	orgcore "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/org"
+	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/orgkeys"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/rbac"
 	rediscache "github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/redis"
 	"github.com/I-Dacosta/AquatiqCMS/apps/org-core/internal/retention"
@@ -38,6 +39,16 @@ func main() {
 
 	if err := httpserver.ValidateSIEMDestinationsConfig(os.Getenv); err != nil {
 		log.Fatalf("[org-core startup] SIEM destinations validation failed: %v", err)
+	}
+
+	// WS17.E2 org key service. Everything below is read only with the switch on; the
+	// refusal names the switch and never the key material or any env value.
+	orgKeysOn := orgkeys.Enabled(os.Getenv)
+	if orgKeysOn {
+		if err := httpserver.ValidateOrgKeysConfig(os.Getenv); err != nil {
+			log.Fatalf("[org-core startup] %s is on but the org key master keys are not usable; refusing to start", orgkeys.EnvEnabled)
+		}
+		log.Printf("[org-core startup] org key master keys OK")
 	}
 
 	// pprof debug server — enable with PPROF_ENABLED=true; default addr :6061
@@ -191,6 +202,20 @@ func main() {
 	server.SetRetention(retentionService)
 	if natsClient != nil {
 		go runRetentionAuditOutbox(ctx, retentionService, 5*time.Second)
+	}
+	// Org key service (WS17.E2). Off: nothing is read, built or started here, and the
+	// key routes are not mounted. On: a store or master-key failure refuses boot.
+	if orgKeysOn {
+		orgKeysService, err := orgkeys.NewServiceFromEnv(db, os.Getenv)
+		if err != nil {
+			log.Fatalf("[org-core startup] %s is on but the org key service could not be built; refusing to start", orgkeys.EnvEnabled)
+		}
+		// Same typed-nil guard as the retention publisher above.
+		if natsClient != nil {
+			orgKeysService.SetAuditPublisher(natsClient)
+		}
+		server.SetOrgKeys(orgKeysService)
+		go runOrgKeysAuditOutbox(ctx, orgKeysService, 5*time.Second)
 	}
 	grpcServer := grpcserver.NewServer(cfg.GRPCPort)
 	metricsServer := metricsserver.NewServer(cfg.MetricsPort)
@@ -380,6 +405,44 @@ func runIdentityAuditOutbox(ctx context.Context, service *orgcore.Service, inter
 				"org-core identity audit outbox published=%d dead_lettered=%d",
 				result.Published, result.DeadLettered,
 			)
+		}
+	}
+	flush()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+// runOrgKeysAuditOutbox publishes the pending audit intents of the org key service
+// (WS17.E2). It runs only with ORG_CORE_KEYS_ENABLED on. Logs carry fixed text and
+// counts only, never an error string, so no key id, purpose or env value can leak.
+// A failing flush (no NATS publisher, store error) is logged once when the loop
+// starts failing and again only after it recovers, so a missing publisher does not
+// flood the log every tick.
+func runOrgKeysAuditOutbox(ctx context.Context, service *orgkeys.Service, interval time.Duration) {
+	failing := false
+	flush := func() {
+		published, err := service.FlushAudit(ctx, 100)
+		if err != nil {
+			if !failing && ctx.Err() == nil {
+				log.Printf("org-core org key audit outbox flush failed; intents stay pending until it succeeds")
+			}
+			failing = true
+			return
+		}
+		if failing {
+			log.Printf("org-core org key audit outbox flush recovered")
+			failing = false
+		}
+		if published > 0 {
+			log.Printf("org-core org key audit outbox published=%d", published)
 		}
 	}
 	flush()

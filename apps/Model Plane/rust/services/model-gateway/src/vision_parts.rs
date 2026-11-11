@@ -162,6 +162,19 @@ impl ImageParts {
         })
     }
 
+    /// Adds the gateway-verified browser region screenshots of the turn (QF-10,
+    /// `browser_page_context`) after any attached images, in region order. They are
+    /// request-scope memory like every other part: never stored, logged or serialized.
+    /// Must run before [`ImageParts::bind`].
+    pub fn push_browser_regions<'a>(&mut self, images: impl IntoIterator<Item = (&'a [u8], &'a str)>) {
+        for (data, mime_type) in images {
+            self.images.push(Image {
+                data: data.to_vec(),
+                mime_type: mime_type.to_owned(),
+            });
+        }
+    }
+
     /// Binds the images to the current turn's user message in the rendered prompt:
     /// the last `user` message, since the prompt ends with the turn being answered
     /// (system blocks and prior history come before it). A no-op without images.

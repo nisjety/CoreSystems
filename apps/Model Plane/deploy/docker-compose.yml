@@ -652,6 +652,11 @@ services:
       # written into execution-core's tool_input.recipe with for_user_id from the verified claims. Off answers
       # 400 browser_recipe_unavailable. Needs EXECUTION_CORE_RECIPE_RUNNER too. Only the literal true turns it on.
       MODEL_GATEWAY_BROWSER_RECIPE: ${MODEL_GATEWAY_BROWSER_RECIPE:-false}
+      # QF-10, OFF by default: a chat turn reads the BFF-verified browser_tab_refs and browser_regions
+      # (only with browser_context_verified true) as one untrusted browser-scraped context block, and each
+      # region screenshot as an image part (needs CHAT_VISION_AS_PARTS_ENABLED and a vision model). A ZDR or
+      # waived turn carrying either is refused (browser_page_context). Only the literal true turns it on.
+      MODEL_GATEWAY_BROWSER_PAGE_CONTEXT_ENABLED: ${MODEL_GATEWAY_BROWSER_PAGE_CONTEXT_ENABLED:-false}
       # WS16.S8, OFF by default: advertise the extract_structured chat tool (schema-validated,
       # verbatim-grounded extraction over 1-5 pages). The gRPC ExtractStructured fixes are unflagged.
       MODEL_GATEWAY_EXTRACT_TOOL: ${MODEL_GATEWAY_EXTRACT_TOOL:-0}

@@ -31,7 +31,7 @@
 //! Not validated: **pattern**, **format** and **$ref**. The validator ignores
 //! them, so a schema that uses one must be refused, or have its references
 //! resolved, before it reaches this module. The AI spec normaliser
-//! (`ai_spec.rs`) refuses all three today.
+//! (`ai_spec.rs`) inlines local **$ref** and refuses **pattern** and **format**.
 //!
 //! The walk follows the schema's own nesting, one level per subschema (an
 //! `anyOf` or `oneOf` branch included), so its depth is the depth of the schema.

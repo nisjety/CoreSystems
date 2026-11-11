@@ -1,9 +1,20 @@
 import { For, Show, createEffect, createSignal } from 'solid-js'
 import type { JSX } from '@solidjs/web'
-import { browserErrorMessage, type BrowserSavedRecipe } from '@/shared/api/browser-client'
+import {
+  browserErrorMessage,
+  type BrowserRecipeDetail,
+  type BrowserRecipeSlot,
+  type BrowserSavedRecipe,
+} from '@/shared/api/browser-client'
 import { useI18n } from '@/shared/i18n'
 import { formatMoment } from '@/shared/i18n/format'
-import { recipesEnabled, useRecipeRun, useSavedRecipes, type BrowserRecipeSaved } from './use-browser-evidence'
+import {
+  recipesEnabled,
+  useRecipeDetail,
+  useRecipeRun,
+  useSavedRecipes,
+  type BrowserRecipeSaved,
+} from './use-browser-evidence'
 import './browser-evidence.css'
 
 /** The gateway's slot bounds: a name `^[a-z0-9_]{1,40}$`, at most 32 slots, a value of at most 2000 characters. */
@@ -12,28 +23,35 @@ const RECIPE_SLOTS_MAX = 32
 const RECIPE_SLOT_VALUE_MAX_CHARS = 2000
 
 /**
- * The slot names a recipe runs with, or null when this panel cannot start it. The list does not
- * send the slots yet (see `BrowserSavedRecipe.slots`), so every recipe reads as unknown until it
- * does. A secret slot is also unknown here: execution-core refuses a secret slot, and a person
- * supplies it by takeover, not in this panel.
+ * The slots a chosen recipe runs with (QF-29, from its detail read), or null when this panel cannot
+ * start it: too many slots, a name outside the gateway's bound, or a kind it does not know.
  */
-function runnableSlots(recipe: BrowserSavedRecipe): string[] | null {
-  const slots = recipe.slots
+function runnableSlots(detail: BrowserRecipeDetail | null): BrowserRecipeSlot[] | null {
+  const slots = detail?.slots
   if (!Array.isArray(slots) || slots.length > RECIPE_SLOTS_MAX) return null
-  const names: string[] = []
+  const kept: BrowserRecipeSlot[] = []
   for (const slot of slots) {
-    if (!slot || slot.kind !== 'text' || typeof slot.name !== 'string' || !SLOT_NAME_PATTERN.test(slot.name)) return null
-    names.push(slot.name)
+    if (
+      !slot ||
+      (slot.kind !== 'text' && slot.kind !== 'secret') ||
+      typeof slot.name !== 'string' ||
+      !SLOT_NAME_PATTERN.test(slot.name)
+    )
+      return null
+    kept.push({ name: slot.name, kind: slot.kind })
   }
-  return names
+  return kept
 }
 
 /**
- * The saved browser recipes under the Procedure panel (Q4-E4.2-4d): the person's recipes, each with
- * one text input per slot and a Run button. Only the literal `true` of VITE_BROWSER_RECIPES builds
- * it. A ZDR session still lists the recipes, but Run and the inputs are disabled. A run starts on
- * the person's click alone. The slot values live in this panel's state, are sent with the start,
- * and are cleared once the start is accepted.
+ * The saved browser recipes under the Procedure panel (Q4-E4.2-4d, QF-29): the person's recipes.
+ * Choosing one reads its detail (the newest version's slot names and kinds) and shows one text
+ * input per text slot and a masked input per secret slot, with Run. Only the literal `true` of
+ * VITE_BROWSER_RECIPES builds it. A ZDR session still lists the recipes, but Run and the inputs
+ * are hidden. A run starts on the person's click alone, pinned to the version the detail read. The
+ * slot values live in this panel's memory only: never prefilled, stored or logged, sent with the
+ * start, and cleared once the start is accepted, when another recipe is chosen, or when the session
+ * changes.
  */
 export function RecipesPanel(props: {
   sessionId: string
@@ -52,8 +70,11 @@ function RecipesList(props: { sessionId: string; zdr: boolean; savedRecipe?: Bro
   const i18n = useI18n()
   const list = useSavedRecipes()
   const run = useRecipeRun()
-  // The typed slot values, per recipe id. They stay in this component.
-  const [values, setValues] = createSignal<Record<string, Record<string, string>>>({})
+  const detail = useRecipeDetail()
+  // The recipe the person chose. Only it shows slot inputs and Run.
+  const [chosen, setChosen] = createSignal<string | null>(null)
+  // The typed slot values of the chosen recipe. They stay in this component's memory only.
+  const [values, setValues] = createSignal<Record<string, string>>({})
   // The recipe the last start was for, so that only its Run button reads as starting.
   const [startedRecipe, setStartedRecipe] = createSignal<string | null>(null)
   const busy = () => run.status() === 'starting' || run.status() === 'live'
@@ -68,41 +89,64 @@ function RecipesList(props: { sessionId: string; zdr: boolean; savedRecipe?: Bro
     () => props.sessionId,
     () => {
       run.reset()
+      detail.clear()
+      setChosen(null)
       setValues({})
       setStartedRecipe(null)
     },
   )
 
-  const valueOf = (recipeId: string, name: string): string => values()[recipeId]?.[name] ?? ''
-  const setValue = (recipeId: string, name: string, value: string) =>
-    setValues((current) => ({ ...current, [recipeId]: { ...current[recipeId], [name]: value } }))
-  const clearValues = (recipeId: string) =>
-    setValues((current) => {
-      const next = { ...current }
-      delete next[recipeId]
-      return next
-    })
+  /** The chosen recipe's slots, once its detail has arrived for that recipe. */
+  const chosenSlots = (recipeId: string): BrowserRecipeSlot[] | null => {
+    const read = detail.detail()
+    if (chosen() !== recipeId || detail.status() !== 'ready' || !read || read.recipeId !== recipeId) return null
+    return runnableSlots(read)
+  }
 
-  const canRun = (recipe: BrowserSavedRecipe, names: string[] | null): boolean =>
+  const choose = (recipe: BrowserSavedRecipe) => {
+    if (busy()) return
+    // A new choice drops every typed value, secret ones included.
+    setValues({})
+    if (chosen() === recipe.recipeId) {
+      setChosen(null)
+      detail.clear()
+      return
+    }
+    setChosen(recipe.recipeId)
+    detail.load(recipe.recipeId)
+  }
+
+  const valueOf = (name: string): string => values()[name] ?? ''
+  const setValue = (name: string, value: string) => setValues((current) => ({ ...current, [name]: value }))
+
+  const slotValue = (slot: BrowserRecipeSlot): string => {
+    const raw = valueOf(slot.name)
+    // A secret is sent as typed; a text value is trimmed.
+    return slot.kind === 'secret' ? raw : raw.trim()
+  }
+
+  const canRun = (recipe: BrowserSavedRecipe, slots: BrowserRecipeSlot[] | null): boolean =>
     !props.zdr &&
     !busy() &&
     props.sessionId !== '' &&
-    names !== null &&
-    names.every((name) => valueOf(recipe.recipeId, name).trim() !== '')
+    slots !== null &&
+    detail.detail() !== null &&
+    slots.every((slot) => slotValue(slot) !== '') &&
+    chosen() === recipe.recipeId
 
-  const startRecipe = async (recipe: BrowserSavedRecipe, names: string[]) => {
-    if (busy() || props.zdr || props.sessionId === '') return
-    const typed: Record<string, string> = values()[recipe.recipeId] ?? {}
-    const slots: Record<string, string> = {}
-    for (const name of names) slots[name] = (typed[name] ?? '').trim()
+  const startRecipe = async (recipe: BrowserSavedRecipe, slots: BrowserRecipeSlot[]) => {
+    const read = detail.detail()
+    if (busy() || props.zdr || props.sessionId === '' || !read || read.recipeId !== recipe.recipeId) return
+    const sent: Record<string, string> = {}
+    for (const slot of slots) sent[slot.name] = slotValue(slot)
     setStartedRecipe(recipe.recipeId)
     const started = await run.runRecipe(props.sessionId, {
       id: recipe.recipeId,
-      name: recipe.name,
-      version: recipe.latestVersion,
-      slots,
+      name: read.name ?? recipe.name,
+      version: read.version,
+      slots: sent,
     })
-    if (started) clearValues(recipe.recipeId)
+    if (started) setValues({})
   }
 
   const labelFor = (recipeId: string): string => {
@@ -116,6 +160,14 @@ function RecipesList(props: { sessionId: string; zdr: boolean; savedRecipe?: Bro
     return browserErrorMessage(failure, i18n.tr, {
       no: 'Oppskriftene kunne ikke lastes.',
       en: 'The recipes could not be loaded.',
+    })
+  }
+  const detailFailure = () => {
+    const failure = detail.error()
+    if (!failure || chosen() === null) return null
+    return browserErrorMessage(failure, i18n.tr, {
+      no: 'Feltene for oppskriften kunne ikke lastes.',
+      en: "The recipe's inputs could not be loaded.",
     })
   }
   const runFailure = () => {
@@ -151,44 +203,62 @@ function RecipesList(props: { sessionId: string; zdr: boolean; savedRecipe?: Bro
       <ol class="browser-evidence-list">
         <For each={list.recipes()}>
           {(recipe) => {
-            const names = runnableSlots(recipe)
+            const isChosen = () => chosen() === recipe.recipeId
+            const slots = () => chosenSlots(recipe.recipeId)
+            const slotSummary = (): string => {
+              if (!isChosen()) return ''
+              if (detail.status() === 'loading') return i18n.tr('Laster felt…', 'Loading slots…')
+              const known = slots()
+              if (detail.status() === 'ready' && known === null) return i18n.tr('felt ukjent', 'slots unknown')
+              return known === null ? '' : `${known.length} ${i18n.tr('felt', 'slots')}`
+            }
             return (
               <li>
                 <div class="browser-evidence-row">
                   <span class="browser-evidence-row__method">v{recipe.latestVersion}</span>
-                  <span class="browser-evidence-row__url" title={recipe.name}>
+                  <button
+                    type="button"
+                    class="browser-evidence-row__url"
+                    title={recipe.name}
+                    aria-expanded={isChosen() ? 'true' : 'false'}
+                    disabled={busy()}
+                    onClick={() => choose(recipe)}
+                  >
                     {recipe.name}
-                  </span>
-                  <span class="browser-evidence-row__policy">
-                    {names === null ? i18n.tr('felt ukjent', 'slots unknown') : `${names.length} ${i18n.tr('felt', 'slots')}`}
-                  </span>
+                  </button>
+                  <span class="browser-evidence-row__policy">{slotSummary()}</span>
                   <time class="browser-evidence-row__time" datetime={recipe.updatedAt}>
                     {formatMoment(recipe.updatedAt, i18n.locale())}
                   </time>
-                  <button
-                    type="button"
-                    class="browser-evidence-panel__action"
-                    disabled={!canRun(recipe, names)}
-                    onClick={() => void startRecipe(recipe, names ?? [])}
-                  >
-                    {labelFor(recipe.recipeId)}
-                  </button>
+                  <Show when={!props.zdr && isChosen() && slots() !== null}>
+                    <button
+                      type="button"
+                      class="browser-evidence-panel__action"
+                      disabled={!canRun(recipe, slots())}
+                      onClick={() => {
+                        const known = slots()
+                        if (known) void startRecipe(recipe, known)
+                      }}
+                    >
+                      {labelFor(recipe.recipeId)}
+                    </button>
+                  </Show>
                 </div>
-                <Show when={names !== null && names.length > 0}>
+                <Show when={!props.zdr && isChosen() && (slots()?.length ?? 0) > 0}>
                   <div class="browser-evidence-recipe">
-                    <For each={names ?? []}>
-                      {(name) => (
+                    <For each={slots() ?? []}>
+                      {(slot) => (
                         <label class="browser-evidence-recipe__label">
-                          <span>{name}</span>
+                          <span>{slot.name}</span>
                           <input
-                            type="text"
+                            type={slot.kind === 'secret' ? 'password' : 'text'}
                             class="browser-evidence-recipe__input"
                             maxlength={RECIPE_SLOT_VALUE_MAX_CHARS}
-                            autocomplete="off"
+                            autocomplete={slot.kind === 'secret' ? 'new-password' : 'off'}
                             spellcheck={false}
-                            value={valueOf(recipe.recipeId, name)}
-                            disabled={props.zdr || busy()}
-                            onInput={(event) => setValue(recipe.recipeId, name, event.currentTarget.value)}
+                            value={valueOf(slot.name)}
+                            disabled={busy()}
+                            onInput={(event) => setValue(slot.name, event.currentTarget.value)}
                           />
                         </label>
                       )}
@@ -200,13 +270,12 @@ function RecipesList(props: { sessionId: string; zdr: boolean; savedRecipe?: Bro
           }}
         </For>
       </ol>
-      <Show when={list.recipes().some((recipe) => runnableSlots(recipe) === null)}>
-        <p class="browser-evidence-panel__hint">
-          {i18n.tr(
-            'Feltene for en oppskrift vises ikke her ennå, så den kan ikke kjøres herfra.',
-            "A recipe's inputs are not shown here yet, so it cannot be run from here.",
-          )}
-        </p>
+      <Show when={detailFailure()}>
+        {(message) => (
+          <p class="browser-evidence-panel__hint" role="alert">
+            {message()}
+          </p>
+        )}
       </Show>
       <Show when={list.nextAfterId()}>
         <button

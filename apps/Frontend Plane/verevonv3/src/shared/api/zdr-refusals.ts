@@ -73,6 +73,7 @@ export type ZdrFeatureKey =
   | 'browser_profile'
   | 'session_resume'
   | 'page_screenshot'
+  | 'browser_page_context'
 
 /** The reader's-language chooser, the same shape the rest of the SPA passes around. */
 export type Translate = (noText: string, enText: string) => string
@@ -214,6 +215,7 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   browser_profile: { no: 'lagrede nettleserprofiler', en: 'saved browser profiles' },
   session_resume: { no: 'gjenopptak av en lagret nettleserøkt', en: 'resuming a saved browser session' },
   page_screenshot: { no: 'skjermbilder av sider', en: 'page screenshots' },
+  browser_page_context: { no: 'vedlagte nettleserfaner og sideutsnitt', en: 'attached browser tabs and page regions' },
 }
 
 /** A refusal whose feature the SPA does not know names it this way. */

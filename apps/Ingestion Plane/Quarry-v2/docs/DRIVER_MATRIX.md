@@ -97,6 +97,8 @@ For long-lived authenticated workflows, Browserbase contexts are the most reliab
 
 ## Configuring overrides
 
+**Not built.** Checked 2026-11-11: no code under `crates/` has `driverHints`, `preferredDriver`, a request-level `fallbackChain`, or `DriverSignals.preferred_driver`. `DriverSignals` (`quarry-runtime/src/driver_plan.rs`) has no preferred-driver field. The example below is a design sketch, not a contract.
+
 Per-request overrides via `DriverSignals.preferred_driver`:
 
 ```json

@@ -117,6 +117,9 @@ use super::dispatchers_spaces::ws03::{
     dispatch_spaces_apply_effect_preset, dispatch_spaces_set_effect_entitlements,
 };
 use super::dispatchers::{
+    dispatch_browser_control_tab, dispatch_browser_stop_attach, dispatch_chat_cancel_research_run,
+};
+use super::dispatchers::{
     dispatch_brreg_lookup, dispatch_connect_source, dispatch_conversation_csat_preference,
     dispatch_conversation_follow, dispatch_crawl_site, dispatch_import_source,
     dispatch_operating_map_blueprint, dispatch_operating_map_generate,
@@ -508,6 +511,9 @@ pub(super) async fn execute_action(
         "chat.cancel_invocation" => {
             dispatch_chat_cancel_invocation(&state, &user, &headers, &body.input).await
         }
+        "chat.research_run.cancel" => {
+            dispatch_chat_cancel_research_run(&state, &user, &headers, &body.input).await
+        }
         "chat.queue_invocation_input" => {
             dispatch_chat_queue_invocation_input(&state, &user, &headers, &body.input).await
         }
@@ -581,6 +587,12 @@ pub(super) async fn execute_action(
         }
         "browser_tab.close" => {
             dispatch_browser_close_tab(&state, &user, &headers, &body.input).await
+        }
+        "browser_tab.control" => {
+            dispatch_browser_control_tab(&state, &user, &headers, &body.input).await
+        }
+        "browser_attach.stop" => {
+            dispatch_browser_stop_attach(&state, &user, &headers, &body.input).await
         }
         "browser_action.run" => {
             dispatch_browser_run_action(&state, &user, &headers, &body.input).await

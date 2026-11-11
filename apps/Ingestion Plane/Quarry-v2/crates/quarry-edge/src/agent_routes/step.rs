@@ -194,7 +194,7 @@ const MAX_EGRESS_BLOCK_EVENTS: usize = 20;
 /// WS10.S4: the closed facts a step's run-trace events carry, read off its receipt before the
 /// receipt store takes it. Labels, counts and opaque ids only: never typed text, a selector,
 /// a URL or a failure message.
-struct StepTraceFacts {
+pub(super) struct StepTraceFacts {
     receipt_id: String,
     step: u32,
     /// The action's serde tag (`click_ref`, `navigate`, ...), never its arguments.
@@ -207,7 +207,7 @@ struct StepTraceFacts {
 }
 
 impl StepTraceFacts {
-    fn of(receipt: &StepReceipt) -> Self {
+    pub(super) fn of(receipt: &StepReceipt) -> Self {
         let (outcome, error_code) = match &receipt.outcome {
             StepOutcome::Completed { .. } => ("completed", None),
             StepOutcome::Failed { error_code, .. } => ("failed", Some(error_code.clone())),
@@ -250,8 +250,9 @@ fn without_nulls(mut value: serde_json::Value) -> serde_json::Value {
 /// observation one `EgressDecided` summary plus at most [`MAX_EGRESS_BLOCK_EVENTS`] blocked
 /// requests, then one `ArtifactRecorded` per stored screenshot, visual observation and
 /// evidence delta. Every event after the first names the receipt event as its cause. All go
-/// through `emit_for_zdr`, so a ZDR run's events reach only live subscribers.
-async fn emit_step_trace(
+/// through `emit_for_zdr`, so a ZDR run's events reach only live subscribers. The delegate
+/// step of the attach lane (`attach::delegate_step`) emits through this as well (QF-32).
+pub(super) async fn emit_step_trace(
     state: &AppState,
     zdr: ZdrMode,
     run_id: &RunKind,
@@ -371,7 +372,7 @@ async fn emit_step_trace(
 }
 
 /// The step's wall time in whole ms, for its `StepReceiptRecorded` event.
-fn elapsed_ms(elapsed: Duration) -> u64 {
+pub(super) fn elapsed_ms(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 

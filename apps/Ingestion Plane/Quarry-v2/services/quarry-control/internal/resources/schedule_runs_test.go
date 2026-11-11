@@ -153,7 +153,7 @@ func TestRegisterRun_SkippedRowIsTerminalWithEvent(t *testing.T) {
 	if !ok {
 		t.Fatal("skipped job not found")
 	}
-	if job.Status != "skipped" || job.TerminalReason != "schedule_skipped" || job.FinishedAt == nil {
+	if job.Status != "skipped" || job.TerminalReason != "preflight_denied" || job.FinishedAt == nil {
 		t.Fatalf("skipped job must be terminal: status=%q reason=%q finished=%v", job.Status, job.TerminalReason, job.FinishedAt)
 	}
 	events := db.Events().ForJob(quarrycontracts.ID(res.JobID), 0, 10)

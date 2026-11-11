@@ -316,7 +316,9 @@ fn policy_and_legal_tracker() -> Preset {
     }
 }
 
-/// Return every shipped preset. Used by `/v1/presets` to enumerate.
+/// Return every shipped preset. Its callers are `resolve_preset` and this module's tests; no
+/// code outside this file calls either. No HTTP route lists the catalog: `GET /v1/presets` is no
+/// longer mounted (see docs/PRESETS.md).
 pub fn builtin_presets() -> Vec<Preset> {
     vec![
         docs_site(),

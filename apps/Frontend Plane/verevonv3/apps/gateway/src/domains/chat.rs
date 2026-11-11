@@ -5,7 +5,7 @@ pub(crate) mod history;
 pub(crate) mod json_handlers;
 mod library;
 pub(crate) mod shared;
-mod research_runs;
+pub(crate) mod research_runs;
 mod search;
 mod streams;
 pub(crate) mod support;

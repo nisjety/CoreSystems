@@ -103,6 +103,8 @@ func scanJob(row jobScanner) (store.Job, error) {
 	return j, nil
 }
 
+// Create inserts a job. terminal_reason and finished_at are written too, so a job
+// created already terminal (a skipped schedule fire) keeps its reason and finish time.
 func (s *jobsStore) Create(j store.Job) error {
 	policy, _ := json.Marshal(j.Policy)
 	params, _ := json.Marshal(j.Params)
@@ -122,10 +124,11 @@ func (s *jobsStore) Create(j store.Job) error {
 	}
 	_, err := s.pool.Exec(context.Background(),
 		`INSERT INTO jobs(id, org_id, kind, status, policy, params, schedule_id, created_at, run_id, idempotency_key,
-		   origin_type, origin_actor, origin_ref, created_by, workflow_id, deadline_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+		   origin_type, origin_actor, origin_ref, created_by, workflow_id, deadline_at, terminal_reason, finished_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
 		string(j.ID), j.OrgID, j.Kind, j.Status, policy, params, sid, j.CreatedAt, rid, j.IdempotencyKey,
-		originType, j.Origin.Actor, j.Origin.Ref, j.Origin.CreatedBy, j.WorkflowID, j.DeadlineAt)
+		originType, j.Origin.Actor, j.Origin.Ref, j.Origin.CreatedBy, j.WorkflowID, j.DeadlineAt,
+		j.TerminalReason, j.FinishedAt)
 	return mapPgErr(err)
 }
 

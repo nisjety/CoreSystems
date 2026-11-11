@@ -665,6 +665,11 @@ pub(crate) const MAX_ROUNDS_CEILING: u32 = 32;
 /// not silently richer on one surface than the other.
 const MAX_TOOL_CONTEXT_CHARS: usize = 8000;
 
+/// Room a provider content read's model copy may add around the read's own text: the provenance
+/// label and any screening note, and the `Executed <operation>. Result:` line. A content read keeps
+/// the connected-app read cap plus this room, so the framing never cuts the text the read kept.
+const CONTENT_READ_FRAMING_CHARS: usize = 512;
+
 /// Graceful reply persisted to the thread when no inference round yields an
 /// answer, so a user-facing answer always exists.
 const GRACEFUL_FAILURE_REPLY: &str =
@@ -773,6 +778,9 @@ struct ToolStepResult {
     name: String,
     output: String,
     error: Option<String>,
+    /// Whether the call is a provider content read whose text the model keeps in full (see
+    /// [`tool_context_cap`]). Set where the outcome is built from the call; false for a refusal.
+    content_read: bool,
 }
 
 /// One requested tool call's pre-dispatch fate, computed by `run_rounds`'
@@ -4090,6 +4098,7 @@ async fn run_rounds(
                             name: name.to_owned(),
                             output: output.to_owned(),
                             error: error.map(str::to_owned),
+                            content_read: provider_call_is_content_read(name, &call.arguments_json),
                         }));
                         continue;
                     }
@@ -4104,6 +4113,7 @@ async fn run_rounds(
                                 mp_contracts::loop_fold::CloserKind::UnknownOutcome,
                                 &call.name,
                             )),
+                            content_read: false,
                         }));
                         continue;
                     }
@@ -4125,6 +4135,7 @@ async fn run_rounds(
                          complete arguments — ideally as the only call in the next round.",
                         call.name
                     )),
+                    content_read: false,
                 }));
                 continue;
             }
@@ -4135,6 +4146,7 @@ async fn run_rounds(
                     name: call.name.clone(),
                     output: String::new(),
                     error: Some(refusal),
+                    content_read: false,
                 }));
                 continue;
             }
@@ -4152,6 +4164,7 @@ async fn run_rounds(
                         "tool '{}' is not in this agent's allowed scope",
                         call.name
                     )),
+                    content_read: false,
                 }));
                 continue;
             }
@@ -4174,6 +4187,7 @@ async fn run_rounds(
                     name: call.name.clone(),
                     output: String::new(),
                     error: Some(refusal.to_owned()),
+                    content_read: false,
                 }));
                 continue;
             }
@@ -4213,6 +4227,7 @@ async fn run_rounds(
                          needs the main agent to run it directly",
                         call.name
                     )),
+                    content_read: false,
                 }));
                 continue;
             }
@@ -4264,6 +4279,7 @@ async fn run_rounds(
                         name: call.name.clone(),
                         output: String::new(),
                         error: Some(refusal),
+                        content_read: false,
                     }));
                     continue;
                 }
@@ -4289,6 +4305,7 @@ async fn run_rounds(
                              out in a URL query string. Fetch the plain page address instead.",
                             call.name
                         )),
+                        content_read: false,
                     }));
                     continue;
                 }
@@ -4322,6 +4339,7 @@ async fn run_rounds(
                     name: call.name.clone(),
                     output: String::new(),
                     error: Some(problem),
+                    content_read: false,
                 }));
                 continue;
             }
@@ -4341,6 +4359,7 @@ async fn run_rounds(
                     error: Some(
                         crate::runtime_loop::subagent_results::main_agent_only_refusal(&call.name),
                     ),
+                    content_read: false,
                 }));
                 continue;
             }
@@ -4365,6 +4384,7 @@ async fn run_rounds(
                     name: call.name.clone(),
                     output: String::new(),
                     error: Some(crate::plan::main_agent_only_refusal(&call.name)),
+                    content_read: false,
                 }));
                 continue;
             }
@@ -4382,6 +4402,7 @@ async fn run_rounds(
                         name: call.name.clone(),
                         output: String::new(),
                         error: Some(refusal),
+                        content_read: false,
                     }));
                     continue;
                 }
@@ -4431,6 +4452,7 @@ async fn run_rounds(
                          doing it.",
                         call.name
                     )),
+                    content_read: false,
                 }));
                 continue;
             }
@@ -4449,6 +4471,7 @@ async fn run_rounds(
                             "duplicate knowledge_search suppressed; reformulate the query with materially different terms before retrying"
                                 .to_owned(),
                         ),
+                        content_read: false,
                     }));
                     continue;
                 }
@@ -5311,6 +5334,7 @@ async fn run_rounds(
                     name: call.name.clone(),
                     output: String::new(),
                     error: Some(super::scheduled_agent::withheld_refusal(&call.name)),
+                    content_read: false,
                 });
                 continue;
             }
@@ -5338,6 +5362,7 @@ async fn run_rounds(
                                 mp_contracts::loop_fold::CloserKind::Denied,
                                 &call.name,
                             )),
+                            content_read: false,
                         });
                         continue;
                     }
@@ -5366,6 +5391,7 @@ async fn run_rounds(
                                  again once the run resumes",
                                 call.name
                             )),
+                            content_read: false,
                         });
                     }
                     continue;
@@ -5389,6 +5415,7 @@ async fn run_rounds(
                          request; report that this step needs the main agent to run it directly",
                         call.name
                     )),
+                    content_read: false,
                 });
                 continue;
             }
@@ -5436,6 +5463,7 @@ async fn run_rounds(
                 name: call.name.clone(),
                 output,
                 error,
+                content_read: provider_call_is_content_read(&call.name, &call.arguments_json),
             });
         }
 
@@ -8581,15 +8609,20 @@ pub(crate) fn offerable_tool_names() -> Vec<String> {
         .collect()
 }
 
-/// How many characters of one tool's result the model gets to keep.
+/// How many characters of one step's result the model gets to keep.
 ///
-/// [`MAX_TOOL_CONTEXT_CHARS`] for every tool except the wide-research fan-out,
-/// whose digest already budgets itself to
-/// [`crate::subagent::research_fan_out::MERGE_BUDGET_CHARS`] and would otherwise
-/// be cut at the tail — losing its last items and the `verification:` summary —
-/// by a cap sized for a single lookup.
-fn tool_context_cap(tool_name: &str) -> usize {
-    if tool_name == crate::subagent::research_fan_out::RESEARCH_TOOL_NAME {
+/// A provider content read keeps [`crate::integration_tools::READ_RESULT_CHAR_CAP`] plus
+/// [`CONTENT_READ_FRAMING_CHARS`]: the read was rendered to fit that cap, and cutting it to the
+/// ordinary one would drop the end of a body the read already kept.
+///
+/// [`MAX_TOOL_CONTEXT_CHARS`] for every other tool except the wide-research fan-out, whose digest
+/// already budgets itself to [`crate::subagent::research_fan_out::MERGE_BUDGET_CHARS`] and would
+/// otherwise be cut at the tail — losing its last items and the `verification:` summary — by a
+/// cap sized for a single lookup.
+fn tool_context_cap(outcome: &ToolStepResult) -> usize {
+    if outcome.content_read {
+        crate::integration_tools::READ_RESULT_CHAR_CAP + CONTENT_READ_FRAMING_CHARS
+    } else if outcome.name == crate::subagent::research_fan_out::RESEARCH_TOOL_NAME {
         crate::subagent::research_fan_out::CONTEXT_CHARS
     } else {
         MAX_TOOL_CONTEXT_CHARS
@@ -8617,7 +8650,7 @@ does not exist:\n",
                     s,
                     "- {} → {}",
                     o.name,
-                    bounded_tool_context(&o.output, tool_context_cap(&o.name))
+                    bounded_tool_context(&o.output, tool_context_cap(o))
                 );
             }
         }
@@ -8726,6 +8759,16 @@ fn connector_call_is_read(tool_name: &str, tool_input: &str) -> bool {
     connector_operation(tool_name, tool_input)
         .and_then(|operation| crate::integration_tools::operation_is_write(&operation))
         == Some(false)
+}
+
+/// Whether a call is a provider content read, whose whole text the model keeps (see
+/// [`tool_context_cap`]). Only `execute_provider_action` and `read_provider_action` can be one, and
+/// only when the operation the call names is a content read in the catalogue: a list read, a write,
+/// an operation the catalogue does not know, and every other tool are not.
+fn provider_call_is_content_read(tool_name: &str, tool_input: &str) -> bool {
+    (tool_name == "execute_provider_action" || tool_name == runtime_loop::READ_PROVIDER_ACTION_TOOL)
+        && connector_operation(tool_name, tool_input)
+            .is_some_and(|operation| crate::integration_tools::is_content_read(&operation))
 }
 
 /// The counts a connector result keeps in its step record: the operation, how many
@@ -15355,11 +15398,13 @@ mod tests {
                 name: "yr_weather".to_owned(),
                 output: "clear".to_owned(),
                 error: None,
+                content_read: false,
             },
             ToolStepResult {
                 name: "subagent.task".to_owned(),
                 output: String::new(),
                 error: Some("refused".to_owned()),
+                content_read: false,
             },
         ];
         let records = loop_guard_records(&calls, &outcomes, Some(2));
@@ -15376,6 +15421,7 @@ mod tests {
             name: "yr_weather".to_owned(),
             output: "clear".to_owned(),
             error: None,
+            content_read: false,
         }];
         let plain = format_tool_context(&outcomes, None);
         assert!(!plain.contains(mp_contracts::loop_guard::REMIND_FIRST));
@@ -25242,8 +25288,17 @@ mod tests {
     #[test]
     fn the_fan_out_digest_gets_a_larger_context_allowance_than_an_ordinary_tool() {
         use crate::subagent::research_fan_out::{CONTEXT_CHARS, MERGE_BUDGET_CHARS, RESEARCH_TOOL_NAME};
-        assert_eq!(tool_context_cap("web_search"), MAX_TOOL_CONTEXT_CHARS);
-        assert_eq!(tool_context_cap(RESEARCH_TOOL_NAME), CONTEXT_CHARS);
+        let step = |name: &str| ToolStepResult {
+            name: name.to_owned(),
+            output: String::new(),
+            error: None,
+            content_read: false,
+        };
+        assert_eq!(
+            tool_context_cap(&step("web_search")),
+            MAX_TOOL_CONTEXT_CHARS
+        );
+        assert_eq!(tool_context_cap(&step(RESEARCH_TOOL_NAME)), CONTEXT_CHARS);
         assert!(MERGE_BUDGET_CHARS < CONTEXT_CHARS);
         assert!(CONTEXT_CHARS > MAX_TOOL_CONTEXT_CHARS);
 
@@ -25253,6 +25308,7 @@ mod tests {
                 name: RESEARCH_TOOL_NAME.to_owned(),
                 output: output.clone(),
                 error: None,
+                content_read: false,
             }],
             None,
         );
@@ -25265,12 +25321,68 @@ mod tests {
                 name: "web_search".to_owned(),
                 output,
                 error: None,
+                content_read: false,
             }],
             None,
         );
         assert!(
             framed_other.contains("[truncated:"),
             "the same size from an ordinary tool is still cut"
+        );
+    }
+
+    /// A provider content read keeps its whole text: its cap is the connected-app read cap plus the
+    /// room its framing takes, so the loop does not cut a read at the ordinary cap. Only a content
+    /// read of a provider tool gets that cap. A list read, a write, another tool and the same size
+    /// of ordinary text keep the ordinary one.
+    #[test]
+    fn a_provider_content_read_keeps_its_whole_text_and_nothing_else_gets_that_cap() {
+        use crate::integration_tools::READ_RESULT_CHAR_CAP;
+        let call = |tool: &str, operation: &str| {
+            let input = format!(r#"{{"connection_id":"conn_1","operation":"{operation}"}}"#);
+            provider_call_is_content_read(tool, &input)
+        };
+        assert!(call("execute_provider_action", "gmail.messages.get"));
+        assert!(call("execute_provider_action", "google.gmail.messages.get"));
+        assert!(call("read_provider_action", "mail.messages.get"));
+        assert!(
+            !call("execute_provider_action", "gmail.messages"),
+            "a list read keeps the ordinary cap"
+        );
+        assert!(
+            !call("execute_provider_action", "gmail.send"),
+            "a write is never a content read"
+        );
+        assert!(
+            !call("web_search", "gmail.messages.get"),
+            "only the provider tools carry a content read"
+        );
+
+        let read = ToolStepResult {
+            name: "execute_provider_action".to_owned(),
+            output: "x".repeat(READ_RESULT_CHAR_CAP),
+            error: None,
+            content_read: true,
+        };
+        assert_eq!(
+            tool_context_cap(&read),
+            READ_RESULT_CHAR_CAP + CONTENT_READ_FRAMING_CHARS
+        );
+        assert!(
+            !format_tool_context(&[read], None).contains("[truncated:"),
+            "a whole content read must survive the loop's framing"
+        );
+
+        let ordinary = ToolStepResult {
+            name: "execute_provider_action".to_owned(),
+            output: "x".repeat(READ_RESULT_CHAR_CAP),
+            error: None,
+            content_read: false,
+        };
+        assert_eq!(tool_context_cap(&ordinary), MAX_TOOL_CONTEXT_CHARS);
+        assert!(
+            format_tool_context(&[ordinary], None).contains("[truncated:"),
+            "the same size from a result that is not a content read is still cut"
         );
     }
 

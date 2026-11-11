@@ -26,9 +26,12 @@ import (
 //	GET    .../keys                   org:keys:admin:any    versions and states, no key material
 //	DELETE .../keys                   org:keys:destroy:any  crypto-shred every KEK of the org
 //
-// The admin and destroy scopes are not in orgServiceScopeAllowlist yet, so no
-// credential can hold them and those three routes answer 403 until a reviewed
-// registry change adds them (the operator and the erasure saga, WS17.E3/U41b).
+// The admin scope (org:keys:admin:any, rotate and metadata) is not in
+// orgServiceScopeAllowlist, so no credential can hold it and those two routes
+// answer 403 until a reviewed registry change adds it (for the operator). The
+// destroy scope (org:keys:destroy:any, DELETE) is allowlisted and pinned to
+// quarry-edge alone, for the org erasure saga's shred hop (Q2-WS17.E2a; WS17.E3
+// and U41b).
 //
 // Bodies are never logged, every answer is Cache-Control: no-store, and no error
 // message carries key material.

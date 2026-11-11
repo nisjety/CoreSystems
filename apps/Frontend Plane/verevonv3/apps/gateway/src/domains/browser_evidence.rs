@@ -87,6 +87,8 @@ const REGION_ATTACH_TOKEN_MAX_CHARS: usize = 96;
 /// Saved recipes (Q4-E4.2-4a), mounted only with `AppState::browser_recipes` (`BROWSER_RECIPES`).
 const SESSION_RECIPES_PATH: &str = "/api/v1/browser/sessions/{session_id}/recipes";
 const RECIPES_PATH: &str = "/api/v1/browser/recipes";
+/// One saved recipe's name, version and slot names and kinds (QF-29), same `BROWSER_RECIPES` gate.
+const RECIPE_DETAIL_PATH: &str = "/api/v1/browser/recipes/{recipe_id}";
 /// capability-core's `procedures.MaxNameRunes` and `MaxDescriptionRunes`.
 const RECIPE_NAME_MAX_CHARS: usize = 120;
 const RECIPE_DESCRIPTION_MAX_CHARS: usize = 500;
@@ -132,7 +134,8 @@ fn router_with(state: AppState, region_attach: bool) -> Router<AppState> {
     if state.browser_recipes {
         routes = routes
             .route(SESSION_RECIPES_PATH, post(save_session_recipe))
-            .route(RECIPES_PATH, get(list_saved_recipes));
+            .route(RECIPES_PATH, get(list_saved_recipes))
+            .route(RECIPE_DETAIL_PATH, get(get_saved_recipe));
     }
     with_rate_class(routes, &state.rate_limiter, RateClass::Interactive)
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
@@ -1021,6 +1024,109 @@ async fn recipes_list_view(
     })))
 }
 
+/// A recipe id the gateway will put in an upstream path: ASCII letters, digits, `-` and `_`, at
+/// most [`RECIPE_ID_MAX_CHARS`]. The same rule the list cursor's `afterId` keeps.
+fn is_recipe_id(raw: &str) -> bool {
+    (1..=RECIPE_ID_MAX_CHARS).contains(&raw.len())
+        && raw
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+/// The detail query (QF-29): only `version`, a whole number from 1. Any other key is dropped.
+/// `None` reads the recipe's newest version.
+fn recipe_detail_version(uri: &Uri) -> Result<Option<u32>, &'static str> {
+    let query = query_map(uri);
+    match query.get("version").filter(|raw| !raw.is_empty()) {
+        None => Ok(None),
+        Some(raw) => {
+            let version: u32 = raw.parse().map_err(|_| "version must be a whole number")?;
+            if version == 0 {
+                return Err("version must be at least 1");
+            }
+            Ok(Some(version))
+        }
+    }
+}
+
+/// One saved recipe's runnable shape (QF-29): its id, name, the version read, and that version's
+/// slot names and kinds. Read through model-gateway `/v1/recipes/{id}` (the metadata and newest
+/// version number) and `/v1/recipes/{id}/versions/{version}` (the body the slots live in), each with
+/// the caller's own capability token, so capability-core reads only the verified caller's recipe.
+/// Only the slots leave the body: never a step, a selector or a URL.
+async fn recipe_detail_view(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    recipe_id: &str,
+    version: Option<u32>,
+) -> Result<Value, Response> {
+    let capability = match shared::required_capability_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(cause) => return Err(shared::delegated_auth_unavailable(cause).into_response()),
+    };
+    let token = shared::model_token(state, user, headers).await;
+    let (status, Json(body)) = shared::proxy_model_json_with_capability(
+        state,
+        Method::GET,
+        &format!("{}/v1/recipes/{recipe_id}", state.model_gateway_url),
+        None,
+        token.as_deref(),
+        Some(&capability),
+        user,
+    )
+    .await;
+    if !status.is_success() {
+        return Err(recipe_upstream_failure(status, &body));
+    }
+    let detail = unwrap_data(&body);
+    let name = detail.get("name").filter(|name| name.is_string()).cloned();
+    let version = match version {
+        Some(version) => version,
+        None => match detail
+            .get("latest_version")
+            .and_then(Value::as_u64)
+            .and_then(|latest| u32::try_from(latest).ok())
+            .filter(|latest| *latest >= 1)
+        {
+            Some(latest) => latest,
+            None => {
+                return Err(
+                    (StatusCode::BAD_GATEWAY, Json(crate::envelope::upstream_unavailable()))
+                        .into_response(),
+                )
+            }
+        },
+    };
+    let (status, Json(body)) = shared::proxy_model_json_with_capability(
+        state,
+        Method::GET,
+        &format!(
+            "{}/v1/recipes/{recipe_id}/versions/{version}",
+            state.model_gateway_url
+        ),
+        None,
+        token.as_deref(),
+        Some(&capability),
+        user,
+    )
+    .await;
+    if !status.is_success() {
+        return Err(recipe_upstream_failure(status, &body));
+    }
+    let read = unwrap_data(&body);
+    let slots = read
+        .get("procedure")
+        .map(slots_view)
+        .unwrap_or_default();
+    Ok(without_nulls(json!({
+        "recipeId": recipe_id,
+        "name": name,
+        "version": version,
+        "slots": slots,
+    })))
+}
+
 // ---------------------------------------------------------------------------
 // Region and selection attach (E3.3-d)
 // ---------------------------------------------------------------------------
@@ -1854,6 +1960,34 @@ async fn list_saved_recipes(
         Err(message) => return bad_request("invalid_browser_recipe_query", message),
     };
     match recipes_list_view(&state, &user, &headers, &query).await {
+        Ok(data) => (
+            StatusCode::OK,
+            [(header::CACHE_CONTROL, "private, no-store")],
+            Json(ok(data)),
+        )
+            .into_response(),
+        Err(response) => response,
+    }
+}
+
+/// `GET /api/v1/browser/recipes/{recipe_id}?version=` (QF-29, mounted only with `BROWSER_RECIPES`).
+/// Answers `{ recipeId, name, version, slots: [{ name, kind: text|secret }] }` for the newest version,
+/// or for `version` when given. Never a step body, a selector or a URL.
+async fn get_saved_recipe(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path(recipe_id): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    if !is_recipe_id(&recipe_id) {
+        return bad_request("invalid_browser_recipe_query", "The recipe id is not valid.");
+    }
+    let version = match recipe_detail_version(&uri) {
+        Ok(version) => version,
+        Err(message) => return bad_request("invalid_browser_recipe_query", message),
+    };
+    match recipe_detail_view(&state, &user, &headers, &recipe_id, version).await {
         Ok(data) => (
             StatusCode::OK,
             [(header::CACHE_CONTROL, "private, no-store")],

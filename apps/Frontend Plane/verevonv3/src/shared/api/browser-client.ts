@@ -1059,8 +1059,8 @@ export type BrowserRecipeSlot = { name: string; kind: 'text' | 'secret' }
 
 /**
  * One saved recipe in the list (Q4-E4.2-4a, `GET /api/v1/browser/recipes`): its metadata and its newest
- * version number. The list carries no body. `slots` is what the browser panel needs before it can start a
- * recipe; the gateway's list does not send it yet, so until it does the panel starts no run from the list.
+ * version number. The list carries no body and no `slots`: the panel reads them per recipe with
+ * {@link getBrowserRecipe} (QF-29) before it can start a run.
  */
 export type BrowserSavedRecipe = {
   recipeId: string
@@ -1090,6 +1090,32 @@ export async function listBrowserRecipes(
   if (options?.afterId) params.set('afterId', options.afterId)
   const query = params.toString()
   return requestJson<BrowserSavedRecipesResponse>(`/api/v1/browser/recipes${query ? `?${query}` : ''}`, {
+    method: 'GET',
+    headers: orgHeaders(orgId),
+    signal,
+  })
+}
+
+/**
+ * One saved recipe's runnable shape (QF-29, `GET /api/v1/browser/recipes/{recipeId}`): the version read
+ * and that version's slot names and kinds. It never carries a step body, a selector or a URL.
+ */
+export type BrowserRecipeDetail = {
+  recipeId: string
+  name?: string
+  version: number
+  slots: BrowserRecipeSlot[]
+}
+
+/** One saved recipe's slots, for its newest version or for `version` (QF-29). Mounted only with `BROWSER_RECIPES` on. */
+export async function getBrowserRecipe(
+  orgId: string,
+  recipeId: string,
+  options?: { version?: number },
+  signal?: AbortSignal,
+): Promise<BrowserRecipeDetail> {
+  const query = typeof options?.version === 'number' ? `?version=${encodeURIComponent(String(options.version))}` : ''
+  return requestJson<BrowserRecipeDetail>(`/api/v1/browser/recipes/${encodeURIComponent(recipeId)}${query}`, {
     method: 'GET',
     headers: orgHeaders(orgId),
     signal,

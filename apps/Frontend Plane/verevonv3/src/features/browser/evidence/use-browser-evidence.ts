@@ -3,12 +3,14 @@ import type { z } from 'zod'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   compileBrowserProcedure,
+  getBrowserRecipe,
   listBrowserEgressReceipts,
   listBrowserReceipts,
   listBrowserRecipes,
   type BrowserEgressReceiptView,
   type BrowserProcedureResponse,
   type BrowserReceiptView,
+  type BrowserRecipeDetail,
   type BrowserSavedRecipe,
 } from '@/shared/api/browser-client'
 import { createAiRunStartKeyring, startBrowserAiRun, type StartBrowserAiRunParams } from '@/shared/api/browser-run-client'
@@ -513,6 +515,71 @@ export function useSavedRecipes(): {
       if (org && after && status() !== 'loading') fetchPage(org, after, true)
     },
   }
+}
+
+export type RecipeDetailStatus = 'idle' | 'loading' | 'ready' | 'error'
+
+/**
+ * One chosen saved recipe's slot names and kinds (QF-29, `getBrowserRecipe`). `load` reads the
+ * recipe's newest version and aborts any read still in flight; `clear` drops it. The detail holds
+ * no slot values: those stay in the panel.
+ */
+export function useRecipeDetail(): {
+  status: () => RecipeDetailStatus
+  detail: () => BrowserRecipeDetail | null
+  error: () => unknown
+  load: (recipeId: string) => void
+  clear: () => void
+} {
+  const [orgId] = createResource(loadEvidenceOrgId)
+  const [status, setStatus] = createSignal<RecipeDetailStatus>('idle')
+  const [detail, setDetail] = createSignal<BrowserRecipeDetail | null>(null)
+  const [error, setError] = createSignal<unknown>(null)
+  let inflight: AbortController | undefined
+
+  const abort = () => {
+    inflight?.abort()
+    inflight = undefined
+  }
+  onCleanup(abort)
+
+  const clear = () => {
+    abort()
+    setDetail(null)
+    setError(null)
+    setStatus('idle')
+  }
+
+  const load = (recipeId: string) => {
+    abort()
+    setDetail(null)
+    setError(null)
+    const org = orgId()
+    if (!org) {
+      setError(new ApiError('unauthenticated', 401, 'unauthenticated'))
+      setStatus('error')
+      return
+    }
+    const controller = new AbortController()
+    inflight = controller
+    setStatus('loading')
+    getBrowserRecipe(org, recipeId, undefined, controller.signal).then(
+      (read) => {
+        if (controller.signal.aborted) return
+        inflight = undefined
+        setDetail(read)
+        setStatus('ready')
+      },
+      (failure: unknown) => {
+        if (controller.signal.aborted) return
+        inflight = undefined
+        setError(failure)
+        setStatus('error')
+      },
+    )
+  }
+
+  return { status, detail, error, load, clear }
 }
 
 export type RecipeRunStatus = 'idle' | 'starting' | 'live' | 'done' | 'error'

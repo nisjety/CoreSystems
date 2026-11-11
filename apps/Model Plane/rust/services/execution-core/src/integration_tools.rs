@@ -134,7 +134,7 @@ const CATALOG: &[(&str, &[CatalogOp])] = &[
     (
         "slack",
         &[
-            CatalogOp { operation: "message.send", is_write: true, summary: "Post a Slack message. params.channel, body.text." },
+            CatalogOp { operation: "message.send", is_write: true, summary: "Post a Slack message. body.channel, body.text." },
             // Real executor op is `channels.list` (GET /conversations.list) — the
             // bare `channels` string matched no case arm and always failed.
             CatalogOp { operation: "channels.list", is_write: false, summary: "List Slack channels." },
@@ -1750,14 +1750,15 @@ provider yet)"
 /// The read operations whose result is a content body, by bare name. Each is capped at
 /// [`READ_CONTENT_RESULT_CHARS`] instead of [`MAX_RESULT_CHARS`]. The field is where a base64 body
 /// sits, when one does: Drive sends a file as `content_base64`, and GitHub sends a file's `content`
-/// as base64. A Notion block list and an Outlook message carry their text inline in JSON, so they
-/// have no base64 field.
+/// as base64. A Notion block list, an Outlook message and a Gmail message carry their text inline
+/// in JSON, so they have no base64 field.
 const CONTENT_READS: &[(&str, Option<&str>)] = &[
     ("drive.file.content", Some("content_base64")),
     ("contents.get", Some("content")),
     ("readme.get", Some("content")),
     ("page.content", None),
     ("mail.messages.get", None),
+    ("gmail.messages.get", None),
 ];
 
 /// The content read `operation` names, bare or behind a catalogued provider prefix
@@ -1772,6 +1773,13 @@ fn content_read(operation: &str) -> Option<(&'static str, Option<&'static str>)>
             .iter()
             .any(|(provider, _)| names_operation(operation.trim(), provider, name))
     })
+}
+
+/// Whether `operation` is a content read, so the agent loop keeps its whole text in the model's
+/// context (its tool context cap, `runtime_loop::agent`). It is [`content_read`] by another name.
+#[must_use]
+pub(crate) fn is_content_read(operation: &str) -> bool {
+    content_read(operation).is_some()
 }
 
 /// The most text one result carries back to the model: [`READ_CONTENT_RESULT_CHARS`] for a content
@@ -2258,6 +2266,22 @@ mod tests {
         assert_eq!(shaped["bodyText"].as_str().map(str::len), Some(8_000));
         assert!(shaped.get("internetMessageHeaders").is_none());
         assert_eq!(shaped["id"], "m1");
+    }
+
+    #[test]
+    fn a_gmail_message_body_is_a_content_read_with_the_content_cap() {
+        assert!(is_content_read("gmail.messages.get"));
+        assert!(is_content_read("google.gmail.messages.get"));
+        assert!(
+            !is_content_read("gmail.messages"),
+            "a list read keeps the ordinary cap"
+        );
+        assert!(
+            !is_content_read("gmail.send"),
+            "a write is never a content read"
+        );
+        assert_eq!(result_cap("gmail.messages.get"), READ_CONTENT_RESULT_CHARS);
+        assert_eq!(result_cap("gmail.messages"), MAX_RESULT_CHARS);
     }
 
     #[test]

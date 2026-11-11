@@ -823,6 +823,7 @@ pub async fn delete_source(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
+    let id = parse_source_id(&request_id, &id)?;
     let path = format!("/v1/sources/{id}");
     forward_mutation(&state, reqwest::Method::DELETE, &path, &claims.org_id, b"")
         .await

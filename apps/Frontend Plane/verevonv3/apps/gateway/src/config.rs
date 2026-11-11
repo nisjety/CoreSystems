@@ -51,7 +51,8 @@ pub(crate) struct AppState {
     pub(crate) browser_downloads: bool,
     /// `BROWSER_RECIPES` (Q4-E4.2-4a): whether a browser session's receipts compile canonically
     /// (version 2) and can be saved as a recipe (`POST /api/v1/browser/sessions/{id}/recipes`,
-    /// `browser_evidence.save_recipe`) and the saved recipes listed (`GET /api/v1/browser/recipes`).
+    /// `browser_evidence.save_recipe`) and the saved recipes listed (`GET /api/v1/browser/recipes`)
+    /// and read one at a time with their slots (`GET /api/v1/browser/recipes/{recipe_id}`, QF-29).
     /// Read once here, never in a handler. Off unless set to a truthy word (1/true/yes/on); while
     /// off the routes are absent and the action answers 404. Quarry also needs
     /// `QUARRY_EDGE__PROCEDURE_CANONICAL` on and capability-core `PROCEDURES_API` on.

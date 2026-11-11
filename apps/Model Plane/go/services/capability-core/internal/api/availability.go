@@ -51,50 +51,60 @@ var reasonCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
 // The bar is the one this list's purpose states: execution-core must OWN the
 // runtime it is claiming health for. It does for every entry —
 //
-//   cap.command.sandbox / cap.command.shell  its bubblewrap sandbox and the
-//       interpreter, probed in-process.
-//   cap.memory.search / cap.memory.index     `recall_memory`/`save_memory`
-//       execute inside execution-core's tool loop; the only thing they need
-//       beyond it is session-core, which execution-core probes by connecting.
-//   cap.agent.spawn                          the delegated loop runs
-//       in-process on the parent's own inference path; its one external
-//       dependency is the same session-core StartRun.
-//   cap.process.background                   the S4.2 `process_*` family runs
-//       on execution-core's own process host, under the same bubblewrap argv
-//       it already probes for cap.command.sandbox. Added 2026-09-13. It is
-//       the narrowest entry on this list: the reporter attests it only when
-//       that instance has the host ENABLED, so an execution-core that cannot
-//       host a background process cannot make the capability available — the
-//       ownership bar is not just "owns the runtime" but "is running it".
-//   cap.retrieval.query                      `knowledge_search` executes inside
-//       execution-core's tool loop (migration 0008 records owner_service =
-//       execution-core). Added 2026-10-01. The reporter attests it only when
-//       BOTH the Data Plane retrieval engine's own readiness endpoint reports
-//       Postgres and Qdrant ready AND an unauthenticated Retrieve to the very
-//       endpoint dispatch uses is answered Unauthenticated (the route and its
-//       JWT interceptor are alive). It sends no user credential and no data. It
-//       does not prove the embedding provider, which still fails per call.
-//   cap.tool.http                            `web_search`/`web_fetch` execute
-//       inside execution-core's tool loop and talk to quarry-edge. Added
-//       2026-10-01. The reporter attests it only when quarry-edge answers
-//       /ready AND the exact Quarry credentials dispatch uses can be minted for
-//       BOTH scopes it requests; it never calls the metered search or extract
-//       routes. So while Auth Core refuses either scope for execution-core the
-//       row stays unavailable, and it flips on its own once that grant lands.
+//	cap.command.sandbox / cap.command.shell  its bubblewrap sandbox and the
+//	    interpreter, probed in-process.
+//	cap.memory.search / cap.memory.index     `recall_memory`/`save_memory`
+//	    execute inside execution-core's tool loop; the only thing they need
+//	    beyond it is session-core, which execution-core probes by connecting.
+//	cap.agent.spawn                          the delegated loop runs
+//	    in-process on the parent's own inference path; its one external
+//	    dependency is the same session-core StartRun.
+//	cap.process.background                   the S4.2 `process_*` family runs
+//	    on execution-core's own process host, under the same bubblewrap argv
+//	    it already probes for cap.command.sandbox. Added 2026-09-13. It is
+//	    the narrowest entry on this list: the reporter attests it only when
+//	    that instance has the host ENABLED, so an execution-core that cannot
+//	    host a background process cannot make the capability available — the
+//	    ownership bar is not just "owns the runtime" but "is running it".
+//	cap.retrieval.query                      `knowledge_search` executes inside
+//	    execution-core's tool loop (migration 0008 records owner_service =
+//	    execution-core). Added 2026-10-01. The reporter attests it only when
+//	    BOTH the Data Plane retrieval engine's own readiness endpoint reports
+//	    Postgres and Qdrant ready AND an unauthenticated Retrieve to the very
+//	    endpoint dispatch uses is answered Unauthenticated (the route and its
+//	    JWT interceptor are alive). It sends no user credential and no data. It
+//	    does not prove the embedding provider, which still fails per call.
+//	cap.tool.http                            `web_search`/`web_fetch` execute
+//	    inside execution-core's tool loop and talk to quarry-edge. Added
+//	    2026-10-01. The reporter attests it only when quarry-edge answers
+//	    /ready AND the exact Quarry credentials dispatch uses can be minted for
+//	    BOTH scopes it requests; it never calls the metered search or extract
+//	    routes. So while Auth Core refuses either scope for execution-core the
+//	    row stays unavailable, and it flips on its own once that grant lands.
 //
-//   cap.workspace.read                       the WS24-S3 read-only Space workspace
-//       tools (`workspace_read`, `workspace_grep`, `workspace_glob`,
-//       `workspace_list`) read the Space's hydrated tree through
-//       execution-core's own lease and workspace store. Added 2026-10-28. The
-//       reporter attests it only while the workspace store and the sandbox-manager
-//       are configured AND WORKSPACE_TOOLS is switched on, so an instance that does
-//       not offer the tools cannot report that it does.
+//	cap.workspace.read                       the WS24-S3 read-only Space workspace
+//	    tools (`workspace_read`, `workspace_grep`, `workspace_glob`,
+//	    `workspace_list`) read the Space's hydrated tree through
+//	    execution-core's own lease and workspace store. Added 2026-10-28. The
+//	    reporter attests it only while the workspace store and the sandbox-manager
+//	    are configured AND WORKSPACE_TOOLS is switched on, so an instance that does
+//	    not offer the tools cannot report that it does.
 //
-//   cap.workspace.write                      the WS24-S4 per-run overlay write tools
-//       (`workspace_edit`, `workspace_put`) change the run's own copy of the Space
-//       tree, and no other run sees the change. Added 2026-10-29. The reporter
-//       attests it only while WORKSPACE_TOOLS is `all` and the stores are configured,
-//       so an instance that does not offer the writes cannot report that it does.
+//	cap.workspace.write                      the WS24-S4 per-run overlay write tools
+//	    (`workspace_edit`, `workspace_put`) change the run's own copy of the Space
+//	    tree, and no other run sees the change. Added 2026-10-29. The reporter
+//	    attests it only while WORKSPACE_TOOLS is `all` and the stores are configured,
+//	    so an instance that does not offer the writes cannot report that it does.
+//
+//	cap.web.crawl, cap.web.map, cap.web.batch
+//	    `knowledge.crawl_site`, `knowledge.map` and `knowledge.batch` (the crawl
+//	    planner shares the map) execute inside execution-core's tool loop and talk
+//	    to quarry-edge, as cap.tool.http does. They write into the org's own
+//	    knowledge base the way save_memory does, not to an external system.
+//	    Added 2026-11-11 (E3.7.10, QF-17). The reporter attests them only while
+//	    EXECUTION_CORE_WEB_CRAWL_TOOLS is on, the cap.tool.http probe passes AND the
+//	    map:read and crawl:write credentials mint, so an instance that does not
+//	    offer the crawl tools cannot report that it does.
 //
 // Everything with effects or an owner elsewhere stays OFF this list on purpose:
 // cap.tool.provider.execute, cap.tool.social.publish, cap.tool.shipping.book,
@@ -127,6 +137,12 @@ var genericGlobalHealthCapabilityIDs = map[string]struct{}{
 	"cap.tool.http":       {},
 	"cap.workspace.read":  {},
 	"cap.workspace.write": {},
+
+	// E3.7.10 (QF-17): the crawl, map and batch tools, attested only while
+	// EXECUTION_CORE_WEB_CRAWL_TOOLS is on (see the comment above).
+	"cap.web.batch": {},
+	"cap.web.crawl": {},
+	"cap.web.map":   {},
 }
 
 type availabilityRequest struct {

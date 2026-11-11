@@ -426,6 +426,12 @@ pub const FEATURES: &[Feature] = &[
         key: "page_screenshot",
         label: "page screenshots",
     },
+    // QF-10 (E3.3): browser tabs and page regions attached to a chat turn are page content sent to a
+    // model, so model-gateway refuses a ZDR or waived turn carrying any before a model call.
+    Feature {
+        key: "browser_page_context",
+        label: "attached browser tabs and page regions",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

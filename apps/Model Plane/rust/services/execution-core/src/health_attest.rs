@@ -27,6 +27,11 @@
 //! the Data Plane retrieval engine) and `cap.tool.http` (`web_search`/`web_fetch`,
 //! probed against quarry-edge AND the Quarry credentials dispatch needs).
 //!
+//! While `EXECUTION_CORE_WEB_CRAWL_TOOLS` is on, the same web probe also attests
+//! `cap.web.crawl`, `cap.web.map` and `cap.web.batch` (`knowledge.crawl_site`,
+//! `knowledge.map` and `knowledge.batch`), once the map and crawl credentials mint
+//! as well. Those rows are never attested without `cap.tool.http`'s probe passing.
+//!
 //! # Measure, then attest — never attest blind
 //!
 //! An attestation is a claim about health, so it is only ever made from a real
@@ -88,6 +93,17 @@ pub const RETRIEVAL_QUERY_CAPABILITY: &str = "cap.retrieval.query";
 /// Public-web access through Quarry (`web_search`, `web_fetch` and their
 /// `web.search`/`web.read` aliases).
 pub const WEB_HTTP_CAPABILITY: &str = "cap.tool.http";
+
+/// The bulk-acquisition crawl tool (`knowledge.crawl_site`, a durable job that ingests pages into the
+/// org's knowledge base). Attested only while `EXECUTION_CORE_WEB_CRAWL_TOOLS` is on and the crawl
+/// probe passes (see [`web_attestations`]).
+pub const WEB_CRAWL_CAPABILITY: &str = "cap.web.crawl";
+
+/// The URL-listing read (`knowledge.map`, which the crawl planner `knowledge.crawl_plan` shares).
+pub const WEB_MAP_CAPABILITY: &str = "cap.web.map";
+
+/// The fixed-list scrape (`knowledge.batch`, a durable job that ingests pages into the org's knowledge base).
+pub const WEB_BATCH_CAPABILITY: &str = "cap.web.batch";
 
 /// The Do loop's browser read tools (`browser.open`, `browser.observe`; WS21-S5a). Attested only
 /// while the switch is on here, BrowserBroker answers its health check and Quarry reports ready.
@@ -457,7 +473,8 @@ pub fn workspace_attestations(
     planned
 }
 
-/// The `cap.tool.http` attestation, when the web probe passed.
+/// The `cap.tool.http` attestation, when the web probe passed, and the three bulk-acquisition rows
+/// (`cap.web.crawl`, `cap.web.map`, `cap.web.batch`) when `crawl_up` is set as well.
 ///
 /// One capability id covers `web_search`, `web_fetch` and the `web.search` /
 /// `web.read` aliases, so it is attested only when BOTH tools' credentials mint
@@ -468,18 +485,58 @@ pub fn workspace_attestations(
 ///
 /// The probe does not exercise a search provider (the edge's search route is
 /// metered, so it is never called), so provider outages still surface per call.
+///
+/// The crawl rows are never attested without `web_up`: the withholding is here as
+/// well as in `web_tools_ready`, which sets `crawl_up` only where the crawl switch
+/// is on and the map and crawl credentials mint. They carry their own reason,
+/// because that probe proves `map:read` and `crawl:write`, which `cap.tool.http`
+/// never checks. Neither `/v1/crawl` nor `/v1/batch` is called (a call starts a
+/// durable job) and `/v1/map` is not called either, so a refusal on those routes
+/// still surfaces per call.
 #[must_use]
-pub fn web_attestations(web_up: bool) -> Vec<Attestation> {
+pub fn web_attestations(web_up: bool, crawl_up: bool) -> Vec<Attestation> {
     if !web_up {
         return Vec::new();
     }
-    vec![attestation_with_cost(
+    let mut planned = vec![attestation_with_cost(
         WEB_HTTP_CAPABILITY,
         "quarry_edge_ready_credential_probed",
         "Quarry edge reported ready, and the search and extract credentials mint.",
         COST_CLASS_VARIABLE,
-    )]
+    )];
+    if crawl_up {
+        // Each row keeps the cost class its migration seeds: crawl and batch are `variable`,
+        // the map read is `bounded` (migrations 0031 and 0040).
+        planned.extend([
+            attestation_with_cost(
+                WEB_CRAWL_CAPABILITY,
+                WEB_CRAWL_REASON_CODE,
+                WEB_CRAWL_REASON,
+                COST_CLASS_VARIABLE,
+            ),
+            attestation_with_cost(
+                WEB_MAP_CAPABILITY,
+                WEB_CRAWL_REASON_CODE,
+                WEB_CRAWL_REASON,
+                COST_CLASS_BOUNDED,
+            ),
+            attestation_with_cost(
+                WEB_BATCH_CAPABILITY,
+                WEB_CRAWL_REASON_CODE,
+                WEB_CRAWL_REASON,
+                COST_CLASS_VARIABLE,
+            ),
+        ]);
+    }
+    planned
 }
+
+/// Reason code shared by the three crawl rows. It is not `quarry_edge_ready_credential_probed`,
+/// because the probe behind it also proves the map and crawl grants.
+const WEB_CRAWL_REASON_CODE: &str = "quarry_edge_ready_crawl_credentials_probed";
+
+/// Reason text for the crawl rows. It stays well under capability-core's 500-character limit.
+const WEB_CRAWL_REASON: &str = "Quarry edge reported ready, the search, extract, map and crawl credentials mint, and the web crawl tools are switched on. The crawl and batch routes are not called by the probe, so a refusal there still surfaces per call.";
 
 /// What the per-round dependency probes measured.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -490,6 +547,10 @@ pub struct DependencyProbes {
     pub retrieval: bool,
     /// quarry-edge is ready AND the web tools' credentials mint.
     pub web: bool,
+    /// The crawl tools are switched on here, `web` passed, and the map and crawl credentials mint.
+    /// It attests `cap.web.crawl`, `cap.web.map` and `cap.web.batch` together. Off is never attested,
+    /// whatever the other probes say, as with `browser`.
+    pub web_crawl: bool,
     /// The Do loop's browser tools are switched on here, BrowserBroker answers its health check and
     /// Quarry reports ready.
     pub browser: bool,
@@ -502,7 +563,7 @@ pub struct DependencyProbes {
 pub fn dependency_attestations(probes: DependencyProbes) -> Vec<Attestation> {
     let mut planned = memory_attestations(probes.session_core);
     planned.extend(retrieval_attestations(probes.retrieval));
-    planned.extend(web_attestations(probes.web));
+    planned.extend(web_attestations(probes.web, probes.web_crawl));
     planned.extend(browser_attestations(probes.browser));
     planned
 }
@@ -597,6 +658,36 @@ async fn web_probe(client: &WebToolsClient, org_id: &str, timeout: Duration) -> 
     }
 }
 
+/// The crawl tools' probe: the credentials the map, crawl and batch calls mint, through the same client
+/// and token source dispatch uses, under `timeout`. It runs only after [`web_probe`] passed in the same
+/// round, so the edge is already known to be ready, and only where the crawl switch is on. A timeout is
+/// a failure, as it is for [`web_probe`]. Its own `note_probe_outcome` state keeps its warning apart from
+/// `cap.tool.http`'s, because the grants it checks are different ones.
+async fn crawl_probe(client: &WebToolsClient, org_id: &str, timeout: Duration) -> bool {
+    static PASSING: AtomicBool = AtomicBool::new(true);
+    match tokio::time::timeout(timeout, client.probe_crawl_ready(org_id)).await {
+        Ok(Ok(())) => {
+            note_probe_outcome(&PASSING, true, WEB_CRAWL_CAPABILITY, "");
+            true
+        }
+        Ok(Err(reason)) => {
+            tracing::debug!(
+                %reason,
+                "web crawl tools probe did not pass; cap.web.crawl, cap.web.map and cap.web.batch are not attested this round"
+            );
+            note_probe_outcome(&PASSING, false, WEB_CRAWL_CAPABILITY, &reason.to_string());
+            false
+        }
+        Err(_elapsed) => {
+            tracing::debug!(
+                "web crawl tools probe timed out; cap.web.crawl, cap.web.map and cap.web.batch are not attested this round"
+            );
+            note_probe_outcome(&PASSING, false, WEB_CRAWL_CAPABILITY, "probe timed out");
+            false
+        }
+    }
+}
+
 /// Logs at `warn`, once, each time a probe goes from passing (or never having
 /// run) to failing. The per-round failure line is `debug` because a probe can
 /// fail every round by design (the Control Plane has not granted the web
@@ -675,23 +766,36 @@ async fn retrieval_engine_ready() -> bool {
     retrieval_engine_probe(&grpc_endpoint, &ready_url, DEPENDENCY_PROBE_TIMEOUT).await
 }
 
-/// The web probe against this process's own configuration: the very client
+/// The web probes against this process's own configuration: the very client
 /// dispatch builds (same edge URL, same token source), asked whether it could
-/// serve right now.
-async fn web_tools_ready(org_id: &str) -> bool {
+/// serve right now. Returns `(cap.tool.http, cap.web.*)`.
+///
+/// The crawl leg runs only where the crawl switch is on, and only after the web
+/// leg passed in this round, so the three crawl rows never stand on an edge that
+/// is not ready. The switch is read here, through the reader dispatch uses
+/// (`crawl_tools_enabled`), the same way [`browser_ready`] reads its own switch:
+/// off is never attested, whatever the dependencies say.
+async fn web_tools_ready(org_id: &str) -> (bool, bool) {
     match WebToolsClient::from_env() {
-        Ok(Some(client)) => web_probe(&client, org_id, WEB_PROBE_TIMEOUT).await,
+        Ok(Some(client)) => {
+            let web = web_probe(&client, org_id, WEB_PROBE_TIMEOUT).await;
+            let web_crawl = web
+                && crate::web_tools::crawl_tools_enabled()
+                && crawl_probe(&client, org_id, WEB_PROBE_TIMEOUT).await;
+            (web, web_crawl)
+        }
         // Not configured, or its credential configuration is unusable: the web
         // tools cannot work here, so nothing is attested.
-        Ok(None) | Err(_) => false,
+        Ok(None) | Err(_) => (false, false),
     }
 }
 
 /// Run every dependency probe for this round, concurrently and each under its
-/// own timeout, so a hung dependency delays the round by one timeout at most
-/// and one failure never blocks another's attestation.
+/// own timeout, so a hung dependency delays the round by its own probe timeouts
+/// at most (the crawl leg follows the web leg) and one failure never blocks
+/// another's attestation.
 pub async fn probe_dependencies(org_id: &str) -> DependencyProbes {
-    let (session_core, retrieval, web, browser) = tokio::join!(
+    let (session_core, retrieval, (web, web_crawl), browser) = tokio::join!(
         session_core_reachable(),
         retrieval_engine_ready(),
         web_tools_ready(org_id),
@@ -701,6 +805,7 @@ pub async fn probe_dependencies(org_id: &str) -> DependencyProbes {
         session_core,
         retrieval,
         web,
+        web_crawl,
         browser,
     }
 }
@@ -1277,6 +1382,9 @@ mod tests {
             PROCESS_CAPABILITY,
             RETRIEVAL_QUERY_CAPABILITY,
             WEB_HTTP_CAPABILITY,
+            WEB_CRAWL_CAPABILITY,
+            WEB_MAP_CAPABILITY,
+            WEB_BATCH_CAPABILITY,
             BROWSER_OBSERVE_CAPABILITY,
             WORKSPACE_READ_CAPABILITY,
             WORKSPACE_WRITE_CAPABILITY,
@@ -1882,8 +1990,12 @@ mod tests {
 
     #[test]
     fn web_attestations_track_the_dependency_probe() {
-        assert!(web_attestations(false).is_empty());
-        let up = web_attestations(true);
+        assert!(web_attestations(false, false).is_empty());
+        assert!(
+            web_attestations(false, true).is_empty(),
+            "the crawl rows never stand without cap.tool.http's probe"
+        );
+        let up = web_attestations(true, false);
         assert_eq!(
             up.len(),
             1,
@@ -1906,11 +2018,15 @@ mod tests {
     #[test]
     fn each_probe_gates_only_its_own_attestations() {
         assert!(dependency_attestations(DependencyProbes::default()).is_empty());
-        for bits in 0..8_u8 {
+        // Bit 8 is the crawl leg, `web_crawl`: the crawl switch and its probe together. Clear is
+        // "switched off, or not measured", and the three crawl rows must then be absent, with or
+        // without cap.tool.http.
+        for bits in 0..16_u8 {
             let probes = DependencyProbes {
                 session_core: bits & 1 != 0,
                 retrieval: bits & 2 != 0,
                 web: bits & 4 != 0,
+                web_crawl: bits & 8 != 0,
                 browser: false,
             };
             let ids: Vec<String> = dependency_attestations(probes)
@@ -1930,6 +2046,13 @@ mod tests {
             }
             if probes.web {
                 expected.push(WEB_HTTP_CAPABILITY);
+                if probes.web_crawl {
+                    expected.extend([
+                        WEB_CRAWL_CAPABILITY,
+                        WEB_MAP_CAPABILITY,
+                        WEB_BATCH_CAPABILITY,
+                    ]);
+                }
             }
             assert_eq!(ids, expected, "probes {probes:?}");
         }
@@ -2392,6 +2515,7 @@ mod tests {
                 session_core: false,
                 retrieval: true,
                 web: false,
+                web_crawl: false,
                 browser: false,
             })
             .await;
@@ -2425,6 +2549,7 @@ mod tests {
                 session_core: false,
                 retrieval: false,
                 web: true,
+                web_crawl: false,
                 browser: false,
             })
             .await;
@@ -2463,6 +2588,7 @@ mod tests {
                 session_core: true,
                 retrieval: true,
                 web: true,
+                web_crawl: false,
                 browser: false,
             })
             .await;
@@ -2504,6 +2630,7 @@ mod tests {
                 session_core: false,
                 retrieval: true,
                 web: true,
+                web_crawl: false,
                 browser: false,
             })
             .await;

@@ -1281,8 +1281,9 @@ caller's `Idempotency-Key` (1 to 128 characters) when one was sent.
 
 **Job record (wire).** `origin`, `desired_state` and `desired_seq`/`applied_seq` (set by
 WS15.L2; empty and zero until then), `workflow_id`, `deadline_at`, `terminal_reason`
-(the event type that ended the job), `finished_at`. List rows (`GET /v1/{kind}/jobs`)
-also carry `phase` and `stats` (`completed`, `failed`, `total`).
+(the event type that ended the job; a skipped schedule fire carries its skip code),
+`finished_at`. List rows (`GET /v1/{kind}/jobs`) also carry `phase` and `stats`
+(`completed`, `failed`, `total`).
 
 **Status document (edge).** `GET /v1/crawl/{id}`, `/v1/batch/{id}`, `/v1/jobs/{id}`:
 `job_id`, `kind`, `status`, `phase`, `terminal`, `origin`, `created_at`, `finished_at`,

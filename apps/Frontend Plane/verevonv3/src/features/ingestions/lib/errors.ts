@@ -66,8 +66,16 @@ function isUnsupported(error: unknown): boolean {
 /** Copy for the schema keyword and shape errors the edge gives an AI `json` schema. */
 const SCHEMA_CODES: Record<string, { no: string; en: string }> = {
   schema_keyword_not_supported: {
-    no: 'Skjemaet bruker et nøkkelord som ikke støttes, for eksempel $ref, anyOf, oneOf, pattern eller format.',
-    en: 'The schema uses a keyword that is not supported, for example $ref, anyOf, oneOf, pattern or format.',
+    no: 'Skjemaet bruker et nøkkelord som ikke støttes, for eksempel pattern eller format.',
+    en: 'The schema uses a keyword that is not supported, for example pattern or format.',
+  },
+  schema_ref_not_supported: {
+    no: 'En $ref kan bare peke til #/$defs/ eller #/definitions/ i samme skjema.',
+    en: 'A $ref can only point to #/$defs/ or #/definitions/ in the same schema.',
+  },
+  schema_recursive: {
+    no: 'En $ref i skjemaet fører tilbake til seg selv. Fjern løkken.',
+    en: 'A $ref in the schema leads back to itself. Remove the loop.',
   },
   schema_root_not_object: {
     no: 'Rotnivået i skjemaet må være et objekt.',

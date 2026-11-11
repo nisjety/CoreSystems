@@ -200,6 +200,16 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     // EP-3 S5: a reference is resolved against durable state (a document's ACL, a thread, a
     // revision), so a ZDR turn carrying any is refused, and none is silently dropped.
     ("context_refs", refused_feature("context_references")),
+    // QF-10: attached browser tab refs and regions are page content sent to a model; a ZDR turn
+    // carrying either is refused (`browser_page_context::resolve` answers the same), none dropped.
+    ("browser_tab_refs", refused_feature("browser_page_context")),
+    ("browser_regions", refused_feature("browser_page_context")),
+    (
+        "browser_context_verified",
+        Treatment::Inert(
+            "a marker the BFF sets on verified browser page context, which a ZDR turn refuses through `browser_tab_refs` and `browser_regions`",
+        ),
+    ),
     // EP-5 S7: a deck template is a skill bundle; a ZDR turn never mounts one, so a pick is refused like a skill.
     ("deck_template", refused_feature("skills")),
     // EP-7 S1: a goal is user content in a durable store, so a ZDR turn naming one is refused.
@@ -330,6 +340,9 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         agent_autonomy_cap: _,
         wide_research: _,
         context_refs: _,
+        browser_tab_refs: _,
+        browser_regions: _,
+        browser_context_verified: _,
         deck_template: _,
         goal_id: _,
         goal_auto: _,
@@ -394,6 +407,9 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "agent_autonomy_cap",
         "wide_research",
         "context_refs",
+        "browser_tab_refs",
+        "browser_regions",
+        "browser_context_verified",
         "deck_template",
         "goal_id",
         "goal_auto",
@@ -476,6 +492,9 @@ pub fn refusal_with(request: &InvokeRequest, deck_templates_enabled: bool) -> Op
     }
     if crate::context_refs::requested(request.context_refs.as_ref()) {
         return feature(crate::context_refs::ZDR_FEATURE);
+    }
+    if crate::browser_page_context::requested_by(request) {
+        return feature(crate::browser_page_context::ZDR_FEATURE);
     }
     if crate::deck_templates::zdr_refused(deck_templates_enabled, request.deck_template.as_ref()) {
         return feature(crate::deck_templates::ZDR_FEATURE);

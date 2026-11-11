@@ -70,7 +70,9 @@ const NOT_SAVEABLE_KEYS: &[&str] = &[
 /// The crawl options a scheduled fire carries through to the job.
 const SCHEDULABLE_CRAWL_KEYS: &[&str] = &["max_pages", "max_depth", "ingest", "scrape_options"];
 
-/// Whether saved job definitions are enabled. Read per request, so a flip needs no restart.
+/// Whether saved job definitions are enabled. The flag is read from the process environment on
+/// each call, but that environment is fixed when the edge starts, so a change takes an edge
+/// restart (see docs/CONTRACTS.md).
 pub fn enabled() -> bool {
     flag_is_on(std::env::var(ENV_SAVED_JOBS).ok().as_deref())
 }

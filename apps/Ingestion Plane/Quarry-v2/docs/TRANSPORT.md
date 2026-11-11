@@ -19,8 +19,9 @@ production image).
 | All `/v1/internal/*`   | REST             | Orchestrator → edge service-to-service                                     |
 
 REST chosen over gRPC for inbound because clients are heterogeneous
-(browsers, CLIs, Cursor, n8n) and OpenAPI generation matters more than
-wire efficiency. SSE handles streaming.
+(browsers and the SDKs generated from OpenAPI) and OpenAPI generation matters more than
+wire efficiency. SSE handles streaming. The CLI and the n8n node are out of scope, and MCP is
+parked, as [ADR 7](decisions/ADR-7-external-contract-mcp-cli.md) proposes (not yet ratified).
 
 ## Quarry outbound
 

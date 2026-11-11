@@ -386,6 +386,28 @@ impl WebToolsClient {
         Ok(())
     }
 
+    /// Health probe behind the `cap.web.crawl`, `cap.web.map` and `cap.web.batch` attestations (QF-17):
+    /// `Ok(())` only when the credentials the map, crawl and batch calls ask for mint, through the same
+    /// token source dispatch uses. `MAP_SCOPES` is what `knowledge.map` and the crawl planner ask for;
+    /// `CRAWL_SCOPES` is what `knowledge.crawl_site` and `knowledge.batch` ask for.
+    ///
+    /// It runs only after [`Self::probe_ready`] has passed in the same round, so the edge is already known
+    /// to be ready and this measures the two grants alone. It NEVER calls `/v1/map`, `/v1/crawl` or
+    /// `/v1/batch`: a crawl or a batch would start a durable job, and a map call every heartbeat is work
+    /// nobody asked for. A refusal on those routes therefore still surfaces per call, as it does for
+    /// `web_search`.
+    ///
+    /// Nothing here logs or returns a token; the error strings carry statuses only.
+    pub(crate) async fn probe_crawl_ready(&self, org_id: &str) -> Result<(), String> {
+        for scopes in [MAP_SCOPES, CRAWL_SCOPES] {
+            self.auth
+                .token(org_id, scopes)
+                .await
+                .map_err(|error| format!("quarry authentication failed: {error}"))?;
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn new_for_test(base_url: &str, auth: TokenSource) -> Self {
         Self {

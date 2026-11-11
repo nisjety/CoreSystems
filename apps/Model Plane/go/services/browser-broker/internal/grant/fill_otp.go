@@ -30,9 +30,9 @@ var (
 	// Data Retention parent or request. Refused (conservative, dark): the binding
 	// would keep an origin and a mail connection for a ZDR run.
 	ErrFillOtpZdrRefused = errors.New("a fill_otp approval is refused for a Zero Data Retention run")
-	// ErrFillOtpNotDurable means the durable store was asked for a fill_otp
-	// approval. It has no columns for the binding yet, so a validated grant would
-	// come back without it; refuse rather than drop the binding silently.
+	// ErrFillOtpNotDurable is kept for wire compatibility and is not returned. The durable
+	// store has persisted the fill_otp binding since migration 0007 (Q3-E3.1-b2-c), so no path
+	// refuses for this reason now. server/errors.go still maps it, so do not delete it.
 	ErrFillOtpNotDurable = errors.New("a fill_otp approval is not available until the durable store persists its binding")
 )
 
