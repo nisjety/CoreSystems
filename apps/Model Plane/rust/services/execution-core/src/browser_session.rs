@@ -470,7 +470,9 @@ fn is_typed_by_person(run_id: &str) -> bool {
         .contains(run_id)
 }
 
-fn is_held_for_person(run_id: &str) -> bool {
+/// Whether `run_id` holds a page for a person right now (a takeover or help pause not yet answered
+/// or released). Read-only; a skipped site's continuation checks it before it asks for anything.
+pub(crate) fn is_held_for_person(run_id: &str) -> bool {
     matches!(
         held_runs()
             .lock()

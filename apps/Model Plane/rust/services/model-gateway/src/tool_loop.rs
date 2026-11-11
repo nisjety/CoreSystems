@@ -2467,6 +2467,33 @@ pub(crate) fn err_outcome(call: &ToolCall, msg: impl Into<String>) -> ToolOutcom
     }
 }
 
+/// The ZDR catalogue feature a tool stops on a ZDR or waived turn (Z-05a), or `None` for a tool the switch does
+/// not touch. A search reaches an external engine and an artifact write is kept with the thread's versions, so
+/// neither may run, or be dropped without a word, on such a turn.
+fn zdr_refused_tool_feature(tool: &str) -> Option<&'static str> {
+    match tool {
+        "web_search" => Some("web_search"),
+        "create_artifact" | "update_artifact" => Some("artifact_output"),
+        _ => None,
+    }
+}
+
+/// The typed `zdr_feature_not_supported` outcome for a call of a tool the turn cannot run under ZDR, or `None`
+/// to carry on. `Some` only while `ZDR_TYPED_REFUSALS_ENABLED` is the literal `true` and the turn is ZDR or
+/// waived (`zdr_or_waived`, the same test every other tool site makes). The model reads the catalogue body
+/// (the refusal, as a JSON error), which names the feature and nothing else: never the query, URL, file name or
+/// output. It is returned before any network call or state change. With the switch off this is always `None`.
+fn zdr_typed_tool_refusal(call: &ToolCall, zdr_or_waived: bool) -> Option<ToolOutcome> {
+    let feature = zdr_refused_tool_feature(&call.name)?;
+    let refusal = crate::zdr_posture::refuse_zdr_feature_for(feature, zdr_or_waived)?;
+    tracing::info!(
+        feature,
+        code = refusal.code(),
+        "tool refused under zero data retention before any call"
+    );
+    Some(err_outcome(call, refusal.json_body().to_string()))
+}
+
 fn brreg_base_url() -> String {
     std::env::var("BRREG_API_BASE_URL")
         .ok()
@@ -3805,6 +3832,12 @@ async fn dispatch_tool_with_cost(
         );
     }
 
+    // Z-05a: a web search or an artifact write on a ZDR or waived turn is a typed refusal, not a silent drop,
+    // returned before the arguments are read and before any network call or state change. Switch off, never.
+    if let Some(refusal) = zdr_typed_tool_refusal(call, zdr || data_plane_mode.is_some()) {
+        return refusal;
+    }
+
     // Check the arguments against the tool's OWN declared schema before anything
     // is dispatched (`mp_contracts::tool_arguments`).
     //
@@ -5015,6 +5048,21 @@ async fn dispatch_tool_with_cost(
                 run_id,
                 session_bearer,
                 capability_bearer,
+                call,
+            )
+            .await
+        }
+        // The question to the person (WS14 S6): stored as a `next_turn` run question and shown as a card, and the
+        // turn ends. Refused here again on a zero-retention or waived turn, in a Space, and while its switch is off.
+        crate::ask_user_ask_mode::ASK_TOOL => {
+            crate::ask_user_ask_mode::ask_outcome(
+                state,
+                crate::ask_user_ask_mode::enabled(),
+                !zdr && data_plane_mode.is_none(),
+                !space_id.is_empty(),
+                run_id,
+                org_id,
+                session_bearer,
                 call,
             )
             .await
@@ -9137,6 +9185,14 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         data_plane_mode.is_some(),
     );
     let tools = crate::thread_reference_tools::tools_for_turn(tools, thread_refs_offered);
+    // The question tool (WS14 S6) is offered only while its switch is on, and never on a ZDR or waived turn nor in a
+    // Space: a question is kept with the turn's run. A plan turn is a Do-loop turn and never reaches this loop. With
+    // the switch off the list is left as it was.
+    let mut tools = tools;
+    crate::ask_user_ask_mode::offer(
+        &mut tools,
+        crate::ask_user_ask_mode::enabled() && !zdr && data_plane_mode.is_none() && space_id.is_empty(),
+    );
     // The image tool (W4-IMG-3) was offered by the chat composer on a persistent turn. The org's capability policy has the
     // last word, read with the person's own capability bearer and reused for a minute per org and person, and the run's
     // image budget is held only for a tool that is admitted. A subscription turn is never admitted: an image is metered API
@@ -9185,6 +9241,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     let mut attempted_calls: BTreeSet<String> = BTreeSet::new();
     // Whether this turn has shown its one connected-app suggestion card (EP-10 S8).
     let mut suggestion_turn = connector_suggestion::SuggestionTurn::default();
+    // Whether this turn has put its one question to the person (WS14 S6). The call that did ends the turn.
+    let mut ask_turn = crate::ask_user_ask_mode::AskTurn::default();
     // The loop guard observes the model's rounds in this turn (WS25-S1). It is built only when
     // `LOOP_GUARD_MODE` observes, so with the switch off no guard runs at all.
     let guard_mode = loop_guard_mode();
@@ -10121,6 +10179,8 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             // One connected-app suggestion per turn (EP-10 S8), decided before its result is shown.
             let answered_call = resp.tool_calls.iter().find(|call| call.id == outcome.call_id);
             let suggestion = suggestion_turn.settle(&mut outcome, answered_call);
+            // One question per turn (WS14 S6), decided before its result is shown.
+            let asked_question = ask_turn.settle(&mut outcome);
             // Artifact-producing tools return their payload through `output`,
             // which would otherwise be appended to the conversation verbatim —
             // a generated .xlsx or a long document would consume the entire
@@ -10269,6 +10329,20 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             // The suggestion card follows its tool result, as a read's sources do.
             if let Some(card) = suggestion {
                 events.push(card).await;
+            }
+            // The question card (WS14 S6) follows the tool result that stored it.
+            if let Some(question_id) = asked_question {
+                if let Some(card) = crate::ask_user_ask_mode::card_event(
+                    state,
+                    run_id,
+                    org_id,
+                    session_bearer,
+                    &question_id,
+                )
+                .await
+                {
+                    events.push(card).await;
+                }
             }
             // A reduced knowledge search says so to the user at the point its result is shown (Z-41b).
             for notice_event in retrieval_notice_events(&outcome) {
@@ -10441,6 +10515,15 @@ pub async fn run_tool_rounds_for_model_with_attachments(
         // in the rewritten output says the same thing to the model; ending the
         // loop is what makes it true rather than advisory.
         if answered_authoritatively {
+            break;
+        }
+        // A question put to the person ends the turn: the answer arrives as their next message (WS14 S6).
+        if ask_turn.asked() {
+            messages.push(ChatMessage {
+                role: "system".to_owned(),
+                content: crate::ask_user_ask_mode::END_TURN_NOTE.to_owned(),
+                ..Default::default()
+            });
             break;
         }
     }

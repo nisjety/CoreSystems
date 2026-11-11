@@ -1251,14 +1251,17 @@ async fn decide_approval_inner(
     }
 
     if updated && matches!(status, "denied" | "timed_out") {
-        sqlx::query(
-            "DELETE FROM approval_continuation_descriptors \
-             WHERE approval_id = $1 AND org_id = $2",
-        )
-        .bind(id)
-        .bind(org_id)
-        .execute(&mut *transaction)
-        .await?;
+        // The one descriptor that outlives its denial is a `browser_human_assist` pause's ("Skip this
+        // site"): the continuation of a skipped site reads the tools and authority it retained
+        // (`read_skipped_assist_authority`), and it is never consumed or run. It is encrypted as
+        // before and the expired-descriptor sweep still removes it at the approval's expiry; a
+        // timed-out pause keeps nothing.
+        sqlx::query(DELETE_DECIDED_DESCRIPTOR_SQL)
+            .bind(id)
+            .bind(org_id)
+            .bind(mp_contracts::approval_cause::CauseCode::BrowserHumanAssist.as_str())
+            .execute(&mut *transaction)
+            .await?;
         // A held quarantined output is blanked with it (build plan WS10 S8).
         sqlx::query(crate::space::quarantine::PURGE_FOR_APPROVAL_SQL)
             .bind(id)
@@ -2420,6 +2423,100 @@ fn consumed_revision(revision: i16, original: Option<String>) -> (u32, String) {
         }
         _ => (0, String::new()),
     }
+}
+
+/// Remove the encrypted continuation descriptor of an approval that was just denied or timed out,
+/// except that of a DENIED `browser_human_assist` pause (`$3` is that cause's code), which the
+/// continuation of a skipped site reads once ([`read_skipped_assist_authority`]). Run in the
+/// decision's own transaction, after the status is written, so the status it reads is the new one.
+const DELETE_DECIDED_DESCRIPTOR_SQL: &str = "DELETE FROM approval_continuation_descriptors AS d \
+     WHERE d.approval_id = $1 AND d.org_id = $2 \
+       AND NOT EXISTS (SELECT 1 FROM approvals AS a \
+                       WHERE a.id = d.approval_id AND a.org_id = d.org_id \
+                         AND a.status = 'denied' \
+                         AND a.metadata #>> '{cause,code}' = $3)";
+
+/// Why the retained authority of a skipped site could not be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkippedAssistRefusal {
+    /// No such approval for this org, run and user, or its run has ended.
+    NotFound,
+    /// The run keeps no state (zero retention or waived), so there is nothing retained to read.
+    NotKeptState,
+    /// The approval is not a denied, unconsumed `browser_human_assist` pause.
+    NotSkipped,
+    /// The step the caller names is not the step the retained descriptor gated.
+    ActionMismatch,
+    /// The approval retains no descriptor, or its descriptor holds no tools and authority.
+    NotResumable,
+}
+
+/// Read, without consuming anything, the tools and authority a DENIED `browser_human_assist` pause
+/// retained ("Skip this site"): the `offered` section of its encrypted continuation descriptor, as
+/// JSON text for the same parser a consume uses (`approved_authority`). Nothing is claimed, spent,
+/// written or logged, and the descriptor stays as it is. The approval must be the caller's own, in
+/// the caller's org and run, of a run that keeps state and has not ended, denied, never consumed,
+/// and raised under `browser_human_assist`; `step_id`, when not empty, must be the step the
+/// descriptor gated.
+///
+/// # Errors
+///
+/// Returns a database, key or decryption error as `Err`, and a closed [`SkippedAssistRefusal`] as
+/// `Ok(Err(..))`.
+pub async fn read_skipped_assist_authority(
+    pool: &Pool,
+    id: &str,
+    org_id: &str,
+    run_id: &str,
+    user_id: &str,
+    step_id: &str,
+) -> Result<std::result::Result<String, SkippedAssistRefusal>> {
+    let row: Option<(String, String, bool, String, Option<String>)> = sqlx::query_as(
+        "SELECT a.status, COALESCE(a.metadata #>> '{cause,code}', ''), a.consumed_at IS NOT NULL, \
+                r.retention_class, d.ciphertext \
+         FROM approvals a \
+         JOIN runs r ON r.id = a.run_id AND r.org_id = a.org_id \
+         LEFT JOIN approval_continuation_descriptors d \
+           ON d.approval_id = a.id AND d.org_id = a.org_id AND d.run_id = a.run_id \
+          AND d.user_id = a.user_id \
+         WHERE a.id = $1 AND a.org_id = $2 AND a.run_id = $3 AND a.user_id = $4 \
+           AND r.status NOT IN ('completed', 'failed', 'cancelled')",
+    )
+    .bind(id)
+    .bind(org_id)
+    .bind(run_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((status, cause_code, consumed, retention_class, ciphertext)) = row else {
+        return Ok(Err(SkippedAssistRefusal::NotFound));
+    };
+    if retention_class != "persistent" {
+        return Ok(Err(SkippedAssistRefusal::NotKeptState));
+    }
+    if status != "denied"
+        || consumed
+        || cause_code != mp_contracts::approval_cause::CauseCode::BrowserHumanAssist.as_str()
+    {
+        return Ok(Err(SkippedAssistRefusal::NotSkipped));
+    }
+    let Some(ciphertext) = ciphertext else {
+        return Ok(Err(SkippedAssistRefusal::NotResumable));
+    };
+    let plaintext = DescriptorCipher::from_env()?.decrypt(id, org_id, user_id, &ciphertext)?;
+    let descriptor: JsonValue = serde_json::from_str(&plaintext)
+        .map_err(|error| anyhow::anyhow!("stored continuation descriptor is invalid: {error}"))?;
+    let gated_step = descriptor
+        .get("step_id")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    if !step_id.is_empty() && step_id != gated_step {
+        return Ok(Err(SkippedAssistRefusal::ActionMismatch));
+    }
+    Ok(descriptor
+        .get("offered")
+        .map(JsonValue::to_string)
+        .ok_or(SkippedAssistRefusal::NotResumable))
 }
 
 const DECIDE_APPROVAL_SQL: &str =

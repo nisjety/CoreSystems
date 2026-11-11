@@ -33,6 +33,7 @@ const (
 	OrchestrationCoreService_DecideApproval_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/DecideApproval"
 	OrchestrationCoreService_RerouteApproval_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/RerouteApproval"
 	OrchestrationCoreService_ConsumeApproval_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/ConsumeApproval"
+	OrchestrationCoreService_GetSkippedAssistAuthority_FullMethodName         = "/model_plane.v1.OrchestrationCoreService/GetSkippedAssistAuthority"
 	OrchestrationCoreService_ClaimOnceApproval_FullMethodName                 = "/model_plane.v1.OrchestrationCoreService/ClaimOnceApproval"
 	OrchestrationCoreService_HoldQuarantinedOutput_FullMethodName             = "/model_plane.v1.OrchestrationCoreService/HoldQuarantinedOutput"
 	OrchestrationCoreService_ClaimQuarantineRelease_FullMethodName            = "/model_plane.v1.OrchestrationCoreService/ClaimQuarantineRelease"
@@ -111,6 +112,13 @@ type OrchestrationCoreServiceClient interface {
 	// a granted approval is executed by the loop once and never also by the cold
 	// delivery worker. Caller-scoped (user bearer), not service-only.
 	ConsumeApproval(ctx context.Context, in *ConsumeApprovalRequest, opts ...grpc.CallOption) (*ConsumeApprovalResponse, error)
+	// Read, without consuming, the tools and authority a DENIED browser_human_assist pause
+	// retained, so a skipped site's continuation runs under the pause's authority and never
+	// under the /continue placeholders. Read-only: it claims, spends and stores nothing, and
+	// the denied approval stays as it is. Same caller scope, run, org and owner checks as
+	// ConsumeApproval. Refused typed for a zero-retention or waived run; any state other than
+	// a denied, unconsumed browser_human_assist approval is FAILED_PRECONDITION.
+	GetSkippedAssistAuthority(ctx context.Context, in *GetSkippedAssistAuthorityRequest, opts ...grpc.CallOption) (*GetSkippedAssistAuthorityResponse, error)
 	// Claim the granted once-approval for one exact action, so the agent's retry of a
 	// non-resumable call passes the Space gate exactly once (build plan WS10 S3). The
 	// caller is the run owner's session; the claim is one atomic update, so two
@@ -326,6 +334,16 @@ func (c *orchestrationCoreServiceClient) ConsumeApproval(ctx context.Context, in
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ConsumeApprovalResponse)
 	err := c.cc.Invoke(ctx, OrchestrationCoreService_ConsumeApproval_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) GetSkippedAssistAuthority(ctx context.Context, in *GetSkippedAssistAuthorityRequest, opts ...grpc.CallOption) (*GetSkippedAssistAuthorityResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSkippedAssistAuthorityResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_GetSkippedAssistAuthority_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -588,6 +606,13 @@ type OrchestrationCoreServiceServer interface {
 	// a granted approval is executed by the loop once and never also by the cold
 	// delivery worker. Caller-scoped (user bearer), not service-only.
 	ConsumeApproval(context.Context, *ConsumeApprovalRequest) (*ConsumeApprovalResponse, error)
+	// Read, without consuming, the tools and authority a DENIED browser_human_assist pause
+	// retained, so a skipped site's continuation runs under the pause's authority and never
+	// under the /continue placeholders. Read-only: it claims, spends and stores nothing, and
+	// the denied approval stays as it is. Same caller scope, run, org and owner checks as
+	// ConsumeApproval. Refused typed for a zero-retention or waived run; any state other than
+	// a denied, unconsumed browser_human_assist approval is FAILED_PRECONDITION.
+	GetSkippedAssistAuthority(context.Context, *GetSkippedAssistAuthorityRequest) (*GetSkippedAssistAuthorityResponse, error)
 	// Claim the granted once-approval for one exact action, so the agent's retry of a
 	// non-resumable call passes the Space gate exactly once (build plan WS10 S3). The
 	// caller is the run owner's session; the claim is one atomic update, so two
@@ -710,6 +735,9 @@ func (UnimplementedOrchestrationCoreServiceServer) RerouteApproval(context.Conte
 }
 func (UnimplementedOrchestrationCoreServiceServer) ConsumeApproval(context.Context, *ConsumeApprovalRequest) (*ConsumeApprovalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ConsumeApproval not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) GetSkippedAssistAuthority(context.Context, *GetSkippedAssistAuthorityRequest) (*GetSkippedAssistAuthorityResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSkippedAssistAuthority not implemented")
 }
 func (UnimplementedOrchestrationCoreServiceServer) ClaimOnceApproval(context.Context, *ClaimOnceApprovalRequest) (*ClaimOnceApprovalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClaimOnceApproval not implemented")
@@ -1038,6 +1066,24 @@ func _OrchestrationCoreService_ConsumeApproval_Handler(srv interface{}, ctx cont
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(OrchestrationCoreServiceServer).ConsumeApproval(ctx, req.(*ConsumeApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_GetSkippedAssistAuthority_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSkippedAssistAuthorityRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).GetSkippedAssistAuthority(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_GetSkippedAssistAuthority_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).GetSkippedAssistAuthority(ctx, req.(*GetSkippedAssistAuthorityRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1439,6 +1485,10 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ConsumeApproval",
 			Handler:    _OrchestrationCoreService_ConsumeApproval_Handler,
+		},
+		{
+			MethodName: "GetSkippedAssistAuthority",
+			Handler:    _OrchestrationCoreService_GetSkippedAssistAuthority_Handler,
 		},
 		{
 			MethodName: "ClaimOnceApproval",

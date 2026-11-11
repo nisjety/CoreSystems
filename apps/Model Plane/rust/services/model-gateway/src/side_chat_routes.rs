@@ -7,7 +7,9 @@
 //! turn text cannot close the block. Nothing is written: no thread, turn, run, event or memory, and
 //! the answer goes back to the caller only. A zero-retention turn carries the flag to inference-core
 //! and its cost is null. A Space thread is refused with 409 `scope_not_available_in_space` (DEC-06),
-//! and a waived token is refused as a route mismatch, as the review route does.
+//! and a waived token is refused as a route mismatch, as the review route does. A thread that holds
+//! a zero-retention or waived run is refused with 409 `side_chat_thread_retention_refused` from the
+//! same thread-summary read, before the transcript is read and before any model call.
 //!
 //! The route answers 404 `side_chat_disabled` while `MODEL_GATEWAY_SIDE_CHAT_ENABLED` is not the
 //! literal `true`. The switch is read at each call.
@@ -275,7 +277,11 @@ fn side_chat_request(
 /// Refuses a Space thread before its transcript is read (DEC-06). Session Core's conversation read
 /// carries no Space id, so the thread's own summary is read by id, through the owner-bound thread
 /// listing. A thread the caller does not own is not listed, and Session Core refuses its read.
-async fn refuse_space_thread(
+///
+/// The same answer also carries `holds_retention_run`: a thread holding a ZDR or waived run is
+/// refused with 409 `side_chat_thread_retention_refused` (DEC-32), so its transcript is never read
+/// and never reaches the org default chain. The Space check comes first, then the retention check.
+async fn refuse_unavailable_thread(
     state: &AppState,
     claims: &Claims,
     session_bearer: &VerifiedSessionBearer,
@@ -307,6 +313,17 @@ async fn refuse_space_thread(
             StatusCode::CONFLICT,
             "scope_not_available_in_space",
             "side chat is not available in a Space thread",
+        ));
+    }
+    if response
+        .threads
+        .iter()
+        .any(|thread| thread.holds_retention_run)
+    {
+        return Err(typed(
+            StatusCode::CONFLICT,
+            "side_chat_thread_retention_refused",
+            "side chat is not available for a thread that holds a zero-retention or waived run",
         ));
     }
     Ok(())
@@ -362,7 +379,7 @@ pub(crate) async fn side_chat_with(
             "thread_id is required",
         ));
     }
-    refuse_space_thread(&state, &claims, &session_bearer, thread_id).await?;
+    refuse_unavailable_thread(&state, &claims, &session_bearer, thread_id).await?;
     let (messages, has_more) =
         read_active_path(&state, &claims, &session_bearer, thread_id).await?;
     let transcript = newest_transcript(&messages, has_more);

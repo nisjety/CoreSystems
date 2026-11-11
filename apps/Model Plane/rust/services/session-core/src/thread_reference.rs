@@ -112,6 +112,24 @@ fn reference_refusal(
     None
 }
 
+/// Whether the thread holds a run kept under zero data retention or a waived one (DEC-32). This is
+/// the one copy of that predicate: the reference read refuses such a thread with it, and the thread
+/// listing reports it, so the side chat can refuse before it reads a transcript.
+pub(crate) async fn holds_retention_run_for_thread<'e, E>(
+    executor: E,
+    thread_id: &str,
+) -> Result<bool, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM runs WHERE thread_id = $1 AND retention_class IN ('zdr', 'zdr_waived'))",
+    )
+    .bind(thread_id)
+    .fetch_one(executor)
+    .await
+}
+
 /// The caller owns the thread: a person in the thread's org who is its owner. Anything else is
 /// answered as a missing thread, so a reference cannot probe for another person's threads.
 fn owned_by(thread: &ReferencedThread, org_id: &str, caller_user: Option<&str>) -> bool {
@@ -197,13 +215,9 @@ pub(crate) async fn read_reference(
     if !owned_by(&thread, org_id, caller.user_id()) {
         return Err(Status::not_found("thread not found"));
     }
-    let holds_retention_run: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM runs WHERE thread_id = $1 AND retention_class IN ('zdr', 'zdr_waived'))",
-    )
-    .bind(thread_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(internal)?;
+    let holds_retention_run = holds_retention_run_for_thread(&mut *tx, thread_id)
+        .await
+        .map_err(internal)?;
     if let Some(reason) =
         reference_refusal(&thread, thread_id, current_thread_id, holds_retention_run)
     {

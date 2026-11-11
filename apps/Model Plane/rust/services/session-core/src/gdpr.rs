@@ -1116,6 +1116,12 @@ pub struct UserErasureSummary {
     pub user_profiles: u64,
     /// The person's own durable memory rows (`scope = 'user'`) deleted.
     pub personal_memory: u64,
+    /// The person's request snapshots (`run_request_snapshots`) deleted (ZDR Q-ERASE).
+    pub run_request_snapshots: u64,
+    /// Request-snapshot blobs deleted because no remaining snapshot references them (D-ZDR-06).
+    pub run_request_snapshot_blobs: u64,
+    /// The person's durable promote-on-use counter rows deleted (W5-093-b).
+    pub promote_use_counts: u64,
     /// Semantic-tier outcome for the copies of those rows, and of any copy the listing found that no
     /// durable row still holds.
     pub semantic_memory: crate::memory_erasure::SemanticErasure,
@@ -1225,6 +1231,18 @@ pub async fn erase_user_personal_data_for(
     .execute(&mut *tx)
     .await?;
     let user_profiles = crate::user_profile::delete_in_tx(&mut tx, org_id, user_id).await?;
+    // Request snapshots (ZDR Q-ERASE, D-ZDR-06): the person's snapshot rows, then the blobs no remaining
+    // snapshot references. Same transaction as the profile and memory rows, after the hold gate above.
+    let snapshot_erasure =
+        crate::request_snapshots::erase_user_snapshots_in_tx(&mut tx, org_id, user_id).await?;
+    // Durable promote-on-use counters (W5-093-b): the person's own rows. Ids, a URL hash and a count only.
+    let promote_use_counts =
+        sqlx::query("DELETE FROM promote_use_counts WHERE org_id = $1 AND user_id = $2")
+            .bind(org_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
     // The audit record of this erasure: counts only, never the erased text or an id list. Written in
     // the erasing transaction, so a rolled-back erasure leaves no row claiming it happened.
     sqlx::query(
@@ -1317,6 +1335,9 @@ pub async fn erase_user_personal_data_for(
     let summary = UserErasureSummary {
         user_profiles,
         personal_memory,
+        run_request_snapshots: snapshot_erasure.snapshots,
+        run_request_snapshot_blobs: snapshot_erasure.blobs,
+        promote_use_counts,
         semantic_memory: semantic,
         listing_degradation,
     };

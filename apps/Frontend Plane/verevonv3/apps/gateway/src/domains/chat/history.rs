@@ -1390,13 +1390,25 @@ async fn delete_durable_thread(
         state.model_gateway_url,
         urlencoding::encode(thread_id),
     );
-    let (status, Json(payload)) = shared::proxy_model_json_with_session(
+    // The owner's own delegated Data Plane credential, as the snapshot share routes send it. Model
+    // Gateway forwards it to Session Core only, which uses it to revoke the deleted thread's
+    // snapshot view grants at Control. Best-effort: without it the delete runs exactly as before.
+    let data_plane_token = shared::data_plane_token(state, user, headers).await;
+    let (status, Json(payload)) = shared::proxy_model_json_with_delegations(
         state,
         Method::DELETE,
         &url,
         None,
         token.as_deref(),
+        data_plane_token.as_deref(),
+        None,
+        None,
+        None,
+        None,
         Some(&session_token),
+        None,
+        None,
+        None,
         user,
     )
     .await;
@@ -1420,13 +1432,23 @@ async fn delete_durable_threads(
         .await
         .map_err(|error| shared::delegated_auth_unavailable(error).into_response())?;
     let url = format!("{}/v1/threads", state.model_gateway_url);
-    let (status, Json(payload)) = shared::proxy_model_json_with_session(
+    // Same delegation as the single delete: the owner's own credential, for Session Core's grant revoke.
+    let data_plane_token = shared::data_plane_token(state, user, headers).await;
+    let (status, Json(payload)) = shared::proxy_model_json_with_delegations(
         state,
         Method::DELETE,
         &url,
         None,
         token.as_deref(),
+        data_plane_token.as_deref(),
+        None,
+        None,
+        None,
+        None,
         Some(&session_token),
+        None,
+        None,
+        None,
         user,
     )
     .await;

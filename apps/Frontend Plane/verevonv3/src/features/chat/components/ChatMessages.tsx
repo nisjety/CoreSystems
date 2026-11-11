@@ -296,6 +296,10 @@ export function MessageBlock(props: {
   /** n/N badge for this turn's exchange versions — only ever set on the trailing assistant turn. */
   version?: VersionBadge | null
   onSelectVersion?: (target: number) => void
+  /** The server's version switcher for this turn (WS17 S9); see `AssistantMessage`. Absent on an unversioned thread. */
+  serverVersion?: ServerVersionBadge | null
+  /** Moves the thread to the sibling version the switcher named. */
+  onSwitchServerVersion?: (messageId: string) => void
   /** The rewind this turn offers, and the turns it would hide (WS17 S9). Absent on a surface with no version tree. */
   rewindPlan?: RewindPlan | null
   /** Rewinds the thread to this turn, once the person has confirmed it. Nothing is deleted. */

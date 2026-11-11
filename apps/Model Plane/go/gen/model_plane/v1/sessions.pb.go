@@ -1032,9 +1032,17 @@ type AppendMessageRequest struct {
 	// text-only previews. Honoured only with post_kind "post"; on any other append it is refused
 	// (invalid_argument), and a failed validation refuses the append. Stored under
 	// messages.metadata.entry; never part of model context. Unset = no entry.
-	Entry         *MessageEntry `protobuf:"bytes,21,opt,name=entry,proto3" json:"entry,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Entry *MessageEntry `protobuf:"bytes,21,opt,name=entry,proto3" json:"entry,omitempty"`
+	// The customer-gateway connection (W4-BYO) that served or will serve this turn: the opaque
+	// Integration Core connection id, so a regenerate, edit or retry of the turn replays on the same
+	// connection and never falls through to a platform provider. An opaque id only, never a key or a
+	// secret; the shape rule is the one `InferRequest.model_connection_id` has (at most 128 bytes of
+	// ASCII letters, digits, '-', '_' and '.'), and a malformed id is refused (invalid_argument).
+	// Stored only on a turn row: a zero-retention caller cannot append at all, and a post ignores it.
+	// Empty = a platform turn, today's behaviour; a send without one never touches the column.
+	ModelConnectionId string `protobuf:"bytes,22,opt,name=model_connection_id,json=modelConnectionId,proto3" json:"model_connection_id,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *AppendMessageRequest) Reset() {
@@ -1212,6 +1220,13 @@ func (x *AppendMessageRequest) GetEntry() *MessageEntry {
 		return x.Entry
 	}
 	return nil
+}
+
+func (x *AppendMessageRequest) GetModelConnectionId() string {
+	if x != nil {
+		return x.ModelConnectionId
+	}
+	return ""
 }
 
 type AppendMessageResponse struct {
@@ -4808,8 +4823,13 @@ type SessionMessage struct {
 	// Set only on a deleted user message: an agent answer to it already exists, and
 	// that answer is not retracted by the deletion.
 	AgentFollowedUp bool `protobuf:"varint,19,opt,name=agent_followed_up,json=agentFollowedUp,proto3" json:"agent_followed_up,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// The customer-gateway connection this turn was written under (see
+	// AppendMessageRequest.model_connection_id): an opaque id, never a key. Empty for a platform turn
+	// and for every row written before the column existed. The gateway reads it off the source turn
+	// of a regenerate or an edit and replays on the same connection.
+	ModelConnectionId string `protobuf:"bytes,20,opt,name=model_connection_id,json=modelConnectionId,proto3" json:"model_connection_id,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *SessionMessage) Reset() {
@@ -4973,6 +4993,13 @@ func (x *SessionMessage) GetAgentFollowedUp() bool {
 		return x.AgentFollowedUp
 	}
 	return false
+}
+
+func (x *SessionMessage) GetModelConnectionId() string {
+	if x != nil {
+		return x.ModelConnectionId
+	}
+	return ""
 }
 
 type ListConversationResponse struct {
@@ -5876,9 +5903,14 @@ type ThreadSummary struct {
 	// "budget_reached", "turns_reached", "blocked"), so the sidebar can show a goal chip without a
 	// second call. Empty when the thread has no goal, its goal was cleared, or the thread goals switch
 	// or the attention switch is off. A status token only, never the objective.
-	GoalStatus    string `protobuf:"bytes,29,opt,name=goal_status,json=goalStatus,proto3" json:"goal_status,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	GoalStatus string `protobuf:"bytes,29,opt,name=goal_status,json=goalStatus,proto3" json:"goal_status,omitempty"`
+	// Whether the thread holds a run kept under zero data retention or a waived run (DEC-32). Read
+	// only when ListThreadsRequest.thread_id names one thread, so that a caller can refuse a content
+	// read of that thread before it happens; a listing without a thread_id filter leaves it false and
+	// it must not be read as "holds none". A flag only, never a retention class or run id.
+	HoldsRetentionRun bool `protobuf:"varint,30,opt,name=holds_retention_run,json=holdsRetentionRun,proto3" json:"holds_retention_run,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ThreadSummary) Reset() {
@@ -6112,6 +6144,13 @@ func (x *ThreadSummary) GetGoalStatus() string {
 		return x.GoalStatus
 	}
 	return ""
+}
+
+func (x *ThreadSummary) GetHoldsRetentionRun() bool {
+	if x != nil {
+		return x.HoldsRetentionRun
+	}
+	return false
 }
 
 type ListThreadsResponse struct {
@@ -10512,7 +10551,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x16trigger_content_digest\x18\x0e \x01(\tR\x14triggerContentDigest\x12(\n" +
 	"\x10agent_subject_id\x18\x0f \x01(\tR\x0eagentSubjectId\x12\x1f\n" +
 	"\vturn_origin\x18\x10 \x01(\tR\n" +
-	"turnOrigin\"\xae\a\n" +
+	"turnOrigin\"\xde\a\n" +
 	"\x14AppendMessageRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x18\n" +
@@ -10536,7 +10575,8 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x11client_message_id\x18\x12 \x01(\tR\x0fclientMessageId\x12\x1b\n" +
 	"\tpost_kind\x18\x13 \x01(\tR\bpostKind\x128\n" +
 	"\bmentions\x18\x14 \x03(\v2\x1c.model_plane.v1.MentionInputR\bmentions\x122\n" +
-	"\x05entry\x18\x15 \x01(\v2\x1c.model_plane.v1.MessageEntryR\x05entry\"\xae\x01\n" +
+	"\x05entry\x18\x15 \x01(\v2\x1c.model_plane.v1.MessageEntryR\x05entry\x12.\n" +
+	"\x13model_connection_id\x18\x16 \x01(\tR\x11modelConnectionId\"\xae\x01\n" +
 	"\x15AppendMessageResponse\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x04R\bsequence\x12\x1d\n" +
 	"\n" +
@@ -10820,7 +10860,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x13include_human_posts\x18\t \x01(\bR\x11includeHumanPosts\x12(\n" +
 	"\x10post_context_cap\x18\n" +
 	" \x01(\rR\x0epostContextCap\x12#\n" +
-	"\rinclude_first\x18\v \x01(\bR\fincludeFirst\"\xa3\x06\n" +
+	"\rinclude_first\x18\v \x01(\bR\fincludeFirst\"\xd3\x06\n" +
 	"\x0eSessionMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12\x1d\n" +
@@ -10846,7 +10886,8 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x15revised_by_subject_id\x18\x11 \x01(\tR\x12revisedBySubjectId\x12\x1f\n" +
 	"\vrevision_no\x18\x12 \x01(\rR\n" +
 	"revisionNo\x12*\n" +
-	"\x11agent_followed_up\x18\x13 \x01(\bR\x0fagentFollowedUp\"\x98\x01\n" +
+	"\x11agent_followed_up\x18\x13 \x01(\bR\x0fagentFollowedUp\x12.\n" +
+	"\x13model_connection_id\x18\x14 \x01(\tR\x11modelConnectionId\"\x98\x01\n" +
 	"\x18ListConversationResponse\x12:\n" +
 	"\bmessages\x18\x01 \x03(\v2\x1e.model_plane.v1.SessionMessageR\bmessages\x12\x19\n" +
 	"\bhas_more\x18\x02 \x01(\bR\ahasMore\x12%\n" +
@@ -10920,7 +10961,8 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\barchived\x18\n" +
 	" \x01(\x0e2\x1d.model_plane.v1.ArchiveFilterR\barchived\x12!\n" +
 	"\fstarred_only\x18\v \x01(\bR\vstarredOnly\x12(\n" +
-	"\x10agent_subject_id\x18\f \x01(\tR\x0eagentSubjectId\"\xe1\t\n" +
+	"\x10agent_subject_id\x18\f \x01(\tR\x0eagentSubjectId\"\x91\n" +
+	"\n" +
 	"\rThreadSummary\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x1f\n" +
 	"\vsession_key\x18\x02 \x01(\tR\n" +
@@ -10959,7 +11001,8 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\n" +
 	"turn_count\x18\x1c \x01(\rR\tturnCount\x12\x1f\n" +
 	"\vgoal_status\x18\x1d \x01(\tR\n" +
-	"goalStatus\"o\n" +
+	"goalStatus\x12.\n" +
+	"\x13holds_retention_run\x18\x1e \x01(\bR\x11holdsRetentionRun\"o\n" +
 	"\x13ListThreadsResponse\x127\n" +
 	"\athreads\x18\x01 \x03(\v2\x1d.model_plane.v1.ThreadSummaryR\athreads\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\tR\n" +

@@ -345,6 +345,40 @@ pub async fn with_user_context_refs<F: std::future::Future>(
     }
 }
 
+tokio::task_local! {
+    /// The customer-gateway connection id of the chat send whose run is being prepared (W4-BYO).
+    /// Scoped by [`with_user_model_connection`] around that one preparation, so the user message it
+    /// appends records the connection the turn is served on, and every other append sees none.
+    static USER_TURN_MODEL_CONNECTION: String;
+}
+
+/// Runs `preparation` (the chat send's run preparation) so the user message it appends records
+/// `model_connection_id` on the turn. A regenerate, edit or retry of that turn, reloaded from
+/// history, then replays on the same customer-gateway connection (see [`plan_version_move`]).
+/// With a blank id the future runs exactly as it would alone. A zero-retention turn appends no
+/// user message, so nothing is recorded for one even when an id is named.
+pub async fn with_user_model_connection<F: std::future::Future>(
+    model_connection_id: &str,
+    zdr: bool,
+    preparation: F,
+) -> F::Output {
+    let id = model_connection_id.trim();
+    if zdr || id.is_empty() {
+        return preparation.await;
+    }
+    USER_TURN_MODEL_CONNECTION
+        .scope(id.to_owned(), preparation)
+        .await
+}
+
+/// The connection id the user message being appended records: the scoped one, or empty outside
+/// [`with_user_model_connection`] (every caller but the chat send, and every send without one).
+fn user_turn_model_connection() -> String {
+    USER_TURN_MODEL_CONNECTION
+        .try_with(Clone::clone)
+        .unwrap_or_default()
+}
+
 /// Builds the durable `messages.metadata` Struct for the first-persisted user
 /// turn (chat-wave2 scope spec §2.4): `source_scope` when the thread is
 /// conversation-only, plus `retrieval_scope` when this turn's per-turn filter
@@ -448,6 +482,8 @@ async fn append_user_message(
             payload_digest: space.payload_digest,
             idempotency_key: space.idempotency_key,
             client_message_id: client_message_id.unwrap_or_default().to_owned(),
+            // The customer-gateway connection the turn is served on, when the send scoped one (W4-BYO).
+            model_connection_id: user_turn_model_connection(),
             ..Default::default()
         },
         bearer,
@@ -1000,24 +1036,39 @@ pub struct VersionMove {
 /// the wrong role, or has no turn to move to. The gateway maps it to the `history_branch_refused` conflict.
 const VERSION_TURN_REFUSED: &str = "history_branch_refused";
 
-/// Moves the active branch of `thread_id` for a regenerate or an edit (WS17 S9), before the run that answers
-/// it starts. The thread is read once: its turns, with the inactive branches, give the turn's parent (where
-/// the leaf moves), the leaf the move must still find (the compare-and-set) and, for a regenerate, the
-/// question. A turn written before the tree has no parent yet, so the turn before it in sequence is its
-/// parent, as Session Core links a legacy chain.
+/// What a regenerate or an edit has read from the thread, before anything is moved (see
+/// [`plan_version_move`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VersionPlan {
+    /// For a regenerate, the question the answer continues; `None` for an edit.
+    pub goal: Option<String>,
+    /// The customer-gateway connection id stored on the source turn (W4-BYO): the question a
+    /// regenerate answers again, or the user turn an edit replaces. Empty for a platform turn and
+    /// for a turn written before the id was kept. An opaque id, never a key.
+    pub model_connection_id: String,
+    parent_message_id: String,
+    expected_leaf_message_id: String,
+}
+
+/// Reads the thread for a regenerate or an edit (WS17 S9) and answers what the move would do,
+/// WITHOUT moving anything. The thread is read once: its turns, with the inactive branches, give the
+/// turn's parent (where the leaf moves), the leaf the move must still find (the compare-and-set),
+/// for a regenerate the question, and the connection id the source turn was written under. A turn
+/// written before the tree has no parent yet, so the turn before it in sequence is its parent, as
+/// Session Core links a legacy chain.
 ///
 /// # Errors
-/// `FailedPrecondition` with `history_branch_refused` for a refused turn; Session Core's own refusals of the
-/// move (a stale leaf, an active run, a Space or waived thread) come back unchanged.
-pub async fn move_active_leaf(
+/// `FailedPrecondition` with `history_branch_refused` for a refused turn (not on the active path, of
+/// the wrong role, or with no turn to move to).
+pub async fn plan_version_move(
     state: &AppState,
     org_id: &str,
     thread_id: &str,
     turn: &crate::normalize::VersionTurn,
     bearer: &VerifiedSessionBearer,
-) -> Result<VersionMove, tonic::Status> {
+) -> Result<VersionPlan, tonic::Status> {
     use crate::normalize::VersionTurn;
-    use mp_contracts::model_plane::v1::{ListConversationRequest, SetActiveLeafRequest};
+    use mp_contracts::model_plane::v1::ListConversationRequest;
 
     let mut session_client = state.session_client.clone();
     let turns = session_client
@@ -1068,12 +1119,41 @@ pub async fn move_active_leaf(
         VersionTurn::Regenerate { .. } => return Err(refused()),
         VersionTurn::Edit { .. } => None,
     };
+    // The user turn the answer (or the replacement) is for holds the connection the turn was served
+    // on: the question of a regenerate, the edited turn itself for an edit.
+    let model_connection_id = match turn {
+        VersionTurn::Regenerate { .. } => parent.model_connection_id.trim().to_owned(),
+        VersionTurn::Edit { .. } => message.model_connection_id.trim().to_owned(),
+    };
     let expected_leaf_message_id = turns
         .iter()
         .rev()
         .find(|candidate| candidate.on_active_path)
         .map(|candidate| candidate.message_id.clone())
         .unwrap_or_default();
+
+    Ok(VersionPlan {
+        goal,
+        model_connection_id,
+        parent_message_id: parent.message_id.clone(),
+        expected_leaf_message_id,
+    })
+}
+
+/// Moves the active branch as a [`VersionPlan`] read it (WS17 S9), before the run that answers the
+/// turn starts.
+///
+/// # Errors
+/// Session Core's own refusals of the move (a stale leaf, an active run, a Space or waived thread)
+/// come back unchanged.
+pub async fn apply_version_move(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    plan: &VersionPlan,
+    bearer: &VerifiedSessionBearer,
+) -> Result<VersionMove, tonic::Status> {
+    use mp_contracts::model_plane::v1::SetActiveLeafRequest;
 
     state
         .message_tree_client
@@ -1082,14 +1162,32 @@ pub async fn move_active_leaf(
             SetActiveLeafRequest {
                 org_id: org_id.to_owned(),
                 thread_id: thread_id.to_owned(),
-                target_message_id: parent.message_id.clone(),
-                expected_leaf_message_id,
+                target_message_id: plan.parent_message_id.clone(),
+                expected_leaf_message_id: plan.expected_leaf_message_id.clone(),
                 exact: false,
             },
             bearer,
         )?)
         .await?;
-    Ok(VersionMove { goal })
+    Ok(VersionMove {
+        goal: plan.goal.clone(),
+    })
+}
+
+/// Moves the active branch of `thread_id` for a regenerate or an edit (WS17 S9), before the run that
+/// answers it starts: [`plan_version_move`], then [`apply_version_move`].
+///
+/// # Errors
+/// As the two steps.
+pub async fn move_active_leaf(
+    state: &AppState,
+    org_id: &str,
+    thread_id: &str,
+    turn: &crate::normalize::VersionTurn,
+    bearer: &VerifiedSessionBearer,
+) -> Result<VersionMove, tonic::Status> {
+    let plan = plan_version_move(state, org_id, thread_id, turn, bearer).await?;
+    apply_version_move(state, org_id, thread_id, &plan, bearer).await
 }
 
 /// The managed run of a regenerate or an edit whose branch has moved (see [`move_active_leaf`]). A regenerate

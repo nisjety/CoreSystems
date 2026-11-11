@@ -190,6 +190,9 @@ async fn handle_message(
                 org_id = %user.org_id,
                 user_profiles = personal.user_profiles,
                 personal_memory = personal.personal_memory,
+                run_request_snapshots = personal.run_request_snapshots,
+                run_request_snapshot_blobs = personal.run_request_snapshot_blobs,
+                promote_use_counts = personal.promote_use_counts,
                 complete = personal.erasure_is_complete(),
                 "GDPR user erasure: standing profile and personal memory erased"
             );

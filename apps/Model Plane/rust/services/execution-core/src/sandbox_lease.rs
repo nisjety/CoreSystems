@@ -538,8 +538,14 @@ pub async fn release_sandbox_lease_if_any(
     process_host: Option<&crate::process_host::ProcessHost>,
     run_id: &str,
     org_id: &str,
+    persistence_free: bool,
 ) -> Option<WorkspaceUploadOutcome> {
     let lease = state.take_sandbox_lease(run_id)?;
+    let upload = workspace_sync::release_upload(
+        workspace_sync::lease_release_filter_switched_on(),
+        workspace_sync::space_write_through_switched_on(),
+        persistence_free,
+    );
 
     // Stop this lease's background processes BEFORE the workspace is diffed
     // and uploaded: a process still writing into it would otherwise race the
@@ -549,6 +555,15 @@ pub async fn release_sandbox_lease_if_any(
     // dies with the host.
     if let Some(host) = process_host {
         host.kill_for_lease(&lease.lease_id).await;
+    }
+    // A run that keeps no content never reaches an upload: the workspace is discarded here, before
+    // any credential is requested. The log names the run and the reason, never a file.
+    if upload == workspace_sync::ReleaseUpload::Discard {
+        if let Some(workspace) = state.take_hydrated_workspace(run_id) {
+            cleanup_workspace_dir(&workspace.path);
+            warn!(run_id = %run_id, reason = "zdr_or_waived_run", "Space workspace discarded at lease release; nothing uploaded");
+        }
+        return None;
     }
     let token = match tokens.token(org_id).await {
         Ok(token) => token,
@@ -571,12 +586,14 @@ pub async fn release_sandbox_lease_if_any(
 
     let outcome = match state.take_hydrated_workspace(run_id) {
         Some(workspace) => Some(
-            upload_and_discard_workspace(
+            upload_and_discard_workspace_with(
                 sandbox_manager_client,
                 cas_client,
                 &token,
                 &lease,
                 &workspace,
+                upload == workspace_sync::ReleaseUpload::SyncableOnly
+                    || workspace_sync::space_write_through_switched_on(),
             )
             .await,
         ),
@@ -627,13 +644,34 @@ async fn upload_and_discard_workspace(
     lease: &SandboxLease,
     workspace: &HydratedWorkspace,
 ) -> WorkspaceUploadOutcome {
-    let outcome = record_workspace_overlay(
+    upload_and_discard_workspace_with(
         sandbox_manager_client,
         cas_client,
         token,
         lease,
         workspace,
         workspace_sync::space_write_through_switched_on(),
+    )
+    .await
+}
+
+/// [`upload_and_discard_workspace`] with the file filter chosen by the caller: `syncable_only` keeps
+/// only the files the per-step write-through accepts.
+async fn upload_and_discard_workspace_with(
+    sandbox_manager_client: &SandboxManagerClient,
+    cas_client: Option<&CasClient>,
+    token: &str,
+    lease: &SandboxLease,
+    workspace: &HydratedWorkspace,
+    syncable_only: bool,
+) -> WorkspaceUploadOutcome {
+    let outcome = record_workspace_overlay(
+        sandbox_manager_client,
+        cas_client,
+        token,
+        lease,
+        workspace,
+        syncable_only,
     )
     .await;
     cleanup_workspace_dir(&workspace.path);
@@ -862,6 +900,7 @@ mod tests {
             None,
             "run-1",
             "org-a",
+            false,
         )
         .await;
     }
@@ -893,6 +932,7 @@ mod tests {
             None,
             "run-1",
             "org-a",
+            false,
         )
         .await;
 
@@ -1010,6 +1050,7 @@ mod tests {
             None,
             "run-1",
             "org-a",
+            false,
         )
         .await;
 
@@ -1231,6 +1272,7 @@ mod tests {
             None,
             "run-1",
             "org-a",
+            false,
         )
         .await
         .expect("a run with a workspace always reports its outcome");

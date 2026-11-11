@@ -76,6 +76,14 @@ service OrchestrationCoreService {
   // delivery worker. Caller-scoped (user bearer), not service-only.
   rpc ConsumeApproval(ConsumeApprovalRequest) returns (ConsumeApprovalResponse);
 
+  // Read, without consuming, the tools and authority a DENIED browser_human_assist pause
+  // retained, so a skipped site's continuation runs under the pause's authority and never
+  // under the /continue placeholders. Read-only: it claims, spends and stores nothing, and
+  // the denied approval stays as it is. Same caller scope, run, org and owner checks as
+  // ConsumeApproval. Refused typed for a zero-retention or waived run; any state other than
+  // a denied, unconsumed browser_human_assist approval is FAILED_PRECONDITION.
+  rpc GetSkippedAssistAuthority(GetSkippedAssistAuthorityRequest) returns (GetSkippedAssistAuthorityResponse);
+
   // Claim the granted once-approval for one exact action, so the agent's retry of a
   // non-resumable call passes the Space gate exactly once (build plan WS10 S3). The
   // caller is the run owner's session; the claim is one atomic update, so two
@@ -1220,6 +1228,30 @@ message ApprovedTool {
   string description = 2;
   // The JSON Schema of the tool's arguments.
   string parameters_json = 3;
+}
+
+// GetSkippedAssistAuthority reads the authority a denied browser_human_assist pause retained.
+// Scope comes from the verified caller; the ids only select.
+message GetSkippedAssistAuthorityRequest {
+  // The denied approval whose retained authority is read.
+  string approval_id = 1;
+  // Server-authoritative org scope.
+  string org_id = 2;
+  // The run the approval gates; must match the approval.
+  string run_id = 3;
+  // The step the approval gated; must match the retained descriptor when set.
+  string step_id = 4;
+  // An opaque token of the continuing segment. Required, as for ConsumeApproval; a read
+  // stores nothing, so it is not kept.
+  string claim_token = 5;
+}
+
+// The authority a denied browser_human_assist pause retained.
+message GetSkippedAssistAuthorityResponse {
+  // The tools and authority the pause was raised under, exactly as ConsumeApproval returns
+  // them for a granted approval. Always set: a denied approval that retained no snapshot is
+  // refused as FAILED_PRECONDITION approval_not_resumable instead.
+  ApprovedAuthority authority = 1;
 }
 
 message CreateApprovalResponse {

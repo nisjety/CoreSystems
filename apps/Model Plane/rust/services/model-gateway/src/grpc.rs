@@ -1590,6 +1590,10 @@ impl ModelGateway for GatewayService {
         let identity = authorize_rpc(&request, RpcAccess::Tool)?;
         let mut req = request.into_inner();
         req.zdr = identity.zdr_for(&crate::zdr_posture::Route::plain(req.zdr))?;
+        // Z-05a: a ZDR search is a typed refusal before the Quarry call, once ZDR_TYPED_REFUSALS_ENABLED is on.
+        if let Some(refusal) = crate::zdr_posture::refuse_zdr_feature_for("web_search", req.zdr) {
+            return Err(refusal.grpc_status(crate::zdr_posture::grpc_code(&refusal)));
+        }
         tools::handle_web_search(&self.state, req)
             .await
             .map(Response::new)

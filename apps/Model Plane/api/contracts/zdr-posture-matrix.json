@@ -886,6 +886,19 @@
         "route": {"provider": "openai-codex-subscription", "connection": "conn-deck", "explicit_zdr": false}
       },
       "expect": {"decision": "waived", "code": "connection_not_zdr_capable"}
+    },
+    {
+      "id": "e_zdr_web_search_and_file_output_typed_refusal",
+      "title": "A temporary chat that asks for ZDR on a platform provider route, with an org that is not ZDR, asking for a web search or a file: ZDR, with each refused as zdr_feature_not_supported and nothing dropped silently.",
+      "tags": [],
+      "note": "Z-05a (behind ZDR_TYPED_REFUSALS_ENABLED, off): the web_search call (feature web_search) and the create_artifact and update_artifact calls (feature artifact_output) are refused by model-gateway's tool dispatch with the catalogue body, before any search, network call or write, and the gRPC WebSearch refuses a ZDR caller the same way (FailedPrecondition, trailers x-mp-provider-error and x-mp-zdr-feature). A waived turn counts as ZDR for these two features (DEC-32, ZDR.md 5.5); the posture decision is the resolver's, so the waived case adds no row. The refusal carries the feature key only, never the query, the URL, the file name or the output. The org default is off and the provider is a platform one, so the row differs from the other ZDR rows. With the switch off the calls behave as before.",
+      "inputs": {
+        "bearers": [
+          {"zdr": true, "org_zdr": false, "waiver": null}
+        ],
+        "route": {"provider": "azure-openai", "connection": null, "explicit_zdr": true}
+      },
+      "expect": {"decision": "zdr", "code": "explicit_zdr"}
     }
   ]
 }

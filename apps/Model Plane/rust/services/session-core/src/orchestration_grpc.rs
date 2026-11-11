@@ -4879,6 +4879,77 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         result
     }
 
+    // "Skip this site" (EP-1 S2): the tools and authority a DENIED `browser_human_assist` pause
+    // retained, for the continuation of the skipped site. Read-only: the denied approval is not
+    // consumed, claimed or changed, nothing is stored, and the descriptor is decrypted here and only
+    // the snapshot leaves, in the shape a consume returns. Gated exactly as `consume_approval` is,
+    // before any lookup. Closed wording only: nothing about the call or the person's reason.
+    async fn get_skipped_assist_authority(
+        &self,
+        request: Request<proto::GetSkippedAssistAuthorityRequest>,
+    ) -> Result<Response<proto::GetSkippedAssistAuthorityResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::GetSkippedAssistAuthorityResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let req = request.into_inner();
+            if req.approval_id.is_empty()
+                || req.run_id.is_empty()
+                || req.org_id.is_empty()
+                || req.claim_token.is_empty()
+            {
+                return Err(Status::invalid_argument(
+                    "approval_id, run_id, org_id and claim_token are required",
+                ));
+            }
+            caller.authorize_org(&req.org_id)?;
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound approval credential required"))?
+                .to_owned();
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+            let offered = store::read_skipped_assist_authority(
+                &self.pool,
+                &req.approval_id,
+                &req.org_id,
+                &req.run_id,
+                &user_id,
+                &req.step_id,
+            )
+            .await
+            .map_err(|_| Status::internal("skipped assist authority unavailable"))?;
+            match offered {
+                Ok(offered_json) => {
+                    let authority = approved_authority(&offered_json)
+                        .ok_or_else(|| Status::failed_precondition("approval_not_resumable"))?;
+                    Ok(Response::new(proto::GetSkippedAssistAuthorityResponse {
+                        authority: Some(authority),
+                    }))
+                }
+                Err(store::SkippedAssistRefusal::NotFound) => {
+                    Err(Status::not_found("approval not found for this run"))
+                }
+                Err(store::SkippedAssistRefusal::NotKeptState) => Err(
+                    Refusal::DURABLE_MUTATION_FORBIDDEN
+                        .grpc_status(tonic::Code::FailedPrecondition),
+                ),
+                Err(store::SkippedAssistRefusal::NotSkipped) => {
+                    Err(Status::failed_precondition("approval_not_skipped"))
+                }
+                Err(store::SkippedAssistRefusal::ActionMismatch) => {
+                    Err(Status::failed_precondition("approval_action_mismatch"))
+                }
+                Err(store::SkippedAssistRefusal::NotResumable) => {
+                    Err(Status::failed_precondition("approval_not_resumable"))
+                }
+            }
+        }
+        .await;
+        record_metrics("get_skipped_assist_authority", started, result.is_ok());
+        result
+    }
+
     async fn reroute_approval(
         &self,
         request: Request<proto::RerouteApprovalRequest>,

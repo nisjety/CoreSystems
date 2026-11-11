@@ -19,6 +19,7 @@ import {
   type ExchangeVersionState,
 } from '@/features/chat/lib/chat-versions'
 import {
+  activeLeafId,
   rewindPlan,
   type HiddenTurn,
   type RewindPlan,
@@ -117,6 +118,7 @@ import {
   saveChatThreadSnapshot,
   streamChat,
   submitFeedback,
+  switchChatVersion,
   undoChatRewind,
   VEREVON_BALANCE_MODE_ID,
   type AutonomyRung,
@@ -5777,7 +5779,37 @@ export function useChatController() {
     }
   }
 
-  const updateTaskStep = (id: string, update: (step: AgentTaskStep) => AgentTaskStep) => {
+  /**
+   * Moves a server-versioned thread to another version of a message (WS17 S9). `messageId` is the sibling the
+   * switcher chose. The server picks the new active path, so the thread is read back rather than guessed. A
+   * temporary or Space thread keeps client-only versions and never reaches the server switch.
+   */
+  const switchServerVersion = async (messageId: string) => {
+    const threadId = state.threadId
+    if (isStreaming() || !threadId || !usesServerVersions(threadId)) return
+    const turns = snapshot(state.turns)
+    const shown = turns.find((turn) => turn.version?.siblings.includes(messageId))
+    const index = shown?.version?.siblings.indexOf(messageId) ?? -1
+    if (index < 0) return
+    const leafTurn = turns.find((turn) => turn.id === activeLeafId(turns))
+    const leaf = leafTurn ? serverIdOf(leafTurn) : undefined
+    if (!leaf) {
+      refuseUnsavedVersionTarget()
+      return
+    }
+    try {
+      await switchChatVersion(threadId, messageId, index, leaf)
+    } catch (error) {
+      reportBranchMoveFailure(error, threadId)
+      return
+    }
+    if (state.threadId !== threadId) return
+    // A rewind offer names the old path's leaf, so it ends with the move.
+    setRewindUndoState(null)
+    await loadThread(threadId)
+  }
+
+  const updateTaskStep =(id: string, update: (step: AgentTaskStep) => AgentTaskStep) => {
     setState((s) => {
       s.taskSteps = s.taskSteps.map((step) => (
         step.id === id ? update(step) : step
@@ -5872,6 +5904,7 @@ export function useChatController() {
     rewindOfferFor,
     rewindTo,
     undoRewind,
+    switchServerVersion,
     startNewChat,
     state,
     activeTab,

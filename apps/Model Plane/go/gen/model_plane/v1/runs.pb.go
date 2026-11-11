@@ -2313,7 +2313,11 @@ type RunContextStatus struct {
 	Memory *RunContextPart `protobuf:"bytes,3,opt,name=memory,proto3" json:"memory,omitempty"`
 	// EP-11 S3: the skill versions the run injected, one pin per skill. Ids,
 	// numbers and hashes only, so the pin is allowed wherever the run record is.
-	Skills        []*SkillPin `protobuf:"bytes,4,rep,name=skills,proto3" json:"skills,omitempty"`
+	Skills []*SkillPin `protobuf:"bytes,4,rep,name=skills,proto3" json:"skills,omitempty"`
+	// WS23-S4: the ids of the connected accounts the person selected for this
+	// turn. Ids only, no tokens, names or content, so the list is allowed
+	// wherever the run record is; never recorded for a zero-retention or waived run.
+	ConnectorIds  []string `protobuf:"bytes,5,rep,name=connector_ids,json=connectorIds,proto3" json:"connector_ids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2372,6 +2376,13 @@ func (x *RunContextStatus) GetMemory() *RunContextPart {
 func (x *RunContextStatus) GetSkills() []*SkillPin {
 	if x != nil {
 		return x.Skills
+	}
+	return nil
+}
+
+func (x *RunContextStatus) GetConnectorIds() []string {
+	if x != nil {
+		return x.ConnectorIds
 	}
 	return nil
 }
@@ -2654,12 +2665,13 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\x05state\x18\x01 \x01(\x0e2\x1f.model_plane.v1.RunContextStateR\x05state\x12\x1a\n" +
 	"\bincluded\x18\x02 \x01(\rR\bincluded\x12\x18\n" +
 	"\aomitted\x18\x03 \x01(\rR\aomitted\x12\x16\n" +
-	"\x06reason\x18\x04 \x01(\tR\x06reason\"\xfa\x01\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"\x9f\x02\n" +
 	"\x10RunContextStatus\x12B\n" +
 	"\finstructions\x18\x01 \x01(\v2\x1e.model_plane.v1.RunContextPartR\finstructions\x128\n" +
 	"\ahistory\x18\x02 \x01(\v2\x1e.model_plane.v1.RunContextPartR\ahistory\x126\n" +
 	"\x06memory\x18\x03 \x01(\v2\x1e.model_plane.v1.RunContextPartR\x06memory\x120\n" +
-	"\x06skills\x18\x04 \x03(\v2\x18.model_plane.v1.SkillPinR\x06skills\"o\n" +
+	"\x06skills\x18\x04 \x03(\v2\x18.model_plane.v1.SkillPinR\x06skills\x12#\n" +
+	"\rconnector_ids\x18\x05 \x03(\tR\fconnectorIds\"o\n" +
 	"\bSkillPin\x12\x19\n" +
 	"\bskill_id\x18\x01 \x01(\tR\askillId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\x05R\aversion\x12\x16\n" +

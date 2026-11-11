@@ -172,6 +172,32 @@ fn agentic_space_retrieval(space_id: &str, decision: Option<&str>, enabled: bool
     Some(decision.unwrap_or_default().trim().to_owned())
 }
 
+/// The knowledge receipt frame of a Do run (WS18-S5-a): what the Space's knowledge does for the run's
+/// `knowledge_search`, told once after `connected`. It reads the Space retrieval the run is dispatched with
+/// (`agentic_space_retrieval`), so it exists exactly when that header does: `None` for a run no Space scopes,
+/// for a continuation, and for every run while `AGENTIC_SPACE_RETRIEVAL_ENABLED` is off, which leaves those
+/// runs' frames as they were. An empty value is a refusal, so the receipt says `not_entitled`; any other value
+/// says `retrieval`. A Do run never reaches `not_searched`: a conversation-only turn and a source filter other
+/// than `Auto` are both refused before the agentic launch, so the receipt is read with the run's own `Auto`
+/// scope. The run's search has not returned when this is sent, so no source count rides it. It is the
+/// `source_scope_applied` frame the Ask turn sends, with the scope `auto` and nothing excluded: a mode only,
+/// no content, and nothing persists it (a ZDR or waived run gets it too).
+fn agentic_knowledge_frame(space_retrieval: Option<&str>) -> Option<crate::sse_events::ChatEvent> {
+    let knowledge = crate::knowledge_receipt::knowledge_receipt(
+        space_retrieval.is_some(),
+        space_retrieval.is_some_and(|decision| decision.trim().is_empty()),
+        crate::normalize::RetrievalScope::Auto,
+        false,
+        None,
+    )?;
+    Some(crate::sse_events::ChatEvent::SourceScopeApplied {
+        scope: "auto".to_owned(),
+        excluded_tools: Vec::new(),
+        knowledge: Some(knowledge),
+        reason: None,
+    })
+}
+
 /// The switch that lets a Do run carry its agent role catalogue to execution-core (EP-6 S10). Opt-in:
 /// only the literal `true` enables it. Off, `InvokeRequest.agent_roles` is never read and the run's
 /// `RunContext` carries no roles. execution-core honours the catalogue only under its own switch,
@@ -701,6 +727,23 @@ fn error_stream(
         let _ = tx.send(Ok(sse)).await;
     });
     Sse::new(ReceiverStream::new(rx))
+}
+
+/// The stream's `error` code and message for a refused branch move (WS17 S9): the same typed mapping the unary
+/// route answers with (`branch_thread_error`), carried as the frame's code and message. The message is the
+/// mapping's own text, never thread content.
+fn branch_move_refusal(error: &tonic::Status) -> (String, String) {
+    let (_, axum::Json(body)) = crate::http_routes::branch_thread_error(error);
+    let field = |name: &str| {
+        body.get("error")
+            .and_then(|inner| inner.get(name))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    (
+        field("code").unwrap_or_else(|| "history_branch_refused".to_owned()),
+        field("message").unwrap_or_else(|| "the branch could not be moved".to_owned()),
+    )
 }
 
 /// A typed zero-data-retention refusal as the stream's terminal `error` frame:
@@ -2221,6 +2264,44 @@ pub async fn invoke_stream_sse(
         Ok(turn_posture) => turn_posture,
         Err(refusal) => return zdr_refusal_stream(&request_id, refusal),
     };
+    // A regenerate or an edit of a turn that was served on one of the caller's customer-gateway connections
+    // is served on it again (W4-BYO, GAP-W4-BYO-1). The thread is read here, without moving anything, for
+    // the connection id the source turn holds, and that id is set on the request before it is normalized,
+    // so every rule of a connection turn applies to it; a request that names a platform provider is refused
+    // typed, before anything is moved or written, and never reaches the platform chain. A zero-retention or
+    // waived turn keeps no thread to read (the durable-mutation refusal below answers it). The plan is
+    // applied at the branch move below, so the thread is read once. The posture above stays: a ZDR or waived
+    // turn is never replayed, and a turn that holds an id is never reclassified as ZDR.
+    let mut version_plan: Option<crate::session_flow::VersionPlan> = None;
+    if let Some(replay_turn) = crate::normalize::version_turn(&req).ok().flatten() {
+        if crate::http_routes::message_versions_enabled() && !turn_posture.zdr() && !turn_posture.is_waived() {
+            let replay_thread = req.thread_id.as_deref().map(str::trim).unwrap_or_default().to_owned();
+            match crate::session_flow::plan_version_move(&state, &claims.org_id, &replay_thread, &replay_turn, &model_bearer).await {
+                Ok(plan) => {
+                    if let Err((_, axum::Json(refusal))) =
+                        crate::normalize::replay_stored_connection(&mut req, &plan.model_connection_id)
+                    {
+                        let code = refusal.get("code").and_then(Value::as_str).unwrap_or("invalid_request");
+                        let message = refusal
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("this turn cannot be replayed on this route");
+                        return error_stream(&request_id, code, message, false);
+                    }
+                    version_plan = Some(plan);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        grpc_code = ?error.code(),
+                        request_id = %request_id,
+                        "session-core read of the source turn of a regenerate or an edit failed"
+                    );
+                    let (code, message) = branch_move_refusal(&error);
+                    return error_stream(&request_id, &code, &message, false);
+                }
+            }
+        }
+    }
     // A wake starts a durable run from a stored post (WS08-S3): refused, typed, for a zero-retention
     // or waived turn before anything else, then checked against the post it was approved for.
     if let Some(wake) = req.wake_context.as_ref() {
@@ -2465,6 +2546,17 @@ pub async fn invoke_stream_sse(
             return error_stream(&request_id, code, message, false);
         }
     };
+    // A regenerate or an edit moves the thread's branch, which is a durable write (WS17 S9). A ZDR or
+    // waived turn keeps no thread to move, so it is refused with the typed durable-mutation refusal
+    // before the branch is read or moved. Normalization above has already validated the turn, and with
+    // the message-version switch off it has refused it, so this is reached only with the switch on.
+    let version_turn = crate::normalize::version_turn(&req).ok().flatten();
+    if version_turn.is_some() && (turn_posture.zdr() || turn_posture.is_waived()) {
+        return zdr_refusal_stream(
+            &request_id,
+            mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN,
+        );
+    }
     // The organisation's model policy, asked of inference-core before a run, a
     // thread or a message exists: a refused turn is the stream's one `error`
     // frame and leaves nothing behind, and the ZDR branch below is under the
@@ -3126,7 +3218,57 @@ pub async fn invoke_stream_sse(
         mp_contracts::model_plane::v1::ManagedRunSource::GatewayDirect
     };
     let admitted_ms = timing.close(crate::turn_timing::Phase::Admission, 0);
-    let session_run = match crate::session_flow::with_user_context_refs(
+    // A regenerate or an edit moves the thread's branch before the run that answers it starts (WS17 S9).
+    // This is the last step before the managed start, after every refusal above, so a refused turn leaves
+    // the thread on the branch it had. A refused move starts nothing. A regenerate's question is read
+    // from the thread and replaces the content, as on the unary route.
+    let version_thread = match version_turn {
+        Some(turn) => {
+            let thread_id = req.thread_id.as_deref().map(str::trim).unwrap_or_default().to_owned();
+            let version_moved = match version_plan.as_ref() {
+                Some(plan) => crate::session_flow::apply_version_move(&state, &org_id, &thread_id, plan, &model_bearer).await,
+                None => crate::session_flow::move_active_leaf(&state, &org_id, &thread_id, &turn, &model_bearer).await,
+            };
+            match version_moved {
+                Ok(version_move) => {
+                    if let Some(goal) = version_move.goal {
+                        req.content = goal;
+                    }
+                    Some((thread_id, turn))
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        grpc_code = ?error.code(),
+                        request_id = %request_id,
+                        "session-core branch move for a regenerate or an edit failed"
+                    );
+                    let (code, message) = branch_move_refusal(&error);
+                    return error_stream(&request_id, &code, &message, false);
+                }
+            }
+        }
+        None => None,
+    };
+    // The user turn the run appends records the customer-gateway connection it is served on (W4-BYO), so a
+    // later regenerate or edit of it replays on the same connection. Nothing is recorded for a ZDR turn.
+    let started = crate::session_flow::with_user_model_connection(&normalized.model_connection_id, effective_zdr, async { match version_thread.as_ref() {
+        Some((thread_id, turn)) => {
+            crate::session_flow::with_user_context_refs(
+                context_refs.as_ref(),
+                crate::session_flow::prepare_version_run_authenticated(
+                    &state,
+                    thread_id,
+                    &org_id,
+                    &user_id,
+                    &req.content,
+                    turn,
+                    &managed_start_key,
+                    &model_bearer,
+                ),
+            )
+            .await
+        }
+        None => crate::session_flow::with_user_context_refs(
         context_refs.as_ref(),
         crate::session_flow::prepare_managed_run_authenticated_with_receipt(
         &state,
@@ -3163,8 +3305,9 @@ pub async fn invoke_stream_sse(
         req.wake_context.as_ref(),
         agent_version_pin.as_ref(),
     ))
-    .await
-    {
+        .await,
+    } }).await;
+    let session_run = match started {
         Ok(run) => run,
         Err(error) => {
             if crate::session_flow::thread_run_active(&error) {
@@ -4393,6 +4536,8 @@ pub async fn invoke_stream_sse(
             "run_id": &session_run_id,
             "thread_id": &session_thread_id,
             "model": &model_clone,
+            // Whether this server serves a regenerate or an edit on a versioned thread (WS17 S9).
+            "versions_enabled": crate::http_routes::message_versions_enabled(),
         });
         // A disconnect during the first thread handoff is not a cancellation.
         // The browser can reload while its active-thread projection is being
@@ -14169,6 +14314,15 @@ fn agentic_run_stream(
                 .event("connected")
                 .data(connected.to_string())))
             .await;
+
+        // The Space knowledge receipt (WS18-S5-a): whether this run's `knowledge_search` runs under the
+        // turn's Space decision or is refused for want of one. Told before the first run event, a mode
+        // only; with the switch off, for a run no Space scopes and for a continuation there is no frame.
+        if let Some(receipt) = agentic_knowledge_frame(space_retrieval.as_deref())
+            .filter(|receipt| receipt.should_emit(&features))
+        {
+            let _ = tx.send(Ok(receipt.to_sse(&request_id))).await;
+        }
 
         // The run's context: the instructions an Ask turn would carry, and with `full`
         // the thread's recent turns and recalled memory. Composed after `connected`

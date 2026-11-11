@@ -183,6 +183,65 @@ pub fn connection_named_by(req: &InvokeRequest) -> Option<&str> {
         .or_else(|| non_blank(req.model_connection_id.as_deref()))
 }
 
+/// The replay of a stored customer-gateway connection on a regenerate or an edit (W4-BYO, GAP-W4-BYO-1).
+///
+/// `stored` is the connection id Session Core holds on the source turn (empty for a platform turn). A turn
+/// that was served on one of the caller's own connections is served on it again, or refused typed: it never
+/// falls through to the platform chain, where a platform provider could serve it under the stored model id.
+///
+/// - `stored` empty: nothing to replay, the request is left as it is.
+/// - The deployment's `MODEL_GATEWAY_BYO_GATEWAY` switch off: refused, `customer_gateway_disabled`, the answer
+///   an id on a fresh request gets.
+/// - The request names a platform route (a platform `provider`, or a subscription connection): refused,
+///   `connection_replay_platform_refused`, before anything is moved or written.
+/// - The request names a connection itself: left as it is. Normalization checks that one, and a person
+///   regenerating on another of their own connections is still a customer-gateway turn.
+/// - Otherwise the stored id is set on the request, and normalization then applies every rule of a connection
+///   turn to it (shape, text-only, no ZDR), exactly as if the client had sent the id.
+///
+/// Returns `Ok(true)` when the request now carries the stored id. Call it before the posture decision and
+/// before [`normalize`], so both see the connection; a ZDR or waived turn is refused before it gets here, and
+/// a turn that holds an id is never reclassified as ZDR.
+///
+/// # Errors
+/// The typed refusals above.
+pub fn replay_stored_connection(
+    req: &mut InvokeRequest,
+    stored: &str,
+) -> Result<bool, (StatusCode, Json<serde_json::Value>)> {
+    let stored = stored.trim();
+    if stored.is_empty() {
+        return Ok(false);
+    }
+    if !byo_gateway_enabled() {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({
+                "error": "customer gateway connections are not enabled on this deployment",
+                "code": "customer_gateway_disabled",
+            })),
+        ));
+    }
+    let provider = req.provider.as_deref().map(str::trim).unwrap_or_default();
+    let names_platform_route = (!provider.is_empty()
+        && !provider.eq_ignore_ascii_case(CUSTOMER_GATEWAY_PROVIDER_HINT))
+        || non_blank(req.subscription_connection_id.as_deref()).is_some();
+    if names_platform_route {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "this turn was served on a customer gateway connection, so it cannot be regenerated or edited on a platform provider",
+                "code": "connection_replay_platform_refused",
+            })),
+        ));
+    }
+    if non_blank(req.model_connection_id.as_deref()).is_some() {
+        return Ok(false);
+    }
+    req.model_connection_id = Some(stored.to_owned());
+    Ok(true)
+}
+
 /// The refusal a subscription turn has always got for anything beyond
 /// text-only, non-ZDR chat. Unchanged byte for byte, so a client (or a test)
 /// that matches on it keeps working when the agentic exception is off.
@@ -365,10 +424,14 @@ fn normalize_with(
         ));
     }
 
-    // A branch move is validated on every path. The streaming endpoint does not make one yet, so a stream
-    // turn that asks for one is refused, rather than landing as an ordinary send that repeats the question.
+    // A branch move is validated on every path. The streaming endpoint makes one only while the message-version
+    // switch is on (WS17 S9), so with it off a stream turn that asks for one is refused, rather than landing as
+    // an ordinary send that repeats the question. With it on the turn is accepted and the stream moves the branch.
     let version_turn_requested = version_turn(req)?.is_some();
-    if stream_policy.is_some() && version_turn_requested {
+    if stream_policy.is_some()
+        && version_turn_requested
+        && !crate::http_routes::message_versions_enabled()
+    {
         return Err((
             StatusCode::NOT_IMPLEMENTED,
             Json(json!({

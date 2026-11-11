@@ -2230,7 +2230,10 @@ async fn run_agent_with_route_parkable(
             // reads `browser_site_skipped` and looks elsewhere. A denied approval is never consumed.
             // Any other continuation (and a denied approval that holds no page for a person, the
             // switch off, a ZDR, waived or Space run) goes to the consume exactly as before, which
-            // refuses a denied approval.
+            // refuses a denied approval. The skip runs under the authority and tools the pause
+            // retained (read from session-core before the page is released, narrowed by the request,
+            // never widened); if that cannot be read or verified the continuation is refused
+            // (`skip_authority_unavailable`), never run under the request's placeholders.
             let skipped = release_skipped_site(
                 &session_channel,
                 session_bearer.as_deref(),
@@ -2239,10 +2242,11 @@ async fn run_agent_with_route_parkable(
                 &req,
                 resume,
                 &route,
+                &tools,
             )
-            .await;
+            .await?;
             match skipped {
-                Some(skipped) => Some(skipped_continuation(&req, skipped, &tools)),
+                Some(skipped) => Some(skipped_continuation(&req, skipped)),
                 None => Some(
                     begin_continuation(
                         &session_channel,
@@ -2275,6 +2279,9 @@ async fn run_agent_with_route_parkable(
         Some(segment) => segment.tools.clone(),
         None => tools,
     };
+    // Whether the run keeps no content (zero retention or a waived route), read before `route`
+    // moves into the loop context: the lease release at the end of the run needs it.
+    let persistence_free = req.zdr || route.is_waived();
     // Run-scoped result handles (WS25-S5). A fresh run is offered `result_query` only when
     // it holds results; a continuation keeps the tools its snapshot was offered. A scheduled
     // run is offered its contract's tools and nothing the loop adds, so it holds no handles.
@@ -2468,6 +2475,30 @@ async fn run_agent_with_route_parkable(
     );
 
     heartbeat_managed_agent_run(&session_channel, &req, terminal_tokens).await?;
+
+    // WS23-S4: record which connected accounts the person selected for this run, ids only, once
+    // per run. A fresh run only: a continuation or a scheduled run carries no selection of its
+    // own. Never for a zero-retention or waived run, and never with an empty selection.
+    if resumed.is_none() && scheduled.is_none() {
+        let selected = connector_scope_of(&req);
+        if crate::connector_scope_record::applies(
+            crate::connector_scope_record::enabled(),
+            req.zdr,
+            route.is_waived(),
+            selected,
+        ) {
+            if let Some(bearer) = session_bearer.as_deref() {
+                crate::connector_scope_record::record(
+                    &session_channel,
+                    bearer,
+                    &req.org_id,
+                    &req.run_id,
+                    selected,
+                )
+                .await;
+            }
+        }
+    }
 
     // 1. Plan: DRAFT → EXECUTING. A continuation is already executing.
     if resumed.is_none() {
@@ -2699,6 +2730,7 @@ async fn run_agent_with_route_parkable(
         process_host,
         &req.run_id,
         &req.org_id,
+        persistence_free,
     )
     .await;
     // A page the run opened ends with the run: its grant is revoked and its Quarry run closed
@@ -10818,6 +10850,19 @@ async fn released_hand_back_note(ctx: &LoopContext<'_>) -> Option<String> {
 /// zero-retention, waived, Space-scoped or holds no browser bearer, the approval cannot be read, it
 /// is not a denied help pause of this run, or the run holds no page for a person (a replay of the same
 /// skip finds none). The consume that follows then refuses a denied approval exactly as it did before.
+///
+/// Once the approval is a denied help pause whose Do tool the run holds a page for, the tools and
+/// authority the pause retained are read (session-core, read-only) and checked BEFORE the page is
+/// released, and the continuation is built from them, narrowed by the request and never widened
+/// ([`super::resume::skipped_authority`]). A read that fails, is unavailable or does not verify
+/// refuses the continuation with `skip_authority_unavailable`, with the page and the run as they
+/// were: there is no fallback to the request's placeholder authority. `offered` is the tools this
+/// request offers; the continuation keeps only the retained tools that are also in it.
+///
+/// # Errors
+///
+/// `failed_precondition("skip_authority_unavailable")`, as above.
+#[allow(clippy::result_large_err, clippy::too_many_arguments)]
 async fn release_skipped_site(
     session_channel: &Channel,
     session_bearer: Option<&str>,
@@ -10826,42 +10871,63 @@ async fn release_skipped_site(
     req: &pb::RunAgentRequest,
     resume: &pb::AgentResume,
     route: &crate::agent_route::ModelRoute,
-) -> Option<SkippedSite> {
+    offered: &[pb::ToolDefinition],
+) -> Result<Option<SkippedSite>, tonic::Status> {
     if !crate::browser_session::human_assist_enabled()
         || req.zdr
         || route.is_waived()
         || !req.space_id.is_empty()
         || resume.approval_id.is_empty()
     {
-        return None;
+        return Ok(None);
     }
-    let bearer = browser_bearer?;
-    let request = authenticated_session_request(
+    let Some(bearer) = browser_bearer else {
+        return Ok(None);
+    };
+    let Ok(request) = authenticated_session_request(
         pb::GetApprovalRequest {
             approval_id: resume.approval_id.clone(),
             org_id: req.org_id.clone(),
             ..Default::default()
         },
         session_bearer,
-    )
-    .ok()?;
+    ) else {
+        return Ok(None);
+    };
     let approval = match OrchestrationCoreServiceClient::new(session_channel.clone())
         .get_approval(request)
         .await
     {
-        Ok(response) => response.into_inner().approval?,
+        Ok(response) => match response.into_inner().approval {
+            Some(approval) => approval,
+            None => return Ok(None),
+        },
         Err(error) => {
             warn!(
                 run_id = %req.run_id,
                 code = ?error.code(),
                 "run_agent: the skipped approval could not be read; the page is kept"
             );
-            return None;
+            return Ok(None);
         }
     };
-    let tool = skipped_assist_tool_of(&approval, &req.run_id)?;
+    let Some(tool) = skipped_assist_tool_of(&approval, &req.run_id) else {
+        return Ok(None);
+    };
+    // Nothing is asked of session-core unless the release below would happen: a tool that is not a
+    // Do browser tool, or a run that holds no page for a person (a replay of the same skip), goes
+    // to the consume exactly as before.
+    if !crate::browser_session::is_do_tool(tool)
+        || !crate::browser_session::is_held_for_person(&req.run_id)
+    {
+        return Ok(None);
+    }
+    // The pause's retained tools and authority, read and verified before the page is touched.
+    let authority =
+        read_skipped_authority(session_channel, session_bearer, req, resume, &approval, offered)
+            .await?;
     let quarry = crate::quarry_agent::QuarryAgentClient::from_env().ok().flatten();
-    let closer = super::resume::skipped_site_closer(
+    let Some(closer) = super::resume::skipped_site_closer(
         &crate::browser_session::BrowserDispatch {
             state,
             broker: crate::browser_session::production_broker(),
@@ -10872,23 +10938,92 @@ async fn release_skipped_site(
         quarry.as_ref(),
         tool,
     )
-    .await?;
+    .await
+    else {
+        return Ok(None);
+    };
     info!(
         run_id = %req.run_id,
         "run_agent: the person skipped the site; its page was released"
     );
     // Only the first continue of a skip gets here: the release ends the hold, so a replay finds no
     // page held for a person and returns `None` above, and the run is never continued twice.
-    Some(SkippedSite {
+    Ok(Some(SkippedSite {
         tool: tool.to_owned(),
         step_id: approval.step_id.clone(),
         closer,
+        authority,
+    }))
+}
+
+/// The closed token of a skipped site's continuation that could not run under the pause's retained
+/// authority: the read failed, was unavailable or did not verify. Never falls back to the
+/// `/continue` request's own (placeholder) authority.
+const SKIP_AUTHORITY_UNAVAILABLE: &str = "skip_authority_unavailable";
+
+/// Read the tools and authority the denied help pause of `approval` retained
+/// (`GetSkippedAssistAuthority`, read-only: nothing is consumed, claimed or stored) and narrow them
+/// by this request ([`super::resume::skipped_authority`]). Logs ids and closed codes only: never the
+/// snapshot, the tools' descriptions or the goal.
+///
+/// # Errors
+///
+/// `failed_precondition("skip_authority_unavailable")` when the read is refused or unavailable, the
+/// snapshot is absent, or it does not verify or fit the request.
+#[allow(clippy::result_large_err)]
+async fn read_skipped_authority(
+    session_channel: &Channel,
+    session_bearer: Option<&str>,
+    req: &pb::RunAgentRequest,
+    resume: &pb::AgentResume,
+    approval: &pb::Approval,
+    offered: &[pb::ToolDefinition],
+) -> Result<super::resume::SkippedAuthority, tonic::Status> {
+    let unavailable = || tonic::Status::failed_precondition(SKIP_AUTHORITY_UNAVAILABLE);
+    let request = authenticated_session_request(
+        pb::GetSkippedAssistAuthorityRequest {
+            approval_id: resume.approval_id.clone(),
+            org_id: req.org_id.clone(),
+            run_id: req.run_id.clone(),
+            step_id: approval.step_id.clone(),
+            claim_token: resume.claim_token.clone(),
+        },
+        session_bearer,
+    )
+    .map_err(|_| unavailable())?;
+    let response = match OrchestrationCoreServiceClient::new(session_channel.clone())
+        .get_skipped_assist_authority(request)
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(error) => {
+            warn!(
+                run_id = %req.run_id,
+                code = ?error.code(),
+                reason = SKIP_AUTHORITY_UNAVAILABLE,
+                "run_agent: the skipped pause's retained authority could not be read; the page is kept"
+            );
+            return Err(unavailable());
+        }
+    };
+    let request_mode = mode_wire(resolve_mode(&req.mode));
+    let authority = response
+        .authority
+        .as_ref()
+        .and_then(|retained| super::resume::skipped_authority(retained, req, request_mode, offered));
+    authority.ok_or_else(|| {
+        warn!(
+            run_id = %req.run_id,
+            reason = SKIP_AUTHORITY_UNAVAILABLE,
+            "run_agent: the skipped pause's retained authority did not verify; the page is kept"
+        );
+        unavailable()
     })
 }
 
 /// A site the person skipped, released by [`release_skipped_site`]: the paused call, the step it was
-/// paused on and what the model reads in its place. Ids, a tool name and the closer text only: the
-/// person's reason is never read into it.
+/// paused on, what the model reads in its place and the authority it continues under. Ids, a tool
+/// name, the closer text and the narrowed authority only: the person's reason is never read into it.
 struct SkippedSite {
     /// The browser tool whose `browser_human_assist` pause the person denied.
     tool: String,
@@ -10896,6 +11031,8 @@ struct SkippedSite {
     step_id: String,
     /// The `browser_site_skipped` text the model reads as that call's tool result.
     closer: String,
+    /// The tools, mode and authority the pause retained, narrowed by the request (FU-25).
+    authority: super::resume::SkippedAuthority,
 }
 
 /// The continuation of a skipped site (EP-1 S2, D3-647): a fresh loop from the run's goal whose
@@ -10903,19 +11040,18 @@ struct SkippedSite {
 /// `browser_site_skipped` as that call's tool result and looks elsewhere. It holds no release and
 /// runs nothing: a denied approval is never consumed, and the call is never dispatched.
 ///
-/// It runs under the tools this request offers and the authority this request states (the
-/// `/continue` placeholders: mode `ask`, no rung, no floor), not under the pause's snapshot, which
-/// only a consume hands back. A run with a Space or a pinned route is never one that pauses for a
-/// `/continue` (its approval is cold), so the route is the default one, as a stage-1 segment's.
-fn skipped_continuation(
-    req: &pb::RunAgentRequest,
-    skipped: SkippedSite,
-    tools: &[pb::ToolDefinition],
-) -> Continuation {
+/// It runs under the tools and authority the pause retained, narrowed by this request and never
+/// widened (`skipped.authority`, read before the page was released), never under the `/continue`
+/// request's placeholders (mode `ask`, no rung, no floor, whatever tools it offers). A run with a
+/// Space or a pinned route is never one that pauses for a `/continue` (its approval is cold), so the
+/// route is the default one, as a stage-1 segment's.
+fn skipped_continuation(req: &pb::RunAgentRequest, skipped: SkippedSite) -> Continuation {
     let segment = super::resume::next_segment_no(&skipped.step_id);
-    let names: BTreeSet<String> = tools.iter().map(|tool| tool.name.clone()).collect();
-    let mode = mode_wire(resolve_mode(&req.mode)).to_owned();
-    let effective = super::resume::offered_authority(req, &mode, &names);
+    let super::resume::SkippedAuthority {
+        tools,
+        mode,
+        effective,
+    } = skipped.authority;
     let call = pb::ToolCall {
         id: "skipped".to_owned(),
         name: skipped.tool.clone(),
@@ -10941,7 +11077,7 @@ fn skipped_continuation(
             },
             slots: vec![slot],
         },
-        tools: tools.to_vec(),
+        tools,
         // A coordinator run is not one that pauses for a `/continue` here: no complete offer is kept.
         coordinator_tools: Vec::new(),
         mode,
@@ -14323,6 +14459,13 @@ mod tests {
             _: tonic::Request<mp_contracts::model_plane::v1::GetApprovalPreviewRequest>,
         ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetApprovalPreviewResponse>, tonic::Status> {
             Err(tonic::Status::unimplemented("get_approval_preview is not served by this double"))
+        }
+
+        async fn get_skipped_assist_authority(
+            &self,
+            _: tonic::Request<mp_contracts::model_plane::v1::GetSkippedAssistAuthorityRequest>,
+        ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetSkippedAssistAuthorityResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("get_skipped_assist_authority is not served by this double"))
         }
 
         type StreamRunEventsStream = RunEventStream;

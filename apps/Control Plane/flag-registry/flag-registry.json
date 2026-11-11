@@ -128,6 +128,17 @@
       ]
     },
     {
+      "name": "CONNECTOR_SCOPE_RECORD_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS23-S4: a Do run records the ids of the connected accounts selected for the turn on its run record (run_context.connector_scope), ids only; never for a ZDR or waived run. Off, nothing is recorded. Only the literal true; read at start.",
+      "declarations": [
+        { "service": "execution-core", "env": "CONNECTOR_SCOPE_RECORD_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "CONTENT_SAFETY_NORMALIZE",
       "kind": "switch",
       "owner": "model-plane",
@@ -240,6 +251,17 @@
       "declarations": [
         { "service": "execution-core", "env": "EXECUTION_COORDINATOR_MODE_ENABLED", "default": "false" },
         { "service": "model-gateway", "env": "EXECUTION_COORDINATOR_MODE_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "EXECUTION_CORE_LEASE_RELEASE_FILTER",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "W4-P6: lease release never uploads an unfiltered Space workspace: a ZDR or waived run's workspace is discarded before any upload, other runs upload only write-through-eligible files. Off, unchanged. Only the literal true; read at start.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_CORE_LEASE_RELEASE_FILTER", "default": "false" }
       ]
     },
     {
@@ -1181,6 +1203,18 @@
       "declarations": [
         { "service": "execution-core", "env": "WIDE_RESEARCH_FAN_OUT_ENABLED", "default": "true" }
       ]
+    },
+    {
+      "name": "ZDR_TYPED_REFUSALS_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Z-05a: on a ZDR or waived turn, web search and file or artifact writes are typed zdr_feature_not_supported refusals (web_search, artifact_output) before any call, not silent drops. Off, unchanged. Only the literal true.",
+      "codeDefault": "false",
+      "declarations": [
+        { "service": "model-gateway", "env": "ZDR_TYPED_REFUSALS_ENABLED", "default": "false" }
+      ]
     }
   ],
   "unregistered": [
@@ -1228,6 +1262,7 @@
     "MCP_TOOL_OBSERVATION_ENABLED",
     "MEMORY_CONTROLS_ENABLED",
     "MODEL_ENTITLEMENT_MODE",
+    "MODEL_GATEWAY_ASK_USER_ASK_MODE_ENABLED",
     "MODEL_GATEWAY_CONTEXT_REFS_ENABLED",
     "MODEL_GATEWAY_LOOP_PARKING_ENABLED",
     "MODEL_GATEWAY_MESSAGE_VERSIONS_ENABLED",

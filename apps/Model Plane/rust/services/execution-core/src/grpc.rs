@@ -1660,6 +1660,9 @@ impl ExecutionCore for ExecutionService {
             browser_grant.as_ref(),
             sandbox.as_ref(),
             thread.as_ref(),
+            // The step's own Space, so the owner document listing refuses a Space-scoped step even
+            // when no sandbox context is built for it (D2-769, `OWNER_LIST_SPACE_REFUSE`).
+            &req.space_id,
         )
         .await;
 
@@ -1886,6 +1889,7 @@ impl ExecutionCore for ExecutionService {
             self.process_host.as_deref(),
             &req.run_id,
             &caller.org_id,
+            caller.zdr_waiver.is_some(),
         )
         .await;
 

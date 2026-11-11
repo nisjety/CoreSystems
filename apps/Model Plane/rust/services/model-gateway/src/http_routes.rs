@@ -15029,6 +15029,7 @@ async fn delete_thread(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedModelBearer,
+    data_plane: Option<Extension<VerifiedBearer>>,
     Path(thread_id): Path<String>,
 ) -> Result<Json<DeleteThreadResponse>, HttpJsonError> {
     use mp_contracts::model_plane::v1::DeleteThreadRequest;
@@ -15043,12 +15044,15 @@ async fn delete_thread(
     let response = state
         .session_client
         .clone()
-        .delete_thread(authenticated_session_request(
+        .delete_thread(crate::thread_share_routes::delegated_share_request(
             DeleteThreadRequest {
                 org_id: claims.org_id.clone(),
                 thread_id: thread_id.to_owned(),
             },
             &bearer,
+            // The owner's delegation, when the caller holds one, lets Session Core revoke the
+            // thread's shared-snapshot view grants at Control; forwarded to Session Core only.
+            data_plane.as_ref().map(|Extension(bearer)| bearer),
         )?)
         .await
         .map_err(|error| thread_erase_error("session-core delete_thread failed", &error))?
@@ -15067,18 +15071,21 @@ async fn delete_threads(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedModelBearer,
+    data_plane: Option<Extension<VerifiedBearer>>,
 ) -> Result<Json<DeleteThreadsResponse>, HttpJsonError> {
     use mp_contracts::model_plane::v1::DeleteThreadsRequest;
 
     let response = state
         .session_client
         .clone()
-        .delete_threads(authenticated_session_request(
+        .delete_threads(crate::thread_share_routes::delegated_share_request(
             DeleteThreadsRequest {
                 org_id: claims.org_id.clone(),
                 user_id: claims.user_id.clone(),
             },
             &bearer,
+            // Same forwarding as the single delete: the owner's delegation, to Session Core only.
+            data_plane.as_ref().map(|Extension(bearer)| bearer),
         )?)
         .await
         .map_err(|error| thread_erase_error("session-core delete_threads failed", &error))?
@@ -17227,6 +17234,42 @@ async fn invoke(
         return Err(crate::zdr_posture::http(&mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH).into());
     }
 
+    // A regenerate or an edit of a turn that was served on one of the caller's customer-gateway connections
+    // is served on it again (W4-BYO, GAP-W4-BYO-1). The thread is read here, without moving anything, for
+    // the connection id the source turn holds; it is set on the request before the request is normalized,
+    // so every rule of a connection turn applies to it, and a request that names a platform provider is
+    // refused typed instead of reaching the platform chain. A zero-retention or waived turn keeps no thread
+    // to read. The plan is applied below, so the thread is read once.
+    let mut posture = posture;
+    let mut version_plan: Option<session_flow::VersionPlan> = None;
+    if let Some(replay_turn) = normalize::version_turn(&req).ok().flatten() {
+        if message_versions_enabled() && !posture.zdr() && !posture.is_waived() {
+            let replay_thread = req.thread_id.as_deref().map(str::trim).unwrap_or_default().to_owned();
+            let plan = session_flow::plan_version_move(
+                &state,
+                &claims.org_id,
+                &replay_thread,
+                &replay_turn,
+                &model_bearer,
+            )
+            .await
+            .map_err(|error| branch_thread_error(&error))?;
+            if normalize::replay_stored_connection(&mut req, &plan.model_connection_id)? {
+                // The turn now names a connection, so the posture is decided again for that route.
+                let replay_route = crate::zdr_posture::Route::named(
+                    req.provider.as_deref(),
+                    crate::normalize::connection_named_by(&req),
+                    req.zdr,
+                );
+                posture = match crate::zdr_posture::decide_for(&claims, &replay_route) {
+                    Ok(posture) => posture,
+                    Err(refusal) => return Err(crate::zdr_posture::http(&refusal).into()),
+                };
+            }
+            version_plan = Some(plan);
+        }
+    }
+
     // Normalize and validate the request
     let mut normalized = normalize::normalize(&req)?;
     // A regenerate or an edit needs the message tree. With its switch off it is refused before any thread,
@@ -17439,14 +17482,17 @@ async fn invoke(
     let version_thread = match version_turn {
         Some(turn) => {
             let thread_id = normalized.thread_id.clone().unwrap_or_default();
-            let version_move = session_flow::move_active_leaf(
-                &state,
-                &claims.org_id,
-                &thread_id,
-                &turn,
-                &model_bearer,
-            )
-            .await
+            // The thread was read above when the turn could be planned; the move is made from that read.
+            let version_move = match version_plan.as_ref() {
+                Some(plan) => {
+                    session_flow::apply_version_move(&state, &claims.org_id, &thread_id, plan, &model_bearer)
+                        .await
+                }
+                None => {
+                    session_flow::move_active_leaf(&state, &claims.org_id, &thread_id, &turn, &model_bearer)
+                        .await
+                }
+            }
             .map_err(|error| branch_thread_error(&error))?;
             if let Some(goal) = version_move.goal {
                 normalized.content = goal;
@@ -17455,7 +17501,9 @@ async fn invoke(
         }
         None => None,
     };
-    let started = match version_thread.as_ref() {
+    // The user turn the run appends records the customer-gateway connection it is served on (W4-BYO), so a
+    // later regenerate or edit of it replays on the same connection. Nothing is recorded for a ZDR turn.
+    let started = session_flow::with_user_model_connection(&normalized.model_connection_id, effective_zdr, async { match version_thread.as_ref() {
         Some((thread_id, turn)) => {
             session_flow::prepare_version_run_authenticated(
                 &state,
@@ -17501,7 +17549,7 @@ async fn invoke(
             )
             .await
         }
-    };
+    } }).await;
     let session_run = started.map_err(|error| {
         (
             StatusCode::BAD_GATEWAY,

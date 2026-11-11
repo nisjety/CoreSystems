@@ -305,6 +305,52 @@ pub fn decide_content_route(
     Err(http(&refusal))
 }
 
+/// The switch for typed refusals of the features a ZDR or waived turn drops (Z-05a). Only the literal
+/// `true` turns it on; off is today's behaviour, byte for byte.
+pub const TYPED_REFUSALS_ENV: &str = "ZDR_TYPED_REFUSALS_ENABLED";
+
+/// Whether the switch is on, from its raw value: the strict literal `true`, trimmed, nothing else.
+#[must_use]
+pub fn parse_typed_refusals(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// The switch as this process reads it.
+#[must_use]
+pub fn typed_refusals_enabled() -> bool {
+    parse_typed_refusals(std::env::var(TYPED_REFUSALS_ENV).ok().as_deref())
+}
+
+/// The refusal for a feature a ZDR or waived turn cannot use, over an explicit switch value so the
+/// rule is testable: `Some` only when `enabled` and the turn is ZDR or waived. A waived turn counts as
+/// ZDR for these features (DEC-32, ZDR.md 5.5). The refusal carries the feature key and nothing else:
+/// never a query, a URL, a file name or an output.
+#[must_use]
+pub fn refuse_zdr_feature_when(
+    enabled: bool,
+    key: &'static str,
+    zdr_or_waived: bool,
+) -> Option<Refusal> {
+    (enabled && zdr_or_waived).then(|| Refusal::feature_not_supported(key))
+}
+
+/// The refusal for a feature that cannot run on this turn, or `None` to carry on. `Some` only when the
+/// switch ([`TYPED_REFUSALS_ENV`]) is on and the turn is ZDR or waived; the caller returns it before any
+/// network call or state change, in HTTP through [`http`] or gRPC through [`grpc_code`]. `key` is a key of
+/// the catalogue vocabulary (`mp_contracts::zdr_refusal::FEATURES`). With the switch off this is always
+/// `None`, and the feature behaves as it did.
+#[must_use]
+pub fn refuse_zdr_feature(key: &'static str, posture: &TurnPosture) -> Option<Refusal> {
+    refuse_zdr_feature_for(key, posture.zdr() || posture.is_waived())
+}
+
+/// [`refuse_zdr_feature`] for a site that holds the turn's flags rather than its [`TurnPosture`] (the tool
+/// loop is handed `zdr` and the Data Plane mode, which is present on a ZDR or waived turn).
+#[must_use]
+pub fn refuse_zdr_feature_for(key: &'static str, zdr_or_waived: bool) -> Option<Refusal> {
+    refuse_zdr_feature_when(typed_refusals_enabled(), key, zdr_or_waived)
+}
+
 fn is_credential_refusal(refusal: &Refusal) -> bool {
     matches!(
         refusal.code(),

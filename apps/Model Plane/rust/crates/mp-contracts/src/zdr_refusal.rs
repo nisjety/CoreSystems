@@ -444,6 +444,13 @@ pub const FEATURES: &[Feature] = &[
         key: "reasoning_translation",
         label: "translating a reasoning text",
     },
+    // Z-05a: the assistant's file or document output (an artifact or a canvas write) is kept with the thread's
+    // artifact versions, which is retained content. A ZDR or waived turn is refused with this feature before any
+    // write, so the output is never silently dropped (ZDR_TYPED_REFUSALS_ENABLED).
+    Feature {
+        key: "artifact_output",
+        label: "files and documents the assistant creates",
+    },
 ];
 
 /// The catalogue entry for `code`, if it is a catalogue code.

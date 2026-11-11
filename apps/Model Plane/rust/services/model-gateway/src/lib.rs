@@ -9,6 +9,7 @@ pub mod artifact_edit_routes;
 pub mod artifact_revision_routes;
 pub mod artifact_revisions;
 pub mod artifacts;
+pub mod ask_user_ask_mode;
 pub mod audit;
 pub mod auth;
 pub mod author_guidance;

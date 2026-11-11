@@ -734,6 +734,90 @@ pub(crate) fn apply_authority(req: &mut pb::RunAgentRequest, effective: &Authori
     req.provider_hint = effective.provider_hint.clone();
 }
 
+/// What the continuation of a skipped site runs under (EP-1 S2, D3-647, FU-25): the tools, the
+/// permission mode and the authority, built by [`skipped_authority`].
+#[derive(Debug, Clone)]
+pub(crate) struct SkippedAuthority {
+    /// The offered tools, with the definitions the pause retained.
+    pub(crate) tools: Vec<pb::ToolDefinition>,
+    /// The permission mode, the narrower of the pause's and the request's.
+    pub(crate) mode: String,
+    /// The authority the segment runs under; applied to the request before the loop reads it.
+    pub(crate) effective: Authority,
+}
+
+/// The authority a skipped site's continuation runs under: what the paused run retained
+/// (`retained`, read from the denied pause by session-core and never from the request), narrowed
+/// by the request and never widened by it. The request is the `/continue`'s, whose fields are
+/// placeholders, so none of them can replace a retained value, only narrow it.
+///
+/// | dimension | rule |
+/// |---|---|
+/// | tools | the retained definitions whose name the request also offers |
+/// | privacy floor | the stricter (higher) of the retained and the request's |
+/// | mode | the narrower of the retained and the request's (`request_mode`, already a wire word) |
+/// | route, rung, plan mode, round budget | the retained values |
+/// | Space | must equal the request's |
+///
+/// `None` when the snapshot cannot be trusted or does not fit the request: its digest does not
+/// match the authority it carries, its tools are not the ones its names cover, or its Space or
+/// route is not the request's. The caller refuses the continuation then; it never falls back to
+/// the request's own authority.
+pub(crate) fn skipped_authority(
+    retained: &pb::ApprovedAuthority,
+    req: &pb::RunAgentRequest,
+    request_mode: &str,
+    offered: &[pb::ToolDefinition],
+) -> Option<SkippedAuthority> {
+    let mut paused = authority_from_proto(retained);
+    if paused.digest() != retained.digest {
+        return None;
+    }
+    // The tools must be exactly the ones the digest covers.
+    let names_match = retained.tools.len() == retained.tool_names.len()
+        && retained
+            .tools
+            .iter()
+            .all(|tool| retained.tool_names.iter().any(|name| *name == tool.name));
+    if !names_match {
+        return None;
+    }
+    // The same two checks `effective_authority` makes for a granted continuation.
+    if paused.space_id != req.space_id || paused.provider_hint != req.provider_hint {
+        return None;
+    }
+    let offered_names: BTreeSet<&str> = offered.iter().map(|tool| tool.name.as_str()).collect();
+    let tools: Vec<pb::ToolDefinition> = retained
+        .tools
+        .iter()
+        .filter(|tool| offered_names.contains(tool.name.as_str()))
+        .map(|tool| pb::ToolDefinition {
+            name: tool.name.clone(),
+            description: tool.description.clone(),
+            parameters_json: tool.parameters_json.clone(),
+        })
+        .collect();
+    // Both budgets are compared resolved, as `effective_authority` does: a pause that stated none
+    // ran under the default.
+    paused.max_rounds = resolved_max_rounds(paused.max_rounds);
+    let mode = mp_contracts::loop_fold::narrower_mode(&paused.mode, request_mode).to_owned();
+    let mut effective = paused.clone();
+    effective.mode.clone_from(&mode);
+    effective.min_privacy_tier = paused.min_privacy_tier.max(req.min_privacy_tier);
+    effective.tool_names = tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    // The shared comparator, so this and a granted continuation agree on what "narrower" means.
+    effective.narrows(&paused).then_some(SkippedAuthority {
+        tools,
+        mode,
+        effective,
+    })
+}
+
 /// The number of the segment a continuation of the step `paused_step_id` starts.
 ///
 /// Step ids of a continuation segment carry its prefix (`s2.tool_1_x`), and an

@@ -37,6 +37,7 @@ import {
   type ChatTurnTiming,
   type DeckTemplate,
 } from '@/shared/api/chat-client'
+import { serverVersionBadge } from '@/features/chat/lib/chat-versions-server'
 import { getLearningAllowed } from '@/shared/api/memory-client'
 import { importUpload } from '@/shared/api/knowledge-client'
 import { getSession } from '@/shared/session/session-store'
@@ -167,6 +168,7 @@ export default function ChatPage() {
     rewindOfferFor,
     rewindTo,
     undoRewind,
+    switchServerVersion,
     startNewChat,
     state,
     activeTab,
@@ -1503,6 +1505,9 @@ export default function ChatPage() {
         version={row().version}
         isLatest={row().isLatest}
         onSelectVersion={selectExchangeVersion}
+        // The server's version switcher (WS17 S9): shown only for a turn the server reports siblings for.
+        serverVersion={serverVersionBadge(row().turn.version)}
+        onSwitchServerVersion={(messageId) => void switchServerVersion(messageId)}
         // A rewind on a server-versioned thread (WS17 S9): what it would hide, and the undo it leaves under the answer.
         rewindPlan={rewindPlanFor(row().turn.id)}
         onRewind={() => void rewindTo(row().turn.id)}

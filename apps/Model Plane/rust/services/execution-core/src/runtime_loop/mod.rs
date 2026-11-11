@@ -604,6 +604,8 @@ pub async fn execute_step(
         // The compatibility entry point has no run, so no Space retrieval was authorised for it.
         crate::knowledge_tools::SpaceRetrieval::Organisation,
         None,
+        // The compatibility entry point has no request, so it names no Space.
+        "",
     )
     .await
 }
@@ -645,6 +647,9 @@ pub(crate) async fn execute_step_with_browser_grant(
     browser_grant: Option<&tool_bridge::ValidatedBrowserGrant>,
     sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'_>>,
     thread_scope: Option<&crate::sandbox_lease::workspace_sync::ThreadScope<'_>>,
+    // `ExecuteStepRequest.space_id`: the Space the step is scoped to, empty outside one. Read by
+    // the owner document listing, which refuses a Space-scoped step (D2-769).
+    request_space_id: &str,
 ) -> StepOutcome {
     execute_step_inner(
         tool_name,
@@ -677,6 +682,7 @@ pub(crate) async fn execute_step_with_browser_grant(
         // The direct single-step RPC has no run, so no Space retrieval was authorised for it.
         crate::knowledge_tools::SpaceRetrieval::Organisation,
         None,
+        request_space_id,
     )
     .await
 }
@@ -841,6 +847,8 @@ pub(crate) async fn execute_step_with_result_handles(
         connector_scope,
         space_retrieval,
         browser,
+        // The agent loop refuses the listing on its own `space_id` before it dispatches.
+        "",
     )
     .await
 }
@@ -930,6 +938,10 @@ async fn execute_step_inner(
     space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
     // The run's browser page dispatch (WS21-S5a); see `execute_step_with_result_handles`.
     browser: Option<&browser_session::BrowserDispatch<'_>>,
+    // The Space the single-step RPC's request names (`ExecuteStepRequest.space_id`); empty for every
+    // other caller. A step can be Space-scoped without a sandbox context (no sandbox bearer is
+    // demanded for `knowledge_list_documents`), so the owner listing reads it too (D2-769).
+    request_space_id: &str,
 ) -> StepOutcome {
     let released = release.is_some_and(|r| r.covers(step_id, tool_name, tool_input));
     // A Do run's `browser.act` (WS21-S5b): served only while the act switch is on and the run holds its
@@ -1549,10 +1561,13 @@ async fn execute_step_inner(
         // The run's Space: the sandbox context carries it exactly; a run that holds a Space retrieval
         // decision (or the withheld marker) is Space-scoped without it, so it is refused as well
         // rather than listed organisation-wide (D2-769). The agent loop refuses on its own
-        // `space_id` before it dispatches; this covers every other caller.
+        // `space_id` before it dispatches; this covers every other caller. The single-step RPC's
+        // request names its Space even when it carries no sandbox context, and that Space counts too.
         let space_id = sandbox.map_or_else(
             || {
-                if matches!(
+                if !request_space_id.trim().is_empty() {
+                    request_space_id
+                } else if matches!(
                     space_retrieval,
                     crate::knowledge_tools::SpaceRetrieval::Organisation
                 ) {
@@ -3800,6 +3815,7 @@ mod connector_tool_tests {
                     &[],
                     crate::knowledge_tools::SpaceRetrieval::Organisation,
                     None,
+                    "",
                 )
                 .await;
                 assert_eq!(out.status, "failed", "{tool} zdr={zdr} waived={waived}");
@@ -3845,6 +3861,7 @@ mod connector_tool_tests {
             EXECUTE_PROVIDER_ACTION_TOOL, input, "ask", "", "org-1", "user-1", "run-1", "step-1", "",
             None, None, None, false, false, 0, None, None, None, &NoPolicy, None, None, None, None,
             None, None, true, &selected, crate::knowledge_tools::SpaceRetrieval::Organisation, None,
+            "",
         )
         .await;
         assert_eq!(out.status, "failed");
@@ -4939,6 +4956,7 @@ mod tests {
             grant,
             None,
             None,
+            "",
         )
         .await
     }
@@ -5060,6 +5078,7 @@ mod tests {
             Some(&grant),
             None,
             None,
+            "",
         )
         .await;
         assert_eq!(out.status, "awaiting_approval");

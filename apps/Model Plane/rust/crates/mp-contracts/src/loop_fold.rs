@@ -193,6 +193,18 @@ fn mode_rank(mode: &str) -> u8 {
     }
 }
 
+/// The narrower of two permission modes, by the same ranks [`Authority::narrows`] compares with.
+/// On a tie it is `first`, so a caller that passes the retained mode first keeps it. An unrecognised
+/// mode ranks widest, so it never wins against a recognised one.
+#[must_use]
+pub fn narrower_mode<'a>(first: &'a str, second: &'a str) -> &'a str {
+    if mode_rank(second) < mode_rank(first) {
+        second
+    } else {
+        first
+    }
+}
+
 impl Authority {
     /// A stable digest of the authority, so a resume can prove it is resuming
     /// what paused and a reader can detect a swapped authority.

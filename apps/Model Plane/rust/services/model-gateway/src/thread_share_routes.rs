@@ -427,7 +427,9 @@ fn grantee_from(query: Option<String>, body: &[u8]) -> Result<String, HttpJsonEr
 }
 
 /// The session bearer, and the delegated Data Plane bearer when there is one, as gRPC metadata.
-fn delegated_share_request<T>(
+/// Thread delete uses it too, so Session Core can revoke a deleted thread's snapshot grants with the
+/// owner's own credential; without the bearer the request is the plain session request.
+pub(crate) fn delegated_share_request<T>(
     value: T,
     bearer: &VerifiedSessionBearer,
     data_plane: Option<&VerifiedDataPlaneBearer>,

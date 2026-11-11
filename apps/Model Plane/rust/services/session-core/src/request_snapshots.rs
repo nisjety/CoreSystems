@@ -322,6 +322,68 @@ fn db_error(error: sqlx::Error) -> Status {
     Status::internal(error.to_string())
 }
 
+/// Counts of one person's request-snapshot erasure (D-ZDR-06). Counts only: no id, digest or text.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UserSnapshotErasure {
+    /// `run_request_snapshots` rows of the person deleted.
+    pub snapshots: u64,
+    /// `run_request_snapshot_blobs` rows deleted because no remaining snapshot references them.
+    pub blobs: u64,
+}
+
+/// Delete one person's request snapshots, and the blobs no remaining snapshot references, inside the
+/// caller's erasure transaction (ZDR Q-ERASE, decision D-ZDR-06).
+///
+/// A snapshot row carries the `org_id` and `user_id` copied from its run, so the delete is by both. A
+/// blob has no user: it is keyed `(run_id, digest)` and is referenced by digest from the snapshots of
+/// its own run. After the snapshot delete, a blob of an affected run is removed only when no snapshot
+/// that remains names its digest, so a blob another snapshot still uses is never removed. An empty
+/// `user_id` matches nothing: rows written without a user are not any one person's.
+///
+/// Counts only are returned; nothing here logs or returns an id or any text.
+///
+/// # Errors
+///
+/// A database error; the caller's transaction then rolls back with the rest of the erasure.
+pub(crate) async fn erase_user_snapshots_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: &str,
+    user_id: &str,
+) -> Result<UserSnapshotErasure, sqlx::Error> {
+    if user_id.is_empty() {
+        return Ok(UserSnapshotErasure::default());
+    }
+    let run_ids: Vec<String> = sqlx::query_scalar(
+        "DELETE FROM run_request_snapshots WHERE org_id = $1 AND user_id = $2 RETURNING run_id",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let snapshots = run_ids.len() as u64;
+    if run_ids.is_empty() {
+        return Ok(UserSnapshotErasure::default());
+    }
+    let mut affected_runs = run_ids;
+    affected_runs.sort();
+    affected_runs.dedup();
+    let blobs = sqlx::query(
+        "DELETE FROM run_request_snapshot_blobs b
+         WHERE b.org_id = $1 AND b.run_id = ANY($2)
+           AND NOT EXISTS (
+               SELECT 1 FROM run_request_snapshots s
+               WHERE s.run_id = b.run_id
+                 AND (s.system_digest = b.digest OR s.tools_digest = b.digest)
+           )",
+    )
+    .bind(org_id)
+    .bind(&affected_runs)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    Ok(UserSnapshotErasure { snapshots, blobs })
+}
+
 /// Delete expired snapshot rows and blobs, `batch` rows per statement, until a statement deletes fewer than a
 /// full batch. Returns the number deleted.
 ///

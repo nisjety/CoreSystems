@@ -232,6 +232,9 @@ struct ConversationRow {
     revised_by_subject_id: Option<String>,
     revision_no: i32,
     agent_followed_up: bool,
+    /// The customer-gateway connection the turn was written under (W4-BYO): an opaque id, NULL for
+    /// a platform turn and for rows written before the column existed.
+    model_connection_id: Option<String>,
 }
 
 /// The sibling count of a turn, read where the tree is read: a thread that has never been
@@ -302,6 +305,8 @@ fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb:
         // Filled for human posts by `finish_conversation_messages` (WS08-S2).
         mentions: Vec::new(),
         entry,
+        // The opaque connection id only, so a regenerate or an edit replays on the same connection.
+        model_connection_id: row.model_connection_id.unwrap_or_default(),
     }
 }
 
@@ -405,7 +410,8 @@ async fn conversation_rows_ordered(
                 {fold_state} AS revision_state, rv.created_at AS revised_at,
                 rv.actor_subject_id AS revised_by_subject_id,
                 COALESCE(rv.revision_no, 0) AS revision_no,
-                {fold_followed_up} AS agent_followed_up
+                {fold_followed_up} AS agent_followed_up,
+                m.model_connection_id
          FROM messages m
          JOIN threads t ON t.id = m.thread_id
          {fold_join}
@@ -5503,6 +5509,17 @@ async fn append_message_inner_as(
     }))
 }
 
+/// A customer-gateway `model_connection_id` has the shape the `messages` column allows (non-empty, at
+/// most 128 bytes of ASCII letters, digits, `-`, `_` and `.`), so a malformed one is refused as a bad
+/// argument here instead of surfacing as a database error from the CHECK.
+fn valid_model_connection_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
 /// A caller's `client_message_id` has the shape the `messages` CHECK allows, so a malformed one is
 /// refused as a bad argument here instead of surfacing as a database error from the CHECK.
 fn valid_client_message_id(id: &str) -> bool {
@@ -5574,6 +5591,14 @@ pub(crate) async fn append_message_in_tx_as(
     if !client_message_id.is_empty() && !valid_client_message_id(client_message_id) {
         return Err(Status::invalid_argument(
             "client_message_id must match [A-Za-z0-9][A-Za-z0-9_-]{0,127}",
+        ));
+    }
+    // The customer-gateway connection id a turn is written under (W4-BYO). Only the opaque id is
+    // stored, never a key; a malformed one is refused before anything is written.
+    let model_connection_id = req.model_connection_id.trim();
+    if !model_connection_id.is_empty() && !valid_model_connection_id(model_connection_id) {
+        return Err(Status::invalid_argument(
+            "model_connection_id must be at most 128 characters of letters, digits, '-', '_' and '.'",
         ));
     }
     // "" and "turn" are the conversation turn every caller has always written; "post" is a
@@ -5900,6 +5925,19 @@ pub(crate) async fn append_message_in_tx_as(
         sqlx::query("UPDATE messages SET client_message_id = $2 WHERE id = $1")
             .bind(&msg_id)
             .bind(client_message_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+    }
+
+    // The connection a conversation turn was written under (W4-BYO), so a regenerate, edit or retry
+    // reloaded from history replays on the same connection. A separate statement, and only when an
+    // id came with the send, so a send without one never touches the column. A human post is a room
+    // message and never routed to a model, so it keeps none.
+    if !model_connection_id.is_empty() && post_kind == "turn" && !member {
+        sqlx::query("UPDATE messages SET model_connection_id = $2 WHERE id = $1")
+            .bind(&msg_id)
+            .bind(model_connection_id)
             .execute(&mut **tx)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -10666,6 +10704,22 @@ impl SessionCore for SessionService {
                     },
                 )
                 .collect();
+            // The retention flag is read for a single-thread lookup only (thread_id filter), so a
+            // listing page costs no extra query per row. The predicate is the reference read's.
+            if !req.thread_id.trim().is_empty() {
+                for thread in &mut threads {
+                    thread.holds_retention_run =
+                        crate::thread_reference::holds_retention_run_for_thread(
+                            &self.pool,
+                            &thread.thread_id,
+                        )
+                        .await
+                        .map_err(|e| {
+                            warn!(error = %e, "list_threads retention read failed");
+                            Status::internal(e.to_string())
+                        })?;
+                }
+            }
             // The attention fields are a post-step on the rows already read: one batched read of
             // the pending rows, and nothing at all while the switch is off (WS16 S1).
             if attention::enabled() {
@@ -17004,6 +17058,7 @@ mod tests {
             history: Some(pb::RunContextPart { state: pb::RunContextState::Truncated as i32, included: 24, omitted: 6, reason: "cap".into() }),
             memory: Some(pb::RunContextPart { state: pb::RunContextState::SkippedByPolicy as i32, included: 0, omitted: 0, reason: "memory_off".into() }),
             skills: Vec::new(),
+            connector_ids: Vec::new(),
         };
         let request = |org: &str| pb::RecordRunContextRequest { run_id: run_id.clone(), org_id: org.to_owned(), status: Some(status.clone()) };
 
@@ -25492,6 +25547,7 @@ mod conversation_page_tests {
             revised_by_subject_id: None,
             revision_no: 0,
             agent_followed_up: false,
+            model_connection_id: None,
         };
         let message = session_message_from_row(row, false);
         let created_at = message.created_at.expect("created_at is set on every row");

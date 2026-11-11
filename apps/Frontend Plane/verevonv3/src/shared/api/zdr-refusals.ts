@@ -7,6 +7,9 @@
 // The English text below is that golden's text, verbatim; the Norwegian is this
 // SPA's own. The test beside this file fails if either drifts from the golden.
 //
+// The Norwegian text, and any English that describes retention, is assumed copy:
+// the owner confirms it (OD-LEGAL) against the vendor facts before it ships.
+//
 // A code this SPA does not know (a newer server) gets the generic text, never the
 // server's own English, and never a claim about where the request went.
 
@@ -78,6 +81,7 @@ export type ZdrFeatureKey =
   | 'custom_rest'
   | 'teach_mode'
   | 'reasoning_translation'
+  | 'artifact_output'
 
 /** The reader's-language chooser, the same shape the rest of the SPA passes around. */
 export type Translate = (noText: string, enText: string) => string
@@ -224,6 +228,11 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   custom_rest: { no: 'egendefinerte REST-tilkoblinger', en: 'custom REST connectors' },
   teach_mode: { no: 'lagring av stegene i en kjøring som ferdighet', en: "saving a run's steps as a skill" },
   reasoning_translation: { no: 'oversettelse av en resonneringstekst', en: 'translating a reasoning text' },
+  // Added by ZDR-Z-05a in the Model Plane's FEATURES vocabulary (mp-contracts
+  // zdr_refusal.rs). The vendored golden does not carry it until FUGEN
+  // regenerates the catalogue. Assumed wording, owner to confirm (OD-LEGAL):
+  // it describes what is not stored, so legal signs it off.
+  artifact_output: { no: 'filer og dokumenter assistenten oppretter', en: 'files and documents the assistant creates' },
 }
 
 /** A refusal whose feature the SPA does not know names it this way. */

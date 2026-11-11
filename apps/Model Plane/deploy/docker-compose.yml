@@ -471,6 +471,10 @@ services:
       # WS14-S4: offer ask_user to a Do run (max_questions on the run request). Off by default; ZDR, waived, scheduled
       # and Space-scoped runs never get it. Needs capability-core migration 0029 before TOOL_CLASS_GATE=enforce.
       AGENT_ASK_USER_ENABLED: ${AGENT_ASK_USER_ENABLED:-false}
+      # WS14-S6: offer ask_user to an Ask-mode turn (the chat tool loop). Off by default; only the literal true. A ZDR,
+      # waived or Space-scoped turn never gets it, and a call on one is refused. The question is stored as a next_turn
+      # run question (WS14-S3), so it needs session-core's run_questions; the answer arrives as the next message.
+      MODEL_GATEWAY_ASK_USER_ASK_MODE_ENABLED: ${MODEL_GATEWAY_ASK_USER_ASK_MODE_ENABLED:-false}
       # Coordinator mode: a Do run may ask to be a non-editing orchestrator, offered read and delegation tools only. Off by
       # default; only the literal true. The gateway forwards the flag only while this is on, and never for a ZDR or waived
       # turn or a continuation. Execution-core reads the same switch and applies it to a fresh run.
@@ -518,6 +522,8 @@ services:
       MODEL_GATEWAY_REASONING_TRANSLATE_ENABLED: ${MODEL_GATEWAY_REASONING_TRANSLATE_ENABLED:-false}
       # F-t3-098: the model that route runs on. Blank, it runs on the title-class side-task model.
       MODEL_GATEWAY_TRANSLATE_MODEL: ${MODEL_GATEWAY_TRANSLATE_MODEL:-}
+      # Z-05a: a web search or a file or artifact write on a ZDR or waived turn is a typed zdr_feature_not_supported refusal (features web_search, artifact_output) before any call, not a silent drop. Only the literal true.
+      ZDR_TYPED_REFUSALS_ENABLED: ${ZDR_TYPED_REFUSALS_ENABLED:-false}
       # F-t3-081: teach mode, POST /v1/teach/skill-draft drafts one disabled skill proposal from a run's takeover steps (Quarry's procedure draft, read as the caller). Needs QUARRY_TEACH_MODE_ENABLED on the Ingestion Plane edge. Only the literal true.
       MODEL_GATEWAY_TEACH_MODE_ENABLED: ${MODEL_GATEWAY_TEACH_MODE_ENABLED:-false}
       # F-t3-093 (b): a data-source catalogue in the chat tool guidance, listing only the sources this turn's tools reach, with use-when and cost hints. Only the literal true.
@@ -1807,6 +1813,8 @@ services:
       EXECUTION_CORE_THREAD_WORKSPACE: ${EXECUTION_CORE_THREAD_WORKSPACE:-false}
       # WS22-S4: Space overlay write-through per inline step. Empty is off; enabled turns it on.
       EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH: ${EXECUTION_CORE_SPACE_WORKSPACE_WRITE_THROUGH:-}
+      # W4-P6: lease release keeps the write-through file filter and discards a ZDR or waived run's workspace before any upload. Off by default; only the literal true enables it.
+      EXECUTION_CORE_LEASE_RELEASE_FILTER: ${EXECUTION_CORE_LEASE_RELEASE_FILTER:-false}
       # WS25-S5: run-scoped result handles and result_query. `on` or `true` enables; off by default.
       EXECUTION_RESULT_HANDLES: ${EXECUTION_RESULT_HANDLES:-off}
       # EP-2-S10: the Do loop's long-page reader (read_page, find_in_page) over held pages. Off by default; only the literal true enables it, and it needs EXECUTION_RESULT_HANDLES on.
@@ -1924,6 +1932,10 @@ services:
       # changed mid-run. Never for a zero-retention or waived run. Only the literal
       # "true" turns it on.
       EXECUTION_CORE_SKILL_PINS: ${EXECUTION_CORE_SKILL_PINS:-false}
+      # WS23-S4: a Do run records the ids of the connected accounts the person selected for the turn on its run record
+      # (runs.metadata.run_context.connector_scope), ids only. Never for a zero-retention or waived run, and not for a
+      # run with no selection. Only the literal "true" turns it on; read at start.
+      CONNECTOR_SCOPE_RECORD_ENABLED: ${CONNECTOR_SCOPE_RECORD_ENABLED:-false}
       # Wide-research fan-out (the subagent.research_fan_out tool). Not
       # secrets — behaviour knobs. WIDE_RESEARCH_FAN_OUT_ENABLED=false stops
       # the tool being offered or dispatched without a rebuild (the kill switch
@@ -2102,6 +2114,9 @@ services:
       # BROWSER_DO_ENABLED decides whether a bearer is minted at all.
       EXECUTION_DO_BROWSER_ENABLED: ${EXECUTION_DO_BROWSER_ENABLED:-0}
       # EP-1 S2: a wall the person may clear (sign-in, challenge) pauses the run for them. Only the literal true.
+      # "Skip this site" continues the run under the pause's retained tools and authority (session-core
+      # GetSkippedAssistAuthority; FU-25), narrowed by the request, never the /continue placeholders. Keep it off in any
+      # deployment whose session-core predates that RPC: the skip is then refused as skip_authority_unavailable.
       EXECUTION_BROWSER_HUMAN_ASSIST: ${EXECUTION_BROWSER_HUMAN_ASSIST:-false}
       # EP-1 S5: how long a takeover pause waits for the browser back, whole seconds clamped to 300-3600. A setting,
       # not a switch: only a takeover pause reads it.
