@@ -28,6 +28,24 @@ import {
  */
 export interface ScheduleSummary {
     /**
+     * IANA zone the cron is read in (WS15.S1).
+     * @type {string}
+     * @memberof ScheduleSummary
+     */
+    timezone?: string;
+    /**
+     * Spread of each fire in seconds (WS15.S1).
+     * @type {number}
+     * @memberof ScheduleSummary
+     */
+    jitterS?: number;
+    /**
+     * True for a non-monitor schedule created disabled and never toggled (WS15.S1).
+     * @type {boolean}
+     * @memberof ScheduleSummary
+     */
+    needsActivation?: boolean;
+    /**
      * 
      * @type {string}
      * @memberof ScheduleSummary
@@ -111,6 +129,12 @@ export interface ScheduleSummary {
      * @memberof ScheduleSummary
      */
     config?: any | null;
+    /**
+     * The operator label that groups this monitor (E3.5-6). Absent when untagged.
+     * @type {string}
+     * @memberof ScheduleSummary
+     */
+    tag?: string;
 }
 
 
@@ -165,6 +189,9 @@ export function ScheduleSummaryFromJSONTyped(json: any, ignoreDiscriminator: boo
     }
     return {
         
+        'timezone': json['timezone'] == null ? undefined : json['timezone'],
+        'jitterS': json['jitter_s'] == null ? undefined : json['jitter_s'],
+        'needsActivation': json['needs_activation'] == null ? undefined : json['needs_activation'],
         'scheduleId': json['schedule_id'],
         'orgId': json['org_id'],
         'name': json['name'],
@@ -179,6 +206,7 @@ export function ScheduleSummaryFromJSONTyped(json: any, ignoreDiscriminator: boo
         'lastRunAt': json['last_run_at'] == null ? undefined : (new Date(json['last_run_at'])),
         'nextRunAt': json['next_run_at'] == null ? undefined : (new Date(json['next_run_at'])),
         'config': json['config'] == null ? undefined : json['config'],
+        'tag': json['tag'] == null ? undefined : json['tag'],
     };
 }
 
@@ -193,6 +221,9 @@ export function ScheduleSummaryToJSONTyped(value?: ScheduleSummary | null, ignor
 
     return {
         
+        'timezone': value['timezone'],
+        'jitter_s': value['jitterS'],
+        'needs_activation': value['needsActivation'],
         'schedule_id': value['scheduleId'],
         'org_id': value['orgId'],
         'name': value['name'],
@@ -207,6 +238,7 @@ export function ScheduleSummaryToJSONTyped(value?: ScheduleSummary | null, ignor
         'last_run_at': value['lastRunAt'] == null ? value['lastRunAt'] : value['lastRunAt'].toISOString(),
         'next_run_at': value['nextRunAt'] == null ? value['nextRunAt'] : value['nextRunAt'].toISOString(),
         'config': value['config'],
+        'tag': value['tag'],
     };
 }
 

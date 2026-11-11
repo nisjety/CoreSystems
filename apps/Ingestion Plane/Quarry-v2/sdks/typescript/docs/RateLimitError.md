@@ -9,9 +9,9 @@ Name | Type
 `error` | string
 `code` | string
 `hint` | string
+`nextActions` | Array&lt;string&gt;
 `window` | string
 `retryAfterSeconds` | number
-`nextActions` | Array&lt;string&gt;
 
 ## Example
 
@@ -23,9 +23,9 @@ const example = {
   "error": null,
   "code": null,
   "hint": null,
+  "nextActions": null,
   "window": null,
   "retryAfterSeconds": null,
-  "nextActions": null,
 } satisfies RateLimitError
 
 console.log(example)

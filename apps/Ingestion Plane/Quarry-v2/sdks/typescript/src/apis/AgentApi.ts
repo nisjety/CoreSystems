@@ -14,20 +14,95 @@
 
 import * as runtime from '../runtime';
 import {
+    type AgentDownloadKnowledgeRequest,
+    AgentDownloadKnowledgeRequestFromJSON,
+    AgentDownloadKnowledgeRequestToJSON,
+} from '../models/AgentDownloadKnowledgeRequest';
+import {
+    type AgentHitTest200Response,
+    AgentHitTest200ResponseFromJSON,
+    AgentHitTest200ResponseToJSON,
+} from '../models/AgentHitTest200Response';
+import {
     type AgentStepRequest,
     AgentStepRequestFromJSON,
     AgentStepRequestToJSON,
 } from '../models/AgentStepRequest';
+import {
+    type ApplyAgentOriginExtension200Response,
+    ApplyAgentOriginExtension200ResponseFromJSON,
+    ApplyAgentOriginExtension200ResponseToJSON,
+} from '../models/ApplyAgentOriginExtension200Response';
+import {
+    type ApplyAgentOriginExtensionRequest,
+    ApplyAgentOriginExtensionRequestFromJSON,
+    ApplyAgentOriginExtensionRequestToJSON,
+} from '../models/ApplyAgentOriginExtensionRequest';
+import {
+    type AttachAgentCurrentTab200Response,
+    AttachAgentCurrentTab200ResponseFromJSON,
+    AttachAgentCurrentTab200ResponseToJSON,
+} from '../models/AttachAgentCurrentTab200Response';
+import {
+    type AttachAgentCurrentTabRequest,
+    AttachAgentCurrentTabRequestFromJSON,
+    AttachAgentCurrentTabRequestToJSON,
+} from '../models/AttachAgentCurrentTabRequest';
+import {
+    type AttachAgentRun200Response,
+    AttachAgentRun200ResponseFromJSON,
+    AttachAgentRun200ResponseToJSON,
+} from '../models/AttachAgentRun200Response';
+import {
+    type AttachAgentRunRequest,
+    AttachAgentRunRequestFromJSON,
+    AttachAgentRunRequestToJSON,
+} from '../models/AttachAgentRunRequest';
 import {
     type BrowserProcedure,
     BrowserProcedureFromJSON,
     BrowserProcedureToJSON,
 } from '../models/BrowserProcedure';
 import {
+    type BrowserRedirectHop200Response,
+    BrowserRedirectHop200ResponseFromJSON,
+    BrowserRedirectHop200ResponseToJSON,
+} from '../models/BrowserRedirectHop200Response';
+import {
+    type BrowserRedirectHopRequest,
+    BrowserRedirectHopRequestFromJSON,
+    BrowserRedirectHopRequestToJSON,
+} from '../models/BrowserRedirectHopRequest';
+import {
+    type BrowserSessionControlRequest,
+    BrowserSessionControlRequestFromJSON,
+    BrowserSessionControlRequestToJSON,
+} from '../models/BrowserSessionControlRequest';
+import {
     type CompileProcedureRequest,
     CompileProcedureRequestFromJSON,
     CompileProcedureRequestToJSON,
 } from '../models/CompileProcedureRequest';
+import {
+    type EnvelopeAgentDownloadKnowledge,
+    EnvelopeAgentDownloadKnowledgeFromJSON,
+    EnvelopeAgentDownloadKnowledgeToJSON,
+} from '../models/EnvelopeAgentDownloadKnowledge';
+import {
+    type EnvelopeAgentRunDownloads,
+    EnvelopeAgentRunDownloadsFromJSON,
+    EnvelopeAgentRunDownloadsToJSON,
+} from '../models/EnvelopeAgentRunDownloads';
+import {
+    type EnvelopeAgentTab,
+    EnvelopeAgentTabFromJSON,
+    EnvelopeAgentTabToJSON,
+} from '../models/EnvelopeAgentTab';
+import {
+    type EnvelopeAgentTabs,
+    EnvelopeAgentTabsFromJSON,
+    EnvelopeAgentTabsToJSON,
+} from '../models/EnvelopeAgentTabs';
 import {
     type EnvelopeBrowserObservation,
     EnvelopeBrowserObservationFromJSON,
@@ -79,6 +154,46 @@ import {
     EnvelopeStepReceiptsToJSON,
 } from '../models/EnvelopeStepReceipts';
 import {
+    type GetAgentBrowserSession200Response,
+    GetAgentBrowserSession200ResponseFromJSON,
+    GetAgentBrowserSession200ResponseToJSON,
+} from '../models/GetAgentBrowserSession200Response';
+import {
+    type GetAgentLiveFrame200Response,
+    GetAgentLiveFrame200ResponseFromJSON,
+    GetAgentLiveFrame200ResponseToJSON,
+} from '../models/GetAgentLiveFrame200Response';
+import {
+    type GetAgentLiveView200Response,
+    GetAgentLiveView200ResponseFromJSON,
+    GetAgentLiveView200ResponseToJSON,
+} from '../models/GetAgentLiveView200Response';
+import {
+    type ListAgentBrowserTimeline200Response,
+    ListAgentBrowserTimeline200ResponseFromJSON,
+    ListAgentBrowserTimeline200ResponseToJSON,
+} from '../models/ListAgentBrowserTimeline200Response';
+import {
+    type ListAgentDevtoolsEvents200Response,
+    ListAgentDevtoolsEvents200ResponseFromJSON,
+    ListAgentDevtoolsEvents200ResponseToJSON,
+} from '../models/ListAgentDevtoolsEvents200Response';
+import {
+    type MarkAgentTab200Response,
+    MarkAgentTab200ResponseFromJSON,
+    MarkAgentTab200ResponseToJSON,
+} from '../models/MarkAgentTab200Response';
+import {
+    type MarkAgentTabRequest,
+    MarkAgentTabRequestFromJSON,
+    MarkAgentTabRequestToJSON,
+} from '../models/MarkAgentTabRequest';
+import {
+    type OpenAgentTabRequest,
+    OpenAgentTabRequestFromJSON,
+    OpenAgentTabRequestToJSON,
+} from '../models/OpenAgentTabRequest';
+import {
     type ProcedureImpactRequest,
     ProcedureImpactRequestFromJSON,
     ProcedureImpactRequestToJSON,
@@ -89,10 +204,21 @@ import {
     ReplayCheckRequestToJSON,
 } from '../models/ReplayCheckRequest';
 import {
+    type SetAgentTabHolderRequest,
+    SetAgentTabHolderRequestFromJSON,
+    SetAgentTabHolderRequestToJSON,
+} from '../models/SetAgentTabHolderRequest';
+import {
     type StartAgentRunRequest,
     StartAgentRunRequestFromJSON,
     StartAgentRunRequestToJSON,
 } from '../models/StartAgentRunRequest';
+
+export interface AgentHitTestRequest {
+    runId: string;
+    x: number;
+    y: number;
+}
 
 export interface AgentInteractRequest {
     runId: string;
@@ -104,6 +230,25 @@ export interface AgentStepOperationRequest {
     agentStepRequest: AgentStepRequest;
 }
 
+export interface ApplyAgentOriginExtensionOperationRequest {
+    runId: string;
+    applyAgentOriginExtensionRequest: ApplyAgentOriginExtensionRequest;
+}
+
+export interface AttachAgentCurrentTabOperationRequest {
+    runId: string;
+    attachAgentCurrentTabRequest: AttachAgentCurrentTabRequest;
+}
+
+export interface AttachAgentRunOperationRequest {
+    runId: string;
+    attachAgentRunRequest: AttachAgentRunRequest;
+}
+
+export interface BrowserRedirectHopOperationRequest {
+    browserRedirectHopRequest: BrowserRedirectHopRequest;
+}
+
 export interface CheckAgentProcedureReplayRequest {
     replayCheckRequest: ReplayCheckRequest;
 }
@@ -112,13 +257,78 @@ export interface CloseAgentRunRequest {
     runId: string;
 }
 
+export interface CloseAgentTabRequest {
+    runId: string;
+    tabId: string;
+    initiatedBy?: CloseAgentTabInitiatedByEnum;
+    aiRunId?: string;
+    agentLabel?: string;
+}
+
 export interface CompileAgentProcedureRequest {
     runId: string;
     compileProcedureRequest: CompileProcedureRequest;
 }
 
+export interface ConnectAgentLiveFrameSocketRequest {
+    runId: string;
+    tabId?: string;
+    format?: ConnectAgentLiveFrameSocketFormatEnum;
+    quality?: number;
+    maxWidth?: number;
+    maxHeight?: number;
+    everyNthFrame?: number;
+    timeoutMs?: number;
+    intervalMs?: number;
+    maxFrames?: number;
+    xQuarryLiveScope?: string;
+}
+
+export interface GetAgentBrowserSessionRequest {
+    runId: string;
+}
+
+export interface GetAgentLiveFrameRequest {
+    runId: string;
+    tabId?: string;
+    format?: GetAgentLiveFrameFormatEnum;
+    quality?: number;
+    maxWidth?: number;
+    maxHeight?: number;
+    everyNthFrame?: number;
+    timeoutMs?: number;
+    xQuarryLiveScope?: string;
+}
+
+export interface GetAgentLiveViewRequest {
+    runId: string;
+    xQuarryLiveScope?: string;
+}
+
+export interface HandOffAgentRunDownloadRequest {
+    runId: string;
+    artifactId: string;
+    agentDownloadKnowledgeRequest: AgentDownloadKnowledgeRequest;
+}
+
 export interface ImpactCheckAgentProcedureRequest {
     procedureImpactRequest: ProcedureImpactRequest;
+}
+
+export interface ListAgentBrowserTimelineRequest {
+    runId: string;
+    cursor?: string;
+    limit?: number;
+}
+
+export interface ListAgentDevtoolsEventsRequest {
+    runId: string;
+    afterSequence?: number;
+    limit?: number;
+    levels?: string;
+    filter?: string;
+    category?: ListAgentDevtoolsEventsCategoryEnum;
+    tabId?: string;
 }
 
 export interface ListAgentEgressReceiptsRequest {
@@ -131,18 +341,152 @@ export interface ListAgentReceiptsRequest {
     runId: string;
 }
 
+export interface ListAgentRunDownloadsRequest {
+    runId: string;
+}
+
+export interface ListAgentTabsRequest {
+    runId: string;
+}
+
+export interface MarkAgentTabOperationRequest {
+    runId: string;
+    tabId: string;
+    markAgentTabRequest: MarkAgentTabRequest;
+}
+
+export interface OpenAgentTabOperationRequest {
+    runId: string;
+    openAgentTabRequest?: OpenAgentTabRequest;
+}
+
 export interface QualityCheckAgentProcedureRequest {
     browserProcedure: BrowserProcedure;
+}
+
+export interface ReleaseAgentAttachRequest {
+    runId: string;
+    attachId: string;
+    disposition?: ReleaseAgentAttachDispositionEnum;
+}
+
+export interface SelectAgentTabRequest {
+    runId: string;
+    tabId: string;
+    initiatedBy?: SelectAgentTabInitiatedByEnum;
+    aiRunId?: string;
+    agentLabel?: string;
+}
+
+export interface SetAgentBrowserSessionControlRequest {
+    runId: string;
+    browserSessionControlRequest: BrowserSessionControlRequest;
+}
+
+export interface SetAgentTabHolderOperationRequest {
+    runId: string;
+    tabId: string;
+    setAgentTabHolderRequest: SetAgentTabHolderRequest;
 }
 
 export interface StartAgentRunOperationRequest {
     startAgentRunRequest: StartAgentRunRequest;
 }
 
+export interface StreamAgentLiveFramesRequest {
+    runId: string;
+    tabId?: string;
+    format?: StreamAgentLiveFramesFormatEnum;
+    quality?: number;
+    maxWidth?: number;
+    maxHeight?: number;
+    everyNthFrame?: number;
+    timeoutMs?: number;
+    intervalMs?: number;
+    maxFrames?: number;
+    xQuarryLiveScope?: string;
+}
+
+export interface StreamAgentRunEventsRequest {
+    runId: string;
+    fromSeq?: number;
+    maxEvents?: number;
+    lastEventID?: number;
+}
+
 /**
  * 
  */
 export class AgentApi extends runtime.BaseAPI {
+
+    /**
+     * Creates request options for agentHitTest without sending the request
+     */
+    async agentHitTestRequestOpts(requestParameters: AgentHitTestRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling agentHitTest().'
+            );
+        }
+
+        if (requestParameters['x'] == null) {
+            throw new runtime.RequiredError(
+                'x',
+                'Required parameter "x" was null or undefined when calling agentHitTest().'
+            );
+        }
+
+        if (requestParameters['y'] == null) {
+            throw new runtime.RequiredError(
+                'y',
+                'Required parameter "y" was null or undefined when calling agentHitTest().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['x'] != null) {
+            queryParameters['x'] = requestParameters['x'];
+        }
+
+        if (requestParameters['y'] != null) {
+            queryParameters['y'] = requestParameters['y'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/hit-test`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * E3.3-h. A read-only point hit test: it executes nothing, navigates nowhere, focuses or scrolls nothing, and writes nothing (no receipt, timeline row, artifact or cache entry). Off unless QUARRY_EDGE__HIT_TEST is on (default off): off, the call is refused with 403 hit_test_disabled before the run is looked up. `x` and `y` are CSS pixels from the viewport\'s top-left corner, rounded to whole pixels. A missing or non-finite value, or a point outside the run\'s viewport (1280 by 800 when its lease names none), is a 400. The browser\'s hit test finds the DOM node under the point and its accessibility ancestors. The answer names an observed target in `ref` only when one of those nodes is a target of the caller\'s last observation of the run; then `snapshotId` and `generation` name that snapshot, so the caller can tell that it is stale. Without a `ref`, `reason` says why: no_node (nothing under the point), no_snapshot (a node is there, but the run has observed no page) or not_observed (a node is there, but no observed target is on its ancestors). The answer carries no backend node id and no frame id. A ZDR run may use it: nothing is stored or logged, and `zdr` echoes the run\'s flag. Only the actor that started the run, in its organisation, may call it; anyone else gets 404.
+     * Map a viewport point to the observed target under it (dark)
+     */
+    async agentHitTestRaw(requestParameters: AgentHitTestRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AgentHitTest200Response>> {
+        const requestOptions = await this.agentHitTestRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => AgentHitTest200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * E3.3-h. A read-only point hit test: it executes nothing, navigates nowhere, focuses or scrolls nothing, and writes nothing (no receipt, timeline row, artifact or cache entry). Off unless QUARRY_EDGE__HIT_TEST is on (default off): off, the call is refused with 403 hit_test_disabled before the run is looked up. `x` and `y` are CSS pixels from the viewport\'s top-left corner, rounded to whole pixels. A missing or non-finite value, or a point outside the run\'s viewport (1280 by 800 when its lease names none), is a 400. The browser\'s hit test finds the DOM node under the point and its accessibility ancestors. The answer names an observed target in `ref` only when one of those nodes is a target of the caller\'s last observation of the run; then `snapshotId` and `generation` name that snapshot, so the caller can tell that it is stale. Without a `ref`, `reason` says why: no_node (nothing under the point), no_snapshot (a node is there, but the run has observed no page) or not_observed (a node is there, but no observed target is on its ancestors). The answer carries no backend node id and no frame id. A ZDR run may use it: nothing is stored or logged, and `zdr` echoes the run\'s flag. Only the actor that started the run, in its organisation, may call it; anyone else gets 404.
+     * Map a viewport point to the observed target under it (dark)
+     */
+    async agentHitTest(requestParameters: AgentHitTestRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AgentHitTest200Response> {
+        const response = await this.agentHitTestRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
 
     /**
      * Creates request options for agentInteract without sending the request
@@ -237,6 +581,7 @@ export class AgentApi extends runtime.BaseAPI {
     }
 
     /**
+     * For an API-key caller (INNH-10) the grant is revalidated on every step and must still be the key\'s own; a dialog reply, an upload or a download is refused with 403 `error.details.reason` `api_key_sensitive_action_refused` before the driver or the broker is asked, and a run belongs to the key that started it (another caller gets 404).
      * Execute one governed browser action
      */
     async agentStepRaw(requestParameters: AgentStepOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<EnvelopeBrowserObservation>> {
@@ -247,10 +592,231 @@ export class AgentApi extends runtime.BaseAPI {
     }
 
     /**
+     * For an API-key caller (INNH-10) the grant is revalidated on every step and must still be the key\'s own; a dialog reply, an upload or a download is refused with 403 `error.details.reason` `api_key_sensitive_action_refused` before the driver or the broker is asked, and a run belongs to the key that started it (another caller gets 404).
      * Execute one governed browser action
      */
     async agentStep(requestParameters: AgentStepOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<EnvelopeBrowserObservation> {
         const response = await this.agentStepRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for applyAgentOriginExtension without sending the request
+     */
+    async applyAgentOriginExtensionRequestOpts(requestParameters: ApplyAgentOriginExtensionOperationRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling applyAgentOriginExtension().'
+            );
+        }
+
+        if (requestParameters['applyAgentOriginExtensionRequest'] == null) {
+            throw new runtime.RequiredError(
+                'applyAgentOriginExtensionRequest',
+                'Required parameter "applyAgentOriginExtensionRequest" was null or undefined when calling applyAgentOriginExtension().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/origin-extension`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: ApplyAgentOriginExtensionRequestToJSON(requestParameters['applyAgentOriginExtensionRequest']),
+        };
+    }
+
+    /**
+     * Q3-E3.2-e1w. Off unless QUARRY_EDGE__ORIGIN_CONSENT is on: off, the call is refused with 403 origin_consent_disabled before any broker call. The caller is the run\'s owner or the service principal that started it. The origin-extension grant (kind origin_extension, a child of the run\'s grant, owned by the run\'s owner, the start host plus at most eight listed hosts, one extend_origin:turn, extend_origin:conversation or extend_origin:always action; a ZDR run takes turn only) is validated, the org\'s consent caps are applied, and any web-policy, grant or denied-list deny beats the approval; only then is the run\'s browser egress widened. The extension reaches what a page loads or is redirected through, and never widens the run\'s own navigation allow list. Quarry reads the grant again before every step, before a tab is opened and before an attachment starts; when it is no longer usable the run\'s own egress policy is restored and the extension is dropped. Nothing is persisted, and a resumed run starts from its own grant. The answer never names a host. Refusal reasons (in error.details.reason): origin_consent_disabled (403), origin_extension_api_key_run (403), origin_extension_grant_invalid, origin_extension_host_invalid, origin_extension_too_many_hosts, origin_extension_zdr_scope, org_origin_consent_disabled, org_origin_consent_scope, org_origin_consent_unreadable, origin_extension_denied (SECURITY_BLOCKED).
+     * Apply a person\'s per-origin consent to a live run (dark)
+     */
+    async applyAgentOriginExtensionRaw(requestParameters: ApplyAgentOriginExtensionOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<ApplyAgentOriginExtension200Response>> {
+        const requestOptions = await this.applyAgentOriginExtensionRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => ApplyAgentOriginExtension200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Q3-E3.2-e1w. Off unless QUARRY_EDGE__ORIGIN_CONSENT is on: off, the call is refused with 403 origin_consent_disabled before any broker call. The caller is the run\'s owner or the service principal that started it. The origin-extension grant (kind origin_extension, a child of the run\'s grant, owned by the run\'s owner, the start host plus at most eight listed hosts, one extend_origin:turn, extend_origin:conversation or extend_origin:always action; a ZDR run takes turn only) is validated, the org\'s consent caps are applied, and any web-policy, grant or denied-list deny beats the approval; only then is the run\'s browser egress widened. The extension reaches what a page loads or is redirected through, and never widens the run\'s own navigation allow list. Quarry reads the grant again before every step, before a tab is opened and before an attachment starts; when it is no longer usable the run\'s own egress policy is restored and the extension is dropped. Nothing is persisted, and a resumed run starts from its own grant. The answer never names a host. Refusal reasons (in error.details.reason): origin_consent_disabled (403), origin_extension_api_key_run (403), origin_extension_grant_invalid, origin_extension_host_invalid, origin_extension_too_many_hosts, origin_extension_zdr_scope, org_origin_consent_disabled, org_origin_consent_scope, org_origin_consent_unreadable, origin_extension_denied (SECURITY_BLOCKED).
+     * Apply a person\'s per-origin consent to a live run (dark)
+     */
+    async applyAgentOriginExtension(requestParameters: ApplyAgentOriginExtensionOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<ApplyAgentOriginExtension200Response> {
+        const response = await this.applyAgentOriginExtensionRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for attachAgentCurrentTab without sending the request
+     */
+    async attachAgentCurrentTabRequestOpts(requestParameters: AttachAgentCurrentTabOperationRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling attachAgentCurrentTab().'
+            );
+        }
+
+        if (requestParameters['attachAgentCurrentTabRequest'] == null) {
+            throw new runtime.RequiredError(
+                'attachAgentCurrentTabRequest',
+                'Required parameter "attachAgentCurrentTabRequest" was null or undefined when calling attachAgentCurrentTab().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/attach-current-tab`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: AttachAgentCurrentTabRequestToJSON(requestParameters['attachAgentCurrentTabRequest']),
+        };
+    }
+
+    /**
+     * WS8.F, the hand-over of a tab the person already has open. Off unless QUARRY_EDGE__ATTACH is on. The same gates as `POST .../attach` apply: the caller is a service principal holding browser:execute, it holds an attach grant (a child of the run\'s grant, for this run, owned by the run\'s owner, one to eight hosts), and the run is not ZDR. The body must name the tab in `attach_tab` and must not carry `start_url` (both are a 400). The delegate gets that tab, not a new one, so `attached_existing_tab` is true. The tab must be the person\'s active tab, at `expected_epoch` and `expected_origin`, held by the person and with no attachment, and the grant must allow exactly that tab\'s host; otherwise the call is 409 browser_continue_tab_changed. Upload and download are disabled for this attachment whatever `policy` asks: browser.act.upload and browser.act.download are added to the ask\'s `disable` list. Refusal reasons (in error.message): attach_disabled, attach_requires_service_principal, attach_zdr_refused, attach_current_tab_requires_personal_browser (the run is not on the open web), attach_requires_grant, attach_grant_invalid, attach_driver_unsupported (UNSUPPORTED), attach_exists (CONFLICT) and browser_continue_tab_changed (CONFLICT).
+     * Attach an agent to a tab the person already has open (dark; service principal only)
+     */
+    async attachAgentCurrentTabRaw(requestParameters: AttachAgentCurrentTabOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AttachAgentCurrentTab200Response>> {
+        const requestOptions = await this.attachAgentCurrentTabRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => AttachAgentCurrentTab200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * WS8.F, the hand-over of a tab the person already has open. Off unless QUARRY_EDGE__ATTACH is on. The same gates as `POST .../attach` apply: the caller is a service principal holding browser:execute, it holds an attach grant (a child of the run\'s grant, for this run, owned by the run\'s owner, one to eight hosts), and the run is not ZDR. The body must name the tab in `attach_tab` and must not carry `start_url` (both are a 400). The delegate gets that tab, not a new one, so `attached_existing_tab` is true. The tab must be the person\'s active tab, at `expected_epoch` and `expected_origin`, held by the person and with no attachment, and the grant must allow exactly that tab\'s host; otherwise the call is 409 browser_continue_tab_changed. Upload and download are disabled for this attachment whatever `policy` asks: browser.act.upload and browser.act.download are added to the ask\'s `disable` list. Refusal reasons (in error.message): attach_disabled, attach_requires_service_principal, attach_zdr_refused, attach_current_tab_requires_personal_browser (the run is not on the open web), attach_requires_grant, attach_grant_invalid, attach_driver_unsupported (UNSUPPORTED), attach_exists (CONFLICT) and browser_continue_tab_changed (CONFLICT).
+     * Attach an agent to a tab the person already has open (dark; service principal only)
+     */
+    async attachAgentCurrentTab(requestParameters: AttachAgentCurrentTabOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AttachAgentCurrentTab200Response> {
+        const response = await this.attachAgentCurrentTabRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for attachAgentRun without sending the request
+     */
+    async attachAgentRunRequestOpts(requestParameters: AttachAgentRunOperationRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling attachAgentRun().'
+            );
+        }
+
+        if (requestParameters['attachAgentRunRequest'] == null) {
+            throw new runtime.RequiredError(
+                'attachAgentRunRequest',
+                'Required parameter "attachAgentRunRequest" was null or undefined when calling attachAgentRun().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/attach`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: AttachAgentRunRequestToJSON(requestParameters['attachAgentRunRequest']),
+        };
+    }
+
+    /**
+     * WS8.F. Off unless QUARRY_EDGE__ATTACH is on. A service principal holding an attach grant (a child of the run\'s grant, for this run, owned by the run\'s owner, one to eight hosts) gets one agent tab, opened in the background: the person\'s active tab does not change. Refused for ZDR runs. Refusal reasons (in error.message): attach_disabled, attach_requires_service_principal, attach_zdr_refused, attach_requires_grant, attach_grant_invalid, attach_driver_unsupported (UNSUPPORTED), attach_exists (CONFLICT).
+     * Attach an agent to a person\'s live run (dark; service principal only)
+     */
+    async attachAgentRunRaw(requestParameters: AttachAgentRunOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AttachAgentRun200Response>> {
+        const requestOptions = await this.attachAgentRunRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => AttachAgentRun200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * WS8.F. Off unless QUARRY_EDGE__ATTACH is on. A service principal holding an attach grant (a child of the run\'s grant, for this run, owned by the run\'s owner, one to eight hosts) gets one agent tab, opened in the background: the person\'s active tab does not change. Refused for ZDR runs. Refusal reasons (in error.message): attach_disabled, attach_requires_service_principal, attach_zdr_refused, attach_requires_grant, attach_grant_invalid, attach_driver_unsupported (UNSUPPORTED), attach_exists (CONFLICT).
+     * Attach an agent to a person\'s live run (dark; service principal only)
+     */
+    async attachAgentRun(requestParameters: AttachAgentRunOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AttachAgentRun200Response> {
+        const response = await this.attachAgentRunRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for browserRedirectHop without sending the request
+     */
+    async browserRedirectHopRequestOpts(requestParameters: BrowserRedirectHopOperationRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['browserRedirectHopRequest'] == null) {
+            throw new runtime.RequiredError(
+                'browserRedirectHopRequest',
+                'Required parameter "browserRedirectHopRequest" was null or undefined when calling browserRedirectHop().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/browser/redirect-hop`;
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: BrowserRedirectHopRequestToJSON(requestParameters['browserRedirectHopRequest']),
+        };
+    }
+
+    /**
+     * Inspects one public HTTP(S) response and answers where its redirect points, if it redirects at all. The probe sends no cookies, reads no storage and reads the response headers only; the URL\'s fragment is dropped. The probe pins public DNS addresses and refuses a URL that is not public or is blocked (403 SECURITY_BLOCKED). The web policy is checked for the URL and again for the target (403 FORBIDDEN). `target` is the absolute URL of a validated 301, 302, 303, 307 or 308 redirect, and null for any other status; a redirect without exactly one usable Location, or one that downgrades https to http, is refused (403 SECURITY_BLOCKED). A DNS or transport failure is answered with the probe\'s own code and a generic message that never names an internal host or address. A service principal needs browser:execute (a bare 403 otherwise); a person\'s token passes this gate. At most 16 probes run per process, and an excess request is 429 RATE_LIMITED without queueing. The whole probe has a 4 second deadline, past which the answer is 504 TIMEOUT.
+     * One credentialless redirect hop for assistant navigation
+     */
+    async browserRedirectHopRaw(requestParameters: BrowserRedirectHopOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<BrowserRedirectHop200Response>> {
+        const requestOptions = await this.browserRedirectHopRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => BrowserRedirectHop200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Inspects one public HTTP(S) response and answers where its redirect points, if it redirects at all. The probe sends no cookies, reads no storage and reads the response headers only; the URL\'s fragment is dropped. The probe pins public DNS addresses and refuses a URL that is not public or is blocked (403 SECURITY_BLOCKED). The web policy is checked for the URL and again for the target (403 FORBIDDEN). `target` is the absolute URL of a validated 301, 302, 303, 307 or 308 redirect, and null for any other status; a redirect without exactly one usable Location, or one that downgrades https to http, is refused (403 SECURITY_BLOCKED). A DNS or transport failure is answered with the probe\'s own code and a generic message that never names an internal host or address. A service principal needs browser:execute (a bare 403 otherwise); a person\'s token passes this gate. At most 16 probes run per process, and an excess request is 429 RATE_LIMITED without queueing. The whole probe has a 4 second deadline, past which the answer is 504 TIMEOUT.
+     * One credentialless redirect hop for assistant navigation
+     */
+    async browserRedirectHop(requestParameters: BrowserRedirectHopOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<BrowserRedirectHop200Response> {
+        const response = await this.browserRedirectHopRaw(requestParameters, initOverrides);
         return await response.value();
     }
 
@@ -347,6 +913,73 @@ export class AgentApi extends runtime.BaseAPI {
     }
 
     /**
+     * Creates request options for closeAgentTab without sending the request
+     */
+    async closeAgentTabRequestOpts(requestParameters: CloseAgentTabRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling closeAgentTab().'
+            );
+        }
+
+        if (requestParameters['tabId'] == null) {
+            throw new runtime.RequiredError(
+                'tabId',
+                'Required parameter "tabId" was null or undefined when calling closeAgentTab().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['initiatedBy'] != null) {
+            queryParameters['initiatedBy'] = requestParameters['initiatedBy'];
+        }
+
+        if (requestParameters['aiRunId'] != null) {
+            queryParameters['aiRunId'] = requestParameters['aiRunId'];
+        }
+
+        if (requestParameters['agentLabel'] != null) {
+            queryParameters['agentLabel'] = requestParameters['agentLabel'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/tabs/{tab_id}`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+        urlPath = urlPath.replace('{tab_id}', encodeURIComponent(String(requestParameters['tabId'])));
+
+        return {
+            path: urlPath,
+            method: 'DELETE',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Has no body, so the hint and the advisory fields are query parameters. Same take-over rule and recording as opening a tab; the tab\'s opener record is dropped.
+     * Close a tab
+     */
+    async closeAgentTabRaw(requestParameters: CloseAgentTabRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<EnvelopeAgentTabs>> {
+        const requestOptions = await this.closeAgentTabRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => EnvelopeAgentTabsFromJSON(jsonValue));
+    }
+
+    /**
+     * Has no body, so the hint and the advisory fields are query parameters. Same take-over rule and recording as opening a tab; the tab\'s opener record is dropped.
+     * Close a tab
+     */
+    async closeAgentTab(requestParameters: CloseAgentTabRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<EnvelopeAgentTabs> {
+        const response = await this.closeAgentTabRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
      * Creates request options for compileAgentProcedure without sending the request
      */
     async compileAgentProcedureRequestOpts(requestParameters: CompileAgentProcedureRequest): Promise<runtime.RequestOpts> {
@@ -402,6 +1035,334 @@ export class AgentApi extends runtime.BaseAPI {
     }
 
     /**
+     * Creates request options for connectAgentLiveFrameSocket without sending the request
+     */
+    async connectAgentLiveFrameSocketRequestOpts(requestParameters: ConnectAgentLiveFrameSocketRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling connectAgentLiveFrameSocket().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['tabId'] != null) {
+            queryParameters['tabId'] = requestParameters['tabId'];
+        }
+
+        if (requestParameters['format'] != null) {
+            queryParameters['format'] = requestParameters['format'];
+        }
+
+        if (requestParameters['quality'] != null) {
+            queryParameters['quality'] = requestParameters['quality'];
+        }
+
+        if (requestParameters['maxWidth'] != null) {
+            queryParameters['maxWidth'] = requestParameters['maxWidth'];
+        }
+
+        if (requestParameters['maxHeight'] != null) {
+            queryParameters['maxHeight'] = requestParameters['maxHeight'];
+        }
+
+        if (requestParameters['everyNthFrame'] != null) {
+            queryParameters['everyNthFrame'] = requestParameters['everyNthFrame'];
+        }
+
+        if (requestParameters['timeoutMs'] != null) {
+            queryParameters['timeoutMs'] = requestParameters['timeoutMs'];
+        }
+
+        if (requestParameters['intervalMs'] != null) {
+            queryParameters['intervalMs'] = requestParameters['intervalMs'];
+        }
+
+        if (requestParameters['maxFrames'] != null) {
+            queryParameters['maxFrames'] = requestParameters['maxFrames'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (requestParameters['xQuarryLiveScope'] != null) {
+            headerParameters['X-Quarry-Live-Scope'] = String(requestParameters['xQuarryLiveScope']);
+        }
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/frames/ws`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * A WebSocket upgrade. OpenAPI cannot describe the messages, so they are set out here. The owner, gating, scope and query rules are those of `GET .../frames/stream`. A refusal of them (400, 403, 404, 501 or 502) is a plain JSON answer, given before the upgrade. A socket that names a `tabId` is view-only. Gate: none as a route. Once the socket is open, the server sends JSON text messages, each with a `type`: `frame` (`sequence`, `mimeType`, `dataBase64` and `zdr`) every `intervalMs`; `devtools` (`events`, the same objects as `GET .../devtools`, and `zdr`) when new events exist; `observation` (`observation`, a BrowserObservation) as the answer to an action; `pong` as the answer to a ping; `error` (`code`, `message`, `retryable`, and `details` when there are some) for a refused or failed message; and `done` (`reason` `max_frames` or `shutdown`) before the server closes. A frame that cannot be read sends an `error` and closes the socket, and other errors leave it open. The client may send `{\"type\":\"action\",\"action\":{...},\"instruction\":\"...\",\"actor\":\"human\"}`, where `action` is an action object of `POST .../step`, `instruction` and `actor` are optional, and `actor` (`human` or `agent`) can only tighten who the action is attributed to. The action runs as one step, through the same admission and refusals as `POST .../step`. The client may send `{\"type\":\"ping\"}` to keep the socket alive, and transport pings are answered with pongs. On a view-only socket every well-formed message other than a ping is refused with an `error` frame, with code `FORBIDDEN` and `details.reason` `live_view_only`, and the socket stays open. Binary messages are ignored, and text that is not one of these messages answers `BAD_REQUEST`. Frames are transient, as on `frames/stream`, and an action\'s receipt, timeline item and observation follow the rules of a step.
+     * Live frames and browser actions over a WebSocket (the GET answers 101)
+     */
+    async connectAgentLiveFrameSocketRaw(requestParameters: ConnectAgentLiveFrameSocketRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<void>> {
+        const requestOptions = await this.connectAgentLiveFrameSocketRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.VoidApiResponse(response);
+    }
+
+    /**
+     * A WebSocket upgrade. OpenAPI cannot describe the messages, so they are set out here. The owner, gating, scope and query rules are those of `GET .../frames/stream`. A refusal of them (400, 403, 404, 501 or 502) is a plain JSON answer, given before the upgrade. A socket that names a `tabId` is view-only. Gate: none as a route. Once the socket is open, the server sends JSON text messages, each with a `type`: `frame` (`sequence`, `mimeType`, `dataBase64` and `zdr`) every `intervalMs`; `devtools` (`events`, the same objects as `GET .../devtools`, and `zdr`) when new events exist; `observation` (`observation`, a BrowserObservation) as the answer to an action; `pong` as the answer to a ping; `error` (`code`, `message`, `retryable`, and `details` when there are some) for a refused or failed message; and `done` (`reason` `max_frames` or `shutdown`) before the server closes. A frame that cannot be read sends an `error` and closes the socket, and other errors leave it open. The client may send `{\"type\":\"action\",\"action\":{...},\"instruction\":\"...\",\"actor\":\"human\"}`, where `action` is an action object of `POST .../step`, `instruction` and `actor` are optional, and `actor` (`human` or `agent`) can only tighten who the action is attributed to. The action runs as one step, through the same admission and refusals as `POST .../step`. The client may send `{\"type\":\"ping\"}` to keep the socket alive, and transport pings are answered with pongs. On a view-only socket every well-formed message other than a ping is refused with an `error` frame, with code `FORBIDDEN` and `details.reason` `live_view_only`, and the socket stays open. Binary messages are ignored, and text that is not one of these messages answers `BAD_REQUEST`. Frames are transient, as on `frames/stream`, and an action\'s receipt, timeline item and observation follow the rules of a step.
+     * Live frames and browser actions over a WebSocket (the GET answers 101)
+     */
+    async connectAgentLiveFrameSocket(requestParameters: ConnectAgentLiveFrameSocketRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<void> {
+        await this.connectAgentLiveFrameSocketRaw(requestParameters, initOverrides);
+    }
+
+    /**
+     * Creates request options for getAgentBrowserSession without sending the request
+     */
+    async getAgentBrowserSessionRequestOpts(requestParameters: GetAgentBrowserSessionRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling getAgentBrowserSession().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/browser-session`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * The projection the owner\'s browser shows for one run: its profile, current URL, control mode and epoch, tabs and last observation, and the open-web and attachment fields where they apply. A live run is answered from the edge\'s memory, with `live` true. A run the edge no longer holds is answered from its durable checkpoint, with `live` false, an empty `tabs` list, `lastObservation` null, and `tabControl` and `attachAvailable` false. A ZDR run keeps no checkpoint, so once the edge has released it the read is 404. Gate: none as a route. `grantKind` `human_browse` marks a person\'s open-web run, which is admitted only while QUARRY_EDGE__HUMAN_BROWSE is on, and the attach fields (`tabControl`, `attachAvailable` and `attach`) are dark while QUARRY_EDGE__ATTACH is off. Only the run\'s owner, the actor that started it in its organisation, may read it; any other caller gets 404. The read writes nothing durable and counts as activity for a live run\'s idle clock.
+     * The owner browser-session projection of a run
+     */
+    async getAgentBrowserSessionRaw(requestParameters: GetAgentBrowserSessionRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<GetAgentBrowserSession200Response>> {
+        const requestOptions = await this.getAgentBrowserSessionRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => GetAgentBrowserSession200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * The projection the owner\'s browser shows for one run: its profile, current URL, control mode and epoch, tabs and last observation, and the open-web and attachment fields where they apply. A live run is answered from the edge\'s memory, with `live` true. A run the edge no longer holds is answered from its durable checkpoint, with `live` false, an empty `tabs` list, `lastObservation` null, and `tabControl` and `attachAvailable` false. A ZDR run keeps no checkpoint, so once the edge has released it the read is 404. Gate: none as a route. `grantKind` `human_browse` marks a person\'s open-web run, which is admitted only while QUARRY_EDGE__HUMAN_BROWSE is on, and the attach fields (`tabControl`, `attachAvailable` and `attach`) are dark while QUARRY_EDGE__ATTACH is off. Only the run\'s owner, the actor that started it in its organisation, may read it; any other caller gets 404. The read writes nothing durable and counts as activity for a live run\'s idle clock.
+     * The owner browser-session projection of a run
+     */
+    async getAgentBrowserSession(requestParameters: GetAgentBrowserSessionRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<GetAgentBrowserSession200Response> {
+        const response = await this.getAgentBrowserSessionRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getAgentLiveFrame without sending the request
+     */
+    async getAgentLiveFrameRequestOpts(requestParameters: GetAgentLiveFrameRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling getAgentLiveFrame().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['tabId'] != null) {
+            queryParameters['tabId'] = requestParameters['tabId'];
+        }
+
+        if (requestParameters['format'] != null) {
+            queryParameters['format'] = requestParameters['format'];
+        }
+
+        if (requestParameters['quality'] != null) {
+            queryParameters['quality'] = requestParameters['quality'];
+        }
+
+        if (requestParameters['maxWidth'] != null) {
+            queryParameters['maxWidth'] = requestParameters['maxWidth'];
+        }
+
+        if (requestParameters['maxHeight'] != null) {
+            queryParameters['maxHeight'] = requestParameters['maxHeight'];
+        }
+
+        if (requestParameters['everyNthFrame'] != null) {
+            queryParameters['everyNthFrame'] = requestParameters['everyNthFrame'];
+        }
+
+        if (requestParameters['timeoutMs'] != null) {
+            queryParameters['timeoutMs'] = requestParameters['timeoutMs'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (requestParameters['xQuarryLiveScope'] != null) {
+            headerParameters['X-Quarry-Live-Scope'] = String(requestParameters['xQuarryLiveScope']);
+        }
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/frame`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * One frame of the run\'s current page, for live preview and human takeover. The frame is returned to the caller and nothing else: no artifact, receipt, timeline item or checkpoint is written from it, whatever the run\'s posture, and the evidence of a step comes from the observation that the step takes, not from a frame. `zdr` says whether the run is under zero data retention. The request selects no tab, navigates nowhere and changes no control state. The selected driver must produce full-fidelity frames, or the answer is 501 UNSUPPORTED, and that check comes before the run is looked up. `format` is `jpeg` by default, or `png`. `quality`, `maxWidth`, `maxHeight`, `everyNthFrame` and `timeoutMs` are clamped rather than refused, as their parameter descriptions say. `tabId` reads one of the run\'s tabs without selecting it, and needs a driver that can pin a tab. Gate: none as a route; the scope header is read only while QUARRY_EDGE__LIVE_VIEW_ONLY is on. Only the run\'s owner may read it; any other caller gets 404.
+     * One transient live frame of the run browser
+     */
+    async getAgentLiveFrameRaw(requestParameters: GetAgentLiveFrameRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<GetAgentLiveFrame200Response>> {
+        const requestOptions = await this.getAgentLiveFrameRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => GetAgentLiveFrame200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * One frame of the run\'s current page, for live preview and human takeover. The frame is returned to the caller and nothing else: no artifact, receipt, timeline item or checkpoint is written from it, whatever the run\'s posture, and the evidence of a step comes from the observation that the step takes, not from a frame. `zdr` says whether the run is under zero data retention. The request selects no tab, navigates nowhere and changes no control state. The selected driver must produce full-fidelity frames, or the answer is 501 UNSUPPORTED, and that check comes before the run is looked up. `format` is `jpeg` by default, or `png`. `quality`, `maxWidth`, `maxHeight`, `everyNthFrame` and `timeoutMs` are clamped rather than refused, as their parameter descriptions say. `tabId` reads one of the run\'s tabs without selecting it, and needs a driver that can pin a tab. Gate: none as a route; the scope header is read only while QUARRY_EDGE__LIVE_VIEW_ONLY is on. Only the run\'s owner may read it; any other caller gets 404.
+     * One transient live frame of the run browser
+     */
+    async getAgentLiveFrame(requestParameters: GetAgentLiveFrameRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<GetAgentLiveFrame200Response> {
+        const response = await this.getAgentLiveFrameRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getAgentLiveView without sending the request
+     */
+    async getAgentLiveViewRequestOpts(requestParameters: GetAgentLiveViewRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling getAgentLiveView().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (requestParameters['xQuarryLiveScope'] != null) {
+            headerParameters['X-Quarry-Live-Scope'] = String(requestParameters['xQuarryLiveScope']);
+        }
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/live-view`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * The run\'s live-view reference: the URL the App Shell renders, its `kind`, and when it expires as `expires_at`. It is the object that the `live_view` event of the frame stream carries. `data` is null when the driver has no live-view reference. A reference is not a frame and carries no frame bytes. When `expires_at` has passed, the App Shell asks again. Under a view-only scope only a read-only kind, `hls` or `frames`, is answered: an `iframe` or `provider` reference, or one with no kind, is answered as null. Gate: none as a route; the scope header is read only while QUARRY_EDGE__LIVE_VIEW_ONLY is on. The read writes nothing. Only the run\'s owner may read it; any other caller gets 404.
+     * The run live-view reference, read once; the App Shell asks again when it expires
+     */
+    async getAgentLiveViewRaw(requestParameters: GetAgentLiveViewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<GetAgentLiveView200Response>> {
+        const requestOptions = await this.getAgentLiveViewRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => GetAgentLiveView200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * The run\'s live-view reference: the URL the App Shell renders, its `kind`, and when it expires as `expires_at`. It is the object that the `live_view` event of the frame stream carries. `data` is null when the driver has no live-view reference. A reference is not a frame and carries no frame bytes. When `expires_at` has passed, the App Shell asks again. Under a view-only scope only a read-only kind, `hls` or `frames`, is answered: an `iframe` or `provider` reference, or one with no kind, is answered as null. Gate: none as a route; the scope header is read only while QUARRY_EDGE__LIVE_VIEW_ONLY is on. The read writes nothing. Only the run\'s owner may read it; any other caller gets 404.
+     * The run live-view reference, read once; the App Shell asks again when it expires
+     */
+    async getAgentLiveView(requestParameters: GetAgentLiveViewRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<GetAgentLiveView200Response> {
+        const response = await this.getAgentLiveViewRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for handOffAgentRunDownload without sending the request
+     */
+    async handOffAgentRunDownloadRequestOpts(requestParameters: HandOffAgentRunDownloadRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling handOffAgentRunDownload().'
+            );
+        }
+
+        if (requestParameters['artifactId'] == null) {
+            throw new runtime.RequiredError(
+                'artifactId',
+                'Required parameter "artifactId" was null or undefined when calling handOffAgentRunDownload().'
+            );
+        }
+
+        if (requestParameters['agentDownloadKnowledgeRequest'] == null) {
+            throw new runtime.RequiredError(
+                'agentDownloadKnowledgeRequest',
+                'Required parameter "agentDownloadKnowledgeRequest" was null or undefined when calling handOffAgentRunDownload().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/downloads/{artifact_id}/knowledge`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+        urlPath = urlPath.replace('{artifact_id}', encodeURIComponent(String(requestParameters['artifactId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: AgentDownloadKnowledgeRequestToJSON(requestParameters['agentDownloadKnowledgeRequest']),
+        };
+    }
+
+    /**
+     * Reads the stored bytes under the caller\'s org, derives the text (PDF parser, or UTF-8 for text, Markdown and CSV) and sends it through the one Data Plane ingest contract. The org and user come from the verified token. Off until `QUARRY_EDGE__DOWNLOADS` and `QUARRY_EDGE__DOWNLOAD_HANDOFF` are on; a ZDR token or run is refused (403, `download_handoff_zdr_refused`) before anything is read. A repeat for the same artifact and digest returns the first document id with `created` false. Typed refusals (`download_handoff_*` in `details.reason`) pass through from the hand-off.
+     * Hand one admitted download of a run to Data Plane as a document
+     */
+    async handOffAgentRunDownloadRaw(requestParameters: HandOffAgentRunDownloadRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<EnvelopeAgentDownloadKnowledge>> {
+        const requestOptions = await this.handOffAgentRunDownloadRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => EnvelopeAgentDownloadKnowledgeFromJSON(jsonValue));
+    }
+
+    /**
+     * Reads the stored bytes under the caller\'s org, derives the text (PDF parser, or UTF-8 for text, Markdown and CSV) and sends it through the one Data Plane ingest contract. The org and user come from the verified token. Off until `QUARRY_EDGE__DOWNLOADS` and `QUARRY_EDGE__DOWNLOAD_HANDOFF` are on; a ZDR token or run is refused (403, `download_handoff_zdr_refused`) before anything is read. A repeat for the same artifact and digest returns the first document id with `created` false. Typed refusals (`download_handoff_*` in `details.reason`) pass through from the hand-off.
+     * Hand one admitted download of a run to Data Plane as a document
+     */
+    async handOffAgentRunDownload(requestParameters: HandOffAgentRunDownloadRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<EnvelopeAgentDownloadKnowledge> {
+        const response = await this.handOffAgentRunDownloadRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
      * Creates request options for impactCheckAgentProcedure without sending the request
      */
     async impactCheckAgentProcedureRequestOpts(requestParameters: ImpactCheckAgentProcedureRequest): Promise<runtime.RequestOpts> {
@@ -445,6 +1406,132 @@ export class AgentApi extends runtime.BaseAPI {
      */
     async impactCheckAgentProcedure(requestParameters: ImpactCheckAgentProcedureRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<EnvelopeProcedureImpact> {
         const response = await this.impactCheckAgentProcedureRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listAgentBrowserTimeline without sending the request
+     */
+    async listAgentBrowserTimelineRequestOpts(requestParameters: ListAgentBrowserTimelineRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling listAgentBrowserTimeline().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['cursor'] != null) {
+            queryParameters['cursor'] = requestParameters['cursor'];
+        }
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/browser-session/timeline`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * A bounded page of the run\'s owner timeline. It merges the run\'s step receipts, as `action` items, with Quarry\'s compact audit records (`control`, `tab`, `tab_control`, `attach`, `devtools` and `lifecycle` items), and sorts them by `occurredAt` and then `id`, oldest first. An item carries ids, classes, counts and words, never raw browser contents. Action items are the run\'s step receipts: a step on a run that is not ZDR is recorded, and a person\'s step is recorded as QUARRY_EDGE__HUMAN_RECEIPT_MODE says, where `none` records nothing. `limit` defaults to 50 and is clamped to 1 to 100. `cursor` is the `id` of the last item of the previous page, and an id that the timeline does not hold is a 400. `nextCursor` is null on the last page. Gate: none as a route. A ZDR run has no timeline, and the read is 409. Only the run\'s owner may read it; any other caller gets 404.
+     * The owner browser timeline of a run, oldest first, one page at a time
+     */
+    async listAgentBrowserTimelineRaw(requestParameters: ListAgentBrowserTimelineRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<ListAgentBrowserTimeline200Response>> {
+        const requestOptions = await this.listAgentBrowserTimelineRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => ListAgentBrowserTimeline200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * A bounded page of the run\'s owner timeline. It merges the run\'s step receipts, as `action` items, with Quarry\'s compact audit records (`control`, `tab`, `tab_control`, `attach`, `devtools` and `lifecycle` items), and sorts them by `occurredAt` and then `id`, oldest first. An item carries ids, classes, counts and words, never raw browser contents. Action items are the run\'s step receipts: a step on a run that is not ZDR is recorded, and a person\'s step is recorded as QUARRY_EDGE__HUMAN_RECEIPT_MODE says, where `none` records nothing. `limit` defaults to 50 and is clamped to 1 to 100. `cursor` is the `id` of the last item of the previous page, and an id that the timeline does not hold is a 400. `nextCursor` is null on the last page. Gate: none as a route. A ZDR run has no timeline, and the read is 409. Only the run\'s owner may read it; any other caller gets 404.
+     * The owner browser timeline of a run, oldest first, one page at a time
+     */
+    async listAgentBrowserTimeline(requestParameters: ListAgentBrowserTimelineRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<ListAgentBrowserTimeline200Response> {
+        const response = await this.listAgentBrowserTimelineRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listAgentDevtoolsEvents without sending the request
+     */
+    async listAgentDevtoolsEventsRequestOpts(requestParameters: ListAgentDevtoolsEventsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling listAgentDevtoolsEvents().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['afterSequence'] != null) {
+            queryParameters['afterSequence'] = requestParameters['afterSequence'];
+        }
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['levels'] != null) {
+            queryParameters['levels'] = requestParameters['levels'];
+        }
+
+        if (requestParameters['filter'] != null) {
+            queryParameters['filter'] = requestParameters['filter'];
+        }
+
+        if (requestParameters['category'] != null) {
+            queryParameters['category'] = requestParameters['category'];
+        }
+
+        if (requestParameters['tabId'] != null) {
+            queryParameters['tabId'] = requestParameters['tabId'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/devtools`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Returns events newer than afterSequence from the driver\'s bounded buffer (512 events). Filters are optional and combine with AND. levels accepts debug, info, log, warn, warning, error and verbose (at most five; warn is warning, log is info, verbose is debug). filter is a case-insensitive substring over text, url and name only, never payload, at most 200 characters without control characters. nextSequence is the last event examined; pass it back as afterSequence to continue even when no event matched.
+     * Read a filtered window of transient browser DevTools events
+     */
+    async listAgentDevtoolsEventsRaw(requestParameters: ListAgentDevtoolsEventsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<ListAgentDevtoolsEvents200Response>> {
+        const requestOptions = await this.listAgentDevtoolsEventsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => ListAgentDevtoolsEvents200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Returns events newer than afterSequence from the driver\'s bounded buffer (512 events). Filters are optional and combine with AND. levels accepts debug, info, log, warn, warning, error and verbose (at most five; warn is warning, log is info, verbose is debug). filter is a case-insensitive substring over text, url and name only, never payload, at most 200 characters without control characters. nextSequence is the last event examined; pass it back as afterSequence to continue even when no event matched.
+     * Read a filtered window of transient browser DevTools events
+     */
+    async listAgentDevtoolsEvents(requestParameters: ListAgentDevtoolsEventsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<ListAgentDevtoolsEvents200Response> {
+        const response = await this.listAgentDevtoolsEventsRaw(requestParameters, initOverrides);
         return await response.value();
     }
 
@@ -549,6 +1636,215 @@ export class AgentApi extends runtime.BaseAPI {
     }
 
     /**
+     * Creates request options for listAgentRunDownloads without sending the request
+     */
+    async listAgentRunDownloadsRequestOpts(requestParameters: ListAgentRunDownloadsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling listAgentRunDownloads().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/downloads`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Lists the files a `download_ref` step stored for the caller\'s own run, each already checked against the download type allow-list (PDF, plain text, Markdown, CSV). An entry names the artifact, its type, size and SHA-256 digest; it carries no URL and no file name. A ZDR run lists nothing. Off (403 `downloads_disabled`) until `QUARRY_EDGE__DOWNLOADS` is on.
+     * List the admitted downloads of a run
+     */
+    async listAgentRunDownloadsRaw(requestParameters: ListAgentRunDownloadsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<EnvelopeAgentRunDownloads>> {
+        const requestOptions = await this.listAgentRunDownloadsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => EnvelopeAgentRunDownloadsFromJSON(jsonValue));
+    }
+
+    /**
+     * Lists the files a `download_ref` step stored for the caller\'s own run, each already checked against the download type allow-list (PDF, plain text, Markdown, CSV). An entry names the artifact, its type, size and SHA-256 digest; it carries no URL and no file name. A ZDR run lists nothing. Off (403 `downloads_disabled`) until `QUARRY_EDGE__DOWNLOADS` is on.
+     * List the admitted downloads of a run
+     */
+    async listAgentRunDownloads(requestParameters: ListAgentRunDownloadsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<EnvelopeAgentRunDownloads> {
+        const response = await this.listAgentRunDownloadsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listAgentTabs without sending the request
+     */
+    async listAgentTabsRequestOpts(requestParameters: ListAgentTabsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling listAgentTabs().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/tabs`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * The driver\'s current tabs for the run. A tab carries no opener here; the owner projection (`GET .../browser-session`, see CONTRACTS.md) names who opened each tab as `openedBy`.
+     * List the live browser tabs of a run
+     */
+    async listAgentTabsRaw(requestParameters: ListAgentTabsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<EnvelopeAgentTabs>> {
+        const requestOptions = await this.listAgentTabsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => EnvelopeAgentTabsFromJSON(jsonValue));
+    }
+
+    /**
+     * The driver\'s current tabs for the run. A tab carries no opener here; the owner projection (`GET .../browser-session`, see CONTRACTS.md) names who opened each tab as `openedBy`.
+     * List the live browser tabs of a run
+     */
+    async listAgentTabs(requestParameters: ListAgentTabsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<EnvelopeAgentTabs> {
+        const response = await this.listAgentTabsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for markAgentTab without sending the request
+     */
+    async markAgentTabRequestOpts(requestParameters: MarkAgentTabOperationRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling markAgentTab().'
+            );
+        }
+
+        if (requestParameters['tabId'] == null) {
+            throw new runtime.RequiredError(
+                'tabId',
+                'Required parameter "tabId" was null or undefined when calling markAgentTab().'
+            );
+        }
+
+        if (requestParameters['markAgentTabRequest'] == null) {
+            throw new runtime.RequiredError(
+                'markAgentTabRequest',
+                'Required parameter "markAgentTabRequest" was null or undefined when calling markAgentTab().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/tabs/{tab_id}/mark`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+        urlPath = urlPath.replace('{tab_id}', encodeURIComponent(String(requestParameters['tabId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: MarkAgentTabRequestToJSON(requestParameters['markAgentTabRequest']),
+        };
+    }
+
+    /**
+     * WS8.F. The service principal that holds a live attachment on this tab, with its attach grant, nominates the tab. The nomination hands the tab to the person at once: its holder becomes human, so the delegate takes no further step on it. A successful release (`DELETE .../attach/{attach_id}` with the default `release`) then keeps an agent-opened tab open for the owner, if the grant still passes the check made at release; a borrowed tab always goes back to its owner. Both `mark` values are accepted and echoed. The ledger keeps the mark on the tab, and the owner projection (`GET .../browser-session`, see CONTRACTS.md) shows it as the tab\'s `mark`; the two values have the same effect on the holder and on release today. A closed run, a ZDR run, or a tab that is not this delegate\'s attached tab is 404. A grant that is no longer usable for the run is 403 attach_grant_invalid.
+     * Nominate the delegate\'s attached tab for handoff (dark; the delegate only)
+     */
+    async markAgentTabRaw(requestParameters: MarkAgentTabOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<MarkAgentTab200Response>> {
+        const requestOptions = await this.markAgentTabRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => MarkAgentTab200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * WS8.F. The service principal that holds a live attachment on this tab, with its attach grant, nominates the tab. The nomination hands the tab to the person at once: its holder becomes human, so the delegate takes no further step on it. A successful release (`DELETE .../attach/{attach_id}` with the default `release`) then keeps an agent-opened tab open for the owner, if the grant still passes the check made at release; a borrowed tab always goes back to its owner. Both `mark` values are accepted and echoed. The ledger keeps the mark on the tab, and the owner projection (`GET .../browser-session`, see CONTRACTS.md) shows it as the tab\'s `mark`; the two values have the same effect on the holder and on release today. A closed run, a ZDR run, or a tab that is not this delegate\'s attached tab is 404. A grant that is no longer usable for the run is 403 attach_grant_invalid.
+     * Nominate the delegate\'s attached tab for handoff (dark; the delegate only)
+     */
+    async markAgentTab(requestParameters: MarkAgentTabOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<MarkAgentTab200Response> {
+        const response = await this.markAgentTabRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for openAgentTab without sending the request
+     */
+    async openAgentTabRequestOpts(requestParameters: OpenAgentTabOperationRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling openAgentTab().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/tabs`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: OpenAgentTabRequestToJSON(requestParameters['openAgentTabRequest']),
+        };
+    }
+
+    /**
+     * Opens a tab (optionally navigated to `url`) and records who did it. Subject to the same gates as a step: the run\'s domains, its grant, and the take-over rule. Who is calling comes from the token (a service principal is an agent whatever it sends; a person is a person unless `initiatedBy` says `agent`), so the hint only tightens. The recorded identity of an agent is on the timeline item and the owner projection; see CONTRACTS.md.
+     * Open a browser tab on a run
+     */
+    async openAgentTabRaw(requestParameters: OpenAgentTabOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<EnvelopeAgentTab>> {
+        const requestOptions = await this.openAgentTabRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => EnvelopeAgentTabFromJSON(jsonValue));
+    }
+
+    /**
+     * Opens a tab (optionally navigated to `url`) and records who did it. Subject to the same gates as a step: the run\'s domains, its grant, and the take-over rule. Who is calling comes from the token (a service principal is an agent whatever it sends; a person is a person unless `initiatedBy` says `agent`), so the hint only tightens. The recorded identity of an agent is on the timeline item and the owner projection; see CONTRACTS.md.
+     * Open a browser tab on a run
+     */
+    async openAgentTab(requestParameters: OpenAgentTabOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<EnvelopeAgentTab> {
+        const response = await this.openAgentTabRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
      * Creates request options for qualityCheckAgentProcedure without sending the request
      */
     async qualityCheckAgentProcedureRequestOpts(requestParameters: QualityCheckAgentProcedureRequest): Promise<runtime.RequestOpts> {
@@ -596,6 +1892,252 @@ export class AgentApi extends runtime.BaseAPI {
     }
 
     /**
+     * Creates request options for releaseAgentAttach without sending the request
+     */
+    async releaseAgentAttachRequestOpts(requestParameters: ReleaseAgentAttachRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling releaseAgentAttach().'
+            );
+        }
+
+        if (requestParameters['attachId'] == null) {
+            throw new runtime.RequiredError(
+                'attachId',
+                'Required parameter "attachId" was null or undefined when calling releaseAgentAttach().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['disposition'] != null) {
+            queryParameters['disposition'] = requestParameters['disposition'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/attach/{attach_id}`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+        urlPath = urlPath.replace('{attach_id}', encodeURIComponent(String(requestParameters['attachId'])));
+
+        return {
+            path: urlPath,
+            method: 'DELETE',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Closes the agent tab and records the end on the timeline and as agent.detached. Does not revoke the grant.
+     * End an agent attachment (the delegate ends its own; the owner stops it)
+     */
+    async releaseAgentAttachRaw(requestParameters: ReleaseAgentAttachRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<void>> {
+        const requestOptions = await this.releaseAgentAttachRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.VoidApiResponse(response);
+    }
+
+    /**
+     * Closes the agent tab and records the end on the timeline and as agent.detached. Does not revoke the grant.
+     * End an agent attachment (the delegate ends its own; the owner stops it)
+     */
+    async releaseAgentAttach(requestParameters: ReleaseAgentAttachRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<void> {
+        await this.releaseAgentAttachRaw(requestParameters, initOverrides);
+    }
+
+    /**
+     * Creates request options for selectAgentTab without sending the request
+     */
+    async selectAgentTabRequestOpts(requestParameters: SelectAgentTabRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling selectAgentTab().'
+            );
+        }
+
+        if (requestParameters['tabId'] == null) {
+            throw new runtime.RequiredError(
+                'tabId',
+                'Required parameter "tabId" was null or undefined when calling selectAgentTab().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['initiatedBy'] != null) {
+            queryParameters['initiatedBy'] = requestParameters['initiatedBy'];
+        }
+
+        if (requestParameters['aiRunId'] != null) {
+            queryParameters['aiRunId'] = requestParameters['aiRunId'];
+        }
+
+        if (requestParameters['agentLabel'] != null) {
+            queryParameters['agentLabel'] = requestParameters['agentLabel'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/tabs/{tab_id}/select`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+        urlPath = urlPath.replace('{tab_id}', encodeURIComponent(String(requestParameters['tabId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Has no body, so the hint and the advisory fields are query parameters. Same take-over rule and recording as opening a tab.
+     * Make a tab the active one
+     */
+    async selectAgentTabRaw(requestParameters: SelectAgentTabRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<EnvelopeAgentTabs>> {
+        const requestOptions = await this.selectAgentTabRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => EnvelopeAgentTabsFromJSON(jsonValue));
+    }
+
+    /**
+     * Has no body, so the hint and the advisory fields are query parameters. Same take-over rule and recording as opening a tab.
+     * Make a tab the active one
+     */
+    async selectAgentTab(requestParameters: SelectAgentTabRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<EnvelopeAgentTabs> {
+        const response = await this.selectAgentTabRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for setAgentBrowserSessionControl without sending the request
+     */
+    async setAgentBrowserSessionControlRequestOpts(requestParameters: SetAgentBrowserSessionControlRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling setAgentBrowserSessionControl().'
+            );
+        }
+
+        if (requestParameters['browserSessionControlRequest'] == null) {
+            throw new runtime.RequiredError(
+                'browserSessionControlRequest',
+                'Required parameter "browserSessionControlRequest" was null or undefined when calling setAgentBrowserSessionControl().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/browser-session/control`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: BrowserSessionControlRequestToJSON(requestParameters['browserSessionControlRequest']),
+        };
+    }
+
+    /**
+     * Sets who may drive the run\'s browser. `human_takeover` gives it to the person, so an action that an agent proposes is refused with 409 USER_TOOK_OVER, and that refusal is enforced only while QUARRY_EDGE__TAKEOVER_ENFORCEMENT is on. `agent_control` gives it back. Only a person may make the change: a service principal\'s token gets 403 control_transition_requires_human, and an API-key token is refused by the route fence (api_key_route_refused). The change does not wait for an action that is still running. The control epoch advances only on a real change, so a request for the mode the run already has answers 200 and changes nothing. `expected_epoch`, when sent, makes the change a compare-and-set: while the run\'s epoch is another number, the answer is 409 CONFLICT with `details.control_epoch` and `details.expected_epoch`. A real change on a run that is not ZDR writes one control item on the owner timeline. Every real change emits a `browser.control` event on the run\'s trace, and on a ZDR run that event reaches live subscribers only, with nothing durable written. A takeover pauses the run\'s budget clock, and handing the browser back resumes it. The answer is the owner projection, as `GET .../browser-session` gives it. Gate: none as a route. Only the run\'s owner may call it; any other caller, and a run the edge does not hold, gets 404.
+     * Hand the run browser to the person, or back to the agent
+     */
+    async setAgentBrowserSessionControlRaw(requestParameters: SetAgentBrowserSessionControlRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<GetAgentBrowserSession200Response>> {
+        const requestOptions = await this.setAgentBrowserSessionControlRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => GetAgentBrowserSession200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Sets who may drive the run\'s browser. `human_takeover` gives it to the person, so an action that an agent proposes is refused with 409 USER_TOOK_OVER, and that refusal is enforced only while QUARRY_EDGE__TAKEOVER_ENFORCEMENT is on. `agent_control` gives it back. Only a person may make the change: a service principal\'s token gets 403 control_transition_requires_human, and an API-key token is refused by the route fence (api_key_route_refused). The change does not wait for an action that is still running. The control epoch advances only on a real change, so a request for the mode the run already has answers 200 and changes nothing. `expected_epoch`, when sent, makes the change a compare-and-set: while the run\'s epoch is another number, the answer is 409 CONFLICT with `details.control_epoch` and `details.expected_epoch`. A real change on a run that is not ZDR writes one control item on the owner timeline. Every real change emits a `browser.control` event on the run\'s trace, and on a ZDR run that event reaches live subscribers only, with nothing durable written. A takeover pauses the run\'s budget clock, and handing the browser back resumes it. The answer is the owner projection, as `GET .../browser-session` gives it. Gate: none as a route. Only the run\'s owner may call it; any other caller, and a run the edge does not hold, gets 404.
+     * Hand the run browser to the person, or back to the agent
+     */
+    async setAgentBrowserSessionControl(requestParameters: SetAgentBrowserSessionControlRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<GetAgentBrowserSession200Response> {
+        const response = await this.setAgentBrowserSessionControlRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for setAgentTabHolder without sending the request
+     */
+    async setAgentTabHolderRequestOpts(requestParameters: SetAgentTabHolderOperationRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling setAgentTabHolder().'
+            );
+        }
+
+        if (requestParameters['tabId'] == null) {
+            throw new runtime.RequiredError(
+                'tabId',
+                'Required parameter "tabId" was null or undefined when calling setAgentTabHolder().'
+            );
+        }
+
+        if (requestParameters['setAgentTabHolderRequest'] == null) {
+            throw new runtime.RequiredError(
+                'setAgentTabHolderRequest',
+                'Required parameter "setAgentTabHolderRequest" was null or undefined when calling setAgentTabHolder().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/tabs/{tab_id}/control`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+        urlPath = urlPath.replace('{tab_id}', encodeURIComponent(String(requestParameters['tabId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: SetAgentTabHolderRequestToJSON(requestParameters['setAgentTabHolderRequest']),
+        };
+    }
+
+    /**
+     * holder agent needs a live attachment on this tab (no_attached_agent, 409). holder human takes the tab back. Compare-and-set on the tab epoch: a stale expected_epoch is stale_tab_epoch (409). A change writes a tab_control timeline item.
+     * Hand a tab to the agent or take it back (the owner\'s own token only)
+     */
+    async setAgentTabHolderRaw(requestParameters: SetAgentTabHolderOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<void>> {
+        const requestOptions = await this.setAgentTabHolderRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.VoidApiResponse(response);
+    }
+
+    /**
+     * holder agent needs a live attachment on this tab (no_attached_agent, 409). holder human takes the tab back. Compare-and-set on the tab epoch: a stale expected_epoch is stale_tab_epoch (409). A change writes a tab_control timeline item.
+     * Hand a tab to the agent or take it back (the owner\'s own token only)
+     */
+    async setAgentTabHolder(requestParameters: SetAgentTabHolderOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<void> {
+        await this.setAgentTabHolderRaw(requestParameters, initOverrides);
+    }
+
+    /**
      * Creates request options for startAgentRun without sending the request
      */
     async startAgentRunRequestOpts(requestParameters: StartAgentRunOperationRequest): Promise<runtime.RequestOpts> {
@@ -625,7 +2167,7 @@ export class AgentApi extends runtime.BaseAPI {
     }
 
     /**
-     * Creates a tenant-owned browser lease. BrowserBroker grants are revalidated at run start and before every action; non-ZDR runs receive a durable continuation checkpoint. 
+     * Creates a tenant-owned browser lease. BrowserBroker grants are revalidated at run start and before every action; non-ZDR runs receive a durable continuation checkpoint. API-key callers (INNH-10, off until `QUARRY_EDGE__API_KEY_AGENT_RUNS` is on): the bearer is a short-lived token of the `api_key` principal type (`sub` `apikey:<key_id>`, scope `browser:agent`) that Auth Core minted for the key; the key itself never reaches Quarry. A key run needs a `grant_id` in every environment, issued to that key (an allow-list session grant with hosts and a budget; its hosts replace `constraints.allowed_domains`), takes no `resume_run_id`, `profile_id` or `persist_profile`, is always an agent run, and may call only the routes of the key allow-list (see CONTRACTS.md, \"API-key agent runs\"). The refusals are 403 with `error.details.reason` `api_key_*` and 429 `per_key_run_cap`; see ERROR_REASONS.md.
      * Acquire a governed browser-agent run
      */
     async startAgentRunRaw(requestParameters: StartAgentRunOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<EnvelopeStartAgentRun>> {
@@ -636,7 +2178,7 @@ export class AgentApi extends runtime.BaseAPI {
     }
 
     /**
-     * Creates a tenant-owned browser lease. BrowserBroker grants are revalidated at run start and before every action; non-ZDR runs receive a durable continuation checkpoint. 
+     * Creates a tenant-owned browser lease. BrowserBroker grants are revalidated at run start and before every action; non-ZDR runs receive a durable continuation checkpoint. API-key callers (INNH-10, off until `QUARRY_EDGE__API_KEY_AGENT_RUNS` is on): the bearer is a short-lived token of the `api_key` principal type (`sub` `apikey:<key_id>`, scope `browser:agent`) that Auth Core minted for the key; the key itself never reaches Quarry. A key run needs a `grant_id` in every environment, issued to that key (an allow-list session grant with hosts and a budget; its hosts replace `constraints.allowed_domains`), takes no `resume_run_id`, `profile_id` or `persist_profile`, is always an agent run, and may call only the routes of the key allow-list (see CONTRACTS.md, \"API-key agent runs\"). The refusals are 403 with `error.details.reason` `api_key_*` and 429 `per_key_run_cap`; see ERROR_REASONS.md.
      * Acquire a governed browser-agent run
      */
     async startAgentRun(requestParameters: StartAgentRunOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<EnvelopeStartAgentRun> {
@@ -644,4 +2186,219 @@ export class AgentApi extends runtime.BaseAPI {
         return await response.value();
     }
 
+    /**
+     * Creates request options for streamAgentLiveFrames without sending the request
+     */
+    async streamAgentLiveFramesRequestOpts(requestParameters: StreamAgentLiveFramesRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling streamAgentLiveFrames().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['tabId'] != null) {
+            queryParameters['tabId'] = requestParameters['tabId'];
+        }
+
+        if (requestParameters['format'] != null) {
+            queryParameters['format'] = requestParameters['format'];
+        }
+
+        if (requestParameters['quality'] != null) {
+            queryParameters['quality'] = requestParameters['quality'];
+        }
+
+        if (requestParameters['maxWidth'] != null) {
+            queryParameters['maxWidth'] = requestParameters['maxWidth'];
+        }
+
+        if (requestParameters['maxHeight'] != null) {
+            queryParameters['maxHeight'] = requestParameters['maxHeight'];
+        }
+
+        if (requestParameters['everyNthFrame'] != null) {
+            queryParameters['everyNthFrame'] = requestParameters['everyNthFrame'];
+        }
+
+        if (requestParameters['timeoutMs'] != null) {
+            queryParameters['timeoutMs'] = requestParameters['timeoutMs'];
+        }
+
+        if (requestParameters['intervalMs'] != null) {
+            queryParameters['intervalMs'] = requestParameters['intervalMs'];
+        }
+
+        if (requestParameters['maxFrames'] != null) {
+            queryParameters['maxFrames'] = requestParameters['maxFrames'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (requestParameters['xQuarryLiveScope'] != null) {
+            headerParameters['X-Quarry-Live-Scope'] = String(requestParameters['xQuarryLiveScope']);
+        }
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/frames/stream`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * A stream of transient frames of the run\'s current page, for live preview. Each `frame` event carries one frame, and its SSE `id` is the frame\'s `sequence`, counted from 1. Frames are never persisted: the stream writes no artifact, receipt, timeline item or checkpoint, and it is a read-only visual channel, since actions still go through `POST .../step`. Without `tabId` the stream opens with one `live_view` event when the driver has a live-view reference. That event is the same object as `GET .../live-view`, and under a view-only scope only a read-only kind is sent. Frames then come every `intervalMs`. `maxFrames` ends the stream with `done` `max_frames` after that many frames. The stream ends with `done` `shutdown` when the edge drains. A driver failure sends one `error` event, whose data is the error\'s text and not a wire code, and then ends the stream. `agentCursor` appears only on a `tabId` stream of a tab that an agent holds through a live attachment, which needs QUARRY_EDGE__ATTACH. Gate: none as a route, and the frame options and scope are those of `GET .../frame`. The owner, gating, scope and option rules are checked before the stream opens, and only the run\'s owner may open it; any other caller gets 404.
+     * Transient live frames of the run browser as Server-Sent Events
+     */
+    async streamAgentLiveFramesRaw(requestParameters: StreamAgentLiveFramesRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<string>> {
+        const requestOptions = await this.streamAgentLiveFramesRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        if (this.isJsonMime(response.headers.get('content-type'))) {
+            return new runtime.JSONApiResponse<string>(response);
+        } else {
+            return new runtime.TextApiResponse(response) as any;
+        }
+    }
+
+    /**
+     * A stream of transient frames of the run\'s current page, for live preview. Each `frame` event carries one frame, and its SSE `id` is the frame\'s `sequence`, counted from 1. Frames are never persisted: the stream writes no artifact, receipt, timeline item or checkpoint, and it is a read-only visual channel, since actions still go through `POST .../step`. Without `tabId` the stream opens with one `live_view` event when the driver has a live-view reference. That event is the same object as `GET .../live-view`, and under a view-only scope only a read-only kind is sent. Frames then come every `intervalMs`. `maxFrames` ends the stream with `done` `max_frames` after that many frames. The stream ends with `done` `shutdown` when the edge drains. A driver failure sends one `error` event, whose data is the error\'s text and not a wire code, and then ends the stream. `agentCursor` appears only on a `tabId` stream of a tab that an agent holds through a live attachment, which needs QUARRY_EDGE__ATTACH. Gate: none as a route, and the frame options and scope are those of `GET .../frame`. The owner, gating, scope and option rules are checked before the stream opens, and only the run\'s owner may open it; any other caller gets 404.
+     * Transient live frames of the run browser as Server-Sent Events
+     */
+    async streamAgentLiveFrames(requestParameters: StreamAgentLiveFramesRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<string> {
+        const response = await this.streamAgentLiveFramesRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for streamAgentRunEvents without sending the request
+     */
+    async streamAgentRunEventsRequestOpts(requestParameters: StreamAgentRunEventsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['runId'] == null) {
+            throw new runtime.RequiredError(
+                'runId',
+                'Required parameter "runId" was null or undefined when calling streamAgentRunEvents().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['fromSeq'] != null) {
+            queryParameters['from_seq'] = requestParameters['fromSeq'];
+        }
+
+        if (requestParameters['maxEvents'] != null) {
+            queryParameters['max_events'] = requestParameters['maxEvents'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        if (requestParameters['lastEventID'] != null) {
+            headerParameters['Last-Event-ID'] = String(requestParameters['lastEventID']);
+        }
+
+
+        let urlPath = `/v1/agent/runs/{run_id}/events/stream`;
+        urlPath = urlPath.replace('{run_id}', encodeURIComponent(String(requestParameters['runId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Streams the run\'s user-facing events (agent.started, action.started, action.completed, action.failed, observation.ready, agent.completed, agent.expired, agent.budget_exhausted, agent.failed) in the order of the run\'s trace, and the browser trace events (WS10.S4): browser.session.opened, browser.session.closed, browser.control, browser.tab, browser.receipt, browser.egress and browser.artifact. The browser events are agent class and never reach the Ingestion bus (see CONTRACTS.md, \"Agent run trace: browser events and run origin\"). Each SSE `id:` is the event\'s per-run `seq` (dense, starting at 1 for an agent run). Resume with the `Last-Event-ID` header a reconnecting EventSource sends, or with `from_seq`; `from_seq` wins when both are present. The stream replays the run\'s in-memory replay ring after that seq, then tails the live channel with no gap and no duplicate. The ring holds `QUARRY_EDGE__TRACE_RING_EVENTS` events (default 512; 0 disables it) within `QUARRY_EDGE__TRACE_RING_MAX_BYTES` (default 1 MiB) and lives only as long as the run. A `replay_gap` event comes first when the ring no longer holds the events after the resume point; its fallback is the durable browser-session timeline. The stream ends with `event: done` and `data: run_closed` when the run closes, or `data: max_events` when `max_events` is reached. A slow consumer gets `event: lagged` and the stream resumes from the ring. Only the owner of the run may read it; any other caller gets 404.
+     * Typed agent-run events as Server-Sent Events, with resume (WS10.S3)
+     */
+    async streamAgentRunEventsRaw(requestParameters: StreamAgentRunEventsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<string>> {
+        const requestOptions = await this.streamAgentRunEventsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        if (this.isJsonMime(response.headers.get('content-type'))) {
+            return new runtime.JSONApiResponse<string>(response);
+        } else {
+            return new runtime.TextApiResponse(response) as any;
+        }
+    }
+
+    /**
+     * Streams the run\'s user-facing events (agent.started, action.started, action.completed, action.failed, observation.ready, agent.completed, agent.expired, agent.budget_exhausted, agent.failed) in the order of the run\'s trace, and the browser trace events (WS10.S4): browser.session.opened, browser.session.closed, browser.control, browser.tab, browser.receipt, browser.egress and browser.artifact. The browser events are agent class and never reach the Ingestion bus (see CONTRACTS.md, \"Agent run trace: browser events and run origin\"). Each SSE `id:` is the event\'s per-run `seq` (dense, starting at 1 for an agent run). Resume with the `Last-Event-ID` header a reconnecting EventSource sends, or with `from_seq`; `from_seq` wins when both are present. The stream replays the run\'s in-memory replay ring after that seq, then tails the live channel with no gap and no duplicate. The ring holds `QUARRY_EDGE__TRACE_RING_EVENTS` events (default 512; 0 disables it) within `QUARRY_EDGE__TRACE_RING_MAX_BYTES` (default 1 MiB) and lives only as long as the run. A `replay_gap` event comes first when the ring no longer holds the events after the resume point; its fallback is the durable browser-session timeline. The stream ends with `event: done` and `data: run_closed` when the run closes, or `data: max_events` when `max_events` is reached. A slow consumer gets `event: lagged` and the stream resumes from the ring. Only the owner of the run may read it; any other caller gets 404.
+     * Typed agent-run events as Server-Sent Events, with resume (WS10.S3)
+     */
+    async streamAgentRunEvents(requestParameters: StreamAgentRunEventsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<string> {
+        const response = await this.streamAgentRunEventsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
 }
+
+/**
+ * @export
+ */
+export const CloseAgentTabInitiatedByEnum = {
+    Human: 'human',
+    Agent: 'agent'
+} as const;
+export type CloseAgentTabInitiatedByEnum = typeof CloseAgentTabInitiatedByEnum[keyof typeof CloseAgentTabInitiatedByEnum];
+/**
+ * @export
+ */
+export const ConnectAgentLiveFrameSocketFormatEnum = {
+    Jpeg: 'jpeg',
+    Jpg: 'jpg',
+    Png: 'png'
+} as const;
+export type ConnectAgentLiveFrameSocketFormatEnum = typeof ConnectAgentLiveFrameSocketFormatEnum[keyof typeof ConnectAgentLiveFrameSocketFormatEnum];
+/**
+ * @export
+ */
+export const GetAgentLiveFrameFormatEnum = {
+    Jpeg: 'jpeg',
+    Jpg: 'jpg',
+    Png: 'png'
+} as const;
+export type GetAgentLiveFrameFormatEnum = typeof GetAgentLiveFrameFormatEnum[keyof typeof GetAgentLiveFrameFormatEnum];
+/**
+ * @export
+ */
+export const ListAgentDevtoolsEventsCategoryEnum = {
+    Console: 'console',
+    Network: 'network',
+    Lifecycle: 'lifecycle'
+} as const;
+export type ListAgentDevtoolsEventsCategoryEnum = typeof ListAgentDevtoolsEventsCategoryEnum[keyof typeof ListAgentDevtoolsEventsCategoryEnum];
+/**
+ * @export
+ */
+export const ReleaseAgentAttachDispositionEnum = {
+    Release: 'release',
+    Abort: 'abort'
+} as const;
+export type ReleaseAgentAttachDispositionEnum = typeof ReleaseAgentAttachDispositionEnum[keyof typeof ReleaseAgentAttachDispositionEnum];
+/**
+ * @export
+ */
+export const SelectAgentTabInitiatedByEnum = {
+    Human: 'human',
+    Agent: 'agent'
+} as const;
+export type SelectAgentTabInitiatedByEnum = typeof SelectAgentTabInitiatedByEnum[keyof typeof SelectAgentTabInitiatedByEnum];
+/**
+ * @export
+ */
+export const StreamAgentLiveFramesFormatEnum = {
+    Jpeg: 'jpeg',
+    Jpg: 'jpg',
+    Png: 'png'
+} as const;
+export type StreamAgentLiveFramesFormatEnum = typeof StreamAgentLiveFramesFormatEnum[keyof typeof StreamAgentLiveFramesFormatEnum];

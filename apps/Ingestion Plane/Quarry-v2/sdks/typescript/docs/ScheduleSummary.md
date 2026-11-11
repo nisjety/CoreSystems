@@ -23,6 +23,7 @@ Name | Type
 `lastRunAt` | Date
 `nextRunAt` | Date
 `config` | any
+`tag` | string
 
 ## Example
 
@@ -48,6 +49,7 @@ const example = {
   "lastRunAt": null,
   "nextRunAt": null,
   "config": null,
+  "tag": null,
 } satisfies ScheduleSummary
 
 console.log(example)

@@ -20,7 +20,7 @@ import { mapValues } from '../runtime';
  */
 export interface ScrapeResponseAllOfWarnings {
     /**
-     * e.g. unknown_field, document_has_no_text_layer, document_text_truncated, format_unavailable_for_documents
+     * e.g. unknown_field, document_has_no_text_layer, document_text_truncated, format_unavailable_for_documents. A PDF scrape with no text layer, on a deployment with the OCR lane switched on (QUARRY_EDGE__OCR, off by default; never under zero data retention), carries `ocr_applied` (the message names a page count only) when the pages were read, `document_ocr_partial` when the PDF has more pages than one OCR call carries (20), and `document_ocr_unavailable` (the message names a closed reason such as zdr_refused, lane_not_granted, timeout or unusable_answer) when OCR was asked for and produced no text.
      * @type {string}
      * @memberof ScrapeResponseAllOfWarnings
      */

@@ -25,6 +25,12 @@ export interface CompileProcedureRequest {
      * @memberof CompileProcedureRequest
      */
     procedureId?: string;
+    /**
+     * E4.2 step 2: compile a version 2 (canonical) procedure, with semantic targets, typed-text slots and the postconditions Quarry verified. Dark: while QUARRY_EDGE__PROCEDURE_CANONICAL is off (the default) a request that sets it is refused with 400 `procedure_canonical_disabled`. Absent or false compiles version 1, as before.
+     * @type {boolean}
+     * @memberof CompileProcedureRequest
+     */
+    canonical?: boolean;
 }
 
 /**
@@ -45,6 +51,7 @@ export function CompileProcedureRequestFromJSONTyped(json: any, ignoreDiscrimina
     return {
         
         'procedureId': json['procedure_id'] == null ? undefined : json['procedure_id'],
+        'canonical': json['canonical'] == null ? undefined : json['canonical'],
     };
 }
 
@@ -60,6 +67,7 @@ export function CompileProcedureRequestToJSONTyped(value?: CompileProcedureReque
     return {
         
         'procedure_id': value['procedureId'],
+        'canonical': value['canonical'],
     };
 }
 

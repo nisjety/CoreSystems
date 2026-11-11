@@ -39,6 +39,12 @@ export interface RateLimitError {
     hint?: string;
     /**
      * 
+     * @type {Array<string>}
+     * @memberof RateLimitError
+     */
+    nextActions?: Array<string>;
+    /**
+     * 
      * @type {string}
      * @memberof RateLimitError
      */
@@ -49,12 +55,6 @@ export interface RateLimitError {
      * @memberof RateLimitError
      */
     retryAfterSeconds?: number;
-    /**
-     * 
-     * @type {Array<string>}
-     * @memberof RateLimitError
-     */
-    nextActions?: Array<string>;
 }
 
 /**
@@ -79,9 +79,9 @@ export function RateLimitErrorFromJSONTyped(json: any, ignoreDiscriminator: bool
         'error': json['error'],
         'code': json['code'],
         'hint': json['hint'] == null ? undefined : json['hint'],
+        'nextActions': json['next_actions'] == null ? undefined : json['next_actions'],
         'window': json['window'] == null ? undefined : json['window'],
         'retryAfterSeconds': json['retry_after_seconds'] == null ? undefined : json['retry_after_seconds'],
-        'nextActions': json['next_actions'] == null ? undefined : json['next_actions'],
     };
 }
 
@@ -99,9 +99,9 @@ export function RateLimitErrorToJSONTyped(value?: RateLimitError | null, ignoreD
         'error': value['error'],
         'code': value['code'],
         'hint': value['hint'],
+        'next_actions': value['nextActions'],
         'window': value['window'],
         'retry_after_seconds': value['retryAfterSeconds'],
-        'next_actions': value['nextActions'],
     };
 }
 

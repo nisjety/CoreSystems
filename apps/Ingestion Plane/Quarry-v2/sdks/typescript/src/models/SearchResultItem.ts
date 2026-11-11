@@ -49,6 +49,12 @@ export interface SearchResultItem {
      * @memberof SearchResultItem
      */
     provider: string;
+    /**
+     * The Data Plane cross-encoder's relevance score for this result. Present only when the request asked for cross_encoder.v1 in score_kinds and the rerank was applied. Absent otherwise.
+     * @type {number}
+     * @memberof SearchResultItem
+     */
+    score?: number;
 }
 
 /**
@@ -76,6 +82,7 @@ export function SearchResultItemFromJSONTyped(json: any, ignoreDiscriminator: bo
         'snippet': json['snippet'] == null ? undefined : json['snippet'],
         'rank': json['rank'],
         'provider': json['provider'],
+        'score': json['score'] == null ? undefined : json['score'],
     };
 }
 
@@ -95,6 +102,7 @@ export function SearchResultItemToJSONTyped(value?: SearchResultItem | null, ign
         'snippet': value['snippet'],
         'rank': value['rank'],
         'provider': value['provider'],
+        'score': value['score'],
     };
 }
 

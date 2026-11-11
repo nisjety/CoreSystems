@@ -14,19 +14,19 @@
 
 import { mapValues } from '../runtime';
 /**
- * Which agent was behind an operation an agent initiated. Ids and classes only. Only `principalId` of a `service_principal` basis is verified (it is the calling token's signed service id); `aiRunId` and `label` are what the caller said, advisory, and never used to decide anything.
+ * Which agent was behind an operation an agent initiated. Ids and classes only. Only `principalId` of a `service_principal` or `api_key` basis is verified (it is the calling token's signed id); `aiRunId` and `label` are what the caller said, advisory, and never used to decide anything.
  * @export
  * @interface AgentIdentity
  */
 export interface AgentIdentity {
     /**
-     * `service_principal`: the call carried a service principal's own token. `user_session`: it carried a person's token with an `agent` hint, so the token proves the person, not which agent.
+     * `service_principal`: the call carried a service principal's own token. `user_session`: it carried a person's token with an `agent` hint, so the token proves the person, not which agent. `api_key` (INNH-10): the call carried an API key's own token, and `principalId` is that key's `apikey:` id.
      * @type {AgentIdentityBasisEnum}
      * @memberof AgentIdentity
      */
     basis: AgentIdentityBasisEnum;
     /**
-     * The signed service id of the caller. Present only for `service_principal`.
+     * The signed service id of the caller, or the API key's `apikey:` id. Present only for `service_principal` and `api_key`.
      * @type {string}
      * @memberof AgentIdentity
      */
@@ -51,7 +51,8 @@ export interface AgentIdentity {
  */
 export const AgentIdentityBasisEnum = {
     ServicePrincipal: 'service_principal',
-    UserSession: 'user_session'
+    UserSession: 'user_session',
+    ApiKey: 'api_key'
 } as const;
 export type AgentIdentityBasisEnum = typeof AgentIdentityBasisEnum[keyof typeof AgentIdentityBasisEnum];
 

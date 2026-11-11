@@ -44,7 +44,7 @@ export interface BaselineSnapshot {
      */
     fingerprint: string;
     /**
-     * 
+     * The stored markdown of this version (INNH-4). Set on a baseline a change monitor recorded with QUARRY_EDGE__CHANGE_TEXT_DIFF on; absent on older baselines and always under Zero Data Retention.
      * @type {string}
      * @memberof BaselineSnapshot
      */

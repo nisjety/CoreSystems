@@ -13,6 +13,14 @@
  */
 
 import { mapValues } from '../runtime';
+import type { HandoffAckEffectiveRequestWarningsInner } from './HandoffAckEffectiveRequestWarningsInner';
+import {
+    HandoffAckEffectiveRequestWarningsInnerFromJSON,
+    HandoffAckEffectiveRequestWarningsInnerFromJSONTyped,
+    HandoffAckEffectiveRequestWarningsInnerToJSON,
+    HandoffAckEffectiveRequestWarningsInnerToJSONTyped,
+} from './HandoffAckEffectiveRequestWarningsInner';
+
 /**
  * WS14.S3. Set by /v1/crawl only: the scope and bounds the crawl runs with. `scope_mode` is observe (count, drop nothing; the default) or enforce; `legacy` is true when the scope switch is off; `warnings` lists the widened switches. Never a URL.
  * @export
@@ -61,6 +69,24 @@ export interface HandoffAckEffective {
      * @memberof HandoffAckEffective
      */
     warnings?: Array<string>;
+    /**
+     * INNH-6a. Present only when the request asked for `include` or `only`.
+     * @type {HandoffAckEffectiveSitemapEnum}
+     * @memberof HandoffAckEffective
+     */
+    sitemap?: HandoffAckEffectiveSitemapEnum;
+    /**
+     * INNH-6b. Present only when the request had scrape_options. The resolved, canonical form the pages run with.
+     * @type {object}
+     * @memberof HandoffAckEffective
+     */
+    scrapeOptions?: object;
+    /**
+     * Keys the request carried that nothing read (lenient mode); a key inside scrape_options is named `scrape_options.<key>`.
+     * @type {Array<HandoffAckEffectiveRequestWarningsInner>}
+     * @memberof HandoffAckEffective
+     */
+    requestWarnings?: Array<HandoffAckEffectiveRequestWarningsInner>;
 }
 
 
@@ -81,6 +107,15 @@ export const HandoffAckEffectiveRobotsEnum = {
     Ignore: 'ignore'
 } as const;
 export type HandoffAckEffectiveRobotsEnum = typeof HandoffAckEffectiveRobotsEnum[keyof typeof HandoffAckEffectiveRobotsEnum];
+
+/**
+ * @export
+ */
+export const HandoffAckEffectiveSitemapEnum = {
+    Include: 'include',
+    Only: 'only'
+} as const;
+export type HandoffAckEffectiveSitemapEnum = typeof HandoffAckEffectiveSitemapEnum[keyof typeof HandoffAckEffectiveSitemapEnum];
 
 
 /**
@@ -107,6 +142,9 @@ export function HandoffAckEffectiveFromJSONTyped(json: any, ignoreDiscriminator:
         'maxDepth': json['max_depth'] == null ? undefined : json['max_depth'],
         'legacy': json['legacy'] == null ? undefined : json['legacy'],
         'warnings': json['warnings'] == null ? undefined : json['warnings'],
+        'sitemap': json['sitemap'] == null ? undefined : json['sitemap'],
+        'scrapeOptions': json['scrape_options'] == null ? undefined : json['scrape_options'],
+        'requestWarnings': json['request_warnings'] == null ? undefined : ((json['request_warnings'] as Array<any>).map(HandoffAckEffectiveRequestWarningsInnerFromJSON)),
     };
 }
 
@@ -128,6 +166,9 @@ export function HandoffAckEffectiveToJSONTyped(value?: HandoffAckEffective | nul
         'max_depth': value['maxDepth'],
         'legacy': value['legacy'],
         'warnings': value['warnings'],
+        'sitemap': value['sitemap'],
+        'scrape_options': value['scrapeOptions'],
+        'request_warnings': value['requestWarnings'] == null ? undefined : ((value['requestWarnings'] as Array<any>).map(HandoffAckEffectiveRequestWarningsInnerToJSON)),
     };
 }
 

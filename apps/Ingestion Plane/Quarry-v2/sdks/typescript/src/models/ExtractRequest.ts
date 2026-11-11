@@ -32,7 +32,7 @@ export interface ExtractRequest {
      */
     schema?: object;
     /**
-     * 
+     * Instructions for the model, 1 to 10000 characters after trimming (control characters other than line breaks and tabs are dropped). With `schema` they steer the schema-guided extraction and cannot relax the schema; alone they ask for one free-form JSON object. The page text is sent as data, outside the instructions. The prompt is never echoed in a response or written to a log. An empty or over-long prompt is a 400.
      * @type {string}
      * @memberof ExtractRequest
      */

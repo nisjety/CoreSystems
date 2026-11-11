@@ -9,6 +9,7 @@ Name | Type
 `error` | string
 `code` | string
 `hint` | string
+`nextActions` | Array&lt;string&gt;
 
 ## Example
 
@@ -20,6 +21,7 @@ const example = {
   "error": null,
   "code": null,
   "hint": null,
+  "nextActions": null,
 } satisfies ErrorBody
 
 console.log(example)

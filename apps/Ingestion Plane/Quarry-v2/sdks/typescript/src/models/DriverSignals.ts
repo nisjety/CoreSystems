@@ -38,9 +38,10 @@ export interface DriverSignals {
      */
     pdf?: boolean;
     /**
-     * Number of prior blocks (>=2 escalates to browser)
+     * Deprecated. Number of prior blocks. Under QUARRY_BLOCK_ESCALATION=legacy a value of 1 selects the TLS driver and 2 or more the browser; under honest (WS3.I) the field is accepted and ignored, because a block never changes the identity Quarry presents.
      * @type {number}
      * @memberof DriverSignals
+     * @deprecated
      */
     priorBlockSignals?: number;
     /**

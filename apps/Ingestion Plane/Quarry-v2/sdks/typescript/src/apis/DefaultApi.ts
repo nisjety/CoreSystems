@@ -19,10 +19,30 @@ import {
     ChangeCheckRequestToJSON,
 } from '../models/ChangeCheckRequest';
 import {
+    type ClearProfileData200Response,
+    ClearProfileData200ResponseFromJSON,
+    ClearProfileData200ResponseToJSON,
+} from '../models/ClearProfileData200Response';
+import {
+    type ClearProfileDataRequest,
+    ClearProfileDataRequestFromJSON,
+    ClearProfileDataRequestToJSON,
+} from '../models/ClearProfileDataRequest';
+import {
     type CreateProfileRequest,
     CreateProfileRequestFromJSON,
     CreateProfileRequestToJSON,
 } from '../models/CreateProfileRequest';
+import {
+    type GetJobStatus200Response,
+    GetJobStatus200ResponseFromJSON,
+    GetJobStatus200ResponseToJSON,
+} from '../models/GetJobStatus200Response';
+import {
+    type ProcessingContinuesEnvelope,
+    ProcessingContinuesEnvelopeFromJSON,
+    ProcessingContinuesEnvelopeToJSON,
+} from '../models/ProcessingContinuesEnvelope';
 import {
     type ProfileDetail,
     ProfileDetailFromJSON,
@@ -67,6 +87,11 @@ export interface CancelCrawlRequest {
     jobId: string;
 }
 
+export interface ClearProfileDataOperationRequest {
+    profileId: string;
+    clearProfileDataRequest: ClearProfileDataRequest;
+}
+
 export interface CreateProfileOperationRequest {
     createProfileRequest: CreateProfileRequest;
 }
@@ -83,6 +108,8 @@ export interface GetBatchErrorsRequest {
 
 export interface GetBatchStatusRequest {
     jobId: string;
+    wait?: number;
+    resume?: string;
 }
 
 export interface GetCrawlErrorsRequest {
@@ -93,6 +120,8 @@ export interface GetCrawlErrorsRequest {
 
 export interface GetCrawlStatusRequest {
     jobId: string;
+    wait?: number;
+    resume?: string;
 }
 
 export interface GetJobErrorsRequest {
@@ -103,6 +132,8 @@ export interface GetJobErrorsRequest {
 
 export interface GetJobStatusRequest {
     jobId: string;
+    wait?: number;
+    resume?: string;
 }
 
 export interface GetProfileRequest {
@@ -235,6 +266,63 @@ export class DefaultApi extends runtime.BaseAPI {
      */
     async cancelCrawl(requestParameters: CancelCrawlRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<object> {
         const response = await this.cancelCrawlRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for clearProfileData without sending the request
+     */
+    async clearProfileDataRequestOpts(requestParameters: ClearProfileDataOperationRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['profileId'] == null) {
+            throw new runtime.RequiredError(
+                'profileId',
+                'Required parameter "profileId" was null or undefined when calling clearProfileData().'
+            );
+        }
+
+        if (requestParameters['clearProfileDataRequest'] == null) {
+            throw new runtime.RequiredError(
+                'clearProfileDataRequest',
+                'Required parameter "clearProfileDataRequest" was null or undefined when calling clearProfileData().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/profiles/{profile_id}/clear-data`;
+        urlPath = urlPath.replace('{profile_id}', encodeURIComponent(String(requestParameters['profileId'])));
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: ClearProfileDataRequestToJSON(requestParameters['clearProfileDataRequest']),
+        };
+    }
+
+    /**
+     * Removes the browsing data a stored profile holds and keeps the profile, its name, scope, owner, user agent, viewport, locale and timezone. `dry_run` defaults to true: a call that does not send `dry_run: false` only counts what it would remove. The answer carries counts only, never a name or a value.  A profile a live run holds is refused with 409 `profile_in_use` until that run closes, because its browser session would save the profile again. A ZDR organization is not refused (the route is a wind-down, like delete). A service principal is refused. 
+     * Remove a stored profile\'s cookies, web storage and IndexedDB (F-t2-068). Off unless QUARRY_EDGE__PROFILE_CLEAR_DATA is on.
+     */
+    async clearProfileDataRaw(requestParameters: ClearProfileDataOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<ClearProfileData200Response>> {
+        const requestOptions = await this.clearProfileDataRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => ClearProfileData200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Removes the browsing data a stored profile holds and keeps the profile, its name, scope, owner, user agent, viewport, locale and timezone. `dry_run` defaults to true: a call that does not send `dry_run: false` only counts what it would remove. The answer carries counts only, never a name or a value.  A profile a live run holds is refused with 409 `profile_in_use` until that run closes, because its browser session would save the profile again. A ZDR organization is not refused (the route is a wind-down, like delete). A service principal is refused. 
+     * Remove a stored profile\'s cookies, web storage and IndexedDB (F-t2-068). Off unless QUARRY_EDGE__PROFILE_CLEAR_DATA is on.
+     */
+    async clearProfileData(requestParameters: ClearProfileDataOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<ClearProfileData200Response> {
+        const response = await this.clearProfileDataRaw(requestParameters, initOverrides);
         return await response.value();
     }
 
@@ -395,6 +483,14 @@ export class DefaultApi extends runtime.BaseAPI {
 
         const queryParameters: any = {};
 
+        if (requestParameters['wait'] != null) {
+            queryParameters['wait'] = requestParameters['wait'];
+        }
+
+        if (requestParameters['resume'] != null) {
+            queryParameters['resume'] = requestParameters['resume'];
+        }
+
         const headerParameters: runtime.HTTPHeaders = {};
 
 
@@ -410,19 +506,21 @@ export class DefaultApi extends runtime.BaseAPI {
     }
 
     /**
+     * The wait and resume query parameters work as they do on GET /v1/jobs/{job_id}, and are honoured only with QUARRY_EDGE__JOB_CONTROL on.
      * Status document of a batch (WS15.L1)
      */
-    async getBatchStatusRaw(requestParameters: GetBatchStatusRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<object>> {
+    async getBatchStatusRaw(requestParameters: GetBatchStatusRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<GetJobStatus200Response>> {
         const requestOptions = await this.getBatchStatusRequestOpts(requestParameters);
         const response = await this.request(requestOptions, initOverrides);
 
-        return new runtime.JSONApiResponse<any>(response);
+        return new runtime.JSONApiResponse(response, (jsonValue) => GetJobStatus200ResponseFromJSON(jsonValue));
     }
 
     /**
+     * The wait and resume query parameters work as they do on GET /v1/jobs/{job_id}, and are honoured only with QUARRY_EDGE__JOB_CONTROL on.
      * Status document of a batch (WS15.L1)
      */
-    async getBatchStatus(requestParameters: GetBatchStatusRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<object> {
+    async getBatchStatus(requestParameters: GetBatchStatusRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<GetJobStatus200Response> {
         const response = await this.getBatchStatusRaw(requestParameters, initOverrides);
         return await response.value();
     }
@@ -493,6 +591,14 @@ export class DefaultApi extends runtime.BaseAPI {
 
         const queryParameters: any = {};
 
+        if (requestParameters['wait'] != null) {
+            queryParameters['wait'] = requestParameters['wait'];
+        }
+
+        if (requestParameters['resume'] != null) {
+            queryParameters['resume'] = requestParameters['resume'];
+        }
+
         const headerParameters: runtime.HTTPHeaders = {};
 
 
@@ -508,21 +614,21 @@ export class DefaultApi extends runtime.BaseAPI {
     }
 
     /**
-     * A batch id on this path answers 404 (kind mismatch).
+     * A batch id on this path answers 404 (kind mismatch). The wait and resume query parameters work as they do on GET /v1/jobs/{job_id}, and are honoured only with QUARRY_EDGE__JOB_CONTROL on.
      * Status document of a crawl (WS15.L1)
      */
-    async getCrawlStatusRaw(requestParameters: GetCrawlStatusRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<object>> {
+    async getCrawlStatusRaw(requestParameters: GetCrawlStatusRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<GetJobStatus200Response>> {
         const requestOptions = await this.getCrawlStatusRequestOpts(requestParameters);
         const response = await this.request(requestOptions, initOverrides);
 
-        return new runtime.JSONApiResponse<any>(response);
+        return new runtime.JSONApiResponse(response, (jsonValue) => GetJobStatus200ResponseFromJSON(jsonValue));
     }
 
     /**
-     * A batch id on this path answers 404 (kind mismatch).
+     * A batch id on this path answers 404 (kind mismatch). The wait and resume query parameters work as they do on GET /v1/jobs/{job_id}, and are honoured only with QUARRY_EDGE__JOB_CONTROL on.
      * Status document of a crawl (WS15.L1)
      */
-    async getCrawlStatus(requestParameters: GetCrawlStatusRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<object> {
+    async getCrawlStatus(requestParameters: GetCrawlStatusRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<GetJobStatus200Response> {
         const response = await this.getCrawlStatusRaw(requestParameters, initOverrides);
         return await response.value();
     }
@@ -593,6 +699,14 @@ export class DefaultApi extends runtime.BaseAPI {
 
         const queryParameters: any = {};
 
+        if (requestParameters['wait'] != null) {
+            queryParameters['wait'] = requestParameters['wait'];
+        }
+
+        if (requestParameters['resume'] != null) {
+            queryParameters['resume'] = requestParameters['resume'];
+        }
+
         const headerParameters: runtime.HTTPHeaders = {};
 
 
@@ -608,21 +722,21 @@ export class DefaultApi extends runtime.BaseAPI {
     }
 
     /**
-     * Org-scoped by the verified token. A job id of another organization, or an id that is not a job, answers 404. The document carries status, phase, origin, counts, total and total_kind, warnings and the control state.
+     * Org-scoped by the verified token. A job id of another organization, or an id that is not a job, answers 404. The document carries status, phase, origin, counts, total and total_kind, warnings and the control state. For a page-priced job (crawl, batch, scrape, extract) it also carries `credits`, an estimate derived from the fetched-page count, once the control service has `QUARRY_CONTROL__JOB_CREDITS` on (default off). To cancel, use DELETE /v1/crawl/{job_id} or DELETE /v1/batch/{job_id} (WS15.L2). Crawl and batch jobs are refused under zero data retention, so there is no such job to read here under ZDR. The wait and resume query parameters are honoured only with QUARRY_EDGE__JOB_CONTROL on (see the JobWait and JobResume parameters).
      * Status document of a durable job (WS15.L1)
      */
-    async getJobStatusRaw(requestParameters: GetJobStatusRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<object>> {
+    async getJobStatusRaw(requestParameters: GetJobStatusRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<GetJobStatus200Response>> {
         const requestOptions = await this.getJobStatusRequestOpts(requestParameters);
         const response = await this.request(requestOptions, initOverrides);
 
-        return new runtime.JSONApiResponse<any>(response);
+        return new runtime.JSONApiResponse(response, (jsonValue) => GetJobStatus200ResponseFromJSON(jsonValue));
     }
 
     /**
-     * Org-scoped by the verified token. A job id of another organization, or an id that is not a job, answers 404. The document carries status, phase, origin, counts, total and total_kind, warnings and the control state.
+     * Org-scoped by the verified token. A job id of another organization, or an id that is not a job, answers 404. The document carries status, phase, origin, counts, total and total_kind, warnings and the control state. For a page-priced job (crawl, batch, scrape, extract) it also carries `credits`, an estimate derived from the fetched-page count, once the control service has `QUARRY_CONTROL__JOB_CREDITS` on (default off). To cancel, use DELETE /v1/crawl/{job_id} or DELETE /v1/batch/{job_id} (WS15.L2). Crawl and batch jobs are refused under zero data retention, so there is no such job to read here under ZDR. The wait and resume query parameters are honoured only with QUARRY_EDGE__JOB_CONTROL on (see the JobWait and JobResume parameters).
      * Status document of a durable job (WS15.L1)
      */
-    async getJobStatus(requestParameters: GetJobStatusRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<object> {
+    async getJobStatus(requestParameters: GetJobStatusRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<GetJobStatus200Response> {
         const response = await this.getJobStatusRaw(requestParameters, initOverrides);
         return await response.value();
     }

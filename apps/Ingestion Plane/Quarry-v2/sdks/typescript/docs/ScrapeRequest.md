@@ -28,6 +28,13 @@ Name | Type
 `maxInlineBytes` | number
 `actions` | [Array&lt;ScrapeRequestActionsInner&gt;](ScrapeRequestActionsInner.md)
 `actionsOnError` | string
+`maxAge` | number
+`redactPii` | string
+`noEgress` | boolean
+`locale` | string
+`timezone` | string
+`location` | [ScrapeRequestLocation](ScrapeRequestLocation.md)
+`profileId` | string
 
 ## Example
 
@@ -57,6 +64,13 @@ const example = {
   "maxInlineBytes": null,
   "actions": null,
   "actionsOnError": null,
+  "maxAge": null,
+  "redactPii": null,
+  "noEgress": null,
+  "locale": null,
+  "timezone": null,
+  "location": null,
+  "profileId": null,
 } satisfies ScrapeRequest
 
 console.log(example)

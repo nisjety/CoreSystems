@@ -12,6 +12,10 @@ Name | Type
 `markdown` | string
 `structured` | [StructuredData](StructuredData.md)
 `error` | string
+`schemaValid` | boolean
+`schemaIssues` | Array&lt;string&gt;
+`truncatedInput` | boolean
+`ai` | [AiFormatReport](AiFormatReport.md)
 
 ## Example
 
@@ -26,6 +30,10 @@ const example = {
   "markdown": null,
   "structured": null,
   "error": null,
+  "schemaValid": null,
+  "schemaIssues": null,
+  "truncatedInput": null,
+  "ai": null,
 } satisfies ExtractItem
 
 console.log(example)

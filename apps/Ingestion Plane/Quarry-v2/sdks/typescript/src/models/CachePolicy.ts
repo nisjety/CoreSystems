@@ -26,7 +26,7 @@ export interface CachePolicy {
      */
     mode?: CachePolicyModeEnum;
     /**
-     * Custom TTL in seconds (0 = use default 3600s)
+     * The TTL in seconds of a result this request writes to the cache (0 = use the default 3600 s). It is not the freshness a read requires: that is the request's max_age, in milliseconds. `mode` may be left out (INNH-7: it was required by the Rust type although documented as defaulting to read_write).
      * @type {number}
      * @memberof CachePolicy
      */

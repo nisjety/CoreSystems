@@ -14,6 +14,11 @@
 
 import * as runtime from '../runtime';
 import {
+    type BackfillScheduleRequest,
+    BackfillScheduleRequestFromJSON,
+    BackfillScheduleRequestToJSON,
+} from '../models/BackfillScheduleRequest';
+import {
     type CreateSchedule200Response,
     CreateSchedule200ResponseFromJSON,
     CreateSchedule200ResponseToJSON,
@@ -23,6 +28,11 @@ import {
     CreateScheduleRequestFromJSON,
     CreateScheduleRequestToJSON,
 } from '../models/CreateScheduleRequest';
+import {
+    type CreateSource200Response,
+    CreateSource200ResponseFromJSON,
+    CreateSource200ResponseToJSON,
+} from '../models/CreateSource200Response';
 import {
     type DeleteSchedule200Response,
     DeleteSchedule200ResponseFromJSON,
@@ -34,18 +44,35 @@ import {
     ErrorBodyToJSON,
 } from '../models/ErrorBody';
 import {
+    type GetScheduleRequest200Response,
+    GetScheduleRequest200ResponseFromJSON,
+    GetScheduleRequest200ResponseToJSON,
+} from '../models/GetScheduleRequest200Response';
+import {
+    type ListScheduleRuns200Response,
+    ListScheduleRuns200ResponseFromJSON,
+    ListScheduleRuns200ResponseToJSON,
+} from '../models/ListScheduleRuns200Response';
+import {
     type ListSchedules200Response,
     ListSchedules200ResponseFromJSON,
     ListSchedules200ResponseToJSON,
 } from '../models/ListSchedules200Response';
+import {
+    type TagPatchRequest,
+    TagPatchRequestFromJSON,
+    TagPatchRequestToJSON,
+} from '../models/TagPatchRequest';
 import {
     type TriggerSchedule202Response,
     TriggerSchedule202ResponseFromJSON,
     TriggerSchedule202ResponseToJSON,
 } from '../models/TriggerSchedule202Response';
 
-export interface BackfillScheduleRequest {
+export interface BackfillScheduleOperationRequest {
     scheduleId: string;
+    backfillScheduleRequest: BackfillScheduleRequest;
+    idempotencyKey?: string;
 }
 
 export interface CreateScheduleOperationRequest {
@@ -56,9 +83,21 @@ export interface DeleteScheduleRequest {
     scheduleId: string;
 }
 
+export interface GetScheduleRequestRequest {
+    scheduleId: string;
+    requestId: string;
+}
+
+export interface ListScheduleRunsRequest {
+    scheduleId: string;
+    limit?: number;
+    cursor?: string;
+}
+
 export interface ListSchedulesRequest {
     limit?: number;
     cursor?: string;
+    tag?: string;
 }
 
 export interface PauseScheduleRequest {
@@ -67,10 +106,16 @@ export interface PauseScheduleRequest {
 
 export interface TriggerScheduleRequest {
     scheduleId: string;
+    idempotencyKey?: string;
 }
 
 export interface UnpauseScheduleRequest {
     scheduleId: string;
+}
+
+export interface UpdateScheduleTagRequest {
+    scheduleId: string;
+    tagPatchRequest: TagPatchRequest;
 }
 
 /**
@@ -81,7 +126,7 @@ export class SchedulesApi extends runtime.BaseAPI {
     /**
      * Creates request options for backfillSchedule without sending the request
      */
-    async backfillScheduleRequestOpts(requestParameters: BackfillScheduleRequest): Promise<runtime.RequestOpts> {
+    async backfillScheduleRequestOpts(requestParameters: BackfillScheduleOperationRequest): Promise<runtime.RequestOpts> {
         if (requestParameters['scheduleId'] == null) {
             throw new runtime.RequiredError(
                 'scheduleId',
@@ -89,9 +134,22 @@ export class SchedulesApi extends runtime.BaseAPI {
             );
         }
 
+        if (requestParameters['backfillScheduleRequest'] == null) {
+            throw new runtime.RequiredError(
+                'backfillScheduleRequest',
+                'Required parameter "backfillScheduleRequest" was null or undefined when calling backfillSchedule().'
+            );
+        }
+
         const queryParameters: any = {};
 
         const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
 
 
         let urlPath = `/v1/schedules/{schedule_id}/backfill`;
@@ -102,26 +160,28 @@ export class SchedulesApi extends runtime.BaseAPI {
             method: 'POST',
             headers: headerParameters,
             query: queryParameters,
+            body: BackfillScheduleRequestToJSON(requestParameters['backfillScheduleRequest']),
         };
     }
 
     /**
-     * Currently a stub — returns 202 with a Temporal-pending note.
+     * Queues a replay of a past window of a scrape schedule as a request row (WS15.S3a). Only scrape schedules backfill, at most 24 windows, each entirely in the past. The rules and the answers are the trigger\'s, and the outcome is read at GET /v1/schedules/{schedule_id}/requests/{request_id}. With QUARRY_CONTROL__SCHEDULE_REQUESTS off the answer is 501 UNSUPPORTED.
      * Backfill missed runs
      */
-    async backfillScheduleRaw(requestParameters: BackfillScheduleRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<void>> {
+    async backfillScheduleRaw(requestParameters: BackfillScheduleOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<TriggerSchedule202Response>> {
         const requestOptions = await this.backfillScheduleRequestOpts(requestParameters);
         const response = await this.request(requestOptions, initOverrides);
 
-        return new runtime.VoidApiResponse(response);
+        return new runtime.JSONApiResponse(response, (jsonValue) => TriggerSchedule202ResponseFromJSON(jsonValue));
     }
 
     /**
-     * Currently a stub — returns 202 with a Temporal-pending note.
+     * Queues a replay of a past window of a scrape schedule as a request row (WS15.S3a). Only scrape schedules backfill, at most 24 windows, each entirely in the past. The rules and the answers are the trigger\'s, and the outcome is read at GET /v1/schedules/{schedule_id}/requests/{request_id}. With QUARRY_CONTROL__SCHEDULE_REQUESTS off the answer is 501 UNSUPPORTED.
      * Backfill missed runs
      */
-    async backfillSchedule(requestParameters: BackfillScheduleRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<void> {
-        await this.backfillScheduleRaw(requestParameters, initOverrides);
+    async backfillSchedule(requestParameters: BackfillScheduleOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<TriggerSchedule202Response> {
+        const response = await this.backfillScheduleRaw(requestParameters, initOverrides);
+        return await response.value();
     }
 
     /**
@@ -154,6 +214,7 @@ export class SchedulesApi extends runtime.BaseAPI {
     }
 
     /**
+     * An executable schedule (scrape, crawl or batch, with a 5-field cron) or a change monitor (preset). With source_id (E4.1-6) an executable crawl runs a source\'s saved job definition: target_ref becomes the source id, and the config is built from the definition as it is stored when the schedule is created, so a later change to the definition does not reach this schedule. Only a crawl is schedulable, and a scrape with no options. Dark: 501 while QUARRY_EDGE__SAVED_JOBS is off. The 400 reasons are on the response.
      * Create a cron / one-shot / change-monitor schedule
      */
     async createScheduleRaw(requestParameters: CreateScheduleOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<CreateSchedule200Response>> {
@@ -164,6 +225,7 @@ export class SchedulesApi extends runtime.BaseAPI {
     }
 
     /**
+     * An executable schedule (scrape, crawl or batch, with a 5-field cron) or a change monitor (preset). With source_id (E4.1-6) an executable crawl runs a source\'s saved job definition: target_ref becomes the source id, and the config is built from the definition as it is stored when the schedule is created, so a later change to the definition does not reach this schedule. Only a crawl is schedulable, and a scrape with no options. Dark: 501 while QUARRY_EDGE__SAVED_JOBS is off. The 400 reasons are on the response.
      * Create a cron / one-shot / change-monitor schedule
      */
     async createSchedule(requestParameters: CreateScheduleOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<CreateSchedule200Response> {
@@ -217,6 +279,116 @@ export class SchedulesApi extends runtime.BaseAPI {
     }
 
     /**
+     * Creates request options for getScheduleRequest without sending the request
+     */
+    async getScheduleRequestRequestOpts(requestParameters: GetScheduleRequestRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['scheduleId'] == null) {
+            throw new runtime.RequiredError(
+                'scheduleId',
+                'Required parameter "scheduleId" was null or undefined when calling getScheduleRequest().'
+            );
+        }
+
+        if (requestParameters['requestId'] == null) {
+            throw new runtime.RequiredError(
+                'requestId',
+                'Required parameter "requestId" was null or undefined when calling getScheduleRequest().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/schedules/{schedule_id}/requests/{request_id}`;
+        urlPath = urlPath.replace('{schedule_id}', encodeURIComponent(String(requestParameters['scheduleId'])));
+        urlPath = urlPath.replace('{request_id}', encodeURIComponent(String(requestParameters['requestId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Control\'s view of a request row the caller queued (WS15.S3a): the status (pending, claimed, done, failed or rejected), the attempt count, the params, the result and a short error text. The claiming worker and the lease are never shown. A row of another schedule or organization is a 404.
+     * Read one trigger or backfill request row
+     */
+    async getScheduleRequestRaw(requestParameters: GetScheduleRequestRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<GetScheduleRequest200Response>> {
+        const requestOptions = await this.getScheduleRequestRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => GetScheduleRequest200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Control\'s view of a request row the caller queued (WS15.S3a): the status (pending, claimed, done, failed or rejected), the attempt count, the params, the result and a short error text. The claiming worker and the lease are never shown. A row of another schedule or organization is a 404.
+     * Read one trigger or backfill request row
+     */
+    async getScheduleRequest(requestParameters: GetScheduleRequestRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<GetScheduleRequest200Response> {
+        const response = await this.getScheduleRequestRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listScheduleRuns without sending the request
+     */
+    async listScheduleRunsRequestOpts(requestParameters: ListScheduleRunsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['scheduleId'] == null) {
+            throw new runtime.RequiredError(
+                'scheduleId',
+                'Required parameter "scheduleId" was null or undefined when calling listScheduleRuns().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['cursor'] != null) {
+            queryParameters['cursor'] = requestParameters['cursor'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/schedules/{schedule_id}/runs`;
+        urlPath = urlPath.replace('{schedule_id}', encodeURIComponent(String(requestParameters['scheduleId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * One page of the schedule\'s job rows, newest first (WS15.S3a). Each item is a job as control stores it: id, org_id, kind, status, policy, params, schedule_id, run_id, created_at, origin and, once finished, statistics. next_cursor is empty on the last page.
+     * List the fires of a schedule
+     */
+    async listScheduleRunsRaw(requestParameters: ListScheduleRunsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<ListScheduleRuns200Response>> {
+        const requestOptions = await this.listScheduleRunsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => ListScheduleRuns200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * One page of the schedule\'s job rows, newest first (WS15.S3a). Each item is a job as control stores it: id, org_id, kind, status, policy, params, schedule_id, run_id, created_at, origin and, once finished, statistics. next_cursor is empty on the last page.
+     * List the fires of a schedule
+     */
+    async listScheduleRuns(requestParameters: ListScheduleRunsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<ListScheduleRuns200Response> {
+        const response = await this.listScheduleRunsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
      * Creates request options for listSchedules without sending the request
      */
     async listSchedulesRequestOpts(requestParameters: ListSchedulesRequest): Promise<runtime.RequestOpts> {
@@ -228,6 +400,10 @@ export class SchedulesApi extends runtime.BaseAPI {
 
         if (requestParameters['cursor'] != null) {
             queryParameters['cursor'] = requestParameters['cursor'];
+        }
+
+        if (requestParameters['tag'] != null) {
+            queryParameters['tag'] = requestParameters['tag'];
         }
 
         const headerParameters: runtime.HTTPHeaders = {};
@@ -322,6 +498,10 @@ export class SchedulesApi extends runtime.BaseAPI {
 
         const headerParameters: runtime.HTTPHeaders = {};
 
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
+
 
         let urlPath = `/v1/schedules/{schedule_id}/trigger`;
         urlPath = urlPath.replace('{schedule_id}', encodeURIComponent(String(requestParameters['scheduleId'])));
@@ -335,7 +515,7 @@ export class SchedulesApi extends runtime.BaseAPI {
     }
 
     /**
-     * Currently a stub — returns 202 with `status: trigger-accepted` and a note that the Temporal SDK is not yet wired. 
+     * Queues one run of the schedule as a request row (WS15.S3a). The orchestrator applies the row on its next claim, so the run starts later. Read the outcome at GET /v1/schedules/{schedule_id}/requests/{request_id}. With QUARRY_CONTROL__SCHEDULE_REQUESTS off the answer is 501 UNSUPPORTED.
      * Trigger an immediate scheduled run
      */
     async triggerScheduleRaw(requestParameters: TriggerScheduleRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<TriggerSchedule202Response>> {
@@ -346,7 +526,7 @@ export class SchedulesApi extends runtime.BaseAPI {
     }
 
     /**
-     * Currently a stub — returns 202 with `status: trigger-accepted` and a note that the Temporal SDK is not yet wired. 
+     * Queues one run of the schedule as a request row (WS15.S3a). The orchestrator applies the row on its next claim, so the run starts later. Read the outcome at GET /v1/schedules/{schedule_id}/requests/{request_id}. With QUARRY_CONTROL__SCHEDULE_REQUESTS off the answer is 501 UNSUPPORTED.
      * Trigger an immediate scheduled run
      */
     async triggerSchedule(requestParameters: TriggerScheduleRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<TriggerSchedule202Response> {
@@ -396,6 +576,63 @@ export class SchedulesApi extends runtime.BaseAPI {
      */
     async unpauseSchedule(requestParameters: UnpauseScheduleRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<void> {
         await this.unpauseScheduleRaw(requestParameters, initOverrides);
+    }
+
+    /**
+     * Creates request options for updateScheduleTag without sending the request
+     */
+    async updateScheduleTagRequestOpts(requestParameters: UpdateScheduleTagRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['scheduleId'] == null) {
+            throw new runtime.RequiredError(
+                'scheduleId',
+                'Required parameter "scheduleId" was null or undefined when calling updateScheduleTag().'
+            );
+        }
+
+        if (requestParameters['tagPatchRequest'] == null) {
+            throw new runtime.RequiredError(
+                'tagPatchRequest',
+                'Required parameter "tagPatchRequest" was null or undefined when calling updateScheduleTag().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/schedules/{schedule_id}`;
+        urlPath = urlPath.replace('{schedule_id}', encodeURIComponent(String(requestParameters['scheduleId'])));
+
+        return {
+            path: urlPath,
+            method: 'PATCH',
+            headers: headerParameters,
+            query: queryParameters,
+            body: TagPatchRequestToJSON(requestParameters['tagPatchRequest']),
+        };
+    }
+
+    /**
+     * Sets the tag of a schedule the caller\'s org owns. An empty string clears it. A body that names no tag is a 400 with reason `tag_required`; a tag that fails the grammar is a 400 with reason `invalid_tag`. The answer is control\'s updated schedule view.
+     * Set or clear a schedule\'s monitor tag
+     */
+    async updateScheduleTagRaw(requestParameters: UpdateScheduleTagRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<CreateSource200Response>> {
+        const requestOptions = await this.updateScheduleTagRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => CreateSource200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Sets the tag of a schedule the caller\'s org owns. An empty string clears it. A body that names no tag is a 400 with reason `tag_required`; a tag that fails the grammar is a 400 with reason `invalid_tag`. The answer is control\'s updated schedule view.
+     * Set or clear a schedule\'s monitor tag
+     */
+    async updateScheduleTag(requestParameters: UpdateScheduleTagRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<CreateSource200Response> {
+        const response = await this.updateScheduleTagRaw(requestParameters, initOverrides);
+        return await response.value();
     }
 
 }

@@ -6873,7 +6873,7 @@ components:
             client accepts either.
           oneOf:
           - type: string
-            format: date-time
+            description: RFC 3339 date-time
           - type: integer
             format: int64
             description: Unix milliseconds
@@ -6884,7 +6884,7 @@ components:
             client accepts either.
           oneOf:
           - type: string
-            format: date-time
+            description: RFC 3339 date-time
           - type: integer
             format: int64
             description: Unix milliseconds
@@ -8883,10 +8883,10 @@ components:
           description: Attach items give how the attachment ended, and lifecycle items give started, closed or expired.
         attachId:
           type: string
-          description: Attach items only.
-        tabId:
-          type: string
-          description: Attach items only, when the attachment had a tab.
+          description: >-
+            Attach items only. An attach item also carries `tabId` (camelCase, a string) when the attachment
+            had a tab. It is not listed as its own property because a generated client would merge it with
+            `tab_id`.
         initiatedBy:
           type: string
           enum:
@@ -12795,12 +12795,9 @@ components:
             W3-E3.7.2w. How many of the batch's pages run at a time. Read only with
             QUARRY_EDGE__BATCH_PARALLEL on; off, the key is ignored. Absent takes 4, clamped to the edge
             ceiling (QUARRY_EDGE__BATCH_MAX_PARALLEL, default 4, at most 16). A larger value is clamped to
-            the ceiling and reported in limits.max_parallel. Sending both max_parallel and maxParallel is
-            a 400.
-        maxParallel:
-          type: integer
-          minimum: 1
-          description: Alias of max_parallel (W3-E3.7.2w).
+            the ceiling and reported in limits.max_parallel. The camelCase alias maxParallel is accepted
+            too (not listed as its own property, because a generated client would merge the two names);
+            sending both max_parallel and maxParallel is a 400.
         webhook:
           $ref: '#/components/schemas/JobWebhook'
     JobWebhook:

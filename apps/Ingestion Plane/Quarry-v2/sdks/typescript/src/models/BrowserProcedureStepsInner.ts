@@ -13,6 +13,21 @@
  */
 
 import { mapValues } from '../runtime';
+import type { StepTarget } from './StepTarget';
+import {
+    StepTargetFromJSON,
+    StepTargetFromJSONTyped,
+    StepTargetToJSON,
+    StepTargetToJSONTyped,
+} from './StepTarget';
+import type { StepExpectation } from './StepExpectation';
+import {
+    StepExpectationFromJSON,
+    StepExpectationFromJSONTyped,
+    StepExpectationToJSON,
+    StepExpectationToJSONTyped,
+} from './StepExpectation';
+
 /**
  * 
  * @export
@@ -37,6 +52,36 @@ export interface BrowserProcedureStepsInner {
      * @memberof BrowserProcedureStepsInner
      */
     expectedOutcome: BrowserProcedureStepsInnerExpectedOutcomeEnum;
+    /**
+     * True when the action carries a redaction marker: what was typed or selected
+     * was masked when the receipt was written, so a replay must supply it. The
+     * replay check answers repair_required for such a step, never exact. In a
+     * version 2 procedure a typed value is a slot the replay supplies, so the flag
+     * only records the mask there; a masked step outside a slot is still never exact.
+     * 
+     * @type {boolean}
+     * @memberof BrowserProcedureStepsInner
+     */
+    redactedInput?: boolean;
+    /**
+     * 
+     * @type {StepTarget}
+     * @memberof BrowserProcedureStepsInner
+     */
+    target?: StepTarget;
+    /**
+     * Version 2 only: the name of the slot this step types into (`slot_<step>`).
+     * 
+     * @type {string}
+     * @memberof BrowserProcedureStepsInner
+     */
+    slot?: string;
+    /**
+     * 
+     * @type {StepExpectation}
+     * @memberof BrowserProcedureStepsInner
+     */
+    expect?: StepExpectation;
 }
 
 
@@ -74,6 +119,10 @@ export function BrowserProcedureStepsInnerFromJSONTyped(json: any, ignoreDiscrim
         'step': json['step'],
         'action': json['action'],
         'expectedOutcome': json['expected_outcome'],
+        'redactedInput': json['redacted_input'] == null ? undefined : json['redacted_input'],
+        'target': json['target'] == null ? undefined : StepTargetFromJSON(json['target']),
+        'slot': json['slot'] == null ? undefined : json['slot'],
+        'expect': json['expect'] == null ? undefined : StepExpectationFromJSON(json['expect']),
     };
 }
 
@@ -91,6 +140,10 @@ export function BrowserProcedureStepsInnerToJSONTyped(value?: BrowserProcedureSt
         'step': value['step'],
         'action': value['action'],
         'expected_outcome': value['expectedOutcome'],
+        'redacted_input': value['redactedInput'],
+        'target': StepTargetToJSON(value['target']),
+        'slot': value['slot'],
+        'expect': StepExpectationToJSON(value['expect']),
     };
 }
 

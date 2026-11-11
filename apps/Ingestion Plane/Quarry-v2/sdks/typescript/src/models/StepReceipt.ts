@@ -20,6 +20,13 @@ import {
     BrowserObservationToJSON,
     BrowserObservationToJSONTyped,
 } from './BrowserObservation';
+import type { AgentIdentity } from './AgentIdentity';
+import {
+    AgentIdentityFromJSON,
+    AgentIdentityFromJSONTyped,
+    AgentIdentityToJSON,
+    AgentIdentityToJSONTyped,
+} from './AgentIdentity';
 
 /**
  * 
@@ -93,7 +100,48 @@ export interface StepReceipt {
      * @memberof StepReceipt
      */
     costMicroUsd: number;
+    /**
+     * Who drove the step. Absent on a receipt written before initiators were recorded.
+     * @type {StepReceiptInitiatedByEnum}
+     * @memberof StepReceipt
+     */
+    initiatedBy?: StepReceiptInitiatedByEnum;
+    /**
+     * The control epoch the step was admitted under. Absent on older receipts.
+     * @type {number}
+     * @memberof StepReceipt
+     */
+    controlEpoch?: number;
+    /**
+     * 
+     * @type {AgentIdentity}
+     * @memberof StepReceipt
+     */
+    agent?: AgentIdentity;
+    /**
+     * The secret-redaction rule version (for example `qr-redact/3`) the stored
+     * action, observation and failure text were masked under. Absent on a receipt
+     * written before it existed or while masking was not enforcing; the receipts
+     * route masks such a receipt on every read, so what it returns never holds the
+     * raw text. Stored evidence is not rewritten.
+     * 
+     * @type {string}
+     * @memberof StepReceipt
+     */
+    redactionRuleVersion?: string;
 }
+
+
+/**
+ * @export
+ */
+export const StepReceiptInitiatedByEnum = {
+    Human: 'human',
+    Agent: 'agent',
+    System: 'system'
+} as const;
+export type StepReceiptInitiatedByEnum = typeof StepReceiptInitiatedByEnum[keyof typeof StepReceiptInitiatedByEnum];
+
 
 /**
  * Check if a given object implements the StepReceipt interface.
@@ -131,6 +179,10 @@ export function StepReceiptFromJSONTyped(json: any, ignoreDiscriminator: boolean
         'observation': json['observation'] == null ? undefined : BrowserObservationFromJSON(json['observation']),
         'correctionOf': json['correction_of'] == null ? undefined : json['correction_of'],
         'costMicroUsd': json['cost_micro_usd'],
+        'initiatedBy': json['initiated_by'] == null ? undefined : json['initiated_by'],
+        'controlEpoch': json['control_epoch'] == null ? undefined : json['control_epoch'],
+        'agent': json['agent'] == null ? undefined : AgentIdentityFromJSON(json['agent']),
+        'redactionRuleVersion': json['redaction_rule_version'] == null ? undefined : json['redaction_rule_version'],
     };
 }
 
@@ -156,6 +208,10 @@ export function StepReceiptToJSONTyped(value?: StepReceipt | null, ignoreDiscrim
         'observation': BrowserObservationToJSON(value['observation']),
         'correction_of': value['correctionOf'],
         'cost_micro_usd': value['costMicroUsd'],
+        'initiated_by': value['initiatedBy'],
+        'control_epoch': value['controlEpoch'],
+        'agent': AgentIdentityToJSON(value['agent']),
+        'redaction_rule_version': value['redactionRuleVersion'],
     };
 }
 

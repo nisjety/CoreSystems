@@ -27,6 +27,20 @@ import {
     BrowserDriverCapabilitiesToJSON,
     BrowserDriverCapabilitiesToJSONTyped,
 } from './BrowserDriverCapabilities';
+import type { StartAgentRunRequestTrace } from './StartAgentRunRequestTrace';
+import {
+    StartAgentRunRequestTraceFromJSON,
+    StartAgentRunRequestTraceFromJSONTyped,
+    StartAgentRunRequestTraceToJSON,
+    StartAgentRunRequestTraceToJSONTyped,
+} from './StartAgentRunRequestTrace';
+import type { RequestAsk } from './RequestAsk';
+import {
+    RequestAskFromJSON,
+    RequestAskFromJSONTyped,
+    RequestAskToJSON,
+    RequestAskToJSONTyped,
+} from './RequestAsk';
 import type { StartAgentRunRequestViewport } from './StartAgentRunRequestViewport';
 import {
     StartAgentRunRequestViewportFromJSON,
@@ -84,17 +98,35 @@ export interface StartAgentRunRequest {
      */
     resumeRunId?: string;
     /**
+     * Set to "agent" for a model-driven run. A run is budgeted (steps, attempts, active runtime, estimated cost) when it is an agent run: a service principal is one whatever it sends. The hint can only tighten: it never turns an agent run into an interactive one. `initiatedBy` is accepted too.
+     * @type {string}
+     * @memberof StartAgentRunRequest
+     */
+    initiatedBy?: string;
+    /**
      * Experimental ephemeral_evidence forces a disposable no-profile, no-resume, no-durable-state run and remains gated by isolated egress/security proof. Its current explicit engine is Chromium fallback, not a claim of a production Lite renderer.
      * @type {StartAgentRunRequestExecutionTierEnum}
      * @memberof StartAgentRunRequest
      */
     executionTier?: StartAgentRunRequestExecutionTierEnum;
     /**
+     * WS7.D web policy ask. Tighten-only: `disable` names capabilities (browser.act.input, browser.act.interact, browser.act.upload, browser.act.download, browser.profile.persistent, search.paid_provider, and the others of the catalogue), `deny_domains` and `allow_domains` narrow the hosts, `robots_max` and `proxy_max` lower ceilings. It can never loosen the operator baseline or the ZDR floor. Resolved once at start; a resumed run does not carry it. Unknown keys are 400.
+     * @type {RequestAsk}
+     * @memberof StartAgentRunRequest
+     */
+    policy?: RequestAsk;
+    /**
      * 
      * @type {BrowserDriverCapabilities}
      * @memberof StartAgentRunRequest
      */
     driverRequirements?: BrowserDriverCapabilities;
+    /**
+     * 
+     * @type {StartAgentRunRequestTrace}
+     * @memberof StartAgentRunRequest
+     */
+    trace?: StartAgentRunRequestTrace;
 }
 
 
@@ -132,8 +164,11 @@ export function StartAgentRunRequestFromJSONTyped(json: any, ignoreDiscriminator
         'zdr': json['zdr'] == null ? undefined : json['zdr'],
         'grantId': json['grant_id'] == null ? undefined : json['grant_id'],
         'resumeRunId': json['resume_run_id'] == null ? undefined : json['resume_run_id'],
+        'initiatedBy': json['initiated_by'] == null ? undefined : json['initiated_by'],
         'executionTier': json['execution_tier'] == null ? undefined : json['execution_tier'],
+        'policy': json['policy'] == null ? undefined : RequestAskFromJSON(json['policy']),
         'driverRequirements': json['driver_requirements'] == null ? undefined : BrowserDriverCapabilitiesFromJSON(json['driver_requirements']),
+        'trace': json['trace'] == null ? undefined : StartAgentRunRequestTraceFromJSON(json['trace']),
     };
 }
 
@@ -155,8 +190,11 @@ export function StartAgentRunRequestToJSONTyped(value?: StartAgentRunRequest | n
         'zdr': value['zdr'],
         'grant_id': value['grantId'],
         'resume_run_id': value['resumeRunId'],
+        'initiated_by': value['initiatedBy'],
         'execution_tier': value['executionTier'],
+        'policy': RequestAskToJSON(value['policy']),
         'driver_requirements': BrowserDriverCapabilitiesToJSON(value['driverRequirements']),
+        'trace': StartAgentRunRequestTraceToJSON(value['trace']),
     };
 }
 

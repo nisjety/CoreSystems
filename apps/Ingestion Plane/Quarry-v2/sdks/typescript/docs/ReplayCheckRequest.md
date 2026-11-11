@@ -8,6 +8,7 @@ Name | Type
 ------------ | -------------
 `procedure` | [BrowserProcedure](BrowserProcedure.md)
 `actions` | Array&lt;{ [key: string]: any; }&gt;
+`prefix` | boolean
 
 ## Example
 
@@ -18,6 +19,7 @@ import type { ReplayCheckRequest } from '@quarry/client'
 const example = {
   "procedure": null,
   "actions": null,
+  "prefix": null,
 } satisfies ReplayCheckRequest
 
 console.log(example)

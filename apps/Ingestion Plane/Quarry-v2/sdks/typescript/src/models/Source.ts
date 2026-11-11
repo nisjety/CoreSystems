@@ -13,6 +13,14 @@
  */
 
 import { mapValues } from '../runtime';
+import type { SourceCreatedAt } from './SourceCreatedAt';
+import {
+    SourceCreatedAtFromJSON,
+    SourceCreatedAtFromJSONTyped,
+    SourceCreatedAtToJSON,
+    SourceCreatedAtToJSONTyped,
+} from './SourceCreatedAt';
+
 /**
  * 
  * @export
@@ -57,22 +65,28 @@ export interface Source {
     status: SourceStatusEnum;
     /**
      * 
-     * @type {Date}
+     * @type {SourceCreatedAt}
      * @memberof Source
      */
-    createdAt: Date;
+    createdAt: SourceCreatedAt;
     /**
      * 
-     * @type {Date}
+     * @type {SourceCreatedAt}
      * @memberof Source
      */
-    updatedAt: Date;
+    updatedAt: SourceCreatedAt;
     /**
      * 
      * @type {any}
      * @memberof Source
      */
     config?: any | null;
+    /**
+     * The operator label that groups this source (E3.5-6). Absent when untagged.
+     * @type {string}
+     * @memberof Source
+     */
+    tag?: string;
 }
 
 
@@ -128,9 +142,10 @@ export function SourceFromJSONTyped(json: any, ignoreDiscriminator: boolean): So
         'url': json['url'],
         'kind': json['kind'],
         'status': json['status'],
-        'createdAt': (new Date(json['created_at'])),
-        'updatedAt': (new Date(json['updated_at'])),
+        'createdAt': SourceCreatedAtFromJSON(json['created_at']),
+        'updatedAt': SourceCreatedAtFromJSON(json['updated_at']),
         'config': json['config'] == null ? undefined : json['config'],
+        'tag': json['tag'] == null ? undefined : json['tag'],
     };
 }
 
@@ -151,9 +166,10 @@ export function SourceToJSONTyped(value?: Source | null, ignoreDiscriminator: bo
         'url': value['url'],
         'kind': value['kind'],
         'status': value['status'],
-        'created_at': value['createdAt'].toISOString(),
-        'updated_at': value['updatedAt'].toISOString(),
+        'created_at': SourceCreatedAtToJSON(value['createdAt']),
+        'updated_at': SourceCreatedAtToJSON(value['updatedAt']),
         'config': value['config'],
+        'tag': value['tag'],
     };
 }
 

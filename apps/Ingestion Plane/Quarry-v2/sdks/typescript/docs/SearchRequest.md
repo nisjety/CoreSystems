@@ -22,6 +22,7 @@ Name | Type
 `facets` | boolean
 `zdr` | boolean
 `scoreKinds` | Array&lt;string&gt;
+`scrape` | [SearchScrapeBlock](SearchScrapeBlock.md)
 
 ## Example
 
@@ -46,6 +47,7 @@ const example = {
   "facets": null,
   "zdr": null,
   "scoreKinds": null,
+  "scrape": null,
 } satisfies SearchRequest
 
 console.log(example)

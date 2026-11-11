@@ -13,6 +13,28 @@
  */
 
 import { mapValues } from '../runtime';
+import type { HandoffAckEffective } from './HandoffAckEffective';
+import {
+    HandoffAckEffectiveFromJSON,
+    HandoffAckEffectiveFromJSONTyped,
+    HandoffAckEffectiveToJSON,
+    HandoffAckEffectiveToJSONTyped,
+} from './HandoffAckEffective';
+import type { HandoffAckLimits } from './HandoffAckLimits';
+import {
+    HandoffAckLimitsFromJSON,
+    HandoffAckLimitsFromJSONTyped,
+    HandoffAckLimitsToJSON,
+    HandoffAckLimitsToJSONTyped,
+} from './HandoffAckLimits';
+import type { HandoffAckRejectedInner } from './HandoffAckRejectedInner';
+import {
+    HandoffAckRejectedInnerFromJSON,
+    HandoffAckRejectedInnerFromJSONTyped,
+    HandoffAckRejectedInnerToJSON,
+    HandoffAckRejectedInnerToJSONTyped,
+} from './HandoffAckRejectedInner';
+
 /**
  * 
  * @export
@@ -31,6 +53,24 @@ export interface HandoffAck {
      * @memberof HandoffAck
      */
     acceptedAt: Date;
+    /**
+     * WS14.S5. Set by /v1/batch only: the URLs the static check refused, in request order. No URL is fetched or resolved to make this decision. Absent when none was refused.
+     * @type {Array<HandoffAckRejectedInner>}
+     * @memberof HandoffAck
+     */
+    rejected?: Array<HandoffAckRejectedInner>;
+    /**
+     * 
+     * @type {HandoffAckEffective}
+     * @memberof HandoffAck
+     */
+    effective?: HandoffAckEffective;
+    /**
+     * 
+     * @type {HandoffAckLimits}
+     * @memberof HandoffAck
+     */
+    limits?: HandoffAckLimits;
 }
 
 /**
@@ -54,6 +94,9 @@ export function HandoffAckFromJSONTyped(json: any, ignoreDiscriminator: boolean)
         
         'jobId': json['job_id'],
         'acceptedAt': (new Date(json['accepted_at'])),
+        'rejected': json['rejected'] == null ? undefined : ((json['rejected'] as Array<any>).map(HandoffAckRejectedInnerFromJSON)),
+        'effective': json['effective'] == null ? undefined : HandoffAckEffectiveFromJSON(json['effective']),
+        'limits': json['limits'] == null ? undefined : HandoffAckLimitsFromJSON(json['limits']),
     };
 }
 
@@ -70,6 +113,9 @@ export function HandoffAckToJSONTyped(value?: HandoffAck | null, ignoreDiscrimin
         
         'job_id': value['jobId'],
         'accepted_at': value['acceptedAt'].toISOString(),
+        'rejected': value['rejected'] == null ? undefined : ((value['rejected'] as Array<any>).map(HandoffAckRejectedInnerToJSON)),
+        'effective': HandoffAckEffectiveToJSON(value['effective']),
+        'limits': HandoffAckLimitsToJSON(value['limits']),
     };
 }
 

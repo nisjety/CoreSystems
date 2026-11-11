@@ -13,6 +13,21 @@
  */
 
 import { mapValues } from '../runtime';
+import type { CrawlRequestScrapeOptions } from './CrawlRequestScrapeOptions';
+import {
+    CrawlRequestScrapeOptionsFromJSON,
+    CrawlRequestScrapeOptionsFromJSONTyped,
+    CrawlRequestScrapeOptionsToJSON,
+    CrawlRequestScrapeOptionsToJSONTyped,
+} from './CrawlRequestScrapeOptions';
+import type { JobWebhook } from './JobWebhook';
+import {
+    JobWebhookFromJSON,
+    JobWebhookFromJSONTyped,
+    JobWebhookToJSON,
+    JobWebhookToJSONTyped,
+} from './JobWebhook';
+
 /**
  * 
  * @export
@@ -26,12 +41,96 @@ export interface CrawlRequest {
      */
     url: string;
     /**
-     * Maximum pages to crawl
+     * Maximum pages to crawl. Absent or 0 takes the default (1000; operator override QUARRY_CRAWL_DEFAULT_MAX_PAGES), never unlimited. A value above the hard ceiling (5000; QUARRY_CRAWL_HARD_MAX_PAGES) is clamped to it. The response reports the effective value in `limits`.
      * @type {number}
      * @memberof CrawlRequest
      */
     maxPages?: number;
+    /**
+     * Maximum link depth from the seed. Absent or 0 takes the default (5); clamped to the hard ceiling (10). Reported in `limits`.
+     * @type {number}
+     * @memberof CrawlRequest
+     */
+    maxDepth?: number;
+    /**
+     * WS14.S3. Follow links to subdomains of the seed host. Absent means false. The effective scope is echoed in `effective`.
+     * @type {boolean}
+     * @memberof CrawlRequest
+     */
+    allowSubdomains?: boolean;
+    /**
+     * WS14.S3. Follow links to hosts unrelated to the seed host. Absent means false. The effective scope is echoed in `effective`.
+     * @type {boolean}
+     * @memberof CrawlRequest
+     */
+    allowExternalLinks?: boolean;
+    /**
+     * WS14.S6. Patterns a link must match at least one of (glob by default; `re:` prefixes a regular expression). At most 100 patterns across include_paths and exclude_paths together, 512 characters each, 8192 in total. A bad pattern is a 400 with `details.fields[]` (path, code `invalid_pattern`). Enforced only when the scope mode is enforce; under observe the response carries `patterns_reported_not_enforced`.
+     * @type {Array<string>}
+     * @memberof CrawlRequest
+     */
+    includePaths?: Array<string>;
+    /**
+     * WS14.S6. Patterns that deny a link; they beat include_paths. Same caps as include_paths.
+     * @type {Array<string>}
+     * @memberof CrawlRequest
+     */
+    excludePaths?: Array<string>;
+    /**
+     * WS14.S6. Extensions to deny, without the dot. Absent takes the built-in list.
+     * @type {Array<string>}
+     * @memberof CrawlRequest
+     */
+    denyExtensions?: Array<string>;
+    /**
+     * WS14.S6. Absent or true follows links across the whole domain. false keeps the crawl under the seed URL's directory (reported as `same_directory_only`).
+     * @type {boolean}
+     * @memberof CrawlRequest
+     */
+    crawlEntireDomain?: boolean;
+    /**
+     * WS14.S6, INNH-6a. `skip` (absent) follows links only. `include` also seeds the crawl with the URLs of the site's sitemaps (the robots.txt `Sitemap:` lines, else /sitemap.xml; gzip and indexes are read, within bounds), one level below the seed. `only` crawls the seed and the sitemap's URLs and follows no page link. Every sitemap URL goes through the crawl scope (host, include/exclude paths, extensions), robots.txt and the page bound before it is queued, and again when its page runs. A sitemap on another host is never fetched. Dark: with QUARRY_EDGE__CRAWL_SITEMAP off, `include` and `only` are a 400 `unsupported_option`. Needs the crawl scope switch on (QUARRY_EDGE__CRAWL_SCOPE_MODE observe or enforce). The counts (`discovered`, `seeded`, `skipped`) are in the `run_completed` event as `sitemap`; when the discovery fails, `only` ends with `run_failed` code `sitemap_unavailable` and `include` goes on with links only.
+     * @type {CrawlRequestSitemapEnum}
+     * @memberof CrawlRequest
+     */
+    sitemap?: CrawlRequestSitemapEnum;
+    /**
+     * WS14.S6. Reserved; any value is a 400 `unsupported_option` (F-t2-041).
+     * @type {boolean}
+     * @memberof CrawlRequest
+     */
+    ignoreQueryParameters?: boolean;
+    /**
+     * 
+     * @type {CrawlRequestScrapeOptions}
+     * @memberof CrawlRequest
+     */
+    scrapeOptions?: CrawlRequestScrapeOptions;
+    /**
+     * WS14.S6. `true` is a 403 `policy_denied` for every request until the entitlement (WS14.S7) is built. `false` is accepted. Service principals are refused in any case.
+     * @type {boolean}
+     * @memberof CrawlRequest
+     */
+    ignoreRobotsTxt?: boolean;
+    /**
+     * 
+     * @type {JobWebhook}
+     * @memberof CrawlRequest
+     */
+    webhook?: JobWebhook;
 }
+
+
+/**
+ * @export
+ */
+export const CrawlRequestSitemapEnum = {
+    Skip: 'skip',
+    Include: 'include',
+    Only: 'only'
+} as const;
+export type CrawlRequestSitemapEnum = typeof CrawlRequestSitemapEnum[keyof typeof CrawlRequestSitemapEnum];
+
 
 /**
  * Check if a given object implements the CrawlRequest interface.
@@ -53,6 +152,18 @@ export function CrawlRequestFromJSONTyped(json: any, ignoreDiscriminator: boolea
         
         'url': json['url'],
         'maxPages': json['max_pages'] == null ? undefined : json['max_pages'],
+        'maxDepth': json['max_depth'] == null ? undefined : json['max_depth'],
+        'allowSubdomains': json['allow_subdomains'] == null ? undefined : json['allow_subdomains'],
+        'allowExternalLinks': json['allow_external_links'] == null ? undefined : json['allow_external_links'],
+        'includePaths': json['include_paths'] == null ? undefined : json['include_paths'],
+        'excludePaths': json['exclude_paths'] == null ? undefined : json['exclude_paths'],
+        'denyExtensions': json['deny_extensions'] == null ? undefined : json['deny_extensions'],
+        'crawlEntireDomain': json['crawl_entire_domain'] == null ? undefined : json['crawl_entire_domain'],
+        'sitemap': json['sitemap'] == null ? undefined : json['sitemap'],
+        'ignoreQueryParameters': json['ignore_query_parameters'] == null ? undefined : json['ignore_query_parameters'],
+        'scrapeOptions': json['scrape_options'] == null ? undefined : CrawlRequestScrapeOptionsFromJSON(json['scrape_options']),
+        'ignoreRobotsTxt': json['ignore_robots_txt'] == null ? undefined : json['ignore_robots_txt'],
+        'webhook': json['webhook'] == null ? undefined : JobWebhookFromJSON(json['webhook']),
     };
 }
 
@@ -69,6 +180,18 @@ export function CrawlRequestToJSONTyped(value?: CrawlRequest | null, ignoreDiscr
         
         'url': value['url'],
         'max_pages': value['maxPages'],
+        'max_depth': value['maxDepth'],
+        'allow_subdomains': value['allowSubdomains'],
+        'allow_external_links': value['allowExternalLinks'],
+        'include_paths': value['includePaths'],
+        'exclude_paths': value['excludePaths'],
+        'deny_extensions': value['denyExtensions'],
+        'crawl_entire_domain': value['crawlEntireDomain'],
+        'sitemap': value['sitemap'],
+        'ignore_query_parameters': value['ignoreQueryParameters'],
+        'scrape_options': CrawlRequestScrapeOptionsToJSON(value['scrapeOptions']),
+        'ignore_robots_txt': value['ignoreRobotsTxt'],
+        'webhook': JobWebhookToJSON(value['webhook']),
     };
 }
 

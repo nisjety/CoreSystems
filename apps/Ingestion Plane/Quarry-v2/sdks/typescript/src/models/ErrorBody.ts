@@ -37,6 +37,12 @@ export interface ErrorBody {
      * @memberof ErrorBody
      */
     hint?: string;
+    /**
+     * Suggested client next steps; present on a 429 and on the 501 of `/v1/extract`.
+     * @type {Array<string>}
+     * @memberof ErrorBody
+     */
+    nextActions?: Array<string>;
 }
 
 /**
@@ -61,6 +67,7 @@ export function ErrorBodyFromJSONTyped(json: any, ignoreDiscriminator: boolean):
         'error': json['error'],
         'code': json['code'],
         'hint': json['hint'] == null ? undefined : json['hint'],
+        'nextActions': json['next_actions'] == null ? undefined : json['next_actions'],
     };
 }
 
@@ -78,6 +85,7 @@ export function ErrorBodyToJSONTyped(value?: ErrorBody | null, ignoreDiscriminat
         'error': value['error'],
         'code': value['code'],
         'hint': value['hint'],
+        'next_actions': value['nextActions'],
     };
 }
 

@@ -13,6 +13,8 @@ Name | Type
 `sha256` | string
 `createdAt` | Date
 `sourceUrl` | string
+`runId` | string
+`pageHash` | string
 
 ## Example
 
@@ -28,6 +30,8 @@ const example = {
   "sha256": null,
   "createdAt": null,
   "sourceUrl": null,
+  "runId": null,
+  "pageHash": null,
 } satisfies ArtifactSummary
 
 console.log(example)

@@ -13,6 +13,14 @@
  */
 
 import { mapValues } from '../runtime';
+import type { JobWebhook } from './JobWebhook';
+import {
+    JobWebhookFromJSON,
+    JobWebhookFromJSONTyped,
+    JobWebhookToJSON,
+    JobWebhookToJSONTyped,
+} from './JobWebhook';
+
 /**
  * 
  * @export
@@ -25,6 +33,24 @@ export interface BatchRequest {
      * @memberof BatchRequest
      */
     urls: Array<string>;
+    /**
+     * CW-1. A batch page has no per-page scrape options, so it cannot be redacted: `on` (or `redactPii: on`) is a 400 `unsupported_option`. `off` is the default.
+     * @type {string}
+     * @memberof BatchRequest
+     */
+    redactPii?: string;
+    /**
+     * W3-E3.7.2w. How many of the batch's pages run at a time. Read only with QUARRY_EDGE__BATCH_PARALLEL on; off, the key is ignored. Absent takes 4, clamped to the edge ceiling (QUARRY_EDGE__BATCH_MAX_PARALLEL, default 4, at most 16). A larger value is clamped to the ceiling and reported in limits.max_parallel. The camelCase alias maxParallel is accepted too (not listed as its own property, because a generated client would merge the two names); sending both max_parallel and maxParallel is a 400.
+     * @type {number}
+     * @memberof BatchRequest
+     */
+    maxParallel?: number;
+    /**
+     * 
+     * @type {JobWebhook}
+     * @memberof BatchRequest
+     */
+    webhook?: JobWebhook;
 }
 
 /**
@@ -46,6 +72,9 @@ export function BatchRequestFromJSONTyped(json: any, ignoreDiscriminator: boolea
     return {
         
         'urls': json['urls'],
+        'redactPii': json['redact_pii'] == null ? undefined : json['redact_pii'],
+        'maxParallel': json['max_parallel'] == null ? undefined : json['max_parallel'],
+        'webhook': json['webhook'] == null ? undefined : JobWebhookFromJSON(json['webhook']),
     };
 }
 
@@ -61,6 +90,9 @@ export function BatchRequestToJSONTyped(value?: BatchRequest | null, ignoreDiscr
     return {
         
         'urls': value['urls'],
+        'redact_pii': value['redactPii'],
+        'max_parallel': value['maxParallel'],
+        'webhook': JobWebhookToJSON(value['webhook']),
     };
 }
 

@@ -13,6 +13,14 @@
  */
 
 import { mapValues } from '../runtime';
+import type { CreateSourceRequestConfig } from './CreateSourceRequestConfig';
+import {
+    CreateSourceRequestConfigFromJSON,
+    CreateSourceRequestConfigFromJSONTyped,
+    CreateSourceRequestConfigToJSON,
+    CreateSourceRequestConfigToJSONTyped,
+} from './CreateSourceRequestConfig';
+
 /**
  * 
  * @export
@@ -51,10 +59,16 @@ export interface CreateSourceRequest {
     preset?: CreateSourceRequestPresetEnum;
     /**
      * 
-     * @type {{ [key: string]: any; }}
+     * @type {CreateSourceRequestConfig}
      * @memberof CreateSourceRequest
      */
-    config?: { [key: string]: any; };
+    config?: CreateSourceRequestConfig;
+    /**
+     * The operator label that groups this source (E3.5-6). Trimmed and lowercased; 1 to 32 characters of letters a to z, digits, dot, underscore or hyphen, starting with a letter or digit. Blank is untagged. A repeat registration keeps the tag the row already has.
+     * @type {string}
+     * @memberof CreateSourceRequest
+     */
+    tag?: string;
 }
 
 
@@ -104,7 +118,8 @@ export function CreateSourceRequestFromJSONTyped(json: any, ignoreDiscriminator:
         'kind': json['kind'],
         'monitor': json['monitor'] == null ? undefined : json['monitor'],
         'preset': json['preset'] == null ? undefined : json['preset'],
-        'config': json['config'] == null ? undefined : json['config'],
+        'config': json['config'] == null ? undefined : CreateSourceRequestConfigFromJSON(json['config']),
+        'tag': json['tag'] == null ? undefined : json['tag'],
     };
 }
 
@@ -124,7 +139,8 @@ export function CreateSourceRequestToJSONTyped(value?: CreateSourceRequest | nul
         'kind': value['kind'],
         'monitor': value['monitor'],
         'preset': value['preset'],
-        'config': value['config'],
+        'config': CreateSourceRequestConfigToJSON(value['config']),
+        'tag': value['tag'],
     };
 }
 

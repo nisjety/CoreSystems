@@ -28,6 +28,11 @@ Name | Type
 `captures` | object
 `scrapeId` | string
 `actions` | [Array&lt;ScrapeActionOutcome&gt;](ScrapeActionOutcome.md)
+`json` | object
+`summary` | string
+`answer` | string
+`highlights` | [Array&lt;Highlight&gt;](Highlight.md)
+`ai` | [AiReport](AiReport.md)
 
 ## Example
 
@@ -57,6 +62,11 @@ const example = {
   "captures": null,
   "scrapeId": null,
   "actions": null,
+  "json": null,
+  "summary": null,
+  "answer": null,
+  "highlights": null,
+  "ai": null,
 } satisfies ScrapeResponse
 
 console.log(example)

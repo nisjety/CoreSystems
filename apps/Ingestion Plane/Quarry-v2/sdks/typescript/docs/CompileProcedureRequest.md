@@ -7,6 +7,7 @@
 Name | Type
 ------------ | -------------
 `procedureId` | string
+`canonical` | boolean
 
 ## Example
 
@@ -16,6 +17,7 @@ import type { CompileProcedureRequest } from '@quarry/client'
 // TODO: Update the object below with actual values
 const example = {
   "procedureId": null,
+  "canonical": null,
 } satisfies CompileProcedureRequest
 
 console.log(example)

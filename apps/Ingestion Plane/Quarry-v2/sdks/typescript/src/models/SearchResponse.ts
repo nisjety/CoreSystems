@@ -13,6 +13,20 @@
  */
 
 import { mapValues } from '../runtime';
+import type { SearchScrapeReport } from './SearchScrapeReport';
+import {
+    SearchScrapeReportFromJSON,
+    SearchScrapeReportFromJSONTyped,
+    SearchScrapeReportToJSON,
+    SearchScrapeReportToJSONTyped,
+} from './SearchScrapeReport';
+import type { RerankReport } from './RerankReport';
+import {
+    RerankReportFromJSON,
+    RerankReportFromJSONTyped,
+    RerankReportToJSON,
+    RerankReportToJSONTyped,
+} from './RerankReport';
 import type { SearchResultItem } from './SearchResultItem';
 import {
     SearchResultItemFromJSON,
@@ -65,6 +79,18 @@ export interface SearchResponse {
      */
     answer?: string;
     /**
+     * Present only when the request set `include_answer`. `ok`: `answer` is a synthesized answer. `no_sources`: the pipeline ran and no source had text, `answer` is empty and no model was called. `skipped_zdr`: zero data retention is on, nothing was sent to a model and `answer` is absent. `unavailable`: no answer, `answer_reason` says why.
+     * @type {SearchResponseAnswerStatusEnum}
+     * @memberof SearchResponse
+     */
+    answerStatus?: SearchResponseAnswerStatusEnum;
+    /**
+     * Present only with `answer_status` `unavailable`. A closed code, never provider text. See `AnswerErrorBody.reason` for what each one means and the setting that fixes it.
+     * @type {SearchResponseAnswerReasonEnum}
+     * @memberof SearchResponse
+     */
+    answerReason?: SearchResponseAnswerReasonEnum;
+    /**
      * 
      * @type {Array<object>}
      * @memberof SearchResponse
@@ -82,7 +108,68 @@ export interface SearchResponse {
      * @memberof SearchResponse
      */
     facets?: Array<FacetCount>;
+    /**
+     * WS7.E. Capabilities the web policy removed from this request (today `search.paid_provider`). The search ran without them. A downgrade is never a 403; a ZDR floor is not listed here.
+     * @type {Array<string>}
+     * @memberof SearchResponse
+     */
+    policyDowngrades?: Array<string>;
+    /**
+     * The kind of the scores on results. Present only when the request asked for that kind in score_kinds and the rerank was applied.
+     * @type {SearchResponseScoreKindEnum}
+     * @memberof SearchResponse
+     */
+    scoreKind?: SearchResponseScoreKindEnum;
+    /**
+     * 
+     * @type {RerankReport}
+     * @memberof SearchResponse
+     */
+    rerank?: RerankReport;
+    /**
+     * 
+     * @type {SearchScrapeReport}
+     * @memberof SearchResponse
+     */
+    scrape?: SearchScrapeReport;
 }
+
+
+/**
+ * @export
+ */
+export const SearchResponseAnswerStatusEnum = {
+    Ok: 'ok',
+    NoSources: 'no_sources',
+    SkippedZdr: 'skipped_zdr',
+    Unavailable: 'unavailable'
+} as const;
+export type SearchResponseAnswerStatusEnum = typeof SearchResponseAnswerStatusEnum[keyof typeof SearchResponseAnswerStatusEnum];
+
+/**
+ * @export
+ */
+export const SearchResponseAnswerReasonEnum = {
+    SynthesisDisabled: 'synthesis_disabled',
+    ModelPathRefused: 'model_path_refused',
+    NoSearchProvider: 'no_search_provider',
+    NoModelPlaneUrl: 'no_model_plane_url',
+    ModelClientInitFailed: 'model_client_init_failed',
+    ModelPlaneAuthRefused: 'model_plane_auth_refused',
+    ModelPlaneRateLimited: 'model_plane_rate_limited',
+    ModelPlaneError: 'model_plane_error',
+    AnswerSearchFailed: 'answer_search_failed'
+} as const;
+export type SearchResponseAnswerReasonEnum = typeof SearchResponseAnswerReasonEnum[keyof typeof SearchResponseAnswerReasonEnum];
+
+/**
+ * @export
+ */
+export const SearchResponseScoreKindEnum = {
+    CrossEncoderV1: 'cross_encoder.v1'
+} as const;
+export type SearchResponseScoreKindEnum = typeof SearchResponseScoreKindEnum[keyof typeof SearchResponseScoreKindEnum];
+
 
 /**
  * Check if a given object implements the SearchResponse interface.
@@ -110,9 +197,15 @@ export function SearchResponseFromJSONTyped(json: any, ignoreDiscriminator: bool
         'results': ((json['results'] as Array<any>).map(SearchResultItemFromJSON)),
         'count': json['count'],
         'answer': json['answer'] == null ? undefined : json['answer'],
+        'answerStatus': json['answer_status'] == null ? undefined : json['answer_status'],
+        'answerReason': json['answer_reason'] == null ? undefined : json['answer_reason'],
         'citations': json['citations'] == null ? undefined : json['citations'],
         'context': json['context'] == null ? undefined : json['context'],
         'facets': json['facets'] == null ? undefined : ((json['facets'] as Array<any>).map(FacetCountFromJSON)),
+        'policyDowngrades': json['policy_downgrades'] == null ? undefined : json['policy_downgrades'],
+        'scoreKind': json['score_kind'] == null ? undefined : json['score_kind'],
+        'rerank': json['rerank'] == null ? undefined : RerankReportFromJSON(json['rerank']),
+        'scrape': json['scrape'] == null ? undefined : SearchScrapeReportFromJSON(json['scrape']),
     };
 }
 
@@ -132,9 +225,15 @@ export function SearchResponseToJSONTyped(value?: SearchResponse | null, ignoreD
         'results': ((value['results'] as Array<any>).map(SearchResultItemToJSON)),
         'count': value['count'],
         'answer': value['answer'],
+        'answer_status': value['answerStatus'],
+        'answer_reason': value['answerReason'],
         'citations': value['citations'],
         'context': value['context'],
         'facets': value['facets'] == null ? undefined : ((value['facets'] as Array<any>).map(FacetCountToJSON)),
+        'policy_downgrades': value['policyDowngrades'],
+        'score_kind': value['scoreKind'],
+        'rerank': RerankReportToJSON(value['rerank']),
+        'scrape': SearchScrapeReportToJSON(value['scrape']),
     };
 }
 

@@ -37,7 +37,31 @@ export interface PageMetadata {
      * @memberof PageMetadata
      */
     contentType?: string;
+    /**
+     * What the body was detected to be, from its first bytes and then its Content-Type: html, xml, text, json, pdf, docx, xlsx, pptx, odf, epub, ole_compound, image, audio, video, archive, executable, rtf or binary. Absent when QUARRY_EDGE__DOC_ROUTING is off. A body Quarry cannot extract text from is refused with 415 UNSUPPORTED_MEDIA when the mode is skip or on (details.kind names it).
+     * @type {string}
+     * @memberof PageMetadata
+     */
+    contentKind?: string;
+    /**
+     * 
+     * @type {PageMetadataContentKindSourceEnum}
+     * @memberof PageMetadata
+     */
+    contentKindSource?: PageMetadataContentKindSourceEnum;
 }
+
+
+/**
+ * @export
+ */
+export const PageMetadataContentKindSourceEnum = {
+    Header: 'header',
+    Magic: 'magic',
+    Default: 'default'
+} as const;
+export type PageMetadataContentKindSourceEnum = typeof PageMetadataContentKindSourceEnum[keyof typeof PageMetadataContentKindSourceEnum];
+
 
 /**
  * Check if a given object implements the PageMetadata interface.
@@ -59,6 +83,8 @@ export function PageMetadataFromJSONTyped(json: any, ignoreDiscriminator: boolea
         'title': json['title'] == null ? undefined : json['title'],
         'lang': json['lang'] == null ? undefined : json['lang'],
         'contentType': json['content_type'] == null ? undefined : json['content_type'],
+        'contentKind': json['content_kind'] == null ? undefined : json['content_kind'],
+        'contentKindSource': json['content_kind_source'] == null ? undefined : json['content_kind_source'],
     };
 }
 
@@ -76,6 +102,8 @@ export function PageMetadataToJSONTyped(value?: PageMetadata | null, ignoreDiscr
         'title': value['title'],
         'lang': value['lang'],
         'content_type': value['contentType'],
+        'content_kind': value['contentKind'],
+        'content_kind_source': value['contentKindSource'],
     };
 }
 

@@ -29,7 +29,7 @@ import {
 } from './CrawlBound';
 
 /**
- * Set by /v1/crawl and /v1/batch. A crawl carries the page and depth bounds it will run with and why they differ from the request (`clamped_by` is `default` when the request was absent or zero, `hard` when it was above the ceiling, `entitlement` when the organization's remaining allowance was smaller, and empty when it was used as asked). A batch carries `urls`: how many URLs were asked for, accepted (the first ones, in order) and dropped. Counts only; never a URL. `remaining` is present only for a configured allowance (WS6.D-s).
+ * Set by /v1/crawl and /v1/batch. A crawl carries the page and depth bounds it will run with and why they differ from the request (`clamped_by` is `default` when the request was absent or zero, `hard` when it was above the ceiling, `entitlement` when the organization's remaining allowance was smaller, and empty when it was used as asked). A batch carries `urls`: how many URLs were asked for, accepted (the first ones, in order) and dropped. Counts only; never a URL. `remaining` is present only for a configured allowance (WS6.D-s). With QUARRY_EDGE__BATCH_PARALLEL on (W3-E3.7.2w), a batch also carries `max_parallel`, the pages it runs at a time, in the same shape as a crawl bound: `requested` is what the request sent (null when silent), `effective` is what runs, and `clamped_by` is `default` when the request was silent and `hard` when it was above the edge ceiling.
  * @export
  * @interface HandoffAckLimits
  */
@@ -52,6 +52,12 @@ export interface HandoffAckLimits {
      * @memberof HandoffAckLimits
      */
     urls?: BatchUrlsBound;
+    /**
+     * 
+     * @type {CrawlBound}
+     * @memberof HandoffAckLimits
+     */
+    maxParallel?: CrawlBound;
 }
 
 /**
@@ -74,6 +80,7 @@ export function HandoffAckLimitsFromJSONTyped(json: any, ignoreDiscriminator: bo
         'maxPages': json['max_pages'] == null ? undefined : CrawlBoundFromJSON(json['max_pages']),
         'maxDepth': json['max_depth'] == null ? undefined : CrawlBoundFromJSON(json['max_depth']),
         'urls': json['urls'] == null ? undefined : BatchUrlsBoundFromJSON(json['urls']),
+        'maxParallel': json['max_parallel'] == null ? undefined : CrawlBoundFromJSON(json['max_parallel']),
     };
 }
 
@@ -91,6 +98,7 @@ export function HandoffAckLimitsToJSONTyped(value?: HandoffAckLimits | null, ign
         'max_pages': CrawlBoundToJSON(value['maxPages']),
         'max_depth': CrawlBoundToJSON(value['maxDepth']),
         'urls': BatchUrlsBoundToJSON(value['urls']),
+        'max_parallel': CrawlBoundToJSON(value['maxParallel']),
     };
 }
 

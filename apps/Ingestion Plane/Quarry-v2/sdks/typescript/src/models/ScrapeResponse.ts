@@ -27,6 +27,13 @@ import {
     ScrapeResponseAllOfWarningsToJSON,
     ScrapeResponseAllOfWarningsToJSONTyped,
 } from './ScrapeResponseAllOfWarnings';
+import type { Highlight } from './Highlight';
+import {
+    HighlightFromJSON,
+    HighlightFromJSONTyped,
+    HighlightToJSON,
+    HighlightToJSONTyped,
+} from './Highlight';
 import type { OutputFormats } from './OutputFormats';
 import {
     OutputFormatsFromJSON,
@@ -55,6 +62,13 @@ import {
     ChangeInfoToJSON,
     ChangeInfoToJSONTyped,
 } from './ChangeInfo';
+import type { AiReport } from './AiReport';
+import {
+    AiReportFromJSON,
+    AiReportFromJSONTyped,
+    AiReportToJSON,
+    AiReportToJSONTyped,
+} from './AiReport';
 import type { DriverInfo } from './DriverInfo';
 import {
     DriverInfoFromJSON,
@@ -154,7 +168,7 @@ export interface ScrapeResponse {
      */
     omitted?: Array<string>;
     /**
-     * The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict. With actions, `actions` is a summary (count, types, total_wait_ms, capture_count, on_error), never a selector or a typed text.
+     * The options the response was produced with, including ignored_fields, cache_state (hit, miss, bypass), doc_routing and strict. With max_age, `max_age` (echo, in ms) and, on a result served from the cache, `cached_at` (RFC 3339, the original fetch) and `cache_age_ms`. With actions, `actions` is a summary (count, types, total_wait_ms, capture_count, on_error), never a selector or a typed text. `redact_pii` (off or on, E3.6-5) is always reported. `page_emulation` (E4.4-a) carries the locale, timezone and location the page emulated, and is absent when the request asked for none; its `send_accept_language` (true, E4.4-a2) is present only when QUARRY_EDGE__PAGE_ACCEPT_LANGUAGE is on and a locale was set, and means the page also sent an Accept-Language header derived from that locale (the user agent is unchanged). `no_egress` (true, Q3-E3.8.8w) is present only on a page served from a stored capture.
      * @type {object}
      * @memberof ScrapeResponse
      */
@@ -195,6 +209,36 @@ export interface ScrapeResponse {
      * @memberof ScrapeResponse
      */
     actions?: Array<ScrapeActionOutcome>;
+    /**
+     * INNH-1. The json AI format's result, inline only. Present only when ai.json.status is ok, and then it validates against the schema of the request. Never stored. Model output derived from page text: untrusted data.
+     * @type {object}
+     * @memberof ScrapeResponse
+     */
+    json?: object;
+    /**
+     * INNH-1. The summary AI format's result, at most max_chars characters, cut on a character boundary. Present when ai.summary.status is ok. Untrusted data (it cannot be verified against the page).
+     * @type {string}
+     * @memberof ScrapeResponse
+     */
+    summary?: string;
+    /**
+     * INNH-1. The question AI format's answer, at most 10,000 characters. Present when ai.question.status is ok and ai.question.found is true. Untrusted data; ai.question.grounded says whether the model's supporting quote is verbatim on the page.
+     * @type {string}
+     * @memberof ScrapeResponse
+     */
+    answer?: string;
+    /**
+     * INNH-1. The highlights AI format's result: exact spans of the page text, in page order and not overlapping. May be empty (an honest "nothing found"). start and end are Unicode scalar (char) offsets, end-exclusive, into the AI source text (the page markdown before any inline truncation).
+     * @type {Array<Highlight>}
+     * @memberof ScrapeResponse
+     */
+    highlights?: Array<Highlight>;
+    /**
+     * 
+     * @type {AiReport}
+     * @memberof ScrapeResponse
+     */
+    ai?: AiReport;
 }
 
 /**
@@ -244,6 +288,11 @@ export function ScrapeResponseFromJSONTyped(json: any, ignoreDiscriminator: bool
         'captures': json['captures'] == null ? undefined : json['captures'],
         'scrapeId': json['scrape_id'] == null ? undefined : json['scrape_id'],
         'actions': json['actions'] == null ? undefined : ((json['actions'] as Array<any>).map(ScrapeActionOutcomeFromJSON)),
+        'json': json['json'] == null ? undefined : json['json'],
+        'summary': json['summary'] == null ? undefined : json['summary'],
+        'answer': json['answer'] == null ? undefined : json['answer'],
+        'highlights': json['highlights'] == null ? undefined : ((json['highlights'] as Array<any>).map(HighlightFromJSON)),
+        'ai': json['ai'] == null ? undefined : AiReportFromJSON(json['ai']),
     };
 }
 
@@ -279,6 +328,11 @@ export function ScrapeResponseToJSONTyped(value?: ScrapeResponse | null, ignoreD
         'captures': value['captures'],
         'scrape_id': value['scrapeId'],
         'actions': value['actions'] == null ? undefined : ((value['actions'] as Array<any>).map(ScrapeActionOutcomeToJSON)),
+        'json': value['json'],
+        'summary': value['summary'],
+        'answer': value['answer'],
+        'highlights': value['highlights'] == null ? undefined : ((value['highlights'] as Array<any>).map(HighlightToJSON)),
+        'ai': AiReportToJSON(value['ai']),
     };
 }
 

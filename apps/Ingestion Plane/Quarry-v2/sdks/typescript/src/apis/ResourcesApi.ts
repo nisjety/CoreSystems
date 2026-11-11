@@ -39,10 +39,15 @@ import {
     GetArtifact200ResponseToJSON,
 } from '../models/GetArtifact200Response';
 import {
-    type JobHistoryEvent,
-    JobHistoryEventFromJSON,
-    JobHistoryEventToJSON,
-} from '../models/JobHistoryEvent';
+    type GetCrawlResults200Response,
+    GetCrawlResults200ResponseFromJSON,
+    GetCrawlResults200ResponseToJSON,
+} from '../models/GetCrawlResults200Response';
+import {
+    type GetSource200Response,
+    GetSource200ResponseFromJSON,
+    GetSource200ResponseToJSON,
+} from '../models/GetSource200Response';
 import {
     type ListArtifacts200Response,
     ListArtifacts200ResponseFromJSON,
@@ -78,6 +83,16 @@ import {
     ListSources200ResponseFromJSON,
     ListSources200ResponseToJSON,
 } from '../models/ListSources200Response';
+import {
+    type SourceDefinitionRequest,
+    SourceDefinitionRequestFromJSON,
+    SourceDefinitionRequestToJSON,
+} from '../models/SourceDefinitionRequest';
+import {
+    type TagPatchRequest,
+    TagPatchRequestFromJSON,
+    TagPatchRequestToJSON,
+} from '../models/TagPatchRequest';
 
 export interface CreateSourceOperationRequest {
     createSourceRequest: CreateSourceRequest;
@@ -91,14 +106,45 @@ export interface GetArtifactRequest {
     artifactId: string;
 }
 
+export interface GetJobResultsRequest {
+    jobId: string;
+    afterSeq?: number;
+    limit?: number;
+    latest?: boolean;
+    format?: GetJobResultsFormatEnum;
+    fields?: string;
+}
+
+export interface GetSourceRequest {
+    sourceId: string;
+}
+
 export interface ListArtifactsRequest {
     limit?: number;
     cursor?: string;
     kind?: ListArtifactsKindEnum;
+    runId?: string;
+}
+
+export interface ListBatchEventsRequest {
+    jobId: string;
+    follow?: string;
+    replay?: ListBatchEventsReplayEnum;
+}
+
+export interface ListCrawlEventsRequest {
+    jobId: string;
+    follow?: string;
+    replay?: ListCrawlEventsReplayEnum;
 }
 
 export interface ListJobEventsRequest {
     jobId: string;
+    follow?: string;
+    replay?: ListJobEventsReplayEnum;
+    afterSeq?: number;
+    limit?: number;
+    lastEventID?: number;
 }
 
 export interface ListJobsByKindRequest {
@@ -128,6 +174,17 @@ export interface ListSnapshotsRequest {
 export interface ListSourcesRequest {
     limit?: number;
     cursor?: string;
+    tag?: string;
+}
+
+export interface PutSourceDefinitionRequest {
+    sourceId: string;
+    sourceDefinitionRequest: SourceDefinitionRequest;
+}
+
+export interface UpdateSourceTagRequest {
+    sourceId: string;
+    tagPatchRequest: TagPatchRequest;
 }
 
 /**
@@ -165,6 +222,7 @@ export class ResourcesApi extends runtime.BaseAPI {
     }
 
     /**
+     * config.definition (E4.1-6) is a saved job definition for the source. The edge checks it with the same validators as POST /v1/crawl (crawl) or POST /v1/scrape (scrape) before anything is stored, and control keeps the canonical form. A refused definition is a 400 with details.fields[]. Sending the key at all, null included, needs QUARRY_EDGE__SAVED_JOBS on, else 501. A repeat registration of the same URL returns the row that exists and does not rewrite its config: change a stored definition with PUT /v1/sources/{source_id}/definition.
      * Register an ingestion source
      */
     async createSourceRaw(requestParameters: CreateSourceOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<CreateSource200Response>> {
@@ -175,6 +233,7 @@ export class ResourcesApi extends runtime.BaseAPI {
     }
 
     /**
+     * config.definition (E4.1-6) is a saved job definition for the source. The edge checks it with the same validators as POST /v1/crawl (crawl) or POST /v1/scrape (scrape) before anything is stored, and control keeps the canonical form. A refused definition is a 400 with details.fields[]. Sending the key at all, null included, needs QUARRY_EDGE__SAVED_JOBS on, else 501. A repeat registration of the same URL returns the row that exists and does not rewrite its config: change a stored definition with PUT /v1/sources/{source_id}/definition.
      * Register an ingestion source
      */
     async createSource(requestParameters: CreateSourceOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<CreateSource200Response> {
@@ -273,6 +332,120 @@ export class ResourcesApi extends runtime.BaseAPI {
     }
 
     /**
+     * Creates request options for getJobResults without sending the request
+     */
+    async getJobResultsRequestOpts(requestParameters: GetJobResultsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['jobId'] == null) {
+            throw new runtime.RequiredError(
+                'jobId',
+                'Required parameter "jobId" was null or undefined when calling getJobResults().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['afterSeq'] != null) {
+            queryParameters['after_seq'] = requestParameters['afterSeq'];
+        }
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['latest'] != null) {
+            queryParameters['latest'] = requestParameters['latest'];
+        }
+
+        if (requestParameters['format'] != null) {
+            queryParameters['format'] = requestParameters['format'];
+        }
+
+        if (requestParameters['fields'] != null) {
+            queryParameters['fields'] = requestParameters['fields'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/jobs/{job_id}/results`;
+        urlPath = urlPath.replace('{job_id}', encodeURIComponent(String(requestParameters['jobId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * The pages a job fetched, one row for each fetch (INNH-12): the page URL, the fetch metadata and the ids of the stored artifacts. This is an index of the pages fetched, not their content; the page content is not in the response, read it by id with `GET /v1/artifacts/{id}` (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the original document). Failed and blocked pages are not rows: they are on `/errors`.  Rows are in the order the pages were fetched. `after_seq` pages forward: pass the `next_seq` of the last page (also in `meta.page.next`). `next_seq` is absent on the last page. A URL fetched twice (a retry, an escalation to a browser) has two rows; `latest=true` returns the latest fetch of each URL instead, still in `seq` order. When a job has more than 20 000 fetches, `latest=true` reads the first 20 000 only and `scan_capped` is true.  A row from before this release carries `url`, `status`, `title` and `fetched_at` only. The artifact ids are absent when nothing was stored (never under Zero Data Retention). On the in-memory artifact backend the ids stop resolving when the edge restarts.  Off unless the edge runs with `QUARRY_EDGE__JOB_RESULTS=1` (501 otherwise). 403 for a caller under Zero Data Retention (`error.details.reason` is `job_result_urls`) and for a service principal. The organization comes from the token. 
+     * The pages any durable job fetched, with their artifact ids (INNH-12)
+     */
+    async getJobResultsRaw(requestParameters: GetJobResultsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<GetCrawlResults200Response>> {
+        const requestOptions = await this.getJobResultsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => GetCrawlResults200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * The pages a job fetched, one row for each fetch (INNH-12): the page URL, the fetch metadata and the ids of the stored artifacts. This is an index of the pages fetched, not their content; the page content is not in the response, read it by id with `GET /v1/artifacts/{id}` (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the original document). Failed and blocked pages are not rows: they are on `/errors`.  Rows are in the order the pages were fetched. `after_seq` pages forward: pass the `next_seq` of the last page (also in `meta.page.next`). `next_seq` is absent on the last page. A URL fetched twice (a retry, an escalation to a browser) has two rows; `latest=true` returns the latest fetch of each URL instead, still in `seq` order. When a job has more than 20 000 fetches, `latest=true` reads the first 20 000 only and `scan_capped` is true.  A row from before this release carries `url`, `status`, `title` and `fetched_at` only. The artifact ids are absent when nothing was stored (never under Zero Data Retention). On the in-memory artifact backend the ids stop resolving when the edge restarts.  Off unless the edge runs with `QUARRY_EDGE__JOB_RESULTS=1` (501 otherwise). 403 for a caller under Zero Data Retention (`error.details.reason` is `job_result_urls`) and for a service principal. The organization comes from the token. 
+     * The pages any durable job fetched, with their artifact ids (INNH-12)
+     */
+    async getJobResults(requestParameters: GetJobResultsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<GetCrawlResults200Response> {
+        const response = await this.getJobResultsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getSource without sending the request
+     */
+    async getSourceRequestOpts(requestParameters: GetSourceRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['sourceId'] == null) {
+            throw new runtime.RequiredError(
+                'sourceId',
+                'Required parameter "sourceId" was null or undefined when calling getSource().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/sources/{source_id}`;
+        urlPath = urlPath.replace('{source_id}', encodeURIComponent(String(requestParameters['sourceId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * The source of the caller\'s organization, config included: a saved job definition sits at config.definition (E4.1-6). This route reads what is stored, so it is not behind QUARRY_EDGE__SAVED_JOBS. A malformed id is a 400; a missing, deleted or other organization\'s id is a 404.
+     * Read one ingestion source
+     */
+    async getSourceRaw(requestParameters: GetSourceRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<GetSource200Response>> {
+        const requestOptions = await this.getSourceRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => GetSource200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * The source of the caller\'s organization, config included: a saved job definition sits at config.definition (E4.1-6). This route reads what is stored, so it is not behind QUARRY_EDGE__SAVED_JOBS. A malformed id is a 400; a missing, deleted or other organization\'s id is a 404.
+     * Read one ingestion source
+     */
+    async getSource(requestParameters: GetSourceRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<GetSource200Response> {
+        const response = await this.getSourceRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
      * Creates request options for listArtifacts without sending the request
      */
     async listArtifactsRequestOpts(requestParameters: ListArtifactsRequest): Promise<runtime.RequestOpts> {
@@ -288,6 +461,10 @@ export class ResourcesApi extends runtime.BaseAPI {
 
         if (requestParameters['kind'] != null) {
             queryParameters['kind'] = requestParameters['kind'];
+        }
+
+        if (requestParameters['runId'] != null) {
+            queryParameters['run_id'] = requestParameters['runId'];
         }
 
         const headerParameters: runtime.HTTPHeaders = {};
@@ -318,6 +495,65 @@ export class ResourcesApi extends runtime.BaseAPI {
      */
     async listArtifacts(requestParameters: ListArtifactsRequest = {}, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<ListArtifacts200Response> {
         const response = await this.listArtifactsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for listBatchEvents without sending the request
+     */
+    async listBatchEventsRequestOpts(requestParameters: ListBatchEventsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['jobId'] == null) {
+            throw new runtime.RequiredError(
+                'jobId',
+                'Required parameter "jobId" was null or undefined when calling listBatchEvents().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['follow'] != null) {
+            queryParameters['follow'] = requestParameters['follow'];
+        }
+
+        if (requestParameters['replay'] != null) {
+            queryParameters['replay'] = requestParameters['replay'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/batch/{job_id}/events`;
+        urlPath = urlPath.replace('{job_id}', encodeURIComponent(String(requestParameters['jobId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * A crawl id on this path is 404. The follow, replay, after_seq, limit and Last-Event-ID rules are those of list_job_events.
+     * Job events of a batch job (same contract as /v1/jobs/{job_id}/events)
+     */
+    async listBatchEventsRaw(requestParameters: ListBatchEventsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<string>> {
+        const requestOptions = await this.listBatchEventsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        if (this.isJsonMime(response.headers.get('content-type'))) {
+            return new runtime.JSONApiResponse<string>(response);
+        } else {
+            return new runtime.TextApiResponse(response) as any;
+        }
+    }
+
+    /**
+     * A crawl id on this path is 404. The follow, replay, after_seq, limit and Last-Event-ID rules are those of list_job_events.
+     * Job events of a batch job (same contract as /v1/jobs/{job_id}/events)
+     */
+    async listBatchEvents(requestParameters: ListBatchEventsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<string> {
+        const response = await this.listBatchEventsRaw(requestParameters, initOverrides);
         return await response.value();
     }
 
@@ -361,6 +597,65 @@ export class ResourcesApi extends runtime.BaseAPI {
     }
 
     /**
+     * Creates request options for listCrawlEvents without sending the request
+     */
+    async listCrawlEventsRequestOpts(requestParameters: ListCrawlEventsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['jobId'] == null) {
+            throw new runtime.RequiredError(
+                'jobId',
+                'Required parameter "jobId" was null or undefined when calling listCrawlEvents().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['follow'] != null) {
+            queryParameters['follow'] = requestParameters['follow'];
+        }
+
+        if (requestParameters['replay'] != null) {
+            queryParameters['replay'] = requestParameters['replay'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/crawl/{job_id}/events`;
+        urlPath = urlPath.replace('{job_id}', encodeURIComponent(String(requestParameters['jobId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * A batch id on this path is 404. The follow, replay, after_seq, limit and Last-Event-ID rules are those of list_job_events.
+     * Job events of a crawl job (same contract as /v1/jobs/{job_id}/events)
+     */
+    async listCrawlEventsRaw(requestParameters: ListCrawlEventsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<string>> {
+        const requestOptions = await this.listCrawlEventsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        if (this.isJsonMime(response.headers.get('content-type'))) {
+            return new runtime.JSONApiResponse<string>(response);
+        } else {
+            return new runtime.TextApiResponse(response) as any;
+        }
+    }
+
+    /**
+     * A batch id on this path is 404. The follow, replay, after_seq, limit and Last-Event-ID rules are those of list_job_events.
+     * Job events of a crawl job (same contract as /v1/jobs/{job_id}/events)
+     */
+    async listCrawlEvents(requestParameters: ListCrawlEventsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<string> {
+        const response = await this.listCrawlEventsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
      * Creates request options for listJobEvents without sending the request
      */
     async listJobEventsRequestOpts(requestParameters: ListJobEventsRequest): Promise<runtime.RequestOpts> {
@@ -373,7 +668,27 @@ export class ResourcesApi extends runtime.BaseAPI {
 
         const queryParameters: any = {};
 
+        if (requestParameters['follow'] != null) {
+            queryParameters['follow'] = requestParameters['follow'];
+        }
+
+        if (requestParameters['replay'] != null) {
+            queryParameters['replay'] = requestParameters['replay'];
+        }
+
+        if (requestParameters['afterSeq'] != null) {
+            queryParameters['after_seq'] = requestParameters['afterSeq'];
+        }
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
         const headerParameters: runtime.HTTPHeaders = {};
+
+        if (requestParameters['lastEventID'] != null) {
+            headerParameters['Last-Event-ID'] = String(requestParameters['lastEventID']);
+        }
 
 
         let urlPath = `/v1/jobs/{job_id}/events`;
@@ -388,21 +703,25 @@ export class ResourcesApi extends runtime.BaseAPI {
     }
 
     /**
-     * Forwards to control\'s /v1/jobs/{id}/events and re-emits as JSON (or SSE for the SPA gateway).
-     * Durable events keyed by handoff job_id
+     * Without follow (the legacy drain): every event of the job after after_seq (or Last-Event-ID), read page by page until caught up, then a terminal \"done\" frame. With follow=true and the edge flag QUARRY_EDGE__JOB_STREAM_FOLLOW=1: a live tail. The first frame is \"event: snapshot\" (status, phase, counts, last_seq, deadline_at, origin, control; its id is the start cursor). Every event frame carries \"id: <seq>\" and \"event: <type>\". The stream ends with \"data: done\" after a terminal event (run_completed, run_failed, run_cancelled, run_timed_out) or when the job record is terminal and the log is caught up. After QUARRY_EDGE__JOB_STREAM_MAX_AGE_S (default 1800) it ends with \"event: reconnect\"; a failed control read ends it with \"event: error\". Over the per-org or per-instance cap of open streams: 429 RATE_LIMITED with retry_after_seconds. A foreign id is 404 before any frame.
+     * Durable events keyed by handoff job_id, or a live tail with follow=true
      */
-    async listJobEventsRaw(requestParameters: ListJobEventsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<Array<JobHistoryEvent>>> {
+    async listJobEventsRaw(requestParameters: ListJobEventsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<string>> {
         const requestOptions = await this.listJobEventsRequestOpts(requestParameters);
         const response = await this.request(requestOptions, initOverrides);
 
-        return new runtime.JSONApiResponse(response, (jsonValue) => jsonValue.map(JobHistoryEventFromJSON));
+        if (this.isJsonMime(response.headers.get('content-type'))) {
+            return new runtime.JSONApiResponse<string>(response);
+        } else {
+            return new runtime.TextApiResponse(response) as any;
+        }
     }
 
     /**
-     * Forwards to control\'s /v1/jobs/{id}/events and re-emits as JSON (or SSE for the SPA gateway).
-     * Durable events keyed by handoff job_id
+     * Without follow (the legacy drain): every event of the job after after_seq (or Last-Event-ID), read page by page until caught up, then a terminal \"done\" frame. With follow=true and the edge flag QUARRY_EDGE__JOB_STREAM_FOLLOW=1: a live tail. The first frame is \"event: snapshot\" (status, phase, counts, last_seq, deadline_at, origin, control; its id is the start cursor). Every event frame carries \"id: <seq>\" and \"event: <type>\". The stream ends with \"data: done\" after a terminal event (run_completed, run_failed, run_cancelled, run_timed_out) or when the job record is terminal and the log is caught up. After QUARRY_EDGE__JOB_STREAM_MAX_AGE_S (default 1800) it ends with \"event: reconnect\"; a failed control read ends it with \"event: error\". Over the per-org or per-instance cap of open streams: 429 RATE_LIMITED with retry_after_seconds. A foreign id is 404 before any frame.
+     * Durable events keyed by handoff job_id, or a live tail with follow=true
      */
-    async listJobEvents(requestParameters: ListJobEventsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<Array<JobHistoryEvent>> {
+    async listJobEvents(requestParameters: ListJobEventsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<string> {
         const response = await this.listJobEventsRaw(requestParameters, initOverrides);
         return await response.value();
     }
@@ -638,6 +957,10 @@ export class ResourcesApi extends runtime.BaseAPI {
             queryParameters['cursor'] = requestParameters['cursor'];
         }
 
+        if (requestParameters['tag'] != null) {
+            queryParameters['tag'] = requestParameters['tag'];
+        }
+
         const headerParameters: runtime.HTTPHeaders = {};
 
 
@@ -671,8 +994,131 @@ export class ResourcesApi extends runtime.BaseAPI {
         return await response.value();
     }
 
+    /**
+     * Creates request options for putSourceDefinition without sending the request
+     */
+    async putSourceDefinitionRequestOpts(requestParameters: PutSourceDefinitionRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['sourceId'] == null) {
+            throw new runtime.RequiredError(
+                'sourceId',
+                'Required parameter "sourceId" was null or undefined when calling putSourceDefinition().'
+            );
+        }
+
+        if (requestParameters['sourceDefinitionRequest'] == null) {
+            throw new runtime.RequiredError(
+                'sourceDefinitionRequest',
+                'Required parameter "sourceDefinitionRequest" was null or undefined when calling putSourceDefinition().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/sources/{source_id}/definition`;
+        urlPath = urlPath.replace('{source_id}', encodeURIComponent(String(requestParameters['sourceId'])));
+
+        return {
+            path: urlPath,
+            method: 'PUT',
+            headers: headerParameters,
+            query: queryParameters,
+            body: SourceDefinitionRequestToJSON(requestParameters['sourceDefinitionRequest']),
+        };
+    }
+
+    /**
+     * Replaces config.definition of a source the caller\'s organization owns, or clears it with `definition: null` (E4.1-6). Dark: 501 while QUARRY_EDGE__SAVED_JOBS is off, null included. A definition is checked against the source\'s kind and URL with the validators of POST /v1/crawl (crawl) or POST /v1/scrape (scrape), and the canonical form is stored; the other keys of config are kept. The URL must pass the org web policy: a denied URL is a 403 with details.reason policy_denied. Clearing fetches nothing, so the policy does not apply to it. The answer is the updated source.
+     * Replace or clear a source\'s saved job definition
+     */
+    async putSourceDefinitionRaw(requestParameters: PutSourceDefinitionRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<CreateSource200Response>> {
+        const requestOptions = await this.putSourceDefinitionRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => CreateSource200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Replaces config.definition of a source the caller\'s organization owns, or clears it with `definition: null` (E4.1-6). Dark: 501 while QUARRY_EDGE__SAVED_JOBS is off, null included. A definition is checked against the source\'s kind and URL with the validators of POST /v1/crawl (crawl) or POST /v1/scrape (scrape), and the canonical form is stored; the other keys of config are kept. The URL must pass the org web policy: a denied URL is a 403 with details.reason policy_denied. Clearing fetches nothing, so the policy does not apply to it. The answer is the updated source.
+     * Replace or clear a source\'s saved job definition
+     */
+    async putSourceDefinition(requestParameters: PutSourceDefinitionRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<CreateSource200Response> {
+        const response = await this.putSourceDefinitionRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for updateSourceTag without sending the request
+     */
+    async updateSourceTagRequestOpts(requestParameters: UpdateSourceTagRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['sourceId'] == null) {
+            throw new runtime.RequiredError(
+                'sourceId',
+                'Required parameter "sourceId" was null or undefined when calling updateSourceTag().'
+            );
+        }
+
+        if (requestParameters['tagPatchRequest'] == null) {
+            throw new runtime.RequiredError(
+                'tagPatchRequest',
+                'Required parameter "tagPatchRequest" was null or undefined when calling updateSourceTag().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/sources/{source_id}`;
+        urlPath = urlPath.replace('{source_id}', encodeURIComponent(String(requestParameters['sourceId'])));
+
+        return {
+            path: urlPath,
+            method: 'PATCH',
+            headers: headerParameters,
+            query: queryParameters,
+            body: TagPatchRequestToJSON(requestParameters['tagPatchRequest']),
+        };
+    }
+
+    /**
+     * Sets the tag of a source the caller\'s org owns. An empty string clears it. A body that names no tag is a 400 with reason `tag_required`; a tag that fails the grammar is a 400 with reason `invalid_tag`. The answer is the updated source in control\'s wire shape.
+     * Set or clear a source\'s monitor tag
+     */
+    async updateSourceTagRaw(requestParameters: UpdateSourceTagRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<CreateSource200Response>> {
+        const requestOptions = await this.updateSourceTagRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => CreateSource200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Sets the tag of a source the caller\'s org owns. An empty string clears it. A body that names no tag is a 400 with reason `tag_required`; a tag that fails the grammar is a 400 with reason `invalid_tag`. The answer is the updated source in control\'s wire shape.
+     * Set or clear a source\'s monitor tag
+     */
+    async updateSourceTag(requestParameters: UpdateSourceTagRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<CreateSource200Response> {
+        const response = await this.updateSourceTagRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
 }
 
+/**
+ * @export
+ */
+export const GetJobResultsFormatEnum = {
+    Json: 'json',
+    Csv: 'csv',
+    Jsonl: 'jsonl'
+} as const;
+export type GetJobResultsFormatEnum = typeof GetJobResultsFormatEnum[keyof typeof GetJobResultsFormatEnum];
 /**
  * @export
  */
@@ -685,6 +1131,30 @@ export const ListArtifactsKindEnum = {
     Extract: 'extract'
 } as const;
 export type ListArtifactsKindEnum = typeof ListArtifactsKindEnum[keyof typeof ListArtifactsKindEnum];
+/**
+ * @export
+ */
+export const ListBatchEventsReplayEnum = {
+    All: 'all',
+    None: 'none'
+} as const;
+export type ListBatchEventsReplayEnum = typeof ListBatchEventsReplayEnum[keyof typeof ListBatchEventsReplayEnum];
+/**
+ * @export
+ */
+export const ListCrawlEventsReplayEnum = {
+    All: 'all',
+    None: 'none'
+} as const;
+export type ListCrawlEventsReplayEnum = typeof ListCrawlEventsReplayEnum[keyof typeof ListCrawlEventsReplayEnum];
+/**
+ * @export
+ */
+export const ListJobEventsReplayEnum = {
+    All: 'all',
+    None: 'none'
+} as const;
+export type ListJobEventsReplayEnum = typeof ListJobEventsReplayEnum[keyof typeof ListJobEventsReplayEnum];
 /**
  * @export
  */

@@ -13,6 +13,21 @@
  */
 
 import { mapValues } from '../runtime';
+import type { StructuredData } from './StructuredData';
+import {
+    StructuredDataFromJSON,
+    StructuredDataFromJSONTyped,
+    StructuredDataToJSON,
+    StructuredDataToJSONTyped,
+} from './StructuredData';
+import type { AiFormatReport } from './AiFormatReport';
+import {
+    AiFormatReportFromJSON,
+    AiFormatReportFromJSONTyped,
+    AiFormatReportToJSON,
+    AiFormatReportToJSONTyped,
+} from './AiFormatReport';
+
 /**
  * 
  * @export
@@ -32,7 +47,7 @@ export interface ExtractItem {
      */
     status: string;
     /**
-     * 
+     * The model's answer, present only on status `ok`. It is always valid against `schema` (or a JSON object for a prompt-only request): an answer that is still invalid after one repair is not returned (WS16.S6).
      * @type {object}
      * @memberof ExtractItem
      */
@@ -45,10 +60,40 @@ export interface ExtractItem {
     markdown?: string;
     /**
      * 
+     * @type {StructuredData}
+     * @memberof ExtractItem
+     */
+    structured?: StructuredData;
+    /**
+     * Why this source failed. A model-arm failure starts with its code (`ZDR_UNAVAILABLE:`, `PRIVACY_POLICY:`, `SCHEMA_INVALID:`, `BUDGET_EXHAUSTED:`, `EMPTY_SOURCE:`, `MODEL_UNAVAILABLE:`), or names the request time budget.
      * @type {string}
      * @memberof ExtractItem
      */
     error?: string;
+    /**
+     * Present when a `schema` was sent and the model answered: whether its answer conforms to it. `true` comes with status `ok` and `data`; `false` with status `error`, no `data` and `schema_issues` (WS16.S6). Absent for a prompt-only request.
+     * @type {boolean}
+     * @memberof ExtractItem
+     */
+    schemaValid?: boolean;
+    /**
+     * Why the answer does not conform, one `path: code` line per issue (never a value). Present only when `schema_valid` is false.
+     * @type {Array<string>}
+     * @memberof ExtractItem
+     */
+    schemaIssues?: Array<string>;
+    /**
+     * True when the page was longer than the 20000-byte input cap and `markdown` or the text the model read is only its start. Absent otherwise.
+     * @type {boolean}
+     * @memberof ExtractItem
+     */
+    truncatedInput?: boolean;
+    /**
+     * WS16.S6: what the model arm did for this source, the `json` entry of the scrape route's `data.ai` (status, code, reason, model, usage, schema verdict). Present on every fetched source of a request with a `schema` or a `prompt`, including a ZDR or privacy refusal (`skipped`, no model call); absent on a markdown-only request.
+     * @type {AiFormatReport}
+     * @memberof ExtractItem
+     */
+    ai?: AiFormatReport;
 }
 
 /**
@@ -74,7 +119,12 @@ export function ExtractItemFromJSONTyped(json: any, ignoreDiscriminator: boolean
         'status': json['status'],
         'data': json['data'] == null ? undefined : json['data'],
         'markdown': json['markdown'] == null ? undefined : json['markdown'],
+        'structured': json['structured'] == null ? undefined : StructuredDataFromJSON(json['structured']),
         'error': json['error'] == null ? undefined : json['error'],
+        'schemaValid': json['schema_valid'] == null ? undefined : json['schema_valid'],
+        'schemaIssues': json['schema_issues'] == null ? undefined : json['schema_issues'],
+        'truncatedInput': json['truncated_input'] == null ? undefined : json['truncated_input'],
+        'ai': json['ai'] == null ? undefined : AiFormatReportFromJSON(json['ai']),
     };
 }
 
@@ -93,7 +143,12 @@ export function ExtractItemToJSONTyped(value?: ExtractItem | null, ignoreDiscrim
         'status': value['status'],
         'data': value['data'],
         'markdown': value['markdown'],
+        'structured': StructuredDataToJSON(value['structured']),
         'error': value['error'],
+        'schema_valid': value['schemaValid'],
+        'schema_issues': value['schemaIssues'],
+        'truncated_input': value['truncatedInput'],
+        'ai': AiFormatReportToJSON(value['ai']),
     };
 }
 

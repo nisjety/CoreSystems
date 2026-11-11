@@ -15,6 +15,9 @@ Name | Type
 `startedAt` | Date
 `completedAt` | Date
 `stats` | any
+`origin` | [JobRunOrigin](JobRunOrigin.md)
+`phase` | string
+`credits` | [JobCredits](JobCredits.md)
 
 ## Example
 
@@ -32,6 +35,9 @@ const example = {
   "startedAt": null,
   "completedAt": null,
   "stats": null,
+  "origin": null,
+  "phase": null,
+  "credits": null,
 } satisfies JobSummary
 
 console.log(example)

@@ -28,9 +28,24 @@ import {
     EnvelopeHandoffAckFromJSON,
     EnvelopeHandoffAckToJSON,
 } from '../models/EnvelopeHandoffAck';
+import {
+    type GetCrawlResults200Response,
+    GetCrawlResults200ResponseFromJSON,
+    GetCrawlResults200ResponseToJSON,
+} from '../models/GetCrawlResults200Response';
 
 export interface CrawlHandoffRequest {
     crawlRequest: CrawlRequest;
+    idempotencyKey?: string;
+}
+
+export interface GetCrawlResultsRequest {
+    jobId: string;
+    afterSeq?: number;
+    limit?: number;
+    latest?: boolean;
+    format?: GetCrawlResultsFormatEnum;
+    fields?: string;
 }
 
 /**
@@ -54,6 +69,10 @@ export class CrawlApi extends runtime.BaseAPI {
         const headerParameters: runtime.HTTPHeaders = {};
 
         headerParameters['Content-Type'] = 'application/json';
+
+        if (requestParameters['idempotencyKey'] != null) {
+            headerParameters['Idempotency-Key'] = String(requestParameters['idempotencyKey']);
+        }
 
 
         let urlPath = `/v1/crawl`;
@@ -87,4 +106,81 @@ export class CrawlApi extends runtime.BaseAPI {
         return await response.value();
     }
 
+    /**
+     * Creates request options for getCrawlResults without sending the request
+     */
+    async getCrawlResultsRequestOpts(requestParameters: GetCrawlResultsRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['jobId'] == null) {
+            throw new runtime.RequiredError(
+                'jobId',
+                'Required parameter "jobId" was null or undefined when calling getCrawlResults().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        if (requestParameters['afterSeq'] != null) {
+            queryParameters['after_seq'] = requestParameters['afterSeq'];
+        }
+
+        if (requestParameters['limit'] != null) {
+            queryParameters['limit'] = requestParameters['limit'];
+        }
+
+        if (requestParameters['latest'] != null) {
+            queryParameters['latest'] = requestParameters['latest'];
+        }
+
+        if (requestParameters['format'] != null) {
+            queryParameters['format'] = requestParameters['format'];
+        }
+
+        if (requestParameters['fields'] != null) {
+            queryParameters['fields'] = requestParameters['fields'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/crawl/{job_id}/results`;
+        urlPath = urlPath.replace('{job_id}', encodeURIComponent(String(requestParameters['jobId'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * The pages a crawl fetched, one row for each fetch (INNH-12): the page URL, the fetch metadata and the ids of the stored artifacts. This is an index of the pages fetched, not their content; the page content is not in the response, read it by id with `GET /v1/artifacts/{id}` (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the original document). Failed and blocked pages are not rows: they are on `/errors`.  Rows are in the order the pages were fetched. `after_seq` pages forward: pass the `next_seq` of the last page (also in `meta.page.next`). `next_seq` is absent on the last page. A URL fetched twice (a retry, an escalation to a browser) has two rows; `latest=true` returns the latest fetch of each URL instead, still in `seq` order. When a job has more than 20 000 fetches, `latest=true` reads the first 20 000 only and `scan_capped` is true.  A row from before this release carries `url`, `status`, `title` and `fetched_at` only. The artifact ids are absent when nothing was stored (never under Zero Data Retention). On the in-memory artifact backend the ids stop resolving when the edge restarts.  Off unless the edge runs with `QUARRY_EDGE__JOB_RESULTS=1` (501 otherwise). 403 for a caller under Zero Data Retention (`error.details.reason` is `job_result_urls`) and for a service principal. The organization comes from the token. 
+     * The pages a crawl fetched, with their artifact ids (INNH-12)
+     */
+    async getCrawlResultsRaw(requestParameters: GetCrawlResultsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<GetCrawlResults200Response>> {
+        const requestOptions = await this.getCrawlResultsRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => GetCrawlResults200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * The pages a crawl fetched, one row for each fetch (INNH-12): the page URL, the fetch metadata and the ids of the stored artifacts. This is an index of the pages fetched, not their content; the page content is not in the response, read it by id with `GET /v1/artifacts/{id}` (`markdown_artifact_id` is the page as Markdown, `source_artifact_id` the HTML or the original document). Failed and blocked pages are not rows: they are on `/errors`.  Rows are in the order the pages were fetched. `after_seq` pages forward: pass the `next_seq` of the last page (also in `meta.page.next`). `next_seq` is absent on the last page. A URL fetched twice (a retry, an escalation to a browser) has two rows; `latest=true` returns the latest fetch of each URL instead, still in `seq` order. When a job has more than 20 000 fetches, `latest=true` reads the first 20 000 only and `scan_capped` is true.  A row from before this release carries `url`, `status`, `title` and `fetched_at` only. The artifact ids are absent when nothing was stored (never under Zero Data Retention). On the in-memory artifact backend the ids stop resolving when the edge restarts.  Off unless the edge runs with `QUARRY_EDGE__JOB_RESULTS=1` (501 otherwise). 403 for a caller under Zero Data Retention (`error.details.reason` is `job_result_urls`) and for a service principal. The organization comes from the token. 
+     * The pages a crawl fetched, with their artifact ids (INNH-12)
+     */
+    async getCrawlResults(requestParameters: GetCrawlResultsRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<GetCrawlResults200Response> {
+        const response = await this.getCrawlResultsRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
 }
+
+/**
+ * @export
+ */
+export const GetCrawlResultsFormatEnum = {
+    Json: 'json',
+    Csv: 'csv',
+    Jsonl: 'jsonl'
+} as const;
+export type GetCrawlResultsFormatEnum = typeof GetCrawlResultsFormatEnum[keyof typeof GetCrawlResultsFormatEnum];

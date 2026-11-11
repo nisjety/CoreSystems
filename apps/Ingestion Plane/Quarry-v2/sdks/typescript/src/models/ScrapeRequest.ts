@@ -27,13 +27,73 @@ import {
     DriverSignalsToJSON,
     DriverSignalsToJSONTyped,
 } from './DriverSignals';
+import type { ScrapeRequestFormatsInner } from './ScrapeRequestFormatsInner';
+import {
+    ScrapeRequestFormatsInnerFromJSON,
+    ScrapeRequestFormatsInnerFromJSONTyped,
+    ScrapeRequestFormatsInnerToJSON,
+    ScrapeRequestFormatsInnerToJSONTyped,
+} from './ScrapeRequestFormatsInner';
+import type { ScrapeRequestLocation } from './ScrapeRequestLocation';
+import {
+    ScrapeRequestLocationFromJSON,
+    ScrapeRequestLocationFromJSONTyped,
+    ScrapeRequestLocationToJSON,
+    ScrapeRequestLocationToJSONTyped,
+} from './ScrapeRequestLocation';
+import type { ScrapeRequestActionsInner } from './ScrapeRequestActionsInner';
+import {
+    ScrapeRequestActionsInnerFromJSON,
+    ScrapeRequestActionsInnerFromJSONTyped,
+    ScrapeRequestActionsInnerToJSON,
+    ScrapeRequestActionsInnerToJSONTyped,
+} from './ScrapeRequestActionsInner';
+import type { ScrapeRequestRender } from './ScrapeRequestRender';
+import {
+    ScrapeRequestRenderFromJSON,
+    ScrapeRequestRenderFromJSONTyped,
+    ScrapeRequestRenderToJSON,
+    ScrapeRequestRenderToJSONTyped,
+} from './ScrapeRequestRender';
+import type { RequestAsk } from './RequestAsk';
+import {
+    RequestAskFromJSON,
+    RequestAskFromJSONTyped,
+    RequestAskToJSON,
+    RequestAskToJSONTyped,
+} from './RequestAsk';
 
 /**
- * 
+ * Fields not listed here are unknown: ignored with an unknown_field warning (and Deprecation and Sunset headers) unless the edge runs strict, where they are a 400. skipTlsVerification, skip_tls_verification, proxy, proxyUrl, headers, mobile and stealth are always a 400 reserved_field. A bad value is a 400 with details.fields[] {path, code, message}.
  * @export
  * @interface ScrapeRequest
  */
 export interface ScrapeRequest {
+    [key: string]: any | any;
+    /**
+     * Privacy policy for this request (purpose, classification, third-party processing). ZDR raises it.
+     * @type {object}
+     * @memberof ScrapeRequest
+     */
+    privacy?: object;
+    /**
+     * 
+     * @type {ScrapeRequestRender}
+     * @memberof ScrapeRequest
+     */
+    render?: ScrapeRequestRender;
+    /**
+     * Prefer HTTP/3 when the edge was built and configured for it.
+     * @type {boolean}
+     * @memberof ScrapeRequest
+     */
+    preferHttp3?: boolean;
+    /**
+     * 
+     * @type {RequestAsk}
+     * @memberof ScrapeRequest
+     */
+    policy?: RequestAsk;
     /**
      * URL to scrape
      * @type {string}
@@ -76,7 +136,139 @@ export interface ScrapeRequest {
      * @memberof ScrapeRequest
      */
     orgId?: string;
+    /**
+     * What to return inline besides the artifact references. `markdown`, `html` (the HTML the markdown was made from, after the cleaning options), `rawHtml` (the document as fetched), `links` and `metadata` (the last two are in every response already). Naming formats makes the request non-default: it neither reads nor writes the page cache. Under ZDR the default is `["markdown"]`. `json`, `summary`, `question` and `highlights` (INNH-1, see ScrapeAiFormat and CONTRACTS.md "Scrape AI formats") ask a model about the page: objects, and `summary` also as the string. Refused with 400 `feature_disabled` at `formats[i]` while QUARRY_EDGE__AI_FORMATS is not `on`, and at most one of each kind (`too_many`). The bare strings `json`, `question` and `highlights` are 400 `missing_field` at `formats[i].schema`, `.question` and `.query`. The result is inline only (`json`, `summary`, `answer`, `highlights` on the response, a report in `ai`); it is never stored, cached or put in an event. Under Zero Data Retention every AI format is answered `skipped` with code `ZDR_UNAVAILABLE` and no model is called. A model failure never fails the scrape: it is an `error` or `skipped` entry in `ai` inside the 200. `screenshot` and `pdf` are captures (WS13.4b), given as a string or as an object `{"type": "screenshot"}` or `{"type": "pdf"}` with options (see CONTRACTS.md section 10). Refused with 400 `feature_disabled` at `formats` while QUARRY_EDGE__SCRAPE_CAPTURE is not `on`.
+     * @type {Array<ScrapeRequestFormatsInner>}
+     * @memberof ScrapeRequest
+     */
+    formats?: Array<ScrapeRequestFormatsInner>;
+    /**
+     * true runs the main-content heuristic (extractor readability); false keeps the whole body (clean_full). Must agree with extractor. camelCase alias onlyMainContent.
+     * @type {boolean}
+     * @memberof ScrapeRequest
+     */
+    onlyMainContent?: boolean;
+    /**
+     * CSS selectors; only the matching subtrees are kept, each once. Matching nothing gives empty markdown and the warning include_tags_matched_nothing. An invalid selector is a 400 invalid_selector. Alias includeTags.
+     * @type {Array<string>}
+     * @memberof ScrapeRequest
+     */
+    includeTags?: Array<string>;
+    /**
+     * CSS selectors; every match and its subtree is removed before extraction. Alias excludeTags.
+     * @type {Array<string>}
+     * @memberof ScrapeRequest
+     */
+    excludeTags?: Array<string>;
+    /**
+     * Strip inline base64 images (clean_full always does). Alias removeBase64Images.
+     * @type {boolean}
+     * @memberof ScrapeRequest
+     */
+    removeBase64Images?: boolean;
+    /**
+     * readability (main content), clean_full (whole body without scripts and chrome) or raw (as is). Setting it against only_main_content is a 400 conflicts_with_only_main_content.
+     * @type {ScrapeRequestExtractorEnum}
+     * @memberof ScrapeRequest
+     */
+    extractor?: ScrapeRequestExtractorEnum;
+    /**
+     * Upper bound for the whole scrape; on expiry the response is a 504 TIMEOUT with details.op = scrape. Alias timeoutMs.
+     * @type {number}
+     * @memberof ScrapeRequest
+     */
+    timeoutMs?: number;
+    /**
+     * Cap for each inline field. Over it, a non-ZDR field is left out (listed in omitted), a ZDR field is cut (listed in truncated). Alias maxInlineBytes.
+     * @type {number}
+     * @memberof ScrapeRequest
+     */
+    maxInlineBytes?: number;
+    /**
+     * Actions run in order on the page the scrape opened (WS13.5). Off by default: QUARRY_EDGE__SCRAPE_ACTIONS must admit the caller (`user` admits user tokens, dev only; `on` also admits a service principal with scrape:interact). Each item is an object whose `type` is one of wait (`milliseconds`, or `selector` with `timeoutMs`), click (`selector`), write (`selector` and `text`; the text is never echoed), press (`key`: a named key such as Enter, Tab or Escape, or one printable character), scroll (`to` top or bottom, or `selector`, or `direction` up or down with `pixels`), select (`selector` and `value`), screenshot and pdf (their options, as in formats). At most 50 actions; the total wait is at most 60 s and one wait at most 30 s. The types executeJavascript, evaluate, navigate, back, forward, clickPoint, mouseWheel, upload, download and dialog are refused by name (action_denied). A request labelled initiated_by "agent" is refused with 403 scrape_interact_scope_required whatever the token. Not served on /v1/scrape/stream (400 unsupported_in_stream).
+     * @type {Array<ScrapeRequestActionsInner>}
+     * @memberof ScrapeRequest
+     */
+    actions?: Array<ScrapeRequestActionsInner>;
+    /**
+     * What to do when an action fails. abort stops the run and answers with the outcome of every action in error.details.actions; continue goes on to the next action. There is no retry: a replayed click or type can submit twice. Alias actionsOnError.
+     * @type {ScrapeRequestActionsOnErrorEnum}
+     * @memberof ScrapeRequest
+     */
+    actionsOnError?: ScrapeRequestActionsOnErrorEnum;
+    /**
+     * INNH-7. Serve a stored result no older than this many milliseconds (Firecrawl's maxAge) instead of fetching. Alias maxAge. Absent: the result cache is not read and the request behaves as before. 0: it is not read (the fresh result is still written). N: the result stored for the same organization, canonical URL (fragment and tracking parameters dropped) and options (formats, selectors, extractor), if it was fetched at most N ms ago; otherwise the page is fetched and the entry replaced. A hit makes no fetch, is not metered as scrape.page, has no scrape_id, keeps the ORIGINAL data.fetched_at, and says so in effective_options (cache_state hit, cached_at, cache_age_ms); markdown, html and rawHtml are rebuilt from the stored artifacts, and a result whose artifacts are gone is a miss. Entries live for cache.max_age_s (default 3600 s), so a max_age beyond that behaves as that TTL. Never served or written for ZDR (warning max_age_ignored_zdr), captures, actions, AI formats, the browser driver, a non-default web policy, ingest, or a private privacy class (warning max_age_ignored); with no cache backend it is ignored with the warning cache_unavailable. 400 feature_disabled at max_age while QUARRY_EDGE__SCRAPE_MAX_AGE is not on; 400 out_of_range above 30 days, invalid_type for a non-integer. Not on crawl, batch or run_page. cache.max_age_s is a different thing: the TTL, in seconds, of the entry this request writes. A 2xx page the run flagged as a bot wall or a soft-404 is returned as usual but never written, so the next call fetches again.
+     * @type {number}
+     * @memberof ScrapeRequest
+     */
+    maxAge?: number;
+    /**
+     * E3.6-5. on: the returned text goes through the PII scanner before it is cached, recorded or answered (inline markdown, html, rawHtml, the AI source, the page title, description, author and keywords, and the extraction title, excerpt and summary); the text fingerprint is cleared, and a field the redaction markers grow past max_inline_bytes is cut again and named in truncated. Absent and off are the same request. Alias redactPii. 400 requires_zdr (path redact_pii) outside zero data retention; 400 not_supported_with_redact_pii with a screenshot or pdf format (path formats) or with actions (path actions); 400 unsupported_redact_pii for any other value. A redacted request never reads or writes the page or result cache. Refused on /v1/scrape/stream (unsupported_in_stream).
+     * @type {ScrapeRequestRedactPiiEnum}
+     * @memberof ScrapeRequest
+     */
+    redactPii?: ScrapeRequestRedactPiiEnum;
+    /**
+     * Q3-E3.8.8w. true: the page is served from the organization's stored capture in the Data Plane, read through its API only, and no connection is opened to the page's host. That means no robots.txt or sitemap discovery, no redirect follow, no proxy and no DNS lookup of the host. Absent and false are the same request. Alias noEgress. Off unless QUARRY_EDGE__NO_EGRESS is on (default off), the edge has a Data Plane URL and the cross-plane token provider. A page with no stored capture is 404 NOT_FOUND with details.reason no_egress_miss, and the URL is in neither the message nor the details. 400 feature_disabled (path no_egress) while the switch is off; 400 not_supported_with_no_egress with a screenshot or pdf format (path formats), with actions (path actions), with locale, timezone or location (path no_egress) or with ingest (path ingest); 400 invalid_type for a value that is not a boolean; 503 RUNTIME_NOT_READY (details.reason no_egress_unavailable) when the switch is on but the Data Plane reader could not be built. Under zero data retention it is 403 FORBIDDEN with details.reason no_egress_zdr_refused, before anything is read. A no_egress request never reads or writes the page or result cache, takes no per-host slot, and indexes, titles or ingests nothing. Its effective_options carry no_egress true. Refused on /v1/scrape/stream (unsupported_in_stream) and on crawl and batch scrape_options (unsupported_option).
+     * @type {boolean}
+     * @memberof ScrapeRequest
+     */
+    noEgress?: boolean;
+    /**
+     * E4.4-a. The language tag the page emulates, as Chromium takes it: navigator.language and Intl see it. nb-NO is stored as nb_NO. Absent: the host's locale, as before. Off unless QUARRY_EDGE__PER_PAGE_LOCALE is on; while off the key is an unknown field. 400 invalid_locale (path locale) for a value that is not a language tag such as en-US or nb-NO. A request with a locale is browser work: the page is emulated before its first navigation, and it never reads or writes the page or result cache. Refused on /v1/scrape/stream (unsupported_in_stream) while the switch is on. On an edge with no browser, 400 unsupported_option, one field error per emulated field (locale, timezone or location).
+     * @type {string}
+     * @memberof ScrapeRequest
+     */
+    locale?: string;
+    /**
+     * E4.4-a. The IANA timezone the page emulates, such as Europe/Oslo (Date and Intl use it). Absent: the host's timezone. The same switch, cache and stream rules as locale. 400 invalid_timezone (path timezone) for a name that is not IANA-shaped. A name the browser does not know is refused with 400 page_emulation_failed (details.field timezone).
+     * @type {string}
+     * @memberof ScrapeRequest
+     */
+    timezone?: string;
+    /**
+     * 
+     * @type {ScrapeRequestLocation}
+     * @memberof ScrapeRequest
+     */
+    location?: ScrapeRequestLocation;
+    /**
+     * E4.4-b. Pins one stored browser profile (prof_<ulid>) to this one scrape: the page is loaded in the browser with that profile restored read-only, so nothing the page sets is written back to the profile. Alias profileId. Off unless QUARRY_EDGE__SCRAPE_PROFILE_PIN is on (default off); while off the key is an unknown field (stripped, never read). Accepted for person tokens only: the profile must belong to the caller's verified identity, and a profile id that is unknown to the caller is 404 NOT_FOUND (a profile is never created by this option). A pinned scrape is personalised, logged-in content: it never reads or writes the page or result cache, it is refused with ingest and under zero data retention, and its effective_options carry profile_pinned true, never the id. 400 feature_disabled (path profile_id) while the switch is off on a caller that builds the options itself; 400 invalid_profile_id (path profile_id) for a value that is not a profile id; 400 conflicting_option (path profile_id) with actions (an authenticated action run needs its own gate) or with no_egress; 400 invalid_type for a value that is not a string. The refusals that follow are the scrape's own: 400 profile_ingest_forbidden (path ingest) with ingest true; 400 profile_zdr_forbidden (path profile_id) under zero data retention, the token's ZDR floor included; 403 FORBIDDEN for a service principal (the profile guard's refusal) and for an API key (details.reason api_key_profile_refused); 404 NOT_FOUND (profile not found) for a profile the organization does not hold, and for a profile the caller does not own under enforce; 400 unsupported_option (path profile_id) on an edge with no browser to restore the profile into. The stream route refuses profile_id with 400 unsupported_in_stream.
+     * @type {string}
+     * @memberof ScrapeRequest
+     */
+    profileId?: string;
 }
+
+
+/**
+ * @export
+ */
+export const ScrapeRequestExtractorEnum = {
+    Readability: 'readability',
+    CleanFull: 'clean_full',
+    Raw: 'raw'
+} as const;
+export type ScrapeRequestExtractorEnum = typeof ScrapeRequestExtractorEnum[keyof typeof ScrapeRequestExtractorEnum];
+
+/**
+ * @export
+ */
+export const ScrapeRequestActionsOnErrorEnum = {
+    Abort: 'abort',
+    Continue: 'continue'
+} as const;
+export type ScrapeRequestActionsOnErrorEnum = typeof ScrapeRequestActionsOnErrorEnum[keyof typeof ScrapeRequestActionsOnErrorEnum];
+
+/**
+ * @export
+ */
+export const ScrapeRequestRedactPiiEnum = {
+    Off: 'off',
+    On: 'on'
+} as const;
+export type ScrapeRequestRedactPiiEnum = typeof ScrapeRequestRedactPiiEnum[keyof typeof ScrapeRequestRedactPiiEnum];
+
 
 /**
  * Check if a given object implements the ScrapeRequest interface.
@@ -96,6 +288,11 @@ export function ScrapeRequestFromJSONTyped(json: any, ignoreDiscriminator: boole
     }
     return {
         
+            ...json,
+        'privacy': json['privacy'] == null ? undefined : json['privacy'],
+        'render': json['render'] == null ? undefined : ScrapeRequestRenderFromJSON(json['render']),
+        'preferHttp3': json['prefer_http3'] == null ? undefined : json['prefer_http3'],
+        'policy': json['policy'] == null ? undefined : RequestAskFromJSON(json['policy']),
         'url': json['url'],
         'prevFingerprint': json['prev_fingerprint'] == null ? undefined : json['prev_fingerprint'],
         'cache': json['cache'] == null ? undefined : CachePolicyFromJSON(json['cache']),
@@ -103,6 +300,23 @@ export function ScrapeRequestFromJSONTyped(json: any, ignoreDiscriminator: boole
         'signals': json['signals'] == null ? undefined : DriverSignalsFromJSON(json['signals']),
         'ingest': json['ingest'] == null ? undefined : json['ingest'],
         'orgId': json['org_id'] == null ? undefined : json['org_id'],
+        'formats': json['formats'] == null ? undefined : ((json['formats'] as Array<any>).map(ScrapeRequestFormatsInnerFromJSON)),
+        'onlyMainContent': json['only_main_content'] == null ? undefined : json['only_main_content'],
+        'includeTags': json['include_tags'] == null ? undefined : json['include_tags'],
+        'excludeTags': json['exclude_tags'] == null ? undefined : json['exclude_tags'],
+        'removeBase64Images': json['remove_base64_images'] == null ? undefined : json['remove_base64_images'],
+        'extractor': json['extractor'] == null ? undefined : json['extractor'],
+        'timeoutMs': json['timeout_ms'] == null ? undefined : json['timeout_ms'],
+        'maxInlineBytes': json['max_inline_bytes'] == null ? undefined : json['max_inline_bytes'],
+        'actions': json['actions'] == null ? undefined : ((json['actions'] as Array<any>).map(ScrapeRequestActionsInnerFromJSON)),
+        'actionsOnError': json['actions_on_error'] == null ? undefined : json['actions_on_error'],
+        'maxAge': json['max_age'] == null ? undefined : json['max_age'],
+        'redactPii': json['redact_pii'] == null ? undefined : json['redact_pii'],
+        'noEgress': json['no_egress'] == null ? undefined : json['no_egress'],
+        'locale': json['locale'] == null ? undefined : json['locale'],
+        'timezone': json['timezone'] == null ? undefined : json['timezone'],
+        'location': json['location'] == null ? undefined : ScrapeRequestLocationFromJSON(json['location']),
+        'profileId': json['profile_id'] == null ? undefined : json['profile_id'],
     };
 }
 
@@ -117,6 +331,11 @@ export function ScrapeRequestToJSONTyped(value?: ScrapeRequest | null, ignoreDis
 
     return {
         
+            ...value,
+        'privacy': value['privacy'],
+        'render': ScrapeRequestRenderToJSON(value['render']),
+        'prefer_http3': value['preferHttp3'],
+        'policy': RequestAskToJSON(value['policy']),
         'url': value['url'],
         'prev_fingerprint': value['prevFingerprint'],
         'cache': CachePolicyToJSON(value['cache']),
@@ -124,6 +343,23 @@ export function ScrapeRequestToJSONTyped(value?: ScrapeRequest | null, ignoreDis
         'signals': DriverSignalsToJSON(value['signals']),
         'ingest': value['ingest'],
         'org_id': value['orgId'],
+        'formats': value['formats'] == null ? undefined : ((value['formats'] as Array<any>).map(ScrapeRequestFormatsInnerToJSON)),
+        'only_main_content': value['onlyMainContent'],
+        'include_tags': value['includeTags'],
+        'exclude_tags': value['excludeTags'],
+        'remove_base64_images': value['removeBase64Images'],
+        'extractor': value['extractor'],
+        'timeout_ms': value['timeoutMs'],
+        'max_inline_bytes': value['maxInlineBytes'],
+        'actions': value['actions'] == null ? undefined : ((value['actions'] as Array<any>).map(ScrapeRequestActionsInnerToJSON)),
+        'actions_on_error': value['actionsOnError'],
+        'max_age': value['maxAge'],
+        'redact_pii': value['redactPii'],
+        'no_egress': value['noEgress'],
+        'locale': value['locale'],
+        'timezone': value['timezone'],
+        'location': ScrapeRequestLocationToJSON(value['location']),
+        'profile_id': value['profileId'],
     };
 }
 

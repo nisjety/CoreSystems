@@ -12,9 +12,10 @@ Name | Type
 `url` | string
 `kind` | string
 `status` | string
-`createdAt` | Date
-`updatedAt` | Date
+`createdAt` | [SourceCreatedAt](SourceCreatedAt.md)
+`updatedAt` | [SourceCreatedAt](SourceCreatedAt.md)
 `config` | any
+`tag` | string
 
 ## Example
 
@@ -32,6 +33,7 @@ const example = {
   "createdAt": null,
   "updatedAt": null,
   "config": null,
+  "tag": null,
 } satisfies Source
 
 console.log(example)

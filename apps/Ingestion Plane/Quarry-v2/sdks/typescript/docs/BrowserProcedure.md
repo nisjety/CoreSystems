@@ -10,6 +10,7 @@ Name | Type
 `version` | number
 `sourceReceiptIds` | Array&lt;string&gt;
 `steps` | [Array&lt;BrowserProcedureStepsInner&gt;](BrowserProcedureStepsInner.md)
+`slots` | [Array&lt;ProcedureSlot&gt;](ProcedureSlot.md)
 
 ## Example
 
@@ -22,6 +23,7 @@ const example = {
   "version": null,
   "sourceReceiptIds": null,
   "steps": null,
+  "slots": null,
 } satisfies BrowserProcedure
 
 console.log(example)

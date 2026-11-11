@@ -58,7 +58,7 @@ export interface ChangeRecord {
      */
     prevBaseline?: BaselineSnapshot;
     /**
-     * Present only for status=changed
+     * Present only for status=changed. A monitor's change event carries it with QUARRY_EDGE__CHANGE_TEXT_DIFF on (`GET /v1/change/diff?diff_id=`).
      * @type {string}
      * @memberof ChangeRecord
      */

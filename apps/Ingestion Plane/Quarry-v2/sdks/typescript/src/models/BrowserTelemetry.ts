@@ -13,6 +13,14 @@
  */
 
 import { mapValues } from '../runtime';
+import type { ProfileRestoreSummary } from './ProfileRestoreSummary';
+import {
+    ProfileRestoreSummaryFromJSON,
+    ProfileRestoreSummaryFromJSONTyped,
+    ProfileRestoreSummaryToJSON,
+    ProfileRestoreSummaryToJSONTyped,
+} from './ProfileRestoreSummary';
+
 /**
  * Measured browser execution facts. renderer_* values are renderer-scoped CDP metrics, not host-wide process usage. Missing cost/resource values mean no provider-authoritative meter was available.
  * @export
@@ -79,6 +87,12 @@ export interface BrowserTelemetry {
      * @memberof BrowserTelemetry
      */
     verifiedActionCostMicroUsd?: number;
+    /**
+     * What restoring the session's saved profile did when its first tab opened. Counts only. Absent for a session without a saved profile.
+     * @type {ProfileRestoreSummary}
+     * @memberof BrowserTelemetry
+     */
+    profileRestore?: ProfileRestoreSummary;
 }
 
 
@@ -126,6 +140,7 @@ export function BrowserTelemetryFromJSONTyped(json: any, ignoreDiscriminator: bo
         'challengeObservationCount': json['challenge_observation_count'],
         'challengeRatePerMille': json['challenge_rate_per_mille'],
         'verifiedActionCostMicroUsd': json['verified_action_cost_micro_usd'] == null ? undefined : json['verified_action_cost_micro_usd'],
+        'profileRestore': json['profile_restore'] == null ? undefined : ProfileRestoreSummaryFromJSON(json['profile_restore']),
     };
 }
 
@@ -150,6 +165,7 @@ export function BrowserTelemetryToJSONTyped(value?: BrowserTelemetry | null, ign
         'challenge_observation_count': value['challengeObservationCount'],
         'challenge_rate_per_mille': value['challengeRatePerMille'],
         'verified_action_cost_micro_usd': value['verifiedActionCostMicroUsd'],
+        'profile_restore': ProfileRestoreSummaryToJSON(value['profileRestore']),
     };
 }
 

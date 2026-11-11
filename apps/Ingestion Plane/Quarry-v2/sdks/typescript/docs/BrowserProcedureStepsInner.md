@@ -10,6 +10,9 @@ Name | Type
 `action` | { [key: string]: any; }
 `expectedOutcome` | string
 `redactedInput` | boolean
+`target` | [StepTarget](StepTarget.md)
+`slot` | string
+`expect` | [StepExpectation](StepExpectation.md)
 
 ## Example
 
@@ -22,6 +25,9 @@ const example = {
   "action": null,
   "expectedOutcome": null,
   "redactedInput": null,
+  "target": null,
+  "slot": null,
+  "expect": null,
 } satisfies BrowserProcedureStepsInner
 
 console.log(example)

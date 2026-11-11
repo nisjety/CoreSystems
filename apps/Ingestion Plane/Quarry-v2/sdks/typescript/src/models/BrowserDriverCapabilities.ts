@@ -67,6 +67,18 @@ export interface BrowserDriverCapabilities {
      * @memberof BrowserDriverCapabilities
      */
     atomicTargetActions?: boolean;
+    /**
+     * True when the driver runs with QUARRY_BROWSER_TRUSTED_INPUT=on. A click_ref, type_ref or select_ref on a top-level ref is then checked (visible, enabled, still, not covered) and a click and a type are real browser input (event.isTrusted is true). Reported only: a requirement for it in driver_requirements is ignored. An older peer omits it and it reads as false.
+     * @type {boolean}
+     * @memberof BrowserDriverCapabilities
+     */
+    trustedInput?: boolean;
+    /**
+     * True when the driver can restore a stored browser profile read-only into a scrape pinned to it (E4.4-b, the scrape option is dark behind QUARRY_EDGE__SCRAPE_PROFILE_PIN). The profile is never saved back. Reported only: a requirement for it in driver_requirements is ignored. An older peer omits it and it reads as false.
+     * @type {boolean}
+     * @memberof BrowserDriverCapabilities
+     */
+    profilePin?: boolean;
 }
 
 /**
@@ -94,6 +106,8 @@ export function BrowserDriverCapabilitiesFromJSONTyped(json: any, ignoreDiscrimi
         'isolatedEgress': json['isolated_egress'] == null ? undefined : json['isolated_egress'],
         'securityEvidence': json['security_evidence'] == null ? undefined : json['security_evidence'],
         'atomicTargetActions': json['atomic_target_actions'] == null ? undefined : json['atomic_target_actions'],
+        'trustedInput': json['trusted_input'] == null ? undefined : json['trusted_input'],
+        'profilePin': json['profile_pin'] == null ? undefined : json['profile_pin'],
     };
 }
 
@@ -116,6 +130,8 @@ export function BrowserDriverCapabilitiesToJSONTyped(value?: BrowserDriverCapabi
         'isolated_egress': value['isolatedEgress'],
         'security_evidence': value['securityEvidence'],
         'atomic_target_actions': value['atomicTargetActions'],
+        'trusted_input': value['trustedInput'],
+        'profile_pin': value['profilePin'],
     };
 }
 

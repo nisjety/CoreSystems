@@ -34,6 +34,30 @@ export interface CreateScheduleRequest {
      */
     name?: string;
     /**
+     * Start the schedule when created (WS15.S1). Honoured only for a user token; a service token value is ignored. Without it the schedule is created disabled and needs_activation is true.
+     * @type {boolean}
+     * @memberof CreateScheduleRequest
+     */
+    activate?: boolean;
+    /**
+     * IANA zone the cron is read in (WS15.S1).
+     * @type {string}
+     * @memberof CreateScheduleRequest
+     */
+    timezone?: string;
+    /**
+     * Catch-up window for missed fires (WS15.S1).
+     * @type {number}
+     * @memberof CreateScheduleRequest
+     */
+    catchupWindowS?: number;
+    /**
+     * 
+     * @type {boolean}
+     * @memberof CreateScheduleRequest
+     */
+    pauseOnFailure?: boolean;
+    /**
      * Optional when preset-driven (W2 change-monitor create)
      * @type {CreateScheduleRequestKindEnum}
      * @memberof CreateScheduleRequest
@@ -58,19 +82,7 @@ export interface CreateScheduleRequest {
      */
     overlapPolicy?: OverlapPolicy;
     /**
-     * 
-     * @type {number}
-     * @memberof CreateScheduleRequest
-     */
-    catchupWindowS?: number;
-    /**
-     * 
-     * @type {boolean}
-     * @memberof CreateScheduleRequest
-     */
-    pauseOnFailure?: boolean;
-    /**
-     * When set
+     * When set, this is a W2 change-monitor create; target_ref becomes required. The preset becomes the cron (hourly, daily or weekly).
      * @type {string}
      * @memberof CreateScheduleRequest
      */
@@ -82,11 +94,23 @@ export interface CreateScheduleRequest {
      */
     targetRef?: string;
     /**
+     * The operator label that groups this monitor (E3.5-6). Trimmed and lowercased; 1 to 32 characters of letters a to z, digits, dot, underscore or hyphen, starting with a letter or digit. Blank is untagged.
+     * @type {string}
+     * @memberof CreateScheduleRequest
+     */
+    tag?: string;
+    /**
      * 
      * @type {{ [key: string]: any; }}
      * @memberof CreateScheduleRequest
      */
     config?: { [key: string]: any; };
+    /**
+     * The id of a saved job definition (src_ and a ULID) that an executable schedule runs in place of config (E4.1-6). The schedule's target_ref becomes this id, and its config is built from the definition when the schedule is created. Only a crawl is schedulable, and a scrape with no options; a batch is refused with 400 saved_job_not_schedulable, and a non-empty config with 400 config_conflicts_with_source_id. Answers 501 while QUARRY_EDGE__SAVED_JOBS is off.
+     * @type {string}
+     * @memberof CreateScheduleRequest
+     */
+    sourceId?: string;
 }
 
 
@@ -123,15 +147,19 @@ export function CreateScheduleRequestFromJSONTyped(json: any, ignoreDiscriminato
     return {
         
         'name': json['name'] == null ? undefined : json['name'],
+        'activate': json['activate'] == null ? undefined : json['activate'],
+        'timezone': json['timezone'] == null ? undefined : json['timezone'],
+        'catchupWindowS': json['catchup_window_s'] == null ? undefined : json['catchup_window_s'],
+        'pauseOnFailure': json['pause_on_failure'] == null ? undefined : json['pause_on_failure'],
         'kind': json['kind'] == null ? undefined : json['kind'],
         'cron': json['cron'] == null ? undefined : json['cron'],
         'scheduleAt': json['schedule_at'] == null ? undefined : (new Date(json['schedule_at'])),
         'overlapPolicy': json['overlap_policy'] == null ? undefined : OverlapPolicyFromJSON(json['overlap_policy']),
-        'catchupWindowS': json['catchup_window_s'] == null ? undefined : json['catchup_window_s'],
-        'pauseOnFailure': json['pause_on_failure'] == null ? undefined : json['pause_on_failure'],
         'preset': json['preset'] == null ? undefined : json['preset'],
         'targetRef': json['target_ref'] == null ? undefined : json['target_ref'],
+        'tag': json['tag'] == null ? undefined : json['tag'],
         'config': json['config'] == null ? undefined : json['config'],
+        'sourceId': json['source_id'] == null ? undefined : json['source_id'],
     };
 }
 
@@ -147,15 +175,19 @@ export function CreateScheduleRequestToJSONTyped(value?: CreateScheduleRequest |
     return {
         
         'name': value['name'],
+        'activate': value['activate'],
+        'timezone': value['timezone'],
+        'catchup_window_s': value['catchupWindowS'],
+        'pause_on_failure': value['pauseOnFailure'],
         'kind': value['kind'],
         'cron': value['cron'],
         'schedule_at': value['scheduleAt'] == null ? value['scheduleAt'] : value['scheduleAt'].toISOString(),
         'overlap_policy': OverlapPolicyToJSON(value['overlapPolicy']),
-        'catchup_window_s': value['catchupWindowS'],
-        'pause_on_failure': value['pauseOnFailure'],
         'preset': value['preset'],
         'target_ref': value['targetRef'],
+        'tag': value['tag'],
         'config': value['config'],
+        'source_id': value['sourceId'],
     };
 }
 

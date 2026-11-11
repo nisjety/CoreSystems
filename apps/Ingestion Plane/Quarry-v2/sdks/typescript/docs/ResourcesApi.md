@@ -7,6 +7,8 @@ All URIs are relative to *http://localhost:8080*
 | [**createSource**](ResourcesApi.md#createsourceoperation) | **POST** /v1/sources | Register an ingestion source |
 | [**deleteSource**](ResourcesApi.md#deletesource) | **DELETE** /v1/sources/{source_id} | Soft-delete an ingestion source |
 | [**getArtifact**](ResourcesApi.md#getartifact) | **GET** /v1/artifacts/{artifact_id} | Fetch artifact bytes or metadata |
+| [**getJobResults**](ResourcesApi.md#getjobresults) | **GET** /v1/jobs/{job_id}/results | The pages any durable job fetched, with their artifact ids (INNH-12) |
+| [**getSource**](ResourcesApi.md#getsource) | **GET** /v1/sources/{source_id} | Read one ingestion source |
 | [**listArtifacts**](ResourcesApi.md#listartifacts) | **GET** /v1/artifacts | List stored artifacts (served locally by edge) |
 | [**listBatchEvents**](ResourcesApi.md#listbatchevents) | **GET** /v1/batch/{job_id}/events | Job events of a batch job (same contract as /v1/jobs/{job_id}/events) |
 | [**listBenchmarks**](ResourcesApi.md#listbenchmarks) | **GET** /v1/benchmarks | List benchmark runs (placeholder) |
@@ -17,6 +19,8 @@ All URIs are relative to *http://localhost:8080*
 | [**listRunEvents**](ResourcesApi.md#listrunevents) | **GET** /v1/runs/{run_id}/events | Durable event history for one run |
 | [**listSnapshots**](ResourcesApi.md#listsnapshots) | **GET** /v1/snapshots | List captured page snapshots |
 | [**listSources**](ResourcesApi.md#listsources) | **GET** /v1/sources | List ingestion sources |
+| [**putSourceDefinition**](ResourcesApi.md#putsourcedefinition) | **PUT** /v1/sources/{source_id}/definition | Replace or clear a source\&#39;s saved job definition |
+| [**updateSourceTag**](ResourcesApi.md#updatesourcetag) | **PATCH** /v1/sources/{source_id} | Set or clear a source\&#39;s monitor tag |
 
 
 
@@ -25,6 +29,8 @@ All URIs are relative to *http://localhost:8080*
 > CreateSource200Response createSource(createSourceRequest)
 
 Register an ingestion source
+
+config.definition (E4.1-6) is a saved job definition for the source. The edge checks it with the same validators as POST /v1/crawl (crawl) or POST /v1/scrape (scrape) before anything is stored, and control keeps the canonical form. A refused definition is a 400 with details.fields[]. Sending the key at all, null included, needs QUARRY_EDGE__SAVED_JOBS on, else 501. A repeat registration of the same URL returns the row that exists and does not rewrite its config: change a stored definition with PUT /v1/sources/{source_id}/definition.
 
 ### Example
 
@@ -82,6 +88,7 @@ No authorization required
 |-------------|-------------|------------------|
 | **200** | Created source (control-plane wire shape) |  -  |
 | **400** | Invalid body |  -  |
+| **501** | config.definition is sent while QUARRY_EDGE__SAVED_JOBS is off (UNSUPPORTED; the message names the switch) |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 
@@ -218,9 +225,164 @@ No authorization required
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 
 
+## getJobResults
+
+> GetCrawlResults200Response getJobResults(jobId, afterSeq, limit, latest, format, fields)
+
+The pages any durable job fetched, with their artifact ids (INNH-12)
+
+The pages a job fetched, one row for each fetch (INNH-12): the page URL, the fetch metadata and the ids of the stored artifacts. This is an index of the pages fetched, not their content; the page content is not in the response, read it by id with &#x60;GET /v1/artifacts/{id}&#x60; (&#x60;markdown_artifact_id&#x60; is the page as Markdown, &#x60;source_artifact_id&#x60; the HTML or the original document). Failed and blocked pages are not rows: they are on &#x60;/errors&#x60;.  Rows are in the order the pages were fetched. &#x60;after_seq&#x60; pages forward: pass the &#x60;next_seq&#x60; of the last page (also in &#x60;meta.page.next&#x60;). &#x60;next_seq&#x60; is absent on the last page. A URL fetched twice (a retry, an escalation to a browser) has two rows; &#x60;latest&#x3D;true&#x60; returns the latest fetch of each URL instead, still in &#x60;seq&#x60; order. When a job has more than 20 000 fetches, &#x60;latest&#x3D;true&#x60; reads the first 20 000 only and &#x60;scan_capped&#x60; is true.  A row from before this release carries &#x60;url&#x60;, &#x60;status&#x60;, &#x60;title&#x60; and &#x60;fetched_at&#x60; only. The artifact ids are absent when nothing was stored (never under Zero Data Retention). On the in-memory artifact backend the ids stop resolving when the edge restarts.  Off unless the edge runs with &#x60;QUARRY_EDGE__JOB_RESULTS&#x3D;1&#x60; (501 otherwise). 403 for a caller under Zero Data Retention (&#x60;error.details.reason&#x60; is &#x60;job_result_urls&#x60;) and for a service principal. The organization comes from the token. 
+
+### Example
+
+```ts
+import {
+  Configuration,
+  ResourcesApi,
+} from '@quarry/client';
+import type { GetJobResultsRequest } from '@quarry/client';
+
+async function example() {
+  console.log("🚀 Testing @quarry/client SDK...");
+  const api = new ResourcesApi();
+
+  const body = {
+    // string
+    jobId: jobId_example,
+    // number | The `next_seq` of the previous page. (optional)
+    afterSeq: 56,
+    // number (optional)
+    limit: 56,
+    // boolean | Keep only the latest fetch of each URL. (optional)
+    latest: true,
+    // 'json' | 'csv' | 'jsonl' | json (the default) is the envelope. csv and jsonl export the same rows as text, and the 200 body is text/csv or application/x-ndjson (CONTRACTS, Job results, E4.1-4). (optional)
+    format: format_example,
+    // string | With an export format, a comma-separated projection of the row fields, each named once, in the order given. Without a format it is a 400. (optional)
+    fields: fields_example,
+  } satisfies GetJobResultsRequest;
+
+  try {
+    const data = await api.getJobResults(body);
+    console.log(data);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+// Run the test
+example().catch(console.error);
+```
+
+### Parameters
+
+
+| Name | Type | Description  | Notes |
+|------------- | ------------- | ------------- | -------------|
+| **jobId** | `string` |  | [Defaults to `undefined`] |
+| **afterSeq** | `number` | The &#x60;next_seq&#x60; of the previous page. | [Optional] [Defaults to `undefined`] |
+| **limit** | `number` |  | [Optional] [Defaults to `100`] |
+| **latest** | `boolean` | Keep only the latest fetch of each URL. | [Optional] [Defaults to `false`] |
+| **format** | `json`, `csv`, `jsonl` | json (the default) is the envelope. csv and jsonl export the same rows as text, and the 200 body is text/csv or application/x-ndjson (CONTRACTS, Job results, E4.1-4). | [Optional] [Defaults to `&#39;json&#39;`] [Enum: json, csv, jsonl] |
+| **fields** | `string` | With an export format, a comma-separated projection of the row fields, each named once, in the order given. Without a format it is a 400. | [Optional] [Defaults to `undefined`] |
+
+### Return type
+
+[**GetCrawlResults200Response**](GetCrawlResults200Response.md)
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: Not defined
+- **Accept**: `application/json`, `text/csv`, `application/x-ndjson`
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+| **200** | One page of results. With &#x60;format&#x3D;csv&#x60; or &#x60;format&#x3D;jsonl&#x60; the body is that text instead of the envelope, and the kind and cursor are in the headers. |  * X-Quarry-Result-Kind - Export only (&#x60;format&#x3D;csv&#x60; or &#x60;jsonl&#x60;). What the rows are; &#x60;page_index&#x60; is an index of the fetched pages, not their content. The JSON envelope carries the same value as &#x60;data.kind&#x60;. <br>  * X-Quarry-Next-Seq - Export only. The &#x60;after_seq&#x60; of the next page; absent on the last page. <br>  |
+| **400** | A bad &#x60;limit&#x60; (not 1 to 500), &#x60;after_seq&#x60; or &#x60;latest&#x60;. &#x60;error.details.field&#x60; names it. |  -  |
+| **403** | The token\&#39;s ZDR floor is set (&#x60;error.details.reason&#x60; is &#x60;job_result_urls&#x60;), or the caller is a service principal. |  -  |
+| **404** | Not found for this organization, a foreign id, or a job of another kind. |  -  |
+| **501** | Job results are not enabled on this edge (QUARRY_EDGE__JOB_RESULTS). |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
+
+
+## getSource
+
+> GetSource200Response getSource(sourceId)
+
+Read one ingestion source
+
+The source of the caller\&#39;s organization, config included: a saved job definition sits at config.definition (E4.1-6). This route reads what is stored, so it is not behind QUARRY_EDGE__SAVED_JOBS. A malformed id is a 400; a missing, deleted or other organization\&#39;s id is a 404.
+
+### Example
+
+```ts
+import {
+  Configuration,
+  ResourcesApi,
+} from '@quarry/client';
+import type { GetSourceRequest } from '@quarry/client';
+
+async function example() {
+  console.log("🚀 Testing @quarry/client SDK...");
+  const api = new ResourcesApi();
+
+  const body = {
+    // string
+    sourceId: sourceId_example,
+  } satisfies GetSourceRequest;
+
+  try {
+    const data = await api.getSource(body);
+    console.log(data);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+// Run the test
+example().catch(console.error);
+```
+
+### Parameters
+
+
+| Name | Type | Description  | Notes |
+|------------- | ------------- | ------------- | -------------|
+| **sourceId** | `string` |  | [Defaults to `undefined`] |
+
+### Return type
+
+[**GetSource200Response**](GetSource200Response.md)
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: Not defined
+- **Accept**: `application/json`
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+| **200** | The source (control-plane wire shape) |  -  |
+| **400** | Malformed source id |  -  |
+| **404** | Unknown source for this org |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
+
+
 ## listArtifacts
 
-> ListArtifacts200Response listArtifacts(limit, cursor, kind)
+> ListArtifacts200Response listArtifacts(limit, cursor, kind, runId)
 
 List stored artifacts (served locally by edge)
 
@@ -242,8 +404,10 @@ async function example() {
     limit: 56,
     // string | Opaque cursor from a prior page (optional)
     cursor: cursor_example,
-    // 'markdown' | 'html' | 'raw' | 'pdf' | 'screenshot' | 'extract' (optional)
+    // 'markdown' | 'html' | 'raw' | 'pdf' | 'screenshot' | 'extract' | Keep only artifacts of this kind. Any other value is a 400 (`error.details.field` is `kind`). (optional)
     kind: kind_example,
+    // string | Keep only the artifacts one run wrote (`run_...`, as `ArtifactSummary.run_id` and the per-job results carry it). Any other value is a 400 (`error.details.field` is `run_id`). The filter works on the in-memory and filesystem backends; an S3 backend cannot list, so it lists nothing. (optional)
+    runId: runId_example,
   } satisfies ListArtifactsRequest;
 
   try {
@@ -265,7 +429,8 @@ example().catch(console.error);
 |------------- | ------------- | ------------- | -------------|
 | **limit** | `number` | Page size | [Optional] [Defaults to `50`] |
 | **cursor** | `string` | Opaque cursor from a prior page | [Optional] [Defaults to `undefined`] |
-| **kind** | `markdown`, `html`, `raw`, `pdf`, `screenshot`, `extract` |  | [Optional] [Defaults to `undefined`] [Enum: markdown, html, raw, pdf, screenshot, extract] |
+| **kind** | `markdown`, `html`, `raw`, `pdf`, `screenshot`, `extract` | Keep only artifacts of this kind. Any other value is a 400 (&#x60;error.details.field&#x60; is &#x60;kind&#x60;). | [Optional] [Defaults to `undefined`] [Enum: markdown, html, raw, pdf, screenshot, extract] |
+| **runId** | `string` | Keep only the artifacts one run wrote (&#x60;run_...&#x60;, as &#x60;ArtifactSummary.run_id&#x60; and the per-job results carry it). Any other value is a 400 (&#x60;error.details.field&#x60; is &#x60;run_id&#x60;). The filter works on the in-memory and filesystem backends; an S3 backend cannot list, so it lists nothing. | [Optional] [Defaults to `undefined`] |
 
 ### Return type
 
@@ -874,7 +1039,7 @@ No authorization required
 
 ## listSources
 
-> ListSources200Response listSources(limit, cursor)
+> ListSources200Response listSources(limit, cursor, tag)
 
 List ingestion sources
 
@@ -898,6 +1063,8 @@ async function example() {
     limit: 56,
     // string (optional)
     cursor: cursor_example,
+    // string | Keeps only the sources with this monitor tag (E3.5-6). The value is trimmed and lowercased first; a value that fails the tag grammar is a 400 with reason `invalid_tag`. A blank value is no filter. (optional)
+    tag: tag_example,
   } satisfies ListSourcesRequest;
 
   try {
@@ -919,6 +1086,7 @@ example().catch(console.error);
 |------------- | ------------- | ------------- | -------------|
 | **limit** | `number` |  | [Optional] [Defaults to `50`] |
 | **cursor** | `string` |  | [Optional] [Defaults to `undefined`] |
+| **tag** | `string` | Keeps only the sources with this monitor tag (E3.5-6). The value is trimmed and lowercased first; a value that fails the tag grammar is a 400 with reason &#x60;invalid_tag&#x60;. A blank value is no filter. | [Optional] [Defaults to `undefined`] |
 
 ### Return type
 
@@ -938,6 +1106,152 @@ No authorization required
 | Status code | Description | Response headers |
 |-------------|-------------|------------------|
 | **200** | Source page |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
+
+
+## putSourceDefinition
+
+> CreateSource200Response putSourceDefinition(sourceId, sourceDefinitionRequest)
+
+Replace or clear a source\&#39;s saved job definition
+
+Replaces config.definition of a source the caller\&#39;s organization owns, or clears it with &#x60;definition: null&#x60; (E4.1-6). Dark: 501 while QUARRY_EDGE__SAVED_JOBS is off, null included. A definition is checked against the source\&#39;s kind and URL with the validators of POST /v1/crawl (crawl) or POST /v1/scrape (scrape), and the canonical form is stored; the other keys of config are kept. The URL must pass the org web policy: a denied URL is a 403 with details.reason policy_denied. Clearing fetches nothing, so the policy does not apply to it. The answer is the updated source.
+
+### Example
+
+```ts
+import {
+  Configuration,
+  ResourcesApi,
+} from '@quarry/client';
+import type { PutSourceDefinitionRequest } from '@quarry/client';
+
+async function example() {
+  console.log("🚀 Testing @quarry/client SDK...");
+  const api = new ResourcesApi();
+
+  const body = {
+    // string
+    sourceId: sourceId_example,
+    // SourceDefinitionRequest
+    sourceDefinitionRequest: ...,
+  } satisfies PutSourceDefinitionRequest;
+
+  try {
+    const data = await api.putSourceDefinition(body);
+    console.log(data);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+// Run the test
+example().catch(console.error);
+```
+
+### Parameters
+
+
+| Name | Type | Description  | Notes |
+|------------- | ------------- | ------------- | -------------|
+| **sourceId** | `string` |  | [Defaults to `undefined`] |
+| **sourceDefinitionRequest** | [SourceDefinitionRequest](SourceDefinitionRequest.md) |  | |
+
+### Return type
+
+[**CreateSource200Response**](CreateSource200Response.md)
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: `application/json`
+- **Accept**: `application/json`
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+| **200** | Updated source (control-plane wire shape) |  -  |
+| **400** | Malformed source id; a body that names no definition (details.fields[] with code required); or a definition the validators refuse (details.fields[] with path, code and message, as on SavedJobDefinition) |  -  |
+| **403** | The source URL is denied by the org web policy (details.reason policy_denied) |  -  |
+| **404** | Unknown source for this org |  -  |
+| **501** | QUARRY_EDGE__SAVED_JOBS is off (UNSUPPORTED; the message names the switch) |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
+
+
+## updateSourceTag
+
+> CreateSource200Response updateSourceTag(sourceId, tagPatchRequest)
+
+Set or clear a source\&#39;s monitor tag
+
+Sets the tag of a source the caller\&#39;s org owns. An empty string clears it. A body that names no tag is a 400 with reason &#x60;tag_required&#x60;; a tag that fails the grammar is a 400 with reason &#x60;invalid_tag&#x60;. The answer is the updated source in control\&#39;s wire shape.
+
+### Example
+
+```ts
+import {
+  Configuration,
+  ResourcesApi,
+} from '@quarry/client';
+import type { UpdateSourceTagRequest } from '@quarry/client';
+
+async function example() {
+  console.log("🚀 Testing @quarry/client SDK...");
+  const api = new ResourcesApi();
+
+  const body = {
+    // string
+    sourceId: sourceId_example,
+    // TagPatchRequest
+    tagPatchRequest: ...,
+  } satisfies UpdateSourceTagRequest;
+
+  try {
+    const data = await api.updateSourceTag(body);
+    console.log(data);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+// Run the test
+example().catch(console.error);
+```
+
+### Parameters
+
+
+| Name | Type | Description  | Notes |
+|------------- | ------------- | ------------- | -------------|
+| **sourceId** | `string` |  | [Defaults to `undefined`] |
+| **tagPatchRequest** | [TagPatchRequest](TagPatchRequest.md) |  | |
+
+### Return type
+
+[**CreateSource200Response**](CreateSource200Response.md)
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: `application/json`
+- **Accept**: `application/json`
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+| **200** | Updated source (control-plane wire shape) |  -  |
+| **400** | Malformed source id, missing tag or invalid tag |  -  |
+| **404** | Unknown source for this org |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 

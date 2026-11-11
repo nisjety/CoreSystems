@@ -17,6 +17,7 @@ Name | Type
 `executionTier` | string
 `policy` | [RequestAsk](RequestAsk.md)
 `driverRequirements` | [BrowserDriverCapabilities](BrowserDriverCapabilities.md)
+`trace` | [StartAgentRunRequestTrace](StartAgentRunRequestTrace.md)
 
 ## Example
 
@@ -36,6 +37,7 @@ const example = {
   "executionTier": null,
   "policy": null,
   "driverRequirements": null,
+  "trace": null,
 } satisfies StartAgentRunRequest
 
 console.log(example)

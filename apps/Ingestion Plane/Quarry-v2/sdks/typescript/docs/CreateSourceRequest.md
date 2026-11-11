@@ -11,7 +11,8 @@ Name | Type
 `kind` | string
 `monitor` | boolean
 `preset` | string
-`config` | { [key: string]: any; }
+`config` | [CreateSourceRequestConfig](CreateSourceRequestConfig.md)
+`tag` | string
 
 ## Example
 
@@ -26,6 +27,7 @@ const example = {
   "monitor": null,
   "preset": null,
   "config": null,
+  "tag": null,
 } satisfies CreateSourceRequest
 
 console.log(example)

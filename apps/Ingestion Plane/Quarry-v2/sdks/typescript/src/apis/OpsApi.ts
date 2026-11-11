@@ -13,6 +13,16 @@
  */
 
 import * as runtime from '../runtime';
+import {
+    type Ready200Response,
+    Ready200ResponseFromJSON,
+    Ready200ResponseToJSON,
+} from '../models/Ready200Response';
+import {
+    type Ready503Response,
+    Ready503ResponseFromJSON,
+    Ready503ResponseToJSON,
+} from '../models/Ready503Response';
 
 /**
  * 
@@ -80,23 +90,21 @@ export class OpsApi extends runtime.BaseAPI {
     }
 
     /**
+     * Whether this edge should receive traffic. 503 while it drains for shutdown, while its stores are not durable, and when a local browser is unhealthy. The edge runs two local Chromium drivers: agent runs\' (`browser`) and the scrape path\'s (`scrape_browser`); each object is present only when that driver runs a local browser, and a driver without one (a remote provider) leaves the body as `{\"durable\":true,\"status\":\"ready\"}`. A browser that was never launched is `idle` and ready: the first run launches it. `/health` never changes with any of this.
      * Readiness probe
      */
-    async readyRaw(initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<string>> {
+    async readyRaw(initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<Ready200Response>> {
         const requestOptions = await this.readyRequestOpts();
         const response = await this.request(requestOptions, initOverrides);
 
-        if (this.isJsonMime(response.headers.get('content-type'))) {
-            return new runtime.JSONApiResponse<string>(response);
-        } else {
-            return new runtime.TextApiResponse(response) as any;
-        }
+        return new runtime.JSONApiResponse(response, (jsonValue) => Ready200ResponseFromJSON(jsonValue));
     }
 
     /**
+     * Whether this edge should receive traffic. 503 while it drains for shutdown, while its stores are not durable, and when a local browser is unhealthy. The edge runs two local Chromium drivers: agent runs\' (`browser`) and the scrape path\'s (`scrape_browser`); each object is present only when that driver runs a local browser, and a driver without one (a remote provider) leaves the body as `{\"durable\":true,\"status\":\"ready\"}`. A browser that was never launched is `idle` and ready: the first run launches it. `/health` never changes with any of this.
      * Readiness probe
      */
-    async ready(initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<string> {
+    async ready(initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<Ready200Response> {
         const response = await this.readyRaw(initOverrides);
         return await response.value();
     }

@@ -17,7 +17,9 @@ Name | Type
 `overlapPolicy` | [OverlapPolicy](OverlapPolicy.md)
 `preset` | string
 `targetRef` | string
+`tag` | string
 `config` | { [key: string]: any; }
+`sourceId` | string
 
 ## Example
 
@@ -37,7 +39,9 @@ const example = {
   "overlapPolicy": null,
   "preset": null,
   "targetRef": null,
+  "tag": null,
   "config": null,
+  "sourceId": null,
 } satisfies CreateScheduleRequest
 
 console.log(example)

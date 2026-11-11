@@ -12,6 +12,13 @@
  * Do not edit the class manually.
  */
 
+import type { ScrapeAiFormat } from './ScrapeAiFormat';
+import {
+    instanceOfScrapeAiFormat,
+    ScrapeAiFormatFromJSON,
+    ScrapeAiFormatFromJSONTyped,
+    ScrapeAiFormatToJSON,
+} from './ScrapeAiFormat';
 import type { ScrapeRequestFormatsInnerOneOf } from './ScrapeRequestFormatsInnerOneOf';
 import {
     instanceOfScrapeRequestFormatsInnerOneOf,
@@ -25,7 +32,7 @@ import {
  * 
  * @export
  */
-export type ScrapeRequestFormatsInner = ScrapeRequestFormatsInnerOneOf | string;
+export type ScrapeRequestFormatsInner = ScrapeAiFormat | ScrapeRequestFormatsInnerOneOf | string;
 
 export function ScrapeRequestFormatsInnerFromJSON(json: any): ScrapeRequestFormatsInner {
     return ScrapeRequestFormatsInnerFromJSONTyped(json, false);
@@ -38,10 +45,13 @@ export function ScrapeRequestFormatsInnerFromJSONTyped(json: any, ignoreDiscrimi
     if (typeof json !== 'object') {
         return json;
     }
+    if (instanceOfScrapeAiFormat(json)) {
+        return ScrapeAiFormatFromJSONTyped(json, true);
+    }
     if (instanceOfScrapeRequestFormatsInnerOneOf(json)) {
         return ScrapeRequestFormatsInnerOneOfFromJSONTyped(json, true);
     }
-    if (typeof json === 'string' && (json === 'markdown' || json === 'html' || json === 'rawHtml' || json === 'links' || json === 'metadata' || json === 'screenshot' || json === 'pdf')) {
+    if (typeof json === 'string' && (json === 'markdown' || json === 'html' || json === 'rawHtml' || json === 'links' || json === 'metadata' || json === 'screenshot' || json === 'pdf' || json === 'summary')) {
         return json;
     }
     return {} as any;
@@ -58,10 +68,13 @@ export function ScrapeRequestFormatsInnerToJSONTyped(value?: ScrapeRequestFormat
     if (typeof value !== 'object') {
         return value;
     }
+    if (instanceOfScrapeAiFormat(value)) {
+        return ScrapeAiFormatToJSON(value as ScrapeAiFormat);
+    }
     if (instanceOfScrapeRequestFormatsInnerOneOf(value)) {
         return ScrapeRequestFormatsInnerOneOfToJSON(value as ScrapeRequestFormatsInnerOneOf);
     }
-    if (typeof value === 'string' && (value === 'markdown' || value === 'html' || value === 'rawHtml' || value === 'links' || value === 'metadata' || value === 'screenshot' || value === 'pdf')) {
+    if (typeof value === 'string' && (value === 'markdown' || value === 'html' || value === 'rawHtml' || value === 'links' || value === 'metadata' || value === 'screenshot' || value === 'pdf' || value === 'summary')) {
         return value;
     }
     return {};

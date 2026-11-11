@@ -1,7 +1,7 @@
 
 # AgentIdentity
 
-Which agent was behind an operation an agent initiated. Ids and classes only. Only `principalId` of a `service_principal` basis is verified (it is the calling token\'s signed service id); `aiRunId` and `label` are what the caller said, advisory, and never used to decide anything.
+Which agent was behind an operation an agent initiated. Ids and classes only. Only `principalId` of a `service_principal` or `api_key` basis is verified (it is the calling token\'s signed id); `aiRunId` and `label` are what the caller said, advisory, and never used to decide anything.
 
 ## Properties
 

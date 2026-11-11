@@ -12,6 +12,7 @@ Name | Type
 `agentLabel` | string
 `instruction` | string
 `extractionProfile` | { [key: string]: any; }
+`expect` | [StepExpectation](StepExpectation.md)
 
 ## Example
 
@@ -26,6 +27,7 @@ const example = {
   "agentLabel": null,
   "instruction": null,
   "extractionProfile": null,
+  "expect": null,
 } satisfies AgentStepRequest
 
 console.log(example)

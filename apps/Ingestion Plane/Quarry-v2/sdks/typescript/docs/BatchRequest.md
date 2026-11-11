@@ -7,6 +7,9 @@
 Name | Type
 ------------ | -------------
 `urls` | Array&lt;string&gt;
+`redactPii` | string
+`maxParallel` | number
+`webhook` | [JobWebhook](JobWebhook.md)
 
 ## Example
 
@@ -16,6 +19,9 @@ import type { BatchRequest } from '@quarry/client'
 // TODO: Update the object below with actual values
 const example = {
   "urls": null,
+  "redactPii": null,
+  "maxParallel": null,
+  "webhook": null,
 } satisfies BatchRequest
 
 console.log(example)

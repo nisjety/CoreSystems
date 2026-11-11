@@ -9,6 +9,7 @@ Name | Type
 `requested` | string
 `finalUrl` | string
 `canonical` | string
+`fetchedUrl` | string
 
 ## Example
 
@@ -20,6 +21,7 @@ const example = {
   "requested": null,
   "finalUrl": null,
   "canonical": null,
+  "fetchedUrl": null,
 } satisfies UrlTriple
 
 console.log(example)

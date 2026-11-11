@@ -17,8 +17,9 @@ Name | Type
 `crawlEntireDomain` | boolean
 `sitemap` | string
 `ignoreQueryParameters` | boolean
-`scrapeOptions` | object
+`scrapeOptions` | [CrawlRequestScrapeOptions](CrawlRequestScrapeOptions.md)
 `ignoreRobotsTxt` | boolean
+`webhook` | [JobWebhook](JobWebhook.md)
 
 ## Example
 
@@ -40,6 +41,7 @@ const example = {
   "ignoreQueryParameters": null,
   "scrapeOptions": null,
   "ignoreRobotsTxt": null,
+  "webhook": null,
 } satisfies CrawlRequest
 
 console.log(example)

@@ -7,6 +7,14 @@
 Name | Type
 ------------ | -------------
 `type` | string
+`schema` | object
+`prompt` | string
+`maxChars` | number
+`language` | string
+`question` | string
+`query` | string
+`maxHighlights` | number
+`maxCharsEach` | number
 
 ## Example
 
@@ -16,6 +24,14 @@ import type { ScrapeRequestFormatsInner } from '@quarry/client'
 // TODO: Update the object below with actual values
 const example = {
   "type": null,
+  "schema": null,
+  "prompt": null,
+  "maxChars": null,
+  "language": null,
+  "question": null,
+  "query": null,
+  "maxHighlights": null,
+  "maxCharsEach": null,
 } satisfies ScrapeRequestFormatsInner
 
 console.log(example)

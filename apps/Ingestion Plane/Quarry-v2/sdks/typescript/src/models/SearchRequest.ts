@@ -13,6 +13,14 @@
  */
 
 import { mapValues } from '../runtime';
+import type { SearchScrapeBlock } from './SearchScrapeBlock';
+import {
+    SearchScrapeBlockFromJSON,
+    SearchScrapeBlockFromJSONTyped,
+    SearchScrapeBlockToJSON,
+    SearchScrapeBlockToJSONTyped,
+} from './SearchScrapeBlock';
+
 /**
  * 
  * @export
@@ -80,7 +88,7 @@ export interface SearchRequest {
      */
     chunksPerSource?: number;
     /**
-     * 
+     * Also synthesize an answer, as `POST /v1/answer` does. Never fails the search: the response carries `answer_status` (and `answer_reason`) to say whether `answer` is a real answer. Metered as `quarry.answer.synth` once per synthesis, never on a cache hit. Skipped under zero data retention.
      * @type {boolean}
      * @memberof SearchRequest
      */
@@ -103,7 +111,35 @@ export interface SearchRequest {
      * @memberof SearchRequest
      */
     facets?: boolean;
+    /**
+     * Zero data retention for this search: the cache and the durable content events are bypassed. A user of a ZDR organisation runs as ZDR whatever this says. A service caller (for example quarry-edge) must send it: an omitted value is refused with ZDR_REQUIRED (400). A ZDR search makes no rerank call (the rerank status is skipped, reason zdr).
+     * @type {boolean}
+     * @memberof SearchRequest
+     */
+    zdr?: boolean;
+    /**
+     * The score kinds the caller accepts on the results. Empty (the default) means the order only: no score reaches the wire. cross_encoder.v1 asks for the Data Plane's cross-encoder score on a reranked result set, and the response then names the kind in score_kind. An unknown kind is refused with SCORE_KIND_UNSUPPORTED (400).
+     * @type {Array<SearchRequestScoreKindsEnum>}
+     * @memberof SearchRequest
+     */
+    scoreKinds?: Array<SearchRequestScoreKindsEnum>;
+    /**
+     * 
+     * @type {SearchScrapeBlock}
+     * @memberof SearchRequest
+     */
+    scrape?: SearchScrapeBlock;
 }
+
+
+/**
+ * @export
+ */
+export const SearchRequestScoreKindsEnum = {
+    CrossEncoderV1: 'cross_encoder.v1'
+} as const;
+export type SearchRequestScoreKindsEnum = typeof SearchRequestScoreKindsEnum[keyof typeof SearchRequestScoreKindsEnum];
+
 
 /**
  * Check if a given object implements the SearchRequest interface.
@@ -137,6 +173,9 @@ export function SearchRequestFromJSONTyped(json: any, ignoreDiscriminator: boole
         'format': json['format'] == null ? undefined : json['format'],
         'highlight': json['highlight'] == null ? undefined : json['highlight'],
         'facets': json['facets'] == null ? undefined : json['facets'],
+        'zdr': json['zdr'] == null ? undefined : json['zdr'],
+        'scoreKinds': json['score_kinds'] == null ? undefined : json['score_kinds'],
+        'scrape': json['scrape'] == null ? undefined : SearchScrapeBlockFromJSON(json['scrape']),
     };
 }
 
@@ -165,6 +204,9 @@ export function SearchRequestToJSONTyped(value?: SearchRequest | null, ignoreDis
         'format': value['format'],
         'highlight': value['highlight'],
         'facets': value['facets'],
+        'zdr': value['zdr'],
+        'score_kinds': value['scoreKinds'],
+        'scrape': SearchScrapeBlockToJSON(value['scrape']),
     };
 }
 

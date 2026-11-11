@@ -20,6 +20,13 @@ import {
     BrowserSnapshotToJSON,
     BrowserSnapshotToJSONTyped,
 } from './BrowserSnapshot';
+import type { RedactionStamp } from './RedactionStamp';
+import {
+    RedactionStampFromJSON,
+    RedactionStampFromJSONTyped,
+    RedactionStampToJSON,
+    RedactionStampToJSONTyped,
+} from './RedactionStamp';
 import type { BrowserTelemetry } from './BrowserTelemetry';
 import {
     BrowserTelemetryFromJSON,
@@ -34,6 +41,20 @@ import {
     ActionOutcomeToJSON,
     ActionOutcomeToJSONTyped,
 } from './ActionOutcome';
+import type { ObservationWarning } from './ObservationWarning';
+import {
+    ObservationWarningFromJSON,
+    ObservationWarningFromJSONTyped,
+    ObservationWarningToJSON,
+    ObservationWarningToJSONTyped,
+} from './ObservationWarning';
+import type { ChallengeSignal } from './ChallengeSignal';
+import {
+    ChallengeSignalFromJSON,
+    ChallengeSignalFromJSONTyped,
+    ChallengeSignalToJSON,
+    ChallengeSignalToJSONTyped,
+} from './ChallengeSignal';
 import type { BrowserDialog } from './BrowserDialog';
 import {
     BrowserDialogFromJSON,
@@ -111,6 +132,12 @@ export interface BrowserObservation {
      */
     visualObservationArtifactId?: string;
     /**
+     * Id of the PDF artifact a `pdf` action stored for this step. Absent for any other action, under ZDR, when artifact persistence is absent, or when the page was withheld.
+     * @type {string}
+     * @memberof BrowserObservation
+     */
+    pdfArtifactId?: string;
+    /**
      * 
      * @type {string}
      * @memberof BrowserObservation
@@ -160,10 +187,10 @@ export interface BrowserObservation {
     observationDelta?: ObservationDelta;
     /**
      * 
-     * @type {{ [key: string]: any; }}
+     * @type {ChallengeSignal}
      * @memberof BrowserObservation
      */
-    challenge?: { [key: string]: any; };
+    challenge?: ChallengeSignal;
     /**
      * 
      * @type {{ [key: string]: any; }}
@@ -177,7 +204,7 @@ export interface BrowserObservation {
      */
     extractionResult?: { [key: string]: any; };
     /**
-     * 
+     * Evidence manifest for this observation. redaction_rule_version names the secret-redaction rule set the observation was masked under. expectation, when the step carried an expect, is that expect and Quarry's verdict on it.
      * @type {{ [key: string]: any; }}
      * @memberof BrowserObservation
      */
@@ -194,6 +221,24 @@ export interface BrowserObservation {
      * @memberof BrowserObservation
      */
     telemetry?: BrowserTelemetry;
+    /**
+     * What the secret-redaction pass did to this observation. Counts per rule id only; no content and no lengths.
+     * @type {RedactionStamp}
+     * @memberof BrowserObservation
+     */
+    redaction?: RedactionStamp;
+    /**
+     * Page-quality warnings for this observation, so a planner can tell a partial page read from a complete one. Omitted when there are none. Each warning is a closed code with a fixed message; none carries page text, a URL or a frame id, so they are safe under ZDR.
+     * @type {Array<ObservationWarning>}
+     * @memberof BrowserObservation
+     */
+    warnings?: Array<ObservationWarning>;
+    /**
+     * How long the page's DOM took to go quiet after the action this observation follows, in milliseconds. Never more than the settle bound (QUARRY_BROWSER_ACTION_SETTLE_MS). A value equal to the bound means the DOM was still changing when the bound ran out. Omitted when the settle is off or the action only read the page; mirrors telemetry.settle_ms.
+     * @type {number}
+     * @memberof BrowserObservation
+     */
+    settleMs?: number;
     /**
      * 
      * @type {Date}
@@ -232,6 +277,7 @@ export function BrowserObservationFromJSONTyped(json: any, ignoreDiscriminator: 
         'domSummary': json['dom_summary'] == null ? undefined : json['dom_summary'],
         'screenshotArtifactId': json['screenshot_artifact_id'] == null ? undefined : json['screenshot_artifact_id'],
         'visualObservationArtifactId': json['visual_observation_artifact_id'] == null ? undefined : json['visual_observation_artifact_id'],
+        'pdfArtifactId': json['pdf_artifact_id'] == null ? undefined : json['pdf_artifact_id'],
         'evidenceDeltaArtifactId': json['evidence_delta_artifact_id'] == null ? undefined : json['evidence_delta_artifact_id'],
         'consoleSummary': json['console_summary'] == null ? undefined : json['console_summary'],
         'networkSummary': json['network_summary'] == null ? undefined : json['network_summary'],
@@ -240,12 +286,15 @@ export function BrowserObservationFromJSONTyped(json: any, ignoreDiscriminator: 
         'policyDenials': json['policy_denials'] == null ? undefined : json['policy_denials'],
         'actionOutcome': ActionOutcomeFromJSON(json['action_outcome']),
         'observationDelta': json['observation_delta'] == null ? undefined : ObservationDeltaFromJSON(json['observation_delta']),
-        'challenge': json['challenge'] == null ? undefined : json['challenge'],
+        'challenge': json['challenge'] == null ? undefined : ChallengeSignalFromJSON(json['challenge']),
         'extractionProfile': json['extraction_profile'] == null ? undefined : json['extraction_profile'],
         'extractionResult': json['extraction_result'] == null ? undefined : json['extraction_result'],
         'proofBundle': json['proof_bundle'] == null ? undefined : json['proof_bundle'],
         'targetResolution': json['target_resolution'] == null ? undefined : json['target_resolution'],
         'telemetry': json['telemetry'] == null ? undefined : BrowserTelemetryFromJSON(json['telemetry']),
+        'redaction': json['redaction'] == null ? undefined : RedactionStampFromJSON(json['redaction']),
+        'warnings': json['warnings'] == null ? undefined : ((json['warnings'] as Array<any>).map(ObservationWarningFromJSON)),
+        'settleMs': json['settle_ms'] == null ? undefined : json['settle_ms'],
         'observedAt': (new Date(json['observed_at'])),
     };
 }
@@ -269,6 +318,7 @@ export function BrowserObservationToJSONTyped(value?: BrowserObservation | null,
         'dom_summary': value['domSummary'],
         'screenshot_artifact_id': value['screenshotArtifactId'],
         'visual_observation_artifact_id': value['visualObservationArtifactId'],
+        'pdf_artifact_id': value['pdfArtifactId'],
         'evidence_delta_artifact_id': value['evidenceDeltaArtifactId'],
         'console_summary': value['consoleSummary'],
         'network_summary': value['networkSummary'],
@@ -277,12 +327,15 @@ export function BrowserObservationToJSONTyped(value?: BrowserObservation | null,
         'policy_denials': value['policyDenials'],
         'action_outcome': ActionOutcomeToJSON(value['actionOutcome']),
         'observation_delta': ObservationDeltaToJSON(value['observationDelta']),
-        'challenge': value['challenge'],
+        'challenge': ChallengeSignalToJSON(value['challenge']),
         'extraction_profile': value['extractionProfile'],
         'extraction_result': value['extractionResult'],
         'proof_bundle': value['proofBundle'],
         'target_resolution': value['targetResolution'],
         'telemetry': BrowserTelemetryToJSON(value['telemetry']),
+        'redaction': RedactionStampToJSON(value['redaction']),
+        'warnings': value['warnings'] == null ? undefined : ((value['warnings'] as Array<any>).map(ObservationWarningToJSON)),
+        'settle_ms': value['settleMs'],
         'observed_at': value['observedAt'].toISOString(),
     };
 }

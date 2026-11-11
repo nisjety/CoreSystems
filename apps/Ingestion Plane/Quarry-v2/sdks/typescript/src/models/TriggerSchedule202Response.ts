@@ -13,6 +13,28 @@
  */
 
 import { mapValues } from '../runtime';
+import type { ErrorDetail } from './ErrorDetail';
+import {
+    ErrorDetailFromJSON,
+    ErrorDetailFromJSONTyped,
+    ErrorDetailToJSON,
+    ErrorDetailToJSONTyped,
+} from './ErrorDetail';
+import type { ScheduleRequestAccepted } from './ScheduleRequestAccepted';
+import {
+    ScheduleRequestAcceptedFromJSON,
+    ScheduleRequestAcceptedFromJSONTyped,
+    ScheduleRequestAcceptedToJSON,
+    ScheduleRequestAcceptedToJSONTyped,
+} from './ScheduleRequestAccepted';
+import type { ResponseMeta } from './ResponseMeta';
+import {
+    ResponseMetaFromJSON,
+    ResponseMetaFromJSONTyped,
+    ResponseMetaToJSON,
+    ResponseMetaToJSONTyped,
+} from './ResponseMeta';
+
 /**
  * 
  * @export
@@ -21,28 +43,29 @@ import { mapValues } from '../runtime';
 export interface TriggerSchedule202Response {
     /**
      * 
-     * @type {string}
+     * @type {ScheduleRequestAccepted}
      * @memberof TriggerSchedule202Response
      */
-    scheduleId?: string;
+    data?: ScheduleRequestAccepted;
     /**
      * 
-     * @type {string}
+     * @type {ResponseMeta}
      * @memberof TriggerSchedule202Response
      */
-    status?: string;
+    meta: ResponseMeta;
     /**
      * 
-     * @type {string}
+     * @type {ErrorDetail}
      * @memberof TriggerSchedule202Response
      */
-    note?: string;
+    error?: ErrorDetail;
 }
 
 /**
  * Check if a given object implements the TriggerSchedule202Response interface.
  */
 export function instanceOfTriggerSchedule202Response(value: object): value is TriggerSchedule202Response {
+    if (!('meta' in value) || value['meta'] === undefined) return false;
     return true;
 }
 
@@ -56,9 +79,9 @@ export function TriggerSchedule202ResponseFromJSONTyped(json: any, ignoreDiscrim
     }
     return {
         
-        'scheduleId': json['schedule_id'] == null ? undefined : json['schedule_id'],
-        'status': json['status'] == null ? undefined : json['status'],
-        'note': json['note'] == null ? undefined : json['note'],
+        'data': json['data'] == null ? undefined : ScheduleRequestAcceptedFromJSON(json['data']),
+        'meta': ResponseMetaFromJSON(json['meta']),
+        'error': json['error'] == null ? undefined : ErrorDetailFromJSON(json['error']),
     };
 }
 
@@ -73,9 +96,9 @@ export function TriggerSchedule202ResponseToJSONTyped(value?: TriggerSchedule202
 
     return {
         
-        'schedule_id': value['scheduleId'],
-        'status': value['status'],
-        'note': value['note'],
+        'data': ScheduleRequestAcceptedToJSON(value['data']),
+        'meta': ResponseMetaToJSON(value['meta']),
+        'error': ErrorDetailToJSON(value['error']),
     };
 }
 

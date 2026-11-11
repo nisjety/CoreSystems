@@ -13,6 +13,13 @@
  */
 
 import { mapValues } from '../runtime';
+import type { EnvelopeStartAgentRunDataConstraints } from './EnvelopeStartAgentRunDataConstraints';
+import {
+    EnvelopeStartAgentRunDataConstraintsFromJSON,
+    EnvelopeStartAgentRunDataConstraintsFromJSONTyped,
+    EnvelopeStartAgentRunDataConstraintsToJSON,
+    EnvelopeStartAgentRunDataConstraintsToJSONTyped,
+} from './EnvelopeStartAgentRunDataConstraints';
 import type { BrowserDriverCapabilities } from './BrowserDriverCapabilities';
 import {
     BrowserDriverCapabilitiesFromJSON,
@@ -20,6 +27,13 @@ import {
     BrowserDriverCapabilitiesToJSON,
     BrowserDriverCapabilitiesToJSONTyped,
 } from './BrowserDriverCapabilities';
+import type { EnvelopeStartAgentRunDataClampedInner } from './EnvelopeStartAgentRunDataClampedInner';
+import {
+    EnvelopeStartAgentRunDataClampedInnerFromJSON,
+    EnvelopeStartAgentRunDataClampedInnerFromJSONTyped,
+    EnvelopeStartAgentRunDataClampedInnerToJSON,
+    EnvelopeStartAgentRunDataClampedInnerToJSONTyped,
+} from './EnvelopeStartAgentRunDataClampedInner';
 
 /**
  * 
@@ -63,6 +77,18 @@ export interface EnvelopeStartAgentRunData {
      * @memberof EnvelopeStartAgentRunData
      */
     executionEngine: EnvelopeStartAgentRunDataExecutionEngineEnum;
+    /**
+     * 
+     * @type {EnvelopeStartAgentRunDataConstraints}
+     * @memberof EnvelopeStartAgentRunData
+     */
+    constraints?: EnvelopeStartAgentRunDataConstraints;
+    /**
+     * Requested values that were replaced.
+     * @type {Array<EnvelopeStartAgentRunDataClampedInner>}
+     * @memberof EnvelopeStartAgentRunData
+     */
+    clamped?: Array<EnvelopeStartAgentRunDataClampedInner>;
 }
 
 
@@ -114,6 +140,8 @@ export function EnvelopeStartAgentRunDataFromJSONTyped(json: any, ignoreDiscrimi
         'driverCapabilities': BrowserDriverCapabilitiesFromJSON(json['driver_capabilities']),
         'executionTier': json['execution_tier'],
         'executionEngine': json['execution_engine'],
+        'constraints': json['constraints'] == null ? undefined : EnvelopeStartAgentRunDataConstraintsFromJSON(json['constraints']),
+        'clamped': json['clamped'] == null ? undefined : ((json['clamped'] as Array<any>).map(EnvelopeStartAgentRunDataClampedInnerFromJSON)),
     };
 }
 
@@ -134,6 +162,8 @@ export function EnvelopeStartAgentRunDataToJSONTyped(value?: EnvelopeStartAgentR
         'driver_capabilities': BrowserDriverCapabilitiesToJSON(value['driverCapabilities']),
         'execution_tier': value['executionTier'],
         'execution_engine': value['executionEngine'],
+        'constraints': EnvelopeStartAgentRunDataConstraintsToJSON(value['constraints']),
+        'clamped': value['clamped'] == null ? undefined : ((value['clamped'] as Array<any>).map(EnvelopeStartAgentRunDataClampedInnerToJSON)),
     };
 }
 

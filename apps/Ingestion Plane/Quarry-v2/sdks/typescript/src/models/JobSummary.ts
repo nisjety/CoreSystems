@@ -13,6 +13,21 @@
  */
 
 import { mapValues } from '../runtime';
+import type { JobRunOrigin } from './JobRunOrigin';
+import {
+    JobRunOriginFromJSON,
+    JobRunOriginFromJSONTyped,
+    JobRunOriginToJSON,
+    JobRunOriginToJSONTyped,
+} from './JobRunOrigin';
+import type { JobCredits } from './JobCredits';
+import {
+    JobCreditsFromJSON,
+    JobCreditsFromJSONTyped,
+    JobCreditsToJSON,
+    JobCreditsToJSONTyped,
+} from './JobCredits';
+
 /**
  * 
  * @export
@@ -73,6 +88,24 @@ export interface JobSummary {
      * @memberof JobSummary
      */
     stats?: any | null;
+    /**
+     * 
+     * @type {JobRunOrigin}
+     * @memberof JobSummary
+     */
+    origin?: JobRunOrigin;
+    /**
+     * What a person reads; queued while waiting, otherwise the status.
+     * @type {string}
+     * @memberof JobSummary
+     */
+    phase?: string;
+    /**
+     * 
+     * @type {JobCredits}
+     * @memberof JobSummary
+     */
+    credits?: JobCredits;
 }
 
 
@@ -122,6 +155,9 @@ export function JobSummaryFromJSONTyped(json: any, ignoreDiscriminator: boolean)
         'startedAt': json['started_at'] == null ? undefined : (new Date(json['started_at'])),
         'completedAt': json['completed_at'] == null ? undefined : (new Date(json['completed_at'])),
         'stats': json['stats'] == null ? undefined : json['stats'],
+        'origin': json['origin'] == null ? undefined : JobRunOriginFromJSON(json['origin']),
+        'phase': json['phase'] == null ? undefined : json['phase'],
+        'credits': json['credits'] == null ? undefined : JobCreditsFromJSON(json['credits']),
     };
 }
 
@@ -145,6 +181,9 @@ export function JobSummaryToJSONTyped(value?: JobSummary | null, ignoreDiscrimin
         'started_at': value['startedAt'] == null ? value['startedAt'] : value['startedAt'].toISOString(),
         'completed_at': value['completedAt'] == null ? value['completedAt'] : value['completedAt'].toISOString(),
         'stats': value['stats'],
+        'origin': JobRunOriginToJSON(value['origin']),
+        'phase': value['phase'],
+        'credits': JobCreditsToJSON(value['credits']),
     };
 }
 

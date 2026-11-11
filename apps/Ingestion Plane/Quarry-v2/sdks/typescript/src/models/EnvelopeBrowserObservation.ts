@@ -20,6 +20,13 @@ import {
     BrowserObservationToJSON,
     BrowserObservationToJSONTyped,
 } from './BrowserObservation';
+import type { EnvelopeBrowserObservationMeta } from './EnvelopeBrowserObservationMeta';
+import {
+    EnvelopeBrowserObservationMetaFromJSON,
+    EnvelopeBrowserObservationMetaFromJSONTyped,
+    EnvelopeBrowserObservationMetaToJSON,
+    EnvelopeBrowserObservationMetaToJSONTyped,
+} from './EnvelopeBrowserObservationMeta';
 
 /**
  * 
@@ -45,6 +52,12 @@ export interface EnvelopeBrowserObservation {
      * @memberof EnvelopeBrowserObservation
      */
     data: BrowserObservation;
+    /**
+     * 
+     * @type {EnvelopeBrowserObservationMeta}
+     * @memberof EnvelopeBrowserObservation
+     */
+    meta?: EnvelopeBrowserObservationMeta;
 }
 
 /**
@@ -70,6 +83,7 @@ export function EnvelopeBrowserObservationFromJSONTyped(json: any, ignoreDiscrim
         'requestId': json['request_id'],
         'success': json['success'],
         'data': BrowserObservationFromJSON(json['data']),
+        'meta': json['meta'] == null ? undefined : EnvelopeBrowserObservationMetaFromJSON(json['meta']),
     };
 }
 
@@ -87,6 +101,7 @@ export function EnvelopeBrowserObservationToJSONTyped(value?: EnvelopeBrowserObs
         'request_id': value['requestId'],
         'success': value['success'],
         'data': BrowserObservationToJSON(value['data']),
+        'meta': EnvelopeBrowserObservationMetaToJSON(value['meta']),
     };
 }
 

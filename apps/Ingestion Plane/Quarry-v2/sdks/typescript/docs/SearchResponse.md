@@ -11,12 +11,15 @@ Name | Type
 `results` | [Array&lt;SearchResultItem&gt;](SearchResultItem.md)
 `count` | number
 `answer` | string
+`answerStatus` | string
+`answerReason` | string
 `citations` | Array&lt;object&gt;
 `context` | string
 `facets` | [Array&lt;FacetCount&gt;](FacetCount.md)
 `policyDowngrades` | Array&lt;string&gt;
 `scoreKind` | string
 `rerank` | [RerankReport](RerankReport.md)
+`scrape` | [SearchScrapeReport](SearchScrapeReport.md)
 
 ## Example
 
@@ -30,12 +33,15 @@ const example = {
   "results": null,
   "count": null,
   "answer": null,
+  "answerStatus": null,
+  "answerReason": null,
   "citations": null,
   "context": null,
   "facets": null,
   "policyDowngrades": null,
   "scoreKind": null,
   "rerank": null,
+  "scrape": null,
 } satisfies SearchResponse
 
 console.log(example)

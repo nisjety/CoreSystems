@@ -14,20 +14,48 @@
 
 import * as runtime from '../runtime';
 import {
+    type AuditPage,
+    AuditPageFromJSON,
+    AuditPageToJSON,
+} from '../models/AuditPage';
+import {
+    type AuditPageRequest,
+    AuditPageRequestFromJSON,
+    AuditPageRequestToJSON,
+} from '../models/AuditPageRequest';
+import {
     type EnvelopeError,
     EnvelopeErrorFromJSON,
     EnvelopeErrorToJSON,
 } from '../models/EnvelopeError';
 import {
-    type EnvelopeNormalizedOutput,
-    EnvelopeNormalizedOutputFromJSON,
-    EnvelopeNormalizedOutputToJSON,
-} from '../models/EnvelopeNormalizedOutput';
+    type EnvelopeScrapeResponse,
+    EnvelopeScrapeResponseFromJSON,
+    EnvelopeScrapeResponseToJSON,
+} from '../models/EnvelopeScrapeResponse';
+import {
+    type ErrorBody,
+    ErrorBodyFromJSON,
+    ErrorBodyToJSON,
+} from '../models/ErrorBody';
+import {
+    type RateLimitError,
+    RateLimitErrorFromJSON,
+    RateLimitErrorToJSON,
+} from '../models/RateLimitError';
 import {
     type ScrapeRequest,
     ScrapeRequestFromJSON,
     ScrapeRequestToJSON,
 } from '../models/ScrapeRequest';
+
+export interface AuditPageOperationRequest {
+    auditPageRequest: AuditPageRequest;
+}
+
+export interface GetScrapeRequest {
+    id: string;
+}
 
 export interface ScrapeOperationRequest {
     scrapeRequest: ScrapeRequest;
@@ -41,6 +69,102 @@ export interface ScrapeStreamRequest {
  * 
  */
 export class ScrapeApi extends runtime.BaseAPI {
+
+    /**
+     * Creates request options for auditPage without sending the request
+     */
+    async auditPageRequestOpts(requestParameters: AuditPageOperationRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['auditPageRequest'] == null) {
+            throw new runtime.RequiredError(
+                'auditPageRequest',
+                'Required parameter "auditPageRequest" was null or undefined when calling auditPage().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/audit/page`;
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: AuditPageRequestToJSON(requestParameters['auditPageRequest']),
+        };
+    }
+
+    /**
+     * Bounded public-page evidence (`bounded_page_v1`) for Marketing Core\'s audit rules. It reads `robots.txt` for the page\'s origin first, then the page, following redirects only inside the discovery scope with every hop traced into `redirects`. It runs no analysis and stores nothing, and calls no browser fallback, provider or ingest. The URL passes the web policy before any fetch, as `POST /v1/map` does, and a refusal names the layer that decided, not the URL. A 2xx source must be an HTML document (text/html or application/xhtml+xml), or the answer is 503 UNSUPPORTED. An upstream 404 or 500 is evidence in `status`, not a failure. A title or description over its limit is 502 UPSTREAM_LIMIT, never a truncated value. Link and heading text is cut at 512 characters, and the lists are capped at 100 and 200, with `partial` set when the source has more. The success body is the `AuditPage` object itself, not wrapped in the typed envelope. A service principal needs scrape:read (a bare 403 otherwise); a person\'s token passes this gate. At most eight captures run per process, and an excess request is 429 RATE_LIMITED without queueing. The whole capture has a 10 second deadline, past which the answer is 504 TIMEOUT.
+     * Bounded public-page evidence for the audit rules
+     */
+    async auditPageRaw(requestParameters: AuditPageOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AuditPage>> {
+        const requestOptions = await this.auditPageRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => AuditPageFromJSON(jsonValue));
+    }
+
+    /**
+     * Bounded public-page evidence (`bounded_page_v1`) for Marketing Core\'s audit rules. It reads `robots.txt` for the page\'s origin first, then the page, following redirects only inside the discovery scope with every hop traced into `redirects`. It runs no analysis and stores nothing, and calls no browser fallback, provider or ingest. The URL passes the web policy before any fetch, as `POST /v1/map` does, and a refusal names the layer that decided, not the URL. A 2xx source must be an HTML document (text/html or application/xhtml+xml), or the answer is 503 UNSUPPORTED. An upstream 404 or 500 is evidence in `status`, not a failure. A title or description over its limit is 502 UPSTREAM_LIMIT, never a truncated value. Link and heading text is cut at 512 characters, and the lists are capped at 100 and 200, with `partial` set when the source has more. The success body is the `AuditPage` object itself, not wrapped in the typed envelope. A service principal needs scrape:read (a bare 403 otherwise); a person\'s token passes this gate. At most eight captures run per process, and an excess request is 429 RATE_LIMITED without queueing. The whole capture has a 10 second deadline, past which the answer is 504 TIMEOUT.
+     * Bounded public-page evidence for the audit rules
+     */
+    async auditPage(requestParameters: AuditPageOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AuditPage> {
+        const response = await this.auditPageRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for getScrape without sending the request
+     */
+    async getScrapeRequestOpts(requestParameters: GetScrapeRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['id'] == null) {
+            throw new runtime.RequiredError(
+                'id',
+                'Required parameter "id" was null or undefined when calling getScrape().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/scrape/{id}`;
+        urlPath = urlPath.replace('{id}', encodeURIComponent(String(requestParameters['id'])));
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Returns the record a non-ZDR scrape stored: the normalized output and the effective options, without inline text. The id is the `scrape_id` of the scrape response. Another organization\'s id, or an id that is not a scrape record, is a 404. A caller whose organization is under ZDR is refused with 403, even for a record written before the organization turned ZDR on. A ZDR scrape stores nothing and has no id.
+     * Read back an earlier scrape
+     */
+    async getScrapeRaw(requestParameters: GetScrapeRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<EnvelopeScrapeResponse>> {
+        const requestOptions = await this.getScrapeRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => EnvelopeScrapeResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Returns the record a non-ZDR scrape stored: the normalized output and the effective options, without inline text. The id is the `scrape_id` of the scrape response. Another organization\'s id, or an id that is not a scrape record, is a 404. A caller whose organization is under ZDR is refused with 403, even for a record written before the organization turned ZDR on. A ZDR scrape stores nothing and has no id.
+     * Read back an earlier scrape
+     */
+    async getScrape(requestParameters: GetScrapeRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<EnvelopeScrapeResponse> {
+        const response = await this.getScrapeRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
 
     /**
      * Creates request options for scrape without sending the request
@@ -75,18 +199,18 @@ export class ScrapeApi extends runtime.BaseAPI {
      * Fetches a URL, runs the transform pipeline (readability, markdown, links, metadata, fingerprint, diff), stores artifacts, and returns a normalized output envelope. Optionally forwards results to the Data Plane for ingestion. 
      * Scrape a single URL
      */
-    async scrapeRaw(requestParameters: ScrapeOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<EnvelopeNormalizedOutput>> {
+    async scrapeRaw(requestParameters: ScrapeOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<EnvelopeScrapeResponse>> {
         const requestOptions = await this.scrapeRequestOpts(requestParameters);
         const response = await this.request(requestOptions, initOverrides);
 
-        return new runtime.JSONApiResponse(response, (jsonValue) => EnvelopeNormalizedOutputFromJSON(jsonValue));
+        return new runtime.JSONApiResponse(response, (jsonValue) => EnvelopeScrapeResponseFromJSON(jsonValue));
     }
 
     /**
      * Fetches a URL, runs the transform pipeline (readability, markdown, links, metadata, fingerprint, diff), stores artifacts, and returns a normalized output envelope. Optionally forwards results to the Data Plane for ingestion. 
      * Scrape a single URL
      */
-    async scrape(requestParameters: ScrapeOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<EnvelopeNormalizedOutput> {
+    async scrape(requestParameters: ScrapeOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<EnvelopeScrapeResponse> {
         const response = await this.scrapeRaw(requestParameters, initOverrides);
         return await response.value();
     }
@@ -121,7 +245,7 @@ export class ScrapeApi extends runtime.BaseAPI {
     }
 
     /**
-     * Same as /v1/scrape but returns a Server-Sent Event stream with per-step events (page_fetched, change_detected, artifact_written, etc.) followed by the final result or error. 
+     * Same as /v1/scrape but returns a Server-Sent Event stream with per-step events (page_fetched, change_detected, artifact_written, etc.) followed by the final result or error. Captures, actions, the AI formats and a profile pin (profile_id) are not served here: the error event is BAD_REQUEST with details.reason unsupported_in_stream. 
      * Scrape with SSE event stream
      */
     async scrapeStreamRaw(requestParameters: ScrapeStreamRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<string>> {
@@ -136,7 +260,7 @@ export class ScrapeApi extends runtime.BaseAPI {
     }
 
     /**
-     * Same as /v1/scrape but returns a Server-Sent Event stream with per-step events (page_fetched, change_detected, artifact_written, etc.) followed by the final result or error. 
+     * Same as /v1/scrape but returns a Server-Sent Event stream with per-step events (page_fetched, change_detected, artifact_written, etc.) followed by the final result or error. Captures, actions, the AI formats and a profile pin (profile_id) are not served here: the error event is BAD_REQUEST with details.reason unsupported_in_stream. 
      * Scrape with SSE event stream
      */
     async scrapeStream(requestParameters: ScrapeStreamRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<string> {

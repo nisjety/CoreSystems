@@ -13,6 +13,14 @@
  */
 
 import { mapValues } from '../runtime';
+import type { EnvelopeClosedRunDataUsage } from './EnvelopeClosedRunDataUsage';
+import {
+    EnvelopeClosedRunDataUsageFromJSON,
+    EnvelopeClosedRunDataUsageFromJSONTyped,
+    EnvelopeClosedRunDataUsageToJSON,
+    EnvelopeClosedRunDataUsageToJSONTyped,
+} from './EnvelopeClosedRunDataUsage';
+
 /**
  * 
  * @export
@@ -25,6 +33,12 @@ export interface EnvelopeClosedRunData {
      * @memberof EnvelopeClosedRunData
      */
     closed: boolean;
+    /**
+     * 
+     * @type {EnvelopeClosedRunDataUsage}
+     * @memberof EnvelopeClosedRunData
+     */
+    usage?: EnvelopeClosedRunDataUsage;
 }
 
 /**
@@ -46,6 +60,7 @@ export function EnvelopeClosedRunDataFromJSONTyped(json: any, ignoreDiscriminato
     return {
         
         'closed': json['closed'],
+        'usage': json['usage'] == null ? undefined : EnvelopeClosedRunDataUsageFromJSON(json['usage']),
     };
 }
 
@@ -61,6 +76,7 @@ export function EnvelopeClosedRunDataToJSONTyped(value?: EnvelopeClosedRunData |
     return {
         
         'closed': value['closed'],
+        'usage': EnvelopeClosedRunDataUsageToJSON(value['usage']),
     };
 }
 

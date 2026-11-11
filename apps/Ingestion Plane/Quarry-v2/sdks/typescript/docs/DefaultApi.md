@@ -6,6 +6,7 @@ All URIs are relative to *http://localhost:8080*
 |------------- | ------------- | -------------|
 | [**cancelBatch**](DefaultApi.md#cancelbatch) | **DELETE** /v1/batch/{job_id} | Cancel a batch (WS15.L2) |
 | [**cancelCrawl**](DefaultApi.md#cancelcrawl) | **DELETE** /v1/crawl/{job_id} | Cancel a crawl (WS15.L2) |
+| [**clearProfileData**](DefaultApi.md#clearprofiledataoperation) | **POST** /v1/profiles/{profile_id}/clear-data | Remove a stored profile\&#39;s cookies, web storage and IndexedDB (F-t2-068). Off unless QUARRY_EDGE__PROFILE_CLEAR_DATA is on. |
 | [**createProfile**](DefaultApi.md#createprofileoperation) | **POST** /v1/profiles/create | Create a named, scoped profile owned by the caller (WS17.P0 guard) |
 | [**deleteProfile**](DefaultApi.md#deleteprofile) | **DELETE** /v1/profiles/{profile_id} | Erase a profile. Never refused on the ZDR side (wind-down). |
 | [**getBatchErrors**](DefaultApi.md#getbatcherrors) | **GET** /v1/batch/{job_id}/errors | Final page failures and blocked pages of a batch, paged by event seq (WS15.L1) |
@@ -166,6 +167,80 @@ No authorization required
 | **404** | Not found, a foreign id, or a job of another kind. |  -  |
 | **409** | The job ended, or the verb does not fit its state. details.reason is ended, not_running or not_controllable. |  -  |
 | **501** | Job control is not enabled on this edge (QUARRY_EDGE__JOB_CONTROL). |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
+
+
+## clearProfileData
+
+> ClearProfileData200Response clearProfileData(profileId, clearProfileDataRequest)
+
+Remove a stored profile\&#39;s cookies, web storage and IndexedDB (F-t2-068). Off unless QUARRY_EDGE__PROFILE_CLEAR_DATA is on.
+
+Removes the browsing data a stored profile holds and keeps the profile, its name, scope, owner, user agent, viewport, locale and timezone. &#x60;dry_run&#x60; defaults to true: a call that does not send &#x60;dry_run: false&#x60; only counts what it would remove. The answer carries counts only, never a name or a value.  A profile a live run holds is refused with 409 &#x60;profile_in_use&#x60; until that run closes, because its browser session would save the profile again. A ZDR organization is not refused (the route is a wind-down, like delete). A service principal is refused. 
+
+### Example
+
+```ts
+import {
+  Configuration,
+  DefaultApi,
+} from '@quarry/client';
+import type { ClearProfileDataOperationRequest } from '@quarry/client';
+
+async function example() {
+  console.log("🚀 Testing @quarry/client SDK...");
+  const api = new DefaultApi();
+
+  const body = {
+    // string
+    profileId: profileId_example,
+    // ClearProfileDataRequest
+    clearProfileDataRequest: ...,
+  } satisfies ClearProfileDataOperationRequest;
+
+  try {
+    const data = await api.clearProfileData(body);
+    console.log(data);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+// Run the test
+example().catch(console.error);
+```
+
+### Parameters
+
+
+| Name | Type | Description  | Notes |
+|------------- | ------------- | ------------- | -------------|
+| **profileId** | `string` |  | [Defaults to `undefined`] |
+| **clearProfileDataRequest** | [ClearProfileDataRequest](ClearProfileDataRequest.md) |  | |
+
+### Return type
+
+[**ClearProfileData200Response**](ClearProfileData200Response.md)
+
+### Authorization
+
+No authorization required
+
+### HTTP request headers
+
+- **Content-Type**: `application/json`
+- **Accept**: `application/json`
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+| **200** | The counts, and whether this call removed them. |  -  |
+| **403** | A service principal. |  -  |
+| **404** | Not found, or not visible to the caller under enforce. |  -  |
+| **409** | A live run holds the profile (&#x60;profile_in_use&#x60;), or the profile was written during the clear (&#x60;profile_busy&#x60;; retry). |  -  |
+| **501** | The flag is off (&#x60;profile_clear_data_disabled&#x60;). |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 
@@ -379,9 +454,11 @@ No authorization required
 
 ## getBatchStatus
 
-> object getBatchStatus(jobId)
+> GetJobStatus200Response getBatchStatus(jobId, wait, resume)
 
 Status document of a batch (WS15.L1)
+
+The wait and resume query parameters work as they do on GET /v1/jobs/{job_id}, and are honoured only with QUARRY_EDGE__JOB_CONTROL on.
 
 ### Example
 
@@ -399,6 +476,10 @@ async function example() {
   const body = {
     // string
     jobId: jobId_example,
+    // number | Whole seconds to wait for the job to reach a terminal status, polled from control every 2 s. A job that is terminal before or during the wait answers 200 with the status document. 0 (the default) is a plain read. A value above 25 is clamped to 25, which stays below the 60 s route deadline. Honoured only with QUARRY_EDGE__JOB_CONTROL on; with the flag off the parameter is ignored and the read is the plain status read. With the flag on, a value that is not a whole number is a 400 (BAD_REQUEST, `wait must be a whole number of seconds`). With the flag on, a caller under zero data retention is refused a wait above 0 with 403 (FORBIDDEN), because the durable path a wait stands on is refused under ZDR; a plain read is unchanged. When the wait runs out before the job is terminal, the answer is the 408 processing_continues envelope. (optional)
+    wait: 56,
+    // string | The resume_token of an earlier 408 processing_continues, sent back exactly as it came, to keep waiting on the same job. Honoured only with QUARRY_EDGE__JOB_CONTROL on, like wait. A token names the job it was issued for: a token for another job is a 400 (`resume token is for another job`), and a value that is not a token is a 400 (`resume token is not valid`). An empty value is a 400 (`resume must carry the resume_token of a 408`), and so is a resume with no wait or with wait=0 (`resume needs a wait of at least 1 second`). The token records the job\'s progress when the 408 was sent, so the next 408 says in its details whether the job moved since. The token is not a credential and holds no URL or content. (optional)
+    resume: resume_example,
   } satisfies GetBatchStatusRequest;
 
   try {
@@ -419,10 +500,12 @@ example().catch(console.error);
 | Name | Type | Description  | Notes |
 |------------- | ------------- | ------------- | -------------|
 | **jobId** | `string` |  | [Defaults to `undefined`] |
+| **wait** | `number` | Whole seconds to wait for the job to reach a terminal status, polled from control every 2 s. A job that is terminal before or during the wait answers 200 with the status document. 0 (the default) is a plain read. A value above 25 is clamped to 25, which stays below the 60 s route deadline. Honoured only with QUARRY_EDGE__JOB_CONTROL on; with the flag off the parameter is ignored and the read is the plain status read. With the flag on, a value that is not a whole number is a 400 (BAD_REQUEST, &#x60;wait must be a whole number of seconds&#x60;). With the flag on, a caller under zero data retention is refused a wait above 0 with 403 (FORBIDDEN), because the durable path a wait stands on is refused under ZDR; a plain read is unchanged. When the wait runs out before the job is terminal, the answer is the 408 processing_continues envelope. | [Optional] [Defaults to `0`] |
+| **resume** | `string` | The resume_token of an earlier 408 processing_continues, sent back exactly as it came, to keep waiting on the same job. Honoured only with QUARRY_EDGE__JOB_CONTROL on, like wait. A token names the job it was issued for: a token for another job is a 400 (&#x60;resume token is for another job&#x60;), and a value that is not a token is a 400 (&#x60;resume token is not valid&#x60;). An empty value is a 400 (&#x60;resume must carry the resume_token of a 408&#x60;), and so is a resume with no wait or with wait&#x3D;0 (&#x60;resume needs a wait of at least 1 second&#x60;). The token records the job\&#39;s progress when the 408 was sent, so the next 408 says in its details whether the job moved since. The token is not a credential and holds no URL or content. | [Optional] [Defaults to `undefined`] |
 
 ### Return type
 
-**object**
+[**GetJobStatus200Response**](GetJobStatus200Response.md)
 
 ### Authorization
 
@@ -437,8 +520,11 @@ No authorization required
 ### HTTP response details
 | Status code | Description | Response headers |
 |-------------|-------------|------------------|
-| **200** | The batch status document. |  -  |
+| **200** | The batch status document. A waited read answers it once the job is terminal. |  -  |
+| **400** | A wait that is not a whole number, an empty resume, a resume with no wait or with wait&#x3D;0, a resume token that is not valid, or a token for another job. error.code is BAD_REQUEST, and the message names which. |  -  |
+| **403** | A caller under zero data retention asked for a wait above 0, with QUARRY_EDGE__JOB_CONTROL on. error.code is FORBIDDEN (&#x60;waiting on a job is not available under zero data retention&#x60;). Nothing is read from control. |  -  |
 | **404** | Not found, a foreign id, or a job of another kind. |  -  |
+| **408** | Two cases. With a wait, the wait ran out before the job reached a terminal status: the body is the processing_continues envelope (error.code TIMEOUT, retryable), and the response carries a Retry-After header of 1 second. Without a wait, the route deadline (60 s by default) passed before the status was read: the body is empty, with no error envelope, and the x-request-id header is still echoed. |  * Retry-After - Seconds to wait before a resume. Always 1 on the processing_continues envelope. <br>  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 
@@ -518,11 +604,11 @@ No authorization required
 
 ## getCrawlStatus
 
-> object getCrawlStatus(jobId)
+> GetJobStatus200Response getCrawlStatus(jobId, wait, resume)
 
 Status document of a crawl (WS15.L1)
 
-A batch id on this path answers 404 (kind mismatch).
+A batch id on this path answers 404 (kind mismatch). The wait and resume query parameters work as they do on GET /v1/jobs/{job_id}, and are honoured only with QUARRY_EDGE__JOB_CONTROL on.
 
 ### Example
 
@@ -540,6 +626,10 @@ async function example() {
   const body = {
     // string
     jobId: jobId_example,
+    // number | Whole seconds to wait for the job to reach a terminal status, polled from control every 2 s. A job that is terminal before or during the wait answers 200 with the status document. 0 (the default) is a plain read. A value above 25 is clamped to 25, which stays below the 60 s route deadline. Honoured only with QUARRY_EDGE__JOB_CONTROL on; with the flag off the parameter is ignored and the read is the plain status read. With the flag on, a value that is not a whole number is a 400 (BAD_REQUEST, `wait must be a whole number of seconds`). With the flag on, a caller under zero data retention is refused a wait above 0 with 403 (FORBIDDEN), because the durable path a wait stands on is refused under ZDR; a plain read is unchanged. When the wait runs out before the job is terminal, the answer is the 408 processing_continues envelope. (optional)
+    wait: 56,
+    // string | The resume_token of an earlier 408 processing_continues, sent back exactly as it came, to keep waiting on the same job. Honoured only with QUARRY_EDGE__JOB_CONTROL on, like wait. A token names the job it was issued for: a token for another job is a 400 (`resume token is for another job`), and a value that is not a token is a 400 (`resume token is not valid`). An empty value is a 400 (`resume must carry the resume_token of a 408`), and so is a resume with no wait or with wait=0 (`resume needs a wait of at least 1 second`). The token records the job\'s progress when the 408 was sent, so the next 408 says in its details whether the job moved since. The token is not a credential and holds no URL or content. (optional)
+    resume: resume_example,
   } satisfies GetCrawlStatusRequest;
 
   try {
@@ -560,10 +650,12 @@ example().catch(console.error);
 | Name | Type | Description  | Notes |
 |------------- | ------------- | ------------- | -------------|
 | **jobId** | `string` |  | [Defaults to `undefined`] |
+| **wait** | `number` | Whole seconds to wait for the job to reach a terminal status, polled from control every 2 s. A job that is terminal before or during the wait answers 200 with the status document. 0 (the default) is a plain read. A value above 25 is clamped to 25, which stays below the 60 s route deadline. Honoured only with QUARRY_EDGE__JOB_CONTROL on; with the flag off the parameter is ignored and the read is the plain status read. With the flag on, a value that is not a whole number is a 400 (BAD_REQUEST, &#x60;wait must be a whole number of seconds&#x60;). With the flag on, a caller under zero data retention is refused a wait above 0 with 403 (FORBIDDEN), because the durable path a wait stands on is refused under ZDR; a plain read is unchanged. When the wait runs out before the job is terminal, the answer is the 408 processing_continues envelope. | [Optional] [Defaults to `0`] |
+| **resume** | `string` | The resume_token of an earlier 408 processing_continues, sent back exactly as it came, to keep waiting on the same job. Honoured only with QUARRY_EDGE__JOB_CONTROL on, like wait. A token names the job it was issued for: a token for another job is a 400 (&#x60;resume token is for another job&#x60;), and a value that is not a token is a 400 (&#x60;resume token is not valid&#x60;). An empty value is a 400 (&#x60;resume must carry the resume_token of a 408&#x60;), and so is a resume with no wait or with wait&#x3D;0 (&#x60;resume needs a wait of at least 1 second&#x60;). The token records the job\&#39;s progress when the 408 was sent, so the next 408 says in its details whether the job moved since. The token is not a credential and holds no URL or content. | [Optional] [Defaults to `undefined`] |
 
 ### Return type
 
-**object**
+[**GetJobStatus200Response**](GetJobStatus200Response.md)
 
 ### Authorization
 
@@ -578,8 +670,11 @@ No authorization required
 ### HTTP response details
 | Status code | Description | Response headers |
 |-------------|-------------|------------------|
-| **200** | The crawl status document. |  -  |
+| **200** | The crawl status document. A waited read answers it once the job is terminal. |  -  |
+| **400** | A wait that is not a whole number, an empty resume, a resume with no wait or with wait&#x3D;0, a resume token that is not valid, or a token for another job. error.code is BAD_REQUEST, and the message names which. |  -  |
+| **403** | A caller under zero data retention asked for a wait above 0, with QUARRY_EDGE__JOB_CONTROL on. error.code is FORBIDDEN (&#x60;waiting on a job is not available under zero data retention&#x60;). Nothing is read from control. |  -  |
 | **404** | Not found, a foreign id, or a job of another kind. |  -  |
+| **408** | Two cases. With a wait, the wait ran out before the job reached a terminal status: the body is the processing_continues envelope (error.code TIMEOUT, retryable), and the response carries a Retry-After header of 1 second. Without a wait, the route deadline (60 s by default) passed before the status was read: the body is empty, with no error envelope, and the x-request-id header is still echoed. |  * Retry-After - Seconds to wait before a resume. Always 1 on the processing_continues envelope. <br>  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 
@@ -659,11 +754,11 @@ No authorization required
 
 ## getJobStatus
 
-> object getJobStatus(jobId)
+> GetJobStatus200Response getJobStatus(jobId, wait, resume)
 
 Status document of a durable job (WS15.L1)
 
-Org-scoped by the verified token. A job id of another organization, or an id that is not a job, answers 404. The document carries status, phase, origin, counts, total and total_kind, warnings and the control state.
+Org-scoped by the verified token. A job id of another organization, or an id that is not a job, answers 404. The document carries status, phase, origin, counts, total and total_kind, warnings and the control state. For a page-priced job (crawl, batch, scrape, extract) it also carries &#x60;credits&#x60;, an estimate derived from the fetched-page count, once the control service has &#x60;QUARRY_CONTROL__JOB_CREDITS&#x60; on (default off). To cancel, use DELETE /v1/crawl/{job_id} or DELETE /v1/batch/{job_id} (WS15.L2). Crawl and batch jobs are refused under zero data retention, so there is no such job to read here under ZDR. The wait and resume query parameters are honoured only with QUARRY_EDGE__JOB_CONTROL on (see the JobWait and JobResume parameters).
 
 ### Example
 
@@ -681,6 +776,10 @@ async function example() {
   const body = {
     // string
     jobId: jobId_example,
+    // number | Whole seconds to wait for the job to reach a terminal status, polled from control every 2 s. A job that is terminal before or during the wait answers 200 with the status document. 0 (the default) is a plain read. A value above 25 is clamped to 25, which stays below the 60 s route deadline. Honoured only with QUARRY_EDGE__JOB_CONTROL on; with the flag off the parameter is ignored and the read is the plain status read. With the flag on, a value that is not a whole number is a 400 (BAD_REQUEST, `wait must be a whole number of seconds`). With the flag on, a caller under zero data retention is refused a wait above 0 with 403 (FORBIDDEN), because the durable path a wait stands on is refused under ZDR; a plain read is unchanged. When the wait runs out before the job is terminal, the answer is the 408 processing_continues envelope. (optional)
+    wait: 56,
+    // string | The resume_token of an earlier 408 processing_continues, sent back exactly as it came, to keep waiting on the same job. Honoured only with QUARRY_EDGE__JOB_CONTROL on, like wait. A token names the job it was issued for: a token for another job is a 400 (`resume token is for another job`), and a value that is not a token is a 400 (`resume token is not valid`). An empty value is a 400 (`resume must carry the resume_token of a 408`), and so is a resume with no wait or with wait=0 (`resume needs a wait of at least 1 second`). The token records the job\'s progress when the 408 was sent, so the next 408 says in its details whether the job moved since. The token is not a credential and holds no URL or content. (optional)
+    resume: resume_example,
   } satisfies GetJobStatusRequest;
 
   try {
@@ -701,10 +800,12 @@ example().catch(console.error);
 | Name | Type | Description  | Notes |
 |------------- | ------------- | ------------- | -------------|
 | **jobId** | `string` |  | [Defaults to `undefined`] |
+| **wait** | `number` | Whole seconds to wait for the job to reach a terminal status, polled from control every 2 s. A job that is terminal before or during the wait answers 200 with the status document. 0 (the default) is a plain read. A value above 25 is clamped to 25, which stays below the 60 s route deadline. Honoured only with QUARRY_EDGE__JOB_CONTROL on; with the flag off the parameter is ignored and the read is the plain status read. With the flag on, a value that is not a whole number is a 400 (BAD_REQUEST, &#x60;wait must be a whole number of seconds&#x60;). With the flag on, a caller under zero data retention is refused a wait above 0 with 403 (FORBIDDEN), because the durable path a wait stands on is refused under ZDR; a plain read is unchanged. When the wait runs out before the job is terminal, the answer is the 408 processing_continues envelope. | [Optional] [Defaults to `0`] |
+| **resume** | `string` | The resume_token of an earlier 408 processing_continues, sent back exactly as it came, to keep waiting on the same job. Honoured only with QUARRY_EDGE__JOB_CONTROL on, like wait. A token names the job it was issued for: a token for another job is a 400 (&#x60;resume token is for another job&#x60;), and a value that is not a token is a 400 (&#x60;resume token is not valid&#x60;). An empty value is a 400 (&#x60;resume must carry the resume_token of a 408&#x60;), and so is a resume with no wait or with wait&#x3D;0 (&#x60;resume needs a wait of at least 1 second&#x60;). The token records the job\&#39;s progress when the 408 was sent, so the next 408 says in its details whether the job moved since. The token is not a credential and holds no URL or content. | [Optional] [Defaults to `undefined`] |
 
 ### Return type
 
-**object**
+[**GetJobStatus200Response**](GetJobStatus200Response.md)
 
 ### Authorization
 
@@ -719,8 +820,11 @@ No authorization required
 ### HTTP response details
 | Status code | Description | Response headers |
 |-------------|-------------|------------------|
-| **200** | The job status document. |  -  |
+| **200** | The job status document. A waited read answers it once the job is terminal. |  -  |
+| **400** | A wait that is not a whole number, an empty resume, a resume with no wait or with wait&#x3D;0, a resume token that is not valid, or a token for another job. error.code is BAD_REQUEST, and the message names which. |  -  |
+| **403** | A caller under zero data retention asked for a wait above 0, with QUARRY_EDGE__JOB_CONTROL on. error.code is FORBIDDEN (&#x60;waiting on a job is not available under zero data retention&#x60;). Nothing is read from control. |  -  |
 | **404** | Not found for this organization, or not a job id. |  -  |
+| **408** | Two cases. With a wait, the wait ran out before the job reached a terminal status: the body is the processing_continues envelope (error.code TIMEOUT, retryable), and the response carries a Retry-After header of 1 second. Without a wait, the route deadline (60 s by default) passed before the status was read: the body is empty, with no error envelope, and the x-request-id header is still echoed. |  * Retry-After - Seconds to wait before a resume. Always 1 on the processing_continues envelope. <br>  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 

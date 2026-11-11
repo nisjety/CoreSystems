@@ -14,6 +14,7 @@ Name | Type
 `domSummary` | { [key: string]: any; }
 `screenshotArtifactId` | string
 `visualObservationArtifactId` | string
+`pdfArtifactId` | string
 `evidenceDeltaArtifactId` | string
 `consoleSummary` | Array&lt;{ [key: string]: any; }&gt;
 `networkSummary` | Array&lt;{ [key: string]: any; }&gt;
@@ -29,6 +30,8 @@ Name | Type
 `targetResolution` | { [key: string]: any; }
 `telemetry` | [BrowserTelemetry](BrowserTelemetry.md)
 `redaction` | [RedactionStamp](RedactionStamp.md)
+`warnings` | [Array&lt;ObservationWarning&gt;](ObservationWarning.md)
+`settleMs` | number
 `observedAt` | Date
 
 ## Example
@@ -46,6 +49,7 @@ const example = {
   "domSummary": null,
   "screenshotArtifactId": null,
   "visualObservationArtifactId": null,
+  "pdfArtifactId": null,
   "evidenceDeltaArtifactId": null,
   "consoleSummary": null,
   "networkSummary": null,
@@ -61,6 +65,8 @@ const example = {
   "targetResolution": null,
   "telemetry": null,
   "redaction": null,
+  "warnings": null,
+  "settleMs": null,
   "observedAt": null,
 } satisfies BrowserObservation
 

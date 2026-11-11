@@ -68,7 +68,7 @@ export class ExtractApi extends runtime.BaseAPI {
     }
 
     /**
-     * Fetch a bounded set of URLs and return structured data per source (JSON-Schema-guided via Model Plane) or cleaned markdown. Per-source isolation — one failure never sinks the batch. 
+     * Fetch a bounded set of URLs and return structured data per source (JSON-Schema-guided via Model Plane) or cleaned markdown. Per-source isolation — one failure never sinks the batch.  `schema` alone is schema-guided extraction. `prompt` alone asks the model for one free-form JSON object (`data`, status `ok`, no `schema_valid`). Both together is schema-guided extraction with the prompt as extra instructions. Neither returns cleaned markdown (status `fetched`). Under zero data retention no page text is sent to a model: each source answers status `error` with a `ZDR_UNAVAILABLE` message, and its `structured` harvest still comes back.  WS16.S6: the model arm runs on the AI scrape engine (`POST /v1/ai/chat` on the Model Plane), one `json` run per source, sources concurrently (at most `QUARRY_EDGE__AI_FORMATS_CONCURRENCY`), results in the order of `urls`. Each source of a model request carries `ai`, the json `AiFormatReport`. Off unless `QUARRY_EDGE__AI_FORMATS` is on. 
      * Multi-URL structured extraction
      */
     async extractRaw(requestParameters: ExtractOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<ExtractResponse>> {
@@ -79,7 +79,7 @@ export class ExtractApi extends runtime.BaseAPI {
     }
 
     /**
-     * Fetch a bounded set of URLs and return structured data per source (JSON-Schema-guided via Model Plane) or cleaned markdown. Per-source isolation — one failure never sinks the batch. 
+     * Fetch a bounded set of URLs and return structured data per source (JSON-Schema-guided via Model Plane) or cleaned markdown. Per-source isolation — one failure never sinks the batch.  `schema` alone is schema-guided extraction. `prompt` alone asks the model for one free-form JSON object (`data`, status `ok`, no `schema_valid`). Both together is schema-guided extraction with the prompt as extra instructions. Neither returns cleaned markdown (status `fetched`). Under zero data retention no page text is sent to a model: each source answers status `error` with a `ZDR_UNAVAILABLE` message, and its `structured` harvest still comes back.  WS16.S6: the model arm runs on the AI scrape engine (`POST /v1/ai/chat` on the Model Plane), one `json` run per source, sources concurrently (at most `QUARRY_EDGE__AI_FORMATS_CONCURRENCY`), results in the order of `urls`. Each source of a model request carries `ai`, the json `AiFormatReport`. Off unless `QUARRY_EDGE__AI_FORMATS` is on. 
      * Multi-URL structured extraction
      */
     async extract(requestParameters: ExtractOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<ExtractResponse> {

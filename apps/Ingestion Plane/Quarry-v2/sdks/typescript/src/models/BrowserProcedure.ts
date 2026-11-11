@@ -20,6 +20,13 @@ import {
     BrowserProcedureStepsInnerToJSON,
     BrowserProcedureStepsInnerToJSONTyped,
 } from './BrowserProcedureStepsInner';
+import type { ProcedureSlot } from './ProcedureSlot';
+import {
+    ProcedureSlotFromJSON,
+    ProcedureSlotFromJSONTyped,
+    ProcedureSlotToJSON,
+    ProcedureSlotToJSONTyped,
+} from './ProcedureSlot';
 
 /**
  * 
@@ -34,7 +41,7 @@ export interface BrowserProcedure {
      */
     procedureId: string;
     /**
-     * 
+     * 1 for a receipt-literal procedure. 2 for a canonical one (compiled with `canonical` true): semantic targets (`target`), typed-text slots (`slots`) and verified postconditions (`expect`).
      * @type {number}
      * @memberof BrowserProcedure
      */
@@ -51,6 +58,14 @@ export interface BrowserProcedure {
      * @memberof BrowserProcedure
      */
     steps: Array<BrowserProcedureStepsInner>;
+    /**
+     * Version 2 only: the typed-input slots. The step types into each at replay and the
+     * value is supplied then, never stored. Absent on a version 1 procedure.
+     * 
+     * @type {Array<ProcedureSlot>}
+     * @memberof BrowserProcedure
+     */
+    slots?: Array<ProcedureSlot>;
 }
 
 /**
@@ -78,6 +93,7 @@ export function BrowserProcedureFromJSONTyped(json: any, ignoreDiscriminator: bo
         'version': json['version'],
         'sourceReceiptIds': json['source_receipt_ids'],
         'steps': ((json['steps'] as Array<any>).map(BrowserProcedureStepsInnerFromJSON)),
+        'slots': json['slots'] == null ? undefined : ((json['slots'] as Array<any>).map(ProcedureSlotFromJSON)),
     };
 }
 
@@ -96,6 +112,7 @@ export function BrowserProcedureToJSONTyped(value?: BrowserProcedure | null, ign
         'version': value['version'],
         'source_receipt_ids': value['sourceReceiptIds'],
         'steps': ((value['steps'] as Array<any>).map(BrowserProcedureStepsInnerToJSON)),
+        'slots': value['slots'] == null ? undefined : ((value['slots'] as Array<any>).map(ProcedureSlotToJSON)),
     };
 }
 

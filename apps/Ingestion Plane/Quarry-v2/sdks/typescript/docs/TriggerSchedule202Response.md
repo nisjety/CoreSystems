@@ -6,9 +6,9 @@
 
 Name | Type
 ------------ | -------------
-`scheduleId` | string
-`status` | string
-`note` | string
+`data` | [ScheduleRequestAccepted](ScheduleRequestAccepted.md)
+`meta` | [ResponseMeta](ResponseMeta.md)
+`error` | [ErrorDetail](ErrorDetail.md)
 
 ## Example
 
@@ -17,9 +17,9 @@ import type { TriggerSchedule202Response } from '@quarry/client'
 
 // TODO: Update the object below with actual values
 const example = {
-  "scheduleId": null,
-  "status": null,
-  "note": null,
+  "data": null,
+  "meta": null,
+  "error": null,
 } satisfies TriggerSchedule202Response
 
 console.log(example)

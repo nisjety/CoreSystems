@@ -68,6 +68,13 @@ import {
     EvaluateActionFromJSONTyped,
     EvaluateActionToJSON,
 } from './EvaluateAction';
+import type { FillOtpRefAction } from './FillOtpRefAction';
+import {
+    instanceOfFillOtpRefAction,
+    FillOtpRefActionFromJSON,
+    FillOtpRefActionFromJSONTyped,
+    FillOtpRefActionToJSON,
+} from './FillOtpRefAction';
 import type { ForwardAction } from './ForwardAction';
 import {
     instanceOfForwardAction,
@@ -152,6 +159,13 @@ import {
     PressActionFromJSONTyped,
     PressActionToJSON,
 } from './PressAction';
+import type { ReloadAction } from './ReloadAction';
+import {
+    instanceOfReloadAction,
+    ReloadActionFromJSON,
+    ReloadActionFromJSONTyped,
+    ReloadActionToJSON,
+} from './ReloadAction';
 import type { ScreenshotAction } from './ScreenshotAction';
 import {
     instanceOfScreenshotAction,
@@ -246,10 +260,10 @@ import {
 
 /**
  * @type AgentAction
- * Tagged action. Existing CSS selector actions remain supported. Snapshot actions (`*_ref` and `*_semantic`) must include the exact snapshot_id and generation from BrowserObservation.snapshot; stale, missing, or ambiguous targets return TARGET_REPAIR_REQUIRED (409).
+ * Tagged action. Existing CSS selector actions remain supported. Snapshot actions (`*_ref` and `*_semantic`) must include the exact snapshot_id and generation from BrowserObservation.snapshot; stale, missing, or ambiguous targets return TARGET_REPAIR_REQUIRED (409). With driver_capabilities.trusted_input true, a click_ref, type_ref or select_ref that cannot be performed as a person would also returns TARGET_REPAIR_REQUIRED (409), with details.reason one of target_not_attached, target_not_visible, target_disabled, target_covered (plus details.covered_by_tag, a tag name only), target_unstable, target_has_no_box or target_unreachable_after_scroll. The details never carry a selector, URL or page text.
  * @export
  */
-export type AgentAction = { type: 'back' } & BackAction | { type: 'click' } & ClickAction | { type: 'click_point' } & ClickPointAction | { type: 'click_ref' } & ClickRefAction | { type: 'click_semantic' } & ClickSemanticAction | { type: 'download_ref' } & DownloadRefAction | { type: 'evaluate' } & EvaluateAction | { type: 'forward' } & ForwardAction | { type: 'frame_click_ref' } & FrameClickRefAction | { type: 'frame_download_ref' } & FrameDownloadRefAction | { type: 'frame_select_ref' } & FrameSelectRefAction | { type: 'frame_type_ref' } & FrameTypeRefAction | { type: 'frame_upload_ref' } & FrameUploadRefAction | { type: 'frame_wait_for_ref' } & FrameWaitForRefAction | { type: 'get_content' } & GetContentAction | { type: 'mouse_wheel' } & MouseWheelAction | { type: 'navigate' } & NavigateAction | { type: 'pdf' } & PdfAction | { type: 'press' } & PressAction | { type: 'respond_dialog' } & DialogResponseAction | { type: 'screenshot' } & ScreenshotAction | { type: 'scroll' } & ScrollAction | { type: 'select' } & SelectAction | { type: 'select_ref' } & SelectRefAction | { type: 'select_semantic' } & SelectSemanticAction | { type: 'type' } & TypeAction | { type: 'type_ref' } & TypeRefAction | { type: 'type_semantic' } & TypeSemanticAction | { type: 'upload_ref' } & UploadRefAction | { type: 'wait' } & WaitAction | { type: 'wait_for' } & WaitForAction | { type: 'wait_for_ref' } & WaitForRefAction | { type: 'wait_for_semantic' } & WaitForSemanticAction;
+export type AgentAction = { type: 'back' } & BackAction | { type: 'click' } & ClickAction | { type: 'click_point' } & ClickPointAction | { type: 'click_ref' } & ClickRefAction | { type: 'click_semantic' } & ClickSemanticAction | { type: 'download_ref' } & DownloadRefAction | { type: 'evaluate' } & EvaluateAction | { type: 'fill_otp_ref' } & FillOtpRefAction | { type: 'forward' } & ForwardAction | { type: 'frame_click_ref' } & FrameClickRefAction | { type: 'frame_download_ref' } & FrameDownloadRefAction | { type: 'frame_select_ref' } & FrameSelectRefAction | { type: 'frame_type_ref' } & FrameTypeRefAction | { type: 'frame_upload_ref' } & FrameUploadRefAction | { type: 'frame_wait_for_ref' } & FrameWaitForRefAction | { type: 'get_content' } & GetContentAction | { type: 'mouse_wheel' } & MouseWheelAction | { type: 'navigate' } & NavigateAction | { type: 'pdf' } & PdfAction | { type: 'press' } & PressAction | { type: 'reload' } & ReloadAction | { type: 'respond_dialog' } & DialogResponseAction | { type: 'screenshot' } & ScreenshotAction | { type: 'scroll' } & ScrollAction | { type: 'select' } & SelectAction | { type: 'select_ref' } & SelectRefAction | { type: 'select_semantic' } & SelectSemanticAction | { type: 'type' } & TypeAction | { type: 'type_ref' } & TypeRefAction | { type: 'type_semantic' } & TypeSemanticAction | { type: 'upload_ref' } & UploadRefAction | { type: 'wait' } & WaitAction | { type: 'wait_for' } & WaitForAction | { type: 'wait_for_ref' } & WaitForRefAction | { type: 'wait_for_semantic' } & WaitForSemanticAction;
 
 export function AgentActionFromJSON(json: any): AgentAction {
     return AgentActionFromJSONTyped(json, false);
@@ -274,6 +288,8 @@ export function AgentActionFromJSONTyped(json: any, ignoreDiscriminator: boolean
             return Object.assign({}, DownloadRefActionFromJSONTyped(json, true), { type: 'download_ref' } as const);
         case 'evaluate':
             return Object.assign({}, EvaluateActionFromJSONTyped(json, true), { type: 'evaluate' } as const);
+        case 'fill_otp_ref':
+            return Object.assign({}, FillOtpRefActionFromJSONTyped(json, true), { type: 'fill_otp_ref' } as const);
         case 'forward':
             return Object.assign({}, ForwardActionFromJSONTyped(json, true), { type: 'forward' } as const);
         case 'frame_click_ref':
@@ -298,6 +314,8 @@ export function AgentActionFromJSONTyped(json: any, ignoreDiscriminator: boolean
             return Object.assign({}, PdfActionFromJSONTyped(json, true), { type: 'pdf' } as const);
         case 'press':
             return Object.assign({}, PressActionFromJSONTyped(json, true), { type: 'press' } as const);
+        case 'reload':
+            return Object.assign({}, ReloadActionFromJSONTyped(json, true), { type: 'reload' } as const);
         case 'respond_dialog':
             return Object.assign({}, DialogResponseActionFromJSONTyped(json, true), { type: 'respond_dialog' } as const);
         case 'screenshot':
@@ -354,6 +372,8 @@ export function AgentActionToJSONTyped(value?: AgentAction | null, ignoreDiscrim
             return Object.assign({}, DownloadRefActionToJSON(value), { type: 'download_ref' } as const);
         case 'evaluate':
             return Object.assign({}, EvaluateActionToJSON(value), { type: 'evaluate' } as const);
+        case 'fill_otp_ref':
+            return Object.assign({}, FillOtpRefActionToJSON(value), { type: 'fill_otp_ref' } as const);
         case 'forward':
             return Object.assign({}, ForwardActionToJSON(value), { type: 'forward' } as const);
         case 'frame_click_ref':
@@ -378,6 +398,8 @@ export function AgentActionToJSONTyped(value?: AgentAction | null, ignoreDiscrim
             return Object.assign({}, PdfActionToJSON(value), { type: 'pdf' } as const);
         case 'press':
             return Object.assign({}, PressActionToJSON(value), { type: 'press' } as const);
+        case 'reload':
+            return Object.assign({}, ReloadActionToJSON(value), { type: 'reload' } as const);
         case 'respond_dialog':
             return Object.assign({}, DialogResponseActionToJSON(value), { type: 'respond_dialog' } as const);
         case 'screenshot':

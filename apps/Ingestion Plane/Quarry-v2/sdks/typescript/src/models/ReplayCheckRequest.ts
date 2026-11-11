@@ -39,6 +39,12 @@ export interface ReplayCheckRequest {
      * @memberof ReplayCheckRequest
      */
     actions?: Array<{ [key: string]: any; }>;
+    /**
+     * E4.2 step 2: the actions are a leading part of the procedure, so the replay may stop early. Only a version 2 procedure takes it; a version 1 procedure with `prefix` true is refused with 400 `prefix_needs_v2`. Actions beyond the procedure are always a repair.
+     * @type {boolean}
+     * @memberof ReplayCheckRequest
+     */
+    prefix?: boolean;
 }
 
 /**
@@ -61,6 +67,7 @@ export function ReplayCheckRequestFromJSONTyped(json: any, ignoreDiscriminator: 
         
         'procedure': BrowserProcedureFromJSON(json['procedure']),
         'actions': json['actions'] == null ? undefined : json['actions'],
+        'prefix': json['prefix'] == null ? undefined : json['prefix'],
     };
 }
 
@@ -77,6 +84,7 @@ export function ReplayCheckRequestToJSONTyped(value?: ReplayCheckRequest | null,
         
         'procedure': BrowserProcedureToJSON(value['procedure']),
         'actions': value['actions'],
+        'prefix': value['prefix'],
     };
 }
 

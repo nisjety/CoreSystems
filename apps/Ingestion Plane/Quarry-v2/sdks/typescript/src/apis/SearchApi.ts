@@ -14,10 +14,35 @@
 
 import * as runtime from '../runtime';
 import {
+    type AnswerErrorBody,
+    AnswerErrorBodyFromJSON,
+    AnswerErrorBodyToJSON,
+} from '../models/AnswerErrorBody';
+import {
+    type AnswerRequest,
+    AnswerRequestFromJSON,
+    AnswerRequestToJSON,
+} from '../models/AnswerRequest';
+import {
+    type AnswerResponse,
+    AnswerResponseFromJSON,
+    AnswerResponseToJSON,
+} from '../models/AnswerResponse';
+import {
     type ErrorBody,
     ErrorBodyFromJSON,
     ErrorBodyToJSON,
 } from '../models/ErrorBody';
+import {
+    type ImageSearchRequest,
+    ImageSearchRequestFromJSON,
+    ImageSearchRequestToJSON,
+} from '../models/ImageSearchRequest';
+import {
+    type ImageSearchResponse,
+    ImageSearchResponseFromJSON,
+    ImageSearchResponseToJSON,
+} from '../models/ImageSearchResponse';
 import {
     type RateLimitError,
     RateLimitErrorFromJSON,
@@ -33,15 +58,166 @@ import {
     SearchResponseFromJSON,
     SearchResponseToJSON,
 } from '../models/SearchResponse';
+import {
+    type SimilarRequest,
+    SimilarRequestFromJSON,
+    SimilarRequestToJSON,
+} from '../models/SimilarRequest';
+import {
+    type SuggestRequest,
+    SuggestRequestFromJSON,
+    SuggestRequestToJSON,
+} from '../models/SuggestRequest';
+import {
+    type SuggestResponse,
+    SuggestResponseFromJSON,
+    SuggestResponseToJSON,
+} from '../models/SuggestResponse';
+import {
+    type VideoSearchRequest,
+    VideoSearchRequestFromJSON,
+    VideoSearchRequestToJSON,
+} from '../models/VideoSearchRequest';
+import {
+    type VideoSearchResponse,
+    VideoSearchResponseFromJSON,
+    VideoSearchResponseToJSON,
+} from '../models/VideoSearchResponse';
+
+export interface AnswerOperationRequest {
+    answerRequest: AnswerRequest;
+}
+
+export interface AnswerStreamRequest {
+    answerRequest: AnswerRequest;
+}
 
 export interface SearchOperationRequest {
     searchRequest: SearchRequest;
+}
+
+export interface SearchImagesRequest {
+    imageSearchRequest: ImageSearchRequest;
+}
+
+export interface SearchSimilarRequest {
+    similarRequest: SimilarRequest;
+}
+
+export interface SearchSuggestRequest {
+    suggestRequest: SuggestRequest;
+}
+
+export interface SearchVideosRequest {
+    videoSearchRequest: VideoSearchRequest;
 }
 
 /**
  * 
  */
 export class SearchApi extends runtime.BaseAPI {
+
+    /**
+     * Creates request options for answer without sending the request
+     */
+    async answerRequestOpts(requestParameters: AnswerOperationRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['answerRequest'] == null) {
+            throw new runtime.RequiredError(
+                'answerRequest',
+                'Required parameter "answerRequest" was null or undefined when calling answer().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/answer`;
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: AnswerRequestToJSON(requestParameters['answerRequest']),
+        };
+    }
+
+    /**
+     * Searches, reads the top pages and synthesizes one answer through the Model Plane, with the sources as citations. Metered as `quarry.answer.synth`, once per synthesis. Off until the operator turns it on: it needs `QUARRY_EDGE__ANSWER_SYNTHESIS=1` (decided by the Model Plane boot gate, which refuses a switch that has no granted model path), a search provider and `QUARRY_EDGE__MODEL_PLANE_URL`, and a Model Plane that accepts the edge\'s service token. When it is not available the response names the reason, see `AnswerErrorBody`. The same pipeline serves `include_answer` on `POST /v1/search`, which reports the same reasons as `answer_status` and `answer_reason`. A zero data retention request (the body flag or the token\'s floor) is refused with a 403, reason `zdr_unavailable`, before the pipeline starts: the model hop carries no ZDR posture, so there is no search, no page fetch and no Model Plane call. The refusal leaves a metadata-only tombstone when that is switched on.
+     * One-call grounded answer with citations
+     */
+    async answerRaw(requestParameters: AnswerOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<AnswerResponse>> {
+        const requestOptions = await this.answerRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => AnswerResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Searches, reads the top pages and synthesizes one answer through the Model Plane, with the sources as citations. Metered as `quarry.answer.synth`, once per synthesis. Off until the operator turns it on: it needs `QUARRY_EDGE__ANSWER_SYNTHESIS=1` (decided by the Model Plane boot gate, which refuses a switch that has no granted model path), a search provider and `QUARRY_EDGE__MODEL_PLANE_URL`, and a Model Plane that accepts the edge\'s service token. When it is not available the response names the reason, see `AnswerErrorBody`. The same pipeline serves `include_answer` on `POST /v1/search`, which reports the same reasons as `answer_status` and `answer_reason`. A zero data retention request (the body flag or the token\'s floor) is refused with a 403, reason `zdr_unavailable`, before the pipeline starts: the model hop carries no ZDR posture, so there is no search, no page fetch and no Model Plane call. The refusal leaves a metadata-only tombstone when that is switched on.
+     * One-call grounded answer with citations
+     */
+    async answer(requestParameters: AnswerOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<AnswerResponse> {
+        const response = await this.answerRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for answerStream without sending the request
+     */
+    async answerStreamRequestOpts(requestParameters: AnswerStreamRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['answerRequest'] == null) {
+            throw new runtime.RequiredError(
+                'answerRequest',
+                'Required parameter "answerRequest" was null or undefined when calling answerStream().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/answer/stream`;
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: AnswerRequestToJSON(requestParameters['answerRequest']),
+        };
+    }
+
+    /**
+     * Same pipeline and same request. Frames: `event: citations` (the citation array), `event: delta` (`{\"delta\": text}`, repeated), then `event: done` (`{\"answer\", \"cached\"}`); `event: error` (`{\"message\", \"reason\"}`) on failure, where `reason` is the closed code of `AnswerErrorBody`. A warm org-scoped answer-cache hit replays with no model call. A ZDR request is refused with the same JSON 403 as `/v1/answer` (reason `zdr_unavailable`), not a stream. When the pipeline is not wired the response is the same 501 as `/v1/answer`, not a stream. Metered as `quarry.answer.synth` when an answer is produced.
+     * Server-sent events variant of /v1/answer
+     */
+    async answerStreamRaw(requestParameters: AnswerStreamRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<string>> {
+        const requestOptions = await this.answerStreamRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        if (this.isJsonMime(response.headers.get('content-type'))) {
+            return new runtime.JSONApiResponse<string>(response);
+        } else {
+            return new runtime.TextApiResponse(response) as any;
+        }
+    }
+
+    /**
+     * Same pipeline and same request. Frames: `event: citations` (the citation array), `event: delta` (`{\"delta\": text}`, repeated), then `event: done` (`{\"answer\", \"cached\"}`); `event: error` (`{\"message\", \"reason\"}`) on failure, where `reason` is the closed code of `AnswerErrorBody`. A warm org-scoped answer-cache hit replays with no model call. A ZDR request is refused with the same JSON 403 as `/v1/answer` (reason `zdr_unavailable`), not a stream. When the pipeline is not wired the response is the same 501 as `/v1/answer`, not a stream. Metered as `quarry.answer.synth` when an answer is produced.
+     * Server-sent events variant of /v1/answer
+     */
+    async answerStream(requestParameters: AnswerStreamRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<string> {
+        const response = await this.answerStreamRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
 
     /**
      * Creates request options for search without sending the request
@@ -89,6 +265,202 @@ export class SearchApi extends runtime.BaseAPI {
      */
     async search(requestParameters: SearchOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SearchResponse> {
         const response = await this.searchRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for searchImages without sending the request
+     */
+    async searchImagesRequestOpts(requestParameters: SearchImagesRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['imageSearchRequest'] == null) {
+            throw new runtime.RequiredError(
+                'imageSearchRequest',
+                'Required parameter "imageSearchRequest" was null or undefined when calling searchImages().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/search/images`;
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: ImageSearchRequestToJSON(requestParameters['imageSearchRequest']),
+        };
+    }
+
+    /**
+     * Focused image search. The query goes to the SearXNG the edge is configured with (QUARRY_EDGE__SEARXNG_URL), in its image category, and nothing else. Without that URL the route answers 501 UNSUPPORTED. A successful call, even one with no images, is metered as one SEARCH_QUERY unit with kind images. Zero data retention: the route reads no zdr field and makes no ZDR decision. The query is not cached, and the usage event carries the org, the user, the vertical and the result count, never the query text. Codes from SearXNG are the upper-cased names of the error code (DRIVERFAILED, BADREQUEST, NOTFOUND), not the underscore wire names; the 429 envelope carries RATE_LIMITED. A service principal is refused with a bare 403. A body that is not JSON, or does not match the schema, gets the framework\'s plain-text 400 or 422 before the handler runs.
+     * Image search through the SearXNG image vertical
+     */
+    async searchImagesRaw(requestParameters: SearchImagesRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<ImageSearchResponse>> {
+        const requestOptions = await this.searchImagesRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => ImageSearchResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Focused image search. The query goes to the SearXNG the edge is configured with (QUARRY_EDGE__SEARXNG_URL), in its image category, and nothing else. Without that URL the route answers 501 UNSUPPORTED. A successful call, even one with no images, is metered as one SEARCH_QUERY unit with kind images. Zero data retention: the route reads no zdr field and makes no ZDR decision. The query is not cached, and the usage event carries the org, the user, the vertical and the result count, never the query text. Codes from SearXNG are the upper-cased names of the error code (DRIVERFAILED, BADREQUEST, NOTFOUND), not the underscore wire names; the 429 envelope carries RATE_LIMITED. A service principal is refused with a bare 403. A body that is not JSON, or does not match the schema, gets the framework\'s plain-text 400 or 422 before the handler runs.
+     * Image search through the SearXNG image vertical
+     */
+    async searchImages(requestParameters: SearchImagesRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<ImageSearchResponse> {
+        const response = await this.searchImagesRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for searchSimilar without sending the request
+     */
+    async searchSimilarRequestOpts(requestParameters: SearchSimilarRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['similarRequest'] == null) {
+            throw new runtime.RequiredError(
+                'similarRequest',
+                'Required parameter "similarRequest" was null or undefined when calling searchSimilar().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/search/similar`;
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: SimilarRequestToJSON(requestParameters['similarRequest']),
+        };
+    }
+
+    /**
+     * Find-similar, from the Data Plane vector index. Send text (a passage), url (a page, whose markdown seeds the search) or both. A body with neither after trimming is 400 BAD_REQUEST. The route needs the Data Plane vector leg: QUARRY_EDGE__VECTOR_RETRIEVAL set to true, QUARRY_EDGE__DATA_PLANE_URL, and a service identity. Without it the route answers 501 UNSUPPORTED. A url is checked against the web policy before anything is fetched, even when text is also sent; a refusal is 403 FORBIDDEN, and its message never carries the url. The page is fetched only when text is absent, and when that fetch yields nothing the url itself seeds the search. The response query is the literal string text when a passage seeded the search, and the url otherwise. Results come in the Data Plane\'s order with no score, and provider is similar. Each call that runs the vector leg is metered as one SEARCH_QUERY unit with kind similar. Zero data retention: there is no zdr field, so the posture is the token\'s ZDR floor alone. Under ZDR the vector leg does not run (no Data Plane call, no hits, no meter) and the answer is 200 with no results; a url is still fetched under the ZDR posture first. Codes from the vector leg are the upper-cased names of the error code (UPSTREAMBLOCKED, DRIVERFAILED, RATELIMITED, TIMEOUT), not the underscore wire names. A service principal is refused with a bare 403. A body that is not JSON gets the framework\'s plain-text 400.
+     * Semantic neighbours of a passage, a page or both
+     */
+    async searchSimilarRaw(requestParameters: SearchSimilarRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SearchResponse>> {
+        const requestOptions = await this.searchSimilarRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => SearchResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Find-similar, from the Data Plane vector index. Send text (a passage), url (a page, whose markdown seeds the search) or both. A body with neither after trimming is 400 BAD_REQUEST. The route needs the Data Plane vector leg: QUARRY_EDGE__VECTOR_RETRIEVAL set to true, QUARRY_EDGE__DATA_PLANE_URL, and a service identity. Without it the route answers 501 UNSUPPORTED. A url is checked against the web policy before anything is fetched, even when text is also sent; a refusal is 403 FORBIDDEN, and its message never carries the url. The page is fetched only when text is absent, and when that fetch yields nothing the url itself seeds the search. The response query is the literal string text when a passage seeded the search, and the url otherwise. Results come in the Data Plane\'s order with no score, and provider is similar. Each call that runs the vector leg is metered as one SEARCH_QUERY unit with kind similar. Zero data retention: there is no zdr field, so the posture is the token\'s ZDR floor alone. Under ZDR the vector leg does not run (no Data Plane call, no hits, no meter) and the answer is 200 with no results; a url is still fetched under the ZDR posture first. Codes from the vector leg are the upper-cased names of the error code (UPSTREAMBLOCKED, DRIVERFAILED, RATELIMITED, TIMEOUT), not the underscore wire names. A service principal is refused with a bare 403. A body that is not JSON gets the framework\'s plain-text 400.
+     * Semantic neighbours of a passage, a page or both
+     */
+    async searchSimilar(requestParameters: SearchSimilarRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SearchResponse> {
+        const response = await this.searchSimilarRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for searchSuggest without sending the request
+     */
+    async searchSuggestRequestOpts(requestParameters: SearchSuggestRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['suggestRequest'] == null) {
+            throw new runtime.RequiredError(
+                'suggestRequest',
+                'Required parameter "suggestRequest" was null or undefined when calling searchSuggest().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/search/suggest`;
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: SuggestRequestToJSON(requestParameters['suggestRequest']),
+        };
+    }
+
+    /**
+     * Did-you-mean, related searches and a knowledge panel for one query, from the Model Plane. The route is degrade-safe and always answers 200: with nothing to give, the answer is an object whose related_queries is empty. It is off unless QUARRY_EDGE__SEARCH_SUGGEST is set to on, and boot must also find a Model Plane path (QUARRY_EDGE__MODEL_PLANE_URL, a service identity and a granted model-invoke row). When the switch is off, or boot refuses it, the route answers the same empty 200 and makes no Model Plane call; so does an empty query. The model\'s reply is read leniently: a correction equal to the query is dropped, related queries are trimmed, de-duplicated and capped at five, and a reply that does not parse gives no suggestions. Zero data retention is not honoured: the handler reads no ZDR posture and the Model Plane call carries none, so under ZDR the query still reaches the model whenever the route runs. The edge keeps no copy. A service principal is refused with a bare 403. A body that is not JSON, or does not match the schema, gets the framework\'s plain-text 400 or 422.
+     * Spelling correction, related searches and a panel for one query
+     */
+    async searchSuggestRaw(requestParameters: SearchSuggestRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<SuggestResponse>> {
+        const requestOptions = await this.searchSuggestRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => SuggestResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Did-you-mean, related searches and a knowledge panel for one query, from the Model Plane. The route is degrade-safe and always answers 200: with nothing to give, the answer is an object whose related_queries is empty. It is off unless QUARRY_EDGE__SEARCH_SUGGEST is set to on, and boot must also find a Model Plane path (QUARRY_EDGE__MODEL_PLANE_URL, a service identity and a granted model-invoke row). When the switch is off, or boot refuses it, the route answers the same empty 200 and makes no Model Plane call; so does an empty query. The model\'s reply is read leniently: a correction equal to the query is dropped, related queries are trimmed, de-duplicated and capped at five, and a reply that does not parse gives no suggestions. Zero data retention is not honoured: the handler reads no ZDR posture and the Model Plane call carries none, so under ZDR the query still reaches the model whenever the route runs. The edge keeps no copy. A service principal is refused with a bare 403. A body that is not JSON, or does not match the schema, gets the framework\'s plain-text 400 or 422.
+     * Spelling correction, related searches and a panel for one query
+     */
+    async searchSuggest(requestParameters: SearchSuggestRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<SuggestResponse> {
+        const response = await this.searchSuggestRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for searchVideos without sending the request
+     */
+    async searchVideosRequestOpts(requestParameters: SearchVideosRequest): Promise<runtime.RequestOpts> {
+        if (requestParameters['videoSearchRequest'] == null) {
+            throw new runtime.RequiredError(
+                'videoSearchRequest',
+                'Required parameter "videoSearchRequest" was null or undefined when calling searchVideos().'
+            );
+        }
+
+        const queryParameters: any = {};
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+        headerParameters['Content-Type'] = 'application/json';
+
+
+        let urlPath = `/v1/search/videos`;
+
+        return {
+            path: urlPath,
+            method: 'POST',
+            headers: headerParameters,
+            query: queryParameters,
+            body: VideoSearchRequestToJSON(requestParameters['videoSearchRequest']),
+        };
+    }
+
+    /**
+     * Focused video search. The query goes to the SearXNG the edge is configured with (QUARRY_EDGE__SEARXNG_URL), in its video category, and nothing else. Without that URL the route answers 501 UNSUPPORTED. A successful call, even one with no videos, is metered as one SEARCH_QUERY unit with kind videos. Zero data retention: the route reads no zdr field and makes no ZDR decision. The query is not cached, and the usage event carries the org, the user, the vertical and the result count, never the query text. Codes from SearXNG are the upper-cased names of the error code (DRIVERFAILED, BADREQUEST, NOTFOUND), not the underscore wire names; the 429 envelope carries RATE_LIMITED. A service principal is refused with a bare 403. A body that is not JSON, or does not match the schema, gets the framework\'s plain-text 400 or 422 before the handler runs.
+     * Video search through the SearXNG video vertical
+     */
+    async searchVideosRaw(requestParameters: SearchVideosRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<VideoSearchResponse>> {
+        const requestOptions = await this.searchVideosRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => VideoSearchResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Focused video search. The query goes to the SearXNG the edge is configured with (QUARRY_EDGE__SEARXNG_URL), in its video category, and nothing else. Without that URL the route answers 501 UNSUPPORTED. A successful call, even one with no videos, is metered as one SEARCH_QUERY unit with kind videos. Zero data retention: the route reads no zdr field and makes no ZDR decision. The query is not cached, and the usage event carries the org, the user, the vertical and the result count, never the query text. Codes from SearXNG are the upper-cased names of the error code (DRIVERFAILED, BADREQUEST, NOTFOUND), not the underscore wire names; the 429 envelope carries RATE_LIMITED. A service principal is refused with a bare 403. A body that is not JSON, or does not match the schema, gets the framework\'s plain-text 400 or 422 before the handler runs.
+     * Video search through the SearXNG video vertical
+     */
+    async searchVideos(requestParameters: SearchVideosRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<VideoSearchResponse> {
+        const response = await this.searchVideosRaw(requestParameters, initOverrides);
         return await response.value();
     }
 

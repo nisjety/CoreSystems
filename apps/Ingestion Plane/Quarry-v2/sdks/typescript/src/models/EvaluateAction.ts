@@ -14,7 +14,7 @@
 
 import { mapValues } from '../runtime';
 /**
- * 
+ * Raw page script. Refused on every agent entry point with 403 FORBIDDEN and details.reason raw_script_denied; the action stays in the schema only so existing clients still deserialize. Use typed browser actions.
  * @export
  * @interface EvaluateAction
  */

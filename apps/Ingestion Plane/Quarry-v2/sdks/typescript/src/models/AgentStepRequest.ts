@@ -20,6 +20,13 @@ import {
     AgentActionToJSON,
     AgentActionToJSONTyped,
 } from './AgentAction';
+import type { StepExpectation } from './StepExpectation';
+import {
+    StepExpectationFromJSON,
+    StepExpectationFromJSONTyped,
+    StepExpectationToJSON,
+    StepExpectationToJSONTyped,
+} from './StepExpectation';
 
 /**
  * 
@@ -34,6 +41,24 @@ export interface AgentStepRequest {
      */
     action: AgentAction;
     /**
+     * Who proposed the action. It can only tighten: `agent` on a person's token makes the call an agent's, and a service principal is always an agent. Receipts record the derived initiator and the control epoch, and for an agent which one (`agent` on the receipt). `initiatedBy` is accepted too; both in one body is a 422.
+     * @type {AgentStepRequestInitiatedByEnum}
+     * @memberof AgentStepRequest
+     */
+    initiatedBy?: AgentStepRequestInitiatedByEnum;
+    /**
+     * An identifier-shaped value the caller chose. A value of any other shape is dropped, not rejected, so it can never carry a URL or a page title into a stored record.
+     * @type {string}
+     * @memberof AgentStepRequest
+     */
+    aiRunId?: string;
+    /**
+     * An identifier-shaped value the caller chose. A value of any other shape is dropped, not rejected, so it can never carry a URL or a page title into a stored record.
+     * @type {string}
+     * @memberof AgentStepRequest
+     */
+    agentLabel?: string;
+    /**
      * 
      * @type {string}
      * @memberof AgentStepRequest
@@ -45,7 +70,24 @@ export interface AgentStepRequest {
      * @memberof AgentStepRequest
      */
     extractionProfile?: { [key: string]: any; };
+    /**
+     * 
+     * @type {StepExpectation}
+     * @memberof AgentStepRequest
+     */
+    expect?: StepExpectation;
 }
+
+
+/**
+ * @export
+ */
+export const AgentStepRequestInitiatedByEnum = {
+    Human: 'human',
+    Agent: 'agent'
+} as const;
+export type AgentStepRequestInitiatedByEnum = typeof AgentStepRequestInitiatedByEnum[keyof typeof AgentStepRequestInitiatedByEnum];
+
 
 /**
  * Check if a given object implements the AgentStepRequest interface.
@@ -66,8 +108,12 @@ export function AgentStepRequestFromJSONTyped(json: any, ignoreDiscriminator: bo
     return {
         
         'action': AgentActionFromJSON(json['action']),
+        'initiatedBy': json['initiated_by'] == null ? undefined : json['initiated_by'],
+        'aiRunId': json['aiRunId'] == null ? undefined : json['aiRunId'],
+        'agentLabel': json['agentLabel'] == null ? undefined : json['agentLabel'],
         'instruction': json['instruction'] == null ? undefined : json['instruction'],
         'extractionProfile': json['extraction_profile'] == null ? undefined : json['extraction_profile'],
+        'expect': json['expect'] == null ? undefined : StepExpectationFromJSON(json['expect']),
     };
 }
 
@@ -83,8 +129,12 @@ export function AgentStepRequestToJSONTyped(value?: AgentStepRequest | null, ign
     return {
         
         'action': AgentActionToJSON(value['action']),
+        'initiated_by': value['initiatedBy'],
+        'aiRunId': value['aiRunId'],
+        'agentLabel': value['agentLabel'],
         'instruction': value['instruction'],
         'extraction_profile': value['extractionProfile'],
+        'expect': StepExpectationToJSON(value['expect']),
     };
 }
 

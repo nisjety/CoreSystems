@@ -24,6 +24,11 @@ import {
     ChangeCheckRequestToJSON,
 } from '../models/ChangeCheckRequest';
 import {
+    type ChangeDiff200Response,
+    ChangeDiff200ResponseFromJSON,
+    ChangeDiff200ResponseToJSON,
+} from '../models/ChangeDiff200Response';
+import {
     type ChangeHistory200Response,
     ChangeHistory200ResponseFromJSON,
     ChangeHistory200ResponseToJSON,
@@ -56,6 +61,14 @@ import {
 
 export interface ChangeCheckOperationRequest {
     changeCheckRequest: ChangeCheckRequest;
+}
+
+export interface ChangeDiffRequest {
+    url?: string;
+    from?: string;
+    to?: string;
+    diffId?: string;
+    include?: ChangeDiffIncludeEnum;
 }
 
 export interface ChangeHistoryRequest {
@@ -124,6 +137,65 @@ export class ChangeTrackingApi extends runtime.BaseAPI {
      */
     async changeCheck(requestParameters: ChangeCheckOperationRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<ChangeCheck200Response> {
         const response = await this.changeCheckRaw(requestParameters, initOverrides);
+        return await response.value();
+    }
+
+    /**
+     * Creates request options for changeDiff without sending the request
+     */
+    async changeDiffRequestOpts(requestParameters: ChangeDiffRequest): Promise<runtime.RequestOpts> {
+        const queryParameters: any = {};
+
+        if (requestParameters['url'] != null) {
+            queryParameters['url'] = requestParameters['url'];
+        }
+
+        if (requestParameters['from'] != null) {
+            queryParameters['from'] = requestParameters['from'];
+        }
+
+        if (requestParameters['to'] != null) {
+            queryParameters['to'] = requestParameters['to'];
+        }
+
+        if (requestParameters['diffId'] != null) {
+            queryParameters['diff_id'] = requestParameters['diffId'];
+        }
+
+        if (requestParameters['include'] != null) {
+            queryParameters['include'] = requestParameters['include'];
+        }
+
+        const headerParameters: runtime.HTTPHeaders = {};
+
+
+        let urlPath = `/v1/change/diff`;
+
+        return {
+            path: urlPath,
+            method: 'GET',
+            headers: headerParameters,
+            query: queryParameters,
+        };
+    }
+
+    /**
+     * Returns the stored text of two baselines of a tracked URL and the paragraph diff between them. A baseline keeps its page text only for a change monitor, only when the edge runs with `QUARRY_EDGE__CHANGE_TEXT_DIFF` on, and never under Zero Data Retention.  Pick the pair one way: `url` alone compares the latest two baselines; `url` with `from` and `to` compares two named baselines of that url (any two, in the order given); `diff_id` reads the diff a `quarry.change.detected` event announced (`url` may be added and must then be the diff\'s url). `include=markdown` adds the two pages\' text, each cut at 1 MiB.  The diff is paragraph-level and set-based: a paragraph is added when the newer text has it and the older does not, removed in the opposite case, moved when it kept its text but changed its place among the paragraphs both versions hold (an inserted paragraph does not make the rest move). Whitespace and line endings are ignored. `real_delta` is false when nothing was added or removed, which is the honest answer for a page whose raw bytes changed (an ad, a timestamp in the markup) and whose text did not. The diff holds at most 500 ops and 2 KB of text per op; the counts are complete and `truncated` says whether anything was cut.  When the pair has no readable text the answer is 200 with `available: false` and a `reason`: `no_previous_version` (the url has one baseline), `no_previous_text` (the older baseline was recorded before text was kept), `no_text` (the newer one has none) or `artifact_gone` (a stored page was evicted or cannot be read). The two sides\' metadata is returned either way.  An id of another organization answers 404 exactly like an id that does not exist. 501 when the edge runs without the flag; 403 for a Zero Data Retention caller. 
+     * The two versions of a tracked page and the paragraph diff between them (INNH-4)
+     */
+    async changeDiffRaw(requestParameters: ChangeDiffRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<ChangeDiff200Response>> {
+        const requestOptions = await this.changeDiffRequestOpts(requestParameters);
+        const response = await this.request(requestOptions, initOverrides);
+
+        return new runtime.JSONApiResponse(response, (jsonValue) => ChangeDiff200ResponseFromJSON(jsonValue));
+    }
+
+    /**
+     * Returns the stored text of two baselines of a tracked URL and the paragraph diff between them. A baseline keeps its page text only for a change monitor, only when the edge runs with `QUARRY_EDGE__CHANGE_TEXT_DIFF` on, and never under Zero Data Retention.  Pick the pair one way: `url` alone compares the latest two baselines; `url` with `from` and `to` compares two named baselines of that url (any two, in the order given); `diff_id` reads the diff a `quarry.change.detected` event announced (`url` may be added and must then be the diff\'s url). `include=markdown` adds the two pages\' text, each cut at 1 MiB.  The diff is paragraph-level and set-based: a paragraph is added when the newer text has it and the older does not, removed in the opposite case, moved when it kept its text but changed its place among the paragraphs both versions hold (an inserted paragraph does not make the rest move). Whitespace and line endings are ignored. `real_delta` is false when nothing was added or removed, which is the honest answer for a page whose raw bytes changed (an ad, a timestamp in the markup) and whose text did not. The diff holds at most 500 ops and 2 KB of text per op; the counts are complete and `truncated` says whether anything was cut.  When the pair has no readable text the answer is 200 with `available: false` and a `reason`: `no_previous_version` (the url has one baseline), `no_previous_text` (the older baseline was recorded before text was kept), `no_text` (the newer one has none) or `artifact_gone` (a stored page was evicted or cannot be read). The two sides\' metadata is returned either way.  An id of another organization answers 404 exactly like an id that does not exist. 501 when the edge runs without the flag; 403 for a Zero Data Retention caller. 
+     * The two versions of a tracked page and the paragraph diff between them (INNH-4)
+     */
+    async changeDiff(requestParameters: ChangeDiffRequest = {}, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<ChangeDiff200Response> {
+        const response = await this.changeDiffRaw(requestParameters, initOverrides);
         return await response.value();
     }
 
@@ -327,3 +399,11 @@ export class ChangeTrackingApi extends runtime.BaseAPI {
     }
 
 }
+
+/**
+ * @export
+ */
+export const ChangeDiffIncludeEnum = {
+    Markdown: 'markdown'
+} as const;
+export type ChangeDiffIncludeEnum = typeof ChangeDiffIncludeEnum[keyof typeof ChangeDiffIncludeEnum];

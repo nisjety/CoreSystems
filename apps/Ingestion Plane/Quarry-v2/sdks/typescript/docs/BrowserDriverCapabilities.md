@@ -16,6 +16,7 @@ Name | Type
 `securityEvidence` | boolean
 `atomicTargetActions` | boolean
 `trustedInput` | boolean
+`profilePin` | boolean
 
 ## Example
 
@@ -33,6 +34,7 @@ const example = {
   "securityEvidence": null,
   "atomicTargetActions": null,
   "trustedInput": null,
+  "profilePin": null,
 } satisfies BrowserDriverCapabilities
 
 console.log(example)

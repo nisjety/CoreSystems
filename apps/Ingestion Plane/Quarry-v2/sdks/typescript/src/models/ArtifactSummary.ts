@@ -61,6 +61,18 @@ export interface ArtifactSummary {
      * @memberof ArtifactSummary
      */
     sourceUrl?: string;
+    /**
+     * The run that wrote the artifact (`run_...`). Absent when the backend cannot tell.
+     * @type {string}
+     * @memberof ArtifactSummary
+     */
+    runId?: string;
+    /**
+     * The page the artifact belongs to, the hash of its URL and content fingerprint. A changed page in a later run has a different one.
+     * @type {string}
+     * @memberof ArtifactSummary
+     */
+    pageHash?: string;
 }
 
 
@@ -107,6 +119,8 @@ export function ArtifactSummaryFromJSONTyped(json: any, ignoreDiscriminator: boo
         'sha256': json['sha256'] == null ? undefined : json['sha256'],
         'createdAt': (new Date(json['created_at'])),
         'sourceUrl': json['source_url'] == null ? undefined : json['source_url'],
+        'runId': json['run_id'] == null ? undefined : json['run_id'],
+        'pageHash': json['page_hash'] == null ? undefined : json['page_hash'],
     };
 }
 
@@ -128,6 +142,8 @@ export function ArtifactSummaryToJSONTyped(value?: ArtifactSummary | null, ignor
         'sha256': value['sha256'],
         'created_at': value['createdAt'].toISOString(),
         'source_url': value['sourceUrl'],
+        'run_id': value['runId'],
+        'page_hash': value['pageHash'],
     };
 }
 

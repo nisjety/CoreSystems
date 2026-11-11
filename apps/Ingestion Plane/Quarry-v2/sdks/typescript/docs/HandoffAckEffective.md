@@ -14,6 +14,9 @@ Name | Type
 `maxDepth` | number
 `legacy` | boolean
 `warnings` | Array&lt;string&gt;
+`sitemap` | string
+`scrapeOptions` | object
+`requestWarnings` | [Array&lt;HandoffAckEffectiveRequestWarningsInner&gt;](HandoffAckEffectiveRequestWarningsInner.md)
 
 ## Example
 
@@ -29,6 +32,9 @@ const example = {
   "maxDepth": null,
   "legacy": null,
   "warnings": null,
+  "sitemap": null,
+  "scrapeOptions": null,
+  "requestWarnings": null,
 } satisfies HandoffAckEffective
 
 console.log(example)

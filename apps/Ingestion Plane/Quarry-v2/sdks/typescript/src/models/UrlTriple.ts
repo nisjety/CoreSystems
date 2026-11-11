@@ -37,6 +37,12 @@ export interface UrlTriple {
      * @memberof UrlTriple
      */
     canonical?: string;
+    /**
+     * The URL actually fetched when the public-URL rewrite (QUARRY_RUNTIME__URL_REWRITE, default off) replaced the requested one, for example a Google Docs export or a raw GitHub file. Present only in that case, and never null. requested stays the URL the caller sent, and remains the identity of the run, its events and its cache entry.
+     * @type {string}
+     * @memberof UrlTriple
+     */
+    fetchedUrl?: string;
 }
 
 /**
@@ -61,6 +67,7 @@ export function UrlTripleFromJSONTyped(json: any, ignoreDiscriminator: boolean):
         'requested': json['requested'],
         'finalUrl': json['final_url'],
         'canonical': json['canonical'] == null ? undefined : json['canonical'],
+        'fetchedUrl': json['fetched_url'] == null ? undefined : json['fetched_url'],
     };
 }
 
@@ -78,6 +85,7 @@ export function UrlTripleToJSONTyped(value?: UrlTriple | null, ignoreDiscriminat
         'requested': value['requested'],
         'final_url': value['finalUrl'],
         'canonical': value['canonical'],
+        'fetched_url': value['fetchedUrl'],
     };
 }
 
