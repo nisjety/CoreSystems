@@ -2402,6 +2402,11 @@ message UseApprovalScopeGrantRequest {
 
   // The call's declared effect class under the run, from the signed capability decision.
   string effect_class = 7;
+
+  // sha256 of the pinned MCP definition the call is bound to, from the verified capability
+  // decision and registry binding; empty for a built-in tool. A grant matches only the digest it
+  // was created with (D2-1123).
+  string tool_digest = 8;
 }
 
 // Result of UseApprovalScopeGrantRequest: the grant that released the call, if any.

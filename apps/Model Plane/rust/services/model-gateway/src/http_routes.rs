@@ -588,6 +588,13 @@ fn orchestration_routes() -> Router<AppState> {
             "/v1/orchestration/threads/:thread_id/lineage",
             get(get_subagent_lineage),
         )
+        // The standing approval grants of a thread, for their owner (build plan WS13 S6). Served
+        // whatever APPROVAL_SCOPE_GRANTS_ENABLED says: a grant made while it was on must stay
+        // visible and revocable after it is turned off.
+        .route(
+            "/v1/orchestration/threads/:thread_id/approval-grants",
+            get(list_approval_grants),
+        )
         // mutations
         .route(
             "/v1/orchestration/plans/:plan_id/approve",
@@ -601,6 +608,11 @@ fn orchestration_routes() -> Router<AppState> {
         .route(
             "/v1/orchestration/approvals/:approval_id/decide",
             post(decide_approval),
+        )
+        // Revokes one standing approval grant: a narrowing delete, served under every switch state.
+        .route(
+            "/v1/orchestration/approval-grants/:grant_id",
+            delete(revoke_approval_grant),
         )
         .route(
             "/v1/orchestration/questions/:question_id/answer",
@@ -3766,6 +3778,155 @@ async fn decide_approval(
         body["continuation_delivery"] = json!(status);
     }
     Ok(Json(body))
+}
+
+/// The longest thread or grant id the grant routes accept.
+const APPROVAL_GRANT_ID_MAX_LEN: usize = 128;
+
+/// What a list of a thread's approval grants does, decided from the caller's credential alone.
+#[derive(Debug)]
+enum ListPosture {
+    /// A ZDR principal holds no grant, and Session Core would refuse it: answered empty here,
+    /// with no upstream call.
+    Empty,
+    /// Ask Session Core, which enforces the owner binding.
+    Upstream,
+    /// The posture could not be decided; refused, never guessed.
+    Refused(HttpJsonError),
+}
+
+/// The posture of a grants list (build plan WS13 S6). A persistent credential reads its grants. A
+/// waived credential reads its own: a read of durable state sends nothing to a processor, and a
+/// waiver is a route mismatch only because the plain route names no connection. A ZDR credential
+/// holds no grant. Any other refusal is an undecidable posture and is refused.
+fn grants_list_posture(claims: &Claims) -> ListPosture {
+    match crate::zdr_posture::decide_for(claims, &crate::zdr_posture::Route::plain(false)) {
+        Ok(posture) if posture.zdr() => ListPosture::Empty,
+        Ok(_) => ListPosture::Upstream,
+        Err(refusal)
+            if refusal.code() == mp_contracts::zdr_refusal::code::WAIVER_ROUTE_MISMATCH =>
+        {
+            ListPosture::Upstream
+        }
+        Err(refusal) => ListPosture::Refused(crate::zdr_posture::http(&refusal)),
+    }
+}
+
+/// The 400 answer for a malformed id in a grant route path.
+fn invalid_grant_path_id(code: &'static str, message: &str) -> HttpJsonError {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": { "code": code, "message": message } })),
+    )
+}
+
+/// An RFC 3339 timestamp, or null when the timestamp is unset.
+fn optional_timestamp_value(value: Option<&prost_types::Timestamp>) -> Value {
+    let text = timestamp_to_rfc3339(value.cloned());
+    if text.is_empty() {
+        Value::Null
+    } else {
+        Value::String(text)
+    }
+}
+
+/// The part of a standing grant its owner may read. An allowlist: the stored grant also holds the
+/// action key and the call digest, which are for the gate and stay server-side (as
+/// `approval_cause_value` does), and no argument value is ever part of it. The cause code is read
+/// through the closed vocabulary.
+fn approval_grant_value(grant: &mp_contracts::model_plane::v1::ApprovalScopeGrant) -> Value {
+    json!({
+        "id": grant.id,
+        "thread_id": grant.thread_id,
+        "run_id": empty_to_null(&grant.run_id),
+        "scope": match ApprovalScope::try_from(grant.scope) {
+            Ok(ApprovalScope::Thread) => Value::String("thread".to_owned()),
+            Ok(ApprovalScope::Run) => Value::String("run".to_owned()),
+            _ => Value::Null,
+        },
+        "tool_name": grant.tool_name,
+        "effect_class": empty_to_null(&grant.effect_class),
+        "cause_code": CauseCode::from_wire(&grant.cause_code).as_str(),
+        "created_from_approval_id": empty_to_null(&grant.created_from_approval_id),
+        "created_at": optional_timestamp_value(grant.created_at.as_ref()),
+        "expires_at": optional_timestamp_value(grant.expires_at.as_ref()),
+        "revoked_at": optional_timestamp_value(grant.revoked_at.as_ref()),
+        "use_count": grant.use_count,
+        "last_used_at": optional_timestamp_value(grant.last_used_at.as_ref()),
+    })
+}
+
+/// `GET /v1/orchestration/threads/:thread_id/approval-grants`: the caller's own standing grants in
+/// one thread (build plan WS13 S6). Served whatever the grants switch says, so a grant made while
+/// it was on stays visible. The org comes from the claims; Session Core owns the owner binding.
+async fn list_approval_grants(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    session_bearer: VerifiedModelBearer,
+    Path(thread_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    if thread_id.is_empty() || thread_id.chars().count() > APPROVAL_GRANT_ID_MAX_LEN {
+        return Err(invalid_grant_path_id(
+            "invalid_thread_id",
+            "thread_id must be 1 to 128 characters",
+        ));
+    }
+    match grants_list_posture(&claims) {
+        ListPosture::Empty => return Ok(Json(json!({ "data": { "grants": [] } }))),
+        ListPosture::Refused(refusal) => return Err(refusal),
+        ListPosture::Upstream => {}
+    }
+    let response = state
+        .approval_grant_client
+        .clone()
+        .list_approval_scope_grants(authenticated_session_request(
+            mp_contracts::model_plane::v1::ListApprovalScopeGrantsRequest {
+                org_id: claims.org_id.clone(),
+                thread_id,
+            },
+            &session_bearer,
+        )?)
+        .await
+        .map_err(|error| grpc_status_to_http(&error))?
+        .into_inner();
+    let grants: Vec<Value> = response.grants.iter().map(approval_grant_value).collect();
+    Ok(Json(json!({ "data": { "grants": grants } })))
+}
+
+/// `DELETE /v1/orchestration/approval-grants/:grant_id`: revokes one of the caller's live standing
+/// grants. A narrowing delete, so it is allowed under every posture and no gateway posture refusal
+/// stands in front of it; Session Core refuses a ZDR credential and serves a waived owner.
+async fn revoke_approval_grant(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    session_bearer: VerifiedModelBearer,
+    Path(grant_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !grant_id.starts_with("apg_") || grant_id.chars().count() > APPROVAL_GRANT_ID_MAX_LEN {
+        return Err(invalid_grant_path_id(
+            "invalid_grant_id",
+            "grant_id must start with apg_ and be at most 128 characters",
+        ));
+    }
+    let response = state
+        .approval_grant_client
+        .clone()
+        .revoke_approval_scope_grant(authenticated_session_request(
+            mp_contracts::model_plane::v1::RevokeApprovalScopeGrantRequest {
+                org_id: claims.org_id.clone(),
+                grant_id,
+            },
+            &session_bearer,
+        )?)
+        .await
+        .map_err(|error| grpc_status_to_http(&error))?
+        .into_inner();
+    let grant = response
+        .grant
+        .ok_or_else(|| not_found("approval grant not found"))?;
+    Ok(Json(
+        json!({ "data": { "grant": approval_grant_value(&grant) } }),
+    ))
 }
 
 /// The one-word `continuation_delivery` of a decided approval, kept for older clients next to the

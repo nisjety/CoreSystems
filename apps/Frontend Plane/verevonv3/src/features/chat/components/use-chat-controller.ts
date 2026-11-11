@@ -92,6 +92,7 @@ import {
   resumeRun,
   type ApprovalDecision,
   type ApprovalEdit,
+  type ApprovalScope,
   type PlanStepEdit,
 } from '@/shared/api/orchestration-client'
 import { runBrowserGiveBack, type BrowserGiveBackOutcome } from '@/features/chat/lib/browser-give-back'
@@ -3427,6 +3428,8 @@ export function useChatController() {
     turnId: string,
     approvalId: string,
     decision: ApprovalDecision,
+    scope: ApprovalScope = 'once',
+    promote = false,
   ) => {
     if (isForeignOriginThread(state.threadId)) return
     const decidedTurn = state.turns.find((turn) => turn.id === turnId)
@@ -3441,7 +3444,7 @@ export function useChatController() {
       if (turn) turn.pendingApprovals = (turn.pendingApprovals ?? []).filter((approval) => approval.id !== approvalId)
     })
     try {
-      await decideApproval(approvalId, decision)
+      await decideApproval(approvalId, decision, undefined, undefined, scope, promote)
       // A skipped site continues the run under chat.run.continue, so the held page is released and
       // the agent reads that the site was skipped. A denial is never consumed, so a refused continue
       // spends nothing and falls through to the plain resume below.

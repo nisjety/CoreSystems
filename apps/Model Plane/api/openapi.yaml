@@ -488,6 +488,72 @@ paths:
         "422":
           description: The scope is not available (error code scope_not_enabled)
 
+  /v1/orchestration/threads/{thread_id}/approval-grants:
+    get:
+      operationId: listApprovalGrants
+      tags: [orchestration]
+      summary: List the caller's standing approval grants in a thread
+      description: >
+        The "this thread" and "this run" grants the verified caller made in one thread, live and
+        revoked. Served whether or not standing scopes are enabled, so a grant made while they
+        were on stays visible. A ZDR credential holds no grant and gets an empty list. The call
+        digest and the action key are never part of a grant.
+      parameters:
+        - $ref: "#/components/parameters/ThreadId"
+      responses:
+        "200":
+          description: The caller's grants in the thread
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      grants:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/ApprovalGrant"
+        "400":
+          description: The thread id is empty or longer than 128 characters (error code invalid_thread_id)
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/orchestration/approval-grants/{grant_id}:
+    delete:
+      operationId: revokeApprovalGrant
+      tags: [orchestration]
+      summary: Revoke one of the caller's standing approval grants
+      description: >
+        Takes effect at once and only narrows what the agent may do. Served whether or not standing
+        scopes are enabled. Only the grant's owner may revoke it; a ZDR credential holds no grant
+        and is refused by Session Core.
+      parameters:
+        - name: grant_id
+          in: path
+          required: true
+          description: Grant id, prefixed apg_ and at most 128 characters.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The grant as it stands after the revocation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      grant:
+                        $ref: "#/components/schemas/ApprovalGrant"
+        "400":
+          description: The grant id does not start with apg_ or is longer than 128 characters (error code invalid_grant_id)
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /v1/orchestration/runs/{run_id}/cancel:
     post:
       operationId: cancelRun
@@ -1974,6 +2040,58 @@ components:
         step_up_required:
           type: boolean
           description: True when granting needs a recent re-authentication.
+
+    ApprovalGrant:
+      type: object
+      description: >-
+        A standing release for one eligible call, as its owner sees it. An allowlisted projection:
+        the action key, the call digest and any argument value are never part of it.
+      properties:
+        id:
+          type: string
+          description: Grant id, prefixed apg_.
+        thread_id:
+          type: string
+        run_id:
+          type: string
+          nullable: true
+          description: The run a run grant covers. Null for a thread grant.
+        scope:
+          type: string
+          nullable: true
+          enum: [thread, run]
+        tool_name:
+          type: string
+        effect_class:
+          type: string
+          nullable: true
+        cause_code:
+          type: string
+          description: Closed cause code of the approval that created the grant.
+        created_from_approval_id:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null while the grant is live.
+        use_count:
+          type: integer
+          format: int64
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null until the grant first releases a call.
 
     SubagentLineage:
       type: object

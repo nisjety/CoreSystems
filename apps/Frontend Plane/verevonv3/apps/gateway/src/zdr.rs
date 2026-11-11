@@ -138,6 +138,11 @@ pub(crate) async fn org_zdr_lookup(state: &AppState, user: &AuthenticatedUser) -
 }
 
 /// The tri-state behind [`org_zdr_enabled`]; see there for the failure policy.
+///
+/// Reads the session's authorized org and reuses a cached answer for
+/// [`ORG_ZDR_CACHE_SECS`]. Only a `Zdr` or `NotZdr` answer is cached. A caller that gates a durable
+/// write on an explicit org id must use [`org_posture_live`] instead: a cached `NotZdr` is up to a
+/// minute stale.
 pub(crate) async fn org_posture(state: &AppState, user: &AuthenticatedUser) -> OrgPosture {
     let org_id = crate::upstream::authorized_org_id(state, user).await;
     let org_id = org_id.trim();
@@ -160,6 +165,86 @@ pub(crate) async fn org_posture(state: &AppState, user: &AuthenticatedUser) -> O
         }
     }
 
+    let posture = match fetch_org_record(state, user, org_id).await {
+        Some(organization) => org_record_posture(&organization, state.zdr_effective_posture_read),
+        None => OrgPosture::Unknown,
+    };
+    match posture {
+        OrgPosture::Zdr => {
+            state
+                .cache
+                .store_for_secs(&key, &Value::Bool(true), ORG_ZDR_CACHE_SECS)
+                .await;
+            crate::zdr_log::mark_current_span();
+        }
+        OrgPosture::NotZdr => {
+            state
+                .cache
+                .store_for_secs(&key, &Value::Bool(false), ORG_ZDR_CACHE_SECS)
+                .await;
+        }
+        OrgPosture::Unknown => {}
+    }
+    posture
+}
+
+/// The org's posture read from org-core NOW, for an explicit org id, with the cache bypassed on the
+/// read side.
+///
+/// The durable-write gates (inbox drafts, support AI review) and the model-policy guard decide
+/// whether content may be kept or a policy saved, so they must see the CURRENT posture, not one a
+/// minute old: a cached `NotZdr` would let a write through for an org that turned ZDR on inside the
+/// window. conversation-core states the same rule for its own org read.
+///
+/// A `Zdr` answer is stored under the shared `org-zdr` key, which only makes [`org_posture`] (the
+/// chat path) stricter sooner. A `NotZdr` answer is never stored, so this function can never be the
+/// reason another path reads "not ZDR". `Unknown` (org-core did not answer, or answered without the
+/// field the switch reads) is not stored either. The caller decides what `Unknown` means; every
+/// current caller fails closed.
+pub(crate) async fn org_posture_live(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+) -> OrgPosture {
+    org_posture_live_with_record(state, user, org_id).await.0
+}
+
+/// [`org_posture_live`] that also hands back the org-core record it read, for a caller that needs a
+/// second field of the SAME read (the support AI mode) rather than a second call. The record is
+/// `None` exactly when org-core did not answer, which is always `Unknown`. A record may come back
+/// with `Unknown` too (the switch is on and the record lacks a boolean `effective_zdr`).
+pub(crate) async fn org_posture_live_with_record(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+) -> (OrgPosture, Option<Value>) {
+    let org_id = org_id.trim();
+    if org_id.is_empty() {
+        return (OrgPosture::Unknown, None);
+    }
+    let Some(organization) = fetch_org_record(state, user, org_id).await else {
+        return (OrgPosture::Unknown, None);
+    };
+    let posture = org_record_posture(&organization, state.zdr_effective_posture_read);
+    if posture == OrgPosture::Zdr {
+        let key = cache_key("org-zdr", &[org_id]);
+        state
+            .cache
+            .store_for_secs(&key, &Value::Bool(true), ORG_ZDR_CACHE_SECS)
+            .await;
+        crate::zdr_log::mark_current_span();
+    }
+    (posture, Some(organization))
+}
+
+/// One read of the organization record from org-core with the user's actor, never a write route.
+/// `None` when org-core did not answer with a success status; the log carries the org id and the
+/// status only.
+async fn fetch_org_record(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+) -> Option<Value> {
     let actor = ActionActor {
         user_id: user.user_id.clone(),
         user_email: user.user_email.clone(),
@@ -187,19 +272,38 @@ pub(crate) async fn org_posture(state: &AppState, user: &AuthenticatedUser) -> O
             %status,
             "org ZDR posture unavailable; assuming Zero Data Retention and skipping local persistence"
         );
-        return OrgPosture::Unknown;
+        return None;
     }
+    Some(organization)
+}
 
-    let enabled = read_zdr_flag(&organization);
-    state
-        .cache
-        .store_for_secs(&key, &Value::Bool(enabled), ORG_ZDR_CACHE_SECS)
-        .await;
-    if enabled {
-        crate::zdr_log::mark_current_span();
-        OrgPosture::Zdr
-    } else {
-        OrgPosture::NotZdr
+/// The one parser of an org-core organization record into a posture.
+///
+/// Switch off (`effective_read` false): the stored intent only, the rule every reader had before
+/// ZDR-Z-03c. A record without the `interactiveRetention` block is `NotZdr`.
+///
+/// Switch on: org-core's own computed `retention_posture.effective_zdr`, read as a JSON boolean from
+/// the `{ data: … }` envelope or the bare record. `true` is `Zdr`, `false` is `NotZdr`. A missing or
+/// non-boolean field is `Unknown`, not `NotZdr`: an org-core that predates the field must never read
+/// as "not ZDR", because every caller treats `Unknown` as fail closed.
+pub(crate) fn org_record_posture(organization: &Value, effective_read: bool) -> OrgPosture {
+    if !effective_read {
+        return if read_zdr_flag(organization) {
+            OrgPosture::Zdr
+        } else {
+            OrgPosture::NotZdr
+        };
+    }
+    match organization
+        .get("data")
+        .unwrap_or(organization)
+        .get("retention_posture")
+        .and_then(|posture| posture.get("effective_zdr"))
+        .and_then(Value::as_bool)
+    {
+        Some(true) => OrgPosture::Zdr,
+        Some(false) => OrgPosture::NotZdr,
+        None => OrgPosture::Unknown,
     }
 }
 
@@ -209,6 +313,7 @@ pub(crate) async fn org_posture(state: &AppState, user: &AuthenticatedUser) -> O
 /// A record that simply has no `interactiveRetention` block predates the toggle
 /// and is not ZDR — unlike a *failed lookup*, this is a successful answer that
 /// says "no posture set", and the ZDR add-on is opt-in and off by default.
+/// This is the switch-off rule of [`org_record_posture`].
 fn read_zdr_flag(organization: &Value) -> bool {
     organization
         .get("data")

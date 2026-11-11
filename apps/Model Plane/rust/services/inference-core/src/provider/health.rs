@@ -15,9 +15,9 @@
 //!
 //! [`classify`] maps a [`ProviderError`] to a [`FailureClass`], or to `None` when
 //! the failure says nothing about the provider's health: a gate refusal (residency,
-//! privacy tier, entitlement, vision), a configuration fault, or an exhausted
-//! chain. Its match has no wildcard arm, so a new variant does not compile until it
-//! is classified.
+//! privacy tier, entitlement, vision), a configuration fault, an exhausted chain, or
+//! a chain whose every provider is benched. Its match has no wildcard arm, so a new
+//! variant does not compile until it is classified.
 //!
 //! An HTTP failure is read from its text only in the form the providers build it:
 //! a leading three-digit status (`"503: body"`, or reqwest's `"503 Service
@@ -192,7 +192,8 @@ pub fn classify(error: &ProviderError) -> Option<FailureClass> {
         | ProviderError::ModelNotEntitled { .. }
         | ProviderError::EntitlementUnavailable
         | ProviderError::ModelHidden { .. }
-        | ProviderError::ImageModelUnavailable { .. } => None,
+        | ProviderError::ImageModelUnavailable { .. }
+        | ProviderError::ProvidersBenched { .. } => None,
     }
 }
 

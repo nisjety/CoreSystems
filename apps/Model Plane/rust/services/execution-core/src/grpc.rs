@@ -1715,11 +1715,12 @@ impl ExecutionCore for ExecutionService {
                         &req.tool_input,
                         crate::space_gate::RESUME_NONE,
                     ),
-                    cause: Some(approval_cause::for_call(
+                    cause: Some(approval_cause::for_call_with_facts(
                         outcome.cause.unwrap_or(CauseCode::UnclassifiedGate),
                         &run_id,
                         &req.tool_name,
                         &req.tool_input,
+                        &outcome.pause_facts,
                     )),
                     ..Default::default()
                 },

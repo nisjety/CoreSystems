@@ -145,6 +145,9 @@ pub struct PurgeSummary {
     pub approvals: u64,
     /// Standing approval grants erased with the organization (build plan WS13 S6).
     pub approval_scope_grants: u64,
+    /// "Always" rule proposals erased with the organization (build plan WS13 S7). They also
+    /// cascade from their approval; counted here so the erasure summary is honest.
+    pub approval_rule_proposals: u64,
     pub plans: u64,
     pub memory_index: u64,
     /// Artifact revision texts (EP-3 S2). They also cascade from `threads`; counted here so the
@@ -216,6 +219,7 @@ impl PurgeSummary {
             + self.plan_steps
             + self.approvals
             + self.approval_scope_grants
+            + self.approval_rule_proposals
             + self.plans
             + self.memory_index
             + self.artifact_revisions
@@ -596,6 +600,15 @@ pub async fn purge_organization_data(
     // Standing grants reference their approval, run and thread, so they go before any of them.
     summary.approval_scope_grants =
         sqlx::query("DELETE FROM approval_scope_grants WHERE org_id = $1")
+            .bind(org_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+
+    // Rule proposals go right after the grants that reference them (ON DELETE SET NULL). They
+    // would also cascade with their approval; deleting them here keeps the summary honest.
+    summary.approval_rule_proposals =
+        sqlx::query("DELETE FROM approval_rule_proposals WHERE org_id = $1")
             .bind(org_id)
             .execute(&mut *tx)
             .await?
@@ -1867,6 +1880,7 @@ mod tests {
             plan_steps: 1,
             approvals: 1,
             approval_scope_grants: 1,
+            approval_rule_proposals: 1,
             plans: 1,
             memory_index: 1,
             artifact_revisions: 1,
@@ -1913,7 +1927,7 @@ mod tests {
         };
         assert_eq!(
             summary.total(),
-            40,
+            41,
             "total() must count only Postgres rows; semantic-tier counts belong \
              to erasure_is_complete(), not to this sum"
         );

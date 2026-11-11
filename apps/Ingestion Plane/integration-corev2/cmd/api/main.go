@@ -234,6 +234,12 @@ func main() {
 		Int("examined", zdrResult.Examined).Int("created", zdrResult.Created).Int("changed", zdrResult.Changed).
 		Int("unchanged", zdrResult.Unchanged).Int("revoked", zdrResult.Revoked).Int("failed", zdrResult.Failed).
 		Msg("connection ZDR assessment reconcile")
+	// Retention sweep of the acknowledgement ledger: revoked rows are deleted once they are older than
+	// ZDR_ACK_RETENTION_DAYS, once at start and then every 24 hours. Active rows are never touched, and
+	// with nothing revoked it deletes nothing. Logs carry counts only.
+	sweepCtx, cancelSweep := context.WithCancel(context.Background())
+	defer cancelSweep()
+	go runZDRAcknowledgementSweep(sweepCtx, repo, cfg.ZDRAcknowledgementRetentionDays, &logger)
 	// Inbound "forward an email to create a task" pipeline (chat-wave2
 	// mail-task spec, owner ruling 2026-09-28: Postmark inbound, self-forward
 	// only). Always constructed -- Handler itself stays off by default until
@@ -401,4 +407,36 @@ func buildRepository(ctx context.Context, cfg config.Config) (store.Repository, 
 	}
 	repo := store.NewPostgresRepository(pool)
 	return repo, repo.Close, nil
+}
+
+// zdrAcknowledgementSweepInterval is how often the retention sweep of the acknowledgement ledger runs.
+const zdrAcknowledgementSweepInterval = 24 * time.Hour
+
+// zdrAcknowledgementSweepBatch is how many revoked rows one delete statement removes.
+const zdrAcknowledgementSweepBatch = 500
+
+// runZDRAcknowledgementSweep deletes revoked acknowledgements older than the retention window, once on
+// entry and then every 24 hours until ctx ends. A failure is logged and retried on the next tick; the
+// log carries counts and the window only, never a row.
+func runZDRAcknowledgementSweep(ctx context.Context, repo store.ConnectionZDRStore, retentionDays int, logger *zerolog.Logger) {
+	sweep := func() {
+		revokedBefore := time.Now().UTC().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+		deleted, err := repo.PurgeRevokedConnectionZDRAcknowledgements(ctx, revokedBefore, zdrAcknowledgementSweepBatch)
+		if err != nil {
+			logger.Error().Err(err).Int("deleted", deleted).Int("retention_days", retentionDays).Msg("connection ZDR acknowledgement retention sweep")
+			return
+		}
+		logger.Info().Int("deleted", deleted).Int("retention_days", retentionDays).Msg("connection ZDR acknowledgement retention sweep")
+	}
+	sweep()
+	ticker := time.NewTicker(zdrAcknowledgementSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
 }

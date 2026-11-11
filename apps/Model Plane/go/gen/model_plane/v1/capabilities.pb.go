@@ -459,7 +459,13 @@ type EvaluatePolicyRequest struct {
 	TargetKind string `protobuf:"bytes,8,opt,name=target_kind,json=targetKind,proto3" json:"target_kind,omitempty"`
 	// The value of target_kind: a lower-case host or domain, or a command's first token of at most 64
 	// characters. Empty on a zero-retention or waived run, which sends target_kind alone.
-	TargetValue   string `protobuf:"bytes,9,opt,name=target_value,json=targetValue,proto3" json:"target_value,omitempty"`
+	TargetValue string `protobuf:"bytes,9,opt,name=target_value,json=targetValue,proto3" json:"target_value,omitempty"`
+	// The run's retention as execution-core resolved it: "persistent" for a run that keeps state,
+	// "retention_bound" for a zero-retention or waived run (DEC-32). Empty when the caller does not
+	// state it. Asserted by the execution-core service principal like user_id. capability-core never
+	// lets a person's allow relax a call stated retention_bound; while TOOL_POLICY_RULE_AUDIT_ENABLED
+	// is on, anything but "persistent" counts as retention_bound (WS13 S7, D-WS13-1).
+	RunRetention  string `protobuf:"bytes,10,opt,name=run_retention,json=runRetention,proto3" json:"run_retention,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -553,6 +559,13 @@ func (x *EvaluatePolicyRequest) GetTargetKind() string {
 func (x *EvaluatePolicyRequest) GetTargetValue() string {
 	if x != nil {
 		return x.TargetValue
+	}
+	return ""
+}
+
+func (x *EvaluatePolicyRequest) GetRunRetention() string {
+	if x != nil {
+		return x.RunRetention
 	}
 	return ""
 }
@@ -1820,7 +1833,7 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\fprivacy_tier\x18\x10 \x01(\x0e2\x1b.model_plane.v1.PrivacyTierR\vprivacyTier\x12\x1c\n" +
 	"\tresidency\x18\x11 \x01(\tR\tresidency\x12*\n" +
 	"\x11side_effect_class\x18\x12 \x01(\tR\x0fsideEffectClass\x12%\n" +
-	"\x0eapproval_floor\x18\x13 \x01(\tR\rapprovalFloor\"\x95\x02\n" +
+	"\x0eapproval_floor\x18\x13 \x01(\tR\rapprovalFloor\"\xba\x02\n" +
 	"\x15EvaluatePolicyRequest\x12#\n" +
 	"\rcapability_id\x18\x01 \x01(\tR\fcapabilityId\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x19\n" +
@@ -1831,7 +1844,9 @@ const file_model_plane_v1_capabilities_proto_rawDesc = "" +
 	"\ttool_name\x18\a \x01(\tR\btoolName\x12\x1f\n" +
 	"\vtarget_kind\x18\b \x01(\tR\n" +
 	"targetKind\x12!\n" +
-	"\ftarget_value\x18\t \x01(\tR\vtargetValue\"\x89\x03\n" +
+	"\ftarget_value\x18\t \x01(\tR\vtargetValue\x12#\n" +
+	"\rrun_retention\x18\n" +
+	" \x01(\tR\frunRetention\"\x89\x03\n" +
 	"\x16EvaluatePolicyResponse\x12\x1a\n" +
 	"\bdecision\x18\x01 \x01(\tR\bdecision\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\x12%\n" +

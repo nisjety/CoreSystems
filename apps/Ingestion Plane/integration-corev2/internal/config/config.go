@@ -127,7 +127,9 @@ type Config struct {
 	// unless CUSTOM_REST_CONNECTORS_ENABLED is exactly "true"; while off the provider is unknown to
 	// the actions surface, as before. Needs CREDENTIAL_BINDINGS_ENABLED.
 	CustomRESTConnectorsEnabled        bool
-	ZDRAcknowledgementEnabled          bool
+	ZDRAcknowledgementEnabled          bool // exactly "true" only (ZDR_ACKNOWLEDGEMENT_ENABLED)
+	ZDRAcknowledgementRetentionDays    int  // ZDR_ACK_RETENTION_DAYS: revoked rows are swept after this, default 365, clamped 30..3650
+	ZDROrgEffectivePostureRead         bool // exactly "true" only (INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED): org-core client reads the org record
 	CodexSubscriptionEnabled           bool
 	CodexAppServerCommand              string
 	CodexSubscriptionHome              string
@@ -437,7 +439,9 @@ func Load() (Config, error) {
 		CredentialBindingsEnabled:          strings.TrimSpace(os.Getenv("CREDENTIAL_BINDINGS_ENABLED")) == "true",
 		CustomRESTConnectorsEnabled:        strings.TrimSpace(os.Getenv("CUSTOM_REST_CONNECTORS_ENABLED")) == "true",
 		CredentialRefSealKeys:              strings.TrimSpace(os.Getenv("CREDENTIAL_REF_SEAL_KEYS")),
-		ZDRAcknowledgementEnabled:          envBool("ZDR_ACKNOWLEDGEMENT_ENABLED", false),
+		ZDRAcknowledgementEnabled:          envStrictTrue("ZDR_ACKNOWLEDGEMENT_ENABLED"),
+		ZDRAcknowledgementRetentionDays:    clampInt(envInt("ZDR_ACK_RETENTION_DAYS", 365), 30, 3650),
+		ZDROrgEffectivePostureRead:         envStrictTrue("INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED"),
 		CodexSubscriptionEnabled:           envBool("CODEX_SUBSCRIPTION_ENABLED", false),
 		CodexAppServerCommand:              strings.TrimSpace(envOr("CODEX_APP_SERVER_COMMAND", "codex")),
 		CodexSubscriptionHome:              strings.TrimSpace(os.Getenv("CODEX_SUBSCRIPTION_HOME")),
@@ -1465,6 +1469,22 @@ func envBool(key string, fallback bool) bool {
 		return fallback
 	}
 	return parsed
+}
+
+// envStrictTrue is true only when the trimmed value is the literal "true". Unlike envBool it does not
+// accept 1, t or TRUE, so a dark switch cannot be opened by a near miss.
+func envStrictTrue(key string) bool {
+	return strings.TrimSpace(os.Getenv(key)) == "true"
+}
+
+func clampInt(value, low, high int) int {
+	if value < low {
+		return low
+	}
+	if value > high {
+		return high
+	}
+	return value
 }
 
 func envInt(key string, fallback int) int {

@@ -146,6 +146,15 @@ pub(crate) struct AppState {
     /// `{"enabled": false}` so the SPA hides the section, every write and explain is a 404, and
     /// the ZDR gate answers as it did before the policy existed.
     pub(crate) model_entitlement_admin_enabled: bool,
+    /// `GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED` (ZDR Z-03c): whether the one org-posture reader
+    /// (`zdr::org_posture`, `zdr::org_posture_live`) answers from org-core's computed
+    /// `retention_posture.effective_zdr` instead of parsing the stored intent
+    /// (`metadata.interactiveRetention.zdr`) itself. Read once from the environment in
+    /// `build_state` (trimmed, exactly `true` turns it on), never in a handler. Off, the readers
+    /// keep the intent-only rule. On, a record that lacks a boolean `effective_zdr` (org-core older
+    /// than ZDR-Z-03a) is `Unknown`, which every caller already treats as fail closed. A rollout
+    /// control, never an authorization input: org-core computes the posture.
+    pub(crate) zdr_effective_posture_read: bool,
     /// `AGENT_DEFINITION_VERSIONS` (EP-6 S7/S8): the agent builder routes (draft, publish, versions)
     /// and the draft preview of a chat body (`agent_preview`). Read once from the environment in
     /// `build_state`, exactly `true` turns it on, never by default in development. Off, the builder
@@ -819,6 +828,11 @@ pub(crate) async fn build_state() -> Result<AppState> {
         allow_dev_auth_bypass: dev_only_flag("ALLOW_DEV_AUTH_BYPASS"),
         continue_park_form: continue_park_form_enabled(),
         model_entitlement_admin_enabled: model_entitlement_admin_enabled(),
+        zdr_effective_posture_read: zdr_effective_posture_read_from(
+            env::var("GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED")
+                .ok()
+                .as_deref(),
+        ),
         agent_definition_versions: agent_definition_versions_enabled(),
         chat_process_output_enabled: chat_process_output_enabled(),
         chat_snapshots_enabled: chat_snapshots_enabled(),
@@ -1015,6 +1029,13 @@ fn model_entitlement_admin_enabled() -> bool {
 /// is not yet enforcing.
 fn model_entitlement_admin_from(value: Option<&str>) -> bool {
     value == Some("true")
+}
+
+/// `GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED`, read once by `build_state` (ZDR Z-03c). Off unless the
+/// trimmed value is exactly `true`: a stray `1` or `TRUE` must not move the org-posture reader onto
+/// a field an older org-core does not serve.
+fn zdr_effective_posture_read_from(value: Option<&str>) -> bool {
+    value.map(str::trim) == Some("true")
 }
 
 /// `AGENT_DEFINITION_VERSIONS`, read once by `build_state` (EP-6 S7/S8). Off unless it is exactly

@@ -38,6 +38,12 @@ export function ApprovalRuleProposals(props: {
             'You chose "Always" for a tool. The rule does not apply until you confirm it, and it lapses after 90 days.',
           )}
         />
+        <p class="verevon-settings-subnote">
+          {i18n.tr(
+            'En bekreftet regel hopper over verktøyets høyrisikokontroll for deg. Andre kontroller, som tillatelsesmodusen din, gjelder fortsatt.',
+            "A confirmed rule skips this tool's high-risk check for you. Other checks, such as your permission mode, still apply.",
+          )}
+        </p>
         <ul>
           <For each={props.proposals}>
             {(proposal) => (

@@ -1444,6 +1444,16 @@ export class ConvexTokenService {
     };
   }
 
+  /**
+   * SPKI DER of the token signing public key. Exposed only so the dedicated
+   * retention-decision signer can prove its key differs from this one (a leaked
+   * token key must never be able to mint a waiver). It carries no private
+   * material and is not published anywhere that the JWKS does not already.
+   */
+  tokenSigningPublicKeySpki(): Buffer {
+    return this.publicKey.export({ type: 'spki', format: 'der' }) as Buffer;
+  }
+
   private loadKeyPair() {
     // Precedence: mounted key files (secrets-as-files; survives container
     // recreation so the JWKS at /api/convex-auth/jwks is STABLE and downstream

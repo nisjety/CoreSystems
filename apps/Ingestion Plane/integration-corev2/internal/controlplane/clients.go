@@ -51,6 +51,10 @@ type OrgClient struct {
 	serviceToken string
 	serviceID    string
 	httpClient   *http.Client
+	// effectivePostureFromOrg makes EffectiveZDR read org-core's organisation record instead of the
+	// retention-posture route. Fixed at construction from the config switch; the client never reads
+	// the environment.
+	effectivePostureFromOrg bool
 }
 
 type BillingClient struct {
@@ -119,6 +123,8 @@ func NewOrgClient(cfg config.Config, httpClient *http.Client) *OrgClient {
 		serviceToken: strings.TrimSpace(cfg.OrgCoreServiceToken),
 		serviceID:    cfg.ServiceName,
 		httpClient:   withDefaultClient(httpClient),
+
+		effectivePostureFromOrg: cfg.ZDROrgEffectivePostureRead,
 	}
 }
 
@@ -382,6 +388,9 @@ func (c *OrgClient) EffectiveZDR(ctx context.Context, orgID string) (bool, error
 	if c.baseURL == "" {
 		return false, auth.NewError(http.StatusServiceUnavailable, "org_core_unconfigured", "ORG_CORE_URL is not configured")
 	}
+	if c.effectivePostureFromOrg {
+		return c.effectiveZDRFromOrganization(ctx, orgID)
+	}
 	endpoint := c.baseURL + "/internal/orgs/" + url.PathEscape(orgID) + "/retention-posture"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -405,6 +414,43 @@ func (c *OrgClient) EffectiveZDR(ctx context.Context, orgID string) (bool, error
 		return false, auth.NewError(http.StatusBadGateway, "org_core_bad_response", "org-core returned a non-JSON retention posture")
 	}
 	return posture.ZDRIntent && posture.Entitled, nil
+}
+
+// effectiveZDRFromOrganization reads the effective ZDR posture from the organisation record
+// (GET /internal/orgs/{id}, scope org:read:any), which org-core projects as retention_posture.effective_zdr.
+// It is used while INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED is on, because this service's credential
+// holds org:read:any and not the retention-posture scope. A non-200, a non-JSON body or a missing or
+// non-boolean field is an error and never a value, so the caller refuses.
+func (c *OrgClient) effectiveZDRFromOrganization(ctx context.Context, orgID string) (bool, error) {
+	endpoint := c.baseURL + "/internal/orgs/" + url.PathEscape(orgID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false, err
+	}
+	setServicePrincipal(req, c.serviceID, c.serviceToken)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return false, auth.NewError(http.StatusServiceUnavailable, "org_core_unreachable", "Unable to reach org-core for the organisation record")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, auth.NewError(http.StatusBadGateway, "org_core_error", fmt.Sprintf("org-core returned HTTP %d for the organisation record", resp.StatusCode))
+	}
+	var decoded map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return false, auth.NewError(http.StatusBadGateway, "org_core_bad_response", "org-core returned a non-JSON organisation record")
+	}
+	payload := unwrapData(decoded)
+	posture, ok := payload["retention_posture"].(map[string]any)
+	if !ok {
+		return false, auth.NewError(http.StatusBadGateway, "org_core_bad_response", "org-core returned an organisation record without a retention posture")
+	}
+	effective, ok := posture["effective_zdr"].(bool)
+	if !ok {
+		return false, auth.NewError(http.StatusBadGateway, "org_core_bad_response", "org-core returned a retention posture without a boolean effective_zdr")
+	}
+	return effective, nil
 }
 
 func (c *BillingClient) RecordUsage(ctx context.Context, orgID string, event UsageEvent) error {

@@ -403,37 +403,12 @@ fn guard_unavailable() -> GatewayJsonResponse {
 /// Whether org-core says the org has interactive ZDR on. `None` when org-core
 /// cannot answer: the guard then fails closed, never reads it as "off".
 async fn org_zdr_enabled(state: &AppState, user: &AuthenticatedUser, org_id: &str) -> Option<bool> {
-    let (status, Json(organization)) = proxy_json(
-        state,
-        Method::GET,
-        &format!(
-            "{}/api/v1/organizations/{}",
-            state.org_core_url,
-            urlencoding::encode(org_id)
-        ),
-        None,
-        Some(org_id),
-        Some(&actor_for(user)),
-        None,
-    )
-    .await;
-    if !status.is_success() {
-        tracing::warn!(
-            status = status.as_u16(),
-            "model policy ZDR guard: the organization could not be read"
-        );
-        return None;
+    // The shared reader, read live: the guard decides whether a policy may be saved.
+    match crate::zdr::org_posture_live(state, user, org_id).await {
+        crate::zdr::OrgPosture::Zdr => Some(true),
+        crate::zdr::OrgPosture::NotZdr => Some(false),
+        crate::zdr::OrgPosture::Unknown => None,
     }
-    Some(
-        organization
-            .get("data")
-            .unwrap_or(&organization)
-            .get("metadata")
-            .and_then(|metadata| metadata.get("interactiveRetention"))
-            .and_then(|retention| retention.get("zdr"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    )
 }
 
 /// The ids of the chat models in a catalogue that carry a zero-retention

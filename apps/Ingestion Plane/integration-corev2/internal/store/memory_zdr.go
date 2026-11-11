@@ -199,6 +199,26 @@ func (r *MemoryRepository) PurgeOrganizationConnectionZDR(_ context.Context, org
 	return result, nil
 }
 
+func (r *MemoryRepository) PurgeRevokedConnectionZDRAcknowledgements(_ context.Context, revokedBefore time.Time, limit int) (int, error) {
+	if limit < 1 {
+		return 0, invalidZDR("limit must be at least 1")
+	}
+	revokedBefore = revokedBefore.UTC()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	kept := make([]ConnectionZDRAcknowledgement, 0, len(r.zdrAcks))
+	deleted := 0
+	for _, ack := range r.zdrAcks {
+		if ack.RevokedAt != nil && ack.RevokedAt.Before(revokedBefore) {
+			deleted++
+			continue
+		}
+		kept = append(kept, ack)
+	}
+	r.zdrAcks = kept
+	return deleted, nil
+}
+
 func (r *MemoryRepository) ListOrganizationConnectionZDRAcknowledgements(_ context.Context, organizationID string, limit int) (ConnectionZDRAcknowledgementList, error) {
 	organizationID = strings.TrimSpace(organizationID)
 	if organizationID == "" {

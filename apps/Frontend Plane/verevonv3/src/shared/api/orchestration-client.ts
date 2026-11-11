@@ -1,5 +1,6 @@
 import type { z } from 'zod'
 import {
+  approvalsConfirmRuleInput,
   approvalsListGrantsInput,
   approvalsRevokeGrantInput,
   getActionDescriptor,
@@ -155,6 +156,8 @@ export function normalizeApprovalCause(raw: unknown): ApprovalCause | undefined 
       ? cause.scope_options.filter((scope): scope is string => typeof scope === 'string')
       : [],
     stepUpRequired: cause.step_up_required === true,
+    // Only an explicit `true` offers "Always"; absent or anything else leaves it undefined.
+    ruleOffered: cause.rule_offered === true ? true : undefined,
     assistKind: str(cause.assist_kind),
     assistOrigin: str(cause.assist_origin),
     host: str(cause.host),
@@ -320,40 +323,67 @@ export type ApprovalRuleProposal = {
   createdAt: string
 }
 
-/** The lifetime a confirmed rule gets: ninety days, which the server applies to every rule (K3-10). */
-export const RULE_LIFETIME_MS = 90 * 24 * 60 * 60 * 1000
-
 /**
- * The write that confirms a proposed rule (build plan WS13 S7): a user-scope allow pinned to the
- * digest the person reviewed, lapsing ninety days from `now`. Pure, so what a confirm sends is
- * checked without a network.
+ * A rule proposal from the server's snake_case projection (id, tool_name, tool_digest, capability_id,
+ * created_at). A row without an id cannot be confirmed or dismissed, so it is dropped. The capability
+ * and the digest are for showing only: a confirm never sends them.
  */
-export function ruleConfirmationRequest(
-  proposal: ApprovalRuleProposal,
-  now: Date,
-): { capabilityId: string; body: Record<string, unknown> } {
+export function normalizeRuleProposal(raw: unknown): ApprovalRuleProposal | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  const row = raw as Record<string, unknown>
+  const id = str(row.id)
+  if (!id) return null
   return {
-    capabilityId: proposal.capabilityId,
-    body: {
-      scope: 'user',
-      decision: 'allow',
-      pinned_digest: proposal.toolDigest,
-      reason: '',
-      expires_at: new Date(now.getTime() + RULE_LIFETIME_MS).toISOString(),
-    },
+    id,
+    capabilityId: str(row.capability_id) ?? '',
+    toolName: str(row.tool_name) ?? '',
+    toolDigest: str(row.tool_digest) ?? '',
+    createdAt: str(row.created_at) ?? '',
   }
 }
 
-/** Confirm a proposed rule through the tool-policy route. The server checks the digest and the tool. */
-export async function confirmApprovalRule(
-  proposal: ApprovalRuleProposal,
-  now: Date = new Date(),
-  signal?: AbortSignal,
-): Promise<void> {
-  const { capabilityId, body } = ruleConfirmationRequest(proposal, now)
-  await requestJson<unknown>(`/api/v1/tool-policies/${encodeURIComponent(capabilityId)}`, {
-    method: 'PUT',
-    body: JSON.stringify(body),
+/** The proposal id checked against the action contract (it is the only thing a confirm or dismiss names). */
+function checkedProposalId(proposal: ApprovalRuleProposal): string {
+  const checked = approvalsConfirmRuleInput.safeParse({ proposalId: proposal.id })
+  if (!checked.success) {
+    throw new ApiError('Ugyldig regelforslag.', 400, 'invalid_proposal_id')
+  }
+  return checked.data.proposalId
+}
+
+/**
+ * The caller's open rule proposals. The server answers empty for a zero-retention principal, and
+ * keeps answering while its switch is off so open proposals stay visible.
+ */
+export async function listApprovalRuleProposals(signal?: AbortSignal): Promise<ApprovalRuleProposal[]> {
+  // The `{data: {proposals}}` envelope is unwrapped by `requestJson`.
+  const payload = await requestJson<{ proposals?: unknown[] }>('/api/v1/orchestration/rule-proposals', {
+    signal,
+  })
+  const list = Array.isArray(payload?.proposals) ? payload.proposals : []
+  return list.map(normalizeRuleProposal).filter((proposal): proposal is ApprovalRuleProposal => proposal !== null)
+}
+
+/**
+ * Confirm a proposed rule (build plan WS13 S7). The body is empty on purpose: the server writes the
+ * user-scope allow, pinned to the reviewed definition and lapsing after ninety days, from its own
+ * record of the proposal, so the client never chooses the capability, the digest or the expiry.
+ */
+export async function confirmApprovalRule(proposal: ApprovalRuleProposal, signal?: AbortSignal): Promise<void> {
+  const id = checkedProposalId(proposal)
+  await requestJson<unknown>(`/api/v1/orchestration/rule-proposals/${encodeURIComponent(id)}/confirm`, {
+    method: 'POST',
+    body: '{}',
+    signal,
+  })
+}
+
+/** Dismiss a proposed rule. It works with the server switch off, because it only narrows authority. */
+export async function dismissApprovalRule(proposal: ApprovalRuleProposal, signal?: AbortSignal): Promise<void> {
+  const id = checkedProposalId(proposal)
+  await requestJson<unknown>(`/api/v1/orchestration/rule-proposals/${encodeURIComponent(id)}/dismiss`, {
+    method: 'POST',
+    body: '{}',
     signal,
   })
 }

@@ -9,7 +9,7 @@ import {
   type RuleProposalCard,
 } from '@/features/settings/components/ApprovalRuleProposals'
 import {
-  ruleConfirmationRequest,
+  confirmApprovalRule,
   type ApprovalRuleProposal,
 } from '@/shared/api/orchestration-client'
 
@@ -26,16 +26,21 @@ const proposal: ApprovalRuleProposal = {
 afterEach(() => cleanup())
 
 describe('ApprovalRuleProposals', () => {
-  it('confirming writes a digest-pinned allow that lapses in ninety days', () => {
-    const { capabilityId, body } = ruleConfirmationRequest(proposal, new Date('2026-11-01T12:00:00Z'))
-    expect(capabilityId).toBe('cap.mcp_tool.notes')
-    expect(body).toEqual({
-      scope: 'user',
-      decision: 'allow',
-      pinned_digest: reviewedDigest,
-      reason: '',
-      expires_at: '2027-01-30T12:00:00.000Z',
-    })
+  it('confirming posts to the confirm route with an empty body, naming no capability or digest', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ data: {} }), { status: 200, headers: { 'content-type': 'application/json' } }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await confirmApprovalRule(proposal)
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(String(url)).toContain('/api/v1/orchestration/rule-proposals/arp_01/confirm')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({})
+    vi.unstubAllGlobals()
   })
 
   it('shows each proposal and hands the choice to the parent that owns the list', () => {

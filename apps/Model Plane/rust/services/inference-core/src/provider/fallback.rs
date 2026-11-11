@@ -520,9 +520,22 @@ struct ThrottleState {
     /// `INFERENCE_SAME_TIER_FALLBACK`. It holds for the whole call: every rung of the ladder and both
     /// passes, so a pass reset keeps it ([`ThrottleState::next_pass`]).
     anchor_tier: Option<PrivacyTier>,
+    /// The earliest end of a bench this pass skipped a provider for, set only under
+    /// `INFERENCE_PROVIDER_BENCHING`. Only a provider that passed every gate is counted here, so with no
+    /// attempt made it ends the walk as `providers_benched` (retry later), ahead of the posture refusals.
+    /// Unlike `anchor_tier` it is reset with the pass.
+    benched_until: Option<tokio::time::Instant>,
 }
 
 impl ThrottleState {
+    /// Notes that a provider was skipped for a bench ending at `until`, keeping the earliest end.
+    fn note_benched(&mut self, until: tokio::time::Instant) {
+        self.benched_until = Some(match self.benched_until {
+            Some(current) => current.min(until),
+            None => until,
+        });
+    }
+
     /// Clears what one pass learned before the second pass, and keeps the call's tier anchor.
     fn next_pass(&mut self) {
         let anchor = self.anchor_tier;
@@ -1278,6 +1291,106 @@ impl FallbackChain {
         false
     }
 
+    /// Whether a provider is the user's subscription route. It is never benched and never records an
+    /// outcome on the board.
+    fn is_subscription_route(name: &str, caps: &ProviderCapabilities) -> bool {
+        caps.provider_id == mp_contracts::agentic_subscription::PROVIDER_ID
+            || name == mp_contracts::agentic_subscription::PROVIDER_ID
+    }
+
+    /// Whether a benched platform provider is skipped for `model` (`INFERENCE_PROVIDER_BENCHING`). Runs
+    /// after every other gate and the route rules, so a provider counted here was otherwise eligible. The
+    /// earliest bench end is kept in `throttle`. Logs name the provider and model, never content.
+    fn bench_skip(
+        &self,
+        req: &InferRequest,
+        name: &str,
+        model: &str,
+        caps: &ProviderCapabilities,
+        throttle: &mut ThrottleState,
+    ) -> bool {
+        let Some(bench) = &self.bench else {
+            return false;
+        };
+        if Self::is_subscription_route(name, caps) {
+            return false;
+        }
+        let Some(until) = bench.benched_until(name, model, tokio::time::Instant::now()) else {
+            return false;
+        };
+        throttle.note_benched(until);
+        warn!(
+            provider = %name,
+            model = %model,
+            request_id = %req.request_id,
+            "provider skipped: benched after repeated failures"
+        );
+        true
+    }
+
+    /// Records one attempt outcome of a platform provider on the bench board
+    /// (`INFERENCE_PROVIDER_BENCHING`). A success clears the pair's run; a classified failure is counted
+    /// and may start a bench. Returns `true` when this failure started a bench, so the caller stops
+    /// retrying the provider. A subscription route, and a subscription outcome from any provider, records
+    /// nothing. Logs and metrics carry the provider, model and class only.
+    fn bench_record(
+        &self,
+        req: &InferRequest,
+        name: &str,
+        model: &str,
+        caps: &ProviderCapabilities,
+        failure: Option<&ProviderError>,
+    ) -> bool {
+        let Some(bench) = &self.bench else {
+            return false;
+        };
+        if Self::is_subscription_route(name, caps) {
+            return false;
+        }
+        let now = tokio::time::Instant::now();
+        let Some(error) = failure else {
+            bench.record_success(name, model);
+            return false;
+        };
+        if matches!(
+            error,
+            ProviderError::SubscriptionRefused { .. } | ProviderError::SubscriptionFailed(_)
+        ) {
+            return false;
+        }
+        let Some(class) = super::health::classify(error) else {
+            return false;
+        };
+        crate::metrics::record_provider_failure(name, class.as_str());
+        let retry_after = match error {
+            ProviderError::RateLimited { retry_after_ms } if *retry_after_ms > 0 => {
+                Some(Duration::from_millis(*retry_after_ms))
+            }
+            _ => None,
+        };
+        let Some(until) = bench.record_failure(name, model, &req.org_id, class, retry_after, now)
+        else {
+            return false;
+        };
+        crate::metrics::record_provider_benched(name, class.as_str());
+        warn!(
+            provider = %name,
+            model = %model,
+            class = class.as_str(),
+            bench_ms = until.saturating_duration_since(now).as_millis(),
+            "provider benched after repeated failures"
+        );
+        true
+    }
+
+    /// The `providers_benched` answer for a walk that made no attempt because every provider that
+    /// passed the gates was benched: the wait until the earliest bench ends, at least 1 ms.
+    fn providers_benched_error(until: tokio::time::Instant) -> ProviderError {
+        let wait = until.saturating_duration_since(tokio::time::Instant::now());
+        let retry_after_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX).max(1);
+        ProviderError::ProvidersBenched { retry_after_ms }
+    }
+
     /// The gate the handlers resolve a caller's entitlement through.
     #[must_use]
     pub fn entitlement(&self) -> &EntitlementGate {
@@ -1965,7 +2078,14 @@ impl FallbackChain {
             }
         }
 
-        if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
+        let benched = throttle
+            .benched_until
+            .filter(|_| self.bench.is_some() && total_attempts == 0);
+        if let Some(until) = benched {
+            // Every provider that passed the gates was benched: retry later, not a terminal posture
+            // refusal.
+            Err(Self::providers_benched_error(until))
+        } else if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
             Err(refusal)
         } else if throttle.vision_skipped && total_attempts == 0 {
             Err(vision_unsupported_error())
@@ -2091,6 +2211,9 @@ impl FallbackChain {
             if self.route_rules_skip(req, name, &caps, throttle) {
                 continue;
             }
+            if self.bench_skip(req, name, &call_req.model, &caps, throttle) {
+                continue;
+            }
             for attempt in 1..=self.max_retries {
                 *total_attempts += 1;
                 let span = tracing::info_span!(
@@ -2114,6 +2237,13 @@ impl FallbackChain {
                     clock.attempt_failed(began);
                 }
                 let _enter = span.enter();
+                let benched_now = self.bench_record(
+                    req,
+                    name,
+                    &call_req.model,
+                    &caps,
+                    outcome.as_ref().err(),
+                );
 
                 match outcome {
                     Ok(mut response) => {
@@ -2209,6 +2339,9 @@ impl FallbackChain {
                             error = %e,
                             "provider attempt failed"
                         );
+                        if benched_now {
+                            break; // This failure benched the provider: no more attempts on it.
+                        }
                     }
                 }
             }
@@ -2428,7 +2561,14 @@ impl FallbackChain {
             }
         }
 
-        if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
+        let benched = throttle
+            .benched_until
+            .filter(|_| self.bench.is_some() && total_attempts == 0);
+        if let Some(until) = benched {
+            // Every provider that passed the gates was benched: retry later, not a terminal posture
+            // refusal.
+            Err(Self::providers_benched_error(until))
+        } else if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
             Err(refusal)
         } else if throttle.vision_skipped && total_attempts == 0 {
             Err(vision_unsupported_error())
@@ -2522,6 +2662,9 @@ impl FallbackChain {
             if self.route_rules_skip(req, name, &caps, throttle) {
                 continue;
             }
+            if self.bench_skip(req, name, &call_req.model, &caps, throttle) {
+                continue;
+            }
             for attempt in 1..=self.max_retries {
                 *total_attempts += 1;
                 let span = tracing::info_span!(
@@ -2541,6 +2684,13 @@ impl FallbackChain {
                     clock.attempt_failed(began);
                 }
                 let _enter = span.enter();
+                let benched_now = self.bench_record(
+                    req,
+                    name,
+                    &call_req.model,
+                    &caps,
+                    outcome.as_ref().err(),
+                );
 
                 match outcome {
                     Ok(rx) => {
@@ -2635,6 +2785,9 @@ impl FallbackChain {
                             error = %e,
                             "provider stream attempt failed"
                         );
+                        if benched_now {
+                            break; // This failure benched the provider: no more attempts on it.
+                        }
                     }
                 }
             }

@@ -2592,7 +2592,7 @@ mod tests {
 
     #[test]
     fn assist_cause_carries_kind_origin_and_host_only() {
-        use mp_contracts::approval_cause::{CauseCode, ASSIST_KINDS};
+        use mp_contracts::approval_cause::{CallFacts, CauseCode, ASSIST_KINDS};
         use crate::runtime_loop::agent::approval_cause_for_pause;
 
         let run = "run-help-cause";
@@ -2610,6 +2610,7 @@ mod tests {
         let takeover = approval_cause_for_pause(
             &state,
             CauseCode::BrowserHumanAssist,
+            &CallFacts::default(),
             run,
             OBSERVE_TOOL,
             "{}",
@@ -2624,6 +2625,7 @@ mod tests {
         let help = approval_cause_for_pause(
             &state,
             CauseCode::BrowserHumanAssist,
+            &CallFacts::default(),
             run,
             OBSERVE_TOOL,
             "{}",
@@ -2634,7 +2636,14 @@ mod tests {
             ("login", "agent", "example.com"),
             "the host is the session's, never a page's"
         );
-        let other = approval_cause_for_pause(&state, CauseCode::ProviderWrite, run, "send_email", "{}");
+        let other = approval_cause_for_pause(
+            &state,
+            CauseCode::ProviderWrite,
+            &CallFacts::default(),
+            run,
+            "send_email",
+            "{}",
+        );
         assert!(other.assist_kind.is_empty() && other.assist_origin.is_empty() && other.host.is_empty());
         forget_help(run);
         for (kind, _) in HELP_NEEDED {

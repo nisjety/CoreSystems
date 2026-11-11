@@ -8394,7 +8394,11 @@ type UseApprovalScopeGrantRequest struct {
 	// Tool and operation of the call, from the pause's cause.
 	ActionKey string `protobuf:"bytes,6,opt,name=action_key,json=actionKey,proto3" json:"action_key,omitempty"`
 	// The call's declared effect class under the run, from the signed capability decision.
-	EffectClass   string `protobuf:"bytes,7,opt,name=effect_class,json=effectClass,proto3" json:"effect_class,omitempty"`
+	EffectClass string `protobuf:"bytes,7,opt,name=effect_class,json=effectClass,proto3" json:"effect_class,omitempty"`
+	// sha256 of the pinned MCP definition the call is bound to, from the verified capability
+	// decision and registry binding; empty for a built-in tool. A grant matches only the digest it
+	// was created with (D2-1123).
+	ToolDigest    string `protobuf:"bytes,8,opt,name=tool_digest,json=toolDigest,proto3" json:"tool_digest,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -8474,6 +8478,13 @@ func (x *UseApprovalScopeGrantRequest) GetActionKey() string {
 func (x *UseApprovalScopeGrantRequest) GetEffectClass() string {
 	if x != nil {
 		return x.EffectClass
+	}
+	return ""
+}
+
+func (x *UseApprovalScopeGrantRequest) GetToolDigest() string {
+	if x != nil {
+		return x.ToolDigest
 	}
 	return ""
 }
@@ -11196,7 +11207,7 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"revoked_at\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\trevokedAt\x12\x1b\n" +
 	"\tuse_count\x18\r \x01(\x03R\buseCount\x12<\n" +
 	"\flast_used_at\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\n" +
-	"lastUsedAt\"\xe1\x01\n" +
+	"lastUsedAt\"\x82\x02\n" +
 	"\x1cUseApprovalScopeGrantRequest\x12\x15\n" +
 	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x1b\n" +
@@ -11205,7 +11216,9 @@ const file_model_plane_v1_orchestration_proto_rawDesc = "" +
 	"\ttool_name\x18\x05 \x01(\tR\btoolName\x12\x1d\n" +
 	"\n" +
 	"action_key\x18\x06 \x01(\tR\tactionKey\x12!\n" +
-	"\feffect_class\x18\a \x01(\tR\veffectClass\":\n" +
+	"\feffect_class\x18\a \x01(\tR\veffectClass\x12\x1f\n" +
+	"\vtool_digest\x18\b \x01(\tR\n" +
+	"toolDigest\":\n" +
 	"\x1dUseApprovalScopeGrantResponse\x12\x19\n" +
 	"\bgrant_id\x18\x01 \x01(\tR\agrantId\"T\n" +
 	"\x1eListApprovalScopeGrantsRequest\x12\x15\n" +

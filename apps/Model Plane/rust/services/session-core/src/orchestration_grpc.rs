@@ -3019,8 +3019,24 @@ impl ApprovalScopeGrantService for OrchestrationGrpc {
                     "tool_name and action_key are required",
                 ));
             }
+            // The definition digest is empty (a built-in tool) or a sha256 in lowercase hex.
+            if !req.tool_digest.is_empty()
+                && !(req.tool_digest.len() == 64
+                    && req
+                        .tool_digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+            {
+                return Err(Status::invalid_argument("tool_digest is malformed"));
+            }
             // A release is never granted while the switch is off, whatever the caller sent.
             if !approval_cause::scope_grants_enabled() {
+                return Ok(Response::new(proto::UseApprovalScopeGrantResponse {
+                    grant_id: String::new(),
+                }));
+            }
+            // An unpinned MCP tool is never released by a grant: no digest, no match (D2-1123).
+            if req.tool_name.trim().starts_with("mcp__") && req.tool_digest.is_empty() {
                 return Ok(Response::new(proto::UseApprovalScopeGrantResponse {
                     grant_id: String::new(),
                 }));
@@ -3037,6 +3053,7 @@ impl ApprovalScopeGrantService for OrchestrationGrpc {
                     tool_name: req.tool_name.trim(),
                     action_key: &req.action_key,
                     effect_class: &req.effect_class,
+                    tool_digest: &req.tool_digest,
                 },
             )
             .await

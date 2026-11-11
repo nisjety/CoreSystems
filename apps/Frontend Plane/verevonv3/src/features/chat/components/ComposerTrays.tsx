@@ -8,7 +8,7 @@ import type {
   WideResearchStart as WideResearchChoice,
 } from '@/shared/api/chat-client'
 import { listDeckTemplates, type DeckTemplate } from '@/shared/api/chat-client'
-import type { ApprovalDecision, ApprovalEdit, PlanStepEdit } from '@/shared/api/orchestration-client'
+import type { ApprovalDecision, ApprovalEdit, ApprovalScope, PlanStepEdit } from '@/shared/api/orchestration-client'
 import { QuestionCard } from '@/shared/chat-nodes/QuestionCard'
 import { X } from '@/shared/icons'
 import { useI18n } from '@/shared/i18n'
@@ -43,7 +43,13 @@ const TRAY_NAME: Record<DockedTrayKind, { no: string; en: string }> = {
  */
 export function ComposerTrays(props: {
   trays: readonly DockedTray[]
-  onApprovalDecision: (turnId: string, approvalId: string, decision: ApprovalDecision) => void
+  onApprovalDecision: (
+    turnId: string,
+    approvalId: string,
+    decision: ApprovalDecision,
+    scope?: ApprovalScope,
+    promote?: boolean,
+  ) => void
   onApprovalEditedDecision?: (turnId: string, approvalId: string, edit: ApprovalEdit) => Promise<void>
   onApprovePlan: (turnId: string, rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
   onRejectPlan: (turnId: string, reason: string) => void
@@ -205,9 +211,9 @@ export function ComposerTrays(props: {
           {(tray) => (
             <ApprovalRequests
               approvals={tray().approvals.map((entry) => entry.approval)}
-              onDecide={(approvalId, decision) => {
+              onDecide={(approvalId, decision, scope, promote) => {
                 const entry = tray().approvals.find((candidate) => candidate.approval.id === approvalId)
-                if (entry) props.onApprovalDecision(entry.turnId, approvalId, decision)
+                if (entry) props.onApprovalDecision(entry.turnId, approvalId, decision, scope, promote)
               }}
               onDecideEdited={props.onApprovalEditedDecision
                 ? (approvalId, edit) => {

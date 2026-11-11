@@ -723,6 +723,12 @@ services:
       META_JS_SDK_LOCALE: ${META_JS_SDK_LOCALE:-en_US}
       META_BUSINESS_LOGIN_CONFIG_ID: ${META_BUSINESS_LOGIN_CONFIG_ID:-}
       META_BUSINESS_LOGIN_CONVERSIONS_CONFIG_ID: ${META_BUSINESS_LOGIN_CONVERSIONS_CONFIG_ID:-}
+      # Model-connection ZDR acknowledgement (Z-13). Dark: each switch is on only for the literal
+      # "true". INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED flips together with Auth Core's
+      # AUTH_CORE_ZDR_EFFECTIVE_POSTURE_ENABLED; ZDR_ACK_RETENTION_DAYS is how long revoked rows are kept.
+      ZDR_ACKNOWLEDGEMENT_ENABLED: ${ZDR_ACKNOWLEDGEMENT_ENABLED:-false}
+      INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED: ${INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED:-false}
+      ZDR_ACK_RETENTION_DAYS: ${ZDR_ACK_RETENTION_DAYS:-365}
       NATS_ENABLED: ${NATS_ENABLED:-false}
       # Cross-plane bridge (#3): publish integration events
       # (verevon.ingestion.integration.*) DIRECTLY into the Application Plane's

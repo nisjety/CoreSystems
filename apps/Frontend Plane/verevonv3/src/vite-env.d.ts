@@ -132,6 +132,8 @@ interface ImportMetaEnv {
 	readonly VITE_REPORT_PROBLEM?: string;
 	/** "true" shows the active approval grants of a thread with a Revoke control (WS13-S6). Default off. */
 	readonly VITE_APPROVAL_SCOPE_GRANTS?: string;
+	/** "true" shows the rules proposed from "Always" approvals in settings, to confirm or dismiss (WS13-S7). Default off. */
+	readonly VITE_APPROVAL_RULE_PROPOSALS?: string;
 }
 
 interface ImportMeta {

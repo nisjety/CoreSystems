@@ -2177,19 +2177,25 @@ export const approvalEditInput = z
 
 // The decision on a pending approval (build plan WS13 S2). The decider is the verified credential's,
 // never an input, so a field naming one, a decision source or a grant is refused rather than ignored.
-// `scope` is how far the decision reaches; only `once` exists until standing grants do. An `edit`
-// rides an approval only (EP-10-S6): a rejection has nothing to send.
+// `scope` is how far the decision reaches: `once` unless the server offered a standing scope in the
+// approval's scope_options. `promote` is "Always" (WS13 S7): a thread grant of an approval whose
+// cause offers a rule, and nothing else. An `edit` rides an approval only (EP-10-S6): a rejection
+// has nothing to send.
 const approvalsDecideInput = z
   .object({
     approvalId: z.string().min(1),
     decision: z.enum(['approve', 'reject']),
     reason: z.string().max(500).optional(),
-    scope: z.literal('once').optional(),
+    scope: z.enum(['once', 'thread', 'run']).optional(),
+    promote: z.boolean().optional(),
     edit: approvalEditInput.optional(),
   })
   .strict()
   .refine((input) => input.edit === undefined || input.decision === 'approve', {
     message: 'edit_requires_grant',
+  })
+  .refine((input) => !input.promote || (input.decision === 'approve' && input.scope === 'thread'), {
+    message: 'rule_not_offered',
   })
 
 // The full draft behind a pending write approval (EP-10-S1). Only the approval id is an input: the
@@ -2261,6 +2267,33 @@ export const approvalsRevokeGrantInput = z
 const approvalsRevokeGrantOutput = z.object({
   grant: approvalGrantOutput.optional(),
 })
+
+// A rule an "Always" approval proposed (WS13-S7), as the projection names it. The capability and the
+// digest are shown, never sent: the server confirms from its own record of the proposal.
+const approvalRuleProposalOutput = z.object({
+  id: z.string(),
+  toolName: z.string(),
+  toolDigest: z.string(),
+  capabilityId: z.string(),
+  createdAt: z.string(),
+})
+
+// The caller's open rule proposals (WS13-S7). No input: the org and the owner are the verified credential's.
+const approvalsListRuleProposalsInput = z.object({}).strict()
+
+const approvalsListRuleProposalsOutput = z.object({
+  proposals: z.array(approvalRuleProposalOutput),
+})
+
+// Confirming or dismissing one proposal (WS13-S7). Only the proposal's `arp_` id is an input: the
+// capability, the digest, the scope and the expiry are the server's own record, never the client's.
+export const approvalsConfirmRuleInput = z
+  .object({
+    proposalId: z.string().regex(/^arp_[A-Za-z0-9_-]{1,124}$/),
+  })
+  .strict()
+
+export const approvalsDismissRuleInput = approvalsConfirmRuleInput
 
 const chatClearThreadsInput = z.object({})
 
@@ -5317,7 +5350,7 @@ export const actionRegistry = [
   {
     id: 'approvals.decide',
     label: 'Decide an approval',
-    description: 'Approve or reject one pending approval of a run, for this one call. Only the person the approval is requested of can decide it; the decider is the verified credential, never an input, and a client field naming a decider, a decision source or a grant is refused 400. A scope other than once is refused 422 scope_not_enabled until standing grants exist, so a caller never believes it granted more than it did. A decision is idempotent, and a different second decision is a 412 conflict. Refused typed under zero data retention and for a waived credential, since such a run holds no approval. An approval may carry edit {patch, baseFingerprint}: the person\'s changes to a drafted mail send (to, subject, bodyText only), approved for this one call; an edit with a reject is refused edit_requires_grant, a draft that changed since the person saw it is a 409 approval_changed, and while edits are switched off the server refuses it 403 approval_edit_disabled. Never model-executable: an approval is the person\'s own authority, and a model deciding its own approval would void the gate.',
+    description: 'Approve or reject one pending approval of a run, for this one call. Only the person the approval is requested of can decide it; the decider is the verified credential, never an input, and a client field naming a decider, a decision source or a grant is refused 400. A standing scope (thread or run) is offered only through the approval cause\'s scope_options while standing grants are switched on; otherwise it is refused 422 scope_not_enabled, so a caller never believes it granted more than it did. promote (\'Always\') is accepted only on a thread grant of a cause whose rule is offered (a pinned MCP tool paused only by its high-risk capability check), else 422 rule_not_offered, and it proposes a rule the person must confirm in settings; it does not lift any other pause. A decision is idempotent, and a different second decision is a 412 conflict. Refused typed under zero data retention and for a waived credential, since such a run holds no approval. An approval may carry edit {patch, baseFingerprint}: the person\'s changes to a drafted mail send (to, subject, bodyText only), approved for this one call; an edit with a reject is refused edit_requires_grant, a draft that changed since the person saw it is a 409 approval_changed, and while edits are switched off the server refuses it 403 approval_edit_disabled. Never model-executable: an approval is the person\'s own authority, and a model deciding its own approval would void the gate.',
     ownerPlane: 'model',
     risk: 'high',
     requiresApproval: false,
@@ -5357,6 +5390,39 @@ export const actionRegistry = [
     reversible: false,
     inputSchema: approvalsRevokeGrantInput,
     outputSchema: approvalsRevokeGrantOutput,
+  },
+  {
+    id: 'approvals.list_rule_proposals',
+    label: 'List the rules proposed from approvals',
+    description: "List the caller's own open rule proposals: the tools the person chose \"Always\" for, which are not rules until confirmed. Read-only; it changes nothing and grants nothing. Never another person's proposal, and never an argument value. Empty for a zero-retention principal, since such a run holds no proposal. Served with the server switch off too, so open proposals stay visible. Never model-executable: a person's standing authority is shown to that person.",
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: approvalsListRuleProposalsInput,
+    outputSchema: approvalsListRuleProposalsOutput,
+  },
+  {
+    id: 'approvals.confirm_rule',
+    label: 'Confirm a proposed approval rule',
+    description: "Confirm one of the caller's own rule proposals. The server writes a user-scope allow pinned to the reviewed tool definition, lapsing after 90 days, from its own record of the proposal; the client names the proposal and nothing else (no capability, digest, scope or expiry). A tool that changed since it was approved is refused 409 rule_proposal_stale (or the capability-core digest refusal), and the person approves it again in a conversation. While the server switch is off it answers 404 rule_proposals_disabled. 503 rule_confirm_incomplete means the confirmation did not finish and is safe to retry. Refused typed under zero data retention and for a waived credential, since such a run holds no proposal. The rule lifts only the tool's high-risk capability check (D-WS13-8); every other check, such as the permission mode, still applies. Reversible: the rule can be revoked in tool policies. Never model-executable: a model may propose but never grant its own permission.",
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: approvalsConfirmRuleInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'approvals.dismiss_rule',
+    label: 'Dismiss a proposed approval rule',
+    description: "Dismiss one of the caller's own rule proposals, so it is no longer offered and no rule is written. Works with the server switch off (it only narrows authority). A proposal that is being confirmed right now is refused 409 rule_proposal_busy; try again in a minute. Refused typed under zero data retention and for a waived credential. Never model-executable: a person's authority is managed by that person.",
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: approvalsDismissRuleInput,
+    outputSchema: envelopeStatusOutput,
   },
   {
     id: 'chat.clear_threads',

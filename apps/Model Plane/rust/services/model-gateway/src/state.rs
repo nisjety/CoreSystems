@@ -9,6 +9,7 @@ use mp_contracts::dataplane::{
     wiki_v1::wiki_service_client::WikiServiceClient,
 };
 use mp_contracts::model_plane::v1::{
+    approval_scope_grant_service_client::ApprovalScopeGrantServiceClient,
     artifact_revision_service_client::ArtifactRevisionServiceClient,
     browser_broker_client::BrowserBrokerClient, capability_core_client::CapabilityCoreClient,
     event_log_client::EventLogClient,
@@ -191,9 +192,10 @@ pub struct AppState {
     /// matches `mail_task.rs`'s existing `MailTaskPipeline: None` default on
     /// the gateway BFF side of this same, still-not-fully-wired pipeline.
     pub(crate) mail_task_bridge_tokens: Option<Arc<crate::mail_task_bridge_auth::MailTaskBridgeTokenProvider>>,
-    /// The gateway's own minting client for the completion judge's verdict write (EP-7 S3), a token
-    /// for `session:write` per settled goal turn. `None` when `MODEL_GATEWAY_SERVICE_API_KEY` is unset:
-    /// the judge then records no verdict and the goal stays as it is.
+    /// The minting client for the completion judge (EP-7 S3), from the goal-judge principal: a token
+    /// for `session:goal-judge:read` per judged read and `session:goal-verdict:write` per verdict.
+    /// `None` when `MODEL_GATEWAY_GOAL_JUDGE_SERVICE_API_KEY` is unset: the judge then does not run
+    /// and the goal stays as it is.
     pub(crate) goal_verdict_tokens: Option<Arc<crate::thread_goal::GoalVerdictTokens>>,
     /// Keyed, opaque transformer for all values persisted as managed start
     /// identities. This prevents public request/idempotency strings from
@@ -212,6 +214,10 @@ pub struct AppState {
     /// consume (it answers Unimplemented), and the executor makes its own consume against
     /// session-core too. Found by the first live /continue (2026-10-19).
     pub consume_client: OrchestrationCoreServiceClient<Channel>,
+    /// The `ApprovalScopeGrantService` hosted by session-core, on the session endpoint. Lists and
+    /// revokes a person's standing approval grants (build plan WS13 S6); orchestrator-core, behind
+    /// `orchestration_client`, does not serve it.
+    pub approval_grant_client: ApprovalScopeGrantServiceClient<Channel>,
     /// execution-core (:9093). Used to resume a run after an approval is
     /// granted — the gateway is the approval decision point but does not drive
     /// the execution loop, so it signals execution-core directly.
@@ -489,6 +495,7 @@ impl AppState {
         let run_channel = session_channel.clone();
         let managed_run_channel = session_channel.clone();
         let consume_channel = session_channel.clone();
+        let approval_grant_channel = session_channel.clone();
         let orchestration_channel = lazy_static_channel("http://localhost:9080");
         let execution_channel = lazy_static_channel("http://localhost:9093");
         let sandbox_channel = lazy_static_channel("http://localhost:9094");
@@ -538,6 +545,7 @@ impl AppState {
             run_client: RunServiceClient::new(run_channel),
             orchestration_client: OrchestrationCoreServiceClient::new(orchestration_channel),
             consume_client: OrchestrationCoreServiceClient::new(consume_channel),
+            approval_grant_client: ApprovalScopeGrantServiceClient::new(approval_grant_channel),
             execution_client: ExecutionCoreClient::new(execution_channel)
                 .max_decoding_message_size(EXECUTE_STEP_DECODE_LIMIT_BYTES),
             sandbox_client: SandboxManagerClient::new(sandbox_channel),
@@ -804,6 +812,11 @@ impl AppState {
             "SESSION_CORE_ADDR",
             "http://localhost:9091",
         )?);
+        let approval_grant_client = ApprovalScopeGrantServiceClient::new(Self::lazy_channel(
+            "SESSION_CORE_URL",
+            "SESSION_CORE_ADDR",
+            "http://localhost:9091",
+        )?);
         let orchestration_client = OrchestrationCoreServiceClient::new(Self::lazy_channel(
             "ORCHESTRATOR_CORE_URL",
             "ORCHESTRATOR_CORE_ADDR",
@@ -950,15 +963,16 @@ impl AppState {
                 }
             };
 
-        // EP-7 S3 — the completion judge's verdict credential, from the gateway's own service key.
-        // Optional like the mail-task bridge: without it the judge records no verdict and the goal
-        // stays as it is, and the boot does not fail.
+        // EP-7 S3 — the completion judge's credential, from the dedicated persistent goal-judge
+        // principal (OD-58), never the gateway's zero-retention key. Optional like the mail-task
+        // bridge: without it the judge records no verdict and the goal stays as it is, and the boot
+        // does not fail.
         let goal_verdict_tokens = match crate::thread_goal::GoalVerdictTokens::from_env() {
             Ok(provider) => Some(Arc::new(provider)),
             Err(error) => {
                 tracing::info!(
                     %error,
-                    "goal verdict credential not configured; the goal judge cannot record verdicts"
+                    "goal judge credential not configured; the goal judge cannot read evidence or record verdicts"
                 );
                 None
             }
@@ -1035,6 +1049,7 @@ impl AppState {
             state.run_client = run_client;
             state.orchestration_client = orchestration_client;
             state.consume_client = consume_client.clone();
+            state.approval_grant_client = approval_grant_client.clone();
             state.execution_client = execution_client.clone();
             state.sandbox_client = sandbox_client;
             state.browser_client = browser_client;
@@ -1113,6 +1128,7 @@ impl AppState {
             state.run_client = run_client;
             state.orchestration_client = orchestration_client;
             state.consume_client = consume_client.clone();
+            state.approval_grant_client = approval_grant_client;
             state.execution_client = execution_client;
             state.sandbox_client = sandbox_client;
             state.browser_client = browser_client;

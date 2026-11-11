@@ -42,7 +42,7 @@ import type {
   LifecycleNotice,
   StreamFailureAction,
 } from '@/features/chat/components/chat-types'
-import type { Approval, ApprovalDecision, ApprovalEdit } from '@/shared/api/orchestration-client'
+import type { Approval, ApprovalDecision, ApprovalEdit, ApprovalScope } from '@/shared/api/orchestration-client'
 import type { RecalledMemory } from '@/shared/api/chat-client'
 import type { StreamActivity } from '@/features/chat/lib/stream-activity'
 
@@ -186,7 +186,16 @@ export type ConversationNodeContext = {
   onViewSteps: () => void
   /** Open the contextual attachment canvas without replacing the transcript. */
   onViewAttachments?: (attachmentId: string) => void
-  onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  /**
+   * Sends the person's decision. `scope` is the grant they chose (absent means 'once') and
+   * `promote` is "Always" on a thread grant; both only ever come from what the server offered.
+   */
+  onApprovalDecision: (
+    approvalId: string,
+    decision: ApprovalDecision,
+    scope?: ApprovalScope,
+    promote?: boolean,
+  ) => void
   /** Sends an approval with the person's edits (EP-10-S6). Absent: the card offers no edit mode. */
   onApprovalEditedDecision?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
   /**

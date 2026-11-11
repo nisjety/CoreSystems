@@ -29,6 +29,7 @@ import { LearningSection } from '@/features/settings/components/LearningSection'
 import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
 import { CustomConnectorSection } from '@/features/settings/components/CustomConnectorSection'
 import { CustomerGatewaySection } from '@/features/settings/components/CustomerGatewaySection'
+import { ApprovalRuleProposalsSection } from '@/features/settings/components/ApprovalRuleProposalsSection'
 import { ConnectedAppsPolicy } from '@/features/settings/components/ConnectedAppsPolicy'
 import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
 import { NexiCheckout } from '@/features/billing/components/NexiCheckout'
@@ -2066,6 +2067,9 @@ function IntegrationsSection() {
         {loadFailed() ? ` ${i18n.tr('Integrasjonstilstanden kunne ikke oppdateres fra de lokale tjenestene.', 'Integration state could not be refreshed from the local services.')}` : ''}
       </p>
       <ConnectedAppsPolicy />
+      <Show when={import.meta.env.VITE_APPROVAL_RULE_PROPOSALS === 'true'}>
+        <ApprovalRuleProposalsSection />
+      </Show>
       <Show when={notice()}>
         {(message) => <p class="verevon-settings-status-message" role="status">{message()}</p>}
       </Show>

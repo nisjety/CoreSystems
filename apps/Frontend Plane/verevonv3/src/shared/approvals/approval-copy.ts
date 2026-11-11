@@ -45,6 +45,13 @@ export type ApprovalCause = {
   scopeOptions: string[]
   stepUpRequired: boolean
   /**
+   * The server offers "Always" for this approval: a pinned MCP tool paused only by its high-risk
+   * capability check, the one pause a confirmed rule lifts (D-WS13-8), with standing grants and
+   * rule proposals switched on. Absent means not offered; the SPA never offers what the server did
+   * not.
+   */
+  ruleOffered?: boolean
+  /**
    * A `browser_human_assist` pause only (EP-1): which wall the page showed (`login`, `captcha`,
    * `consent`, `waf`) or `user_takeover`, who started it (`agent` or `person`), and the host of
    * the session the run holds. The host is the server's record, never text from the page.

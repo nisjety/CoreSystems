@@ -50,6 +50,10 @@ pub struct CapabilityEvaluation {
     /// The capability the call was bound to, as this process resolved it (never
     /// what the response claims); empty from a policy that does not say.
     pub capability_id: String,
+    /// The pinned definition digest of the registry binding this process resolved
+    /// for an MCP tool, never the response's claim; empty for a built-in tool and
+    /// from a policy that does not say.
+    pub tool_digest: String,
     /// capability-core's reason for the decision, verbatim; empty from a policy
     /// that does not say. A deny logs it only once it passes a slug check.
     pub reason: String,
@@ -76,6 +80,7 @@ impl CapabilityEvaluation {
             side_effect_class: String::new(),
             approval_floor: String::new(),
             capability_id: String::new(),
+            tool_digest: String::new(),
             reason: String::new(),
             // Mirrors `evidence_verified`: a policy with no wire proof is trusted
             // as a whole or not at all.
@@ -299,7 +304,7 @@ impl CapabilityPolicy for GrpcCapabilityPolicy {
         org_id: &str,
     ) -> Result<CapabilityDecision, Status> {
         let (binding, response) = self
-            .evaluate_response(tool_name, run_id, org_id, "", None)
+            .evaluate_response(tool_name, run_id, org_id, "", None, "")
             .await?;
         self.refuse_dynamic_unless_enforced(&binding)?;
         map_capability_response(&response).map(|evaluation| evaluation.decision)
@@ -321,8 +326,9 @@ impl CapabilityPolicy for GrpcCapabilityPolicy {
         org_id: &str,
         user_id: &str,
     ) -> Result<CapabilityEvaluation, Status> {
-        // A call made without its input names no target.
-        self.evaluate_tool_call_with_input(tool_name, "", run_id, org_id, user_id, false)
+        // A call made without its input names no target, and a caller that never stated a run
+        // posture must not claim "persistent": the retention is stated empty (WS13 S7).
+        self.evaluate_tool_call_inner(tool_name, "", run_id, org_id, user_id, "", false)
             .await
     }
 
@@ -335,64 +341,23 @@ impl CapabilityPolicy for GrpcCapabilityPolicy {
         user_id: &str,
         retention_bound: bool,
     ) -> Result<CapabilityEvaluation, Status> {
-        let strict_browser = self.browser_agent_policy_enforced && tool_name == "browser_agent";
-        let target = self.wire_target(tool_name, tool_input, retention_bound);
-        let (binding, response) = self
-            .evaluate_response(tool_name, run_id, org_id, user_id, target)
-            .await?;
-        let evaluation = map_capability_response(&response)?;
-        let call = EvidenceCall {
+        // The caller states the run's posture: "retention_bound" for a zero-retention or waived run,
+        // "persistent" for a run that keeps state (WS13 S7, D-WS13-1).
+        let run_retention = if retention_bound {
+            "retention_bound"
+        } else {
+            "persistent"
+        };
+        self.evaluate_tool_call_inner(
             tool_name,
+            tool_input,
             run_id,
             org_id,
             user_id,
-            capability_id: &binding.capability_id,
-            registry: binding.registry.as_ref(),
-            gate: self.effective_gate(tool_name),
-        };
-        if strict_browser {
-            // A valid v2 signature alone is insufficient: older capability-core
-            // builds can sign a decision while ignoring stored user/org policies.
-            let checked = self.decision_verifier
-                .verified_claims(&response.decision_evidence, &response, &call)
-                .is_some_and(|claims| claims.tool_policy_checked);
-            if !checked {
-                return Err(Status::permission_denied(
-                    "browser policy requires signed tool-policy enforcement evidence",
-                ));
-            }
-        }
-        // An `ask` is checked too, but never refused for failing: it parks the
-        // step either way. Only a verified ask may later be satisfied by a
-        // broker-validated browser run grant, so it is held to the strict
-        // check whatever the gate mode (see `verify_ask`).
-        let ask_evidence_verified = evaluation.decision == CapabilityDecision::Ask
-            && self
-                .decision_verifier
-                .verify_ask(&response.decision_evidence, &response, &call);
-        if evaluation.decision == CapabilityDecision::Allow {
-            if !self
-                .decision_verifier
-                .verify(&response.decision_evidence, &response, &call)
-            {
-                return Err(Status::permission_denied(
-                    "capability policy returned invalid decision evidence",
-                ));
-            }
-            self.pin_binding(&call, &response)?;
-        } else if strict_browser && evaluation.decision == CapabilityDecision::Ask {
-            // The broker can satisfy the high-risk ask only when its class has
-            // remained pinned under the same verified policy during the run.
-            self.pin_binding(&call, &response)?;
-        }
-        self.refuse_dynamic_unless_enforced(&binding)?;
-        Ok(CapabilityEvaluation {
-            evidence_verified: evaluation.decision != CapabilityDecision::Allow
-                || self.decision_verifier.is_configured(),
-            capability_id: binding.capability_id.clone(),
-            ask_evidence_verified,
-            ..evaluation
-        })
+            run_retention,
+            retention_bound,
+        )
+        .await
     }
 
     async fn prefetch_tool_bindings(
@@ -642,6 +607,85 @@ impl GrpcCapabilityPolicy {
         })
     }
 
+    /// The body of a tool-call evaluation. `run_retention` is the posture stated on the wire
+    /// ("persistent", "retention_bound", or "" when the caller never stated one); `retention_bound`
+    /// separately withholds the target value (WS13 S7).
+    #[allow(clippy::too_many_arguments)]
+    async fn evaluate_tool_call_inner(
+        &self,
+        tool_name: &str,
+        tool_input: &str,
+        run_id: &str,
+        org_id: &str,
+        user_id: &str,
+        run_retention: &'static str,
+        retention_bound: bool,
+    ) -> Result<CapabilityEvaluation, Status> {
+        let strict_browser = self.browser_agent_policy_enforced && tool_name == "browser_agent";
+        let target = self.wire_target(tool_name, tool_input, retention_bound);
+        let (binding, response) = self
+            .evaluate_response(tool_name, run_id, org_id, user_id, target, run_retention)
+            .await?;
+        let evaluation = map_capability_response(&response)?;
+        let call = EvidenceCall {
+            tool_name,
+            run_id,
+            org_id,
+            user_id,
+            capability_id: &binding.capability_id,
+            registry: binding.registry.as_ref(),
+            gate: self.effective_gate(tool_name),
+        };
+        if strict_browser {
+            // A valid v2 signature alone is insufficient: older capability-core
+            // builds can sign a decision while ignoring stored user/org policies.
+            let checked = self.decision_verifier
+                .verified_claims(&response.decision_evidence, &response, &call)
+                .is_some_and(|claims| claims.tool_policy_checked);
+            if !checked {
+                return Err(Status::permission_denied(
+                    "browser policy requires signed tool-policy enforcement evidence",
+                ));
+            }
+        }
+        // An `ask` is checked too, but never refused for failing: it parks the
+        // step either way. Only a verified ask may later be satisfied by a
+        // broker-validated browser run grant, so it is held to the strict
+        // check whatever the gate mode (see `verify_ask`).
+        let ask_evidence_verified = evaluation.decision == CapabilityDecision::Ask
+            && self
+                .decision_verifier
+                .verify_ask(&response.decision_evidence, &response, &call);
+        if evaluation.decision == CapabilityDecision::Allow {
+            if !self
+                .decision_verifier
+                .verify(&response.decision_evidence, &response, &call)
+            {
+                return Err(Status::permission_denied(
+                    "capability policy returned invalid decision evidence",
+                ));
+            }
+            self.pin_binding(&call, &response)?;
+        } else if strict_browser && evaluation.decision == CapabilityDecision::Ask {
+            // The broker can satisfy the high-risk ask only when its class has
+            // remained pinned under the same verified policy during the run.
+            self.pin_binding(&call, &response)?;
+        }
+        self.refuse_dynamic_unless_enforced(&binding)?;
+        Ok(CapabilityEvaluation {
+            evidence_verified: evaluation.decision != CapabilityDecision::Allow
+                || self.decision_verifier.is_configured(),
+            capability_id: binding.capability_id.clone(),
+            tool_digest: binding
+                .registry
+                .as_ref()
+                .map(|registry| registry.digest.clone())
+                .unwrap_or_default(),
+            ask_evidence_verified,
+            ..evaluation
+        })
+    }
+
     /// Bind `tool_name` and ask capability-core for a decision on it. The binding
     /// comes back so the caller can verify the evidence against what was bound.
     async fn evaluate_response(
@@ -651,6 +695,7 @@ impl GrpcCapabilityPolicy {
         org_id: &str,
         user_id: &str,
         target: Option<(&'static str, String)>,
+        run_retention: &'static str,
     ) -> Result<(Binding, EvaluatePolicyResponse), Status> {
         if run_id.trim().is_empty() || org_id.trim().is_empty() {
             return Err(Status::invalid_argument(
@@ -690,6 +735,7 @@ impl GrpcCapabilityPolicy {
             },
             target_kind,
             target_value,
+            run_retention: run_retention.to_owned(),
         });
         request.metadata_mut().insert(
             "authorization",
@@ -1157,6 +1203,8 @@ fn map_capability_response(
         // The binding is the caller's, not the response's: set by
         // `evaluate_tool_call`.
         capability_id: String::new(),
+        // Set by `evaluate_tool_call_with_input` from the binding.
+        tool_digest: String::new(),
         reason: response.reason.clone(),
         ask_evidence_verified: false,
     })

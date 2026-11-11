@@ -1769,20 +1769,26 @@ const APPROVAL_GRANT_CONTEXT_SQL: &str = "SELECT a.user_id, a.run_id, r.thread_i
 /// already proposed for the owner (build plan WS13 S7). A reused proposal moves to the decision
 /// that renewed it.
 const INSERT_APPROVAL_RULE_PROPOSAL_SQL: &str = "INSERT INTO approval_rule_proposals \
-     (id, org_id, user_id, created_from_approval_id, tool_name, tool_digest) \
-     VALUES ($1, $2, $3, $4, $5, $6) \
+     (id, org_id, user_id, created_from_approval_id, tool_name, tool_digest, capability_id) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7) \
      ON CONFLICT (org_id, user_id, tool_name, tool_digest) WHERE state = 'proposed' \
-     DO UPDATE SET created_from_approval_id = EXCLUDED.created_from_approval_id \
+     DO UPDATE SET created_from_approval_id = EXCLUDED.created_from_approval_id, \
+                   capability_id = EXCLUDED.capability_id \
      RETURNING id";
 
 const INSERT_APPROVAL_SCOPE_GRANT_SQL: &str = "INSERT INTO approval_scope_grants \
      (id, org_id, user_id, thread_id, run_id, scope, tool_name, action_key, effect_class, \
-      cause_code, created_from_approval_id, expires_at, rule_id) \
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now() + make_interval(secs => $12), $13) \
+      cause_code, created_from_approval_id, expires_at, rule_id, tool_digest) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now() + make_interval(secs => $12), $13, \
+             $14) \
      ON CONFLICT (org_id, user_id, thread_id, scope, COALESCE(run_id, ''), action_key) \
      WHERE revoked_at IS NULL \
      DO UPDATE SET expires_at = GREATEST(approval_scope_grants.expires_at, EXCLUDED.expires_at), \
-                   rule_id = COALESCE(EXCLUDED.rule_id, approval_scope_grants.rule_id)";
+                   tool_digest = EXCLUDED.tool_digest, \
+                   effect_class = EXCLUDED.effect_class, \
+                   rule_id = CASE WHEN approval_scope_grants.tool_digest = EXCLUDED.tool_digest \
+                                  THEN COALESCE(EXCLUDED.rule_id, approval_scope_grants.rule_id) \
+                                  ELSE EXCLUDED.rule_id END";
 
 /// Record the standing grant one granted decision creates (build plan WS13 S6), in the decision's
 /// transaction. The scope must be one the cause offers, and the thread must be an ordinary one.
@@ -1833,6 +1839,7 @@ async fn create_scope_grant(
             .bind(approval_id)
             .bind(&cause.tool)
             .bind(&cause.tool_digest)
+            .bind(&cause.capability_id)
             .fetch_one(&mut **transaction)
             .await?;
         Some(proposal)
@@ -1853,13 +1860,15 @@ async fn create_scope_grant(
         .bind(approval_id)
         .bind(record.grant_ttl_secs as f64)
         .bind(rule_id)
+        .bind(&cause.tool_digest)
         .execute(&mut **transaction)
         .await?;
     Ok(())
 }
 
 /// The call a standing grant is asked to release (build plan WS13 S6). No argument value is part
-/// of the match: the owner, thread, tool, action key and declared class are the whole of it.
+/// of the match: the owner, thread, tool, action key, declared class and, for a pinned MCP tool,
+/// the definition digest are the whole of it (D2-1123).
 #[derive(Debug, Clone, Copy)]
 pub struct ScopeGrantUse<'a> {
     pub org_id: &'a str,
@@ -1869,11 +1878,14 @@ pub struct ScopeGrantUse<'a> {
     pub tool_name: &'a str,
     pub action_key: &'a str,
     pub effect_class: &'a str,
+    /// The sha256 of the pinned MCP definition the call is bound to, or empty for a built-in tool.
+    /// A grant matches only the digest it was created with, so a changed definition never matches.
+    pub tool_digest: &'a str,
 }
 
 /// The atomic match and count of one standing release. The grant must be live and unexpired for
-/// this owner and thread, name this tool, action and class, and cover this run (a run grant names
-/// one; a thread grant covers any). The run must be a live run of this owner and thread, and a
+/// this owner and thread, name this tool, action, class and definition digest, and cover this run
+/// (a run grant names one; a thread grant covers any). A digest that drifted matches nothing. The run must be a live run of this owner and thread, and a
 /// child agent never matches a grant.
 const USE_APPROVAL_SCOPE_GRANT_SQL: &str = "UPDATE approval_scope_grants \
      SET use_count = use_count + 1, last_used_at = now() \
@@ -1882,6 +1894,7 @@ const USE_APPROVAL_SCOPE_GRANT_SQL: &str = "UPDATE approval_scope_grants \
          JOIN runs r ON r.id = $4 \
          WHERE g.org_id = $1 AND g.user_id = $2 AND g.thread_id = $3 \
            AND g.tool_name = $5 AND g.action_key = $6 AND g.effect_class = $7 \
+           AND g.tool_digest = $8 \
            AND g.revoked_at IS NULL AND g.expires_at > now() \
            AND (g.scope = 'thread' OR g.run_id = $4) \
            AND r.org_id = $1 AND r.user_id = $2 AND r.thread_id = $3 \
@@ -1957,6 +1970,7 @@ pub async fn use_approval_scope_grant(
         .bind(call.tool_name)
         .bind(call.action_key)
         .bind(call.effect_class)
+        .bind(call.tool_digest)
         .fetch_optional(&mut *transaction)
         .await?;
     let Some((grant_id, scope, cause_code, use_count)) = used else {
@@ -2061,6 +2075,245 @@ pub async fn revoke_approval_scope_grant(
         .bind(user_id)
         .fetch_optional(pool)
         .await?)
+}
+
+/// One "Always" rule proposal as its owner reads it (build plan WS13 S7, migration 0126). Ids, a
+/// digest and closed words only: no content.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ApprovalRuleProposalRow {
+    pub id: String,
+    pub tool_name: String,
+    pub tool_digest: String,
+    /// The capability-core id a confirm writes the rule under, or empty for a proposal made
+    /// before migration 0126 (it reads as stale and cannot be confirmed).
+    pub capability_id: String,
+    /// `proposed`, `confirming`, `confirmed` or `dismissed`.
+    pub state: String,
+    pub created_from_approval_id: String,
+    pub created_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
+    /// The capability-core policy a confirm wrote, or empty until then.
+    pub policy_id: String,
+}
+
+const APPROVAL_RULE_PROPOSAL_COLUMNS: &str = "id, tool_name, tool_digest, capability_id, state, \
+     created_from_approval_id, created_at, resolved_at, policy_id";
+
+/// How long a confirm's claim holds a proposal against a dismiss. A confirm is a saga across
+/// services (D-WS13-2): it claims the row, writes the rule in capability-core, then records the
+/// policy. A dismiss refuses while the claim is this fresh, so it cannot land between the write
+/// and the record and leave a live allow behind a dismissed proposal. Mirrored in
+/// [`RESOLVE_RULE_PROPOSAL_DISMISSED_SQL`].
+pub const RULE_PROPOSAL_CLAIM_SECS: u32 = 60;
+
+/// How one call resolves a proposal (build plan WS13 S7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleProposalResolution<'a> {
+    /// A confirm takes the row before it writes the rule. Re-claiming its own claim is the
+    /// idempotent retry.
+    Claim,
+    /// The confirm wrote the rule; the row records the policy and becomes `confirmed`.
+    Confirmed {
+        /// The capability-core policy id the confirm wrote.
+        policy_id: &'a str,
+    },
+    /// The person dismissed the proposal.
+    Dismissed,
+}
+
+/// Why a proposal could not be resolved as asked. Returned as the error of
+/// [`resolve_rule_proposal`]; downcast it like [`ScopeGrantRefusal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleProposalRefusal {
+    /// The proposal is already resolved the other way (or confirmed under another policy).
+    Resolved,
+    /// The proposal predates migration 0126 and names no capability, so it cannot be confirmed.
+    Stale,
+    /// A confirm holds the proposal and its claim is still fresh, so a dismiss must wait.
+    Busy,
+    /// A confirm recorded its result without having claimed the proposal.
+    NotClaimed,
+}
+
+impl RuleProposalRefusal {
+    /// The closed token the refusal reaches the caller as.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Resolved => "rule_proposal_resolved",
+            Self::Stale => "rule_proposal_stale",
+            Self::Busy => "rule_proposal_busy",
+            Self::NotClaimed => "rule_proposal_not_claimed",
+        }
+    }
+}
+
+impl std::fmt::Display for RuleProposalRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+impl std::error::Error for RuleProposalRefusal {}
+
+/// A confirm takes an open proposal that names a capability. Owner-bound by id, org and user.
+const RESOLVE_RULE_PROPOSAL_CLAIM_SQL: &str = "UPDATE approval_rule_proposals \
+     SET state = 'confirming', claimed_at = now() \
+     WHERE id = $1 AND org_id = $2 AND user_id = $3 \
+       AND state IN ('proposed', 'confirming') AND capability_id <> '' \
+     RETURNING id, tool_name, tool_digest, capability_id, state, created_from_approval_id, \
+               created_at, resolved_at, policy_id";
+
+/// A confirm that wrote its rule records the policy on the row it claimed.
+const RESOLVE_RULE_PROPOSAL_CONFIRMED_SQL: &str = "UPDATE approval_rule_proposals \
+     SET state = 'confirmed', policy_id = $4, resolved_at = now() \
+     WHERE id = $1 AND org_id = $2 AND user_id = $3 AND state = 'confirming' \
+     RETURNING id, tool_name, tool_digest, capability_id, state, created_from_approval_id, \
+               created_at, resolved_at, policy_id";
+
+/// A dismiss takes a proposed row, or a claim old enough that its confirm is presumed dead.
+const RESOLVE_RULE_PROPOSAL_DISMISSED_SQL: &str = "UPDATE approval_rule_proposals \
+     SET state = 'dismissed', resolved_at = now() \
+     WHERE id = $1 AND org_id = $2 AND user_id = $3 \
+       AND (state = 'proposed' \
+            OR (state = 'confirming' AND claimed_at < now() - interval '60 seconds')) \
+     RETURNING id, tool_name, tool_digest, capability_id, state, created_from_approval_id, \
+               created_at, resolved_at, policy_id";
+
+/// The owner's open proposals (proposed, or held by a confirm), oldest first.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn list_open_rule_proposals(
+    pool: &Pool,
+    org_id: &str,
+    user_id: &str,
+) -> Result<Vec<ApprovalRuleProposalRow>> {
+    let sql = format!(
+        "SELECT {APPROVAL_RULE_PROPOSAL_COLUMNS} FROM approval_rule_proposals \
+         WHERE org_id = $1 AND user_id = $2 AND state IN ('proposed', 'confirming') \
+         ORDER BY created_at, id LIMIT 100"
+    );
+    Ok(sqlx::query_as::<_, ApprovalRuleProposalRow>(&sql)
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_all(pool)
+        .await?)
+}
+
+/// One of the owner's proposals in any state, or `None` when the owner has no such proposal.
+/// Another person's proposal reads as absent.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn get_rule_proposal(
+    pool: &Pool,
+    org_id: &str,
+    user_id: &str,
+    id: &str,
+) -> Result<Option<ApprovalRuleProposalRow>> {
+    let sql = format!(
+        "SELECT {APPROVAL_RULE_PROPOSAL_COLUMNS} FROM approval_rule_proposals \
+         WHERE id = $1 AND org_id = $2 AND user_id = $3"
+    );
+    Ok(sqlx::query_as::<_, ApprovalRuleProposalRow>(&sql)
+        .bind(id)
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?)
+}
+
+/// What a resolution that matched no row means, given the row as it stands (build plan WS13 S7).
+/// A replay of a resolution that already happened returns the row; a resolution the row's state
+/// forbids is a [`RuleProposalRefusal`].
+fn rule_proposal_unmatched(
+    resolution: RuleProposalResolution<'_>,
+    row: ApprovalRuleProposalRow,
+) -> std::result::Result<ApprovalRuleProposalRow, RuleProposalRefusal> {
+    let open = matches!(row.state.as_str(), "proposed" | "confirming");
+    match resolution {
+        RuleProposalResolution::Claim => {
+            if row.state == "confirmed" {
+                Ok(row)
+            } else if open && row.capability_id.is_empty() {
+                Err(RuleProposalRefusal::Stale)
+            } else {
+                Err(RuleProposalRefusal::Resolved)
+            }
+        }
+        RuleProposalResolution::Confirmed { policy_id } => {
+            if row.state == "confirmed" && row.policy_id == policy_id {
+                Ok(row)
+            } else if row.state == "proposed" {
+                Err(RuleProposalRefusal::NotClaimed)
+            } else {
+                Err(RuleProposalRefusal::Resolved)
+            }
+        }
+        RuleProposalResolution::Dismissed => {
+            if row.state == "dismissed" {
+                Ok(row)
+            } else if row.state == "confirming" {
+                Err(RuleProposalRefusal::Busy)
+            } else {
+                Err(RuleProposalRefusal::Resolved)
+            }
+        }
+    }
+}
+
+/// Resolve one of the owner's proposals (build plan WS13 S7). One UPDATE per resolution, every
+/// WHERE bound to the id, org and user. `None` when the owner has no such proposal; a refusal is
+/// an `Err` that downcasts to [`RuleProposalRefusal`].
+///
+/// A confirm calls this with [`RuleProposalResolution::Claim`] before it writes the rule in
+/// capability-core, and with [`RuleProposalResolution::Confirmed`] after, so a dismiss cannot land
+/// between the two (review finding 3). Residual: a confirm that dies after its capability-core
+/// write and before its `Confirmed` leaves a claim. Dismissing it after
+/// [`RULE_PROPOSAL_CLAIM_SECS`] leaves that allow in place; it is revocable with
+/// `DELETE /v1/tool-policies/{capability_id}?scope=user` and lapses after 90 days.
+///
+/// # Errors
+///
+/// Returns an error if a query fails, if a `Confirmed` resolution names an empty policy id, or a
+/// [`RuleProposalRefusal`] when the proposal's state forbids the resolution.
+pub async fn resolve_rule_proposal(
+    pool: &Pool,
+    org_id: &str,
+    user_id: &str,
+    id: &str,
+    resolution: RuleProposalResolution<'_>,
+) -> Result<Option<ApprovalRuleProposalRow>> {
+    let sql = match resolution {
+        RuleProposalResolution::Claim => RESOLVE_RULE_PROPOSAL_CLAIM_SQL,
+        RuleProposalResolution::Confirmed { policy_id } => {
+            if policy_id.is_empty() {
+                bail!("a confirmed proposal records the policy it wrote");
+            }
+            RESOLVE_RULE_PROPOSAL_CONFIRMED_SQL
+        }
+        RuleProposalResolution::Dismissed => RESOLVE_RULE_PROPOSAL_DISMISSED_SQL,
+    };
+    let mut update = sqlx::query_as::<_, ApprovalRuleProposalRow>(sql)
+        .bind(id)
+        .bind(org_id)
+        .bind(user_id);
+    if let RuleProposalResolution::Confirmed { policy_id } = resolution {
+        update = update.bind(policy_id);
+    }
+    if let Some(row) = update.fetch_optional(pool).await? {
+        return Ok(Some(row));
+    }
+    let Some(row) = get_rule_proposal(pool, org_id, user_id, id).await? else {
+        return Ok(None);
+    };
+    match rule_proposal_unmatched(resolution, row) {
+        Ok(row) => Ok(Some(row)),
+        Err(refusal) => Err(refusal.into()),
+    }
 }
 
 /// The call an approval authorised, read from its retained descriptor.
@@ -4062,8 +4315,11 @@ mod tests {
 
     #[test]
     fn the_grant_names_its_proposal_and_a_renewal_keeps_the_link() {
-        assert!(INSERT_APPROVAL_SCOPE_GRANT_SQL
-            .contains("rule_id = COALESCE(EXCLUDED.rule_id, approval_scope_grants.rule_id)"));
+        assert!(INSERT_APPROVAL_SCOPE_GRANT_SQL.contains(
+            "rule_id = CASE WHEN approval_scope_grants.tool_digest = EXCLUDED.tool_digest \
+             THEN COALESCE(EXCLUDED.rule_id, approval_scope_grants.rule_id) \
+             ELSE EXCLUDED.rule_id END"
+        ));
         assert!(INSERT_APPROVAL_RULE_PROPOSAL_SQL.contains("WHERE state = 'proposed'"));
     }
 
@@ -6670,6 +6926,7 @@ mod approval_scope_grant_db_tests {
             tool_name: "knowledge_search",
             action_key: "knowledge_search",
             effect_class: "read",
+            tool_digest: "",
         }
     }
 
@@ -6709,6 +6966,7 @@ mod approval_scope_grant_db_tests {
             tool_name: "knowledge_search",
             action_key: "knowledge_search",
             effect_class: "read",
+            tool_digest: "",
         };
         let body = approval_auto_released_body(&call, "apg_1", "consent_to_disclose", "thread", 2);
         assert_eq!(body["event"], EVENT_APPROVAL_AUTO_RELEASED);

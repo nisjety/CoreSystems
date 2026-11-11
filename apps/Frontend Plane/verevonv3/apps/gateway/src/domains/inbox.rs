@@ -306,51 +306,26 @@ async fn require_draft_persistence(
             .into_response());
     }
 
-    let actor = actor_for(user);
-    let (status, Json(organization)) = proxy_json(
-        state,
-        Method::GET,
-        &format!(
-            "{}/api/v1/organizations/{}",
-            state.org_core_url,
-            urlencoding::encode(org_id)
-        ),
-        None,
-        Some(org_id),
-        Some(&actor),
-        None,
-    )
-    .await;
-    if !status.is_success() {
-        return Err((
+    // A durable-write gate: read the org's CURRENT posture, never the chat path's cached one.
+    match crate::zdr::org_posture_live(state, user, org_id).await {
+        crate::zdr::OrgPosture::Unknown => Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(error(
                 "retention_posture_unavailable",
                 "Draft persistence is unavailable until the organization retention policy can be verified.",
             )),
         )
-            .into_response());
-    }
-
-    let zdr_enabled = organization
-        .get("data")
-        .unwrap_or(&organization)
-        .get("metadata")
-        .and_then(|metadata| metadata.get("interactiveRetention"))
-        .and_then(|retention| retention.get("zdr"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if zdr_enabled {
-        return Err((
+            .into_response()),
+        crate::zdr::OrgPosture::Zdr => Err((
             StatusCode::PRECONDITION_FAILED,
             Json(error(
                 "zdr_draft_persistence_forbidden",
                 "Personal drafts are not retained while Zero Data Retention is enabled.",
             )),
         )
-            .into_response());
+            .into_response()),
+        crate::zdr::OrgPosture::NotZdr => Ok(()),
     }
-    Ok(())
 }
 
 /// AI-generated support work is retained review material. The Control Plane is
@@ -383,51 +358,38 @@ pub(crate) async fn require_support_ai_review(
             .into_response());
     }
 
-    let actor = actor_for(user);
-    let (status, Json(organization)) = proxy_json(
-        state,
-        Method::GET,
-        &format!(
-            "{}/api/v1/organizations/{}",
-            state.org_core_url,
-            urlencoding::encode(org_id)
-        ),
-        None,
-        Some(org_id),
-        Some(&actor),
-        None,
-    )
-    .await;
-    if !status.is_success() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(error(
-                "support_ai_policy_unavailable",
-                "AI review is unavailable until the organization policy can be verified.",
-            )),
-        )
-            .into_response());
-    }
-
+    // A durable-write gate: read the org's CURRENT posture, never the chat path's cached one. The
+    // same read also hands back the record, which carries the support AI mode checked below.
+    let (posture, organization) =
+        crate::zdr::org_posture_live_with_record(state, user, org_id).await;
+    let organization = match (posture, organization) {
+        (crate::zdr::OrgPosture::Zdr, _) => {
+            return Err((
+                StatusCode::PRECONDITION_FAILED,
+                Json(error(
+                    "zdr_ai_proposal_forbidden",
+                    "AI proposals are not retained while Zero Data Retention is enabled.",
+                )),
+            )
+                .into_response());
+        }
+        (crate::zdr::OrgPosture::NotZdr, Some(organization)) => organization,
+        // Unknown, or an answer that carries no record to read the mode from: fail closed.
+        _ => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "support_ai_policy_unavailable",
+                    "AI review is unavailable until the organization policy can be verified.",
+                )),
+            )
+                .into_response());
+        }
+    };
     let metadata = organization
         .get("data")
         .unwrap_or(&organization)
         .get("metadata");
-    let zdr_enabled = metadata
-        .and_then(|value| value.get("interactiveRetention"))
-        .and_then(|retention| retention.get("zdr"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if zdr_enabled {
-        return Err((
-            StatusCode::PRECONDITION_FAILED,
-            Json(error(
-                "zdr_ai_proposal_forbidden",
-                "AI proposals are not retained while Zero Data Retention is enabled.",
-            )),
-        )
-            .into_response());
-    }
 
     let support_ai_mode = metadata
         .and_then(|value| value.get("supportAi"))

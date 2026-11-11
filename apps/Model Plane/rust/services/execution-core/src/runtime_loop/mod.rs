@@ -210,6 +210,11 @@ pub struct StepOutcome {
     /// Set on a `read_provider_action` result that screening flagged or could not verify. The
     /// loop that ran the read takes it into the run's [`ConnectorTaint`].
     pub screening_taint: bool,
+    /// What the gate read from the verified capability decision and its own registry binding for
+    /// the call it paused: the effect class, the pinned tool digest and, for a pause a confirmed
+    /// rule lifts, the capability id. Set only with `awaiting_approval` at the capability gate;
+    /// empty everywhere else, which leaves the cause `once` only.
+    pub pause_facts: approval_cause::CallFacts,
 }
 
 impl StepOutcome {
@@ -221,6 +226,7 @@ impl StepOutcome {
             compaction_triggered: false,
             cause: None,
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
         }
     }
 
@@ -232,6 +238,7 @@ impl StepOutcome {
             compaction_triggered: false,
             cause: None,
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
         }
     }
 
@@ -243,6 +250,15 @@ impl StepOutcome {
             compaction_triggered: false,
             cause: Some(cause),
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
+        }
+    }
+
+    /// [`Self::awaiting_approval`] carrying the facts the gate read for the paused call.
+    fn awaiting_approval_with(cause: CauseCode, facts: approval_cause::CallFacts) -> Self {
+        Self {
+            pause_facts: facts,
+            ..Self::awaiting_approval(cause)
         }
     }
 
@@ -254,6 +270,7 @@ impl StepOutcome {
             compaction_triggered: false,
             cause: None,
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
         }
     }
 
@@ -265,6 +282,7 @@ impl StepOutcome {
             compaction_triggered: false,
             cause: None,
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
         }
     }
 
@@ -276,6 +294,7 @@ impl StepOutcome {
             compaction_triggered: false,
             cause: None,
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
         }
     }
 
@@ -287,6 +306,7 @@ impl StepOutcome {
             compaction_triggered: false,
             cause: None,
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
         }
     }
 
@@ -298,6 +318,7 @@ impl StepOutcome {
             compaction_triggered: false,
             cause: None,
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
         }
     }
 
@@ -309,6 +330,7 @@ impl StepOutcome {
             compaction_triggered: false,
             cause: None,
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
         }
     }
 }
@@ -422,7 +444,8 @@ mod connector_taint_tests {
 }
 
 /// The call a standing grant (build plan WS13 S6) may release from a pause, and whose owner it is.
-/// Carries the identifiers, the declared class and the run's retention, never an argument value.
+/// Carries the identifiers, the declared class, the pinned definition digest and the run's
+/// retention, never an argument value.
 #[derive(Clone, Copy)]
 struct StandingCall<'a> {
     channel: Option<&'a Channel>,
@@ -433,6 +456,9 @@ struct StandingCall<'a> {
     tool_name: &'a str,
     tool_input: &'a str,
     effect_class: &'a str,
+    /// The sha256 of the pinned MCP definition the call is bound to, from the verified decision and
+    /// the registry binding; empty for a built-in tool or an unverified decision (D2-1123).
+    tool_digest: &'a str,
     zdr: bool,
     waived: bool,
 }
@@ -452,7 +478,13 @@ impl StandingCall<'_> {
         switch_on
             && !self.zdr
             && !self.waived
-            && offers_standing_scope(cause, self.tool_name, self.tool_input, self.effect_class)
+            && offers_standing_scope(
+                cause,
+                self.tool_name,
+                self.tool_input,
+                self.effect_class,
+                self.tool_digest,
+            )
     }
 
     /// Ask the session whether a live grant releases this call. Asked once for the whole pause. An
@@ -489,15 +521,17 @@ fn offers_standing_scope(
     tool_name: &str,
     tool_input: &str,
     effect_class: &str,
+    tool_digest: &str,
 ) -> bool {
-    approval_cause::for_call_with_class(cause, "", tool_name, tool_input, effect_class)
+    approval_cause::for_call_with_tool(cause, "", tool_name, tool_input, effect_class, tool_digest)
         .scope_options
         .iter()
         .any(|scope| scope.as_str() != approval_cause::SCOPE_ONCE)
 }
 
 /// The request a standing grant is asked with: the owner, the run's thread and the call's tool,
-/// action key and class. The action key names the tool and its operation, never an argument.
+/// action key, class and pinned definition digest. The action key names the tool and its
+/// operation, never an argument.
 fn standing_request(call: &StandingCall<'_>) -> pb::UseApprovalScopeGrantRequest {
     pb::UseApprovalScopeGrantRequest {
         org_id: call.org_id.to_owned(),
@@ -507,6 +541,7 @@ fn standing_request(call: &StandingCall<'_>) -> pb::UseApprovalScopeGrantRequest
         tool_name: call.tool_name.trim().to_owned(),
         action_key: approval_cause::action_key(call.tool_name, call.tool_input),
         effect_class: call.effect_class.to_owned(),
+        tool_digest: call.tool_digest.to_owned(),
     }
 }
 
@@ -1065,6 +1100,10 @@ async fn execute_step_inner(
     // The class and floor this call's policy decision carried. A governed MCP call is
     // compared with them at dispatch (`execute_governed_mcp`).
     let signed_class: crate::mcp_gateway::SignedToolClass;
+    // What the verified decision and this process's own registry binding say about the call, for
+    // the cause of a pause (WS13 S7). Filled only from a verified decision; empty leaves the
+    // cause `once` only.
+    let mut pause_facts = approval_cause::CallFacts::default();
     // Set when the user's broker-validated run grant satisfied the high-risk ask
     // (`browser_grant_approval`); recorded on the run once every later gate passed.
     let mut grant_approval: Option<browser_grant_approval::GrantApproval> = None;
@@ -1099,6 +1138,11 @@ async fn execute_step_inner(
                 &evaluation.side_effect_class,
                 &evaluation.approval_floor,
             );
+            pause_facts = approval_cause::CallFacts {
+                effect_class: evaluation.side_effect_class.clone(),
+                tool_digest: evaluation.tool_digest.clone(),
+                capability_id: evaluation.capability_id.clone(),
+            };
         }
         Ok(evaluation)
             if evaluation.decision == crate::capability_policy::CapabilityDecision::Allow =>
@@ -1117,6 +1161,15 @@ async fn execute_step_inner(
                 &evaluation.side_effect_class,
                 &evaluation.approval_floor,
             );
+            // An ask whose evidence did not verify states nothing: an unverified class never
+            // widens a scope.
+            if evaluation.ask_evidence_verified {
+                pause_facts = approval_cause::CallFacts {
+                    effect_class: evaluation.side_effect_class.clone(),
+                    tool_digest: evaluation.tool_digest.clone(),
+                    capability_id: evaluation.capability_id.clone(),
+                };
+            }
             if !released {
               {
                 // A managed browser run's start was already approved by its user, in
@@ -1157,12 +1210,20 @@ async fn execute_step_inner(
                             run_id,
                             tool_name,
                             tool_input,
-                            effect_class: &signed_class.class,
+                            effect_class: &pause_facts.effect_class,
+                            tool_digest: &pause_facts.tool_digest,
                             zdr,
                             waived,
                         };
                         if !standing.grantable(cause) {
-                            return StepOutcome::awaiting_approval(cause);
+                            // A cause that is not grantable is never offered a rule.
+                            return StepOutcome::awaiting_approval_with(
+                                cause,
+                                approval_cause::CallFacts {
+                                    capability_id: String::new(),
+                                    ..pause_facts
+                                },
+                            );
                         }
                         deferred_pause = Some(cause);
                     }
@@ -1311,7 +1372,8 @@ async fn execute_step_inner(
             run_id,
             tool_name,
             tool_input,
-            effect_class: &signed_class.class,
+            effect_class: &pause_facts.effect_class,
+            tool_digest: &pause_facts.tool_digest,
             zdr,
             waived,
         };
@@ -1320,7 +1382,21 @@ async fn execute_step_inner(
             covered = covered && standing.grantable(second);
         }
         if !covered || !standing.released().await {
-            return StepOutcome::awaiting_approval(cause);
+            // A confirmed rule lifts only capability-core's risk-level ask, so a call the
+            // permission gate also holds is not offered the capability scope (D-WS13-8).
+            let rule_liftable = deferred_pause == Some(CauseCode::CapabilityHighRisk)
+                && permission_pause.is_none();
+            return StepOutcome::awaiting_approval_with(
+                cause,
+                approval_cause::CallFacts {
+                    capability_id: if rule_liftable {
+                        pause_facts.capability_id.clone()
+                    } else {
+                        String::new()
+                    },
+                    ..pause_facts
+                },
+            );
         }
     }
 
@@ -4796,6 +4872,7 @@ mod tests {
                 side_effect_class: String::new(),
                 approval_floor: String::new(),
                 capability_id: String::new(),
+                tool_digest: String::new(),
                 reason: String::new(),
                 ask_evidence_verified: false,
             })
@@ -4832,6 +4909,7 @@ mod tests {
                 side_effect_class: String::new(),
                 approval_floor: String::new(),
                 capability_id: String::new(),
+                tool_digest: String::new(),
                 reason: String::new(),
                 ask_evidence_verified: true,
             })
@@ -4879,6 +4957,7 @@ mod tests {
                 side_effect_class: String::new(),
                 approval_floor: String::new(),
                 capability_id: "cap.browser.open".to_owned(),
+                tool_digest: String::new(),
                 reason: reason.to_owned(),
                 ask_evidence_verified: decision
                     == crate::capability_policy::CapabilityDecision::Ask,
@@ -5174,6 +5253,115 @@ mod tests {
                 Some(CauseCode::CapabilityHighRisk),
                 "{source:?}"
             );
+        }
+    }
+
+    /// The pinned definition digest the double below reports for its MCP tool.
+    const PINNED_DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// Answers a high-risk `ask` for a pinned MCP read tool, with the class, capability and digest
+    /// a gRPC policy would read from its own registry binding. `verified` is whether the ask's
+    /// evidence verified.
+    struct PinnedReadAsk {
+        verified: bool,
+    }
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for PinnedReadAsk {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, tonic::Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Ask)
+        }
+
+        async fn evaluate_tool_call(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+            _user_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityEvaluation, tonic::Status> {
+            Ok(crate::capability_policy::CapabilityEvaluation {
+                decision: crate::capability_policy::CapabilityDecision::Ask,
+                decision_id: "pdec_pinned".to_owned(),
+                capability_version: "1.0.0".to_owned(),
+                evidence_verified: true,
+                policy_source: "risk_level".to_owned(),
+                side_effect_class: "read".to_owned(),
+                approval_floor: String::new(),
+                capability_id: "cap.mcp.srv.echo".to_owned(),
+                tool_digest: PINNED_DIGEST.to_owned(),
+                reason: "capability requires approval".to_owned(),
+                ask_evidence_verified: self.verified,
+            })
+        }
+    }
+
+    /// Serialises the tests that turn the scope-grant switch on, which is process-wide.
+    static SCOPE_GRANTS_SWITCH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// A verified high-risk ask for a pinned MCP read tool that no other gate holds carries the
+    /// verified class, the pinned digest and the capability id (WS13 S7); with grants off the
+    /// cause is not grantable, so it carries no capability id.
+    #[tokio::test]
+    async fn a_verified_high_risk_ask_for_a_pinned_read_tool_carries_its_facts() {
+        let _switch = SCOPE_GRANTS_SWITCH.lock().await;
+        let policy = PinnedReadAsk { verified: true };
+
+        std::env::set_var(approval_cause::SCOPE_GRANTS_ENV, "true");
+        let on = step_through_the_gate("mcp__srv__echo", "{}", "auto", "", &policy).await;
+        std::env::remove_var(approval_cause::SCOPE_GRANTS_ENV);
+        assert_eq!(on.status, "awaiting_approval", "{on:?}");
+        assert_eq!(on.cause, Some(CauseCode::CapabilityHighRisk));
+        assert_eq!(
+            on.pause_facts,
+            approval_cause::CallFacts {
+                effect_class: "read".to_owned(),
+                tool_digest: PINNED_DIGEST.to_owned(),
+                capability_id: "cap.mcp.srv.echo".to_owned(),
+            }
+        );
+
+        let off = step_through_the_gate("mcp__srv__echo", "{}", "auto", "", &policy).await;
+        assert_eq!(off.status, "awaiting_approval", "{off:?}");
+        assert_eq!(off.pause_facts.effect_class, "read");
+        assert_eq!(off.pause_facts.tool_digest, PINNED_DIGEST);
+        assert!(off.pause_facts.capability_id.is_empty(), "{off:?}");
+    }
+
+    /// A call the permission gate also holds is not offered a rule: capability-core's allow lifts
+    /// only its own risk-level ask (D-WS13-8), so the capability id is not carried.
+    #[tokio::test]
+    async fn a_call_the_permission_gate_also_holds_carries_no_capability_id() {
+        let _switch = SCOPE_GRANTS_SWITCH.lock().await;
+        let policy = PinnedReadAsk { verified: true };
+
+        std::env::set_var(approval_cause::SCOPE_GRANTS_ENV, "true");
+        let out = step_through_the_gate("tickets.create", "{}", "auto", "", &policy).await;
+        std::env::remove_var(approval_cause::SCOPE_GRANTS_ENV);
+        assert_eq!(out.status, "awaiting_approval", "{out:?}");
+        assert_eq!(out.pause_facts.effect_class, "read");
+        assert_eq!(out.pause_facts.tool_digest, PINNED_DIGEST);
+        assert!(out.pause_facts.capability_id.is_empty(), "{out:?}");
+    }
+
+    /// An ask whose evidence did not verify states nothing: an unverified class never widens a
+    /// scope.
+    #[tokio::test]
+    async fn an_unverified_ask_carries_empty_facts() {
+        let _switch = SCOPE_GRANTS_SWITCH.lock().await;
+        let policy = PinnedReadAsk { verified: false };
+
+        std::env::set_var(approval_cause::SCOPE_GRANTS_ENV, "true");
+        let on = step_through_the_gate("mcp__srv__echo", "{}", "auto", "", &policy).await;
+        std::env::remove_var(approval_cause::SCOPE_GRANTS_ENV);
+        let off = step_through_the_gate("mcp__srv__echo", "{}", "auto", "", &policy).await;
+        for out in [on, off] {
+            assert_eq!(out.status, "awaiting_approval", "{out:?}");
+            assert_eq!(out.pause_facts, approval_cause::CallFacts::default(), "{out:?}");
         }
     }
 
@@ -6405,6 +6593,7 @@ mod standing_grant_gate_tests {
             tool_name,
             tool_input,
             effect_class,
+            tool_digest: "",
             zdr: false,
             waived: false,
         }
@@ -6440,7 +6629,7 @@ mod standing_grant_gate_tests {
             ("mcp__srv__pay", "read"),
         ] {
             assert!(
-                !offers_standing_scope(CauseCode::OwnerEffectReserved, tool, "{}", class),
+                !offers_standing_scope(CauseCode::OwnerEffectReserved, tool, "{}", class, ""),
                 "{tool} {class}"
             );
         }
@@ -6451,24 +6640,31 @@ mod standing_grant_gate_tests {
         let write = r#"{"operation":"message.send"}"#;
         for code in [CauseCode::ProviderWrite, CauseCode::AutoPostureProviderWrite] {
             assert!(
-                !offers_standing_scope(code, "execute_provider_action", write, "external_write"),
+                !offers_standing_scope(code, "execute_provider_action", write, "external_write", ""),
                 "{code:?}"
             );
         }
         assert!(
-            !offers_standing_scope(CauseCode::ConsentToDisclose, "execute_provider_action", write, "read"),
+            !offers_standing_scope(
+                CauseCode::ConsentToDisclose,
+                "execute_provider_action",
+                write,
+                "read",
+                ""
+            ),
             "a connected-account write is bound to its own receipt, whatever the class"
         );
     }
 
     #[test]
     fn a_hook_ask_is_not_satisfied_by_a_grant() {
-        assert!(!offers_standing_scope(CauseCode::HookAsk, "knowledge_search", "{}", "read"));
+        assert!(!offers_standing_scope(CauseCode::HookAsk, "knowledge_search", "{}", "read", ""));
         assert!(!offers_standing_scope(
             CauseCode::BrowserActionRisk,
             "browser_agent",
             "{}",
-            "read"
+            "read",
+            ""
         ));
     }
 
@@ -6478,10 +6674,11 @@ mod standing_grant_gate_tests {
             CauseCode::ConsentToDisclose,
             "knowledge_search",
             "{}",
-            "read"
+            "read",
+            ""
         ));
         assert!(
-            !offers_standing_scope(CauseCode::ConsentToDisclose, "knowledge_search", "{}", ""),
+            !offers_standing_scope(CauseCode::ConsentToDisclose, "knowledge_search", "{}", "", ""),
             "a call that states no class is offered once only"
         );
     }

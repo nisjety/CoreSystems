@@ -2627,6 +2627,23 @@ pub async fn invoke_stream_sse(
         if let Some(refusal) = crate::zdr_features::refusal(&req) {
             return zdr_refusal_stream(&request_id, refusal);
         }
+        // Under the ZDR ledger switch (DEF-Z-06b) the turn is checked against the org's budget as a persistent turn is,
+        // before any retrieval or provider call: a read of ceilings and spend, never of content. A turn over its
+        // ceiling is refused here, so it cannot exceed one it was never checked against.
+        if zdr_ledger_rows_switch() {
+            if let Some(refusal) = zdr_budget_refusal(
+                &state,
+                &request_id,
+                &org_id,
+                &user_id,
+                cost_bearer.as_ref(),
+                &normalized,
+            )
+            .await
+            {
+                return refusal;
+            }
+        }
         let grounding = if !conversation_only
             && retrieval_scope != crate::normalize::RetrievalScope::WebOnly
             && crate::retrieval::wants_grounding(&features)
@@ -2720,6 +2737,7 @@ pub async fn invoke_stream_sse(
             state,
             request_id,
             org_id,
+            user_id,
             model,
             provider_content,
             features,
@@ -6852,6 +6870,8 @@ pub async fn invoke_stream_sse(
                         }
                         usage_envelope.payload["run_id"] = json!(session_run_for_terminal.run_id);
                     }
+                    // A waived turn's row states its retention class under the ZDR ledger switch (DEF-Z-06b).
+                    stamp_retention_class(&mut usage_envelope, retention_class);
                     // A summary as of now, beside the unchanged `latency_ms`.
                     usage_envelope.payload["timing"] = timing.summary();
                     if let Some(reason) = cache_telemetry::miss_reason_for_turn(
@@ -10160,6 +10180,8 @@ async fn run_infer_fallback(
                 }
                 usage.payload["run_id"] = json!(run.run_id);
             }
+            // A waived turn's row states its retention class under the ZDR ledger switch (DEF-Z-06b).
+            stamp_retention_class(&mut usage, retention_class);
             usage.payload["timing"] = timing.summary();
             if let Some(reason) = cache_telemetry::miss_reason_for_turn(
                 // Only a platform-metered call is classified, as on the streaming path.
@@ -11044,8 +11066,9 @@ impl DirectAnswer {
 }
 
 /// What a ZDR answer states about its own cost (WS27-S5, DEC-18): numbers only. It
-/// is priced for the one stream that states it and written nowhere, so a ZDR turn
-/// still has no ledger row and no usage envelope.
+/// is priced for the one stream that states it and written nowhere. A ZDR turn's spend
+/// reaches the ledger only under `MODEL_GATEWAY_ZDR_LEDGER_ROWS` (DEF-Z-06b), as a
+/// content-free row built by `record_zdr_spend`.
 #[derive(Debug, Clone, Copy)]
 struct StatedCost {
     /// The answer's cost in USD; `None` when its model's price is unknown.
@@ -11422,7 +11445,10 @@ fn goal_judge_evidence(response: &RunAgentResponse) -> Vec<crate::goal_judge::Ev
 /// criteria, judged on the evidence the run offers. It records the verdict and the judge's own metered
 /// tokens on the turn, and answers the goal with one more `goal_progress` frame carrying the verdict.
 /// Best-effort: every failure is logged by its code and leaves the goal as it stands (active), so the
-/// user closes it by hand.
+/// user closes it by hand. The caller reaches this only after the run's tool-call evidence read
+/// answered (`thread_goal::run_tool_call_evidence`), which is session-core's thread check: a turn whose
+/// read did not answer is never judged, so no answer of a thread holding a ZDR or waived run reaches
+/// the judge model.
 async fn judge_settled_goal_turn(
     state: &AppState,
     inference_bearer: &VerifiedInferenceBearer,
@@ -11997,6 +12023,170 @@ fn zdr_stream_cost_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
     get(ZDR_STREAM_COST_VAR).is_some_and(|value| value.trim() == "true")
 }
 
+/// The switch that puts a ZDR turn's spend in the usage ledger (DEF-Z-06b). Opt-in: only
+/// the literal `true` enables it. Off, a ZDR turn is not checked against the org's budget
+/// and publishes no ledger row, exactly as it did before the switch existed. Turning it
+/// on is an owner call under DEC-18(d).
+const ZDR_LEDGER_ROWS_VAR: &str = "MODEL_GATEWAY_ZDR_LEDGER_ROWS";
+
+fn zdr_ledger_rows_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(ZDR_LEDGER_ROWS_VAR).is_some_and(|value| value.trim() == "true")
+}
+
+/// The switch as this process's environment states it. The ZDR branch and the ledger
+/// helpers read it through here, so the handler itself reads no environment.
+fn zdr_ledger_rows_switch() -> bool {
+    zdr_ledger_rows_enabled_with(&|key| std::env::var(key).ok())
+}
+
+/// Stamps the retention class of a ZDR or waived turn on its ledger row, under the ZDR
+/// ledger switch (DEF-Z-06b). A turn that states no class, and every turn while the switch
+/// is off, leaves its row as it was. The class is a closed token, never content.
+fn stamp_retention_class(
+    envelope: &mut Envelope,
+    retention_class: Option<crate::sse_events::RetentionClass>,
+) {
+    if let Some(class) = retention_class.filter(|_| zdr_ledger_rows_switch()) {
+        envelope.payload["retention_class"] = json!(class.as_str());
+    }
+}
+
+/// The budget check of a ZDR turn (DEF-Z-06b), run before its provider call under the ZDR
+/// ledger switch. It is the check a persistent turn runs: the org's ceilings are read from
+/// org-core and the org's spend from cost-core, by ids and amounts only, and no content of
+/// the turn leaves the gateway. A refusal is the stream the persistent path would send for
+/// the same check, so the client sees one wording either way. `None` lets the turn go on.
+async fn zdr_budget_refusal(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+    cost_bearer: Option<&VerifiedCostBearer>,
+    normalized: &crate::normalize::NormalizedRequest,
+) -> Option<Sse<ReceiverStream<Result<Event, Infallible>>>> {
+    let org_limits = crate::org_quota::fetch_org_limits(
+        &state.http_client,
+        &state.org_core_base_url,
+        org_id,
+        &state.org_core_service_id,
+        &state.org_core_service_token,
+    )
+    .await;
+    let (status, Json(error)) = crate::budget::check_budget(
+        &state.http_client,
+        org_id,
+        user_id,
+        cost_bearer.map_or("", VerifiedCostBearer::as_str),
+        normalized,
+        org_limits,
+    )
+    .await
+    .err()?;
+    let code = error
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("budget_unavailable");
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("Unable to verify the request budget.");
+    tracing::warn!(request_id = %request_id, code = %code, "zdr turn refused by the budget check before any provider call");
+    Some(error_stream(
+        request_id,
+        code,
+        message,
+        status == StatusCode::SERVICE_UNAVAILABLE,
+    ))
+}
+
+/// The ledger row of a ZDR answer (DEF-Z-06b): the ordinary usage envelope, so cost-core
+/// reads it as it reads any chat row. It carries ids (org, user, request), the served model
+/// and provider, the four token counts, the amount when the answer was priced, and the
+/// retention class. It carries no prompt, no answer, no thread or message id and no tool
+/// argument, and a direct answer has no run, so it names none.
+///
+/// The envelope's own `zdr` flag stays false on purpose: the publisher drops every
+/// envelope that sets it, and cost-core refuses one. What keeps the row ZDR-safe is its
+/// shape, not that flag.
+#[allow(clippy::too_many_arguments)]
+fn build_zdr_usage_envelope(
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+    answer: &DirectAnswer,
+    basis: crate::pricing::CostBasis,
+    cost_usd: Option<f64>,
+    latency_ms: u64,
+    min_privacy_tier: i32,
+) -> Envelope {
+    let mut envelope = build_usage_envelope(
+        request_id,
+        org_id,
+        user_id,
+        &answer.model_used,
+        answer.input_tokens,
+        answer.output_tokens,
+        latency_ms,
+        zdr_enforced_floor(min_privacy_tier),
+        answer.provider_used.clone(),
+        answer.residency.clone(),
+        answer.cache_read_tokens,
+        answer.cache_write_tokens,
+        basis,
+    );
+    envelope.payload["retention_class"] = json!(crate::sse_events::RetentionClass::Zdr.as_str());
+    if let Some(usd) = cost_usd {
+        envelope.payload["cost_usd"] = json!(usd);
+    }
+    envelope
+}
+
+/// Puts a completed ZDR answer's spend on the usage ledger (DEF-Z-06b), under the ZDR
+/// ledger switch; off, it returns at once. `stated` is the answer's price when the
+/// in-stream cost already priced it, so the catalogue is read once; otherwise it is priced
+/// here. The row goes through the usage publisher every chat row uses, so no new store is
+/// written. Best effort, like the persistent path's row: a failed publish is logged with
+/// ids only and changes nothing the client sees. The publish is spawned so the answer's
+/// first byte does not wait on it.
+#[allow(clippy::too_many_arguments)]
+async fn record_zdr_spend(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+    route: &crate::zdr_precheck::ConnectionRoute,
+    answer: &DirectAnswer,
+    stated: Option<StatedCost>,
+    latency_ms: u64,
+    min_privacy_tier: i32,
+) {
+    if !zdr_ledger_rows_switch() {
+        return;
+    }
+    let stated = match stated {
+        Some(stated) => stated,
+        None => zdr_stated_cost(state, route, answer).await,
+    };
+    let envelope = build_zdr_usage_envelope(
+        request_id,
+        org_id,
+        user_id,
+        answer,
+        stated.basis,
+        stated.usd,
+        latency_ms,
+        min_privacy_tier,
+    );
+    let publisher = state.publisher.clone();
+    let subject = subjects::usage_subject(org_id);
+    let request_id = request_id.to_owned();
+    tokio::spawn(async move {
+        if let Err(error) = publisher.publish(&subject, &envelope).await {
+            tracing::warn!(%error, request_id = %request_id, "failed to publish a zdr turn's usage envelope");
+        }
+    });
+}
+
 /// The cost a ZDR answer states, priced from its own counts and the model that served
 /// it. The basis is the route's, settled by the provider that answered, as the durable
 /// path settles it. The catalogue is read and the figure returned; nothing is stored or
@@ -12039,6 +12229,9 @@ async fn zdr_direct_stream(
     state: AppState,
     request_id: String,
     org_id: String,
+    // The caller's user id: the ledger row of the answer (DEF-Z-06b) names the user the spend is attributed to, as
+    // every chat row does. An id only; read nowhere else in this path.
+    user_id: String,
     model: String,
     content: String,
     features: Vec<String>,
@@ -12149,6 +12342,20 @@ async fn zdr_direct_stream(
     } else {
         None
     };
+    // Under its own switch the answer's spend reaches the ledger as a content-free row (DEF-Z-06b). The in-stream
+    // cost above is unchanged: it is stated only when its own switch priced the answer.
+    record_zdr_spend(
+        &state,
+        &request_id,
+        &org_id,
+        &user_id,
+        &route,
+        &answer,
+        stated_cost,
+        latency_ms,
+        min_privacy_tier,
+    )
+    .await;
     zdr_answer_stream(
         request_id,
         grounding,
@@ -12178,7 +12385,7 @@ fn zdr_answer_stream(
     // The answer's provenance as the serving call stated it, floored at the ZDR
     // tier the call was made under. It carries counts and provenance only, never
     // content. The cost and the cache counts it was priced from are stated only when
-    // the cost switch priced this answer; persisting a ZDR turn's cost is DEF-Z-06b.
+    // the cost switch priced this answer; the ledger row of a ZDR turn's cost is `record_zdr_spend`, under its own switch.
     let (cost_usd, cost_basis, cache_read_tokens, cache_write_tokens, cost_by_category) =
         match stated_cost {
             Some(stated) => (
@@ -15039,36 +15246,48 @@ fn agentic_run_stream(
                         zdr,
                         ..Default::default()
                     };
-                    // The run's tool calls, by name and status, read by run id; this block already
-                    // excludes ZDR and waived turns, so no such run is read.
-                    let mut evidence = crate::thread_goal::run_tool_call_evidence(
+                    // The run's tool calls, by name and status, read by run id. The read is also the
+                    // thread check: session-core refuses it for a thread holding a ZDR or waived run,
+                    // so the turn is judged only after it answered. Any failure skips the judge.
+                    match crate::thread_goal::run_tool_call_evidence(
                         &state,
                         &org_id,
                         &run.run_id,
                         zdr || retention_class.is_some(),
                     )
-                    .await;
-                    for line in goal_judge_evidence(&response) {
-                        if !evidence.iter().any(|kept| kept.id == line.id) {
-                            evidence.push(line);
-                        }
-                    }
-                    evidence.truncate(crate::goal_judge::MAX_EVIDENCE_LINES);
-                    if let Some(frame) = judge_settled_goal_turn(
-                        &state,
-                        &inference_bearer,
-                        &judge_route,
-                        &model,
-                        &request_id,
-                        &org_id,
-                        zdr,
-                        &settled,
-                        &response.final_output,
-                        &evidence,
-                    )
                     .await
                     {
-                        let _ = tx.send(Ok(frame.to_sse(&request_id))).await;
+                        Err(crate::thread_goal::JudgeSkipped) => {
+                            tracing::warn!(
+                                %request_id,
+                                turn_no = settled.turn_no,
+                                "goal judge skipped: evidence read incomplete"
+                            );
+                        }
+                        Ok(mut evidence) => {
+                            for line in goal_judge_evidence(&response) {
+                                if !evidence.iter().any(|kept| kept.id == line.id) {
+                                    evidence.push(line);
+                                }
+                            }
+                            evidence.truncate(crate::goal_judge::MAX_EVIDENCE_LINES);
+                            if let Some(frame) = judge_settled_goal_turn(
+                                &state,
+                                &inference_bearer,
+                                &judge_route,
+                                &model,
+                                &request_id,
+                                &org_id,
+                                zdr,
+                                &settled,
+                                &response.final_output,
+                                &evidence,
+                            )
+                            .await
+                            {
+                                let _ = tx.send(Ok(frame.to_sse(&request_id))).await;
+                            }
+                        }
                     }
                 }
             }

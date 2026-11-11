@@ -343,6 +343,17 @@ services:
             # JWT_PUBLIC_KEY_FILE). Paths only — no private-key material in compose.
             CONVEX_AUTH_PRIVATE_KEY_FILE: ${CONVEX_AUTH_PRIVATE_KEY_FILE:-/app/keys/convex-auth.key}
             CONVEX_AUTH_PUBLIC_KEY_FILE: ${CONVEX_AUTH_PUBLIC_KEY_FILE:-/app/keys/convex-auth.pub}
+            # Dedicated retention-decision signing key (ZDR section 5.3, D-ZDR-01). The
+            # owner provisions /app/keys/zdr-decision.key and /app/keys/zdr-decision.pub
+            # under the read-only keys mount above; the pair MUST differ from the convex
+            # pair and is never published in the JWKS. Empty means unset: the signer is
+            # unavailable and every waiver fails closed. There is no ephemeral fallback.
+            # The PREVIOUS pair (public key only) is accepted for verify during rotation.
+            ZDR_DECISION_KEY_ID: ${ZDR_DECISION_KEY_ID:-}
+            ZDR_DECISION_PRIVATE_KEY_FILE: ${ZDR_DECISION_PRIVATE_KEY_FILE:-}
+            ZDR_DECISION_PUBLIC_KEY_FILE: ${ZDR_DECISION_PUBLIC_KEY_FILE:-}
+            ZDR_DECISION_PREVIOUS_KEY_ID: ${ZDR_DECISION_PREVIOUS_KEY_ID:-}
+            ZDR_DECISION_PREVIOUS_PUBLIC_KEY_FILE: ${ZDR_DECISION_PREVIOUS_PUBLIC_KEY_FILE:-}
         volumes:
             - ./config/security/disposable-email-domains.txt:/app/config/security/disposable-email-domains.txt:ro
             - ./auth-core/keys:/app/keys:ro

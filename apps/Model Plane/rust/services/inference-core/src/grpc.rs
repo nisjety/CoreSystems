@@ -1896,6 +1896,11 @@ pub const PROVIDER_ERROR_MODEL_HIDDEN: &str = "model_hidden";
 /// provider answers in its place. A retry cannot change the answer.
 pub const PROVIDER_ERROR_IMAGE_MODEL_UNAVAILABLE: &str = "image_model_unavailable";
 
+/// Value of [`PROVIDER_ERROR_KIND_TRAILER`] when every provider that could serve the request is benched by the
+/// failure board, so no provider was called. [`RETRY_AFTER_MS_TRAILER`] carries when the soonest bench ends.
+/// Unlike the posture refusals, a retry after that delay can succeed.
+pub const PROVIDER_ERROR_PROVIDERS_BENCHED: &str = "providers_benched";
+
 /// Add one typed trailer. Every value here is a static code, a number or a
 /// formatted timestamp, all valid ASCII; if one ever were not, that signal is
 /// simply absent and the status code still applies.
@@ -2068,6 +2073,16 @@ fn provider_error_to_status(error: provider::ProviderError) -> Status {
                 None,
             )
         }
+        // Every eligible provider is benched, so none was called. Unavailable, as a transient failure is: the
+        // benches end on their own, and the trailer says when the soonest one does. Not a posture refusal,
+        // which asks the caller to change the request.
+        provider::ProviderError::ProvidersBenched { retry_after_ms } => typed_status(
+            tonic::Code::Unavailable,
+            format!("every eligible provider is benched; retry after {retry_after_ms}ms"),
+            PROVIDER_ERROR_PROVIDERS_BENCHED,
+            Some(retry_after_ms),
+            None,
+        ),
     }
 }
 
@@ -2658,6 +2673,9 @@ mod tests {
             },
             E::ImageModelUnavailable {
                 model: "gpt-image-1".to_owned(),
+            },
+            E::ProvidersBenched {
+                retry_after_ms: 30_000,
             },
             E::EntitlementUnavailable,
         ] {
@@ -3256,6 +3274,7 @@ mod tests {
             E::EntitlementUnavailable => "ProviderError::EntitlementUnavailable",
             E::ModelHidden { .. } => "ProviderError::ModelHidden",
             E::ImageModelUnavailable { .. } => "ProviderError::ImageModelUnavailable",
+            E::ProvidersBenched { .. } => "ProviderError::ProvidersBenched",
         }
     }
 

@@ -697,6 +697,7 @@ fn unrecorded_effect_outcome(run_id: &str, tool: &str, reason: &str) -> StepOutc
         compaction_triggered: false,
         cause: None,
         screening_taint: false,
+        pause_facts: approval_cause::CallFacts::default(),
     }
 }
 
@@ -744,6 +745,9 @@ struct PendingPause {
     arguments_json: String,
     /// The gate that held the call, from the step's own outcome.
     cause: CauseCode,
+    /// What the gate read from the verified decision and its own registry binding for the call
+    /// (WS13 S7); empty for a pause that is `once` only.
+    facts: approval_cause::CallFacts,
 }
 
 /// Everything a round loop needs that does not change between its rounds.
@@ -5113,6 +5117,7 @@ async fn run_rounds(
                             compaction_triggered: false,
                             cause: Some(CauseCode::TaintedEgress),
                             screening_taint: false,
+                            pause_facts: approval_cause::CallFacts::default(),
                         });
                     }
                     // The run's egress ceiling for this call (EP-9 E3, D-E3), from what the run is
@@ -5171,6 +5176,7 @@ async fn run_rounds(
                             compaction_triggered: false,
                             cause: None,
                             screening_taint: false,
+                            pause_facts: approval_cause::CallFacts::default(),
                         });
                     }
                     // The release's pre-reserve could not be recorded (it failed, or its answer
@@ -5231,6 +5237,7 @@ async fn run_rounds(
                                     compaction_triggered: false,
                                     cause: None,
                                     screening_taint: false,
+                                    pause_facts: approval_cause::CallFacts::default(),
                                 });
                             }
                             // The action exists under another identity: whatever holds the
@@ -5543,6 +5550,7 @@ async fn run_rounds(
                         name: call.name.clone(),
                         arguments_json: call.arguments_json.clone(),
                         cause: CauseCode::BrowserHumanAssist,
+                        facts: approval_cause::CallFacts::default(),
                     });
                     continue;
                 }
@@ -5610,6 +5618,7 @@ async fn run_rounds(
                             name: call.name.clone(),
                             arguments_json: call.arguments_json.clone(),
                             cause: CauseCode::BrowserHumanAssist,
+                            facts: approval_cause::CallFacts::default(),
                         });
                         continue;
                     } else {
@@ -5682,6 +5691,7 @@ async fn run_rounds(
                             name: call.name.clone(),
                             arguments_json: call.arguments_json.clone(),
                             cause: outcome.cause.unwrap_or(CauseCode::UnclassifiedGate),
+                            facts: outcome.pause_facts.clone(),
                         });
                     } else {
                         outcomes.push(ToolStepResult {
@@ -5865,6 +5875,7 @@ async fn run_rounds(
                 &pending.name,
                 &pending.arguments_json,
                 pending.cause,
+                &pending.facts,
                 ctx.permission_wire,
                 ctx.route.is_waived(),
                 rounds_executed.saturating_add(delegated_rounds),
@@ -9497,10 +9508,12 @@ async fn declined_earlier_in_run(
 /// own input reads as, so the approval shows that category for the call it is for. A takeover pause
 /// (EP-1 S1) names the host of the session the run holds, never one the page states. A help request
 /// the agent raised (EP-1 S2) states the wall the page showed; any other browser pause is the person's
-/// takeover.
+/// takeover. Every other cause states the `facts` the gate read from the verified decision and its own
+/// registry binding (WS13 S7); empty facts leave it `once` only.
 pub(crate) fn approval_cause_for_pause(
     state: &crate::state::StateStore,
     cause: CauseCode,
+    facts: &approval_cause::CallFacts,
     run_id: &str,
     tool_name: &str,
     tool_input: &str,
@@ -9527,7 +9540,8 @@ pub(crate) fn approval_cause_for_pause(
             &host,
         );
     }
-    let mut stored = approval_cause::for_call(cause, run_id, tool_name, tool_input);
+    let mut stored =
+        approval_cause::for_call_with_facts(cause, run_id, tool_name, tool_input, facts);
     if tool_name == crate::browser_session::ACT_TOOL {
         stored.risk_category = crate::tool_bridge::browser_act_risk_category(tool_input)
             .unwrap_or_default()
@@ -9696,6 +9710,10 @@ async fn pause_for_approval(
     tool_input: &str,
     // The gate that held the call (build plan WS13 S1), stored beside the approval.
     cause: CauseCode,
+    // What the gate read for the call from the verified decision and its own registry binding
+    // (WS13 S7): the effect class, the pinned tool digest and, for a rule-liftable pause, the
+    // capability id. Empty leaves the cause `once` only.
+    facts: &approval_cause::CallFacts,
     permission_mode: &str,
     // The run's route is waived: it counts as zero-retention for new stores, so the pause states
     // no shell rule read from the command.
@@ -9827,6 +9845,7 @@ async fn pause_for_approval(
             cause: Some(approval_cause_for_pause(
                 state,
                 cause,
+                facts,
                 &req.run_id,
                 tool_name,
                 tool_input,
@@ -15297,6 +15316,7 @@ mod tests {
             compaction_triggered: false,
             cause: None,
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
         };
         let degraded = StepOutcome {
             status: "failed".to_owned(),
@@ -15305,6 +15325,7 @@ mod tests {
             compaction_triggered: false,
             cause: None,
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
         };
 
         record_tool_step(
@@ -15365,6 +15386,7 @@ mod tests {
             compaction_triggered: false,
             cause: None,
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
         };
         let failed = StepOutcome {
             status: "failed".to_owned(),
@@ -15373,6 +15395,7 @@ mod tests {
             compaction_triggered: false,
             cause: None,
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
         };
 
         record_tool_step(
@@ -15431,6 +15454,7 @@ mod tests {
             compaction_triggered: false,
             cause: None,
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
         };
 
         record_tool_step(
@@ -15524,6 +15548,7 @@ mod tests {
             compaction_triggered: false,
             cause: None,
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
         };
         let failure = StepOutcome {
             status: "failed".to_owned(),
@@ -15532,6 +15557,7 @@ mod tests {
             compaction_triggered: false,
             cause: None,
             screening_taint: false,
+            pause_facts: approval_cause::CallFacts::default(),
         };
 
         record_tool_step(
@@ -18505,6 +18531,7 @@ mod tests {
             "delete_records",
             "{}",
             CauseCode::RiskyEffectUnderAsk,
+            &approval_cause::CallFacts::default(),
             "ask",
             false,
             0,
@@ -18541,6 +18568,7 @@ mod tests {
             crate::browser_session::ACT_TOOL,
             input,
             CauseCode::BrowserActionRisk,
+            &approval_cause::CallFacts::default(),
             "ask",
             false,
             0,
@@ -18590,6 +18618,7 @@ mod tests {
             crate::browser_session::OBSERVE_TOOL,
             "{}",
             CauseCode::BrowserHumanAssist,
+            &approval_cause::CallFacts::default(),
             "ask",
             false,
             0,
@@ -18659,6 +18688,7 @@ mod tests {
             "delete_records",
             "{}",
             CauseCode::RiskyEffectUnderAsk,
+            &approval_cause::CallFacts::default(),
             "ask",
             false,
             0,

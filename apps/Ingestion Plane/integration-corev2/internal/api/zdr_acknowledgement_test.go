@@ -594,10 +594,13 @@ func TestThePostureReadIsNeverCached(t *testing.T) {
 
 func assertPostureKeys(t *testing.T, data map[string]any) {
 	t.Helper()
-	allowed := map[string]bool{"connectionId": true, "ackState": true, "ackId": true, "digest": true, "textVersion": true}
+	allowed := map[string]bool{
+		"connectionId": true, "ackState": true, "ackId": true, "digest": true, "textVersion": true,
+		"providerKey": true, "capability": true, "waiverRoute": true, "ackReason": true,
+	}
 	for key := range data {
 		if !allowed[key] {
-			t.Fatalf("posture read leaks %q; it may carry only the digest, text version and ack state", key)
+			t.Fatalf("posture read leaks %q; it may carry only the posture fields (no basis, organisation, request id or text)", key)
 		}
 	}
 	if len(data) != len(allowed) {

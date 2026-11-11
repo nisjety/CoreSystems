@@ -413,6 +413,36 @@ func (r *PostgresRepository) PurgeOrganizationConnectionZDR(ctx context.Context,
 	return result, nil
 }
 
+func (r *PostgresRepository) PurgeRevokedConnectionZDRAcknowledgements(ctx context.Context, revokedBefore time.Time, limit int) (int, error) {
+	if limit < 1 {
+		return 0, invalidZDR("limit must be at least 1")
+	}
+	total := 0
+	for {
+		// The BEFORE UPDATE guard does not fire on DELETE. Only revoked rows are selected, so an
+		// active acknowledgement can never be removed here.
+		tag, err := r.pool.Exec(ctx, `
+			DELETE FROM integration_connection_zdr_acknowledgements
+			WHERE id IN (
+				SELECT id FROM integration_connection_zdr_acknowledgements
+				WHERE revoked_at IS NOT NULL AND revoked_at < $1
+				ORDER BY revoked_at ASC, id ASC
+				LIMIT $2
+			)`, revokedBefore.UTC(), limit)
+		if err != nil {
+			return total, fmt.Errorf("sweep revoked zdr acknowledgements: %w", err)
+		}
+		deleted := int(tag.RowsAffected())
+		total += deleted
+		if deleted < limit {
+			return total, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+	}
+}
+
 func (r *PostgresRepository) ListOrganizationConnectionZDRAcknowledgements(ctx context.Context, organizationID string, limit int) (ConnectionZDRAcknowledgementList, error) {
 	organizationID = strings.TrimSpace(organizationID)
 	if organizationID == "" {

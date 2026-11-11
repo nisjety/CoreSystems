@@ -1477,8 +1477,8 @@ export default function ChatPage() {
         onRerunAsNewTurn={() => void rerunAsNewTurn(row().turn.id)}
         onScheduleThis={() => openScheduleDialogForTurn(row().turn.id)}
         onFeedback={(rating, note) => submitTurnFeedback(row().turn.id, rating, note)}
-        onApprovalDecision={(approvalId, decision) =>
-          void handleApprovalDecision(row().turn.id, approvalId, decision)
+        onApprovalDecision={(approvalId, decision, scope, promote) =>
+          void handleApprovalDecision(row().turn.id, approvalId, decision, scope, promote)
         }
         onApprovalEditedDecision={(approvalId, edit) => handleEditedApprovalDecision(row().turn.id, approvalId, edit)}
         onApprovePlan={(rung, justification, steps) =>
@@ -1767,8 +1767,8 @@ export default function ChatPage() {
               */}
               <ComposerTrays
                 trays={dockedTrays()}
-                onApprovalDecision={(turnId, approvalId, decision) =>
-                  void handleApprovalDecision(turnId, approvalId, decision)
+                onApprovalDecision={(turnId, approvalId, decision, scope, promote) =>
+                  void handleApprovalDecision(turnId, approvalId, decision, scope, promote)
                 }
                 onApprovalEditedDecision={(turnId, approvalId, edit) => handleEditedApprovalDecision(turnId, approvalId, edit)}
                 onApprovePlan={(turnId, rung, justification, steps) =>

@@ -19,7 +19,7 @@
 //!
 //! The completion judge (EP-7 S3) answers after a settled, completed turn. Its verdict is the
 //! gateway's one write to the goal store: [`record_verdict`] sends `RecordGoalVerdict` under a token
-//! that [`GoalVerdictTokens`] mints from the gateway's own service credential.
+//! that [`GoalVerdictTokens`] mints from the dedicated goal-judge service credential.
 
 use std::fmt;
 use std::time::Duration;
@@ -524,8 +524,8 @@ async fn send_settle(
 }
 
 /// The scope the verdict write checks. `RecordGoalVerdict` answers only a caller that holds it and
-/// is the `model-gateway` principal (see [`record_verdict`]).
-const VERDICT_SCOPE: &str = "session:write";
+/// is the `service:model-gateway-goal-judge` principal (see [`record_verdict`]).
+const VERDICT_SCOPE: &str = "session:goal-verdict:write";
 /// The reason Auth Core records beside a minted verdict token.
 const VERDICT_REASON: &str = "model-gateway goal verdict";
 /// The Auth Core audience every Session Core token names.
@@ -538,7 +538,7 @@ const JUDGE_MODEL_MAX_CHARS: usize = 128;
 const VERDICT_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// The scope the judge's read of an unattended fire holds (EP-7 S6): session-core's
 /// `GetGoalTurnForJudge`, which answers only the judge's own principal.
-const JUDGE_READ_SCOPE: &str = "session:read";
+const JUDGE_READ_SCOPE: &str = "session:goal-judge:read";
 /// The reason Auth Core records beside a minted judge read token.
 const JUDGE_READ_REASON: &str = "model-gateway goal judge read";
 /// The longest a completion judge call may take. The judge answers one short structured verdict once
@@ -559,18 +559,23 @@ pub(crate) enum GoalVerdictTokenError {
     Refused(reqwest::StatusCode),
     #[error("Auth Core returned an invalid goal verdict token")]
     InvalidResponse,
+    /// The minted token's `zdr` claim was true or unreadable: the goal-judge principal is registered
+    /// zero-retention, and session-core would refuse it. The message names the registry row, never the
+    /// token.
+    #[error("the goal judge token is zero-retention scoped; service:model-gateway-goal-judge must be persistent for session-core")]
+    ZdrScoped,
 }
 
 /// The gateway's minting client for the verdict write: its own service credential, exchanged at Auth
 /// Core for a short-lived `aud=session-core` token that holds [`VERDICT_SCOPE`] for one org. The
 /// long-lived credential is never logged or shown in `Debug`.
 ///
-/// Auth Core grants the scope only when the registry does, and session-core accepts a write only from
-/// a persistent credential (`refuse_retention_exempt`). The gateway's `session-core` principal is
-/// registered zero-retention and holds neither today, so the mint is refused, the judge does not run
-/// and the goal stays as it is, until the owner decides the principal that records verdicts.
-/// `mail_task_bridge_auth.rs` explains why a durable write needs its own registry row rather than the
-/// gateway's.
+/// The credential is the dedicated, persistent goal-judge principal (`service:model-gateway-goal-judge`,
+/// OD-58): Auth Core grants the scopes only when the registry does, and session-core accepts a read or
+/// write only from that principal with a persistent token. A token whose `zdr` claim is true (or
+/// unreadable) is refused at the mint ([`GoalVerdictTokenError::ZdrScoped`]). Unset, the judge does not
+/// run and the goal stays as it is. `mail_task_bridge_auth.rs` explains why a durable write needs its
+/// own registry row rather than the gateway's zero-retention one.
 #[derive(Clone)]
 pub(crate) struct GoalVerdictTokens {
     auth_core_url: String,
@@ -600,15 +605,23 @@ struct MintedVerdictToken {
 }
 
 impl GoalVerdictTokens {
-    /// Read from the gateway's own service credential, as the terminalization tokens are:
-    /// `MODEL_GATEWAY_SERVICE_ID` (default `model-gateway`) and `MODEL_GATEWAY_SERVICE_API_KEY`.
+    /// Read from the environment: the dedicated goal-judge credential,
+    /// `MODEL_GATEWAY_GOAL_JUDGE_SERVICE_ID` (default `model-gateway-goal-judge`) and
+    /// `MODEL_GATEWAY_GOAL_JUDGE_SERVICE_API_KEY` (required). It never falls back to
+    /// `MODEL_GATEWAY_SERVICE_API_KEY`, the zero-retention principal.
     pub(crate) fn from_env() -> Result<Self, GoalVerdictTokenError> {
-        let auth_core_url = required_env("AUTH_CORE_URL")?;
-        let service_id = std::env::var("MODEL_GATEWAY_SERVICE_ID")
-            .ok()
+        Self::from_lookup(&|name| std::env::var(name).ok())
+    }
+
+    /// [`Self::from_env`] over any variable lookup, so a test needs no environment mutation.
+    pub(crate) fn from_lookup(
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self, GoalVerdictTokenError> {
+        let auth_core_url = required_value(lookup, "AUTH_CORE_URL")?;
+        let service_id = lookup("MODEL_GATEWAY_GOAL_JUDGE_SERVICE_ID")
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "model-gateway".to_owned());
-        let credential = required_env("MODEL_GATEWAY_SERVICE_API_KEY")?;
+            .unwrap_or_else(|| "model-gateway-goal-judge".to_owned());
+        let credential = required_value(lookup, "MODEL_GATEWAY_GOAL_JUDGE_SERVICE_API_KEY")?;
         Self::from_service_credential(&auth_core_url, service_id, credential)
     }
 
@@ -656,8 +669,10 @@ impl GoalVerdictTokens {
         if org_id.is_empty() {
             return Err(GoalVerdictTokenError::MissingOrganization);
         }
-        let mut credential = reqwest::header::HeaderValue::from_str(&self.credential)
-            .map_err(|_| GoalVerdictTokenError::Configuration("MODEL_GATEWAY_SERVICE_API_KEY"))?;
+        let mut credential =
+            reqwest::header::HeaderValue::from_str(&self.credential).map_err(|_| {
+                GoalVerdictTokenError::Configuration("MODEL_GATEWAY_GOAL_JUDGE_SERVICE_API_KEY")
+            })?;
         credential.set_sensitive(true);
         let response = self
             .http
@@ -687,13 +702,21 @@ impl GoalVerdictTokens {
         {
             return Err(GoalVerdictTokenError::InvalidResponse);
         }
+        // A token whose own `zdr` claim is true (or cannot be read) would make session-core refuse the
+        // judge's read and write as a retention-exempt caller, so it is refused here, before any use.
+        if crate::mail_task_bridge_auth::decoded_zdr_claim(&minted.token).unwrap_or(true) {
+            return Err(GoalVerdictTokenError::ZdrScoped);
+        }
         Ok(minted.token)
     }
 }
 
-fn required_env(name: &'static str) -> Result<String, GoalVerdictTokenError> {
-    std::env::var(name)
-        .ok()
+/// `name` from `lookup`, or [`GoalVerdictTokenError::Configuration`] when it is unset or blank.
+fn required_value(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    name: &'static str,
+) -> Result<String, GoalVerdictTokenError> {
+    lookup(name)
         .filter(|value| !value.trim().is_empty())
         .ok_or(GoalVerdictTokenError::Configuration(name))
 }
@@ -802,35 +825,70 @@ pub(crate) async fn read_run_tool_calls_for_judge(
         .map(|response| response.into_inner().calls)
 }
 
+/// The attended judge must not run: the thread check did not answer (OD-58). It carries no cause, so
+/// nothing about the thread, the run or the answer can travel with it; the cause is logged by code at
+/// the point it arises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct JudgeSkipped;
+
+/// What an answered or failed `ListRunToolCallsForJudge` means for the attended judge. A successful read
+/// (an empty list when the run made no tool calls) offers its evidence lines. Any non-OK status, a
+/// catalogue refusal (a thread holding a zero-retention or waived run) or any other failure, skips the
+/// judge, because session-core's thread check did not answer. Logs the status code only.
+pub(crate) fn evidence_or_skip(
+    read: Result<Vec<JudgeToolCall>, tonic::Status>,
+) -> Result<Vec<EvidenceLine>, JudgeSkipped> {
+    match read {
+        Ok(calls) => Ok(crate::goal_judge::tool_call_evidence(&calls)),
+        Err(status) => {
+            tracing::warn!(code = ?status.code(), "goal judge tool-call read did not answer; the turn is not judged");
+            Err(JudgeSkipped)
+        }
+    }
+}
+
 /// The tool-call evidence the judge may cite for `run_id` (`tool:<name>:<status>`), read with the judge
-/// read token. A zero-retention or waived run is never read: `zdr` is the turn's retention and a
-/// session-core refusal covers the rest. Best-effort: a failed mint or read is logged by its code, with
-/// no content, and offers no evidence, so a `met` verdict the judge could only have cited from these
-/// lines is downgraded to `unsure` as it was before this read existed.
+/// read token. This read is also the thread check of the attended judge (OD-58): session-core refuses
+/// it for a thread that holds a zero-retention or waived run, so the judge model sees no answer of such
+/// a thread. It fails closed: `Err(JudgeSkipped)` when the turn is zero-retention, the run id is empty,
+/// the judge credential is not configured, the read token is not minted, or the read answers any
+/// non-OK status; `Ok` (an empty list when the run made no tool calls) only after a successful read.
+/// Each skip cause is logged by its code, with no ids and no content.
 pub(crate) async fn run_tool_call_evidence(
     state: &AppState,
     org_id: &str,
     run_id: &str,
     zdr: bool,
-) -> Vec<EvidenceLine> {
-    if zdr || run_id.trim().is_empty() {
-        return Vec::new();
+) -> Result<Vec<EvidenceLine>, JudgeSkipped> {
+    if zdr {
+        tracing::warn!("goal judge skipped: the turn is zero-retention");
+        return Err(JudgeSkipped);
+    }
+    if run_id.trim().is_empty() {
+        tracing::warn!("goal judge skipped: the turn has no run to check");
+        return Err(JudgeSkipped);
     }
     let Some(provider) = state.goal_verdict_tokens.as_ref() else {
-        return Vec::new();
+        tracing::warn!("goal judge skipped: the goal judge credential is not configured");
+        return Err(JudgeSkipped);
     };
     let token = match provider.read_token(org_id).await {
         Ok(token) => token,
         Err(error) => {
-            tracing::warn!(%error, "goal judge read token was not minted; the judge has no tool-call evidence");
-            return Vec::new();
+            tracing::warn!(%error, "goal judge skipped: the read token was not minted");
+            return Err(JudgeSkipped);
         }
     };
-    tool_call_evidence_for_run(state, &token, org_id, run_id).await
+    evidence_or_skip(
+        read_run_tool_calls_for_judge(state.thread_goal_client.clone(), &token, org_id, run_id)
+            .await,
+    )
 }
 
 /// The tool-call evidence of `run_id` under an already minted judge read token (the unattended judge
-/// route mints one for its goal read). Best-effort as [`run_tool_call_evidence`] is.
+/// route mints one for its goal read). Best-effort, unlike [`run_tool_call_evidence`]: that route reads
+/// the turn through `GetGoalTurnForJudge` first, which session-core refuses for a thread holding a
+/// zero-retention or waived run before any answer is read.
 pub(crate) async fn tool_call_evidence_for_run(
     state: &AppState,
     token: &str,

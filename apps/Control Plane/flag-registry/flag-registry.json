@@ -909,6 +909,17 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_ZDR_LEDGER_ROWS",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "DEF-Z-06b: a ZDR turn runs the budget check before its provider call and publishes one content-free ledger row (ids, counts, amount) after. Off, ZDR spend stays unledgered. Owner call under DEC-18(d). Only the literal true.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_ZDR_LEDGER_ROWS", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_PLANE_ALLOW_GLOBAL_DEPLOYMENT",
       "kind": "switch",
       "owner": "model-plane",

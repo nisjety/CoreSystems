@@ -285,6 +285,12 @@ type ConnectionZDRStore interface {
 	// organisation purge). It is the only operation that deletes ledger rows; a second run finds
 	// nothing and removes nothing.
 	PurgeOrganizationConnectionZDR(ctx context.Context, organizationID string) (ConnectionZDRPurgeResult, error)
+	// PurgeRevokedConnectionZDRAcknowledgements is the retention sweep: it deletes revoked
+	// acknowledgements whose revoked_at is before revokedBefore, at most limit rows per batch,
+	// repeating until a batch comes back short, and returns how many it deleted. An active row is
+	// never deleted by it, and neither is a row revoked at or after revokedBefore. limit below 1 is
+	// ErrInvalidZDR.
+	PurgeRevokedConnectionZDRAcknowledgements(ctx context.Context, revokedBefore time.Time, limit int) (int, error)
 	// ListOrganizationConnectionZDRAcknowledgements returns the organisation's ledger for its admins:
 	// the newest limit rows (no more than limit, at least one) and the counts over all rows.
 	ListOrganizationConnectionZDRAcknowledgements(ctx context.Context, organizationID string, limit int) (ConnectionZDRAcknowledgementList, error)

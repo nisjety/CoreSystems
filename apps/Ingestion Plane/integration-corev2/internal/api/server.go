@@ -41,6 +41,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/readiness"
 	"github.com/triodelab/integration-corev2/internal/store"
 	"github.com/triodelab/integration-corev2/internal/webhookorg"
+	"github.com/triodelab/integration-corev2/internal/zdr"
 )
 
 type ServerConfig struct {
@@ -74,6 +75,9 @@ type ServerConfig struct {
 	// OrgZDR reads the organisation's ZDR posture from org-core for the acknowledgement API. Nil
 	// refuses every acknowledgement (fail closed), and the routes exist only with the switch on.
 	OrgZDR ZDROrgPosture
+	// ZDRWording is the acknowledgement wording the ZDR routes use. Nil means the embedded wording
+	// (zdr.DefaultWording); a test supplies its own to reach a text version below the minimum.
+	ZDRWording *zdr.Wording
 	// CredentialSealer seals a credential binding's secret (the credential vault). Nil, and the
 	// credential-binding routes absent (404), unless CREDENTIAL_BINDINGS_ENABLED is exactly "true".
 	CredentialSealer CredentialSealer
@@ -2948,7 +2952,7 @@ func runGDPRDelete(ctx context.Context, cfg ServerConfig, body gdprRequestBody) 
 		}
 		if userID == "" {
 			// An organisation-wide delete is the organisation purge: its ZDR records and acknowledgements
-			// are erased. A user-level delete keeps the revoked rows for the audit window instead.
+			// are erased. A user-level delete keeps the revoked rows for the retention window (ZDR_ACK_RETENTION_DAYS) instead; the daily sweep removes them.
 			purged, purgeErr := tx.PurgeOrganizationConnectionZDR(ctx, organizationID)
 			if purgeErr != nil {
 				return purgeErr

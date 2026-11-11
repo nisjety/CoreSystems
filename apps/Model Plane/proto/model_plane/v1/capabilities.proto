@@ -194,6 +194,13 @@ message EvaluatePolicyRequest {
   // The value of target_kind: a lower-case host or domain, or a command's first token of at most 64
   // characters. Empty on a zero-retention or waived run, which sends target_kind alone.
   string target_value = 9;
+
+  // The run's retention as execution-core resolved it: "persistent" for a run that keeps state,
+  // "retention_bound" for a zero-retention or waived run (DEC-32). Empty when the caller does not
+  // state it. Asserted by the execution-core service principal like user_id. capability-core never
+  // lets a person's allow relax a call stated retention_bound; while TOOL_POLICY_RULE_AUDIT_ENABLED
+  // is on, anything but "persistent" counts as retention_bound (WS13 S7, D-WS13-1).
+  string run_retention = 10;
 }
 
 message EvaluatePolicyResponse {

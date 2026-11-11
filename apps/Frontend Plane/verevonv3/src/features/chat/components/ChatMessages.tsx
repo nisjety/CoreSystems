@@ -282,7 +282,12 @@ export function MessageBlock(props: {
    * offer scheduling (mirrors `onTogglePin`/`onRerunAsNewTurn`'s convention).
    */
   onScheduleThis?: () => void
-  onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  onApprovalDecision: (
+    approvalId: string,
+    decision: ApprovalDecision,
+    scope?: ApprovalScope,
+    promote?: boolean,
+  ) => void
   /** Sends an approval with the person's edits (EP-10-S6); see `ApprovalRequests`. */
   onApprovalEditedDecision?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
   onApprovePlan: (rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
@@ -625,7 +630,12 @@ export function AssistantMessage(props: {
   onContinue?: () => void
   /** See `MessageBlock`'s doc — same "Planlegg dette" affordance, forwarded through. */
   onScheduleThis?: () => void
-  onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  onApprovalDecision: (
+    approvalId: string,
+    decision: ApprovalDecision,
+    scope?: ApprovalScope,
+    promote?: boolean,
+  ) => void
   /** Sends an approval with the person's edits (EP-10-S6); see `ApprovalRequests`. */
   onApprovalEditedDecision?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
   onApprovePlan: (rung: AutonomyRung, justification: string, steps?: PlanStepEdit[]) => void
@@ -2731,7 +2741,12 @@ export function BrowserHumanAssistCard(props: {
 
 export function ApprovalRequests(props: {
   approvals: Approval[]
-  onDecide: (approvalId: string, decision: ApprovalDecision, scope?: ApprovalScope) => void
+  onDecide: (
+    approvalId: string,
+    decision: ApprovalDecision,
+    scope?: ApprovalScope,
+    promote?: boolean,
+  ) => void
   /** The turn's browser, as the person may address it (EP-1 S1); a help card offers Take over with it. */
   browserControl?: ChatRunBrowserControl
   /** Takes the turn's browser for a help request (EP-1 S2). Absent while takeover is not offered. */
@@ -2803,6 +2818,8 @@ export function ApprovalRequests(props: {
   // The standing scope a confirmed grant carries. A standing scope is only ever chosen by its own
   // control, so the one decision stays what a plain approval means.
   const [confirmingScope, setConfirmingScope] = createSignal<ApprovalScope | undefined>(undefined)
+  // "Always" (build plan WS13 S7) rides the same confirmation as the scope it is a promotion of.
+  const [confirmingPromote, setConfirmingPromote] = createSignal(false)
   const [password, setPassword] = createSignal('')
   const [confirmError, setConfirmError] = createSignal<string | null>(null)
   const [confirmBusy, setConfirmBusy] = createSignal(false)
@@ -2810,24 +2827,32 @@ export function ApprovalRequests(props: {
   const cancelConfirmation = () => {
     setConfirming(null)
     setConfirmingScope(undefined)
+    setConfirmingPromote(false)
     setPassword('')
     setConfirmError(null)
   }
 
-  const decide = (approvalId: string, decision: ApprovalDecision, scope?: ApprovalScope) => {
+  const decide = (
+    approvalId: string,
+    decision: ApprovalDecision,
+    scope?: ApprovalScope,
+    promote = false,
+  ) => {
     if (scope) {
-      props.onDecide(approvalId, decision, scope)
+      if (promote) props.onDecide(approvalId, decision, scope, true)
+      else props.onDecide(approvalId, decision, scope)
     } else {
       props.onDecide(approvalId, decision)
     }
   }
 
-  const approve = (approval: Approval, scope?: ApprovalScope) => {
+  const approve = (approval: Approval, scope?: ApprovalScope, promote = false) => {
     const draft = scope === undefined ? drafts()[approval.id] : undefined
     if (draft?.problem) return
     if (approval.cause?.stepUpRequired) {
       setConfirmError(null)
       setConfirmingScope(scope)
+      setConfirmingPromote(promote)
       setConfirming(approval.id)
       return
     }
@@ -2835,7 +2860,7 @@ export function ApprovalRequests(props: {
       void sendEdited(approval.id, draft.edit)
       return
     }
-    decide(approval.id, 'approve', scope)
+    decide(approval.id, 'approve', scope, promote)
   }
 
   const confirmationFailure = (error: unknown): string => {
@@ -2867,6 +2892,7 @@ export function ApprovalRequests(props: {
       setPassword('')
     }
     const scope = confirmingScope()
+    const promote = confirmingPromote()
     cancelConfirmation()
     // The step-up runs first for an edited grant exactly as for a plain one (WS13-S5).
     const draft = scope === undefined ? drafts()[approval.id] : undefined
@@ -2874,7 +2900,7 @@ export function ApprovalRequests(props: {
       void sendEdited(approval.id, draft.edit)
       return
     }
-    decide(approval.id, 'approve', scope)
+    decide(approval.id, 'approve', scope, promote)
   }
 
   // E3.2-b swap: the shared keyboard-first card (W3-B1-06), inline in the
@@ -2936,6 +2962,7 @@ export function ApprovalRequests(props: {
             <Show
               when={confirming() === approval.id}
               fallback={
+                <>
                 <div class="verevon-chat-approval__actions">
                   <button
                     type="button"
@@ -2956,6 +2983,21 @@ export function ApprovalRequests(props: {
                       {i18n.tr('Godkjenn for denne tråden', 'Approve for this thread')}
                     </button>
                   </Show>
+                  <Show
+                    when={
+                      !drafts()[approval.id] &&
+                      approval.cause?.ruleOffered &&
+                      offersStandingScope(approval, 'thread')
+                    }
+                  >
+                    <button
+                      type="button"
+                      class="verevon-chat-approval__approve"
+                      onClick={() => approve(approval, 'thread', true)}
+                    >
+                      {i18n.tr('Godkjenn alltid for dette verktøyet', 'Always allow this tool')}
+                    </button>
+                  </Show>
                   <Show when={!drafts()[approval.id] && offersStandingScope(approval, 'run')}>
                     <button
                       type="button"
@@ -2973,6 +3015,21 @@ export function ApprovalRequests(props: {
                     {i18n.tr('Avvis', 'Reject')}
                   </button>
                 </div>
+                <Show
+                  when={
+                    !drafts()[approval.id] &&
+                    approval.cause?.ruleOffered &&
+                    offersStandingScope(approval, 'thread')
+                  }
+                >
+                  <p class="verevon-chat-approval__detail">
+                    {i18n.tr(
+                      'Gjelder denne tråden nå. En regel foreslås i innstillingene. Når du har bekreftet den, spør ikke verktøyets høyrisikokontroll i nye samtaler på 90 dager. Tillatelsesmodusen din kan fortsatt spørre.',
+                      "Applies to this thread now. A rule is proposed in settings. Once you confirm it, this tool's high-risk check stops asking in new conversations for 90 days. Your permission mode can still ask.",
+                    )}
+                  </p>
+                </Show>
+                </>
               }
             >
               <form

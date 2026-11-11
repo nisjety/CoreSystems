@@ -73,6 +73,10 @@ services:
       # gateway reports gate_open = (this == strict) && identity_live at
       # /api/v1/ownership/status; the SPA renders no privacy affordance otherwise.
       CONTROL_PLANE_ENFORCEMENT: ${CONTROL_PLANE_ENFORCEMENT:-strict}
+      # ZDR Z-03c: the one org-posture reader answers from org-core's computed
+      # retention_posture.effective_zdr instead of the stored intent. Only the literal `true`
+      # enables it; enable after org-core serves the field (ZDR-Z-03a), or every read is Unknown.
+      GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED: ${GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED:-false}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
       ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}

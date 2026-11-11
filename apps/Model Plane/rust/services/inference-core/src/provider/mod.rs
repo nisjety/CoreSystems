@@ -1237,6 +1237,13 @@ pub enum ProviderError {
     /// the model the caller named, empty when it named none.
     #[error("image model unavailable: {model}")]
     ImageModelUnavailable { model: String },
+
+    /// Every provider that could serve the request is benched, so none was called.
+    /// `retry_after_ms` is the time until the soonest bench ends, when a provider
+    /// may be tried again. Unlike the ZDR, residency and privacy-tier refusals, this
+    /// is a wait: a caller retries after the delay rather than giving up.
+    #[error("every eligible provider is benched; retry after {retry_after_ms}ms")]
+    ProvidersBenched { retry_after_ms: u64 },
 }
 
 /// Canonical EU Azure regions permitted to serve embeddings under the EU
