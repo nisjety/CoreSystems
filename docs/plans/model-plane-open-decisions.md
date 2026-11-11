@@ -395,3 +395,100 @@ D-ZDR-02 is not used.
 - **R2-DEC-OD-59** ("assumed, owner to confirm"). Question: what does a user-subject erasure do to thread-bound memory? Recommended: delete rows bound to the person's own personal threads; on Space threads apply the EP-8 S7 attribution rule. Sub-choices assumed: user_anonymize also deletes own-thread rows and keeps Space rows (FU-03's rule); a legal hold on any affected thread (own threads, Space threads with the person's links, and the threads the person's Space-source rows cite) refuses the whole event before any store, including the existing Space-source erasure, so a release completes it on redelivery. Units: R2-OD-59-a1, a2, a3.
 - **R2-DEC-OD-40-a** ("assumed, owner to confirm"; changed after review). Recommended: a closed failure vocabulary; per-replica in-memory benching of (provider, model) for 30 s doubling to at most 300 s, clamped retry-after, half-open recovery; Server, Timeout and Empty bench only after 3 consecutive failures from at least 2 distinct orgs (cross-tenant guard; a single-org deployment then benches only on Auth, Quota and declared rate limits); a bare Unavailable never benches; a platform request never reaches the subscription provider; all eligible benched gives `providers_benched` (UNAVAILABLE plus retry-after), ahead of the posture refusals. Same-tier fallback is a separate switch (INFERENCE_SAME_TIER_FALLBACK) because it can refuse requests servable today. Rejected: a shared Redis bench board. Units: R2-OD-40-a, b1, b2, b3, c.
 - **R2-DEC-OD-40-b** ("owner must decide; not built"). Question: may a turn fall back between a platform model and the user's subscription or BYO route? Needs a reversal of ownership-matrix rule 17. Recommended: keep rule 17. Units: none.
+
+### 3.5 Depth-register triage decisions (step F, 2026-11-11)
+
+The open P0/P1 code rows of `docs/plans/model-plane-depth-register.md` (569 rows) were triaged: 127 closed, 54 covered by existing units, 285 real code gaps (207 F units after the merge), 47 owed a proof only, 43 needed a decision and 13 were stale. Because of the usage budget only the F units that close a hole in live authorization, ZDR or org-policy enforcement are built in this phase: F-f02-10, F-f02-18, F-f03-18, F-f05-01-executestep-space-search, F-f06-01, F-f06-19, F-f06-21, F-f08-12, F-f10-01, F-f10-04, F-f10-05, F-f10-16, F-f10-29. A class-A ("assumed") entry below is built only where its unit is in that list; otherwise its unit is written and waits for the next phase. Class O entries are not built.
+
+Class codes: A = "assumed, owner to confirm" (unit built dark); O = "owner must decide; not built". Source = chunk triage file. Entries are in chunk order; the merge decisions DEC-M1..M6 come last.
+
+| id | rows | question | options | recommended | class | units |
+|---|---|---|---|---|---|---|
+| DEC-F01-01 | D1-156,157 | File-size ratchet fails on this branch (hot files grew past ceilings); how to get the gate green | A split files later; B reviewed time-boxed exception list; C merge red | A for new growth + B for current backlog | O | none |
+| DEC-F01-02 | D1-177 | Should a member hold capability:write on capability-core? | A read-only + service principal; B capability:write:self; C capability:write | B after a route-by-route owner-check audit | O | none (F-f01-04 independent) |
+| DEC-F01-03 | D1-464,688-692 | May a person retract a queued mid-run message (reverses "persist before deliver")? | A approve + build withdrawn marker; B keep persist-first; C visible retracted note | B until wanted; then A | O | none (F-f01-09 independent) |
+| DEC-F01-04 | D1-475 | Model entitlement also gate non-chat inference RPCs? | A chat only; B + AnalyzeImage/image gen; C every RPC | B (embeddings stay out) | O | F-f01-11 does not extend to them |
+| DEC-F01-05 | D1-724 | How inference-core learns the Codex broker accepts medium/xhigh | A broker advertises; B runbook order; C retry clamped | A | O | F-f01-21 (order rule in PR text meanwhile) |
+| DEC-F01-06 | D1-808 | Extend stable-prefix prompt order to Anthropic routes | A dark switch + A/B; B drop cache_control; C leave | A | A | F-f01-27 |
+| DEC-F01-07 | D1-186 | Purge organization_siem_audit_outbox on org erasure? | A keep; B purge delivered; C purge all | A | A | none |
+| DEC-F01-08 | D1-426 | Repair procedure for a broken audit chain head | A owner-signed re-anchor runbook; B new epoch; C auto reset | A (owner names signers) | O | none (F-f01-02 skips broken orgs) |
+| DEC-F01-09 | D1-508 | Keep hosted URL-only image attachments? (allowlist ships off) | A allowlist on; B refuse all; C allow any | A | A | F-f01-12 |
+| DEC-F01-10 | D1-545 | Crash-parked run time-to-live and notice | A TTL ~1h; B 24h + notice; C revert to outcome_unknown | B if a resume control is planned, else A | O | none |
+| DEC-F01-11 | D1-812 | How the auth-core base schema is committed | A pg_dump live; B restore init file; C snapshot | A (operator step) | O | none |
+| DEC-F01-12 | D1-176 | Scope name capability:admin | A capability:admin; B org:admin | A | A | F-f01-04 |
+| DEC-F01-13 | D1-399 | Details guard: redact or reject | A redact; B reject + dead-letter | A | A | F-f01-03 |
+| DEC-F02-1 | D2-038 | Rollout default of CRON_CONTRACT_GUARDS_ENABLED | a off, flip with SCHEDULE_CONTRACT_ENABLED; b default true when contracts on; c independent | a (already built) | A | none |
+| DEC-F02-2 | D2-046 | Host cap counts raw entries (32) | a keep; b dedupe first | a | A | none |
+| DEC-F02-3 | D2-057 | Rotate MODEL_EXECUTION_SERVICE_API_KEY exposed in a 2026-10-23 transcript | a rotate; b accept if dev-only | a if used outside dev (needs live credential store; do not grep .env) | O | none |
+| DEC-F02-4 | D2-140 | Per-cap budget windows instead of the widest | a per-cap; b widest; c one stored period | a | A | F-f02-04 |
+| DEC-F02-5 | D2-299 | Where the Space browser entitlement is read | a org-core resolves floor; b broker asks user-core; c mint into grant request | a (same answer as DEC-F03-1) | A | F-f03-01, F-f03-02, F-f03-03 (F-f02-19/20 merged in) |
+| DEC-F03-1 | D2-309 | Where the Space browser floor bit comes from | a org-core reads user-core via scope spaces:browser-floor:read; b signed field on Space decision; c boolean from caller | a (c refused) | A | F-f03-01, F-f03-02, F-f03-03 |
+| DEC-F03-2 | D2-321 | Scheduled-run web_search egress | a withhold after external content read; b refuse always; c cap + log | a | A | F-f03-07 |
+| DEC-F03-3 | D2-452 | Posture auto and step-up causes | a never auto, stays pending for a person; b as today | a | A | F-f03-12 |
+| DEC-F03-4 | D2-464 | ZDR follow-up carrying a Space append context | a honour (narrows only); b refuse | a | A | F-f03-17 |
+| DEC-F03-5 | D2-379 | Who may read a skill bundle manifest | a follow skill visibility; b any org member | a | A | F-f03-08 |
+| DEC-F03-6 | D2-424,428 | Read-class owner actions in the admission table | a stay on owner_reads pins; b add read-class validator | a (rows closed as not applicable) | A | none (F-f04-17 builds the single listing row) |
+| DEC-F03-7 | D2-319 | Scheduled-run token ceiling value | 120,000 input+output tokens lane constant | as stated | A | F-f03-06 |
+| DEC-F04-1 | D2-549,550 | Deterministic marker scan: quoted marker / "you are now a" under enforce | a keep; b narrow list; c flag but withhold only when classifier agrees | c | A | none |
+| DEC-F04-2 | D2-700 | Unpriced metered call with a USD-only run cap | a stop (fail closed); b default price; c ignore | a | A | F-f04-07 |
+| DEC-F04-3 | D2-583 | Second narrow service key execution-core-screening for Do classifier | a separate principal; b widen existing; c deterministic only | a | A | F-f04-12 |
+| DEC-F04-4 | D2-586 | ZDR/waived Do run sends a tool result to gateway for deterministic scan only | a yes; b no | a | A | F-f04-13 step 4 (drop if no) |
+| DEC-F04-5 | D2-604 | After a flagged connector read in the Ask loop: refuse web tools or ask approval | a refuse; b approval pause | a | A | F-f04-16 |
+| DEC-F04-6 | D2-751 | One late "needs approval" notification inside the outbox latency | accept | accept | A | F-f04-20 |
+| DEC-F04-7 | D2-595 | Corpus and pass mark to release BUILTIN_OFFICE_SKILLS_ENABLED | >=100 labelled NO/EN requests, zero false injections | as stated (verification work) | A | F-f04-23 |
+| DEC-F04-8 | D2-612 | Space Do run pausing for approval loses its overlay on another process | a typed workspace_lost; b upload overlay at pause; c pin replica | a first, b later | O | none |
+| DEC-F04-9 | D2-621,624 | Stop then regenerate on a versioned thread | a refuse and say so; b regenerate names the question | b (contract of chat.run regenerate) | O | none |
+| DEC-F04-10 | D2-717 | Rotate EXECUTION_CORE_PROVIDER_WRITE_ATTESTATION_PRIVATE_KEY printed in a transcript | operator act | rotate before any shared deployment, purge transcript | O | none |
+| D-F05-1 | D2-878 | Renewal of an expired schedule approval: new schedule or in-place PATCH | a new schedule; b in-place | a (assumed); in-place not built | A (b is O) | F-f05-20 context |
+| D-F05-2 | D2-810 | Who gets approval:grant_use scope | a execution-core only via principal train + golden re-pin; b edit registry from a Model Plane unit | a | O | W2-WS13-S7-grant-digest, W2-WS13-S7-producers-b (live only) |
+| D-F05-3 | D2-863 | Service worker silent notice when a window is visible | a show then close behind VITE_PUSH_SHOW_WHEN_VISIBLE; b silent; c always show | a after a live Safari/Chrome check | A | F-f05-12 |
+| D-F05-4 | D2-936 | Browser bearer near expiry mid-turn | a typed refusal now; b park + re-mint | a now, b later | A | F-f05-15 |
+| D-F05-5 | D2-767 | Action-surface contract meaning | a ratchet with closed client-routed list; b arm per id; c delete test | a (see D-f09-5: owner prefers an executor field) | A | F-f05-02 |
+| D-F05-6 | D2-896 | Build overlay tombstones before any promote caller | a build now dark; b wait | a | A | F-f05-16, F-f05-17 |
+| D-F05-7 | D2-890 | Should a fork copy artifact revisions | a no; b copy up to fork point | a | A | none |
+| D-F05-8 | D2-861 | Extend org purge to every notification-core table | a yes, follow-up unit; b leave to teardown | a | A | F-f05-10 (extension, not yet a unit) |
+| D-F05-9 | D2-816 | Server WORKING vs legacy needs_approval | a server wins when present; b change session-core | a | A | F-f05-07 |
+| D-f06-A | - | Should sandbox-manager verify thread ownership itself too | a gateway-only (built); b sandbox-manager principal + orphan sweep | a now, b later | A | F-f06-01, F-f06-03 |
+| D-f06-B | - | Should lockdown/read-only also withdraw inline code_interpreter from Ask turns | a leave; b withdraw on lockdown; c on lockdown and read-only | b | O | F-f06-21 covers standalone browser runs only |
+| D-f06-C | - | How far project threads must go before VITE_/GATEWAY_CHAT_PROJECTS_ENABLED may go on | a append-only; b live following, approvals, plan hydration first | a first release, b before wide enablement | O | F-f06-15, F-f06-16 |
+| D-f06-D | D2-1087 | Link answered_message_id on a run question | a leave empty; b send client id + atomic append | a | A | F-f07-01 (does not depend) |
+| D-f06-E | D2-1033,1035 | Bind the Do browser session to the live panel (browser_session_opened) | a owner-only event with quarry_run_id; b gateway session id; c unbound | a (needs trace vocabulary + Quarry contract) | O | none (F-f05-28 builds the emitter dark; F-f06-10 mounts only the consent card) |
+| DEC-F07-1 | D2-1179 | What a plan approval durable grant covers after approve-then-execute | a 24h thread grant; b one approval one run; c cap by runs/TTL | b | O | none yet |
+| DEC-F07-2 | D3-077,078,080,153 | Gemini ids, regions and records at enablement | a source rows at S8 + funded live run; b ship dark only | a | O | none |
+| DEC-F07-3 | D3-180 | Precision of local time in the date notice | a minute; b hour; c date | a, flip with the stable prompt order | A | none |
+| DEC-F08-01 | D3-317 | Public Cohere rerank for tenant retrieval | a keep; b refuse non-Azure (RERANK_REQUIRE_AZURE_ENDPOINT); c b + remove default | b | A | F-f08-06 |
+| DEC-F08-02 | D3-319 | Fifteen not_gated egress destinations | a declare, publish nothing until counsel; b per-destination gate; c retire | a now, then one at a time | A (no unit) | none |
+| DEC-F08-03 | D3-392 | When the data-use label may show | a always; b behind VITE_MODEL_DATA_USE_LABEL; c remove | b | A | F-f08-17 |
+| DEC-F08-04 | D3-517 | Org spend ceilings for API-key turns | a service principal budget check; b accept api_key in cost-core; c refuse runs for ceilinged orgs (interim) | c now, a real fix | O (a/b not built there; F-f10-23a/b now builds a dark, see D-f10-5) | F-f08-14, F-f10-23a, F-f10-23b |
+| DEC-F08-05 | D3-440,449 | Credential for non-model-origin MCP elicitation questions (= DEC-EP4-S7-2) | scope orchestration:question:service-origin | as recorded in units-draft/ws14/_blocked-W3-EP-4-S7.md | O | none |
+| DEC-F08-06 | D3-442 | Held MCP elicitation calls with more than one gateway replica | a single replica; b sticky routing; c shared store | a until WS04, then b | A | none |
+| D-f09-1 | D3-583 | Do browser session across replicas or a restart | a single replica; b sticky by run id; c ids in pause state | a now, b when scaled | O | none (F-f09-02 does not hold across replicas) |
+| D-f09-2 | D3-865 | Identity that reads skill bundle blobs for the gateway | a narrow service credential; b relax rule for theme file; c leave off | a | A | F-f09-07 |
+| D-f09-3 | D3-930 | Does web.mode=off also cover browser tools | a yes behind own switch; b site policy only | a (CAPABILITY_ORG_WEB_MODE_COVERS_BROWSER) | A | F-f09-13 |
+| D-f09-4 | D3-734 | Document and skill references on a Do turn | a refuse typed now; b carry + scoped search; c silent drop | a now, b later | A | F-f09-05 |
+| D-f09-5 | D3-894 | Action-surface contract test vs client-executed actions | a committed list; b executor field on registry; c arms for all | b (changes action contract type + admission golden) | O | none (F-f05-02 builds the a-style ratchet meanwhile) |
+| D-f09-6 | D3-938,945 | May a shell approval become an Always rule | a never; b read-only argument-screened table; c wider table | b; F-f09-14 narrows regardless | O | F-f09-14 (narrowing only) |
+| D-f09-7 | D3-872 | USD half of a goal turn budget inside a run | a tokens now, USD at settle; b cancel on streamed meter; c price table in execution-core | a now, b later | A | F-f04-08, F-f04-09 (F-f09-09 merged in) |
+| D-f10-1 | D3-948 | Which roles may place/release legal holds ("compliance" role does not exist) | a add compliance role end to end; b owner-only, remove from lists; c leave | see f10 triage (no unit) | O | none |
+| D-f10-2 | D3-981 | Space settings mount of the effective-policy panel | a wait for Space ownership check; b space_id route now | a | A | none |
+| D-f10-3 | D3-975 | Do org web domain rules also bind BFF person search and crawl links | a model web calls only; b + BFF; c + Quarry deny list | a, turn on Quarry CRAWL_SCOPE=enforce at deploy | A | F-f10-04, F-f10-05 |
+| D-f10-4 | D0-014 | Scheduled Do lane non-completed step: Complete or Fail activity | a FailRunActivity closed code; b Complete + marker | a | A | F-f10-29 |
+| D-f10-5 | D3-1216 | How an Agent API key turn is budget-checked | a cost-core accepts api_key; b gateway service credential + key principal; c metering only | b | A | F-f10-23a, F-f10-23b (needs the Control registry grant) |
+| D-f10-6 | D3-947 | May org-core ask session-core whether a thread retains anything | a dedicated read-only gRPC; b push receipts; c BFF check | a | A | F-f10-02, F-f10-03 |
+| D-f10-7 | D3-1051 | How the retention sweeper erases a thread workspace | a new sandbox-manager RPC with own scope; b impersonate owner; c unconfirmed | a | A | F-f10-08, F-f10-09 |
+| D-f10-8 | D3-1096 | Where thread export gets a run model and token totals | a join cost-core ledger at export; b stamp on run row; c omit | a | A | F-f10-13 |
+| D-f10-9 | D3-940 | Should a waived Space run state neither gate tool key nor digest | a yes; b keep (digest only) | a when owner confirms | O | none |
+| D-f10-10 | D3-1151 | Which Space role may author a Space skill | same as model.space.memory.manage | as stated | A | F-f10-18 |
+
+Merge-pass decisions (new):
+
+| id | rows | question | options | recommended | class | units |
+|---|---|---|---|---|---|---|
+| DEC-M1 | D3-733,736,1070 | Learning review budget store: Postgres counters (F-f01-22) or Redis (F-f10-12) | Postgres: no new dependency, rows erased with the org purge, inside capability-core own database; Redis: cheaper counters but a new client dependency and TTL-only erasure | Postgres | A | F-f01-22, F-f10-19 (also fixes /learn 503) |
+| DEC-M2 | D2-316,317 | Scheduled step retention transport: two bools zdr/zdr_waived (F-f10-26) or a string retention_class (F-f03-04) | bools match the existing AuthenticatedUser flags; string needs an unknown-value rule | bools, absent/unknown context refused as scheduled_retention_unknown | A | F-f10-26, F-f10-29 |
+| DEC-M3 | D1-292,310,399 | audit-core switches read the literal "1" (existing parseStrictSwitch), not "true" | a keep service convention; b change parseStrictSwitch to "true" (touches every audit-core switch) | a | A | F-f01-01, F-f01-02, F-f01-03 |
+| DEC-M4 | - | Five units add or change scopes in apps/Control Plane/config/plane-service-principals.json (F-f04-12, F-f09-07, F-f10-03, F-f10-08, F-f10-23a); D-F05-2 classes a similar grant as owner-must-decide | a treat as one principal-train approval, built dark, pins re-pinned by the repo script; b hold all five | a; the owner reviews the five scopes together (each is a narrow read/erase scope on one audience) | A | the five units |
+| DEC-M5 | D3-517 | Interim guard F-f08-14 and real check F-f10-23: both kept | the real check replaces the guard when AGENT_API_BUDGET_CHECK is true; the guard is the only control if the owner rejects the principal grant | keep both, ordered | A | F-f08-14, F-f10-23a, F-f10-23b |
+| DEC-M6 | D2-299,307,309,311 | Switch name for the Space browser floor: BROWSER_SPACE_FLOOR_ENABLED (F-f03-03) vs BROWSER_SITE_SPACE_FLOOR (F-f02-20, dropped) | one name only, read in browser-broker and execution-core | BROWSER_SPACE_FLOOR_ENABLED | A | F-f03-03 |
+
+Not determined (carried from the chunk triage files): see the "Not determined" and "Notes for the integrator" sections of each f0x/_triage.md. This pass did not run any code, tests or docker, so all "verified" statements in the specs are the chunk analysts, spot-checked here against C:/dev/mp-w345 for file paths (every non-[new] path exists), session-core migration numbers, the session-core crate layout and the audit-core switch parser.
