@@ -5,6 +5,32 @@ Branch `quarry-w45` (cut from main `031e7965d` + `afcee0802`). Code only: everyt
 Unit specs come from a read-only inventory (135 units: W3 48, W4 69, W5 18). Open owner questions with a recommended option were taken at that option for dark code (owner delegation of 2026-10-23 and 2026-10-27); each unit records the decision it used. Still needing the owner: FENCE-2 (delete the committed worktree snapshot under Quarry-v2/.claude) and the tracked duplicate tree apps/Frontend Plane/Ingestion Plane.
 Merge rules: never hand-merge the agent-action-admission golden (regenerate at the second merge); session-core and capability-core migration numbers may collide with branch mp-w345 and are renumbered at whichever merge comes second.
 
+## Final status (2026-11-11): waves 1-5 code complete, not tested
+
+Owner order 2026-11-10: "complete the quarry audit plan from wave 1-5 code only before we start testing". Done on branch `quarry-w45` (worktree `C:/dev/quarry-w45`), committed per batch, not merged, not pushed.
+
+- **Units.** 235 planned units in 14 batches (QB01-QB14): 135 from the first inventory, 93 from a second inventory of W1/W2 code gaps, W3-W5 completeness and follow-up items (after a dedupe dropped 3), and 7 the lead added from batch reviews (QF-25 and QF-27 to QF-32). 227 built, 5 found already built, 3 partial, each finished by a later unit (Q3-E3.3-d2b by QF-8/QF-9/QF-10, Q4-E4.3-055c5 by the QB08 lead fix and QF-20, Q4-E4.2-4d-c by QF-29). A re-plan finds nothing left.
+- **Checks, per batch and again at the end.** Quarry-v2 and Model Plane `cargo check --workspace --all-targets`, the BFF gateway `cargo check --all-targets`, `tsc6 -p tsconfig.app.json` at the 33-error baseline, Go build + vet of every touched module, and (from QB12) the Control Plane flag registry `go test` (it is a load-time contract; QB07, QB11 and QB13 had each left an entry that made the registry refuse to load, all fixed). No unit was run or live-proven.
+- **Goldens regenerated with their owners' generators** (commit `791c6b8f5`): Quarry ZDR feature matrix + ZDR_MATRIX.md, Quarry scrape schema goldens, the web-policy catalogue (unchanged), the Model Plane ZDR refusal catalogue and SSE event payloads with every vendored copy, the SPA chat event types, the SSE taxonomy doc, and the repo sync pins. `scripts/tests/zdr-contract-sync.test.sh`: 186 of 189 pass; the 3 failures (the agent-action-admission copy and the space-surface pins) were already failing at the merge base and are regenerated at the second merge.
+
+### Owed before or during testing
+
+1. **At the merge with `mp-w345`** (whichever lands second): renumber session-core migrations 0115/0116/0117 and capability-core 0039/0040 (plus their reverts); regenerate the agent-action-admission golden (`VEREVON_UPDATE_GOLDEN=1`), the space-surface golden and pins, and the AI schema corpus (Quarry + the Model Plane copy, and the Quarry corpus test that asserts no const/anyOf/oneOf).
+2. **Needs the owner's OK** (download or external service): Quarry SDKs (`sdks/generate.sh` pulls `openapitools/openapi-generator-cli`, not present locally; it must also drop the three tracked internal-API SDK files) and the Python/TypeScript bindings of the changed Model Plane protos (`buf.gen.yaml` uses buf.build remote plugins). Go bindings were regenerated locally in each batch.
+3. **Owner decisions recorded in the ledger** (`docs/plans/quarry-w45-followups-2026-11-11.md`), the main ones:
+   - browser.consent.reject, browser.recording and request.credentials can never be turned on: the web-policy lattice has no unlock path for a default-disabled ability.
+   - With EXECUTION_CORE_SERVED_CATALOG on, served-only read operations skip the approval prompt.
+   - fill_otp is never offered: nothing fills ExecuteStepRequest.connector_scope (field 15) with the run's mail connection.
+   - cap.web.crawl/batch can attest available while Quarry refuses durable jobs under the execution lane's ZDR (blocker B4).
+   - The schedule runs list passes control's job rows through (params included).
+   - The Model Plane extract route has no keyword allowlist or depth cap, and the Gemini path refuses oneOf.
+   - The fill_otp migration 0007 down deletes fill_otp approvals.
+   - The org-core key admin scope is held by no principal; the key custody person steps (master value, escrow, custodians, restore drill) are not run.
+   - ADR 7 is still "proposed".
+   - Deep-research failed-synthesis status and USD ceiling on the synthesis call.
+4. **Still open from before:** FENCE-2 (delete the committed worktree snapshot under `Quarry-v2/.claude`) and the tracked duplicate tree `apps/Frontend Plane/Ingestion Plane`.
+5. **Tests:** no unit wrote new tests (code only). The ledger lists, per unit, the tests a writer named as owed (for example QF-8's three wiremock cases, the broker fill_otp grant cases, the quarry_core::identity tests) and every new switch, all default off.
+
 ## Batch QB01
 
 Result: built 12.
