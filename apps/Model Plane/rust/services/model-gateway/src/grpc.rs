@@ -275,7 +275,73 @@ fn plugin_from_catalog(row: &serde_json::Value) -> Plugin {
             .get("installed_at_unix")
             .and_then(serde_json::Value::as_i64)
             .unwrap_or_default(),
+        // The list leaves the supply-chain source empty (W4-PL-1); only the register response reports it.
+        ..Default::default()
     }
+}
+
+/// `PLUGIN_LOADER_ENABLED`, read with the strict reader capability-core uses: only the literal `true`
+/// turns the supply-chain pins on.
+fn plugin_loader_enabled_from_env_value(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// The process's `PLUGIN_LOADER_ENABLED`, read once so it cannot change under a request.
+fn plugin_loader_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let raw = std::env::var("PLUGIN_LOADER_ENABLED").ok();
+        plugin_loader_enabled_from_env_value(raw.as_deref())
+    })
+}
+
+/// A plugin's supply-chain source in capability-core's canonical form: the kind, the URL and the pin, each
+/// trimmed, with the pin lowercased. The gateway checks and forwards this form, so it matches what
+/// capability-core validates.
+#[derive(Debug, Default)]
+struct PluginSource {
+    kind: String,
+    reference: String,
+    pin: String,
+}
+
+impl PluginSource {
+    /// The source a registration request carries, in canonical form.
+    fn from_request(plugin: &Plugin) -> Self {
+        Self {
+            kind: plugin.source_kind.trim().to_owned(),
+            reference: plugin.source_ref.trim().to_owned(),
+            pin: plugin.source_pin.trim().to_ascii_lowercase(),
+        }
+    }
+
+    /// Why this source is not pinned, or `None` when it is. Only a full commit SHA pins a `git_commit`
+    /// source, and only `sha256:` with 64 hex digits pins an `archive`; a branch, a tag or a bare digest
+    /// never does. The reason is for the log only, so the caller never sees a value it sent.
+    fn pin_refusal(&self) -> Option<&'static str> {
+        match self.kind.as_str() {
+            "git_commit" if is_lower_hex(&self.pin, 40) => None,
+            "git_commit" => Some("git_commit pin is not a full 40-hex commit SHA"),
+            "archive" if is_archive_digest(&self.pin) => None,
+            "archive" => Some("archive pin is not sha256 followed by 64 hex digits"),
+            _ => Some("source_kind is not git_commit or archive"),
+        }
+    }
+}
+
+/// Exactly `len` lowercase hex digits.
+fn is_lower_hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// `sha256:` and then 64 lowercase hex digits, the form an archive pin takes.
+fn is_archive_digest(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| is_lower_hex(hex, 64))
 }
 
 /// The caller's own `authorization` header, for forwarding to a plane the
@@ -2304,6 +2370,24 @@ impl ModelGateway for GatewayService {
                 "plugin name and version are required",
             ));
         }
+        // W4-PL-1: with PLUGIN_LOADER_ENABLED on, a plugin needs a supply-chain pin before it reaches
+        // capability-core. The gateway applies capability-core's rule and refuses here; capability-core still
+        // checks the pin and the URL itself. Off, the source is forwarded and capability-core ignores it.
+        let source = PluginSource::from_request(&plugin);
+        let loader_on = plugin_loader_enabled();
+        let refusal = if loader_on {
+            source.pin_refusal()
+        } else {
+            None
+        };
+        if let Some(reason) = refusal {
+            // Only the reason is logged: never the pin, and never the manifest URL.
+            warn!(
+                reason = reason,
+                "plugin registration refused: no supply-chain pin"
+            );
+            return Err(Status::invalid_argument("plugin source pin is required"));
+        }
         let created: serde_json::Value = self
             .capability_json(
                 reqwest::Method::POST,
@@ -2313,6 +2397,11 @@ impl ModelGateway for GatewayService {
                     "name": plugin.name,
                     "version": plugin.version,
                     "description": plugin.kind,
+                    // The supply-chain source (W4-PL-1), in canonical form. capability-core stores it only while
+                    // its own switch is on, so with the switch off it is ignored.
+                    "source_kind": source.kind,
+                    "source_ref": source.reference,
+                    "source_pin": source.pin,
                     // capability-core stores a manifest DOCUMENT; the gateway
                     // contract carries a manifest URL. Keep the URL rather than
                     // fetch-and-inline it here — fetching a caller-supplied URL
@@ -2324,7 +2413,14 @@ impl ModelGateway for GatewayService {
             .await?;
         // capability-core deliberately creates plugins DISABLED (safe rollout)
         // and assigns its own id, so report what it stored rather than echoing
-        // what the caller asked for.
+        // what the caller asked for. The source is reported only with the loader
+        // on: then capability-core validated and stored exactly this source, and
+        // with it off it stored none.
+        let stored = if loader_on {
+            source
+        } else {
+            PluginSource::default()
+        };
         Ok(Response::new(RegisterPluginResponse {
             request_id: req.request_id,
             plugin: Some(Plugin {
@@ -2342,6 +2438,9 @@ impl ModelGateway for GatewayService {
                     .get("installed_at_unix")
                     .and_then(serde_json::Value::as_i64)
                     .unwrap_or_else(|| Utc::now().timestamp()),
+                source_kind: stored.kind,
+                source_pin: stored.pin,
+                source_ref: stored.reference,
             }),
         }))
     }

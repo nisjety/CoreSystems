@@ -207,6 +207,13 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Forbruket kunne ikke kontrolleres, så agenten startet ikke. Prøv igjen om litt.',
     en: 'Spend could not be verified, so the agent did not start. Try again shortly.',
   },
+  // The organisation's agent-run pause (F-t3-083), on a resume or continuation refused over HTTP. Nothing
+  // ran, so the words say plain chat still works and offer no retry. The words are the stream's own
+  // (chat-normalizers.ts), copied exactly.
+  org_agents_paused: {
+    no: 'Organisasjonen har satt agentkjøringer på pause. Vanlig chat fungerer som før. Ingenting ble kjørt.',
+    en: 'Your organisation has paused agent runs. Plain chat works as before. Nothing was run.',
+  },
   shipping_auth_unavailable: { no: 'Fraktintegrasjonen er ikke koblet til ennå.', en: 'The shipping integration is not connected yet.' },
   social_core_unavailable: { no: 'Sosiale medier-tjenesten er utilgjengelig akkurat nå.', en: 'The social service is unavailable right now.' },
   search_provider_unconfigured: { no: 'Søketjenesten er ikke satt opp ennå.', en: 'The search provider is not configured yet.' },

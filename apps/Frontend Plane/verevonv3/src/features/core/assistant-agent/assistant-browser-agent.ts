@@ -5,6 +5,7 @@ import { closeBrowserSession, createBrowserSession, listBrowserTabs } from '@/sh
 import { explainBrowserSite, setMyBrowserSiteChoice } from '@/shared/api/browser-sites-client'
 import { controlBrowserAiRun, createAiRunStartKeyring, isAmbiguousAiRunStartFailure, startBrowserAiRun, type BrowserTabContinuation } from '@/shared/api/browser-run-client'
 import { listRunEventReplay, streamRunEvents, type BrowserActionApprovalRequiredEvent, type BrowserActionDecidedEvent, type BrowserAttachSharedJarEvent, type BrowserObservationReceivedEvent, type RunEventHandlers } from '@/shared/api/run-console-client'
+import { browserTerminalFailureCopy } from '@/features/chat/lib/browser-terminal-copy'
 import type { AssistantAgentView } from '@/features/core/components/GlobalAssistant'
 
 type Scope = { userId: string; orgId: string; zdr?: boolean }
@@ -74,23 +75,7 @@ function actionLabel(kind: string | undefined, tr: (no: string, en: string) => s
 // Terminal replay exposes closed failure codes, never raw upstream details.
 // Unknown values stay generic rather than displaying untrusted server text.
 function terminalFailureMessage(code: unknown, tr: (no: string, en: string) => string): string | null {
-  switch (code) {
-    case 'browser_continue_tab_changed':
-      return tr('Fanen er endret. Velg fanen på nytt for å fortsette.', 'The tab has changed. Select it again to continue.')
-    case 'browser_continue_origin_changed':
-      return tr('Fanen åpnet et annet nettsted. Velg fanen på nytt hvis Verevon skal fortsette der.', 'The tab opened another site. Select the tab again to let Verevon continue there.')
-    case 'browser_permission_denied':
-    case 'browser_agent_permission_denied':
-      return tr('Nettleseragenten mangler tilgang. Kontroller agentens tilgang og tjenestestatus før du prøver igjen.', 'The browser agent lacks permission. Check its access and service status before trying again.')
-    case 'browser_timed_out':
-    case 'browser_agent_timed_out':
-      return tr('Nettleseroppgaven tok for lang tid. Prøv en kortere oppgave.', 'The browser task timed out. Try a shorter task.')
-    case 'browser_resource_exhausted':
-    case 'browser_agent_resource_exhausted':
-      return tr('Nettleseragenten nådde en ressursgrense. Prøv igjen senere eller bruk en kortere oppgave.', 'The browser agent reached a resource limit. Try again later or use a shorter task.')
-    default:
-      return null
-  }
+  return browserTerminalFailureCopy(code, tr)
 }
 
 function approvalAction(kind: string | undefined, category: string | undefined, tr: (no: string, en: string) => string): string {

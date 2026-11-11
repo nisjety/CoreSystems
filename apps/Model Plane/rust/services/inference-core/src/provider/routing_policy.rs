@@ -69,6 +69,11 @@ pub struct RoutingPolicy {
     /// reads and writes as before.
     #[serde(default, skip_serializing_if = "CatalogueOverlay::is_empty")]
     pub catalogue_overlay: CatalogueOverlay,
+    /// The live version the caller read, sent with a PUT so a write that would overwrite a newer policy is refused
+    /// (W4-BYO-3). Absent means no check, as every write did before the field existed. It is read from the request
+    /// only and never written, so the stored policy keeps its shape.
+    #[serde(default, skip_serializing)]
+    pub expected_version: Option<i64>,
 }
 
 /// The side-task purposes the role table can name (EP-13 S4). The snake_case
@@ -219,6 +224,7 @@ impl Default for RoutingPolicy {
             complexity: ComplexityWeights::default(),
             roles: RoleTable::new(),
             catalogue_overlay: CatalogueOverlay::default(),
+            expected_version: None,
             // Ladder over the deployed roster, ascending cost/capability:
             //   gpt-5-nano < gpt-4o-mini < gpt-5-mini < claude-sonnet-4-6 < claude-opus-4-8.
             // Each mode owns a distinct cost/quality identity; complexity climbs

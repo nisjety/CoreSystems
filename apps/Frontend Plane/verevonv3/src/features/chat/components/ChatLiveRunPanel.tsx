@@ -66,6 +66,7 @@ import {
   type ChatRunScreenshotState,
   type ChatRunWatchState,
 } from '@/features/chat/lib/chat-run-watch'
+import { browserTerminalFailureCopy } from '@/features/chat/lib/browser-terminal-copy'
 import { useI18n, translateApiError } from '@/shared/i18n'
 import { Button } from '@/shared/ui/Button'
 import { VerevonField } from '@/shared/ui/verevon/VerevonField'
@@ -749,6 +750,14 @@ export function ChatLiveRunPanel(props: {
     const step = latestBrowserStep(current)
     return step ? i18n.tr(`Steg ${step.step}`, `Step ${step.step}`) : i18n.tr('Kjører', 'Running')
   }
+  /**
+   * Why a takeover run ended, worded from its closed failure code (EP-1 S5). Shown only with the takeover switch on,
+   * since only takeover runs end with these codes. A code the copy does not word renders nothing.
+   */
+  const terminalFailureNote = () => {
+    const code = watch()?.terminalFailure
+    return chatBrowserTakeoverEnabled() && code ? browserTerminalFailureCopy(code, i18n.tr) : null
+  }
   const shotState = (step: ChatRunBrowserStep) => screenshotStateFor(step, { live: live(), zdr: zdr() })
   const expanded = () => {
     const selected = expandedStep()
@@ -880,6 +889,9 @@ export function ChatLiveRunPanel(props: {
                 </section>
               </Show>
               <Show when={controlError()}>
+                {(message) => <p class="verevon-chat-run-panel__control-error" role="alert">{message()}</p>}
+              </Show>
+              <Show when={terminalFailureNote()}>
                 {(message) => <p class="verevon-chat-run-panel__control-error" role="alert">{message()}</p>}
               </Show>
               {/* F-t3-081 teach mode: after a give-back in a run the person took over, save those steps as a skill. */}

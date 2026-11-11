@@ -9,7 +9,7 @@
 // There are two surfaces.
 //
 // HTTP. A refusal that arrives before the stream opens. The model-gateway route
-// answers `{ error: { code, message } }`; the BFF relays the eight codes below,
+// answers `{ error: { code, message } }`; the BFF relays the nine codes below,
 // with the upstream status and its own fixed message, and turns every other
 // upstream error into `model_error` (a 401 into `unauthorized`).
 //
@@ -70,7 +70,7 @@
 // `approval_not_found` for an approval that WAS spent. Those three are `unknown`.
 //
 // Reading rule for callers. Read a thrown value with
-// [chatRunContinueHttpRefusalOf] first (the eight listed pairs), then with
+// [chatRunContinueHttpRefusalOf] first (the nine listed pairs), then with
 // [chatRunContinueTransportFailureOf] (everything else that failed: a 502
 // `upstream_unavailable`, a 504, a network error, an unlisted body). Between them
 // they read every failed request, and none of them says the approval was unspent
@@ -120,6 +120,7 @@ export const CHAT_RUN_CONTINUE_HTTP_REFUSALS = [
   { code: 'approval_not_resumable', status: 409 },
   { code: 'continuation_already_consumed', status: 409 },
   { code: 'continue_unavailable', status: 503 },
+  { code: 'org_agents_paused', status: 403 },
 ] as const
 
 export type ChatRunContinueHttpRefusalCode = (typeof CHAT_RUN_CONTINUE_HTTP_REFUSALS)[number]['code']
@@ -302,6 +303,10 @@ export const CHAT_RUN_CONTINUE_HTTP_EFFECTS: Readonly<
     retryable: true,
     followRun: true,
   },
+  // The organisation paused agent runs (agents.paused). The pause is read before the approval,
+  // so a retry after a spend can be refused by it too, as with a switch flipped off: the spend
+  // stays unknown, and no retry is offered.
+  org_agents_paused: UNKNOWN_FOLLOW,
 }
 
 /** Regime 1: a frame of a continuation the gateway pre-consumed. */
@@ -457,9 +462,9 @@ export function chatRunContinueHttpRefusalOf(input: unknown): ChatRunContinueHtt
  *  - `gateway_timeout`: any 504;
  *  - `network`: an error with no HTTP status (a failed fetch, a stream that broke);
  *  - `unlisted`: any other failed status, such as a `model_error` or an
- *    `unauthorized`, or one of the eight codes under a status the BFF never gives it.
+ *    `unauthorized`, or one of the nine codes under a status the BFF never gives it.
  *
- * Null for the eight listed pairs (the HTTP guard reads those), for a status below
+ * Null for the nine listed pairs (the HTTP guard reads those), for a status below
  * 400, and for anything that is not an object, so exactly one of the two guards
  * reads a failed request.
  */

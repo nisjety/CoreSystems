@@ -2571,6 +2571,8 @@ export function useChatController() {
             modelContent: inlined.length > 0 ? appendInlinedAttachments(pending.text, inlined) : undefined,
             browseWeb: pending.tools?.includes('search') || pending.tools?.includes('research'),
             sourceScope: pending.sourceScope,
+            // The connected-apps picks the composer handed over (WS23 S6); the chat client withholds them on a turn that cannot take them.
+            connectorScope: pending.connectorScope,
             deepResearch: pending.tools?.includes('research'),
             displayAttachments: pending.attachments ?? [],
             effort: pending.effort,

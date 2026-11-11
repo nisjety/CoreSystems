@@ -258,6 +258,9 @@ services:
       MODEL_GATEWAY_POLICY_EFFECTIVE: ${MODEL_GATEWAY_POLICY_EFFECTIVE:-false}
       # W4-BYO-6: a turn may name one of the user's customer-gateway model connections (text-only, never zero retention). Literal true only.
       MODEL_GATEWAY_BYO_GATEWAY: ${MODEL_GATEWAY_BYO_GATEWAY:-false}
+      # W4-PL-1 (F-t3-059): the switch capability-core also reads. On, a plugin registered through this gateway needs a
+      # git_commit SHA or archive sha256 pin, or it is refused. Off by default; only the literal `true` enables it.
+      PLUGIN_LOADER_ENABLED: ${PLUGIN_LOADER_ENABLED:-false}
       RATE_LIMIT_RPM: "100"
       # Resume buffer for chat streams (chat gap closure I3). With it the frames
       # a turn has already sent are kept in the model plane's Dragonfly, so a
@@ -353,6 +356,10 @@ services:
       CONTENT_SAFETY_SEMANTIC_DEADLINE_MS: ${CONTENT_SAFETY_SEMANTIC_DEADLINE_MS:-2500}
       CONTENT_SAFETY_SEMANTIC_MAX_CALLS_PER_RUN: ${CONTENT_SAFETY_SEMANTIC_MAX_CALLS_PER_RUN:-6}
       CONTENT_SAFETY_INJECTION_MODEL: ${CONTENT_SAFETY_INJECTION_MODEL:-}
+      # WS26-S2: the normalised injection scan. It folds invisible characters and look-alike letters before the phrase
+      # match. Tighten-only: a hit adds a NOTE and an audit event. On by default; only a falsey word (0, false, no or
+      # off) opts out and restores the sixteen-phrase path.
+      CONTENT_SAFETY_NORMALIZE: ${CONTENT_SAFETY_NORMALIZE:-true}
       # WS19-S7: the skill_file tool reads a matched skill's bundle from capability-core. Off by default; only the literal
       # `true` turns it on. A skill has a bundle only once an admin uploaded one (SKILL_BUNDLES_ENABLED on capability-core).
       SKILL_FILE_TOOL_ENABLED: ${SKILL_FILE_TOOL_ENABLED:-false}
@@ -1375,6 +1382,9 @@ services:
       # org scope only for origin `user`). `off` by default; `report` counts refusals and still writes, `enforce` refuses.
       # Only those two exact words turn it on. The rollout default and the enforce date are the owner's call.
       CONTENT_WRITE_POLICY: ${CONTENT_WRITE_POLICY:-off}
+      # WS26-S2: declared because this service links mp-content-safety. The write gate above always runs the normalised
+      # scan and does not read this switch, so it stays on whatever this says.
+      CONTENT_SAFETY_NORMALIZE: ${CONTENT_SAFETY_NORMALIZE:-true}
       CONTEXT_RECENT_MESSAGES: "20"
       COMPACTION_THRESHOLD: "80000"
       # P0.4 residency: region stamped onto every run record at StartRun.
@@ -1559,6 +1569,12 @@ services:
       OPENAI_EMBEDDING_MODELS: ${OPENAI_EMBEDDING_MODELS:-}
       OPENAI_IMAGE_MODELS: ${OPENAI_IMAGE_MODELS:-}
       OPENAI_VISION_MODELS: ${OPENAI_VISION_MODELS:-}
+      # WS02-S10: the provider prompt-cache routing key goes to the first-party OpenAI endpoint only, never on a ZDR
+      # request. Off by default; only the literal true turns it on.
+      INFERENCE_OPENAI_PROMPT_CACHE_KEY: ${INFERENCE_OPENAI_PROMPT_CACHE_KEY:-false}
+      # WS08-S3: extra vision-denied model ids, comma-separated (an exact id, or a trailing * for a prefix), added to
+      # the built-in denylist. An id list, not a switch; empty adds none.
+      INFERENCE_VISION_MODEL_DENYLIST_EXTRA: ${INFERENCE_VISION_MODEL_DENYLIST_EXTRA:-}
       # Realtime session broker. OPENAI_REALTIME_MODEL is present in
       # ../.env for local dev; keep explicit forwarding so inference-core
       # sees it even though compose only exposes listed environment keys.
@@ -1876,6 +1892,10 @@ services:
       # W4-CC-7: the custom REST connector tools, offered by this loop and by model-gateway's Ask loop alike. Only the
       # literal true turns them on. A write pauses for the person's approval, and a ZDR or waived run is refused.
       EXECUTION_CUSTOM_REST_TOOLS: ${EXECUTION_CUSTOM_REST_TOOLS:-false}
+      # WS23-S3: a read tool (read_provider_action) for the connected accounts the person selected for the run. Never
+      # offered to a ZDR or Space-scoped run, or to a run that selected none. Off by default; only the literal true
+      # turns it on.
+      PROVIDER_READ_TOOL_ENABLED: ${PROVIDER_READ_TOOL_ENABLED:-false}
       # W5-070: the Do loop's deferred tool index. Off by default; only the literal true turns it on. On, a run whose
       # catalogue has more than EXECUTION_DEFERRED_TOOL_INDEX_THRESHOLD definitions offers its MCP and client-declared
       # tools only after tool_search reveals them. Off, every run is offered its whole catalogue, as before.
@@ -2055,6 +2075,10 @@ services:
       # WS26-S7: Do-mode tool results ask model-gateway ScreenContent for the same tighten-only verdict chat gets. Off by
       # default; only the literal `true`. A refused, slow or mismatched answer keeps the local verdict; ZDR runs never ask.
       CONTENT_SAFETY_SCREEN_RPC: ${CONTENT_SAFETY_SCREEN_RPC:-false}
+      # WS26-S2: the normalised injection scan. It folds invisible characters and look-alike letters before the phrase
+      # match. Tighten-only: a hit adds a NOTE and an audit event. On by default; only a falsey word (0, false, no or
+      # off) opts out and restores the sixteen-phrase path.
+      CONTENT_SAFETY_NORMALIZE: ${CONTENT_SAFETY_NORMALIZE:-true}
       # WS21-S1/S2: the Do loop's browser tools, offered only to a run that carries a verified browser bearer and is not
       # ZDR. Off by default; only the value `1` turns it on (unlike the `true` switches). The Verevon gateway's
       # BROWSER_DO_ENABLED decides whether a bearer is minted at all.

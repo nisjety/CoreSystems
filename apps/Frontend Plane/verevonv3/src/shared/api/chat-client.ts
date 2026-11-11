@@ -3182,6 +3182,16 @@ function streamConnectionFailure(err: unknown, fallback: string): ChatErrorEvent
       ...(err.feature ? { feature: err.feature } : {}),
     }
   }
+  // The organisation's agent-run pause (F-t3-083) is the org's policy refusing the run, not a sign-in problem:
+  // it keeps its code, and a 403 for it is not a lost session. The words come from the code
+  // (streamFailurePresentation), so the event carries a fixed sentence and never the server's text.
+  if (err instanceof ApiError && err.code === 'org_agents_paused') {
+    return {
+      code: err.code,
+      message: 'Organisasjonen har satt agentkjøringer på pause. Vanlig chat fungerer som før. Ingenting ble kjørt.',
+      retryable: false,
+    }
+  }
   // A typed Space denial (a policy, entitlement, role or ZDR refusal) is the
   // server's answer about the room, not a sign-in problem: keep its code and
   // details so the room can say why. An untyped 403 still reads as lost access.

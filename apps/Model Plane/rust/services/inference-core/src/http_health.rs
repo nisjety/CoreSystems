@@ -27,7 +27,7 @@ use tracing::info;
 
 use crate::auth::JwtVerifier;
 use crate::provider::fallback::FallbackChain;
-use crate::provider::policy_client::{CandidateError, PolicyClient};
+use crate::provider::policy_client::{CandidateError, PolicyClient, PolicyWriteError};
 use crate::provider::routing_diff::{self, RouteFacts};
 use crate::provider::routing_policy::RoutingPolicy;
 use crate::provider::{ModelInfo, PrivacyTier};
@@ -146,7 +146,8 @@ async fn get_policy(State(state): State<PolicyState>, headers: HeaderMap) -> Res
 
 /// Persist a new routing policy to session-core, then hot-swap the live copy.
 /// Returns the stored policy (as session-core echoes it back). 503 when no
-/// session-core store is configured.
+/// session-core store is configured. 409 when the live version is no longer the
+/// `expected_version` the PUT carries (W4-BYO-3).
 async fn put_policy(
     State(state): State<PolicyState>,
     headers: HeaderMap,
@@ -169,12 +170,18 @@ async fn put_policy(
         // With promotion required a PUT never takes a policy live: it records a candidate and answers 202.
         return propose_policy_candidate(&state, &client, &policy).await;
     }
-    match client.set(&policy, "inference-core-admin").await {
+    match client
+        .set(&policy, policy.expected_version, "inference-core-admin")
+        .await
+    {
         Ok(stored) => {
             state.policy.store(Arc::new(stored.clone()));
             (StatusCode::OK, Json(stored)).into_response()
         }
-        Err(message) => (
+        Err(PolicyWriteError::VersionConflict) => {
+            policy_version_conflict(client.live_version().await)
+        }
+        Err(PolicyWriteError::Failed(message)) => (
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({
                 "error": { "code": "policy_store_write_failed", "message": message }
@@ -182,6 +189,22 @@ async fn put_policy(
         )
             .into_response(),
     }
+}
+
+/// The 409 for a write whose `expected_version` is no longer the live version (W4-BYO-3). The body carries the live
+/// version number and nothing else of the policy, so the admin reloads it and retries against that version.
+fn policy_version_conflict(live_version: Option<i64>) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({
+            "error": {
+                "code": "policy_version_conflict",
+                "message": "the routing policy changed since the version you read; reload it and retry",
+                "details": { "live_version": live_version },
+            }
+        })),
+    )
+        .into_response()
 }
 
 /// The 503 for an admin write or promotion when no session-core store is configured.

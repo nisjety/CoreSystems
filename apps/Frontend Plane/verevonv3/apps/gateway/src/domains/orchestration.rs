@@ -863,6 +863,9 @@ fn continue_upstream_body(body: &ContinueRunBody, park_form: bool) -> Option<Val
 /// route yet; `the_continue_relay_has_no_switch_and_names_closed_codes_with_every_model_plane_switch_off`
 /// pins it.
 ///
+/// `org_agents_paused` (403) is relayed too: an org's agent-run pause refuses a
+/// continuation before its approval is read, so a retry after a spend can be refused with it.
+///
 /// Not here, on purpose: `continue_incomplete` (this handler's own blank check
 /// answers first) and `missing_bearer` (a 401, which stays `unauthorized`).
 /// Everything else the gateway answers (the owner check, a read, a consume
@@ -900,6 +903,11 @@ pub(crate) const CONTINUE_RELAYED_ERRORS: &[(&str, u16, &str)] = &[
         "continue_unavailable",
         503,
         "The continuation could not be confirmed. The same request can be sent again.",
+    ),
+    (
+        "org_agents_paused",
+        403,
+        "Agent runs are paused for this organization.",
     ),
 ];
 
@@ -1896,7 +1904,7 @@ mod tests {
     }
 
     #[test]
-    fn the_relayed_continue_errors_are_the_eight_closed_codes_with_their_statuses() {
+    fn the_relayed_continue_errors_are_the_closed_codes_with_their_statuses() {
         let listed: Vec<(&str, u16)> = CONTINUE_RELAYED_ERRORS
             .iter()
             .map(|(code, status, _)| (*code, *status))
@@ -1912,6 +1920,7 @@ mod tests {
                 ("approval_not_resumable", 409),
                 ("continuation_already_consumed", 409),
                 ("continue_unavailable", 503),
+                ("org_agents_paused", 403),
             ]
         );
         // The two the gateway sends that the BFF does not relay: its own guard

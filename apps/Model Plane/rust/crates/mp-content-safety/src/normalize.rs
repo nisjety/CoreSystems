@@ -24,10 +24,46 @@ pub fn is_invisible(c: char) -> bool {
 }
 
 /// The Unicode tag block. It has no visible glyph, and no ordinary text uses
-/// it, so every occurrence is a flag.
+/// it, so every occurrence is a flag, except the tag characters of an emoji
+/// subdivision flag (see [`subdivision_sequence_len`]).
 #[must_use]
 pub fn is_tag(c: char) -> bool {
     ('\u{E0000}'..='\u{E007F}').contains(&c)
+}
+
+/// The base of an emoji tag sequence: the waving black flag.
+const TAG_SEQUENCE_BASE: char = '\u{1F3F4}';
+
+/// The cancel tag that ends an emoji tag sequence.
+const CANCEL_TAG: char = '\u{E007F}';
+
+/// The tag characters that spell England (`gbeng`), Scotland (`gbsct`) and
+/// Wales (`gbwls`): the lowercase ISO 3166-2 codes without their hyphen. They
+/// are the only subdivision flags Unicode defines as emoji.
+const ENGLAND_TAGS: [char; 5] = ['\u{E0067}', '\u{E0062}', '\u{E0065}', '\u{E006E}', '\u{E0067}'];
+const SCOTLAND_TAGS: [char; 5] = ['\u{E0067}', '\u{E0062}', '\u{E0073}', '\u{E0063}', '\u{E0074}'];
+const WALES_TAGS: [char; 5] = ['\u{E0067}', '\u{E0062}', '\u{E0077}', '\u{E006C}', '\u{E0073}'];
+
+/// The byte length of the emoji subdivision flag at the start of `text`, or
+/// `None` when `text` does not start with one. The flag is the waving black
+/// flag, then the tag characters of England, Scotland or Wales, then the cancel
+/// tag.
+///
+/// Only those three codes are recognised, not every run of tag characters after
+/// the base. A broader rule would let a phrase ride inside one run, or be split
+/// across several. The folded text has no tag characters, so the tag-block flag
+/// is the only thing that would catch such a phrase. Any other run, a different
+/// base, a lone tag character or a missing cancel tag returns `None`.
+#[must_use]
+pub fn subdivision_sequence_len(text: &str) -> Option<usize> {
+    let body = text.strip_prefix(TAG_SEQUENCE_BASE)?;
+    [&ENGLAND_TAGS[..], &SCOTLAND_TAGS[..], &WALES_TAGS[..]]
+        .into_iter()
+        .find_map(|code| {
+            let mut rest = body.chars();
+            let complete = code.iter().all(|&tag| rest.next() == Some(tag)) && rest.next() == Some(CANCEL_TAG);
+            complete.then(|| text.len() - rest.as_str().len())
+        })
 }
 
 /// Bidirectional override and isolate controls: the characters that make

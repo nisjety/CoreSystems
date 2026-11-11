@@ -161,6 +161,16 @@ impl std::fmt::Display for CandidateError {
     }
 }
 
+/// Why a routing-policy write failed (W4-BYO-3). A version conflict is kept apart from every other failure, so the
+/// HTTP edge answers it as a 409 and every other failure keeps its 502.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyWriteError {
+    /// session-core refused the write (`ABORTED`): the live version is no longer the one the caller read.
+    VersionConflict,
+    /// Any other failure: a serialization or parse error, or session-core's refusal, with its message.
+    Failed(String),
+}
+
 /// How long an organisation's overlay is trusted before it is read again (W4-BYO-3).
 const ORG_OVERLAY_TTL: Duration = Duration::from_secs(120);
 
@@ -335,34 +345,60 @@ impl PolicyClient {
     }
 
     /// Persist `policy` to session-core, returning the stored policy as
-    /// session-core echoes it back. Errors are surfaced as `Err(String)` for
-    /// the explicit write path (the HTTP PUT handler).
+    /// session-core echoes it back. `expected_version` is the live version the
+    /// caller read: `None` sends 0, which session-core takes as an unchecked
+    /// write, and any other value must equal the live version or the write is
+    /// refused (W4-BYO-3). Errors are surfaced for the explicit write path (the
+    /// HTTP PUT handler).
     ///
     /// # Errors
     ///
-    /// Returns `Err` when serialization fails or session-core rejects/cannot
-    /// store the policy.
+    /// Returns [`PolicyWriteError::VersionConflict`] when the live version is no
+    /// longer `expected_version`, and [`PolicyWriteError::Failed`] when
+    /// serialization fails or session-core rejects or cannot store the policy.
     pub async fn set(
         &self,
         policy: &RoutingPolicy,
+        expected_version: Option<i64>,
         updated_by: &str,
-    ) -> Result<RoutingPolicy, String> {
-        let config_json =
-            serde_json::to_string(policy).map_err(|e| format!("serialize policy: {e}"))?;
+    ) -> Result<RoutingPolicy, PolicyWriteError> {
+        let config_json = serde_json::to_string(policy)
+            .map_err(|e| PolicyWriteError::Failed(format!("serialize policy: {e}")))?;
         let mut client = RoutingPolicyClient::new(self.channel.clone());
         let request = self
             .authed_request(SetRoutingPolicyRequest {
                 config_json,
                 updated_by: updated_by.to_owned(),
-                expected_version: 0,
+                expected_version: expected_version.unwrap_or(0),
             })
             .await;
         let resp = client
             .set_policy(request)
             .await
-            .map_err(|status| format!("session-core set_policy: {status}"))?
+            .map_err(|status| {
+                if status.code() == tonic::Code::Aborted {
+                    PolicyWriteError::VersionConflict
+                } else {
+                    PolicyWriteError::Failed(format!("session-core set_policy: {status}"))
+                }
+            })?
             .into_inner();
-        serde_json::from_str(&resp.config_json).map_err(|e| format!("parse stored policy: {e}"))
+        serde_json::from_str(&resp.config_json)
+            .map_err(|e| PolicyWriteError::Failed(format!("parse stored policy: {e}")))
+    }
+
+    /// The live policy's version as session-core holds it now. The conflict answer uses it to tell the admin how far
+    /// the policy has moved (W4-BYO-3). Fail-soft: `None` when the read fails.
+    pub async fn live_version(&self) -> Option<i64> {
+        let mut client = RoutingPolicyClient::new(self.channel.clone());
+        let request = self.authed_request(GetRoutingPolicyRequest {}).await;
+        match client.get_policy(request).await {
+            Ok(response) => Some(response.into_inner().version),
+            Err(error) => {
+                tracing::warn!(%error, "routing-policy version read failed after a conflict");
+                None
+            }
+        }
     }
 
     /// Record `policy` as a candidate in session-core instead of writing it live (EP-14 S10). `diff_json` is the

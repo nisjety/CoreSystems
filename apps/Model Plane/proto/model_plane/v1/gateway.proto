@@ -1308,6 +1308,14 @@ message Plugin {
   // Last-known status string ("active", "stale", "missing").
   string status = 7;
   int64 installed_at_unix = 8;
+  // Supply-chain source kind (W4-PL-1): "git_commit" or "archive". Registration requires it while
+  // PLUGIN_LOADER_ENABLED is on; capability-core refuses a plugin without a pin.
+  string source_kind = 9;
+  // Supply-chain source pin (W4-PL-1): a full 40-hex commit SHA for "git_commit", or "sha256:" and
+  // 64 lowercase hex digits for "archive". A branch or a tag never pins a source.
+  string source_pin = 10;
+  // Supply-chain source URL (W4-PL-1): an https URL with a host and no credentials, query or fragment.
+  string source_ref = 11;
 }
 
 message RegisterPluginRequest {

@@ -568,12 +568,16 @@ fn spill_file_stem(process_id: &str) -> Result<&str, String> {
 /// Creates `<root>/.tmp/process-output/<stem>.log`, replacing an earlier spill of
 /// the same process, and returns the file with its path relative to the
 /// workspace. No component may be a symbolic link, so the file lands inside the
-/// workspace whatever a process running in it has linked.
+/// workspace whatever a process running in it has linked. Both directories are
+/// identified before the file is removed or created, and again once it is open: a
+/// link swapped in between is refused, and on Unix so is a directory replaced by
+/// another one; see [`dir_identity`].
 fn create_spill(root: &Path, stem: &str) -> Result<(std::fs::File, String), String> {
     let temp = root.join(TEMP_SUBDIR);
     let dir = temp.join(OUTPUT_SPILL_SUBDIR);
     ensure_plain_dir(&temp)?;
     ensure_plain_dir(&dir)?;
+    let before = spill_dirs_identity(&temp, &dir).ok_or_else(|| SPILL_PATH_CHANGED.to_owned())?;
     let path = dir.join(format!("{stem}.log"));
     // Removed first, so the exclusive create below cannot follow a link that
     // appeared since the last spill. remove_file takes the link itself, never
@@ -588,6 +592,14 @@ fn create_spill(root: &Path, stem: &str) -> Result<(std::fs::File, String), Stri
         .create_new(true)
         .open(&path)
         .map_err(|error| format!("could not create the spill file: {error}"))?;
+    // Checked again now that the file exists. A directory that is a link now, or is
+    // not the one identified above, means the file may sit outside the workspace: it
+    // is removed, and the spill is refused.
+    if spill_dirs_identity(&temp, &dir) != Some(before) {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(SPILL_PATH_CHANGED.to_owned());
+    }
     Ok((
         file,
         format!("{TEMP_SUBDIR}/{OUTPUT_SPILL_SUBDIR}/{stem}.log"),
@@ -608,6 +620,42 @@ fn ensure_plain_dir(path: &Path) -> Result<(), String> {
         Err(error) => Err(format!("could not inspect the spill directory: {error}")),
     }
 }
+
+/// The identity of a spill directory: its device and inode numbers on Unix, where a
+/// directory swapped for a link or for another directory changes them. Off Unix it
+/// is empty; see [`dir_identity`].
+#[cfg(unix)]
+type DirIdentity = (u64, u64);
+#[cfg(not(unix))]
+type DirIdentity = ();
+
+/// The identity of `path` if it is a plain directory, read without following a
+/// link. `None` for a symbolic link, for anything that is not a directory, and for a
+/// path that cannot be read.
+#[cfg(unix)]
+fn dir_identity(path: &Path) -> Option<DirIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    meta.is_dir().then(|| (meta.dev(), meta.ino()))
+}
+
+/// The directory identity check is Unix only. Elsewhere this reads the file type
+/// alone, so a directory replaced by another one at the same path is not seen here;
+/// links are still refused, both before the file is created and after it is open.
+#[cfg(not(unix))]
+fn dir_identity(path: &Path) -> Option<DirIdentity> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    meta.is_dir().then_some(())
+}
+
+/// The identities of the temp directory and the spill directory inside it, or
+/// `None` when either is not a plain directory now.
+fn spill_dirs_identity(temp: &Path, dir: &Path) -> Option<(DirIdentity, DirIdentity)> {
+    Some((dir_identity(temp)?, dir_identity(dir)?))
+}
+
+/// The refusal when a spill directory changed around the creation of its file.
+const SPILL_PATH_CHANGED: &str = "spill path changed during create";
 
 #[derive(Deserialize)]
 struct StdinInput {

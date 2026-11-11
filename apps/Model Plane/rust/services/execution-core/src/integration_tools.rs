@@ -369,6 +369,10 @@ impl IntegrationActionsClient {
         if connection_id.trim().is_empty() {
             return Err("execute_provider_action requires connection_id".to_owned());
         }
+        // The id is spliced into the gateway path below, so it takes the read paths' guard.
+        if !is_connection_id(connection_id) {
+            return Err("execute_provider_action requires a valid connection_id".to_owned());
+        }
         if operation.trim().is_empty() {
             return Err("execute_provider_action requires operation".to_owned());
         }

@@ -2,6 +2,17 @@
   "schema": "verevon.flag-registry/v1",
   "flags": [
     {
+      "name": "AGENTIC_SPACE_RETRIEVAL_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS18-S5: a Do run in a project forwards its Space retrieval decision to execution-core, so knowledge_search runs Space-scoped. Off, the Do search stays organisation-wide. Only the literal true enables it.",
+      "declarations": [
+        { "service": "model-gateway", "env": "AGENTIC_SPACE_RETRIEVAL_ENABLED", "default": "false" }
+      ]
+    },
+    {
       "name": "AGENTIC_SUBSCRIPTION_ALLOW_EFFECTS",
       "kind": "switch",
       "owner": "model-plane",
@@ -106,6 +117,21 @@
       ]
     },
     {
+      "name": "CONTENT_SAFETY_NORMALIZE",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "true",
+      "purpose": "Normalised injection scan: tighten-only, adds a NOTE and an audit event. Only a falsey word (0, false, no or off) opts out and restores the sixteen-phrase path. session-core's write gate ignores it.",
+      "onDefaultReason": "On by default. The normalised scan only adds flags, so it can make a screen more cautious and never less. The code default is on too, so this declaration changes nothing at runtime.",
+      "codeDefault": "true",
+      "declarations": [
+        { "service": "execution-core", "env": "CONTENT_SAFETY_NORMALIZE", "default": "true" },
+        { "service": "model-gateway", "env": "CONTENT_SAFETY_NORMALIZE", "default": "true" },
+        { "service": "session-core", "env": "CONTENT_SAFETY_NORMALIZE", "default": "true" }
+      ]
+    },
+    {
       "name": "CONTROL_PLANE_ENFORCEMENT",
       "kind": "choice",
       "owner": "frontend-plane",
@@ -177,7 +203,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "EP-7 W4-F T4: the trigger starter in capability-core. Each authorised fire of a trigger that names a cron schedule becomes one scheduled run through the cron fire path (origin trigger), re-authorised by Control and bounded by the run budget and the hourly trigger and org limits. Needs EVENT_TRIGGER_FIRE_ENABLED. Only the literal true turns it on.",
+      "purpose": "EP-7 T4 trigger starter: an authorised fire of a trigger naming a cron schedule becomes one scheduled run, re-authorised by Control and bounded by run, hourly and org limits. Needs EVENT_TRIGGER_FIRE_ENABLED. Only the literal true.",
       "declarations": [
         { "service": "capability-core", "env": "EVENT_TRIGGER_RUN_ENABLED", "default": "false" }
       ]
@@ -199,7 +225,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "Coordinator mode for Do runs: a fresh run that asks for it is offered only the read tools and the subagent delegation tools, so its effects are delegated to subagents, which keep their normal catalogue. Only the literal true turns it on. The gateway forwards the flag only while it is on, and zero-retention, waived and continued runs are never coordinated.",
+      "purpose": "Coordinator Do runs get only read and subagent delegation tools, so effects go through subagents. Never for ZDR, waived or continued runs; the gateway forwards the flag only while on. Only the literal true turns it on.",
       "declarations": [
         { "service": "execution-core", "env": "EXECUTION_COORDINATOR_MODE_ENABLED", "default": "false" },
         { "service": "model-gateway", "env": "EXECUTION_COORDINATOR_MODE_ENABLED", "default": "false" }
@@ -211,7 +237,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "EP-11 S3 for Do runs: a RunAgent run records the skill versions it injected on its run record, and reattach_skill reads the version the run pinned when the skill has changed since. Never applies to a zero-retention or waived run. Only the literal true turns it on; off, injection and recovery read the current skill row as before. Read once at start, so a change needs a restart.",
+      "purpose": "EP-11 S3: a Do run records the skill versions it injected, and reattach_skill reads the pinned version. Never for ZDR or waived runs. Off reads the current skill row. Only the literal true; read at start, restart to change.",
       "declarations": [
         { "service": "execution-core", "env": "EXECUTION_CORE_SKILL_PINS", "default": "false" }
       ]
@@ -222,7 +248,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "W4-CC-7: the custom REST connector tools. execution-core's Do loop offers custom_rest.read and custom_rest.write, and model-gateway's Ask loop offers custom_rest.read, each only on a turn with a connection the person selected. Every write pauses for approval. Only the literal true turns it on, and it is read on every offer. Off, neither loop offers either tool. Both capabilities also start unavailable and need an attestation. A zero-retention or waived run is refused.",
+      "purpose": "W4-CC-7 custom REST tools on a turn with a selected connection: Do offers read and write, Ask offers read; writes pause for approval; capabilities start unavailable until attested; ZDR and waived refused. Only the literal true.",
       "declarations": [
         { "service": "execution-core", "env": "EXECUTION_CUSTOM_REST_TOOLS", "default": "false" },
         { "service": "model-gateway", "env": "EXECUTION_CUSTOM_REST_TOOLS", "default": "false" }
@@ -279,7 +305,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "S4.2 process_start tty: runs a background process on a pseudo-terminal (120x40, TERM=dumb) so stdout and stderr arrive as one stream. Only the literal true turns it on; off, a tty request gets plain pipes. A tty request on a zero-retention or waived run is refused whatever this says. Read once at start, so a change needs a restart.",
+      "purpose": "S4.2 process_start tty: a background process on a pseudo-terminal (120x40, TERM=dumb), one output stream. Off gives plain pipes; ZDR and waived tty requests are always refused. Only the literal true; read at start.",
       "declarations": [
         { "service": "execution-core", "env": "EXECUTION_PROCESS_TTY_ENABLED", "default": "false" }
       ]
@@ -290,7 +316,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "W5-097-a: the shadow action reviewer in the Do loop. Before an effectful tool call is dispatched, one tool-free inference reads the person's last user turns and the proposed call and returns a verdict, which is only counted and logged. It is never read by the permission engine, the hooks or the approval flow, and a zero-retention or waived run is never reviewed. Only the literal true turns it on. Promotion to a tighten-only check needs an ADR.",
+      "purpose": "W5-097-a shadow reviewer: one tool-free inference judges an effectful Do call; the verdict is only counted and logged, never read by permissions, hooks or approvals. ZDR and waived runs skipped. Only the literal true.",
       "declarations": [
         { "service": "execution-core", "env": "EXECUTION_SHADOW_REVIEWER", "default": "false" }
       ]
@@ -324,7 +350,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "F-t3-065 phase 2: a call that names a customer-gateway model connection is served by that gateway alone, through Integration Core, and never by a platform provider. Only the literal true enables it; off, such a call is refused as not implemented. The gateway is never zero data retention and is billed to the customer.",
+      "purpose": "F-t3-065 phase 2: a call naming a customer-gateway connection is served by that gateway alone through Integration Core, never a platform provider; never ZDR, billed to the customer. Off refuses it. Only the literal true.",
       "declarations": [
         { "service": "inference-core", "env": "INFERENCE_BYO_GATEWAY_ENABLED", "default": "false" }
       ]
@@ -335,7 +361,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "F-t3-065 phase 1: the platform catalogue overlay in the routing policy (hide, order and model-id aliases). It applies to the model listing and to pinned requests, and changes nothing about how a model is served. Only the literal true enables it; off, a stored overlay is ignored.",
+      "purpose": "F-t3-065 phase 1: the platform catalogue overlay (hide, order, model-id aliases) for the listing and pinned requests; it does not change how a model is served. Off ignores a stored overlay. Only the literal true.",
       "declarations": [
         { "service": "inference-core", "env": "INFERENCE_CATALOGUE_OVERLAY", "default": "false" }
       ]
@@ -362,12 +388,23 @@
       "codePath": "apps/Model Plane/rust/services/inference-core/src/provider/logprobs.rs"
     },
     {
+      "name": "INFERENCE_OPENAI_PROMPT_CACHE_KEY",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS02-S10: sends the provider prompt-cache routing key to the first-party OpenAI endpoint only, never on a ZDR request. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "inference-core", "env": "INFERENCE_OPENAI_PROMPT_CACHE_KEY", "default": "false" }
+      ]
+    },
+    {
       "name": "INFERENCE_ORG_OVERLAY",
       "kind": "switch",
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "W4-BYO-3: the per-organisation overlay (hide, order and role candidates; narrow-only, no aliases, nothing that adds a model). inference-core reads it from session-core (cached 120 s, 1000 orgs) and applies it to the model listing after the platform overlay and to the verevon-role resolver ahead of the platform role table; entitlement and the ZDR, privacy and residency floors still apply. Only the literal true enables it; off, a stored overlay is ignored. Needs SESSION_ORG_ROUTING_OVERLAY on session-core.",
+      "purpose": "W4-BYO-3 per-org overlay (hide, order, role candidates; narrow-only) read from session-core and applied after the platform overlay; entitlement and ZDR, privacy and residency floors still apply. Needs SESSION_ORG_ROUTING_OVERLAY.",
       "declarations": [
         { "service": "inference-core", "env": "INFERENCE_ORG_OVERLAY", "default": "false" }
       ]
@@ -582,6 +619,18 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_LIFECYCLE_EVENTS",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS15-S1/S3: counts-only lifecycle frames (retry_scheduled and friends) on the chat and run streams. Ephemeral, and carries no text. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_LIFECYCLE_EVENTS", "default": "false" },
+        { "service": "execution-core", "env": "MODEL_GATEWAY_LIFECYCLE_EVENTS", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_MCP_PROBE",
       "kind": "switch",
       "owner": "model-plane",
@@ -622,7 +671,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "F-t3-098 reasoning translation: a reader's translation of one shown text to nb or en, answered and never stored or fed back to the model (POST /v1/ai/reasoning-translate). A ZDR or waived turn is refused. Off, the route is a 404. Only the literal true turns it on.",
+      "purpose": "F-t3-098 reasoning translation of one shown text to nb or en (POST /v1/ai/reasoning-translate), never stored or fed back to the model; ZDR and waived turns refused. Off, the route is a 404. Only the literal true.",
       "codeDefault": "false",
       "declarations": [
         { "service": "model-gateway", "env": "MODEL_GATEWAY_REASONING_TRANSLATE_ENABLED", "default": "false" }
@@ -644,7 +693,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "W5-073-b routing decision: the answer's verevon mode, complexity and reason on its usage frames, usage envelope and message metadata, and the Details popover's Routed line. Closed tokens only. Needs INFERENCE_ROUTE_NOTE on inference-core to state a note. Only the literal true turns it on.",
+      "purpose": "W5-073-b: the answer's verevon mode, complexity and reason on usage frames, the usage envelope, message metadata and the Routed line. Closed tokens only; needs INFERENCE_ROUTE_NOTE. Only the literal true turns it on.",
       "codeDefault": "false",
       "declarations": [
         { "service": "model-gateway", "env": "MODEL_GATEWAY_ROUTING_DECISION_ENABLED", "default": "false" }
@@ -693,7 +742,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "W5-087 web_bundle artifacts: create_artifact accepts kind web_bundle, a multi-file static page that the gateway checks and inlines into one html artifact (no import or export, no type=module, no URL that leaves the page). Off, the kind is unknown. Only the literal true turns it on.",
+      "purpose": "W5-087: create_artifact accepts kind web_bundle, a multi-file static page the gateway checks and inlines into one html artifact (no import, export, modules or outside URLs). Off, the kind is unknown. Only the literal true.",
       "declarations": [
         { "service": "model-gateway", "env": "MODEL_GATEWAY_WEB_BUNDLE_ARTIFACTS", "default": "false" }
       ]
@@ -766,7 +815,8 @@
       "default": "false",
       "purpose": "Plugin supply-chain pins (F-t3-059). On: create needs a commit-SHA or archive-digest source, a killed digest is refused, and enabling needs a pin and an install. Off: inert CRUD.",
       "declarations": [
-        { "service": "capability-core", "env": "PLUGIN_LOADER_ENABLED", "default": "false" }
+        { "service": "capability-core", "env": "PLUGIN_LOADER_ENABLED", "default": "false" },
+        { "service": "model-gateway", "env": "PLUGIN_LOADER_ENABLED", "default": "false" }
       ]
     },
     {
@@ -785,7 +835,7 @@
       "owner": "model-plane",
       "source": "code",
       "default": "false",
-      "purpose": "Keeps the promote-on-use counter in session-core, per org, user and URL hash, so it survives restarts, instead of in execution-core memory. Only the exact lowercase value true enables it. A failed count never promotes. Has no effect unless PROMOTE_ON_USE_ENABLED is true.",
+      "purpose": "Keeps the promote-on-use counter in session-core per org, user and URL hash, so it survives restarts. A failed count never promotes. No effect unless PROMOTE_ON_USE_ENABLED is true. Only the exact value true enables it.",
       "codePath": "apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs"
     },
     {
@@ -804,8 +854,19 @@
       "source": "code",
       "default": "fetch",
       "values": ["fetch", "cited"],
-      "purpose": "Which grounded use promote-on-use counts. fetch counts each successful page fetch. cited counts a fetched page only when the run's final answer cites its URL. Only the exact value cited selects it. Has no effect unless PROMOTE_ON_USE_ENABLED is true.",
+      "purpose": "Which grounded use promote-on-use counts: fetch counts each successful page fetch; cited counts a page only when the final answer cites its URL (exact value cited). No effect unless PROMOTE_ON_USE_ENABLED is true.",
       "codePath": "apps/Model Plane/rust/services/execution-core/src/promote_on_use.rs"
+    },
+    {
+      "name": "PROVIDER_READ_TOOL_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS23-S3: read_provider_action is offered only for a connection the person selected, and is refused in Space and under ZDR. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "execution-core", "env": "PROVIDER_READ_TOOL_ENABLED", "default": "false" }
+      ]
     },
     {
       "name": "QUARRY_BROWSER_AGENT_ENABLED",
@@ -827,7 +888,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "EP-14 S10: a routing-policy PUT in inference-core records a candidate (202 with its offline diff) instead of writing live; POST .../candidates/:id/promote makes it live. Only the literal true enables it. Needs SESSION_CORE_ROUTING_CANDIDATES_ENABLED on session-core.",
+      "purpose": "EP-14 S10: an inference-core routing-policy PUT records a candidate (202 with its offline diff) and POST .../candidates/:id/promote makes it live. Needs SESSION_CORE_ROUTING_CANDIDATES_ENABLED. Only the literal true.",
       "declarations": [
         { "service": "inference-core", "env": "ROUTING_POLICY_PROMOTION_REQUIRED", "default": "false" }
       ]
@@ -838,7 +899,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "W4-BYO-3: GetOrgRoutingOverlay and SetOrgRoutingOverlay on session-core's RoutingPolicy service, over the org_routing_overlays table. Off, both RPCs answer UNAVAILABLE and the table is never touched. A write needs an organisation admin of that organisation and refuses a ZDR caller. Only the literal true enables it. Pair it with INFERENCE_ORG_OVERLAY on inference-core.",
+      "purpose": "W4-BYO-3: Get and SetOrgRoutingOverlay on session-core over org_routing_overlays; off answers UNAVAILABLE. Writes need an org admin and refuse ZDR callers. Pair with INFERENCE_ORG_OVERLAY. Only the literal true.",
       "declarations": [
         { "service": "session-core", "env": "SESSION_ORG_ROUTING_OVERLAY", "default": "false" }
       ]
@@ -860,7 +921,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "W4-SH-4: ShareSnapshot, UnshareSnapshot and ListSnapshotGrants on session-core's ThreadShareService write, remove and list Control view grants on a live share snapshot for organisation members, and revoking a snapshot removes its grants. W4-SH-5: GetSharedSnapshot lets a granted member read the snapshot, after Control confirms that member's view grant. Off, these RPCs answer UNAVAILABLE snapshot_grants_disabled and Control is never called. Sharing refuses a ZDR or waived caller. Only the literal true enables it. Needs SESSION_THREAD_SHARES_ENABLED and MODEL_GATEWAY_THREAD_SHARES, plus USER_CORE_URL and SESSION_USER_CORE_SERVICE_TOKEN on session-core and CONTROL_OWNER_ASSERTED_GRANTS on Control.",
+      "purpose": "W4-SH-4/5: share snapshots to org members through Control view grants (share, unshare, list, read after a grant check). Off answers UNAVAILABLE; ZDR and waived refused. Needs the thread-share switches. Only the literal true.",
       "declarations": [
         { "service": "session-core", "env": "SESSION_SNAPSHOT_GRANTS_ENABLED", "default": "false" }
       ]
@@ -874,6 +935,17 @@
       "purpose": "EP-12 S15 foreign readers: ImportThread also reads a ChatGPT or Claude conversations.json. Only the literal true, and only while SESSION_THREAD_IMPORT_ENABLED is on.",
       "declarations": [
         { "service": "session-core", "env": "SESSION_THREAD_IMPORT_FOREIGN_ENABLED", "default": "false" }
+      ]
+    },
+    {
+      "name": "SKILL_BUNDLE_MOUNT_ENABLED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "WS19-S8: the switch mounts a turn's skill bundles read-only at /skills for code_interpreter. Off means no mounts. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "model-gateway", "env": "SKILL_BUNDLE_MOUNT_ENABLED", "default": "false" }
       ]
     },
     {
@@ -918,7 +990,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "EP-13 S6-S8: registers the Vertex AI Gemini provider in inference-core. Only the literal true turns it on. EU-resident only on an EU location, not ZDR-capable (a ZDR turn skips it), and unpriced until the cost-core price row lands. The release gate checks project, EU location, models and a secret-partition key when it is true.",
+      "purpose": "EP-13 S6-S8: registers the Vertex AI Gemini provider. EU-resident only on an EU location, not ZDR-capable (ZDR turns skip it), unpriced until its cost-core row lands; the release gate checks its config. Only the literal true.",
       "declarations": [
         { "service": "inference-core", "env": "VERTEX_GEMINI_ENABLED", "default": "false" }
       ]
@@ -1011,7 +1083,6 @@
     }
   ],
   "unregistered": [
-    "AGENTIC_SPACE_RETRIEVAL_ENABLED",
     "AGENT_ASK_USER_ENABLED",
     "AGENT_ASK_USER_RESUME_ENABLED",
     "AGENT_CONTINUE_AFTER_APPROVAL_ENABLED",
@@ -1092,7 +1163,6 @@
     "SESSION_THREAD_SHARES_ENABLED",
     "SESSION_USER_PROFILE_ENABLED",
     "SKILL_BUNDLES_ENABLED",
-    "SKILL_BUNDLE_MOUNT_ENABLED",
     "SKILL_BUNDLE_READ_RULE_ENABLED",
     "SKILL_DECK_TEMPLATES_ENABLED",
     "SKILL_FILE_TOOL_ENABLED",
