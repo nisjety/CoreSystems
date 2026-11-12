@@ -1522,7 +1522,7 @@ async fn begin_question_continuation(
     let bearer = session_bearer.filter(|bearer| !bearer.trim().is_empty());
 
     // 1. The stage. A question has no stage 1: a run that cannot be resumed in place releases the
-    // answer, and a run that keeps no content refuses.
+    // answer, and a run that keeps no content refuses, whatever its switches say.
     let stage = super::resume::select_stage(
         "loop",
         super::resume::loop_resume_enabled(),
@@ -1536,7 +1536,7 @@ async fn begin_question_continuation(
     let gate = writer_gate(req, route, runtime_loop::effect::ledger_enabled(), 0, true, true);
     let writer_off = super::resume::in_place_writer_off(gate, bearer.is_some())
         .map(super::resume::writer_off_downgrade);
-    match super::resume::question_stage_decision(stage, writer_off) {
+    match super::resume::question_stage_decision(stage, writer_off, req.zdr, route.is_waived()) {
         StageDecision::Refuse(refusal) => return Err(refusal.status()),
         StageDecision::Release => {
             info!(run_id = %run_id, "question_resume_released_before_claim");

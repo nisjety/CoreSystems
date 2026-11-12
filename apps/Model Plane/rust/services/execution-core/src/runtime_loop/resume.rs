@@ -1909,22 +1909,28 @@ pub(crate) enum StageDecision {
     Refuse(Refusal),
 }
 
-/// The decision for a question continuation from the stage [`select_stage`] picked and the writer
-/// the resume would seed ([`in_place_writer_off`]'s reason, as a [`Downgrade`]). Pure.
+/// The decision for a question continuation from the stage [`select_stage`] picked, the writer
+/// the resume would seed ([`in_place_writer_off`]'s reason, as a [`Downgrade`]) and the run's
+/// retention posture (`zdr`, `waived`). Pure.
 ///
-/// A waived route or a zero-retention run is REFUSED ([`Refusal::DurableMutationForbidden`]), from
-/// either input, and never released: a release asks the client to send the answer again, and a
-/// non-persistent run must not have content resent for it. Otherwise only an in-place stage whose
-/// writer would be active proceeds; a stage-1 segment (a question has none), a switch that is off
-/// and a writer that would be off all release.
-pub(crate) fn question_stage_decision(stage: Stage, writer_off: Option<Downgrade>) -> StageDecision {
+/// A waived route or a zero-retention run is REFUSED ([`Refusal::DurableMutationForbidden`])
+/// whatever its switches say, and never released: a release asks the client to send the answer
+/// again, and a non-persistent run must not have content resent for it. The posture is read on its
+/// own, not through the other two inputs: both read the switches first, so a switch that is off
+/// is a downgrade there and would release a non-persistent run. A non-persistent reason in either
+/// input refuses too. Otherwise only an in-place stage whose writer would be active proceeds; a
+/// stage-1 segment (a question has none), a switch that is off and a writer that would be off all
+/// release.
+pub(crate) fn question_stage_decision(
+    stage: Stage,
+    writer_off: Option<Downgrade>,
+    zdr: bool,
+    waived: bool,
+) -> StageDecision {
     let non_persistent = |downgrade: Downgrade| matches!(downgrade, Downgrade::Zdr | Downgrade::Waived);
-    if let Stage::Segment(Some(downgrade)) = stage {
-        if non_persistent(downgrade) {
-            return StageDecision::Refuse(Refusal::DurableMutationForbidden);
-        }
-    }
-    if writer_off.is_some_and(non_persistent) {
+    let stage_non_persistent =
+        matches!(stage, Stage::Segment(Some(downgrade)) if non_persistent(downgrade));
+    if zdr || waived || stage_non_persistent || writer_off.is_some_and(non_persistent) {
         return StageDecision::Refuse(Refusal::DurableMutationForbidden);
     }
     match (stage, writer_off) {
@@ -2120,7 +2126,9 @@ pub(crate) fn is_question_resume(req: &pb::RunAgentRequest) -> bool {
 ///
 /// A zero-retention or waived run, or a session-core that refused the run as not persistent, maps
 /// to the reasons that REFUSE; every other reason (a switch, the ledger, a Space, a delegated loop,
-/// a missing credential, a disabled store) maps to one that releases the answer.
+/// a missing credential, a disabled store) maps to one that releases the answer. The run's own
+/// posture is read by [`question_stage_decision`], so a zero-retention or waived run is refused
+/// whatever this reason is.
 pub(crate) const fn writer_off_downgrade(reason: fold::OffReason) -> Downgrade {
     match reason {
         fold::OffReason::Zdr | fold::OffReason::RunNotPersistent => Downgrade::Zdr,
@@ -3896,33 +3904,75 @@ mod tests {
     #[test]
     fn question_stage_decision_refuses_a_non_persistent_run_and_releases_what_cannot_resume_in_place() {
         let refuse = StageDecision::Refuse(Refusal::DurableMutationForbidden);
+        // The stage and the writer alone, with no posture stated: each one carries the non-persistent reason.
+        let decide = |stage, writer_off| question_stage_decision(stage, writer_off, false, false);
         // A waived route or a ZDR run is refused, never released, from either input.
-        assert_eq!(question_stage_decision(Stage::Segment(Some(Downgrade::Waived)), None), refuse);
-        assert_eq!(question_stage_decision(Stage::Segment(Some(Downgrade::Zdr)), None), refuse);
-        assert_eq!(question_stage_decision(Stage::InPlace, Some(Downgrade::Waived)), refuse);
-        assert_eq!(question_stage_decision(Stage::InPlace, Some(Downgrade::Zdr)), refuse);
+        assert_eq!(decide(Stage::Segment(Some(Downgrade::Waived)), None), refuse);
+        assert_eq!(decide(Stage::Segment(Some(Downgrade::Zdr)), None), refuse);
+        assert_eq!(decide(Stage::InPlace, Some(Downgrade::Waived)), refuse);
+        assert_eq!(decide(Stage::InPlace, Some(Downgrade::Zdr)), refuse);
         assert_eq!(
-            question_stage_decision(Stage::Segment(Some(Downgrade::ResumeSwitchOff)), Some(Downgrade::Zdr)),
+            decide(Stage::Segment(Some(Downgrade::ResumeSwitchOff)), Some(Downgrade::Zdr)),
             refuse
         );
         // In place with an active writer proceeds.
-        assert_eq!(question_stage_decision(Stage::InPlace, None), StageDecision::Proceed);
+        assert_eq!(decide(Stage::InPlace, None), StageDecision::Proceed);
         // A writer that would be off, a switch that is off and a stage-1 segment all release.
         for writer_off in [Downgrade::ResumeSwitchOff, Downgrade::CheckpointOff, Downgrade::LedgerOff] {
             assert_eq!(
-                question_stage_decision(Stage::InPlace, Some(writer_off)),
+                decide(Stage::InPlace, Some(writer_off)),
                 StageDecision::Release,
                 "{writer_off:?}"
             );
         }
         for downgrade in [Downgrade::ResumeSwitchOff, Downgrade::CheckpointOff, Downgrade::LedgerOff] {
             assert_eq!(
-                question_stage_decision(Stage::Segment(Some(downgrade)), None),
+                decide(Stage::Segment(Some(downgrade)), None),
                 StageDecision::Release,
                 "{downgrade:?}"
             );
         }
-        assert_eq!(question_stage_decision(Stage::Segment(None), None), StageDecision::Release);
+        assert_eq!(decide(Stage::Segment(None), None), StageDecision::Release);
+    }
+
+    /// A zero-retention or waived run with a switch off (resume, checkpoint or ledger) must be
+    /// refused, not released: the switches reach the stage and the writer first, so the posture is
+    /// read on its own. The inputs are the production ones (`select_stage`, and the writer's own
+    /// gate through `in_place_writer_off`), over every switch state.
+    #[test]
+    fn question_stage_decision_refuses_a_zdr_or_waived_run_whatever_its_switches_say() {
+        let refuse = StageDecision::Refuse(Refusal::DurableMutationForbidden);
+        for bits in 0..8_u32 {
+            let (resume_on, checkpoint_on, ledger_on) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);
+            for (zdr, waived) in [(true, false), (false, true), (true, true)] {
+                let stage = select_stage("loop", resume_on, checkpoint_on, ledger_on, zdr, waived);
+                let gate = fold::WriterGate {
+                    switch: checkpoint_on,
+                    ledger: ledger_on,
+                    zdr,
+                    waived,
+                    space: false,
+                    depth: 0,
+                    resumed: false,
+                };
+                let writer_off = in_place_writer_off(gate, true).map(writer_off_downgrade);
+                assert_eq!(
+                    question_stage_decision(stage, writer_off, zdr, waived),
+                    refuse,
+                    "resume={resume_on} checkpoint={checkpoint_on} ledger={ledger_on} zdr={zdr} waived={waived}"
+                );
+            }
+        }
+        // A persistent run is not refused by its posture: its switches alone decide.
+        assert_eq!(
+            question_stage_decision(Stage::InPlace, None, false, false),
+            StageDecision::Proceed
+        );
+        let checkpoint_off = select_stage("loop", true, false, true, false, false);
+        assert_eq!(
+            question_stage_decision(checkpoint_off, Some(Downgrade::CheckpointOff), false, false),
+            StageDecision::Release
+        );
     }
 
     #[test]
