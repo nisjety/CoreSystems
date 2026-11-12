@@ -1743,7 +1743,8 @@ async fn begin_question_continuation(
     };
 
     // 5. The single spend. Only the claim that wins it (or replays its own win) applies the answer.
-    let question = match consume_question(session_channel, bearer, req, resume).await {
+    let claim_token = resume.claim_token.as_str();
+    let question = match consume_question(session_channel, bearer, req, resume, claim_token).await {
         QuestionSpend::Won(question) | QuestionSpend::Replayed(question) => question,
         // Another claim used or released the answer: this fold is stale.
         QuestionSpend::Spent => {
@@ -1779,15 +1780,18 @@ async fn begin_question_continuation(
     })
 }
 
-/// Spend a `resume` question's answer once (`ConsumeRunQuestion`) under this continuation's claim
-/// token, and classify what the spend decided ([`super::resume::classify_question_spend`]). A spend
-/// whose answer was lost in transit may have committed: the same claim token again replays it, where
-/// the effect ledger fences that replay (the approval's rule, `consume_for_resume`).
+/// Spend a `resume` question's answer once (`ConsumeRunQuestion`) under `claim_token`, and classify
+/// what the spend decided ([`super::resume::classify_question_spend`]). The continuation presents the
+/// client's claim token; a release presents [`super::resume::release_claim_token`] of it, so the store
+/// keeps the two spends apart. A spend whose answer was lost in transit may have committed: the same
+/// claim token again replays it, where the effect ledger fences that replay (the approval's rule,
+/// `consume_for_resume`).
 async fn consume_question(
     session_channel: &Channel,
     bearer: &str,
     req: &pb::RunAgentRequest,
     resume: &pb::AgentResume,
+    claim_token: &str,
 ) -> super::resume::QuestionSpend {
     use mp_contracts::model_plane::v1::run_question_consume_service_client::RunQuestionConsumeServiceClient;
     let outcome = match authenticated_session_request(
@@ -1795,7 +1799,7 @@ async fn consume_question(
             question_id: resume.question_id.clone(),
             org_id: req.org_id.clone(),
             run_id: req.run_id.clone(),
-            claim_token: resume.claim_token.clone(),
+            claim_token: claim_token.to_owned(),
         },
         Some(bearer),
     ) {
@@ -1824,9 +1828,23 @@ async fn consume_question(
 ///   only token that tells a client to resend. A question an MCP server asked
 ///   (`mcp_elicitation`) is never released as a chat message: it ends
 ///   `question_resume_unavailable` instead.
-/// * The same claim's replay, or a spend another claim made: `continuation_already_consumed` (the
-///   answer was used or released already; never released twice).
+/// * The same release retried (its frame was lost in transit) while the run is still live, that is while
+///   the first release's terminal receipt did not land: `question_answer_released` again, with nothing
+///   recorded or published a second time. It is answered only where the effect ledger fences the replay
+///   (`classify_question_spend`), as every replay is; with the ledger off it is refused.
+/// * A spend another claim made, or the continuation's own claim spent: `continuation_already_consumed`
+///   (the answer was used or released already; never released twice).
 /// * Any refusal of the spend: its own token (the answer is not released).
+///
+/// The release presents [`super::resume::release_claim_token`], never the client's token. A retry that
+/// lands after the first release's receipt landed (the run has ended) is refused before this function
+/// spends anything: the model-gateway question-form preflight answers `not_resumable` for an ended run,
+/// and the executor's fold claim answers `loop_checkpoint_run_ended`, which is `not_resumable` too. Were
+/// it to reach the store, session-core checks the run before it reads the claim and answers
+/// `question_run_ended`, also `not_resumable`. So a lost release frame is released again only while the
+/// run is live. After a landed receipt the retry is `not_resumable` and the answer is not released
+/// again: a known limit, pinned by a test. Lifting it means the gateway, the fold claim and session-core
+/// all replay before their liveness check (an owner decision).
 ///
 /// Every caller that holds the fold's claim has closed the fold before it gets here. The run id, the
 /// question id and the closed tokens are logged, never an answer.
@@ -1842,9 +1860,10 @@ async fn release_question_answer(
     let Some(bearer) = session_bearer.filter(|bearer| !bearer.trim().is_empty()) else {
         return Refusal::QuestionResumeUnavailable.status();
     };
-    match consume_question(session_channel, bearer, req, resume).await {
+    let release_token = super::resume::release_claim_token(&resume.claim_token);
+    match consume_question(session_channel, bearer, req, resume, &release_token).await {
         QuestionSpend::Won(question) => {
-            if question.origin == mp_contracts::user_question::ORIGIN_MCP_ELICITATION {
+            if !super::resume::is_releasable(&question) {
                 warn!(
                     run_id = %req.run_id,
                     question_id = %question.id,
@@ -1883,7 +1902,22 @@ async fn release_question_answer(
             }
             Refusal::QuestionAnswerReleased.status()
         }
-        QuestionSpend::Replayed(_) | QuestionSpend::Spent => Refusal::ContinuationAlreadyConsumed.status(),
+        // The release's own replay: this claim released the answer already, so the same outcome again.
+        // The store answers a replay without a second spend, and the first win recorded and published
+        // the terminal outcome, so nothing is repeated here.
+        QuestionSpend::Replayed(question) => {
+            if !super::resume::is_releasable(&question) {
+                return Refusal::QuestionResumeUnavailable.status();
+            }
+            info!(
+                run_id = %req.run_id,
+                question_id = %question.id,
+                "question_answer_released_again"
+            );
+            Refusal::QuestionAnswerReleased.status()
+        }
+        // Another claim spent the answer, or the continuation's own claim did: released already.
+        QuestionSpend::Spent => Refusal::ContinuationAlreadyConsumed.status(),
         QuestionSpend::Refused(refusal) => refusal.status(),
     }
 }
@@ -12898,6 +12932,9 @@ mod tests {
         orchestration_core_service_server::{
             OrchestrationCoreService, OrchestrationCoreServiceServer,
         },
+        run_question_consume_service_server::{
+            RunQuestionConsumeService, RunQuestionConsumeServiceServer,
+        },
         session_core_server::{SessionCore, SessionCoreServer},
     };
     use std::pin::Pin;
@@ -14088,6 +14125,9 @@ mod tests {
         persisted_step_payloads: Vec<(String, String, String)>, // (step_id, output, error)
         managed_terminal_outcomes: Vec<(String, i32, i32, String)>, // (run_id, source, outcome, failure_code)
         managed_heartbeats: Vec<(String, i32)>,                     // (run_id, source)
+        /// Every `RecordTerminalOutcome` the mock was asked to record under the terminalize credential, refused
+        /// or not. A refused receipt is in no list above, so this is what counts an attempt that failed.
+        terminal_receipt_attempts: usize,
         /// `(run_id, output)` for each `RecordRunOutput`. Separate from
         /// `managed_terminal_outcomes` on purpose: a test must be able to assert
         /// that a receipt was written and an answer was NOT (the ZDR case).
@@ -14131,6 +14171,13 @@ mod tests {
         /// Action ids whose `ReserveToolAction` COMMITS (and is recorded) and then fails, as a
         /// timeout that hides a commit does: the caller sees an error and cannot know.
         reserve_commit_then_fail_for: BTreeSet<String>,
+        /// The `resume` question `ConsumeRunQuestion` spends (a test seeds it); `None` answers
+        /// `question_not_found`.
+        run_question: Option<pb::RunQuestion>,
+        /// The claim token that spent `run_question`, once it is spent.
+        run_question_spent_by: Option<String>,
+        /// Every claim token `ConsumeRunQuestion` was asked with, in call order.
+        run_question_claims: Vec<String>,
         /// Every `SaveLoopCheckpoint` the mock accepted, in order (build plan WS03 S6).
         loop_saves: Vec<LoopSave>,
         /// The stored seq the mock emulates: a save is accepted only when it expects
@@ -15406,6 +15453,67 @@ mod tests {
         }
     }
 
+    // --- Run-question consume mock: the single spend of a `resume` answer (WS14 S5). ---
+
+    /// Mirrors session-core's `consume_run_question`. A run with a landed terminal receipt has ended, and
+    /// session-core checks that before it reads the claim, so the retry is refused `question_run_ended`. For
+    /// a live run the first claim spends the seeded question, the same claim again replays it, and another
+    /// claim is refused without the question.
+    struct MockRunQuestionConsume {
+        rec: SharedRecorder,
+    }
+
+    #[tonic::async_trait]
+    impl RunQuestionConsumeService for MockRunQuestionConsume {
+        async fn consume_run_question(
+            &self,
+            request: Request<pb::ConsumeRunQuestionRequest>,
+        ) -> Result<Response<pb::ConsumeRunQuestionResponse>, Status> {
+            let req = request.into_inner();
+            let mut rec = self.rec.lock().unwrap();
+            rec.run_question_claims.push(req.claim_token.clone());
+            let Some(question) = rec
+                .run_question
+                .clone()
+                .filter(|question| question.id == req.question_id)
+            else {
+                return Err(Status::not_found("question_not_found"));
+            };
+            // Liveness first, as session-core orders it: an ended run is refused before the claim is read.
+            if rec
+                .managed_terminal_outcomes
+                .iter()
+                .any(|(run_id, ..)| run_id == &req.run_id)
+            {
+                return Err(Status::failed_precondition("question_run_ended"));
+            }
+            let response = match rec.run_question_spent_by.clone() {
+                None => {
+                    rec.run_question_spent_by = Some(req.claim_token.clone());
+                    pb::ConsumeRunQuestionResponse {
+                        question: Some(question),
+                        consumed: true,
+                        already_consumed: false,
+                        same_claim: false,
+                    }
+                }
+                Some(spent) if spent == req.claim_token => pb::ConsumeRunQuestionResponse {
+                    question: Some(question),
+                    consumed: false,
+                    already_consumed: true,
+                    same_claim: true,
+                },
+                Some(_) => pb::ConsumeRunQuestionResponse {
+                    question: None,
+                    consumed: false,
+                    already_consumed: true,
+                    same_claim: false,
+                },
+            };
+            Ok(Response::new(response))
+        }
+    }
+
     // --- Managed terminalization mock: records immutable receipt operations. ---
 
     struct MockManagedRunLifecycle {
@@ -15506,6 +15614,7 @@ mod tests {
                     "managed terminal receipt requires its service credential",
                 ));
             }
+            self.rec.lock().unwrap().terminal_receipt_attempts += 1;
             if self.fail_terminal_receipt {
                 return Err(Status::unavailable("managed terminal receipt unavailable"));
             }
@@ -16088,6 +16197,9 @@ mod tests {
                 }))
                 .add_service(pb::run_service_server::RunServiceServer::new(
                     MockRunService { rec: rec.clone() },
+                ))
+                .add_service(RunQuestionConsumeServiceServer::new(
+                    MockRunQuestionConsume { rec: rec.clone() },
                 ))
                 .add_service(ManagedRunLifecycleServer::new(MockManagedRunLifecycle {
                     rec,
@@ -29426,6 +29538,245 @@ mod tests {
         // The counters the loop re-enters with: the open round is charged once, by the loop.
         assert_eq!((restored.rounds_executed, restored.step_seq), (0, 2));
         assert_eq!((restored.claimed_seq, restored.segment), (claimed.seq, 2));
+    }
+
+    // ---- the question release (WS14 S5, R3) ----
+    //
+    // The single spend of a question's answer and its release to the client's next message. The
+    // mock (`MockRunQuestionConsume`) answers as session-core does: a run whose terminal receipt
+    // landed has ended, so a retry after it is refused, and a live run replays its own spend.
+
+    /// A question the run asked and its owner answered, as a release sees it.
+    fn answered_resume_question(origin: &str) -> pb::RunQuestion {
+        pb::RunQuestion {
+            id: "q_answer".to_owned(),
+            run_id: "run_test".to_owned(),
+            step_id: "tool_1".to_owned(),
+            delivery: mp_contracts::user_question::DELIVERY_RESUME.to_owned(),
+            state: pb::QuestionState::Answered as i32,
+            origin: origin.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// One release of the `q_answer` answer under `claim`: the status message it ends with.
+    async fn release_under(
+        state: &crate::state::StateStore,
+        channel: &Channel,
+        claim: &str,
+    ) -> String {
+        let resume = pb::AgentResume {
+            question_id: "q_answer".to_owned(),
+            claim_token: claim.to_owned(),
+            answer_json: "{}".to_owned(),
+            ..Default::default()
+        };
+        release_question_answer(
+            state,
+            channel,
+            Some("session-token"),
+            &sample_request(),
+            &resume,
+            &STATIC_TERMINAL_TOKENS,
+        )
+        .await
+        .message()
+        .to_owned()
+    }
+
+    fn terminal_receipts(rec: &SharedRecorder) -> usize {
+        rec.lock().unwrap().managed_terminal_outcomes.len()
+    }
+
+    fn terminal_receipt_attempts(rec: &SharedRecorder) -> usize {
+        rec.lock().unwrap().terminal_receipt_attempts
+    }
+
+    /// A release whose frame was lost is retried under the same claim while the run is still live (the first
+    /// release's receipt did not land): the same `question_answer_released`, with no second receipt attempt and
+    /// no plan transition. Another claim finds the answer spent, and every release asked the store with its own
+    /// token, never the client's.
+    #[tokio::test]
+    async fn a_released_answers_same_claim_retry_is_released_again_and_records_nothing_twice() {
+        let _ledger = runtime_loop::effect::LedgerSwitch::set(true);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        rec.lock().unwrap().run_question = Some(answered_resume_question("model"));
+        // The first release's receipt fails, so the run stays live: the only reachable case in which a
+        // same-claim retry is released again (a landed receipt ends the run, see the next test).
+        let channel = spawn_session_channel_with_terminal_receipt_failure(rec.clone()).await;
+        let state = crate::state::StateStore::new();
+
+        assert_eq!(
+            release_under(&state, &channel, "claim-1").await,
+            "question_answer_released"
+        );
+        assert_eq!(
+            terminal_receipt_attempts(&rec),
+            1,
+            "the first win tries its terminal receipt once"
+        );
+
+        assert_eq!(
+            release_under(&state, &channel, "claim-1").await,
+            "question_answer_released",
+            "the lost frame's retry is released again"
+        );
+        assert_eq!(
+            terminal_receipt_attempts(&rec),
+            1,
+            "the replay makes no second receipt attempt"
+        );
+        assert!(
+            rec.lock().unwrap().plan_transitions.is_empty(),
+            "neither release moves the plan: no receipt landed"
+        );
+        assert_ne!(
+            state.get_or_create("run_test").status,
+            crate::state::RunStatus::Completed,
+            "a receipt that never landed does not end the local run"
+        );
+
+        assert_eq!(
+            release_under(&state, &channel, "claim-2").await,
+            "continuation_already_consumed"
+        );
+        assert_eq!(terminal_receipts(&rec), 0, "nothing is ever recorded");
+        assert_eq!(
+            rec.lock().unwrap().run_question_claims,
+            vec!["release:claim-1", "release:claim-1", "release:claim-2"],
+            "each release presents its own token"
+        );
+    }
+
+    /// The known limit (an owner decision, not built): the lost frame's retry after the first release's receipt
+    /// DID land. The run has ended by then, so the retry is refused `not_resumable` and is not released again.
+    /// The gateway preflight and the executor's fold claim refuse it before this function runs; the mock answers
+    /// as session-core does (`question_run_ended`). A change to that order must change this test.
+    #[tokio::test]
+    async fn a_same_claim_retry_after_a_landed_release_is_not_resumable_not_released_again() {
+        let _ledger = runtime_loop::effect::LedgerSwitch::set(true);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        rec.lock().unwrap().run_question = Some(answered_resume_question("model"));
+        let channel = spawn_session_channel(rec.clone()).await;
+        let state = crate::state::StateStore::new();
+
+        assert_eq!(
+            release_under(&state, &channel, "claim-1").await,
+            "question_answer_released"
+        );
+        assert_eq!(
+            terminal_receipts(&rec),
+            1,
+            "the first release's receipt landed"
+        );
+        assert_eq!(
+            state.get_or_create("run_test").status,
+            crate::state::RunStatus::Completed,
+            "the run ended with that receipt"
+        );
+        assert_eq!(
+            rec.lock().unwrap().plan_transitions,
+            [(
+                pb::PlanState::Executing as i32,
+                pb::PlanState::Completed as i32
+            )]
+        );
+
+        assert_eq!(
+            release_under(&state, &channel, "claim-1").await,
+            "not_resumable",
+            "the retry is refused, not released again"
+        );
+        assert_eq!(
+            terminal_receipt_attempts(&rec),
+            1,
+            "the refused retry makes no second receipt attempt"
+        );
+        assert_eq!(terminal_receipts(&rec), 1, "and records no second receipt");
+        assert_eq!(
+            rec.lock().unwrap().plan_transitions.len(),
+            1,
+            "and makes no second plan transition"
+        );
+        assert_eq!(
+            rec.lock().unwrap().run_question_claims,
+            vec!["release:claim-1", "release:claim-1"],
+            "the retry asked the store with the release's own token"
+        );
+    }
+
+    /// A continuation applied the answer under the client's claim. A release retried under that claim must not
+    /// hand the answer back as the next message: it was applied in the run already.
+    #[tokio::test]
+    async fn a_release_under_a_claim_that_applied_the_answer_is_refused_not_released() {
+        let _ledger = runtime_loop::effect::LedgerSwitch::set(true);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        {
+            let mut recorder = rec.lock().unwrap();
+            recorder.run_question = Some(answered_resume_question("model"));
+            recorder.run_question_spent_by = Some("claim-1".to_owned());
+        }
+        let channel = spawn_session_channel(rec.clone()).await;
+        let state = crate::state::StateStore::new();
+
+        assert_eq!(
+            release_under(&state, &channel, "claim-1").await,
+            "continuation_already_consumed"
+        );
+        assert_eq!(terminal_receipts(&rec), 0, "nothing is terminalized");
+    }
+
+    /// With the effect ledger off a replay is not fenced, so the same-claim retry of a release is refused as
+    /// it was before this change. The first win is unchanged. It runs on a live run (the first receipt fails),
+    /// because the fence is what refuses the retry: on a landed receipt the run has ended and the store refuses
+    /// it first (see the known-limit test above).
+    #[tokio::test]
+    async fn a_same_claim_release_retry_with_the_ledger_off_stays_refused() {
+        let _ledger = runtime_loop::effect::LedgerSwitch::set(false);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        rec.lock().unwrap().run_question = Some(answered_resume_question("model"));
+        let channel = spawn_session_channel_with_terminal_receipt_failure(rec.clone()).await;
+        let state = crate::state::StateStore::new();
+
+        assert_eq!(
+            release_under(&state, &channel, "claim-1").await,
+            "question_answer_released"
+        );
+        assert_eq!(
+            release_under(&state, &channel, "claim-1").await,
+            "continuation_already_consumed"
+        );
+        assert_eq!(
+            terminal_receipt_attempts(&rec),
+            1,
+            "the refused replay makes no second receipt attempt"
+        );
+        assert_eq!(
+            terminal_receipts(&rec),
+            0,
+            "the refused replay records nothing"
+        );
+    }
+
+    /// A server's question is never released as a message, on its first spend or on a replay: both end
+    /// `question_resume_unavailable`, and nothing is terminalized.
+    #[tokio::test]
+    async fn a_server_question_is_never_released_and_its_replay_says_so_too() {
+        let _ledger = runtime_loop::effect::LedgerSwitch::set(true);
+        let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+        rec.lock().unwrap().run_question = Some(answered_resume_question("mcp_elicitation"));
+        let channel = spawn_session_channel(rec.clone()).await;
+        let state = crate::state::StateStore::new();
+
+        assert_eq!(
+            release_under(&state, &channel, "claim-1").await,
+            "question_resume_unavailable"
+        );
+        assert_eq!(
+            release_under(&state, &channel, "claim-1").await,
+            "question_resume_unavailable"
+        );
+        assert_eq!(terminal_receipts(&rec), 0);
     }
 
     // ---- the in-place resume (WS03 S7b step 9) ----

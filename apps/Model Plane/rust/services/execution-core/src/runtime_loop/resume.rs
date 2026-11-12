@@ -2164,7 +2164,8 @@ pub(crate) fn question_read_refusal(status: &tonic::Status) -> Refusal {
 pub(crate) enum QuestionSpend {
     /// This claim spent the answer now: nobody else has applied it and nobody else can.
     Won(pb::RunQuestion),
-    /// The same claim token spent it earlier (a retried continuation): the stored question again.
+    /// The same claim token spent it earlier (a retried continuation, or a retried release, which
+    /// presents [`release_claim_token`]): the stored question again.
     Replayed(pb::RunQuestion),
     /// A claim spent it earlier and it was not this one: it is used or released already.
     Spent,
@@ -2264,6 +2265,31 @@ pub(crate) fn classify_question_spend(
         (false, true, None) => unavailable,
         _ => unavailable,
     }
+}
+
+/// The prefix that marks a release's claim token (see [`release_claim_token`]).
+const RELEASE_CLAIM_PREFIX: &str = "release:";
+
+/// The claim token a release presents to `ConsumeRunQuestion`: the continuation's own token, made
+/// distinct from it. Pure and deterministic: the same client claim always gives the same release token.
+///
+/// One answer has two single-use uses under one client claim: a continuation applies it in the run,
+/// and a release hands it back to the client as the next message. Both spend through
+/// `ConsumeRunQuestion`. If a release presented the client's token, its retry (the frame was lost in
+/// transit) would be read as a replay of whatever spent the answer, and a continuation's retry would be
+/// read as a replay of a release. Presenting this token keeps the two spends apart in the store: while the
+/// run is live, a retried release replays its own spend and is answered `question_answer_released` again,
+/// and the client's token, or any other claim, is refused as already consumed. After a landed receipt the
+/// run has ended and every retry is refused `not_resumable` (see `release_question_answer`).
+pub(crate) fn release_claim_token(claim_token: &str) -> String {
+    format!("{RELEASE_CLAIM_PREFIX}{claim_token}")
+}
+
+/// Whether a won or replayed release may be sent to the client as a message. A server's question
+/// (`mcp_elicitation`) is never released as one: it ends `question_resume_unavailable`, on its first
+/// spend and on its replay alike. Pure.
+pub(crate) fn is_releasable(question: &pb::RunQuestion) -> bool {
+    question.origin != mp_contracts::user_question::ORIGIN_MCP_ELICITATION
 }
 
 /// What the placeholder slot of a restored question round says, so a seed that was never given its
@@ -4122,6 +4148,56 @@ mod tests {
             QuestionSpend::Refused(Refusal::QuestionResumeUnavailable),
             "the words without the trailer"
         );
+    }
+
+    /// A release presents its own claim (see [`release_claim_token`]): never the client's token, the same
+    /// token for the same client claim, and different client claims stay different.
+    #[test]
+    fn release_claim_token_is_never_the_continuations_token_and_stays_per_claim() {
+        let claims = ["claim-1", "claim-2", "x", "", "release:claim-1"];
+        let mut released = std::collections::BTreeSet::new();
+        for claim in claims {
+            let token = release_claim_token(claim);
+            assert_ne!(token, claim, "{claim:?} must not present its own token");
+            assert_eq!(
+                token,
+                release_claim_token(claim),
+                "{claim:?} is deterministic"
+            );
+            released.insert(token);
+        }
+        assert_eq!(
+            released.len(),
+            claims.len(),
+            "distinct claims give distinct release tokens"
+        );
+        // A client that sends a release token as its own claim is still another claim.
+        assert_ne!(
+            release_claim_token("release:claim-1"),
+            release_claim_token("claim-1")
+        );
+    }
+
+    /// Only a model question is released as a message. An empty origin reads as a model question, and a
+    /// server's question is never released.
+    #[test]
+    fn is_releasable_refuses_only_a_server_question() {
+        let model = run_question(
+            "q_answer",
+            RUN,
+            mp_contracts::user_question::DELIVERY_RESUME,
+            pb::QuestionState::Answered,
+        );
+        let mut legacy = model.clone();
+        legacy.origin = String::new();
+        let mut server = model.clone();
+        server.origin = mp_contracts::user_question::ORIGIN_MCP_ELICITATION.to_owned();
+        assert!(is_releasable(&model));
+        assert!(
+            is_releasable(&legacy),
+            "an empty origin is a model question"
+        );
+        assert!(!is_releasable(&server));
     }
 
     const INPUT_STEP_CALL: &str = "ask_user";
