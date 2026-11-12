@@ -497,50 +497,7 @@ pub async fn admit_turn(
     }
 }
 
-/// Decides whether the org's agent-run pause refuses a stored run's resume or continuation, both Do runs that start work
-/// on a run that already exists. Off reads nothing and changes nothing. Shadow reads and logs what would be refused and
-/// refuses nothing. Enforce refuses a paused org with [`AGENTS_PAUSED_CODE`], and a policy that cannot be read inside
-/// its bound with [`POLICY_UNAVAILABLE_CODE`], as [`admit_turn`] refuses a Do turn.
-///
-/// # Errors
-///
-/// [`AGENTS_PAUSED_CODE`] when the org has paused agent runs, or [`POLICY_UNAVAILABLE_CODE`] when the policy is enforced
-/// and cannot be read.
-pub async fn ensure_not_paused(
-    mode: PolicyMode,
-    cache: &OrgPolicyCache,
-    client: &reqwest::Client,
-    base_url: &str,
-    org_id: &str,
-    bearer: &str,
-) -> Result<(), &'static str> {
-    match mode {
-        PolicyMode::Off => Ok(()),
-        PolicyMode::Shadow => {
-            match ensure(cache, client, base_url, org_id, bearer).await {
-                Ok(policy) if policy.agents_paused => tracing::info!(
-                    %org_id,
-                    "org agent policy (shadow): agent runs would be paused for this resume or continuation"
-                ),
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(%org_id, %error, "org agent policy (shadow) could not be read");
-                }
-            }
-            Ok(())
-        }
-        PolicyMode::Enforce => match ensure(cache, client, base_url, org_id, bearer).await {
-            Ok(policy) if policy.agents_paused => Err(AGENTS_PAUSED_CODE),
-            Ok(_) => Ok(()),
-            Err(error) => {
-                tracing::warn!(%org_id, %error, "org agent policy cannot be read; the run is not resumed or continued");
-                Err(POLICY_UNAVAILABLE_CODE)
-            }
-        },
-    }
-}
-
-/// Decides what the org policy does to a stored run's resume or continuation: the pause [`ensure_not_paused`] reads,
+/// Decides what the org policy does to a stored run's resume or continuation: the pause [`admit_continuation`] reads,
 /// and the org's mode cap, which a fresh Do turn already obeys at [`admit_turn`] (D2-1114, D2-1117, WS25-S9). Off reads
 /// nothing and returns `Ok(false)`. Shadow reads and logs what would be refused or narrowed, and returns `Ok(false)`.
 /// Enforce refuses a paused org, and an org whose mode cap is `lockdown` (no Do runs), with [`AGENTS_PAUSED_CODE`], and
@@ -1519,4 +1476,161 @@ mod tests {
             "nothing is held for a refused caller"
         );
     }
+
+    /// Runs one enforced continuation admission against a registry that answers `body` for `org`, with nothing held.
+    async fn enforced_continuation(org: &str, body: Value) -> Result<bool, &'static str> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(document(org, 1, body)))
+            .mount(&server)
+            .await;
+        admit_continuation(
+            PolicyMode::Enforce,
+            &OrgPolicyCache::new(),
+            &reqwest::Client::new(),
+            &server.uri(),
+            org,
+            "token",
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_off_admits_a_continuation_unread_and_shadow_refuses_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(document(
+                "org-cont-off",
+                8,
+                json!({"agents.paused": true, "mode_cap": "lockdown"}),
+            )))
+            .mount(&server)
+            .await;
+        let cache = OrgPolicyCache::new();
+        let client = reqwest::Client::new();
+        assert_eq!(
+            admit_continuation(
+                PolicyMode::Off,
+                &cache,
+                &client,
+                &server.uri(),
+                "org-cont-off",
+                "token"
+            )
+            .await,
+            Ok(false)
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "off makes no call to the registry"
+        );
+        assert!(cache.policy("org-cont-off").is_none(), "off holds nothing");
+        assert_eq!(
+            admit_continuation(
+                PolicyMode::Shadow,
+                &cache,
+                &client,
+                &server.uri(),
+                "org-cont-off",
+                "token"
+            )
+            .await,
+            Ok(false),
+            "shadow would refuse this org and refuses nothing"
+        );
+        assert!(
+            cache.policy("org-cont-off").is_some(),
+            "shadow still reads the policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_enforced_continuation_refuses_a_pause_or_a_lockdown_cap() {
+        // A paused org refuses its continuation whatever its cap says.
+        assert_eq!(
+            enforced_continuation("org-paused", json!({"agents.paused": true})).await,
+            Err(AGENTS_PAUSED_CODE)
+        );
+        // A pause this build cannot read pauses the org, so a malformed value can only narrow it.
+        assert_eq!(
+            enforced_continuation("org-paused-odd", json!({"agents.paused": "maybe"})).await,
+            Err(AGENTS_PAUSED_CODE)
+        );
+        // A lockdown cap refuses a continuation as a pause does: no Do run proceeds.
+        assert_eq!(
+            enforced_continuation("org-lockdown", json!({"mode_cap": "lockdown"})).await,
+            Err(AGENTS_PAUSED_CODE)
+        );
+        // The lockdown bundle locks the cap whatever its mode_cap says.
+        assert_eq!(
+            enforced_continuation("org-b", json!({"mode_cap": "auto", "lockdown": true})).await,
+            Err(AGENTS_PAUSED_CODE)
+        );
+        // A cap this build cannot read is the strictest one.
+        assert_eq!(
+            enforced_continuation("org-odd-cap", json!({"mode_cap": "full_access"})).await,
+            Err(AGENTS_PAUSED_CODE)
+        );
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_enforced_continuation_under_a_read_only_cap_is_held_to_plan_mode() {
+        assert_eq!(
+            enforced_continuation("org-read-only", json!({"mode_cap": "read_only"})).await,
+            Ok(true)
+        );
+        // The caps that allow Do runs without plan mode state no plan flag.
+        assert_eq!(
+            enforced_continuation("org-ask-first", json!({"mode_cap": "ask_first"})).await,
+            Ok(false)
+        );
+        assert_eq!(
+            enforced_continuation("org-default", json!({})).await,
+            Ok(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_enforced_continuation_fails_closed_when_unreadable() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        assert_eq!(
+            admit_continuation(
+                PolicyMode::Enforce,
+                &OrgPolicyCache::new(),
+                &client,
+                &server.uri(),
+                "org-unread",
+                "token"
+            )
+            .await,
+            Err(POLICY_UNAVAILABLE_CODE),
+            "a registry outage refuses the continuation"
+        );
+        assert_eq!(
+            admit_continuation(
+                PolicyMode::Enforce,
+                &OrgPolicyCache::new(),
+                &client,
+                &server.uri(),
+                "org-unread",
+                ""
+            )
+            .await,
+            Err(POLICY_UNAVAILABLE_CODE),
+            "a continuation with no bearer cannot read the policy either"
+        );
+    }
+
 }
