@@ -45,6 +45,7 @@ import {
 import { getSession } from '@/shared/session/session-store'
 import { supportQuestionFromPrompt } from '@/shared/chat/support-context-envelope'
 import { en as enStrings } from '@/shared/i18n/en'
+import { LocalizedError } from '@/shared/i18n/errors'
 import { localeIntl, type Locale } from '@/shared/i18n/locales'
 import { no as noStrings } from '@/shared/i18n/no'
 import type { RunDetail } from '@/shared/api/runs-client'
@@ -1549,7 +1550,10 @@ export async function inlineTextAttachments(
       total += content.length
       out.push({ name: attachment.name?.trim() || 'vedlegg.txt', content })
     } catch {
-      throw new Error(`Kunne ikke lese hele «${attachment.name}». Utkastet er beholdt; prøv igjen med et lesbart, mindre vedlegg.`)
+      throw new LocalizedError({
+        no: `Kunne ikke lese hele «${attachment.name}». Utkastet er beholdt; prøv igjen med et lesbart, mindre vedlegg.`,
+        en: `Could not read all of “${attachment.name}”. Your draft has been kept; try again with a readable, smaller attachment.`,
+      })
     }
   }
   return out
@@ -1593,7 +1597,10 @@ export async function toStreamAttachments(
   const spend = (base64: string, name: string) => {
     used += base64ByteLength(base64)
     if (used > budget) {
-      throw new Error(`Vedleggene er for store til å sendes i én melding («${name}» passerte grensen). Fjern noen og prøv igjen.`)
+      throw new LocalizedError({
+        no: `Vedleggene er for store til å sendes i én melding («${name}» passerte grensen). Fjern noen og prøv igjen.`,
+        en: `The attachments are too large to send in one message (“${name}” went over the limit). Remove some and try again.`,
+      })
     }
   }
   for (const attachment of attachments) {
@@ -1618,7 +1625,10 @@ export async function toStreamAttachments(
       parsed = parseDataUrl(dataUrl)
       if (!parsed || !parsed.base64) throw new Error('invalid image encoding')
     } catch {
-      throw new Error(`Kunne ikke lese bildet «${attachment.name}». Prøv igjen eller fjern bildet.`)
+      throw new LocalizedError({
+        no: `Kunne ikke lese bildet «${attachment.name}». Prøv igjen eller fjern bildet.`,
+        en: `Could not read the image “${attachment.name}”. Try again or remove the image.`,
+      })
     }
     spend(parsed.base64, attachment.name)
     out.push({ kind: 'image', data_base64: parsed.base64, mime_type: parsed.mime || attachment.type })
@@ -1646,7 +1656,10 @@ async function toStreamFile(
       mime_type: attachment.type || parsed.mime || 'application/octet-stream',
     }
   } catch {
-    throw new Error(`Kunne ikke lese «${attachment.name}». Prøv igjen eller fjern filen.`)
+    throw new LocalizedError({
+      no: `Kunne ikke lese «${attachment.name}». Prøv igjen eller fjern filen.`,
+      en: `Could not read “${attachment.name}”. Try again or remove the file.`,
+    })
   }
 }
 

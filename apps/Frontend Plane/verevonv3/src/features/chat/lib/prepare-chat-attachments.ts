@@ -1,4 +1,5 @@
 import { extractChatDocument, getAttachmentPolicy } from '@/shared/api/chat-client'
+import { LocalizedError } from '@/shared/i18n/errors'
 import { objectUrlToDataUrl, parseDataUrl } from '@/shared/lib/blob-data'
 import { ATTACHMENT_MAX_FILE_BYTES } from './attachment-policy'
 import type { PendingChatAttachment } from './pending-chat-launch'
@@ -38,13 +39,16 @@ export async function prepareChatAttachments(attachments: PendingChatAttachment[
         if (total > 120_000) throw new Error('too long')
       }
     } catch {
-      throw new Error(`Kunne ikke lese hele «${file.name}». Utkastet er beholdt. Prøv igjen; hvis det fortsatt feiler, velg en lesbar fil under ${formatMegabytes(maxFileBytes)} og 60 000 tegn (maks. 120 000 tegn samlet).`)
+      throw new LocalizedError({
+        no: `Kunne ikke lese hele «${file.name}». Utkastet er beholdt. Prøv igjen; hvis det fortsatt feiler, velg en lesbar fil under ${formatMegabytes(maxFileBytes, 'nb-NO')} og 60 000 tegn (maks. 120 000 tegn samlet).`,
+        en: `Could not read all of “${file.name}”. Your draft has been kept. Try again; if it still fails, choose a readable file under ${formatMegabytes(maxFileBytes, 'en-US')} and 60,000 characters (at most 120,000 characters in total).`,
+      })
     }
     prepared.push({ ...file, url, extractedText })
   }
   return prepared
 }
 
-function formatMegabytes(bytes: number): string {
-  return `${(bytes / 1_000_000).toLocaleString('nb-NO', { maximumFractionDigits: 1 })} MB`
+function formatMegabytes(bytes: number, locale: 'nb-NO' | 'en-US'): string {
+  return `${(bytes / 1_000_000).toLocaleString(locale, { maximumFractionDigits: 1 })} MB`
 }
