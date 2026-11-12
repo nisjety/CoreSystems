@@ -139,7 +139,7 @@ GOLDENS=(
   # the_golden_and_markdown_are_what_the_table_generates (crates/quarry-core/src/zdr_matrix.rs),
   # which quarry-v2-ci.yml runs through cargo test --workspace. A regenerated golden needs
   # its digest here updated in the same change.
-  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|1b386090141fd8da539ef7cad972ad0c4c7601ecf0e9267a79366669de52bb4e"
+  "apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/contracts/zdr-feature-matrix.json|fd96ac298afd297c8a97551bd379b6c596b96c3f0d676cc83dc1eda8f41e125c"
 
   # WS4.J: the allowlist of the ZDR run tombstone, the ONLY fields that egress path may carry.
   # AUTHORED data owned by Quarry. quarry-edge's serializer (src/zdr_tombstone.rs, tests/
@@ -232,7 +232,7 @@ GOLDENS=(
   # model-gateway zdr_posture` (every non-GET route has a row) and the gateway
   # tests/space_routes_zdr_classes.rs (every /api/v1/spaces route has a row). The consumers vendor a
   # copy, with the pin, in the same slice as those lints (VENDORED and CONSUMERS rows then).
-  "apps/Model Plane/api/contracts/space-surface.v1.json|da4ab5f7561e4c76cd0c86bb8db5616ac9f5f1c034966966f4ae6a64abef7166"
+  "apps/Model Plane/api/contracts/space-surface.v1.json|0a013465f738c11ccac21b37f30c4a9b37ea6c84a6c097b60c8b2b2f805188db"
 
   # WS02-S3: the Space event stream vocabulary (SSE events, cursor grammar, kind registry, closing codes,
   # refs allowlist, HTTP error map). AUTHORED by hand with the slice that serves it (session-core

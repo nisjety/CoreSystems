@@ -327,8 +327,7 @@ new credential and `validate-release-credentials.sh` needs no change. The two
 org-core when it is minted, at most 60 seconds of life) and answer 503
 `retention_posture_unavailable` with no token when org-core cannot be read, exactly
 as the Data Plane worker lanes do. The Quarry manifest appends `model-extract` and
-`model-extract-inference` as `granted: true` (both pending their call site,
-WS16.S3); `model-invoke`, `model-stream` and `model-audio` stay `granted: false`.
+`model-extract-inference` as `granted: true` (both called from `mp_client.rs`, the WS16.S3 call site); `model-invoke`, `model-stream` and `model-audio` stay `granted: false`.
 Auth Core cannot tell those three from `model-extract` (same service, audience and
 scope), so for them `granted: false` is Quarry's own closed gate, no longer an
 Auth Core refusal, and the gateway still refuses a service principal on

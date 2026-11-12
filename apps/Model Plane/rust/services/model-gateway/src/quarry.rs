@@ -33,7 +33,8 @@ const RENDER_SETTLE_MS: u32 = 2_500;
 /// retry after a 401. The value lives in a task-local, so it does not follow a `tokio::spawn`: a caller
 /// must not wrap detached work. Both headers are attribution only. quarry-edge uses them for usage records
 /// and logs, never for auth, scope, budget or idempotency, and it reads the parent run from a service
-/// principal only.
+/// principal only. The switch `MODEL_GATEWAY_QUARRY_ATTRIBUTION` is off by default: with it off no scope is entered
+/// and every read goes out as it was built.
 pub mod attribution {
     use std::future::Future;
 
@@ -59,9 +60,38 @@ pub mod attribution {
         pub parent_run: Option<String>,
     }
 
-    /// Runs `fut` with `attribution` in scope, so every Quarry read it makes on this task is stamped.
+    /// The switch that turns attribution on. Off unless its value is the literal `true`.
+    pub const ENABLED_ENV: &str = "MODEL_GATEWAY_QUARRY_ATTRIBUTION";
+
+    /// Whether a raw switch value turns attribution on: only the literal `true`.
+    #[must_use]
+    pub fn parse_enabled(raw: Option<&str>) -> bool {
+        raw == Some("true")
+    }
+
+    /// Whether attribution is on in this process. Read on every scope, so a restart is not needed to turn it off.
+    #[must_use]
+    pub fn enabled() -> bool {
+        parse_enabled(std::env::var(ENABLED_ENV).ok().as_deref())
+    }
+
+    /// Runs `fut` with `attribution` in scope, so every Quarry read it makes on this task is stamped. With the switch
+    /// off the future runs unscoped, so no attribution header is sent.
     pub async fn scope<F: Future>(attribution: Attribution, fut: F) -> F::Output {
-        CURRENT.scope(attribution, fut).await
+        scope_when(enabled(), attribution, fut).await
+    }
+
+    /// [`scope`] with the switch given, so both settings can be tested without touching the process environment.
+    pub(crate) async fn scope_when<F: Future>(
+        on: bool,
+        attribution: Attribution,
+        fut: F,
+    ) -> F::Output {
+        if on {
+            CURRENT.scope(attribution, fut).await
+        } else {
+            fut.await
+        }
     }
 
     /// Stamps the scoped attribution on a Quarry request. Outside a scope the request goes out as it was
@@ -3088,5 +3118,49 @@ mod tests {
         assert_eq!(RerankStatus::Skipped.label(), "skipped");
         assert_eq!(RerankStatus::Degraded.label(), "degraded");
         assert_eq!(RerankStatus::Shadow.label(), "shadow");
+    }
+
+    #[test]
+    fn attribution_switch_is_on_only_for_the_literal_true() {
+        assert!(attribution::parse_enabled(Some("true")));
+        let not_on = [
+            None,
+            Some(""),
+            Some("TRUE"),
+            Some("1"),
+            Some("on"),
+            Some(" true"),
+        ];
+        for raw in not_on {
+            assert!(!attribution::parse_enabled(raw), "{raw:?}");
+        }
+    }
+
+    /// The request a Quarry read builds inside an attribution scope, with the switch given.
+    async fn attributed_request(on: bool) -> reqwest::Request {
+        let scoped = attribution::Attribution {
+            request_id: Some("req_1".to_owned()),
+            parent_run: Some("run_1".to_owned()),
+        };
+        attribution::scope_when(on, scoped, async {
+            attribution::apply(reqwest::Client::new().get("http://127.0.0.1/"))
+                .build()
+                .expect("the request builds")
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn attribution_headers_go_out_only_when_the_switch_is_on() {
+        let off = attributed_request(false).await;
+        assert!(off.headers().get("x-request-id").is_none());
+        assert!(off.headers().get("x-verevon-parent-run").is_none());
+
+        let on = attributed_request(true).await;
+        assert_eq!(on.headers()["x-request-id"].to_str().unwrap(), "req_1");
+        assert_eq!(
+            on.headers()["x-verevon-parent-run"].to_str().unwrap(),
+            "run_1"
+        );
     }
 }

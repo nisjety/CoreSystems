@@ -245,6 +245,25 @@ fn without_nulls(mut value: serde_json::Value) -> serde_json::Value {
     value
 }
 
+/// WS10.S4: the flag that turns on the per-step browser trace events (`StepReceiptRecorded`,
+/// `EgressDecided`, `ArtifactRecorded`). Default off: while it is off the edge emits none of
+/// them, and each step is recorded exactly as before.
+const STEP_TRACE_FLAG: &str = "QUARRY_EDGE__STEP_TRACE";
+
+/// The words that turn the step trace switch on, read the way the other switches read theirs.
+fn parse_step_trace_flag(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(|value| value.trim().to_ascii_lowercase()).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+/// Whether `QUARRY_EDGE__STEP_TRACE` is on in this process. Read per call, like
+/// `QUARRY_EDGE__DOWNLOADS`, so the flag needs no AppState plumbing.
+fn step_trace_enabled() -> bool {
+    parse_step_trace_flag(std::env::var(STEP_TRACE_FLAG).ok().as_deref())
+}
+
 /// WS10.S4: the run-trace events of one recorded step, emitted after its receipt was stored
 /// (or, on a run that keeps none, built): `StepReceiptRecorded`, then for a step with an
 /// observation one `EgressDecided` summary plus at most [`MAX_EGRESS_BLOCK_EVENTS`] blocked
@@ -260,6 +279,10 @@ pub(super) async fn emit_step_trace(
     latency_ms: u64,
     observation: Option<&BrowserObservation>,
 ) {
+    // Dark until the switch is on: the receipt itself is recorded by the caller either way.
+    if !step_trace_enabled() {
+        return;
+    }
     let sink = &state.event_sink;
     let step = facts.step;
     let verified = observation.is_some_and(|obs| {
@@ -904,6 +927,45 @@ pub(super) async fn execute_ws_action(
             .await?;
     }
     Ok(observation)
+}
+
+#[cfg(test)]
+mod step_trace_gate_tests {
+    use super::*;
+
+    #[test]
+    fn the_step_trace_flag_is_off_unless_set_on() {
+        assert!(!parse_step_trace_flag(None));
+        assert!(!parse_step_trace_flag(Some("")));
+        assert!(!parse_step_trace_flag(Some("0")));
+        assert!(!parse_step_trace_flag(Some("off")));
+        assert!(parse_step_trace_flag(Some("1")));
+        assert!(parse_step_trace_flag(Some(" TRUE ")));
+        assert!(parse_step_trace_flag(Some("on")));
+    }
+
+    #[tokio::test]
+    async fn a_step_emits_no_trace_event_while_the_flag_is_off() {
+        // No test in this suite sets QUARRY_EDGE__STEP_TRACE, so the switch reads off here.
+        let state = crate::test_support::test_state(crate::test_support::StubDriver::ok());
+        let run_id = RunKind::new();
+        let mut events = state.event_sink.subscribe(&run_id);
+        let facts = StepTraceFacts {
+            receipt_id: "receipt-1".to_owned(),
+            step: 1,
+            action: "navigate",
+            outcome: "completed",
+            error_code: None,
+            cost_micro_usd: 0,
+            initiated_by: None,
+            control_epoch: None,
+        };
+        emit_step_trace(&state, ZdrMode::Off, &run_id, facts, 1, None).await;
+        assert!(
+            events.try_recv().is_err(),
+            "no step trace event while the flag is off"
+        );
+    }
 }
 
 #[cfg(test)]

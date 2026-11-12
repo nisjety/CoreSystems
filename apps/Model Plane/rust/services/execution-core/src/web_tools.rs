@@ -97,10 +97,15 @@ impl Attribution {
         ok.then_some(value)
     }
 
-    /// Attribution for one step. The parent run is omitted under ZDR so no run id leaves the plane.
+    /// Attribution for one step. Under ZDR no run id leaves the plane: the parent run is omitted,
+    /// and so is the request id, which is built from the run id (a step id can carry it too).
     pub fn for_step(run_id: &str, step_id: &str, zdr: bool) -> Self {
         Self {
-            request_id: Self::clean(format!("{run_id}.{step_id}")),
+            request_id: if zdr {
+                None
+            } else {
+                Self::clean(format!("{run_id}.{step_id}"))
+            },
             parent_run: if zdr {
                 None
             } else {
@@ -1089,6 +1094,57 @@ pub(crate) mod tests {
             extract_body("https://example.com", false)["zdr"],
             json!(false)
         );
+    }
+
+    #[test]
+    fn step_attribution_under_zdr_carries_no_run_id() {
+        // A step id can carry the run id (the orchestrator mints `{run_id}:step:{n}`), so under ZDR
+        // the request id is not built from the step either: neither header names the run.
+        let zdr = Attribution::for_step("run_abc123", "run_abc123:step:0", true);
+        assert!(zdr.request_id.is_none());
+        assert!(zdr.parent_run.is_none());
+        let plain = Attribution::for_step("run_abc123", "run_abc123:step:0", false);
+        assert_eq!(
+            plain.request_id.as_deref(),
+            Some("run_abc123.run_abc123:step:0")
+        );
+        assert_eq!(plain.parent_run.as_deref(), Some("run_abc123"));
+    }
+
+    #[tokio::test]
+    async fn a_zdr_step_sends_no_run_id_to_the_edge() {
+        let edge = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "query": "q", "provider": "hybrid", "results": [], "count": 0
+            })))
+            .mount(&edge)
+            .await;
+        let auth = MockServer::start().await;
+        mint_mock("org-a", "search:read", minted("search-token"))
+            .mount(&auth)
+            .await;
+        let under_zdr = Attribution::for_step("run_abc123", "run_abc123:step:0", true);
+        let client = quarry_client(&edge.uri(), &auth.uri()).with_attribution(under_zdr);
+        client
+            .search("q", 3, "org-a", true)
+            .await
+            .expect("the search answers");
+        // The same step off ZDR carries both headers, so the absence checked below is a real one.
+        let off_zdr = Attribution::for_step("run_abc123", "run_abc123:step:0", false);
+        let client = quarry_client(&edge.uri(), &auth.uri()).with_attribution(off_zdr);
+        client
+            .search("q", 3, "org-a", false)
+            .await
+            .expect("the search answers");
+
+        let sent = edge.received_requests().await.expect("recorded requests");
+        assert_eq!(sent.len(), 2);
+        assert!(sent[0].headers.get(REQUEST_ID_HEADER).is_none());
+        assert!(sent[0].headers.get(PARENT_RUN_HEADER).is_none());
+        assert!(sent[1].headers.get(REQUEST_ID_HEADER).is_some());
+        assert!(sent[1].headers.get(PARENT_RUN_HEADER).is_some());
     }
 
     #[test]

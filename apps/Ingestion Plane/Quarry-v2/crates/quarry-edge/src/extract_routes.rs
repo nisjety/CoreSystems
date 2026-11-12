@@ -58,7 +58,7 @@ const AI_FORMATS_OFF_HINT: &str = "omit `schema` and `prompt` to receive cleaned
 /// A URL, but nothing to authenticate with (no service token provider, no development token).
 const NO_MODEL_CREDENTIAL_ERROR: &str =
     "structured extraction needs a granted Model Plane lane, and this deployment holds no model credential";
-const NO_MODEL_CREDENTIAL_HINT: &str = "omit `schema` and `prompt` to receive cleaned markdown. Operators: the Model Plane URL is set but Quarry has no credential for the model lane (a deployed stack has none until WS16.S1 to S3 and decision X-7 land; in development, QUARRY_EDGE__MODEL_PLANE_TOKEN under the auth dev bypass); see docs/RUNBOOKS.md, \"Enable structured extract and AI formats\"";
+const NO_MODEL_CREDENTIAL_HINT: &str = "omit `schema` and `prompt` to receive cleaned markdown. Operators: the Model Plane URL is set but Quarry has no credential for the model lane (a deployed stack gets one from QUARRY_EDGE__QUARRY_SERVICE_API_KEY, but the boot gate keeps the switch off while the model-invoke row stays granted: false, decision D16; in development, QUARRY_EDGE__MODEL_PLANE_TOKEN under the auth dev bypass); see docs/RUNBOOKS.md, \"Enable structured extract and AI formats\"";
 /// The gateway answered 401 or 403 to the first model call of the request.
 const LANE_REFUSED_ERROR: &str =
     "structured extraction needs a granted Model Plane lane, and the Model Plane refused this service";
@@ -770,18 +770,32 @@ async fn run_extract(
         stop: AtomicBool::new(false),
         any_ok: AtomicBool::new(false),
     };
-    // WS16.S6: sources run concurrently, at most QUARRY_EDGE__AI_FORMATS_CONCURRENCY at a time;
-    // model calls in flight are also bounded by the engine's process-wide limit.
-    let concurrency = crate::scrape_contract::ai_formats::settings()
-        .concurrency
-        .max(1);
+    // WS16.S6: once the first source has answered, the rest run concurrently, at most
+    // QUARRY_EDGE__AI_FORMATS_CONCURRENCY at a time, and model calls in flight are also bounded by
+    // the engine's process-wide limit. The first source runs alone, so a lane refusal or a 429 on
+    // it stops the batch before any other page is fetched (INNH-3: one fetch and one model call).
+    // A markdown-only batch makes no model call and keeps the one-source-at-a-time loop it had
+    // before WS16.S6, so its driver 429 stops the fetches there too.
+    let window = if wants_model {
+        crate::scrape_contract::ai_formats::settings()
+            .concurrency
+            .max(1)
+    } else {
+        1
+    };
     let ctx_ref = &ctx;
-    let mut outcomes: Vec<(usize, TargetOutcome)> =
-        futures::stream::iter(targets.iter().cloned().enumerate())
+    let mut sources = targets.iter().cloned().enumerate();
+    let mut outcomes: Vec<(usize, TargetOutcome)> = Vec::with_capacity(targets.len());
+    if let Some((index, raw)) = sources.next() {
+        outcomes.push((index, extract_target(ctx_ref, &raw).await));
+    }
+    outcomes.extend(
+        futures::stream::iter(sources)
             .map(|(index, raw)| async move { (index, extract_target(ctx_ref, &raw).await) })
-            .buffer_unordered(concurrency)
-            .collect()
-            .await;
+            .buffer_unordered(window)
+            .collect::<Vec<_>>()
+            .await,
+    );
     // Sources finish out of order; the response keeps the order of `urls`.
     outcomes.sort_by_key(|(index, _)| *index);
     let any_ok = ctx.any_ok.load(Ordering::SeqCst);
@@ -1278,7 +1292,7 @@ mod tests {
 
     fn model_reply(content: &str) -> serde_json::Value {
         serde_json::json!({
-            "request_id": "req_1",
+            "id": "req_1",
             "content": content,
             "model_used": "test-model",
         })
@@ -1287,7 +1301,7 @@ mod tests {
     async fn model_double(content: &str) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/invoke"))
+            .and(path("/v1/ai/chat"))
             .respond_with(ResponseTemplate::new(200).set_body_json(model_reply(content)))
             .mount(&server)
             .await;
@@ -1329,7 +1343,9 @@ mod tests {
         (status, crate::test_support::response_json(response).await)
     }
 
-    async fn sent_to_model(model: &MockServer) -> Vec<String> {
+    /// The system and user messages of each model call the double received, in arrival order.
+    /// The caller's schema and prompt are in the system message; the page is the user message.
+    async fn sent_to_model(model: &MockServer) -> Vec<(String, String)> {
         model
             .received_requests()
             .await
@@ -1337,7 +1353,13 @@ mod tests {
             .iter()
             .map(|r| {
                 let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
-                body["content"].as_str().unwrap().to_string()
+                let message = |index: usize| {
+                    body["messages"][index]["content"]
+                        .as_str()
+                        .unwrap()
+                        .to_string()
+                };
+                (message(0), message(1))
             })
             .collect()
     }
@@ -1368,16 +1390,18 @@ mod tests {
         assert!(item.get("truncated_input").is_none());
         let sent = sent_to_model(&model).await;
         assert_eq!(sent.len(), 1);
-        let sent = &sent[0];
-        let open = sent.find("<<<PAGE-").expect("fence opens");
-        let close = sent.find("<<<END-").expect("fence closes");
-        let prompt_at = sent.find("prices are in USD").expect("prompt is sent");
-        assert!(prompt_at < open, "the prompt is outside the fence");
+        let (system, user) = &sent[0];
+        // The prompt and the schema are the instruction, in the system message. The page is the
+        // user message, and only the page is fenced.
+        assert!(system.contains("prices are in USD"), "the prompt is sent");
+        assert!(system.contains("\"basic\""), "the schema is sent");
         assert!(
-            sent.find("\"basic\"").unwrap() < open,
-            "the schema is outside the fence"
+            !user.contains("prices are in USD"),
+            "the prompt is outside the page"
         );
-        let page_at = sent.find("Plan Basic costs 12 USD").expect("page is sent");
+        let open = user.find("<<<PAGE-").expect("fence opens");
+        let close = user.find("<<<END-").expect("fence closes");
+        let page_at = user.find("Plan Basic costs 12 USD").expect("page is sent");
         assert!(
             open < page_at && page_at < close,
             "the page is inside the fence"
@@ -1397,14 +1421,16 @@ mod tests {
         let item = &body["results"][0];
         assert_eq!(item["status"], "ok");
         assert_eq!(item["data"]["cheapest"], "Basic");
-        // No schema was sent, so there is no verdict to report.
+        // No schema was sent, so there is no schema verdict to report; `ai` is the engine's report.
         assert_eq!(
             crate::test_support::json_keys(item),
-            vec!["data", "status", "url"]
+            vec!["ai", "data", "status", "url"]
         );
         let sent = sent_to_model(&model).await;
-        assert!(sent[0].contains("name the cheapest plan"));
-        assert!(!sent[0].contains("JSON Schema"));
+        let (system, _) = &sent[0];
+        assert!(system.contains("name the cheapest plan"));
+        // The model is asked for a free-form object, so no property of a caller's schema is sent.
+        assert!(!system.contains("\"properties\""));
     }
 
     #[tokio::test]
@@ -1480,7 +1506,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_model_answer_that_breaks_the_schema_is_ok_with_the_issues() {
+    async fn a_model_answer_that_breaks_the_schema_is_an_error_with_the_issues() {
         let model = model_double("{\"basic\": \"twelve\"}").await;
         let (status, body) = call(
             state_with_model(PAGE, Some(&model)),
@@ -1490,11 +1516,19 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let item = &body["results"][0];
-        assert_eq!(item["status"], "ok", "the status enum keeps its meaning");
+        // `data` is only ever schema-valid: an answer that still breaks the schema after the one
+        // repair call is an `error` with `SCHEMA_INVALID`, its issues and no `data`.
+        assert_eq!(sent_to_model(&model).await.len(), 2, "one repair call");
+        assert_eq!(item["status"], "error");
+        assert!(item["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("SCHEMA_INVALID:"));
+        assert_eq!(item["ai"]["code"], "SCHEMA_INVALID");
         assert_eq!(item["schema_valid"], false);
         let issues = item["schema_issues"].as_array().unwrap();
         assert!(!issues.is_empty() && issues.iter().all(|i| i.is_string()));
-        assert_eq!(item["data"]["basic"], "twelve");
+        assert!(item.get("data").is_none());
     }
 
     #[tokio::test]
@@ -1657,14 +1691,19 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let item = &body["results"][0];
-        assert_eq!(item["status"], "ok");
+        // The answer lacks the required `basic`, so it is an error that carries no data.
+        assert_eq!(item["status"], "error");
         assert_eq!(item["schema_valid"], false);
+        assert!(item.get("data").is_none());
         assert!(!body.to_string().contains("private-instruction-marker"));
         let sent = sent_to_model(&model).await;
-        let sent = &sent[0];
-        assert!(sent.find("private-instruction-marker").unwrap() < sent.find("<<<PAGE-").unwrap());
+        let (system, user) = &sent[0];
+        // The caller's prompt is guidance in the system message. The page is fenced in the user
+        // message, and the page's own instructions come after the fence opens.
+        assert!(system.contains("private-instruction-marker"));
+        assert!(!user.contains("private-instruction-marker"));
         assert!(
-            sent.find("ignore previous instructions").unwrap() > sent.find("<<<PAGE-").unwrap()
+            user.find("<<<PAGE-").unwrap() < user.find("ignore previous instructions").unwrap()
         );
     }
 
@@ -1672,7 +1711,7 @@ mod tests {
     async fn a_failing_model_call_fails_only_its_source_and_keeps_the_harvest() {
         let model = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/invoke"))
+            .and(path("/v1/ai/chat"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&model)
             .await;
@@ -1697,7 +1736,7 @@ mod tests {
     async fn the_request_time_budget_answers_the_slow_sources_with_a_typed_error() {
         let model = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/invoke"))
+            .and(path("/v1/ai/chat"))
             .respond_with(
                 ResponseTemplate::new(200)
                     .set_body_json(model_reply("{\"a\": 1}"))
@@ -1919,11 +1958,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_gateway_that_refuses_the_service_is_one_501_after_one_fetch_and_one_model_call() {
+    async fn a_gateway_that_refuses_the_service_is_one_501_and_stops_the_unread_sources() {
         for refusal in [403_u16, 401] {
             let model = MockServer::start().await;
             Mock::given(method("POST"))
-                .and(path("/v1/invoke"))
+                .and(path("/v1/ai/chat"))
                 .respond_with(ResponseTemplate::new(refusal))
                 .mount(&model)
                 .await;
@@ -1932,11 +1971,10 @@ mod tests {
             let usage = Arc::new(KeptEvents::default());
             state.usage = usage.clone();
             let mut req = request(Some(plan_schema()), None);
-            req.urls = vec![
-                "https://shop.example/1".into(),
-                "https://shop.example/2".into(),
-                "https://shop.example/3".into(),
-            ];
+            // Six sources: the refusal on the first must leave the other five unread.
+            req.urls = (1..=6)
+                .map(|n| format!("https://shop.example/{n}"))
+                .collect();
             let (status, body) =
                 call(state, crate::test_support::claims_for_org("org_alpha"), req).await;
             assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "gateway answered {refusal}");
@@ -1944,7 +1982,13 @@ mod tests {
             assert_eq!(body["error"], LANE_REFUSED_ERROR);
             assert_eq!(body["hint"], LANE_REFUSED_HINT);
             assert!(body.get("results").is_none());
-            assert_eq!(fetches(&counter), 1, "the other two pages are never fetched");
+            // The first source runs alone: its refusal stops the other five before they are
+            // fetched, so the request costs one page fetch and one model call (INNH-3).
+            assert_eq!(
+                fetches(&counter),
+                1,
+                "the other five pages are never fetched"
+            );
             assert_eq!(sent_to_model(&model).await.len(), 1, "one model call");
             assert!(
                 usage.0.lock().unwrap().is_empty(),
@@ -1959,13 +2003,13 @@ mod tests {
     async fn a_server_error_on_one_source_stays_that_sources_error() {
         let model = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/invoke"))
+            .and(path("/v1/ai/chat"))
             .respond_with(ResponseTemplate::new(500))
             .up_to_n_times(1)
             .mount(&model)
             .await;
         Mock::given(method("POST"))
-            .and(path("/v1/invoke"))
+            .and(path("/v1/ai/chat"))
             .respond_with(ResponseTemplate::new(200).set_body_json(model_reply("{\"basic\": 12}")))
             .mount(&model)
             .await;
@@ -1977,9 +2021,15 @@ mod tests {
         ];
         let (status, body) = call(state, crate::test_support::claims_for_org("org_alpha"), req).await;
         assert_eq!(status, StatusCode::OK, "a 5xx is not a lane refusal");
-        assert_eq!(body["results"][0]["status"], "error");
-        assert_eq!(body["results"][1]["status"], "ok");
-        assert_eq!(body["results"][1]["data"]["basic"], 12);
+        // The first source runs alone, so it meets the 5xx; the test checks the outcome by status,
+        // not by position. One source fails on its own, and the other is extracted.
+        let items = body["results"].as_array().unwrap();
+        let with_status =
+            |status: &str| items.iter().filter(|item| item["status"] == status).count();
+        assert_eq!(with_status("error"), 1);
+        assert_eq!(with_status("ok"), 1);
+        let extracted = items.iter().find(|item| item["status"] == "ok").unwrap();
+        assert_eq!(extracted["data"]["basic"], 12);
         assert_eq!(fetches(&counter), 2);
         assert_eq!(sent_to_model(&model).await.len(), 2);
     }
@@ -1988,13 +2038,13 @@ mod tests {
     async fn a_refusal_after_a_source_was_extracted_stays_per_source() {
         let model = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v1/invoke"))
+            .and(path("/v1/ai/chat"))
             .respond_with(ResponseTemplate::new(200).set_body_json(model_reply("{\"basic\": 12}")))
             .up_to_n_times(1)
             .mount(&model)
             .await;
         Mock::given(method("POST"))
-            .and(path("/v1/invoke"))
+            .and(path("/v1/ai/chat"))
             .respond_with(ResponseTemplate::new(403))
             .mount(&model)
             .await;
@@ -2006,10 +2056,14 @@ mod tests {
             "https://shop.example/3".into(),
         ];
         let (status, body) = call(state, crate::test_support::claims_for_org("org_alpha"), req).await;
-        // The first source was extracted and is owed to the caller, so this is no 501.
+        // One source was extracted and is owed to the caller, so this is no 501. The first source
+        // runs alone and gets the 200. The other two run at once, so which one meets the refusal is
+        // not fixed: the test checks the outcome, and both refused sources stay per source.
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["results"][0]["status"], "ok");
-        assert_eq!(body["results"][1]["status"], "error");
-        assert_eq!(body["results"][2]["status"], "error");
+        let items = body["results"].as_array().unwrap();
+        let with_status =
+            |status: &str| items.iter().filter(|item| item["status"] == status).count();
+        assert_eq!(with_status("ok"), 1);
+        assert_eq!(with_status("error"), 2);
     }
 }

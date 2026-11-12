@@ -7,8 +7,11 @@ import { requestJson } from './http'
 // gateway's `CHAT_RESEARCH_RUNS` is on: off they answer 404. Ids, status and counters only: a zero-retention run
 // keeps no report id, and nothing in this module carries answer text.
 
-/** The closed words a research run can carry. `cancelled` is what the person's own stop records. */
-export const RESEARCH_RUN_STATUS_WORDS = ['running', 'completed', 'stopped', 'cancelled', 'failed'] as const
+/**
+ * The closed words a research run can carry. `cancelled` is what the person's own stop records; `expired` is what a
+ * run gets when its deadline passes before it finishes.
+ */
+export const RESEARCH_RUN_STATUS_WORDS = ['running', 'completed', 'stopped', 'cancelled', 'failed', 'expired'] as const
 
 export type ResearchRunStatusWord = (typeof RESEARCH_RUN_STATUS_WORDS)[number]
 

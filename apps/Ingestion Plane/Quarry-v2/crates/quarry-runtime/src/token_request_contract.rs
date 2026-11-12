@@ -430,14 +430,18 @@ fn the_two_extract_rows_are_exactly_the_registry_grant() {
 }
 
 #[test]
-fn the_extract_rows_are_pending_until_the_model_client_requests_them() {
-    // WS16.S3 adds `chat_for_org` with from_manifest("model-extract") and
-    // from_manifest("model-extract-inference"), fills used_by and drops `pending`.
-    // Until then the source scan must find no call site for either.
+fn the_extract_rows_are_requested_by_the_model_client() {
+    // WS16.S3: `lane_token_requests` in mp_client.rs requests both rows, so each
+    // lists that file in `used_by`, has dropped `pending`, and the source scan
+    // finds its call site.
     for name in ["model-extract", "model-extract-inference"] {
         let row = row(name);
-        assert!(row.get("pending").is_some(), "row {name} has no call site yet");
-        assert!(strings(&row["used_by"]).is_empty(), "row {name}");
+        assert!(row.get("pending").is_none(), "row {name} is still pending");
+        assert_eq!(
+            strings(&row["used_by"]),
+            vec!["crates/quarry-runtime/src/mp_client.rs"],
+            "row {name}: used_by is mp_client.rs alone"
+        );
         assert_eq!(row["granted"], true, "row {name}");
     }
 }

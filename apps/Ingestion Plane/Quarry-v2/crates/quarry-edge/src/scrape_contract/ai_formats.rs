@@ -67,7 +67,7 @@ pub const ENV_REPAIR: &str = "QUARRY_EDGE__AI_FORMATS_REPAIR";
 /// (`cost_usd`), in USD. Unset: no cost ceiling.
 pub const ENV_MAX_COST_USD: &str = "QUARRY_EDGE__AI_FORMATS_MAX_COST_USD";
 /// WS16.S5: how the page's own markup (JSON-LD, microdata, hydration payloads, tables)
-/// reaches the model: `off`, `context` (the default) or `prefill`. A value that is none
+/// reaches the model: `off` (the default), `context` or `prefill`. A value that is none
 /// of these is off.
 pub const ENV_AI_FORMATS_HARVEST: &str = "QUARRY_EDGE__AI_FORMATS_HARVEST";
 
@@ -157,7 +157,7 @@ fn non_empty(value: Option<String>) -> Option<String> {
         .filter(|raw| !raw.is_empty())
 }
 
-/// WS16.S5: `QUARRY_EDGE__AI_FORMATS_HARVEST`. Unset or blank is the default, `context`.
+/// WS16.S5: `QUARRY_EDGE__AI_FORMATS_HARVEST`. Unset or blank is the default, `off`.
 /// `off`, `context` and `prefill` are read as named, ignoring case and spaces. Any other
 /// value is off, and one log line with a fixed label says so. The value is never logged.
 fn harvest_mode(raw: Option<String>) -> HarvestMode {
@@ -581,6 +581,7 @@ mod tests {
         assert_eq!(settings.concurrency, 4);
         assert!(settings.inference_token.is_none());
         assert!(!settings.zdr_allow_requested);
+        assert_eq!(settings.harvest, HarvestMode::Off, "dark until the switch names a mode");
     }
 
     #[test]

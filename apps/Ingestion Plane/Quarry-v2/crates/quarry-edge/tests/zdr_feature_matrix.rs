@@ -427,6 +427,9 @@ const PENDING_FEATURES: &[&str] = &[
     // INNH-8: `/v1/answer` and `/v1/answer/stream` are refused under ZDR (ADR-4), because the Model
     // Plane hop carries no ZDR posture. The catalogue has no key for answer synthesis.
     "answer_synthesis",
+    // Q3-E3.4-7a: a download's knowledge handoff is refused under ZDR (403 download_handoff_zdr_refused)
+    // before any receipt or byte is read. The catalogue has no key for it.
+    "download_handoff",
 ];
 
 fn refusals_named_by_the_matrix() -> (BTreeSet<&'static str>, BTreeSet<&'static str>) {
@@ -447,13 +450,13 @@ fn every_code_and_feature_the_matrix_names_is_in_the_closed_catalogue_list() {
     let catalogue_codes = catalogue_codes();
     let catalogue_features = catalogue_features();
     assert_eq!(catalogue_codes.len(), 10, "the plan's closed list has 10 codes");
+    // 51, the count of the vendored catalogue, which its .sha256 pin fixes to the Model Plane
+    // golden. The earlier 40 was already stale at the merge base (46 keys); the W1-W5 regeneration
+    // (791c6b8f5) took the catalogue to 51.
     assert_eq!(
         catalogue_features.len(),
-        40,
-        "the closed list has 40 feature keys: the plan's 30, connector_read and message_versions \
-         (Model Plane W2-25), sandbox_workspace (W2-33), browser_tool (W2-35), user_profile (W3-08), \
-         agent_api, conversation_export, conversation_share and conversation_import (W3-10), and \
-         run_inspection (W3-11)"
+        51,
+        "the vendored catalogue holds 51 feature keys, the count of the Model Plane golden it is pinned to"
     );
     let (codes, features) = refusals_named_by_the_matrix();
     assert!(!codes.is_empty() && !features.is_empty(), "no refusal row names a code: the premise is gone");

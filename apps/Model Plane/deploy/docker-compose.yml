@@ -482,6 +482,9 @@ services:
       # Q4 E4.6 (062b): the research run routes (GET /v1/research/runs/:run_id, GET /v1/threads/:thread_id/research-run,
       # POST /v1/research/runs/:run_id/cancel). Needs RESEARCH_RUNS_ENABLED on session-core. Only the literal true.
       MODEL_GATEWAY_RESEARCH_RUNS: ${MODEL_GATEWAY_RESEARCH_RUNS:-false}
+      # Q4 E4.6 (062a): advisory Quarry attribution on the gateway's web reads (x-request-id, and x-verevon-parent-run
+      # off ZDR). Only the literal true.
+      MODEL_GATEWAY_QUARRY_ATTRIBUTION: ${MODEL_GATEWAY_QUARRY_ATTRIBUTION:-false}
       # Assistant navigation durable runs (POST /v1/ai/assistant-navigation). Only the literal true.
       MODEL_GATEWAY_ASSISTANT_NAVIGATION: ${MODEL_GATEWAY_ASSISTANT_NAVIGATION:-false}
       # EP-7 S4: Keep going on the goal bar (pump-sent goal turns). Needs MODEL_GATEWAY_THREAD_GOALS_ENABLED. Only the

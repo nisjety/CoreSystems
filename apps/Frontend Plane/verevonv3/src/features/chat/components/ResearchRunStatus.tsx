@@ -2,7 +2,7 @@ import './research-run-status.css'
 import { createMemo, createSignal, Show } from 'solid-js'
 import { executeAction } from '@/shared/actions/action-client'
 import type { ActionActor } from '@/shared/actions/types'
-import { getResearchRun, type ResearchRunStatusWord } from '@/shared/api/research-runs-client'
+import { getResearchRun, type ResearchRunCancelAck, type ResearchRunStatusWord } from '@/shared/api/research-runs-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { getSession } from '@/shared/session/session-store'
@@ -29,6 +29,7 @@ function statusLabels(tr: Tr): Record<ResearchRunStatusWord, string> {
     stopped: tr('Research stoppet', 'Research stopped'),
     cancelled: tr('Research avbrutt', 'Research cancelled'),
     failed: tr('Research feilet', 'Research failed'),
+    expired: tr('Research utløpt', 'Research expired'),
   }
 }
 
@@ -62,10 +63,14 @@ export function ResearchRunStatus(props: { run: { id: string; status: ResearchRu
   const [stopping, setStopping] = createSignal(false)
   const [stopRequested, setStopRequested] = createSignal(false)
   const [stopError, setStopError] = createSignal<string | null>(null)
+  // The run's end as the gateway reads it back after a stop that reached no live stream (see `stop`). The stream sends
+  // its own end, but a run that ended without a live stream never sends it, so the chip would otherwise stay 'running'.
+  const [endedStatus, setEndedStatus] = createSignal<ResearchRunStatusWord | null>(null)
+  const status = () => endedStatus() ?? props.run.status
 
   // Read once, when the run has ended: its pages read and why it stopped. A read that fails adds nothing to the chip.
   const [ended] = createResource(
-    () => (props.run.status === 'running' ? false : props.run.id),
+    () => (status() === 'running' ? false : props.run.id),
     (id: string) => getResearchRun(id),
   )
 
@@ -81,7 +86,9 @@ export function ResearchRunStatus(props: { run: { id: string; status: ResearchRu
   const actorReady = () => Boolean(session.user?.id && session.activeOrg?.id)
 
   // The person's stop. The action names only the run: the gateway checks that the caller owns it, and a run of another
-  // owner reads as not found. A refused stop puts the button back, with the reason beside it.
+  // owner reads as not found. A refused stop puts the button back, with the reason beside it. A stop the run's live
+  // stream did not receive (`stopRequested` false) claims nothing: the chip reads the run again and shows its end, if
+  // the gateway holds one.
   const stop = async () => {
     if (!actorReady() || stopping() || stopRequested()) return
     const actor: ActionActor = {
@@ -92,8 +99,13 @@ export function ResearchRunStatus(props: { run: { id: string; status: ResearchRu
     setStopping(true)
     setStopError(null)
     try {
-      await executeAction('chat.research_run.cancel', actor, { researchRunId: props.run.id })
-      setStopRequested(true)
+      const execution = await executeAction('chat.research_run.cancel', actor, { researchRunId: props.run.id })
+      if ((execution.result as Partial<ResearchRunCancelAck> | undefined)?.stopRequested === true) {
+        setStopRequested(true)
+      } else {
+        const run = await getResearchRun(props.run.id).catch(() => null)
+        if (run && run.status !== 'running') setEndedStatus(run.status)
+      }
     } catch (err) {
       setStopError(translateApiError(err, i18n.tr))
     } finally {
@@ -102,12 +114,12 @@ export function ResearchRunStatus(props: { run: { id: string; status: ResearchRu
   }
 
   return (
-    <div class="verevon-research-run" data-testid="research-run-status" data-status={props.run.status} role="status">
-      <span class="verevon-research-run__label">{statusLabels(i18n.tr)[props.run.status]}</span>
+    <div class="verevon-research-run" data-testid="research-run-status" data-status={status()} role="status">
+      <span class="verevon-research-run__label">{statusLabels(i18n.tr)[status()]}</span>
       <Show when={detail()}>
         <span class="verevon-research-run__detail">{detail()}</span>
       </Show>
-      <Show when={props.run.status === 'running'}>
+      <Show when={status() === 'running'}>
         <button
           type="button"
           class="verevon-research-run__stop"

@@ -2,8 +2,8 @@
 //! plan 3.4 E4.6 scope (b)).
 //!
 //! A research run is one row in `research_runs` (migration 0115). A client addresses it by id to read its status,
-//! partial results and stop reason, and a second research run on the same thread is refused with the id of the one
-//! already running (`BeginError::Active`, which the gRPC service answers as aborted `research_run_active`). The store
+//! partial results and stop reason, and a second research run on the same thread is refused (`BeginError::Active`,
+//! which the gRPC service answers as aborted `research_run_active`, naming the run only to its owner). The store
 //! functions come first; the gRPC service [`ResearchRunGrpc`] (`ResearchRunService`, at the end of this file) is their
 //! first caller. It is behind `RESEARCH_RUNS_ENABLED` (literal true only), and while that is off every RPC answers
 //! `unavailable` with `research_runs_disabled`. Begin records a run and runs nothing: the execution loop stays
@@ -206,9 +206,10 @@ pub(crate) struct NewRun<'a> {
 /// Why `begin` did not start a run.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum BeginError {
-    /// The thread already has a running research run. `run_id` is that run's addressable id (the `id` column).
+    /// The thread already has a running research run. `run_id` is that run's addressable id (the `id` column) and
+    /// `user_id` its owner. The gRPC service names the run to its owner only (see [`begin_status`]).
     #[error("a research run is already running on this thread: {run_id}")]
-    Active { run_id: String },
+    Active { run_id: String, user_id: String },
     #[error(transparent)]
     Store(#[from] sqlx::Error),
 }
@@ -290,8 +291,8 @@ pub(crate) async fn begin(pool: &PgPool, new: NewRun<'_>) -> Result<ResearchRun,
         .bind(new.thread_id)
         .execute(&mut *tx)
         .await?;
-    let running: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM research_runs
+    let running: Option<(String, String)> = sqlx::query_as(
+        "SELECT id, user_id FROM research_runs
           WHERE org_id = $1 AND thread_id = $2 AND status = 'running'
           LIMIT 1",
     )
@@ -299,10 +300,10 @@ pub(crate) async fn begin(pool: &PgPool, new: NewRun<'_>) -> Result<ResearchRun,
     .bind(new.thread_id)
     .fetch_optional(&mut *tx)
     .await?;
-    if let Some(run_id) = running {
+    if let Some((run_id, user_id)) = running {
         // Committed, so the expiry above stands. It only ends runs whose deadline has passed.
         tx.commit().await?;
-        return Err(BeginError::Active { run_id });
+        return Err(BeginError::Active { run_id, user_id });
     }
     let id = format!("rsr_{}", new_ulid());
     let row: RunRow = sqlx::query_as(&format!(
@@ -700,22 +701,28 @@ fn zdr_content_refused() -> RpcStatus {
     Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(tonic::Code::FailedPrecondition)
 }
 
-/// The typed refusal of a begin on a thread whose research run is still running. The trailers name the code and
-/// the id of that run, as the thread run guard names the run it refuses for.
-fn research_run_active_status(active_run_id: &str) -> RpcStatus {
+/// The typed refusal of a begin on a thread whose research run is still running. The trailer names the code, and the
+/// id of that run when the caller may see it (see [`begin_status`]).
+fn research_run_active_status(active_run_id: Option<&str>) -> RpcStatus {
     let mut status = RpcStatus::aborted("thread already has an active research run");
     status
         .metadata_mut()
         .insert(ERROR_CODE_TRAILER, MetadataValue::from_static(ACTIVE_CODE));
-    if let Ok(value) = MetadataValue::try_from(active_run_id) {
+    if let Some(value) = active_run_id.and_then(|id| MetadataValue::try_from(id).ok()) {
         status.metadata_mut().insert(ACTIVE_RUN_TRAILER, value);
     }
     status
 }
 
-fn begin_status(error: BeginError) -> RpcStatus {
+/// The refusal of a begin. The running run's id goes out only to that run's owner: another owner's run is not named,
+/// since the thread's run is not confirmed to anyone else (as [`get_active_run`] does). The refusal still says that the
+/// thread is busy.
+fn begin_status(error: BeginError, owner: &str) -> RpcStatus {
     match error {
-        BeginError::Active { run_id } => research_run_active_status(&run_id),
+        BeginError::Active { run_id, user_id } if user_id == owner => {
+            research_run_active_status(Some(run_id.as_str()))
+        }
+        BeginError::Active { .. } => research_run_active_status(None),
         BeginError::Store(error) => internal(error),
     }
 }
@@ -797,7 +804,7 @@ async fn begin_run(
         },
     )
     .await
-    .map_err(begin_status)?;
+    .map_err(|error| begin_status(error, owner))?;
     Ok(pb::BeginResponse {
         run: Some(run_to_proto(run)),
     })
@@ -921,4 +928,43 @@ async fn get_active_run(
             found: false,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The refusal a begin by `caller` gets while a run of `run_owner` is running on the thread.
+    fn refusal(run_owner: &str, caller: &str) -> RpcStatus {
+        begin_status(
+            BeginError::Active {
+                run_id: "rsr_01HZOWNERCHECK".to_owned(),
+                user_id: run_owner.to_owned(),
+            },
+            caller,
+        )
+    }
+
+    fn trailer<'a>(status: &'a RpcStatus, key: &str) -> Option<&'a str> {
+        status
+            .metadata()
+            .get(key)
+            .and_then(|value| value.to_str().ok())
+    }
+
+    #[test]
+    fn the_owner_of_the_running_run_is_named_on_the_refusal() {
+        let status = refusal("user-a", "user-a");
+        assert_eq!(status.code(), tonic::Code::Aborted);
+        assert_eq!(trailer(&status, ERROR_CODE_TRAILER), Some(ACTIVE_CODE));
+        assert_eq!(trailer(&status, ACTIVE_RUN_TRAILER), Some("rsr_01HZOWNERCHECK"));
+    }
+
+    #[test]
+    fn another_owners_running_run_is_not_named_on_the_refusal() {
+        let status = refusal("user-a", "user-b");
+        assert_eq!(status.code(), tonic::Code::Aborted);
+        assert_eq!(trailer(&status, ERROR_CODE_TRAILER), Some(ACTIVE_CODE));
+        assert_eq!(trailer(&status, ACTIVE_RUN_TRAILER), None);
+    }
 }

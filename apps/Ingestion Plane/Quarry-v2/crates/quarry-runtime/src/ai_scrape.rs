@@ -101,8 +101,8 @@ pub const HARVEST_BLOCK_MAX_CHARS: usize = 4_000;
 /// (see [`crate::harvest_map`]). The edge reads `QUARRY_EDGE__AI_FORMATS_HARVEST`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HarvestMode {
-    Off,
     #[default]
+    Off,
     Context,
     Prefill,
 }
@@ -138,7 +138,7 @@ pub struct AiScrapeConfig {
     /// further call is made in this request; `None` is no cost ceiling. A
     /// negative or non-finite value is `None`.
     pub max_cost_usd: Option<f64>,
-    /// WS16.S5: how the page's markup harvest reaches the model (default `context`).
+    /// WS16.S5: how the page's markup harvest reaches the model (default `off`).
     /// A request without a harvest is unaffected whatever this says.
     pub harvest: HarvestMode,
 }

@@ -16,7 +16,7 @@
     "reasoning_delta", "memory_recall", "grounding", "citation", "citations", "search_results",
     "search_provenance", "source_scope_applied", "verification", "attachment", "retrieval_notice", "usage",
     "usage_progress", "run_usage_progress", "turn_timing", "result_receipt", "title", "follow_ups",
-    "goal_progress", "research_plan", "connector_suggestion", "retry_scheduled", "tool_retry_scheduled", "compaction",
+    "goal_progress", "research_plan", "research_run", "connector_suggestion", "retry_scheduled", "tool_retry_scheduled", "compaction",
     "context_change", "sandbox_state", "run_parked", "run_resumed", "awaiting_approval", "user_question",
     "connected", "done", "plan_transitioned", "todo_transitioned", "approval_state_changed", "subagent_attached",
     "subagent_stopped", "run_paused_for_approval", "run_resumed_after_approval", "approval_continuation_verified",

@@ -3994,6 +3994,135 @@ mod tests {
         assert!(!stream_requests_page_emulation(&unset, true));
     }
 
+    /// E4.4-b: a `profile_id` that parses, for the pinned-scrape tests below.
+    const PINNED_PROFILE: &str = "prof_01ARZ3NDEKTSV4RRFFQ69G5FAV";
+
+    fn profile_pin_settings() -> crate::scrape_contract::ScrapeSettings {
+        crate::scrape_contract::ScrapeSettings {
+            profile_pin_enabled: true,
+            ..Default::default()
+        }
+    }
+
+    /// A page state whose driver counts its fetches, with an artifact store the test can list.
+    fn counted_page_state() -> (AppState, Arc<AtomicU32>, Arc<InMemoryStore>) {
+        let calls = Arc::new(AtomicU32::new(0));
+        let artifacts = Arc::new(InMemoryStore::new());
+        let driver = Arc::new(TestDriver::ok(DriverKind::Static, calls.clone(), PAGE));
+        let mut drivers = DriverRegistry::new(DriverKind::Static);
+        drivers.register(driver.clone());
+        let state = test_state_with_artifacts(driver, drivers, None, artifacts.clone());
+        (state, calls, artifacts)
+    }
+
+    /// `/v1/scrape` as the given principal, with the settings passed in.
+    async fn call_scrape_as(
+        state: AppState,
+        claims: crate::auth::Claims,
+        body: serde_json::Value,
+        settings: &crate::scrape_contract::ScrapeSettings,
+    ) -> axum::response::Response {
+        let body = serde_json::to_vec(&body).expect("request body");
+        match scrape_with(state, claims, &body, settings).await {
+            Ok(response) => response,
+            Err((status, response)) => (status, response).into_response(),
+        }
+    }
+
+    /// E4.4-b: a pinned scrape under ZDR is refused before any fetch, by the request's `zdr` flag
+    /// and by the token's ZDR floor alike.
+    #[tokio::test]
+    async fn a_pinned_scrape_is_refused_under_zdr_before_any_fetch() {
+        let (state, calls, _) = counted_page_state();
+        let body = serde_json::json!({ "url": "https://example.com/a", "profile_id": PINNED_PROFILE });
+
+        let mut with_flag = body.clone();
+        with_flag["zdr"] = serde_json::json!(true);
+        let response = call_scrape_as(state.clone(), claims_for_org("org_alpha"), with_flag, &profile_pin_settings()).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let refused = crate::test_support::response_json(response).await;
+        assert_eq!(refused["error"]["details"]["fields"][0]["path"], "profile_id");
+        assert_eq!(refused["error"]["details"]["fields"][0]["code"], "profile_zdr_forbidden");
+
+        let mut floored = claims_for_org("org_alpha");
+        floored.zdr = Some(true);
+        let response = call_scrape_as(state, floored, body, &profile_pin_settings()).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let refused = crate::test_support::response_json(response).await;
+        assert_eq!(refused["error"]["details"]["fields"][0]["code"], "profile_zdr_forbidden");
+
+        assert_eq!(calls.load(Ordering::Relaxed), 0, "a refused pinned scrape reached the fetch");
+    }
+
+    /// E4.4-b: a pinned scrape is never ingested. The refusal names `ingest`, comes before any
+    /// fetch, and leaves nothing in the artifact store.
+    #[tokio::test]
+    async fn a_pinned_scrape_with_ingest_is_refused_and_nothing_is_ingested() {
+        let (state, calls, artifacts) = counted_page_state();
+        let response = call_scrape_as(
+            state,
+            claims_for_org("org_alpha"),
+            serde_json::json!({ "url": "https://example.com/a", "profile_id": PINNED_PROFILE, "ingest": true }),
+            &profile_pin_settings(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let refused = crate::test_support::response_json(response).await;
+        assert_eq!(refused["error"]["details"]["fields"][0]["path"], "ingest");
+        assert_eq!(refused["error"]["details"]["fields"][0]["code"], "profile_ingest_forbidden");
+        assert_eq!(calls.load(Ordering::Relaxed), 0, "a refused pinned scrape reached the fetch");
+        let listed = artifacts
+            .list("org_alpha", &quarry_core::pagination::ListFilter::default())
+            .await
+            .unwrap();
+        assert!(listed.items.is_empty(), "a refused pinned scrape stored an artifact");
+    }
+
+    /// E4.4-b: only a person pins a profile. A service principal is refused by the profile guard's
+    /// principal check and an API key by its own refusal, both before any fetch.
+    #[tokio::test]
+    async fn a_service_principal_or_api_key_cannot_pin_a_profile() {
+        let (state, calls, _) = counted_page_state();
+        let body = serde_json::json!({ "url": "https://example.com/a", "profile_id": PINNED_PROFILE });
+
+        let mut service = claims_for_org("org_alpha");
+        service.sub = "service:marketing-core".into();
+        service.user_id = service.sub.clone();
+        service.service_id = Some(service.sub.clone());
+        service.principal_type = Some("service".into());
+        service.scopes = vec!["scrape:write".into()];
+        let response = call_scrape_as(state.clone(), service, body.clone(), &profile_pin_settings()).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let refused = crate::test_support::response_json(response).await;
+        assert_eq!(refused["error"]["message"], crate::profile_guard::SERVICE_PRINCIPAL_MESSAGE);
+
+        let mut key = claims_for_org("org_alpha");
+        key.principal_type = Some("api_key".into());
+        let response = call_scrape_as(state, key, body, &profile_pin_settings()).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let refused = crate::test_support::response_json(response).await;
+        assert_eq!(refused["error"]["details"]["reason"], "api_key_profile_refused");
+
+        assert_eq!(calls.load(Ordering::Relaxed), 0, "a refused principal reached the fetch");
+    }
+
+    /// E4.4-b: the stream serves no pinned profile while its switch is on. The stream reads the
+    /// process-wide switch, so the rule is pinned on the helper it calls, as the page-emulation
+    /// test pins its own helper.
+    #[test]
+    fn the_stream_route_refuses_a_profile_id_while_the_pin_is_on() {
+        let request = |body: serde_json::Value| -> ScrapeRequest {
+            serde_json::from_value(body).expect("a request")
+        };
+        let snake = request(serde_json::json!({ "url": "https://example.com/", "profile_id": PINNED_PROFILE }));
+        let camel = request(serde_json::json!({ "url": "https://example.com/", "profileId": PINNED_PROFILE }));
+        let unset = request(serde_json::json!({ "url": "https://example.com/", "profile_id": null }));
+        assert!(stream_requests_profile_pin(&snake, true));
+        assert!(stream_requests_profile_pin(&camel, true));
+        assert!(!stream_requests_profile_pin(&snake, false));
+        assert!(!stream_requests_profile_pin(&unset, true));
+    }
+
     #[tokio::test]
     async fn lenient_mode_warns_about_unknown_fields_and_says_so_in_headers() {
         let settings = crate::scrape_contract::ScrapeSettings {

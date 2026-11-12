@@ -1429,15 +1429,19 @@ pub(crate) mod tests {
         surface["rows"].as_array().expect("rows").clone()
     }
 
-    /// The sources that register routes: the router, the browser routes, the SSE route and every
-    /// file under `space_routes/`.
+    /// The sources that register routes: the router, the browser routes, the SSE route, the
+    /// research run routes and every file under `space_routes/`.
     fn route_sources() -> Vec<(String, String)> {
         read_sources()
             .into_iter()
             .filter(|(name, _)| {
                 matches!(
                     name.as_str(),
-                    "http_routes.rs" | "browser_run.rs" | "browser_grants.rs" | "space_sse.rs"
+                    "http_routes.rs"
+                        | "browser_run.rs"
+                        | "browser_grants.rs"
+                        | "space_sse.rs"
+                        | "research_runs.rs"
                 ) || name.starts_with("space_routes/")
             })
             .collect()

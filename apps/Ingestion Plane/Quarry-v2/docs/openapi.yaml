@@ -2931,8 +2931,8 @@ paths:
             (answered after one fetch and one model call, only while no source was extracted):
             `structured extraction needs a granted Model Plane lane, and the Model Plane refused
             this service`. The retry is the same request without `schema` and `prompt`
-            (cleaned markdown). A deployed stack gets one of these until WS16.S1 to S3 and
-            decision X-7 land; no flag unlocks it. See RUNBOOKS, "Enable structured extract and
+            (cleaned markdown). A deployed stack gets one of these while the `model-invoke` row
+            stays `granted: false` (decision D16, a Quarry-side gate); no flag unlocks it. See RUNBOOKS, "Enable structured extract and
             AI formats".
           content:
             application/json:

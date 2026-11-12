@@ -276,7 +276,7 @@ test("the CROSS_PLANE_AUTH model-plane row says model-extract* are granted and m
   assert.equal(quarry.retentionByAudience["inference-core"], "tenant", "inference-core is a tenant lane");
 });
 
-test("every granted manifest row is allowed by the committed registry for quarry-edge, and the extract rows say they have no call site yet", () => {
+test("every granted manifest row is allowed by the committed registry for quarry-edge, and the extract rows name the Model Plane client as their call site", () => {
   const quarry = registry["quarry-edge"];
   for (const requested of tokenRows.filter((r) => r.granted === true)) {
     const allowed = quarry.scopesByAudience?.[requested.audience] ?? [];
@@ -287,7 +287,8 @@ test("every granted manifest row is allowed by the committed registry for quarry
   }
   for (const name of ["model-extract", "model-extract-inference"]) {
     const row = tokenRows.find((r) => r.name === name);
-    assert.ok(row && typeof row.pending === "string" && row.used_by.length === 0, `${name} is pending its call site (WS16.S3)`);
+    assert.ok(row && !("pending" in row), `${name} is no longer pending: its call site landed in WS16.S3`);
+    assert.deepEqual(row.used_by, ["crates/quarry-runtime/src/mp_client.rs"], `${name} is called from the Model Plane client (WS16.S3)`);
   }
 });
 
@@ -521,10 +522,13 @@ test("the extract 501 texts name the real Model Plane URL setting and the AI for
   assert.ok(sectionOf(read(paths.runbooks), /Enable structured extract and AI formats/, "##").length > 500, "the RUNBOOKS section exists");
 });
 
-test("the RUNBOOKS section says there is no production path before WS16.S1 to S3 and decision X-7", () => {
+test("the RUNBOOKS section names the production path (WS16.S3), its two granted rows and decision X-7", () => {
   const section = sectionOf(read(paths.runbooks), /Enable structured extract and AI formats/, "##");
-  assert.match(section, /no production path today/i);
-  assert.ok(section.includes("WS16.S1 to S3") && section.includes("X-7") && section.includes("OD-1"), "names WS16.S1 to S3, X-7 and OD-1");
+  assert.match(section, /The production path \(WS16\.S3/, "names the production path heading (WS16.S3)");
+  assert.ok(section.includes("WS16.S1 to S3") && section.includes("WS16.S3") && section.includes("X-7"), "names WS16.S1 to S3, WS16.S3 and X-7");
+  assert.ok(section.includes("`model-extract`") && section.includes("`model-extract-inference`"), "names the two granted rows, model-extract and model-extract-inference");
+  assert.match(section, /`model-invoke` row, which stays `granted: false`[^.]*ends in the 501 of state 3/, "says model-invoke stays granted:false, so /v1/extract ends in the state-3 501");
+  assert.match(section, /off by default/, "says the AI formats switch is off by default");
   assert.match(section, /gates `\/v1\/extract`/, "says the AI formats switch gates extract (QB-T17)");
   for (const state of ["No Model Plane URL", "The AI formats switch is off", "A URL, but nothing to authenticate with", "A URL and a credential, but the gateway refuses"]) {
     assert.ok(section.includes(state), `the section describes the state: ${state}`);

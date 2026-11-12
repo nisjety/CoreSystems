@@ -4778,7 +4778,7 @@ pub async fn invoke_stream_sse(
                 }),
             };
             // The research run record (E4.6 062b), begun before any search. A thread that already runs a research run
-            // ends this turn: its chat run fails with `research_run_active`, and the error names the running run. A
+            // ends this turn: its chat run fails with `research_run_active`, naming the run to its owner only. A
             // record that cannot be begun never fails the turn, and neither does one whose calls fail.
             let research_run = if research_runs_on {
                 match begin_research_run(
@@ -4795,6 +4795,15 @@ pub async fn invoke_stream_sse(
                     ResearchRunBegin::Begun(id) => Some(id),
                     ResearchRunBegin::Unrecorded => None,
                     ResearchRunBegin::Active(active) => {
+                        // An empty `active` is another owner's run: session-core names a running run only to its
+                        // owner, so the message leaves the id out rather than print empty parentheses.
+                        let message = if active.is_empty() {
+                            "This thread already has a research run in progress. Try again when it finishes.".to_owned()
+                        } else {
+                            format!(
+                                "This thread already has a research run in progress ({active}). Try again when it finishes."
+                            )
+                        };
                         emit_prepared_failure(
                             &tx,
                             &session_state,
@@ -4802,9 +4811,7 @@ pub async fn invoke_stream_sse(
                             &session_bearer,
                             &req_id,
                             RESEARCH_RUN_ACTIVE,
-                            &format!(
-                                "This thread already has a research run in progress ({active}). Try again when it finishes."
-                            ),
+                            &message,
                             true,
                             &timing,
                             (&stream_buffers, &buffer_key, &mut seq, &features),

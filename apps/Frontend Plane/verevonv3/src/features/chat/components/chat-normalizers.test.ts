@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { cachedTurnsBeforeWindow, cancelledRunTurn, humanizeToolName, mergeServerTurnsWithCachedMetadata, messageToTurn, missingSearchResultStep, normalizeCitation, readBrowseWebPreference, summarizeToolArgs, transcriptTurnToChatTurn, turnsToTranscript, upsertCitation } from './chat-normalizers'
+import { cachedTurnsBeforeWindow, cancelledRunTurn, humanizeToolName, mergeServerTurnsWithCachedMetadata, messageToTurn, missingSearchResultStep, normalizeCitation, readBrowseWebPreference, researchRunAfterFrame, summarizeToolArgs, transcriptTurnToChatTurn, turnsToTranscript, upsertCitation } from './chat-normalizers'
 import type { RunDetail } from '@/shared/api/runs-client'
 import type { ChatTurn, Citation } from './chat-types'
 
@@ -515,5 +515,20 @@ describe('WS09 S9 partial windows', () => {
     const cached = [turn({ id: 'c0', content: 'Zero' }), turn({ id: 'c1', role: 'assistant', content: 'One' })]
     expect(cachedTurnsBeforeWindow([turn({ id: 'w5', content: 'Five' })], cached)).toEqual([])
     expect(cachedTurnsBeforeWindow([turn({ id: 'c0', content: 'Zero' })], cached)).toEqual([])
+  })
+})
+
+describe('researchRunAfterFrame', () => {
+  const runId = 'rsr_01HZX3Q8K4M5N6P7R8S9T0V1W2'
+
+  it('keeps every closed status word, expired included', () => {
+    for (const status of ['running', 'completed', 'stopped', 'cancelled', 'failed', 'expired']) {
+      expect(researchRunAfterFrame(undefined, { researchRunId: runId, status })).toEqual({ id: runId, status })
+    }
+  })
+
+  it('keeps the run it had for a status word this build does not know', () => {
+    const current = { id: runId, status: 'running' as const }
+    expect(researchRunAfterFrame(current, { researchRunId: runId, status: 'paused' })).toBe(current)
   })
 })

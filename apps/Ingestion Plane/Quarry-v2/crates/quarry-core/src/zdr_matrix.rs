@@ -494,6 +494,8 @@ pub const ROWS: &[Row] = &[
             "/v1/schedules/{id}/unpause",
             "/v1/schedules/{id}/trigger",
             "/v1/schedules/{id}/backfill",
+            "/v1/schedules/{id}/requests/{rid}",
+            "/v1/schedules/{id}/runs",
         ],
         treatment: Treatment::Degraded {
             warning: "a schedule is a durable resource; a ZDR organization can create and run one",
@@ -502,7 +504,7 @@ pub const ROWS: &[Row] = &[
             issue: "WS4.H stage B: with QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES on, create, trigger, backfill and unpause are refused and list, get, pause and delete stay open so an organization can wind down; the flag default stays off until ADR-4 sign-off and the customer notice",
         },
         enforced_by: &["zdr_gap_rows::gap_rows_currently_violate_schedules"],
-        basis: "schedule_routes call zdr_refusal::refuse on create, unpause, trigger and backfill (default off: observe, zdr.would_refuse, forwarded as before); POST /v1/sources with monitor:true is covered by this row; the caller's posture is stamped on the change-monitor schedule at create (quarry-control migration 023) from the verified claims, raised (never lowered) by a zdr:true declared in the body. Known gaps: an org that turns ZDR on later keeps its stamp, the legacy non-preset create is not stamped",
+        basis: "schedule_routes call zdr_refusal::refuse on create, unpause, trigger and backfill (default off: observe, zdr.would_refuse, forwarded as before); the reads (list, get, one request row and a schedule's runs) are never refused; POST /v1/sources with monitor:true is covered by this row; the caller's posture is stamped on the change-monitor schedule at create (quarry-control migration 023) from the verified claims, raised (never lowered) by a zdr:true declared in the body. Known gaps: an org that turns ZDR on later keeps its stamp, the legacy non-preset create is not stamped",
         log: Log::Unverified,
     },
     Row {
@@ -512,15 +514,16 @@ pub const ROWS: &[Row] = &[
             "/v1/profiles/create",
             "/v1/profiles/{id}",
             "/v1/profiles/{id}/restore_probe",
+            "/v1/profiles/{id}/clear-data",
         ],
         treatment: Treatment::Degraded {
             warning: "a browser profile (cookies, storage) is a durable resource a ZDR organization can create",
         },
         status: Status::Gap {
-            issue: "WS4.H stage B: with QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES on, create, save, update, read and restore_probe are refused and only list and delete stay open so profiles can be erased; the flag default stays off until ADR-4 sign-off and the customer notice",
+            issue: "WS4.H stage B: with QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES on, create, save, update, read and restore_probe are refused and only list, delete and clear data stay open so profiles can be erased; the flag default stays off until ADR-4 sign-off and the customer notice",
         },
         enforced_by: &["zdr_gap_rows::gap_rows_currently_violate_profiles"],
-        basis: "profile_routes call profile_guard::precheck, whose ZDR half is zdr_refusal::refuse, on create, save, update, read and restore_probe (default off: observe, zdr.would_refuse, served as before); list and delete are never refused. precheck also refuses a service principal on every operation and a save without the quarry:profiles:import scope (WS17.P0), before the ZDR decision, whatever the flag; the agent start refuses a persistent profile in both modes",
+        basis: "profile_routes call profile_guard::precheck, whose ZDR half is zdr_refusal::refuse, on create, save, update, read and restore_probe (default off: observe, zdr.would_refuse, served as before); list, delete and clear data are never refused. precheck also refuses a service principal on every operation and a save without the quarry:profiles:import scope (WS17.P0), before the ZDR decision, whatever the flag; the agent start refuses a persistent profile in both modes",
         log: Log::Unverified,
     },
     Row {
@@ -579,6 +582,7 @@ pub const ROWS: &[Row] = &[
         routes: &[
             "/v1/agent/runs/{run_id}/attach",
             "/v1/agent/runs/{run_id}/attach/{attach_id}",
+            "/v1/agent/runs/{run_id}/attach-current-tab",
         ],
         treatment: Treatment::Refused {
             code: "FORBIDDEN",
@@ -586,7 +590,29 @@ pub const ROWS: &[Row] = &[
         },
         status: Status::Enforced,
         enforced_by: &[],
-        basis: "attach::attach_run refuses a ZDR run (reason attach_zdr_refused) before it reads the grant or opens a tab, in both modes; the route is also dark behind QUARRY_EDGE__ATTACH. The release route has nothing to release for a ZDR run. No test drives a ZDR run through the attach route yet: the refusal is a three-line guard in the handler",
+        basis: "attach::attach_run and attach::attach_current_tab (both through attach_run_inner) refuse a ZDR run (reason attach_zdr_refused) before it reads the grant or opens a tab, in both modes; the route is also dark behind QUARRY_EDGE__ATTACH. The release route has nothing to release for a ZDR run. No test drives a ZDR run through the attach route yet: the refusal is a three-line guard in the handler",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "agent_origin_extension",
+        routes: &["/v1/agent/runs/{run_id}/origin-extension"],
+        treatment: Treatment::Degraded {
+            warning: "a ZDR run takes a turn-scoped origin extension only",
+        },
+        status: Status::Enforced,
+        enforced_by: &["agent_policy_gate::origin_consent_tests::zdr_takes_turn_scope_only_and_the_postures_must_match"],
+        basis: "agent_routes::origin_extension::apply_origin_extension (Q3-E3.2-e1w, dark behind QUARRY_EDGE__ORIGIN_CONSENT: 403 origin_consent_disabled when off) admits the grant through agent_policy_gate::origin_extension_from_grant, which refuses a scope wider than turn for a ZDR run (origin_extension_zdr_scope) and a grant whose ZDR posture differs from the run's. The accepted extension is held on the run entry in memory and dropped when the grant stops being usable; nothing is persisted, and a log carries only a count or a closed label, never a host",
+        log: Log::Unverified,
+    },
+    Row {
+        id: "agent_tab_mark",
+        routes: &["/v1/agent/runs/{run_id}/tabs/{tab_id}/mark"],
+        treatment: Treatment::Inert {
+            reason: "a ZDR run answers 404 before any mark is set; a mark is an in-memory handoff request",
+        },
+        status: Status::Enforced,
+        enforced_by: &[],
+        basis: "attach::mark_tab sets the tab's handoff mark on the run's in-memory tab ledger, for the delegate's own attached tab, after the grant is validated. A ZDR run answers 404 (agent run not found) before the grant is read or any mark is set. Nothing is persisted, and the release that acts on a mark rechecks the grant",
         log: Log::Unverified,
     },
     Row {
@@ -636,9 +662,8 @@ pub const ROWS: &[Row] = &[
     Row {
         id: "browser_trace_publish",
         routes: &[],
-        treatment: Treatment::Refused {
-            code: "FORBIDDEN",
-            feature: "browser_trace_publish",
+        treatment: Treatment::Degraded {
+            warning: "a ZDR run's trace is not sent to the Model Plane; the run itself proceeds",
         },
         status: Status::Enforced,
         enforced_by: &[],
@@ -697,7 +722,10 @@ pub const ROWS: &[Row] = &[
             feature: "download_handoff",
         },
         status: Status::Enforced,
-        enforced_by: &[],
+        enforced_by: &[
+            "ingest_client::download_handoff_tests::zdr_is_refused_before_anything_else",
+            "ingest_client::download_handoff_tests::the_http_transport_never_sends_a_zdr_download",
+        ],
         basis: "agent_routes::downloads::send_download_to_knowledge (Q3-E3.4-7a, dark behind QUARRY_EDGE__DOWNLOADS and QUARRY_EDGE__DOWNLOAD_HANDOFF) persists a download's text to Data Plane, a durable write, so a ZDR token floor or a ZDR run is refused with download_handoff_zdr_refused (403) before any receipt or byte is read; the ingest request builder and the transport repeat the guard. The org and user come from the verified claim only",
         log: Log::Unverified,
     },

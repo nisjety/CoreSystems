@@ -444,6 +444,8 @@ fn route_manifest() -> Vec<(&'static str, Gate)> {
         ("/v1/artifacts/:id", NoUrl),
         ("/v1/sources", GatedAtFireTime),
         ("/v1/sources/:id", NoUrl),
+        // The saved job's URL is stored here (gated at the PUT) and fetched later by run_page.
+        ("/v1/sources/:id/definition", GatedAtFireTime),
         ("/v1/snapshots", NoUrl),
         ("/v1/:kind/jobs", NoUrl),
         ("/v1/request-queues", NoUrl),
@@ -468,6 +470,9 @@ fn route_manifest() -> Vec<(&'static str, Gate)> {
         ("/v1/schedules/:id/unpause", NoUrl),
         ("/v1/schedules/:id/trigger", GatedAtFireTime),
         ("/v1/schedules/:id/backfill", GatedAtFireTime),
+        // Reads of a request row and of a schedule's fires through control; no URL is fetched.
+        ("/v1/schedules/:id/requests/:rid", NoUrl),
+        ("/v1/schedules/:id/runs", NoUrl),
     ]
 }
 

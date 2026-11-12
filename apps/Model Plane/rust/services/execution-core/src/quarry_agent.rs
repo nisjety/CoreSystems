@@ -5189,6 +5189,9 @@ mod tests {
                 "from_env",
                 "start_run",
                 "step",
+                // E4.2 step 3: a stateless procedure check. It reads no run's receipts, timeline,
+                // frames or events, and Quarry lists the route as inert under ZDR.
+                "replay_check",
                 "close_run",
                 "close_run_with",
                 "attach_run",

@@ -386,6 +386,17 @@
       ]
     },
     {
+      "name": "MODEL_GATEWAY_QUARRY_ATTRIBUTION",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Q4 E4.6 (062a): the gateway's web reads send x-request-id and, off ZDR, x-verevon-parent-run to Quarry so its traces join the chat run. Only the literal true.",
+      "declarations": [
+        { "service": "model-gateway", "env": "MODEL_GATEWAY_QUARRY_ATTRIBUTION", "default": "false" }
+      ]
+    },
+    {
       "name": "MODEL_GATEWAY_RESEARCH_RUNS",
       "kind": "switch",
       "owner": "model-plane",

@@ -15,9 +15,10 @@
 //! `reportArtifactId`, and nor do they for a caller who is not persistent.
 //!
 //! A thread holds at most one running research run. A begin refused for that is `Aborted`, with the code
-//! `research_run_active` on its `x-mp-error-code` trailer and the running run's id on `x-mp-active-run-id`.
-//! [`research_run_active`] reads that refusal and [`active_run_conflict`] is its HTTP 409, with the id in
-//! `details.run_id`. The chat stream answers the same refusal with an error frame.
+//! `research_run_active` on its `x-mp-error-code` trailer. The running run's id is on `x-mp-active-run-id` for that
+//! run's owner only, so another owner's refusal has no such trailer. [`research_run_active`] reads that refusal, and
+//! [`active_run_conflict`] is its HTTP 409, with the id in `details.run_id`. The chat stream answers the same refusal
+//! with an error frame.
 //!
 //! Built dark. Every route answers 404 `research_runs_disabled` unless `MODEL_GATEWAY_RESEARCH_RUNS` is the literal
 //! `true`, read at each call. Session Core has its own switch (`RESEARCH_RUNS_ENABLED`), and while it is off the
@@ -153,8 +154,8 @@ impl ResearchRunsClient {
 }
 
 /// The running research run a refused begin names, when the refusal is `research_run_active`: an `Aborted` status
-/// whose `x-mp-error-code` trailer is that code. The run's id is the `x-mp-active-run-id` trailer, empty when the
-/// trailer holds none. `None` for any other status.
+/// whose `x-mp-error-code` trailer is that code. The run's id is the `x-mp-active-run-id` trailer, which session-core
+/// sends only to the run's owner: for another owner's run the id is empty. `None` for any other status.
 #[allow(dead_code)] // the chat research branch (Q4 E4.6 062b) is the first caller
 pub(crate) fn research_run_active(status: &Status) -> Option<String> {
     if status.code() != Code::Aborted {
@@ -173,7 +174,8 @@ pub(crate) fn research_run_active(status: &Status) -> Option<String> {
     Some(run_id.unwrap_or_default().to_owned())
 }
 
-/// The HTTP 409 of a begin refused for a running research run, naming that run in `details.run_id`.
+/// The HTTP 409 of a begin refused for a running research run, naming that run in `details.run_id` (empty when the
+/// refusal named none).
 #[allow(dead_code)] // the chat research branch (Q4 E4.6 062b) is the first caller
 pub(crate) fn active_run_conflict(run_id: &str) -> HttpJsonError {
     envelope(
@@ -391,7 +393,8 @@ async fn get_thread_research_run(
 /// stream registers under the chat session run that the research run belongs to, so the stop is keyed by that run's
 /// id. The run-control route resolves it: here through `cancel_run_for`, or on the replica that holds the stream when
 /// the run-control bus is on. `stopRequested` is true when a live stream was asked; that stream then ends the run as
-/// cancelled. Answered 202 once the caller is known to own the run, and 503 when the bus could not tell.
+/// cancelled. A run that has already ended asks no stream: it is answered 202 with `stopRequested` false, and its
+/// chat run is left alone. Answered 202 once the caller is known to own the run, and 503 when the bus could not tell.
 async fn cancel_research_run(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -404,10 +407,16 @@ async fn cancel_research_run(
         .get(&bearer, &run_id)
         .await
         .map_err(|status| upstream_error(&status))?;
-    let route = state
-        .run_control
-        .cancel_run(&state.cancels, &run.run_id, &claims.org_id, &claims.user_id)
-        .await;
+    // A research run that has ended has nothing left to stop, but its chat run may still be answering the user.
+    // So the chat run is left alone: this route answers `NoOwner`, as it does for a run with no live stream.
+    let route = if run.status == "running" {
+        state
+            .run_control
+            .cancel_run(&state.cancels, &run.run_id, &claims.org_id, &claims.user_id)
+            .await
+    } else {
+        CancelRoute::NoOwner
+    };
     let stop_requested = match route {
         CancelRoute::Local | CancelRoute::Peer => true,
         CancelRoute::NoOwner => false,

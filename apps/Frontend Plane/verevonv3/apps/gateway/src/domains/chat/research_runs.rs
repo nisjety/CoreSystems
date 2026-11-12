@@ -37,9 +37,16 @@ const RUN_ID_PREFIX: &str = "rsr_";
 const ULID_LEN: usize = 26;
 
 /// The statuses a research run can carry. `cancelled` is the end a person's stop gives a run
-/// (the stream's `research_run` frame uses the same word). Anything else from upstream is refused
-/// rather than passed on.
-const RUN_STATUSES: [&str; 5] = ["running", "completed", "stopped", "cancelled", "failed"];
+/// (the stream's `research_run` frame uses the same word). `expired` is the end of a run whose
+/// deadline passed first. Anything else from upstream is refused rather than passed on.
+const RUN_STATUSES: [&str; 6] = [
+    "running",
+    "completed",
+    "stopped",
+    "cancelled",
+    "failed",
+    "expired",
+];
 
 /// The longest error code or message relayed from upstream; longer text is cut.
 const MAX_ERROR_CODE_LEN: usize = 64;
@@ -315,4 +322,34 @@ fn run_body(payload: &Value) -> Option<Value> {
         body["reportId"] = Value::String(capped(report_id, MAX_ID_LEN));
     }
     Some(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RUN_ID: &str = "rsr_01HZX3Q8K4M5N6P7R8S9T0V1W2";
+
+    #[test]
+    fn every_status_session_core_writes_is_passed_on() {
+        let statuses = [
+            "running",
+            "completed",
+            "stopped",
+            "cancelled",
+            "failed",
+            "expired",
+        ];
+        for status in statuses {
+            let payload = json!({ "data": { "id": RUN_ID, "status": status } });
+            let body = run_body(&payload).expect("a closed status is a run");
+            assert_eq!(body["status"], status);
+        }
+    }
+
+    #[test]
+    fn a_status_outside_the_closed_set_is_refused() {
+        let payload = json!({ "data": { "id": RUN_ID, "status": "paused" } });
+        assert!(run_body(&payload).is_none());
+    }
 }

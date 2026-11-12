@@ -70,8 +70,8 @@ Every Auth Core service token quarry-edge asks for is a row of `crates/quarry-ru
 | `web-rerank` | `data-plane` | `data:rerank` | `rerank.rs` (the Data Plane rerank client, QB-T09) |
 | `model-invoke`, `model-stream` | `model-gateway` | `models:invoke` | `mp_client.rs` |
 | `model-audio` | `model-gateway` | `models:invoke` | `audio_routes.rs` |
-| `model-extract` | `model-gateway` | `models:invoke` | none yet (WS16.S3, `ModelPlaneClient::chat_for_org`) |
-| `model-extract-inference` | `inference-core` | `inference:invoke`, `models:invoke` | none yet (WS16.S3, `ModelPlaneClient::chat_for_org`) |
+| `model-extract` | `model-gateway` | `models:invoke` | `mp_client.rs` (`lane_token_requests`, WS16.S3, `ModelPlaneClient::chat_for_org`) |
+| `model-extract-inference` | `inference-core` | `inference:invoke`, `models:invoke` | `mp_client.rs` (`lane_token_requests`, WS16.S3, `ModelPlaneClient::chat_for_org`) |
 | `browser-grant-validate` | `browser-broker` | `browser:read` | `grpc/browser_broker.rs` (`browser_grant_token_request`; the validator that mints it per run organization is WS1.A2 part 2, not yet wired) |
 | `mail-otp-read` | `ingestion` | `integration:otp:read` | `otp_ic_client.rs` (E3.1-h, the integration-core `mail.otp.read` client; behind `QUARRY_EDGE__FILL_OTP`, default off) |
 | `office-extract` | `ingestion` | `imports:read` | `content_route.rs` (`ManifestImportsBearer::for_office_extract`; the imports-core `POST /api/v1/import/extract` client of E3.6-6; behind `QUARRY_EDGE__OFFICE_VIA_IMPORTS`, default off; ZDR lane, ephemeral, nothing stored) |
