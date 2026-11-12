@@ -7,7 +7,7 @@ import (
 
 // conditionBody wraps one expect condition, already encoded as JSON, in a version 2 body with one back step.
 func conditionBody(condition string) []byte {
-	return []byte(`{"version":2,"steps":[{"step":0,"action":{"type":"back"},"expect":{"all":[` + condition + `]}}]}`)
+	return procedureBody(`{"step":0,"expected_outcome":"verified","action":{"type":"back"},"expect":{"all":[`+condition+`]}}`, "")
 }
 
 // Quarry writes each expect condition with exactly the fields of its kind, and writes a text condition's within as
@@ -52,11 +52,11 @@ func TestValidateClosesEveryExpectConditionToItsKind(t *testing.T) {
 			t.Fatalf("the refusal repeats the typed value: %v", err)
 		}
 	}
-	for _, body := range []string{
-		`{"version":2,"steps":[{"step":0,"action":{"type":"back"},"expect":{"all":"hunter2"}}]}`,
-		`{"version":2,"steps":[{"step":0,"action":{"type":"back"},"expect":{}}]}`,
+	for _, step := range []string{
+		`{"step":0,"expected_outcome":"verified","action":{"type":"back"},"expect":{"all":"hunter2"}}`,
+		`{"step":0,"expected_outcome":"verified","action":{"type":"back"},"expect":{}}`,
 	} {
-		if _, err := Validate([]byte(body)); err == nil {
+		if _, err := Validate(procedureBody(step, "")); err == nil {
 			t.Fatalf("Validate accepted a body whose expect is not a list of conditions")
 		} else if v, ok := AsValidation(err); !ok || v.Code != CodeBadShape {
 			t.Fatalf("Validate = %v, want a %s refusal", err, CodeBadShape)

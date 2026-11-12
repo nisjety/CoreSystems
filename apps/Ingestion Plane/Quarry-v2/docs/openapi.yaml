@@ -2923,15 +2923,15 @@ paths:
           description: >-
             A `schema` or a `prompt` was sent and the Model Plane cannot be used (never for a ZDR
             request, and never when neither field is sent). The body is `{error, code, hint,
-            next_actions}` with `code` `UNSUPPORTED`; the three cases differ in `error`. (1) No
+            next_actions}` with `code` `UNSUPPORTED`; the four cases differ in `error`. (1) No
             Model Plane URL: `structured extraction needs the Model Plane, and
-            QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment`. (2) A URL but no model
+            QUARRY_EDGE__MODEL_PLANE_URL is not set on this deployment`. (1b) A URL, but the AI formats switch is off or was refused at boot: `structured extraction is not available on this edge: QUARRY_EDGE__AI_FORMATS is off`. (2) A URL but no model
             credential: `structured extraction needs a granted Model Plane lane, and this
-            deployment holds no model credential`. (3) The gateway refused the first model call
-            (answered after one fetch and one model call, only while no source was extracted):
+            deployment holds no model credential`. (3) The gateway refused a model call while no source had been extracted
+            (usually after one fetch and one model call, the first source running alone):
             `structured extraction needs a granted Model Plane lane, and the Model Plane refused
             this service`. The retry is the same request without `schema` and `prompt`
-            (cleaned markdown). A deployed stack gets one of these while the `model-invoke` row
+            (cleaned markdown). A deployed stack that sets the URL gets (1b) while the `model-invoke` row
             stays `granted: false` (decision D16, a Quarry-side gate); no flag unlocks it. See RUNBOOKS, "Enable structured extract and
             AI formats".
           content:
@@ -2953,7 +2953,7 @@ paths:
                   value:
                     error: structured extraction needs a granted Model Plane lane, and the Model Plane refused this service
                     code: UNSUPPORTED
-                    hint: 'omit `schema` and `prompt` to receive cleaned markdown. Operators: the model lane is not granted to this service (the gateway refused the first model call, so no further page was fetched); see docs/RUNBOOKS.md, "Enable structured extract and AI formats"'
+                    hint: 'omit `schema` and `prompt` to receive cleaned markdown. Operators: the model lane is not granted to this service (the gateway refused a model call before any source was extracted, so the batch stopped); see docs/RUNBOOKS.md, "Enable structured extract and AI formats"'
                     next_actions:
                     - retry without `schema` and `prompt` to receive cleaned markdown
                     - 'operators: see docs/RUNBOOKS.md, "Enable structured extract and AI formats"'
@@ -3163,8 +3163,9 @@ paths:
       summary: Read one ingestion source
       description: >-
         The source of the caller's organization, config included: a saved job definition sits at config.definition
-        (E4.1-6). This route reads what is stored, so it is not behind QUARRY_EDGE__SAVED_JOBS. A malformed id is a
-        400; a missing, deleted or other organization's id is a 404.
+        (E4.1-6). It answers 501 UNSUPPORTED, naming both QUARRY_EDGE__SAVED_JOBS and QUARRY_EDGE__MONITOR_TAGS, while
+        neither is on; that check comes before the id is read. A malformed id is a 400; a missing, deleted or other
+        organization's id is a 404.
       tags:
       - resources
       security:
@@ -3199,6 +3200,12 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
         '404':
           description: Unknown source for this org
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: Neither QUARRY_EDGE__SAVED_JOBS nor QUARRY_EDGE__MONITOR_TAGS is on (UNSUPPORTED; the message names both)
           content:
             application/json:
               schema:
@@ -5465,7 +5472,8 @@ paths:
       description: >-
         Control's view of a request row the caller queued (WS15.S3a): the status (pending, claimed, done, failed or
         rejected), the attempt count, the params, the result and a short error text. The claiming worker and the lease
-        are never shown. A row of another schedule or organization is a 404.
+        are never shown. A row of another schedule or organization is a 404. It answers 501 UNSUPPORTED, naming
+        QUARRY_EDGE__SCHEDULE_RUNS, while that switch is off; that check comes before the ids are read.
       tags:
       - schedules
       security:
@@ -5505,6 +5513,12 @@ paths:
                 $ref: '#/components/schemas/ErrorBody'
         '404':
           description: Unknown request, or a request of another schedule or organization
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '501':
+          description: QUARRY_EDGE__SCHEDULE_RUNS is off (UNSUPPORTED; the message names the switch)
           content:
             application/json:
               schema:

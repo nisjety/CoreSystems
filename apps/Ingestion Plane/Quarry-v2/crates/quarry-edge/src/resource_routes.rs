@@ -434,6 +434,13 @@ pub async fn list_sources(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<Source>>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
+    let enabled = crate::job_results_routes::flag_is_on(
+        std::env::var(crate::schedule_routes::ENV_MONITOR_TAGS)
+            .ok()
+            .as_deref(),
+    );
+    crate::schedule_routes::monitor_tag_named_gate(q.tag.as_deref(), enabled)
+        .map_err(|e| err_response(&request_id, e))?;
     let tag = optional_monitor_tag(q.tag.as_deref()).map_err(|e| err_response(&request_id, e))?;
     let mut filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     filter.tag = tag;
@@ -726,6 +733,13 @@ pub async fn create_source(
             }
         }
     }
+    let enabled = crate::job_results_routes::flag_is_on(
+        std::env::var(crate::schedule_routes::ENV_MONITOR_TAGS)
+            .ok()
+            .as_deref(),
+    );
+    crate::schedule_routes::monitor_tag_named_gate(req.tag.as_deref(), enabled)
+        .map_err(|e| err_response(&request_id, e))?;
     let tag = optional_monitor_tag(req.tag.as_deref()).map_err(|e| err_response(&request_id, e))?;
     // A source is a URL the platform fetches later, so a denied URL is refused at create
     // time, under the same org web policy as the scrape family. The fetch itself is gated
@@ -923,16 +937,43 @@ fn parse_source_id(
     })
 }
 
+/// The check `GET /v1/sources/{id}` makes first. A source is read back for a saved job definition
+/// (`QUARRY_EDGE__SAVED_JOBS`) and for a monitor tag (`QUARRY_EDGE__MONITOR_TAGS`), so the read
+/// answers while either is on. With both off it answers 501 whoever asks, and the message names
+/// both switches.
+fn source_read_gate(saved_jobs: bool, monitor_tags: bool) -> Result<(), QuarryError> {
+    if saved_jobs || monitor_tags {
+        return Ok(());
+    }
+    Err(QuarryError::new(
+        ErrorCode::Unsupported,
+        format!(
+            "source reads are not enabled on this edge: set {}=1 or {}=1",
+            crate::saved_job::ENV_SAVED_JOBS,
+            crate::schedule_routes::ENV_MONITOR_TAGS
+        ),
+    ))
+}
+
 /// `GET /v1/sources/{id}` (Q4-E4.1-6c): one live source of the verified org, config included
 /// (a saved job definition sits at `config.definition`). Control answers in its own wire
 /// shape, which is passed through unchanged; a missing, deleted or other-tenant id is a 404.
-/// The org is the verified JWT org, never a request value.
+/// The org is the verified JWT org, never a request value. Dark until either
+/// `QUARRY_EDGE__SAVED_JOBS` or `QUARRY_EDGE__MONITOR_TAGS` is on: both switches are read before
+/// the id, so a dark edge answers 501 whoever asks.
 pub async fn get_source(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Path(id): Path<String>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
+    let monitor_tags = crate::job_results_routes::flag_is_on(
+        std::env::var(crate::schedule_routes::ENV_MONITOR_TAGS)
+            .ok()
+            .as_deref(),
+    );
+    source_read_gate(crate::saved_job::enabled(), monitor_tags)
+        .map_err(|e| err_response(&request_id, e))?;
     let id = parse_source_id(&request_id, &id)?;
     if state.control_base_url.is_empty() {
         return Err(err_response(
@@ -1178,6 +1219,13 @@ pub async fn list_schedules(
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Envelope<Page<serde_json::Value>>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
+    let enabled = crate::job_results_routes::flag_is_on(
+        std::env::var(crate::schedule_routes::ENV_MONITOR_TAGS)
+            .ok()
+            .as_deref(),
+    );
+    crate::schedule_routes::monitor_tag_named_gate(q.tag.as_deref(), enabled)
+        .map_err(|e| err_response(&request_id, e))?;
     let tag = optional_monitor_tag(q.tag.as_deref()).map_err(|e| err_response(&request_id, e))?;
     let mut filter = q.into_filter().map_err(|e| err_response(&request_id, e))?;
     filter.tag = tag;
@@ -1872,6 +1920,45 @@ mod tests {
         let switch = crate::schedule_routes::ENV_MONITOR_TAGS;
         assert!(dark.message.contains(switch));
         assert!(crate::schedule_routes::monitor_tags_gate(true).is_ok());
+    }
+
+    #[test]
+    fn source_tag_create_and_filter_are_dark_until_the_switch_is_on() {
+        // The `tag` of a source create and the `?tag=` of a list reach the same gate.
+        let create: CreateSourceRequest = serde_json::from_value(serde_json::json!({
+            "name": "x",
+            "url": "https://x.example/",
+            "kind": "crawl",
+            "tag": "pricing"
+        }))
+        .unwrap();
+        let filter: ListQuery =
+            serde_json::from_value(serde_json::json!({ "tag": "pricing" })).unwrap();
+        for named in [create.tag.as_deref(), filter.tag.as_deref()] {
+            let dark = crate::schedule_routes::monitor_tag_named_gate(named, false)
+                .expect_err("a named tag on a source create or a filter answers 501 while dark");
+            assert_eq!(dark.code, ErrorCode::Unsupported);
+            assert!(crate::schedule_routes::monitor_tag_named_gate(named, true).is_ok());
+        }
+        // A blank `tag=` is no filter, so the list passes while dark.
+        let blank: ListQuery = serde_json::from_value(serde_json::json!({ "tag": "" })).unwrap();
+        assert!(
+            crate::schedule_routes::monitor_tag_named_gate(blank.tag.as_deref(), false).is_ok()
+        );
+    }
+
+    #[test]
+    fn source_read_is_dark_until_either_switch_is_on() {
+        // The read-back of a saved definition or of a monitor tag: both switches are off by
+        // default, and either one opens the read.
+        let dark = source_read_gate(false, false).expect_err("a dark source read answers 501");
+        assert_eq!(dark.code, ErrorCode::Unsupported);
+        let saved = crate::saved_job::ENV_SAVED_JOBS;
+        let tags = crate::schedule_routes::ENV_MONITOR_TAGS;
+        assert!(dark.message.contains(saved));
+        assert!(dark.message.contains(tags));
+        assert!(source_read_gate(true, false).is_ok());
+        assert!(source_read_gate(false, true).is_ok());
     }
 }
 

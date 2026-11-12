@@ -317,7 +317,7 @@ No authorization required
 
 Read one ingestion source
 
-The source of the caller\&#39;s organization, config included: a saved job definition sits at config.definition (E4.1-6). This route reads what is stored, so it is not behind QUARRY_EDGE__SAVED_JOBS. A malformed id is a 400; a missing, deleted or other organization\&#39;s id is a 404.
+The source of the caller\&#39;s organization, config included: a saved job definition sits at config.definition (E4.1-6). It answers 501 UNSUPPORTED, naming both QUARRY_EDGE__SAVED_JOBS and QUARRY_EDGE__MONITOR_TAGS, while neither is on; that check comes before the id is read. A malformed id is a 400; a missing, deleted or other organization\&#39;s id is a 404.
 
 ### Example
 
@@ -376,6 +376,7 @@ No authorization required
 | **200** | The source (control-plane wire shape) |  -  |
 | **400** | Malformed source id |  -  |
 | **404** | Unknown source for this org |  -  |
+| **501** | Neither QUARRY_EDGE__SAVED_JOBS nor QUARRY_EDGE__MONITOR_TAGS is on (UNSUPPORTED; the message names both) |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 

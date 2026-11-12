@@ -104,7 +104,8 @@ type Config struct {
 	// FillOtpEnabled lets a caller obtain a fill_otp sensitive approval bound to
 	// one https origin and one mail connection (Q3-E3.1-b1-c, ADR-2a,
 	// BROWSER_BROKER_FILL_OTP_ENABLED). Off by default: any request naming
-	// fill_otp is InvalidArgument.
+	// fill_otp is InvalidArgument, and an existing fill_otp approval validates as
+	// revoked, so turning it off is also the kill switch.
 	FillOtpEnabled bool
 	// WebPolicySnapshot reads the verified token's web_policy claim at acquire
 	// (WS7.K, BROWSER_BROKER_WEB_POLICY_SNAPSHOT): an ordinary grant's hosts are

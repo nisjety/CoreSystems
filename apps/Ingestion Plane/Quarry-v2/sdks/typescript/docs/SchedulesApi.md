@@ -237,7 +237,7 @@ No authorization required
 
 Read one trigger or backfill request row
 
-Control\&#39;s view of a request row the caller queued (WS15.S3a): the status (pending, claimed, done, failed or rejected), the attempt count, the params, the result and a short error text. The claiming worker and the lease are never shown. A row of another schedule or organization is a 404.
+Control\&#39;s view of a request row the caller queued (WS15.S3a): the status (pending, claimed, done, failed or rejected), the attempt count, the params, the result and a short error text. The claiming worker and the lease are never shown. A row of another schedule or organization is a 404. It answers 501 UNSUPPORTED, naming QUARRY_EDGE__SCHEDULE_RUNS, while that switch is off; that check comes before the ids are read.
 
 ### Example
 
@@ -299,6 +299,7 @@ No authorization required
 | **200** | The request row |  -  |
 | **400** | A malformed schedule id or request id (invalid schedule id, invalid request id) |  -  |
 | **404** | Unknown request, or a request of another schedule or organization |  -  |
+| **501** | QUARRY_EDGE__SCHEDULE_RUNS is off (UNSUPPORTED; the message names the switch) |  -  |
 
 [[Back to top]](#) [[Back to API list]](../README.md#api-endpoints) [[Back to Model list]](../README.md#models) [[Back to README]](../README.md)
 

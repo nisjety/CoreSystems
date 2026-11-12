@@ -936,16 +936,17 @@ async fn extract_runs_as_zdr_for_a_zdr_org_user_and_not_for_a_registry_zdr_servi
     assert_eq!(harness.fetch_zdr(), vec![true, false, true]);
 }
 
-/// INNH-2 (ADR-4): `schema` and `prompt` send page text to the Model Plane, whose `/v1/invoke`
-/// carries no ZDR posture. A ZDR org user (whatever the body says) and a body `zdr: true` get a
-/// per-source `ZDR_UNAVAILABLE` and the Model Plane sees no request; a standard org user reaches it.
+/// INNH-2 (ADR-4): `schema` and `prompt` send page text to the Model Plane (`/v1/ai/chat` since
+/// WS16.S6), so the edge never sends a ZDR turn there. A ZDR org user (whatever the body says) and a
+/// body `zdr: true` get a per-source `ZDR_UNAVAILABLE` and the Model Plane sees no request; a
+/// standard org user reaches it.
 #[tokio::test]
 async fn extract_with_a_prompt_or_schema_never_reaches_the_model_for_a_zdr_org_user() {
     let model_plane = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/v1/invoke"))
+        .and(path("/v1/ai/chat"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "request_id": "req_1",
+            "id": "req_1",
             "content": "{\"title\": \"x\"}",
             "model_used": "test-model",
         })))

@@ -11,16 +11,16 @@ import (
 func TestValidateRefusesAValueOfTheWrongTypeUnderAClosedField(t *testing.T) {
 	const typed = `{"typed":"hunter2"}`
 	for _, step := range []string{
-		`{"step":1,"action":{"type":"navigate","url":` + typed + `}}`,
-		`{"step":1,"action":{"type":"click_semantic","snapshot_id":"","generation":` + typed + `,"locator":` + roleLocator + `}}`,
-		`{"step":1,"action":{"type":"wait","ms":` + typed + `}}`,
-		`{"step":1,"action":{"type":"wait","ms":4294967296}}`,
-		`{"step":4294967296,"action":{"type":"back"}}`,
-		`{"step":1,"action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":{"kind":"text","text":"x","exact":` + typed + `}}}`,
-		`{"step":1,"action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":{"kind":"nth","selector":"button","index":` + typed + `}}}`,
-		`{"step":1,"action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":` + roleLocator + `},` +
+		`{"step":1,"expected_outcome":"verified","action":{"type":"navigate","url":` + typed + `}}`,
+		`{"step":1,"expected_outcome":"verified","action":{"type":"click_semantic","snapshot_id":"","generation":` + typed + `,"locator":` + roleLocator + `}}`,
+		`{"step":1,"expected_outcome":"verified","action":{"type":"wait","ms":` + typed + `}}`,
+		`{"step":1,"expected_outcome":"verified","action":{"type":"wait","ms":4294967296}}`,
+		`{"step":4294967296,"expected_outcome":"verified","action":{"type":"back"}}`,
+		`{"step":1,"expected_outcome":"verified","action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":{"kind":"text","text":"x","exact":` + typed + `}}}`,
+		`{"step":1,"expected_outcome":"verified","action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":{"kind":"nth","selector":"button","index":` + typed + `}}}`,
+		`{"step":1,"expected_outcome":"verified","action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":` + roleLocator + `},` +
 			`"target":{"locator":` + roleLocator + `,"fingerprint_id":` + typed + `,"tag":"button"}}`,
-		`{"step":1,"action":{"type":"back"},"expect":{"all":[{"kind":"url_matches","pattern":` + typed + `}]}}`,
+		`{"step":1,"expected_outcome":"verified","action":{"type":"back"},"expect":{"all":[{"kind":"url_matches","pattern":` + typed + `}]}}`,
 		`{"step":1,"expected_outcome":` + typed + `,"action":{"type":"back"}}`,
 		`{"step":1,"expected_outcome":"maybe","action":{"type":"back"}}`,
 	} {
@@ -50,7 +50,7 @@ func TestValidateAcceptsTheU32LimitAndEveryOutcomeToken(t *testing.T) {
 // A typed step's text is refused with CodeTypedText whatever its JSON type, as it was before the field types were checked.
 func TestValidateKeepsTypedTextOnItsOwnCode(t *testing.T) {
 	for _, text := range []string{`"hunter2"`, `{"typed":"hunter2"}`} {
-		step := `{"step":1,"action":{"type":"type","selector":"#q","text":` + text + `},"slot":"slot_1"}`
+		step := `{"step":1,"expected_outcome":"verified","action":{"type":"type","selector":"#q","text":` + text + `},"slot":"slot_1"}`
 		_, err := Validate(procedureBody(step, `{"name":"slot_1","step":1,"kind":"text"}`))
 		if v, ok := AsValidation(err); !ok || v.Code != CodeTypedText {
 			t.Fatalf("Validate = %v, want a %s refusal", err, CodeTypedText)

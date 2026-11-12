@@ -245,9 +245,10 @@ fn without_nulls(mut value: serde_json::Value) -> serde_json::Value {
     value
 }
 
-/// WS10.S4: the flag that turns on the per-step browser trace events (`StepReceiptRecorded`,
-/// `EgressDecided`, `ArtifactRecorded`). Default off: while it is off the edge emits none of
-/// them, and each step is recorded exactly as before.
+/// WS10.S4: the flag that turns on the run's browser trace events: `StepReceiptRecorded`,
+/// `EgressDecided` and `ArtifactRecorded` per step, and `BrowserControlChanged` and
+/// `BrowserTabChanged` per control or tab change. Default off: while it is off the edge emits
+/// none of them, and each step and change is recorded exactly as before.
 const STEP_TRACE_FLAG: &str = "QUARRY_EDGE__STEP_TRACE";
 
 /// The words that turn the step trace switch on, read the way the other switches read theirs.
@@ -260,7 +261,7 @@ fn parse_step_trace_flag(raw: Option<&str>) -> bool {
 
 /// Whether `QUARRY_EDGE__STEP_TRACE` is on in this process. Read per call, like
 /// `QUARRY_EDGE__DOWNLOADS`, so the flag needs no AppState plumbing.
-fn step_trace_enabled() -> bool {
+pub(super) fn step_trace_enabled() -> bool {
     parse_step_trace_flag(std::env::var(STEP_TRACE_FLAG).ok().as_deref())
 }
 

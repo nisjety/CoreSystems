@@ -108,7 +108,8 @@ pub(super) async fn record_browser_timeline_event(
 /// `Tab` change `BrowserTabChanged {operation, tab_id, active_tab_id}`. Other kinds record the
 /// timeline only. The event goes through `emit_for_zdr`, so a ZDR run's change reaches only
 /// live subscribers (its timeline is not written either). Nothing is emitted when the record
-/// fails. Payloads are closed labels and opaque ids: no URL, title, selector or typed text.
+/// fails, or while `QUARRY_EDGE__STEP_TRACE` is off. Payloads are closed labels and opaque ids:
+/// no URL, title, selector or typed text.
 pub(super) async fn record_timeline_and_trace(
     state: &AppState,
     entry: &RunEntry,
@@ -117,7 +118,8 @@ pub(super) async fn record_timeline_and_trace(
 ) -> QuarryResult<()> {
     let trace = browser_trace_event(&event);
     record_browser_timeline_event(state, entry, live, event).await?;
-    if let Some((event_type, payload, key)) = trace {
+    // Dark like the step trace: the timeline row is written either way.
+    if let Some((event_type, payload, key)) = trace.filter(|_| super::step::step_trace_enabled()) {
         state
             .event_sink
             .emit_for_zdr(
@@ -261,4 +263,45 @@ pub async fn set_browser_session_control(
             state.agent_driver.capabilities(),
         ),
     )))
+}
+
+#[cfg(test)]
+mod control_trace_gate_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_control_change_traces_nothing_while_the_step_trace_flag_is_off() {
+        // No test in this suite sets QUARRY_EDGE__STEP_TRACE, so the switch reads off here.
+        let state = crate::test_support::test_state(crate::test_support::StubDriver::ok());
+        let claims = crate::test_support::claims_for_org("org");
+        let handle = crate::test_support::insert_live_run(&state, &claims);
+        let entry = handle.entry.lock().await;
+        let mut events = state.event_sink.subscribe(&entry.run_id);
+        record_timeline_and_trace(
+            &state,
+            &entry,
+            &handle.live,
+            BrowserTimelineEventKind::Control {
+                mode: BrowserControlMode::AgentControl,
+                initiated_by: BrowserTimelineInitiator::Human,
+                control_epoch: 1,
+            },
+        )
+        .await
+        .unwrap();
+        // The timeline row is written either way; only the trace event is held back.
+        let timeline = state
+            .receipts
+            .list_browser_timeline_events(&entry.org_id, &entry.actor_id, &entry.run_id)
+            .await
+            .unwrap();
+        assert!(timeline.iter().any(|row| matches!(
+            &row.event,
+            BrowserTimelineEventKind::Control { .. }
+        )));
+        assert!(
+            events.try_recv().is_err(),
+            "no browser.control trace event while the flag is off"
+        );
+    }
 }

@@ -314,7 +314,7 @@ export class SchedulesApi extends runtime.BaseAPI {
     }
 
     /**
-     * Control\'s view of a request row the caller queued (WS15.S3a): the status (pending, claimed, done, failed or rejected), the attempt count, the params, the result and a short error text. The claiming worker and the lease are never shown. A row of another schedule or organization is a 404.
+     * Control\'s view of a request row the caller queued (WS15.S3a): the status (pending, claimed, done, failed or rejected), the attempt count, the params, the result and a short error text. The claiming worker and the lease are never shown. A row of another schedule or organization is a 404. It answers 501 UNSUPPORTED, naming QUARRY_EDGE__SCHEDULE_RUNS, while that switch is off; that check comes before the ids are read.
      * Read one trigger or backfill request row
      */
     async getScheduleRequestRaw(requestParameters: GetScheduleRequestRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<GetScheduleRequest200Response>> {
@@ -325,7 +325,7 @@ export class SchedulesApi extends runtime.BaseAPI {
     }
 
     /**
-     * Control\'s view of a request row the caller queued (WS15.S3a): the status (pending, claimed, done, failed or rejected), the attempt count, the params, the result and a short error text. The claiming worker and the lease are never shown. A row of another schedule or organization is a 404.
+     * Control\'s view of a request row the caller queued (WS15.S3a): the status (pending, claimed, done, failed or rejected), the attempt count, the params, the result and a short error text. The claiming worker and the lease are never shown. A row of another schedule or organization is a 404. It answers 501 UNSUPPORTED, naming QUARRY_EDGE__SCHEDULE_RUNS, while that switch is off; that check comes before the ids are read.
      * Read one trigger or backfill request row
      */
     async getScheduleRequest(requestParameters: GetScheduleRequestRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<GetScheduleRequest200Response> {

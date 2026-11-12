@@ -310,6 +310,9 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 	if err == nil {
 		err = s.extensionLive(g)
 	}
+	if err == nil {
+		err = s.fillOtpLive(g)
+	}
 	if err != nil {
 		telemetry.GrantsValidatedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
 		return nil, mapErr(err)
@@ -345,6 +348,17 @@ func (s *Server) ValidateGrant(ctx context.Context, req *ValidateGrantRequest) (
 		GrantOrigin:        g.GrantOrigin,
 		WebPolicy:          s.webPolicyResponse(g),
 	}, nil
+}
+
+// fillOtpLive applies the switch to a grant a caller is validating: a fill_otp
+// approval validates as revoked while the switch is off, so turning it off
+// withdraws the OTP-typing authority of every approval already issued, not only
+// new ones. Its own TTL would otherwise be the only bound.
+func (s *Server) fillOtpLive(g *grant.Grant) error {
+	if grant.IsFillOtp(g.AllowedActions) && !s.cfg.FillOtpEnabled {
+		return grant.ErrGrantRevoked
+	}
+	return nil
 }
 
 // derivePurposeAIRun and derivePurposeAttach are the only DeriveRunGrant

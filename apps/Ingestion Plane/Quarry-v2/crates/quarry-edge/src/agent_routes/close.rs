@@ -340,12 +340,18 @@ pub(super) async fn finish_run(
                     rid.clone(),
                     EventType::AgentCompleted,
                     // WS10.S4: the closed reason set the trace projection shows
-                    // (`closed|expired|failed|cancelled`); an owner's close is `closed`.
-                    serde_json::json!({
-                        "reason": "closed",
-                        "steps": ended_steps,
-                        "duration_ms": ended_duration_ms,
-                    }),
+                    // (`closed|expired|failed|cancelled`); an owner's close is `closed`. The
+                    // counts ride on the payload only while the step trace switch is on; off,
+                    // it stays `{}`, as it was before the trace.
+                    if super::step::step_trace_enabled() {
+                        serde_json::json!({
+                            "reason": "closed",
+                            "steps": ended_steps,
+                            "duration_ms": ended_duration_ms,
+                        })
+                    } else {
+                        serde_json::json!({})
+                    },
                     format!("{rid}:agent_completed"),
                 )
                 .await;

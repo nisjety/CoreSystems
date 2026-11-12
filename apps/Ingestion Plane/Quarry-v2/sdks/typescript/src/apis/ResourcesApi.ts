@@ -426,7 +426,7 @@ export class ResourcesApi extends runtime.BaseAPI {
     }
 
     /**
-     * The source of the caller\'s organization, config included: a saved job definition sits at config.definition (E4.1-6). This route reads what is stored, so it is not behind QUARRY_EDGE__SAVED_JOBS. A malformed id is a 400; a missing, deleted or other organization\'s id is a 404.
+     * The source of the caller\'s organization, config included: a saved job definition sits at config.definition (E4.1-6). It answers 501 UNSUPPORTED, naming both QUARRY_EDGE__SAVED_JOBS and QUARRY_EDGE__MONITOR_TAGS, while neither is on; that check comes before the id is read. A malformed id is a 400; a missing, deleted or other organization\'s id is a 404.
      * Read one ingestion source
      */
     async getSourceRaw(requestParameters: GetSourceRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<runtime.ApiResponse<GetSource200Response>> {
@@ -437,7 +437,7 @@ export class ResourcesApi extends runtime.BaseAPI {
     }
 
     /**
-     * The source of the caller\'s organization, config included: a saved job definition sits at config.definition (E4.1-6). This route reads what is stored, so it is not behind QUARRY_EDGE__SAVED_JOBS. A malformed id is a 400; a missing, deleted or other organization\'s id is a 404.
+     * The source of the caller\'s organization, config included: a saved job definition sits at config.definition (E4.1-6). It answers 501 UNSUPPORTED, naming both QUARRY_EDGE__SAVED_JOBS and QUARRY_EDGE__MONITOR_TAGS, while neither is on; that check comes before the id is read. A malformed id is a 400; a missing, deleted or other organization\'s id is a 404.
      * Read one ingestion source
      */
     async getSource(requestParameters: GetSourceRequest, initOverrides?: RequestInit | runtime.InitOverrideFunction): Promise<GetSource200Response> {

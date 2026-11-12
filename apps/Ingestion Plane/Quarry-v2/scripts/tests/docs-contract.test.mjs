@@ -527,12 +527,21 @@ test("the RUNBOOKS section names the production path (WS16.S3), its two granted 
   assert.match(section, /The production path \(WS16\.S3/, "names the production path heading (WS16.S3)");
   assert.ok(section.includes("WS16.S1 to S3") && section.includes("WS16.S3") && section.includes("X-7"), "names WS16.S1 to S3, WS16.S3 and X-7");
   assert.ok(section.includes("`model-extract`") && section.includes("`model-extract-inference`"), "names the two granted rows, model-extract and model-extract-inference");
-  assert.match(section, /`model-invoke` row, which stays `granted: false`[^.]*ends in the 501 of state 3/, "says model-invoke stays granted:false, so /v1/extract ends in the state-3 501");
+  assert.match(section, /`model-invoke` row, which stays `granted: false`[^.]*answers the 501 of state 1b/, "says model-invoke stays granted:false, so /v1/extract answers the state-1b 501 on a deployed stack");
+  assert.doesNotMatch(section, /ends in the 501 of state 3/, "no longer says /v1/extract ends in the state-3 501 on a deployed stack");
+  assert.doesNotMatch(section, /`\/v1\/extract`[^.]*`\/v1\/invoke`/, "no longer says /v1/extract calls /v1/invoke");
   assert.match(section, /off by default/, "says the AI formats switch is off by default");
   assert.match(section, /gates `\/v1\/extract`/, "says the AI formats switch gates extract (QB-T17)");
   for (const state of ["No Model Plane URL", "The AI formats switch is off", "A URL, but nothing to authenticate with", "A URL and a credential, but the gateway refuses"]) {
     assert.ok(section.includes(state), `the section describes the state: ${state}`);
   }
+});
+
+test("the /v1/extract prompt section names the /v1/ai/chat lane that the model arm uses, not /v1/invoke (WS16.S6)", () => {
+  const section = sectionOf(read(paths.runbooks), /`\/v1\/extract` with a `prompt`/, "##");
+  assert.doesNotMatch(section, /calls the gateway's `\/v1\/invoke`/, "the prompt section does not say /v1/extract calls /v1/invoke");
+  assert.match(section, /`\/v1\/ai\/chat`/, "the prompt section names the /v1/ai/chat lane");
+  assert.match(section, /QUARRY_EDGE__AI_FORMATS` gates it/, "the prompt section says the AI formats switch gates the arm");
 });
 
 // ----------------------------------------------------------------------------- answer synthesis (INNH-8a)

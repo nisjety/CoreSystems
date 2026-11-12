@@ -87,7 +87,7 @@ func applyMigration(t *testing.T, pool *pgxpool.Pool, name string) {
 	}
 }
 
-// newTestDB creates a fresh database with 0001, 0003, 0004, 0005, 0006 and 0008 applied and returns a pool on it.
+// newTestDB creates a fresh database with 0001, 0003, 0004, 0005, 0006, 0007 and 0008 applied and returns a pool on it. postgres_migrations_guard_test.go fails when a migration is missing here.
 func newTestDB(t *testing.T) (*pgxpool.Pool, *pgxpool.Config) {
 	t.Helper()
 	bg := context.Background()
@@ -125,6 +125,7 @@ func newTestDB(t *testing.T) (*pgxpool.Pool, *pgxpool.Config) {
 	applyMigration(t, pool, "0004_browser_grants_policy.up.sql")
 	applyMigration(t, pool, "0005_browser_grants_key.up.sql")
 	applyMigration(t, pool, "0006_browser_grants_extension.up.sql")
+	applyMigration(t, pool, "0007_browser_grants_otp_binding.up.sql")
 	applyMigration(t, pool, "0008_browser_grants_web_policy.up.sql")
 	return pool, cfg
 }
@@ -825,6 +826,8 @@ func TestPg_MigrationIsRerunnable(t *testing.T) {
 	applyMigration(t, pool, "0006_browser_grants_extension.up.sql")
 	applyMigration(t, pool, "0005_browser_grants_key.up.sql")
 	applyMigration(t, pool, "0006_browser_grants_extension.up.sql")
+	applyMigration(t, pool, "0007_browser_grants_otp_binding.up.sql")
+	applyMigration(t, pool, "0007_browser_grants_otp_binding.up.sql")
 	applyMigration(t, pool, "0008_browser_grants_web_policy.up.sql")
 	applyMigration(t, pool, "0008_browser_grants_web_policy.up.sql")
 	if _, err := store.GetScoped(ctx, before.ID, before.OrgID, before.OwnerID); err != nil {
@@ -872,6 +875,7 @@ func TestPg_MigrationIsRerunnable(t *testing.T) {
 	applyMigration(t, pool, "0004_browser_grants_policy.up.sql")
 	applyMigration(t, pool, "0005_browser_grants_key.up.sql")
 	applyMigration(t, pool, "0006_browser_grants_extension.up.sql")
+	applyMigration(t, pool, "0007_browser_grants_otp_binding.up.sql")
 	applyMigration(t, pool, "0008_browser_grants_web_policy.up.sql")
 	// The table was re-created: drop connections holding cached statements.
 	pool.Reset()

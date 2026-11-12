@@ -11,10 +11,11 @@
 --   * web_policy   the JSON of the grant's org web-policy snapshot: the verified
 --                  token's web_policy claim, mapped 1:1 (internal/grant/policy.go).
 --                  NULL when the grant carries no snapshot: a row written before
---                  this column, a session minted with no snapshot (the switch
+--                  this column, or a grant minted with none (the switch
 --                  BROWSER_BROKER_WEB_POLICY_SNAPSHOT off, or a token with no
---                  web_policy claim), or an origin_extension or human_browse grant
---                  (neither kind carries a snapshot in either store).
+--                  web_policy claim). Session, API-key and human_browse grants
+--                  take it from the token; run, attach and origin_extension
+--                  children copy their parent's, in both stores.
 --
 -- Still no zdr column: a ZDR grant lives in the broker's memory with a "z_" id
 -- and never reaches this table (X-2), so no ZDR snapshot is stored here.

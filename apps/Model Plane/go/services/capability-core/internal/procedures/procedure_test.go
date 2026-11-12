@@ -49,10 +49,10 @@ func TestValidateRefusesATypedValueUnderAKeyOtherThanText(t *testing.T) {
 // a key, not a value, so each body below carries one field its type does not have.
 func TestValidateRefusesAnActionFieldItsTypeDoesNotHave(t *testing.T) {
 	for _, step := range []string{
-		`{"step":1,"action":{"type":"click","selector":"#go","text":"hunter2"}}`,
-		`{"step":1,"action":{"type":"press","key":"Enter","value":"hunter2"}}`,
-		`{"step":1,"action":{"type":"navigate","url":"https://example.test/","selector":"#pw"}}`,
-		`{"step":1,"action":{"type":"back","text":"hunter2"}}`,
+		`{"step":1,"expected_outcome":"verified","action":{"type":"click","selector":"#go","text":"hunter2"}}`,
+		`{"step":1,"expected_outcome":"verified","action":{"type":"press","key":"Enter","value":"hunter2"}}`,
+		`{"step":1,"expected_outcome":"verified","action":{"type":"navigate","url":"https://example.test/","selector":"#pw"}}`,
+		`{"step":1,"expected_outcome":"verified","action":{"type":"back","text":"hunter2"}}`,
 	} {
 		assertRefused(t, procedureBody(step, ""), CodeBadShape)
 	}
@@ -61,9 +61,9 @@ func TestValidateRefusesAnActionFieldItsTypeDoesNotHave(t *testing.T) {
 // A target and an expect take only the fields Quarry writes for them.
 func TestValidateRefusesAnUnknownFieldInTargetOrExpect(t *testing.T) {
 	action := `"action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":` + roleLocator + `}`
-	withTextInTarget := `{"step":1,` + action + `,"target":{"locator":` + roleLocator +
+	withTextInTarget := `{"step":1,"expected_outcome":"verified",` + action + `,"target":{"locator":` + roleLocator +
 		`,"fingerprint_id":"fp_1","tag":"button","text":"hunter2"}}`
-	withValueInExpect := `{"step":1,` + action + `,"expect":{"all":[{"kind":"url_matches","pattern":"*/done"}],"value":"hunter2"}}`
+	withValueInExpect := `{"step":1,"expected_outcome":"verified",` + action + `,"expect":{"all":[{"kind":"url_matches","pattern":"*/done"}],"value":"hunter2"}}`
 	for _, step := range []string{withTextInTarget, withValueInExpect} {
 		assertRefused(t, procedureBody(step, ""), CodeBadShape)
 	}
@@ -74,8 +74,8 @@ func TestValidateRefusesAnUnknownFieldInTargetOrExpect(t *testing.T) {
 // not repeat it.
 func TestValidateRefusesAnUnknownFieldInALocator(t *testing.T) {
 	labelWithValue := `{"kind":"label","label":"Password","value":"hunter2"}`
-	inAction := `{"step":1,"action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":` + labelWithValue + `}}`
-	inTarget := `{"step":1,"action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":` + roleLocator + `},` +
+	inAction := `{"step":1,"expected_outcome":"verified","action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":` + labelWithValue + `}}`
+	inTarget := `{"step":1,"expected_outcome":"verified","action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":` + roleLocator + `},` +
 		`"target":{"locator":` + labelWithValue + `,"fingerprint_id":"fp_1","tag":"button"}}`
 	for _, step := range []string{inAction, inTarget} {
 		_, err := Validate(procedureBody(step, ""))
@@ -99,12 +99,12 @@ func TestValidateAcceptsEveryLocatorKindWithItsOwnFields(t *testing.T) {
 		`{"kind":"test_id","test_id":"save-button","exact":true}`,
 		`{"kind":"nth","selector":"button","index":2}`,
 	} {
-		step := `{"step":1,"action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":` + loc + `}}`
+		step := `{"step":1,"expected_outcome":"verified","action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":` + loc + `}}`
 		if _, err := Validate(procedureBody(step, "")); err != nil {
 			t.Fatalf("Validate refused a %s locator: %v", loc, err)
 		}
 	}
-	unknownKind := `{"step":1,"action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":{"kind":"css","selector":"#pw"}}}`
+	unknownKind := `{"step":1,"expected_outcome":"verified","action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":{"kind":"css","selector":"#pw"}}}`
 	assertRefused(t, procedureBody(unknownKind, ""), CodeBadShape)
 }
 
@@ -113,18 +113,18 @@ func TestValidateAcceptsEveryActionShapeTheCompileWrites(t *testing.T) {
 	cases := []struct {
 		name, step, slots string
 	}{
-		{"navigate", `{"step":1,"action":{"type":"navigate","url":"https://example.test/"}}`, ""},
-		{"click", `{"step":1,"action":{"type":"click","selector":"#go"}}`, ""},
-		{"click_semantic", `{"step":1,"action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":` + roleLocator + `},` + stepTarget + `,` + stepExpect + `}`, ""},
-		{"type", `{"step":1,"action":{"type":"type","selector":"#q","text":""},"slot":"slot_1"}`, `{"name":"slot_1","step":1,"kind":"text"}`},
-		{"type_semantic", `{"step":1,"action":{"type":"type_semantic","snapshot_id":"","generation":0,"locator":` + roleLocator + `,"text":""},` + stepTarget + `,"slot":"slot_1"}`, `{"name":"slot_1","step":1,"kind":"secret"}`},
-		{"select_semantic", `{"step":1,"action":{"type":"select_semantic","snapshot_id":"","generation":0,"locator":` + roleLocator + `,"value":"NO"},` + stepTarget + `}`, ""},
-		{"wait_for_semantic", `{"step":1,"action":{"type":"wait_for_semantic","snapshot_id":"","generation":0,"locator":` + roleLocator + `,"timeout_ms":5000},` + stepTarget + `}`, ""},
-		{"press", `{"step":1,"action":{"type":"press","key":"Enter"}}`, ""},
-		{"scroll", `{"step":1,"action":{"type":"scroll","target":"down"}}`, ""},
-		{"wait", `{"step":1,"action":{"type":"wait","ms":500}}`, ""},
-		{"back", `{"step":1,"action":{"type":"back"}}`, ""},
-		{"get_content", `{"step":1,"action":{"type":"get_content"}}`, ""},
+		{"navigate", `{"step":1,"expected_outcome":"verified","action":{"type":"navigate","url":"https://example.test/"}}`, ""},
+		{"click", `{"step":1,"expected_outcome":"verified","action":{"type":"click","selector":"#go"}}`, ""},
+		{"click_semantic", `{"step":1,"expected_outcome":"verified","action":{"type":"click_semantic","snapshot_id":"","generation":0,"locator":` + roleLocator + `},` + stepTarget + `,` + stepExpect + `}`, ""},
+		{"type", `{"step":1,"expected_outcome":"verified","action":{"type":"type","selector":"#q","text":""},"slot":"slot_1"}`, `{"name":"slot_1","step":1,"kind":"text"}`},
+		{"type_semantic", `{"step":1,"expected_outcome":"verified","action":{"type":"type_semantic","snapshot_id":"","generation":0,"locator":` + roleLocator + `,"text":""},` + stepTarget + `,"slot":"slot_1"}`, `{"name":"slot_1","step":1,"kind":"secret"}`},
+		{"select_semantic", `{"step":1,"expected_outcome":"verified","action":{"type":"select_semantic","snapshot_id":"","generation":0,"locator":` + roleLocator + `,"value":"NO"},` + stepTarget + `}`, ""},
+		{"wait_for_semantic", `{"step":1,"expected_outcome":"verified","action":{"type":"wait_for_semantic","snapshot_id":"","generation":0,"locator":` + roleLocator + `,"timeout_ms":5000},` + stepTarget + `}`, ""},
+		{"press", `{"step":1,"expected_outcome":"verified","action":{"type":"press","key":"Enter"}}`, ""},
+		{"scroll", `{"step":1,"expected_outcome":"verified","action":{"type":"scroll","target":"down"}}`, ""},
+		{"wait", `{"step":1,"expected_outcome":"verified","action":{"type":"wait","ms":500}}`, ""},
+		{"back", `{"step":1,"expected_outcome":"verified","action":{"type":"back"}}`, ""},
+		{"get_content", `{"step":1,"expected_outcome":"verified","action":{"type":"get_content"}}`, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

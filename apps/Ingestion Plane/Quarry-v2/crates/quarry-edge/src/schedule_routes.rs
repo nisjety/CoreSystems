@@ -591,6 +591,10 @@ pub async fn create_schedule(
         "schedules",
         "create",
     )?;
+    let enabled =
+        crate::job_results_routes::flag_is_on(std::env::var(ENV_MONITOR_TAGS).ok().as_deref());
+    monitor_tag_named_gate(req.tag.as_deref(), enabled)
+        .map_err(|e| err_response(&request_id, e))?;
     let tag = optional_monitor_tag(req.tag.as_deref()).map_err(|e| err_response(&request_id, e))?;
 
     // W2 change-monitoring path: `preset` signals a recurring change monitor. The
@@ -907,13 +911,18 @@ pub async fn backfill_schedule(
 /// request row, control's view (status, attempts, params, result and a short error; never the
 /// claiming worker or the lease). Both ids are parsed before they reach the path, and the org is the
 /// verified claim. A row of another schedule or org is control's 404. No ZDR refusal: the view
-/// carries ids, status and reasons, as the schedule list does.
+/// carries ids, status and reasons, as the schedule list does. Dark behind
+/// `QUARRY_EDGE__SCHEDULE_RUNS`, as the runs list is: the switch is read before the ids, so a dark
+/// edge answers 501 whoever asks.
 pub async fn get_schedule_request(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
     Path((id, rid)): Path<(String, String)>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
+    let enabled =
+        crate::job_results_routes::flag_is_on(std::env::var(ENV_SCHEDULE_RUNS).ok().as_deref());
+    schedule_runs_gate(enabled).map_err(|e| err_response(&request_id, e))?;
     let id = parse_schedule_id(&request_id, &id)?;
     let rid = parse_request_id(&request_id, &rid)?;
     let path = format!("/v1/schedules/{id}/requests/{rid}");
@@ -1023,8 +1032,9 @@ fn parse_request_id(
         })
 }
 
-/// Turns the monitor tag PATCH on. Off (the default), `PATCH /v1/schedules/:id` answers 501 before
-/// control is called. Read per request from the edge's environment.
+/// Turns the monitor tags on. Off (the default), the tag PATCH answers 501 before control is
+/// called, and so does a create or a monitor list that names a tag. Read per request from the
+/// edge's environment.
 pub const ENV_MONITOR_TAGS: &str = "QUARRY_EDGE__MONITOR_TAGS";
 
 /// The check the tag PATCH makes first, as `schedule_runs_gate` does: a dark route answers 501
@@ -1037,6 +1047,17 @@ pub(crate) fn monitor_tags_gate(enabled: bool) -> Result<(), QuarryError> {
         ErrorCode::Unsupported,
         format!("monitor tags are not enabled on this edge: set {ENV_MONITOR_TAGS}=1"),
     ))
+}
+
+/// The check a create or a monitor list makes before control when it names a tag (E3.5-6), so a
+/// dark edge never forwards one. A blank or absent tag is untagged and passes; a named tag answers
+/// the same 501 as `monitor_tags_gate` while the switch is off.
+pub(crate) fn monitor_tag_named_gate(raw: Option<&str>, enabled: bool) -> Result<(), QuarryError> {
+    let names_a_tag = raw.is_some_and(|tag| !tag.trim().is_empty());
+    if names_a_tag {
+        return monitor_tags_gate(enabled);
+    }
+    Ok(())
 }
 
 /// `PATCH /v1/schedules/{id}` (E3.5-6): set the monitor's tag, or clear it with `""`. The id must
@@ -1228,5 +1249,24 @@ mod tests {
             !crate::job_results_routes::flag_is_on(None),
             "the switch is off when unset"
         );
+    }
+
+    #[test]
+    fn monitor_tag_create_and_filter_are_dark_until_the_switch_is_on() {
+        // A create body or a monitor list that names a tag answers the dark 501 before control.
+        for named in ["pricing", " Pricing ", "a"] {
+            let dark = monitor_tag_named_gate(Some(named), false)
+                .expect_err("a named tag on a create or a filter answers 501 while dark");
+            assert_eq!(dark.code, ErrorCode::Unsupported);
+            assert!(dark.message.contains(ENV_MONITOR_TAGS));
+            assert!(monitor_tag_named_gate(Some(named), true).is_ok());
+        }
+        // An absent or blank tag names no monitor tag: it is untagged, so it passes while dark.
+        for untagged in [None, Some(""), Some("   ")] {
+            assert!(
+                monitor_tag_named_gate(untagged, false).is_ok(),
+                "{untagged:?}"
+            );
+        }
     }
 }

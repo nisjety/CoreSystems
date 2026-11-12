@@ -282,6 +282,16 @@ var (
 	idRE       = regexp.MustCompile(`^proc_[0-9a-f-]{36}$`)
 )
 
+// The optional fields of the closed tables: the fields Quarry's serde types may leave out, because they have a serde default
+// or an Option. Every other field of a closed table is required. Quarry refuses a body that lacks one, so such a body cannot
+// be replayed and Validate refuses it. A table that is not listed has no optional field.
+var (
+	topLevelOptional        = map[string]bool{"slots": true}
+	stepOptional            = map[string]bool{"redacted_input": true, "target": true, "slot": true, "expect": true}
+	locatorOptional         = map[string]bool{"exact": true, "name": true}
+	expectConditionOptional = map[string]bool{"within": true}
+)
+
 // Summary is what Validate learned about an accepted body.
 type Summary struct {
 	// Digest is the lowercase hex sha256 of Canonical.
@@ -296,9 +306,9 @@ type Summary struct {
 }
 
 // Validate accepts only a BrowserProcedure v2 body (version 2, 1..MaxSteps steps, at most
-// MaxBodyBytes, the closed action vocabulary) that holds no typed value, no approval_grant_id and no
-// redaction marker. It returns the digest and the canonical form to store. Every refusal is a
-// *ValidationError.
+// MaxBodyBytes, the closed action vocabulary, every field Quarry requires) that holds no typed value,
+// no approval_grant_id and no redaction marker. It returns the digest and the canonical form to store.
+// Every refusal is a *ValidationError.
 func Validate(body []byte) (Summary, error) {
 	if len(body) > MaxBodyBytes {
 		return Summary{}, refuse(CodeBodyTooLarge, "a procedure body is at most %d bytes", MaxBodyBytes)
@@ -453,11 +463,14 @@ func hasRedactionMarker(s string) bool {
 func checkShape(root map[string]any) (Summary, error) {
 	for k := range root {
 		if !topLevelKeys[k] {
-			return Summary{}, refuse(CodeBadShape, "unknown top-level field %q", k)
+			return Summary{}, refuse(CodeBadShape, "a procedure has an unknown top-level field")
 		}
 	}
 	if v, ok := root["version"].(int64); !ok || v != BodyVersion {
 		return Summary{}, refuse(CodeUnsupportedVersion, "only BrowserProcedure version %d is stored", BodyVersion)
+	}
+	if missing := missingField(root, topLevelKeys, topLevelOptional); missing != "" {
+		return Summary{}, refuse(CodeBadShape, "a procedure is missing its %q field", missing)
 	}
 	if v, present := root["procedure_id"]; present {
 		if _, ok := v.(string); !ok {
@@ -497,10 +510,13 @@ func checkShape(root map[string]any) (Summary, error) {
 		}
 		for k := range step {
 			if !stepKeys[k] {
-				return Summary{}, refuse(CodeBadShape, "step %d has an unknown field %q", i, k)
+				return Summary{}, refuse(CodeBadShape, "step %d has an unknown field", i)
 			}
 		}
-		stepNo, hasNo, err := optionalInt(step, "step")
+		if missing := missingField(step, stepKeys, stepOptional); missing != "" {
+			return Summary{}, refuse(CodeBadShape, "step %d is missing its %q field", i, missing)
+		}
+		stepNo, _, err := optionalInt(step, "step")
 		if err != nil {
 			return Summary{}, refuse(CodeBadShape, "step %d: step must be a non-negative integer", i)
 		}
@@ -514,8 +530,11 @@ func checkShape(root map[string]any) (Summary, error) {
 		}
 		for k := range action {
 			if !actionKeys[actionType][k] {
-				return Summary{}, refuse(CodeBadShape, "step %d: the action has an unknown field %q", i, k)
+				return Summary{}, refuse(CodeBadShape, "step %d: the action has an unknown field", i)
 			}
+		}
+		if missing := missingField(action, actionKeys[actionType], nil); missing != "" {
+			return Summary{}, refuse(CodeBadShape, "step %d: the action is missing its %q field", i, missing)
 		}
 		if loc, present := action["locator"]; present {
 			if err := checkLocator(i, "action", loc); err != nil {
@@ -530,11 +549,14 @@ func checkShape(root map[string]any) (Summary, error) {
 				}
 				for k, child := range obj {
 					if !stepObjectKeys[field][k] {
-						return Summary{}, refuse(CodeBadShape, "step %d: %s has an unknown field %q", i, field, k)
+						return Summary{}, refuse(CodeBadShape, "step %d: %s has an unknown field", i, field)
 					}
 					if !stepObjectFieldTypes[k].holds(child) {
 						return Summary{}, refuse(CodeBadShape, "step %d: %s field %q has the wrong type", i, field, k)
 					}
+				}
+				if missing := missingField(obj, stepObjectKeys[field], nil); missing != "" {
+					return Summary{}, refuse(CodeBadShape, "step %d: %s is missing its %q field", i, field, missing)
 				}
 				if loc, present := obj["locator"]; present {
 					if err := checkLocator(i, field, loc); err != nil {
@@ -577,7 +599,7 @@ func checkShape(root map[string]any) (Summary, error) {
 			if used[name] {
 				return Summary{}, refuse(CodeBadSlot, "step %d: a slot is used by one step only", i)
 			}
-			if declaredAt >= 0 && hasNo && declaredAt != stepNo {
+			if declaredAt != stepNo {
 				return Summary{}, refuse(CodeBadSlot, "step %d: the slot belongs to another step", i)
 			}
 			used[name] = true
@@ -627,6 +649,9 @@ func checkLocator(step int, owner string, v any) error {
 			return refuse(CodeBadShape, "step %d: the %s locator field %q has the wrong type", step, owner, k)
 		}
 	}
+	if missing := missingField(loc, fields, locatorOptional); missing != "" {
+		return refuse(CodeBadShape, "step %d: the %s locator is missing its %q field", step, owner, missing)
+	}
 	return nil
 }
 
@@ -657,6 +682,9 @@ func checkExpectConditions(step int, all any) error {
 				return refuse(CodeBadShape, "step %d: an expect condition field %q has the wrong type", step, k)
 			}
 		}
+		if missing := missingField(cond, fields, expectConditionOptional); missing != "" {
+			return refuse(CodeBadShape, "step %d: an expect condition is missing its %q field", step, missing)
+		}
 		if loc, present := cond["locator"]; present {
 			if err := checkLocator(step, "expect", loc); err != nil {
 				return err
@@ -672,7 +700,7 @@ func checkExpectConditions(step int, all any) error {
 }
 
 // readSlots reads the optional slots array. It returns, per slot name, the step number the slot
-// declares (-1 when it declares none) and the names in declaration order.
+// declares and the names in declaration order.
 func readSlots(root map[string]any) (map[string]int64, []string, error) {
 	rawSlots, present := root["slots"]
 	if !present {
@@ -694,8 +722,11 @@ func readSlots(root map[string]any) (map[string]int64, []string, error) {
 		}
 		for k := range slot {
 			if !slotKeys[k] {
-				return nil, nil, refuse(CodeBadSlot, "slot %d has an unknown field %q", i, k)
+				return nil, nil, refuse(CodeBadSlot, "slot %d has an unknown field", i)
 			}
+		}
+		if missing := missingField(slot, slotKeys, nil); missing != "" {
+			return nil, nil, refuse(CodeBadSlot, "slot %d is missing its %q field", i, missing)
 		}
 		name, ok := slot["name"].(string)
 		if !ok || len(name) > maxSlotNameLen || !slotNameRE.MatchString(name) {
@@ -708,20 +739,18 @@ func readSlots(root map[string]any) (map[string]int64, []string, error) {
 		if !ok || !slotKinds[kind] {
 			return nil, nil, refuse(CodeBadSlot, "slot %d: kind is text or secret", i)
 		}
-		at := int64(-1)
-		if n, has, err := optionalInt(slot, "step"); err != nil {
+		step, _, err := optionalInt(slot, "step")
+		if err != nil {
 			return nil, nil, refuse(CodeBadSlot, "slot %d: step must be a non-negative integer", i)
-		} else if has {
-			at = n
 		}
-		declared[name] = at
+		declared[name] = step
 		names = append(names, name)
 	}
 	return declared, names, nil
 }
 
-// optionalInt reads an optional field of an already scanned object that Quarry holds as a u32: a non-negative integer
-// no larger than math.MaxUint32.
+// optionalInt reads a field of an already scanned object that Quarry holds as a u32: a non-negative integer no larger than
+// math.MaxUint32. An absent field reports has false, so a caller that requires the field checks it with missingField first.
 func optionalInt(m map[string]any, key string) (int64, bool, error) {
 	v, present := m[key]
 	if !present {
@@ -732,6 +761,19 @@ func optionalInt(m map[string]any, key string) (int64, bool, error) {
 		return 0, true, errors.New("not a non-negative integer")
 	}
 	return n, true, nil
+}
+
+// missingField names the smallest field of closed that obj lacks and that optional does not allow to be absent, or "" when
+// obj holds them all. The name comes from the closed table, never from the body, so a refusal may quote it, and the choice
+// of the smallest keeps the refusal independent of map iteration order.
+func missingField(obj map[string]any, closed, optional map[string]bool) string {
+	missing := ""
+	for k := range closed {
+		if _, present := obj[k]; !present && !optional[k] && (missing == "" || k < missing) {
+			missing = k
+		}
+	}
+	return missing
 }
 
 // ValidateTag checks a tag name against ^[a-z0-9._-]{1,32}$.

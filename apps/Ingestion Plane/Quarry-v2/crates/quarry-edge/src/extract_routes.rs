@@ -59,10 +59,11 @@ const AI_FORMATS_OFF_HINT: &str = "omit `schema` and `prompt` to receive cleaned
 const NO_MODEL_CREDENTIAL_ERROR: &str =
     "structured extraction needs a granted Model Plane lane, and this deployment holds no model credential";
 const NO_MODEL_CREDENTIAL_HINT: &str = "omit `schema` and `prompt` to receive cleaned markdown. Operators: the Model Plane URL is set but Quarry has no credential for the model lane (a deployed stack gets one from QUARRY_EDGE__QUARRY_SERVICE_API_KEY, but the boot gate keeps the switch off while the model-invoke row stays granted: false, decision D16; in development, QUARRY_EDGE__MODEL_PLANE_TOKEN under the auth dev bypass); see docs/RUNBOOKS.md, \"Enable structured extract and AI formats\"";
-/// The gateway answered 401 or 403 to the first model call of the request.
+/// The gateway refused a model call (401 or 403, or Auth Core would not mint the lane's tokens)
+/// while no source of the request had been extracted.
 const LANE_REFUSED_ERROR: &str =
     "structured extraction needs a granted Model Plane lane, and the Model Plane refused this service";
-const LANE_REFUSED_HINT: &str = "omit `schema` and `prompt` to receive cleaned markdown. Operators: the model lane is not granted to this service (the gateway refused the first model call, so no further page was fetched); see docs/RUNBOOKS.md, \"Enable structured extract and AI formats\"";
+const LANE_REFUSED_HINT: &str = "omit `schema` and `prompt` to receive cleaned markdown. Operators: the model lane is not granted to this service (the gateway refused a model call before any source was extracted, so the batch stopped); see docs/RUNBOOKS.md, \"Enable structured extract and AI formats\"";
 const UNSUPPORTED_NEXT_ACTIONS: [&str; 2] = [
     "retry without `schema` and `prompt` to receive cleaned markdown",
     "operators: see docs/RUNBOOKS.md, \"Enable structured extract and AI formats\"",
@@ -316,6 +317,10 @@ struct TargetCtx<'a> {
     stop: AtomicBool,
     /// Set when a source came back `ok`.
     any_ok: AtomicBool,
+    /// Set once a source's model call went out, answered or not. Until then, a request that may
+    /// make a model call runs its sources one at a time, so a refused lane costs one page fetch and
+    /// one model call.
+    model_called: AtomicBool,
 }
 
 /// How one source ended.
@@ -486,6 +491,10 @@ async fn extract_target(ctx: &TargetCtx<'_>, raw: &str) -> TargetOutcome {
             },
         )
         .await;
+    // `total.calls` counts the calls that went out (a lane that was not granted sends none).
+    if report.total.calls > 0 {
+        ctx.model_called.store(true, Ordering::SeqCst);
+    }
     let mut report = report.json.unwrap_or_else(|| {
         AiFormatReport::failed(AiCode::ModelUnavailable, Some(AiReason::BadReply))
     });
@@ -753,6 +762,9 @@ async fn run_extract(
     // The engine's AI phase ends with the request budget, so a model call still in flight when
     // the budget runs out is cut and reported per source, not left to the router's 60 s cut.
     let deadline = tokio::time::Instant::from_std(started) + budget;
+    // Only a model request that may use the model hop can make a model call, so only it has a
+    // lane to refuse.
+    let model_hop = wants_model && quarry_runtime::page_extract::model_hop_allowed(zdr, &privacy);
     let ctx = TargetCtx {
         state: &state,
         org_id: &claims.org_id,
@@ -769,13 +781,16 @@ async fn run_extract(
         request_id: &request_id,
         stop: AtomicBool::new(false),
         any_ok: AtomicBool::new(false),
+        model_called: AtomicBool::new(false),
     };
-    // WS16.S6: once the first source has answered, the rest run concurrently, at most
-    // QUARRY_EDGE__AI_FORMATS_CONCURRENCY at a time, and model calls in flight are also bounded by
-    // the engine's process-wide limit. The first source runs alone, so a lane refusal or a 429 on
-    // it stops the batch before any other page is fetched (INNH-3: one fetch and one model call).
-    // A markdown-only batch makes no model call and keeps the one-source-at-a-time loop it had
-    // before WS16.S6, so its driver 429 stops the fetches there too.
+    // WS16.S6: the sources run one at a time until one has made its model call, and only then do
+    // the rest run concurrently, at most QUARRY_EDGE__AI_FORMATS_CONCURRENCY at a time (model calls
+    // in flight are also bounded by the engine's process-wide limit). So a refusal of the model
+    // lane, or a 429, stops the batch before another page is fetched (INNH-3: one fetch and one
+    // model call), even when earlier sources never reached the model (a missing or an empty page).
+    // A request that can make no model call (ZDR, a privacy block) has no lane to refuse: its first
+    // source runs alone and the rest run at the window. A markdown-only batch keeps the
+    // one-source-at-a-time loop it had before WS16.S6, so its driver 429 stops the fetches there too.
     let window = if wants_model {
         crate::scrape_contract::ai_formats::settings()
             .concurrency
@@ -786,8 +801,15 @@ async fn run_extract(
     let ctx_ref = &ctx;
     let mut sources = targets.iter().cloned().enumerate();
     let mut outcomes: Vec<(usize, TargetOutcome)> = Vec::with_capacity(targets.len());
-    if let Some((index, raw)) = sources.next() {
+    // The first source always runs alone. A model request then keeps to one at a time until a
+    // model call has gone out.
+    let mut one_at_a_time = true;
+    while one_at_a_time {
+        let Some((index, raw)) = sources.next() else {
+            break;
+        };
         outcomes.push((index, extract_target(ctx_ref, &raw).await));
+        one_at_a_time = model_hop && !ctx.model_called.load(Ordering::SeqCst);
     }
     outcomes.extend(
         futures::stream::iter(sources)
@@ -1997,6 +2019,68 @@ mod tests {
             // The model double's address is not echoed.
             assert!(!body.to_string().contains(&model.uri()));
         }
+    }
+
+    /// Serves `/1` as a missing page (a 404) and every other page as `PAGE`, counting the fetches.
+    struct MissingFirstPage {
+        fetches: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Driver for MissingFirstPage {
+        fn kind(&self) -> DriverKind {
+            DriverKind::Static
+        }
+        async fn fetch(&self, url: &Url) -> QuarryResult<FetchResponse> {
+            self.fetches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(FetchResponse {
+                status: if url.path() == "/1" { 404 } else { 200 },
+                final_url: url.clone(),
+                headers: vec![],
+                body: PAGE.as_bytes().to_vec(),
+                duration_ms: 1,
+                served_by: DriverKind::Static,
+                captures: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_source_that_never_reached_the_model_does_not_open_the_window() {
+        // The first page is missing, so its source never reaches the model and says nothing about
+        // the lane. The refusal on the second source must still stop the batch: the other four are
+        // never fetched or sent to the model, where a window opened after the first source would
+        // have had four in flight.
+        let model = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/ai/chat"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&model)
+            .await;
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut state = crate::test_support::test_state(Arc::new(MissingFirstPage {
+            fetches: counter.clone(),
+        }));
+        state.model_plane_url = Some(model.uri());
+        state.model_plane_token = Some("model-plane-test-token".into());
+        // QB-T17: the model arm is off unless the gate enabled `ai_formats`.
+        state.model_plane.ai_formats = true;
+        let mut req = request(Some(plan_schema()), None);
+        req.urls = (1..=6)
+            .map(|n| format!("https://shop.example/{n}"))
+            .collect();
+        let (status, body) =
+            call(state, crate::test_support::claims_for_org("org_alpha"), req).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert_501_envelope(&body);
+        assert_eq!(body["error"], LANE_REFUSED_ERROR);
+        assert_eq!(
+            fetches(&counter),
+            2,
+            "the missing page and the refused one; the other four are never fetched"
+        );
+        assert_eq!(sent_to_model(&model).await.len(), 1, "one model call");
     }
 
     #[tokio::test]

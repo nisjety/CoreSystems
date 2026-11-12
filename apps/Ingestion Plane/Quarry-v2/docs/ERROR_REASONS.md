@@ -224,13 +224,14 @@ Field errors (400, in `errors[]`, not in `details.reason`): `feature_disabled`, 
 
 ## 501 `UNSUPPORTED` from `POST /v1/extract` (INNH-3)
 
-These come from `POST /v1/extract` when a `schema` or a `prompt` is sent and the Model Plane cannot be used. The body is `{error, code, hint, next_actions}` and has no `details`, so the three are told apart by the `error` text. All are decided before further pages are fetched. None is returned for a request with neither field, nor for a ZDR request. They are not the `model_plane_unavailable` and `model_lane_not_granted` reasons below, which belong to the AI formats of `POST /v1/scrape` and have `details.reason`. The set-up is in `docs/RUNBOOKS.md`, "Enable structured extract and AI formats".
+These come from `POST /v1/extract` when a `schema` or a `prompt` is sent and the Model Plane cannot be used. The body is `{error, code, hint, next_actions}` and has no `details`, so the four are told apart by the `error` text. All are decided before further pages are fetched. None is returned for a request with neither field, nor for a ZDR request. They are not the `model_plane_unavailable` and `model_lane_not_granted` reasons below, which belong to the AI formats of `POST /v1/scrape` and have `details.reason`. The set-up is in `docs/RUNBOOKS.md`, "Enable structured extract and AI formats".
 
 | `error` starts | meaning | what a caller does |
 |---|---|---|
 | `structured extraction needs the Model Plane, and QUARRY_EDGE__MODEL_PLANE_URL is not set` | no Model Plane URL on this deployment | retry without `schema` and `prompt` for cleaned markdown; the operator cannot unlock this on a deployed stack today |
+| `structured extraction is not available on this edge: QUARRY_EDGE__AI_FORMATS is off` | a URL is set, but the AI formats switch is off or was refused at boot (on a deployed stack while the `model-invoke` row stays `granted: false`); no page is fetched | same |
 | `structured extraction needs a granted Model Plane lane, and this deployment holds no model credential` | a URL, but no service key and no development token | same |
-| `structured extraction needs a granted Model Plane lane, and the Model Plane refused this service` | the gateway refused the first model call (one page fetched, one call made, nothing metered) | same |
+| `structured extraction needs a granted Model Plane lane, and the Model Plane refused this service` | the gateway refused a model call while no source had been extracted (usually one page fetched and one call made; the batch stops and nothing is metered) | same |
 
 ## Scrape AI formats (INNH-1)
 

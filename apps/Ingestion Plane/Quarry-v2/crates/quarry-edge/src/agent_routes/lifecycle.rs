@@ -985,14 +985,20 @@ pub async fn start_run(
             run_id.clone(),
             EventType::AgentStarted,
             // WS10.S4: closed labels only (the trace projection allowlists them again; the
-            // org id stays inside Quarry, the envelope carries the verified one).
-            serde_json::json!({
-                "org_id": org_id,
-                "execution_tier": execution_tier,
-                "driver": execution_tier.engine_label(),
-                "profile_scope": profile_scope,
-                "control_mode": started_control_mode,
-            }),
+            // org id stays inside Quarry, the envelope carries the verified one). They ride on
+            // the payload only while the step trace switch is on; off, it is the `org_id` alone,
+            // as it was before the trace.
+            if super::step::step_trace_enabled() {
+                serde_json::json!({
+                    "org_id": org_id,
+                    "execution_tier": execution_tier,
+                    "driver": execution_tier.engine_label(),
+                    "profile_scope": profile_scope,
+                    "control_mode": started_control_mode,
+                })
+            } else {
+                serde_json::json!({ "org_id": org_id })
+            },
             format!("{run_id}:agent_started"),
         )
         .await;

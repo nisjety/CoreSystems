@@ -916,9 +916,11 @@ async fn a_model_stream_asks_auth_core_for_exactly_the_stream_row() {
 }
 
 /// The two extract bearers: each row reaches Auth Core on its own audience's path,
-/// for the verified org, with exactly its scopes and reason. There is no call site
-/// yet (WS16.S3), so the requests are built straight from the manifest, which this
-/// file may do, and sent through the real provider.
+/// for the verified org, with exactly its scopes and reason. The call site is
+/// `lane_token_requests` in `mp_client.rs` (WS16.S3, pinned by
+/// `the_extract_rows_are_requested_by_the_model_client`). This test builds the two
+/// requests straight from the manifest, which this file may do, and sends them
+/// through the real provider.
 #[tokio::test]
 async fn a_model_extract_asks_auth_core_for_exactly_the_two_extract_rows() {
     use crate::service_tokens::{ServiceTokenProvider, ServiceTokenRequest};
