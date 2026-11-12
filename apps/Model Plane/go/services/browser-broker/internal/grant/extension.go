@@ -20,6 +20,9 @@ package grant
 //     user-listed domains);
 //   - deny beats approval: a host equal to, below or above a denied entry is
 //     dropped, and an extension left with no host is refused;
+//   - web policy (WS7.K): it keeps its parent's snapshot, and each host it adds
+//     passes the snapshot's deny rules (a denied host refuses it) and allow rule
+//     (a host outside it is not added, and no other host is put in its place);
 //   - never an approval or derive parent, never renewed, never a key grant's
 //     child: no person stands behind a key to consent;
 //   - Zero Data Retention: turn scope only, the child of a ZDR parent lives in
@@ -224,7 +227,36 @@ func planExtension(p ExtensionParams, parent *Grant) ([]string, error) {
 	if len(fresh) == 0 {
 		return nil, ErrExtensionNothingNew
 	}
-	return fresh, nil
+	// The child keeps the parent's web-policy snapshot (WS7.K), so its new
+	// hosts pass the snapshot's deny and allow rules.
+	return extensionWebPolicy(fresh, parent.WebPolicy)
+}
+
+// extensionWebPolicy applies the parent's web-policy snapshot to the new hosts
+// of an extension (WS7.K). A host equal to or below a deny rule, or above one
+// (a grant covers its subdomains), refuses the extension. A host outside the
+// allow rule is dropped, and an extension left with none is refused. Unlike
+// Narrow it never puts an allowed host in place of a requested one: the server
+// checked the static and site policies on the hosts the person asked for, so
+// the child may hold no other.
+func extensionWebPolicy(hosts []string, s *WebPolicySnapshot) ([]string, error) {
+	if err := s.checkDeny(hosts); err != nil {
+		return nil, err
+	}
+	if s == nil || len(s.DomainsAllow) == 0 {
+		return hosts, nil
+	}
+	allow := ruleNames(s.DomainsAllow)
+	kept := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		if hostWithin(host, allow) {
+			kept = append(kept, host)
+		}
+	}
+	if len(kept) == 0 {
+		return nil, ErrDomainDenied
+	}
+	return kept, nil
 }
 
 // decideExtension looks at the parent's live extension children: an identical
@@ -275,6 +307,7 @@ func newExtensionGrant(id string, p ExtensionParams, parent *Grant, hosts []stri
 		ScopeURL:          p.ScopeURL,
 		Zdr:               parent.Zdr,
 		ReadOnly:          parent.ReadOnly,
+		WebPolicy:         parent.WebPolicy.Clone(),
 		AllowedDomains:    append([]string(nil), hosts...),
 		PolicyMode:        PolicyModeAllowlist,
 		ParentGrantID:     parent.ID,

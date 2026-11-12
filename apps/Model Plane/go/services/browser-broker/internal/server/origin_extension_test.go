@@ -142,6 +142,47 @@ func TestOriginExtension_IssuesAParentBoundGrantAndValidatesIt(t *testing.T) {
 	}
 }
 
+// WS7.K: an origin extension is a child of its parent, so its acquire and
+// validate responses carry the parent's web-policy snapshot, and the org's deny
+// rule holds for the hosts the extension adds.
+func TestOriginExtension_CarriesTheParentsWebPolicyAndItsDenyHolds(t *testing.T) {
+	store := grant.NewMemoryRepository()
+	user := userPrincipal(false)
+	user.WebPolicy = []byte(`{"v":1,"rev":"2","domains":{"deny":["evil.other.org"]}}`)
+	cfg := DefaultConfig()
+	cfg.OriginExtensionEnabled = true
+	cfg.WebPolicySnapshot = true
+	srv := NewServerWithConfig(store, cfg)
+	srv.principal = func(context.Context) (authctx.Principal, error) { return user, nil }
+	session, err := srv.AcquireGrant(context.Background(), &AcquireGrantRequest{
+		OrgId: "org1", SessionKey: "s1", Mode: "cloud", AllowedDomains: []string{"example.com"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := srv.DeriveRunGrant(context.Background(), deriveReq(session.GetGrantId()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = srv.AcquireGrant(context.Background(), extReq(run.GetGrantId(), "browser-01J", func(r *AcquireGrantRequest) {
+		r.AllowedDomains = []string{"evil.other.org"}
+	}))
+	if status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("an extension to a host the org denies: %v, want the web policy refusal", err)
+	}
+	resp, err := srv.AcquireGrant(context.Background(), extReq(run.GetGrantId(), "browser-01J"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetWebPolicy().GetRev() != "2" || strings.Join(resp.GetWebPolicy().GetDomainsDeny(), ",") != "evil.other.org" {
+		t.Fatalf("extension acquire web_policy = %#v, want the parent's snapshot", resp.GetWebPolicy())
+	}
+	val, err := srv.ValidateGrant(context.Background(), &ValidateGrantRequest{GrantId: resp.GetGrantId()})
+	if err != nil || val.GetWebPolicy().GetRev() != "2" {
+		t.Fatalf("extension validate web_policy = %#v, %v; want the parent's snapshot", val.GetWebPolicy(), err)
+	}
+}
+
 func TestOriginExtension_DenyBeatsApproval(t *testing.T) {
 	store := grant.NewMemoryRepository()
 	user := userPrincipal(false)

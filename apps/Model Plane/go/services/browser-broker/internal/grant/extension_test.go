@@ -23,6 +23,7 @@ var extensionContract = []struct {
 	{"Extension_ZdrIsTurnScopeAndStaysInMemory", contractExt_ZdrIsTurnScopeAndStaysInMemory},
 	{"Extension_ScopeIsValidated", contractExt_ScopeIsValidated},
 	{"Extension_DoesNotCountTowardTheOwnerSessionCap", contractExt_DoesNotCountTowardTheOwnerSessionCap},
+	{"Extension_TheParentsWebPolicyBindsTheExtension", contractExt_TheParentsWebPolicyBindsTheExtension},
 }
 
 func TestExtensionContract_Memory(t *testing.T) {
@@ -335,7 +336,62 @@ func contractExt_DoesNotCountTowardTheOwnerSessionCap(t *testing.T, mk storeFact
 	}
 }
 
+// contractExt_TheParentsWebPolicyBindsTheExtension: the extension keeps its
+// parent's web-policy snapshot (WS7.K), and the hosts it adds pass the
+// snapshot's deny and allow rules, as an ordinary grant's hosts do at acquire.
+// A host the org denies, or one a deny rule sits below, is refused, and so is a
+// host outside the allow rule.
+func contractExt_TheParentsWebPolicyBindsTheExtension(t *testing.T, mk storeFactory) {
+	store, _ := mk(t)
+	root, run := extRun(t, store, CreateSessionParams{
+		AllowedDomains: []string{"example.com"},
+		WebPolicy: &WebPolicySnapshot{V: 1, Rev: "1",
+			DomainsAllow: []string{"example.com", "other.org"}, DomainsDeny: []string{"evil.other.org"}},
+	})
+	for _, host := range []string{"evil.other.org", "other.org", "third.net"} {
+		if _, err := store.CreateOriginExtension(ctx, extParams(run, ConsentScopeTurn, host)); !errors.Is(err, ErrDomainDenied) {
+			t.Fatalf("extension to %s: %v, want ErrDomainDenied", host, err)
+		}
+	}
+	g, err := store.CreateOriginExtension(ctx, extParams(run, ConsentScopeTurn, "new.other.org"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g.AllowedDomains) != 1 || g.AllowedDomains[0] != "new.other.org" {
+		t.Fatalf("hosts = %v", g.AllowedDomains)
+	}
+	want := root.WebPolicy
+	carries := func(got *WebPolicySnapshot) bool {
+		return got != nil && got.V == want.V && got.Rev == want.Rev &&
+			equalStrings(got.DomainsAllow, want.DomainsAllow) && equalStrings(got.DomainsDeny, want.DomainsDeny)
+	}
+	if !carries(g.WebPolicy) {
+		t.Fatalf("extension snapshot = %#v, want the parent's %#v", g.WebPolicy, want)
+	}
+	got, err := store.GetScoped(ctx, g.ID, g.OrgID, g.OwnerID)
+	if err != nil || !carries(got.WebPolicy) {
+		t.Fatalf("read back snapshot = %#v, %v; want the parent's", got, err)
+	}
+}
+
 // --- pure rules ---
+
+// TestExtensionWebPolicy_NeverSubstitutesAHost: an allow rule keeps or drops the
+// hosts an extension asks for and never puts an allowed host in their place
+// (Narrow would), since the server checked the policies on the requested hosts.
+func TestExtensionWebPolicy_NeverSubstitutesAHost(t *testing.T) {
+	s := &WebPolicySnapshot{V: 1, Rev: "1", DomainsAllow: []string{"docs.other.org"}}
+	if got, err := extensionWebPolicy([]string{"other.org"}, s); !errors.Is(err, ErrDomainDenied) {
+		t.Fatalf("other.org under an allow rule for docs.other.org = %v, %v; want ErrDomainDenied", got, err)
+	}
+	got, err := extensionWebPolicy([]string{"docs.other.org", "third.net"}, s)
+	if err != nil || len(got) != 1 || got[0] != "docs.other.org" {
+		t.Fatalf("kept = %v, %v; want only the allowed host", got, err)
+	}
+	if got, err := extensionWebPolicy([]string{"api.other.org"}, nil); err != nil || len(got) != 1 {
+		t.Fatalf("no snapshot must change nothing: %v, %v", got, err)
+	}
+}
 
 func TestNormalizeExtensionHosts_RefusesPatternsAndBoundsTheList(t *testing.T) {
 	for _, raw := range []string{"*.example.org", "*", "a*.example.org", ".example.org", " .example.org", "example.org/*", "[a].example.org", "{a}.example.org", "a?.example.org"} {

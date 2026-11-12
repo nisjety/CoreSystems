@@ -33,6 +33,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
                 post(research_runs::cancel_research_run),
             );
     }
+    // WS10.S6 (GW-2): the run's durable trace, one page at a time. Read-only; Model Plane decides that
+    // the run is the caller's own (a non-owner reads the same 404 as no run). Registered only while
+    // `RUN_TRACE_API` is on, so off it answers 404.
+    if state.space_features.run_trace_api {
+        router = router.route("/api/v1/runs/{run_id}/trace", get(streams::run_trace));
+    }
     router
         .route("/api/v1/chat/stream", streams::stream_route())
         .route("/api/v1/chat/invoke", post(json_handlers::invoke_chat))
@@ -181,8 +187,34 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/runs/{run_id}/events/replay",
             get(streams::run_events_replay),
         )
-        // WS10.S6 (GW-2): the run's durable trace, one page at a time. Read-only; Model Plane
-        // decides that the run is the caller's own (a non-owner reads the same 404 as no run).
-        .route("/api/v1/runs/{run_id}/trace", get(streams::run_trace))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    /// WS10.S6 (GW-2): the run-trace route exists only while `RUN_TRACE_API` is on. Off, the path is
+    /// not registered and answers 404. On, the session check answers first (no cookie is a 401), so
+    /// the route is shown to exist without any upstream call.
+    #[tokio::test]
+    async fn the_run_trace_route_is_absent_until_run_trace_api_is_on() {
+        let cases = [(false, StatusCode::NOT_FOUND), (true, StatusCode::UNAUTHORIZED)];
+        for (enabled, expected) in cases {
+            let mut state = crate::tests::test_state(false);
+            state.space_features.run_trace_api = enabled;
+            let app = super::router(state.clone()).with_state(state);
+            let request = Request::builder()
+                .method("GET")
+                .uri("/api/v1/runs/run-1/trace")
+                .body(Body::empty())
+                .expect("request");
+            let response = app.oneshot(request).await.expect("response");
+            assert_eq!(response.status(), expected, "RUN_TRACE_API on = {enabled}");
+        }
+    }
 }

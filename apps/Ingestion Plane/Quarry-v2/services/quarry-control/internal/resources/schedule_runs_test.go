@@ -259,6 +259,36 @@ func TestWorkflowFor_KillSwitchOffReturnsEmpty(t *testing.T) {
 	}
 }
 
+// The change monitor's preflight switch is default off (WS15.S4a). Off, the args are
+// the bytes that shipped, with no schedule id. On, the schedule id rides in, so that
+// ChangeMonitorWF asks the edge before each fire.
+func TestWorkflowFor_MonitorPreflightSwitchIsDefaultOff(t *testing.T) {
+	s := store.Schedule{
+		ID:         quarrycontracts.NewID(quarrycontracts.KindSchedule),
+		OrgID:      "org_a",
+		CreatedBy:  "user_1",
+		TargetKind: store.TargetKindChangeMonitor,
+		TargetRef:  "https://example.com/p",
+	}
+	for _, v := range []string{"", "0", "off"} {
+		t.Setenv(EnvMonitorPreflight, v)
+		wf, args := workflowFor(s)
+		raw, err := json.Marshal(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if wf != "ChangeMonitorWF" || string(raw) != `[{"org_id":"org_a","url":"https://example.com/p","created_by":"user_1"}]` {
+			t.Fatalf("switch %q: wf=%q args=%s, want the shipped args with no schedule_id", v, wf, raw)
+		}
+	}
+	t.Setenv(EnvMonitorPreflight, "1")
+	wf, args := workflowFor(s)
+	a, ok := args[0].(changeMonitorArgs)
+	if wf != "ChangeMonitorWF" || !ok || a.ScheduleID != string(s.ID) {
+		t.Fatalf("switch on: wf=%q args=%v, want schedule_id %q", wf, args, s.ID)
+	}
+}
+
 func TestWorkflowFor_CrawlScrapeBatchBuildScheduledArgs(t *testing.T) {
 	t.Setenv(EnvScheduledJobsEnabled, "1")
 	for _, kind := range []string{"scrape", "crawl", "batch"} {

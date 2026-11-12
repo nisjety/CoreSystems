@@ -153,6 +153,16 @@ func (s *Server) AcquireGrant(ctx context.Context, req *AcquireGrantRequest) (*A
 	if err != nil {
 		return nil, err
 	}
+	// A fill_otp origin is typed into, so the token's web policy keeps it as it
+	// keeps the approval's hosts. The parent's snapshot is checked by the grant
+	// layer (checkFillOtpBinding).
+	if fillOtp {
+		if err := grant.CheckFillOtpOrigin(req.GetGrantOrigin(), webPolicy); err != nil {
+			telemetry.GrantsDeniedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "web_policy")))
+			telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
+			return nil, mapErr(err)
+		}
+	}
 	if err := s.cfg.Policy.CheckSession(ctx, principal.OrganizationID, allowedDomains); err != nil {
 		telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", grantOutcome(err))))
 		return nil, mapErr(err)

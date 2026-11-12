@@ -48,8 +48,8 @@ func IsFillOtp(actions []string) bool {
 
 // checkFillOtpBinding validates the origin and mail connection of an approval
 // whose canonical actions are given. For fill_otp both are required, the origin
-// a canonical https origin whose host the parent may reach; for any other
-// action both must be empty.
+// a canonical https origin whose host the parent may reach under its web policy;
+// for any other action both must be empty.
 func checkFillOtpBinding(actions []string, origin, mailConnectionID string, parent *Grant) error {
 	if !IsFillOtp(actions) {
 		if origin != "" || mailConnectionID != "" {
@@ -64,7 +64,29 @@ func checkFillOtpBinding(actions []string, origin, mailConnectionID string, pare
 	if parent != nil && !hostWithinGrant(host, parent) {
 		return ErrDeriveWidensParent
 	}
+	// The parent's web policy holds for the origin as it holds for the approval's
+	// hosts (CreateScopedSensitiveApproval), so a denied origin is never stored.
+	if parent != nil {
+		return CheckFillOtpOrigin(origin, parent.WebPolicy)
+	}
 	return nil
+}
+
+// CheckFillOtpOrigin refuses a fill_otp grant_origin that a web-policy snapshot
+// does not keep as it is. The origin is one host and is never narrowed, so it
+// must be equal to or below an allow rule when the snapshot has any, and no deny
+// rule may reach it: the same rules an approval's own hosts meet (Narrow and
+// checkDeny). A nil snapshot refuses nothing, and a non-canonical origin is left
+// to checkFillOtpBinding, which refuses it as ErrFillOtpBindingInvalid.
+func CheckFillOtpOrigin(origin string, s *WebPolicySnapshot) error {
+	host, ok := canonicalHTTPSOriginHost(origin)
+	if !ok || s == nil {
+		return nil
+	}
+	if len(s.DomainsAllow) != 0 && !hostWithin(host, ruleNames(s.DomainsAllow)) {
+		return ErrDomainDenied
+	}
+	return s.checkDeny([]string{host})
 }
 
 // ValidMailConnectionID reports an id matching ^[A-Za-z0-9_-]{1,128}$.

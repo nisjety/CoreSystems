@@ -5906,10 +5906,10 @@ fn reload_refused_for_actor(action: &Value, actor: BrowserActionActor) -> bool {
 
 /// E5.1: a PDF capture writes an artifact, and a ZDR run stores none, so a
 /// `pdf` action on a session whose owner projection says `zdr: true` is refused
-/// before any Quarry call.
+/// before any Quarry call. A projection that does not say `zdr: false` is refused as well.
 fn pdf_refused_for_zdr(action: &Value, projection: &Value) -> bool {
     action.get("type").and_then(Value::as_str) == Some("pdf")
-        && projection.get("zdr").and_then(Value::as_bool) == Some(true)
+        && projection.get("zdr").and_then(Value::as_bool) != Some(false)
 }
 
 fn sanitize_action(mut action: Value) -> Result<Value, (&'static str, String)> {
@@ -10519,6 +10519,18 @@ pub(crate) mod tests {
         let typed = sanitize_action(json!({ "type": "reload", "ignore_cache": "yes" }))
             .expect_err("non-boolean ignore_cache must be refused");
         assert_eq!(typed.0, "invalid_browser_action");
+    }
+
+    /// E5.1: a PDF capture is refused unless the owner projection says `zdr: false`. A
+    /// projection that does not state the flag, or states it as a non-boolean, is refused too.
+    #[test]
+    fn pdf_capture_is_refused_unless_the_projection_says_not_zdr() {
+        let pdf = json!({ "type": "pdf" });
+        assert!(pdf_refused_for_zdr(&pdf, &json!({ "zdr": true })));
+        assert!(pdf_refused_for_zdr(&pdf, &json!({})));
+        assert!(pdf_refused_for_zdr(&pdf, &json!({ "zdr": "false" })));
+        assert!(!pdf_refused_for_zdr(&pdf, &json!({ "zdr": false })));
+        assert!(!pdf_refused_for_zdr(&json!({ "type": "screenshot" }), &json!({})));
     }
 
     /// D2-012: a verified service principal is the agent whatever it states, a person's

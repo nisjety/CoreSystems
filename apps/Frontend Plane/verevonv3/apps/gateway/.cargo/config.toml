@@ -1,0 +1,8 @@
+# Test threads default to a 2 MiB stack. In a debug build the generic action dispatcher's
+# future (domains::actions::handlers::execute_action, one state per dispatch arm) no longer fits
+# in that once the Quarry W1-W5 arms and their callees were added, so every unit test that awaits
+# execute_action directly overflowed (Windows and Linux alike). Release builds (the Docker image)
+# share stack slots and axum boxes handler futures, so production is not affected. An explicitly
+# set RUST_MIN_STACK in the environment still wins. CI runs `cargo test` from this directory.
+[env]
+RUST_MIN_STACK = "8388608"

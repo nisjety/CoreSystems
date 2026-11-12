@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,6 +35,11 @@ const (
 	DefaultListLimit = 20
 	MaxListLimit     = 100
 )
+
+// maxVersionNumber is the largest version number the INTEGER version columns hold (migration 0039). A version
+// number reaches Postgres as an int4 parameter, and pgx refuses to encode a larger one, which the caller would
+// see as a store failure. No stored version has a larger number, so such a number is answered as not found.
+const maxVersionNumber = math.MaxInt32
 
 // scopeUser is the only scope today. Sharing a recipe is ADR 8 and is not built; the migration's
 // CHECK admits no other value.
@@ -332,6 +338,9 @@ func (s *Store) GetVersion(ctx context.Context, who Owner, id string, ref Ref) (
 	if ref.Version < 0 || (ref.Version != 0 && ref.Tag != "") {
 		return nil, ErrInvalidRef
 	}
+	if ref.Version > maxVersionNumber {
+		return nil, ErrNotFound
+	}
 	var row pgx.Row
 	switch {
 	case ref.Version > 0:
@@ -410,7 +419,7 @@ func (s *Store) SetTag(ctx context.Context, who Owner, id, tag string, version i
 	if err := ValidateTag(tag); err != nil {
 		return err
 	}
-	if !ValidID(id) || version < 1 {
+	if !ValidID(id) || version < 1 || version > maxVersionNumber {
 		return ErrNotFound
 	}
 	now := s.nowFn()

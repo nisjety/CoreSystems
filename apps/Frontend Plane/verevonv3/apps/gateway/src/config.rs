@@ -381,6 +381,12 @@ pub(crate) struct SpaceFeatureFlags {
     /// `SPACE_ROOM_FILES_UI` (WS14-S7): reported as `features.room_files.files_tab` (together with
     /// `room_files_api`) so the SPA shows the Files tab. Never an authorization input.
     pub(crate) room_files_ui: bool,
+    /// `RUN_TRACE_API` (WS10.S6, GW-2): `GET /api/v1/runs/{run_id}/trace`, one page of a run's durable
+    /// browser trace. `1`/`true`/`yes`/`on` turns it on; default off in every environment, never by
+    /// default in development. Off, the route is not registered (404). A rollout control, never an
+    /// authorization input: Model Gateway and Session Core decide that the run is the caller's own, and
+    /// a zero-retention run has no rows, so its page is empty.
+    pub(crate) run_trace_api: bool,
     /// `SPACE_TURN_ATTACHMENTS_UI` (WS14-S7): reported as `features.room_files.turn_attachments` so the
     /// composer offers per-turn attachments. Never an authorization input.
     pub(crate) turn_attachments_ui: bool,
@@ -566,6 +572,7 @@ impl SpaceFeatureFlags {
             room_pins: space_flag("SPACE_ROOM_PINS_API"),
             room_files_api: space_flag("SPACE_ROOM_FILES_API"),
             room_files_ui: space_flag("SPACE_ROOM_FILES_UI"),
+            run_trace_api: env_bool("RUN_TRACE_API", false),
             turn_attachments_ui: space_flag("SPACE_TURN_ATTACHMENTS_UI"),
             message_search_api: space_flag("SPACE_MESSAGE_SEARCH_API"),
             message_search_ui: space_flag("SPACE_MESSAGE_SEARCH_UI"),
@@ -1454,6 +1461,33 @@ mod tests {
         assert!(!flags.room_artifacts);
         assert!(!flags.send_idempotency_api);
         assert!(!flags.thread_pane_ui);
+    }
+
+    /// WS10.S6 (GW-2): `RUN_TRACE_API` is off unless it is `1`, `true`, `yes` or `on`, in every
+    /// environment, development included, so the run-trace route ships dark.
+    #[test]
+    fn run_trace_api_flag_is_default_off_in_every_environment() {
+        assert!(!super::SpaceFeatureFlags::default().run_trace_api);
+        let read = || super::SpaceFeatureFlags::from_env().run_trace_api;
+        for app_env in [None, Some("production"), Some("development")] {
+            with_env(&[("APP_ENV", app_env), ("RUN_TRACE_API", None)], || {
+                assert!(!read(), "APP_ENV={app_env:?}");
+            });
+        }
+        for value in ["", "0", "false", "off"] {
+            let vars = [
+                ("APP_ENV", Some("development")),
+                ("RUN_TRACE_API", Some(value)),
+            ];
+            with_env(&vars, || assert!(!read(), "{value:?}"));
+        }
+        for value in ["1", "true", "yes", "on"] {
+            let vars = [
+                ("APP_ENV", Some("production")),
+                ("RUN_TRACE_API", Some(value)),
+            ];
+            with_env(&vars, || assert!(read(), "{value:?}"));
+        }
     }
 
     /// P-GW1 / WS01-S5 / WS03-S4: an unset Space flag is OFF under `APP_ENV=production`, ON in

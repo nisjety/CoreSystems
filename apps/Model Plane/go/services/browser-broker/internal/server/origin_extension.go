@@ -121,6 +121,8 @@ func (s *Server) acquireOriginExtension(ctx context.Context, req *AcquireGrantRe
 	logGrantIssued(ctx, g)
 	resp := s.acquireResponse(g)
 	resp.ReadOnly = g.ReadOnly
+	// The parent's snapshot, copied unchanged by the grant layer (WS7.K).
+	resp.WebPolicy = s.webPolicyResponse(g)
 	// The hosts the person's own denies and the org policy dropped are the hosts
 	// this extension may never add.
 	resp.DeniedDomains = append(resp.DeniedDomains, reportedDenied(append(dropped, siteDropped...))...)

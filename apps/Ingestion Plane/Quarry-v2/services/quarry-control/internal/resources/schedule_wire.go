@@ -1,6 +1,8 @@
 package resources
 
 import (
+	"os"
+	"strings"
 	"time"
 
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
@@ -55,9 +57,26 @@ type changeMonitorArgs struct {
 	Zdr *bool `json:"zdr,omitempty"`
 	// ScheduleID is the schedule row's id (WS15.S4a). ChangeMonitorWF sends it
 	// to the edge's fire-time preflight (monitor-preflight-v1); an empty id
-	// skips the preflight. Adding it changes the args once, so the next
-	// reconcile pass updates each existing change_monitor schedule.
+	// skips the preflight. workflowFor sets it only while
+	// QUARRY_CONTROL__MONITOR_PREFLIGHT is on; turning that on changes the args
+	// once, so the next reconcile pass updates each existing change_monitor schedule.
 	ScheduleID string `json:"schedule_id,omitempty"`
+}
+
+// EnvMonitorPreflight is the switch for the change monitor's fire-time preflight
+// (WS15.S4a, monitor-preflight-v1). Truthy (1, true, yes, on) turns it on. Unset or
+// any other value keeps it off, and a monitor fire then runs no edge call.
+const EnvMonitorPreflight = "QUARRY_CONTROL__MONITOR_PREFLIGHT"
+
+// MonitorPreflightEnabled reports whether EnvMonitorPreflight is truthy. Default
+// false. It is read when the desired set is built, as QUARRY_SCHEDULED_JOBS_ENABLED
+// is, so a change lands on the orchestrator's next reconcile pass.
+func MonitorPreflightEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvMonitorPreflight))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // workflowFor maps a schedule's target_kind to the Temporal workflow name +
@@ -68,7 +87,13 @@ type changeMonitorArgs struct {
 func workflowFor(s store.Schedule) (string, []any) {
 	switch s.TargetKind {
 	case store.TargetKindChangeMonitor:
-		return "ChangeMonitorWF", []any{changeMonitorArgs{OrgID: s.OrgID, URL: s.TargetRef, CreatedBy: s.CreatedBy, Zdr: s.Zdr, ScheduleID: string(s.ID)}}
+		args := changeMonitorArgs{OrgID: s.OrgID, URL: s.TargetRef, CreatedBy: s.CreatedBy, Zdr: s.Zdr}
+		// Dark until QUARRY_CONTROL__MONITOR_PREFLIGHT is on (WS15.S4a). Off, the args stay
+		// the bytes that shipped and ChangeMonitorWF runs no edge call.
+		if MonitorPreflightEnabled() {
+			args.ScheduleID = string(s.ID)
+		}
+		return "ChangeMonitorWF", []any{args}
 	case "scrape", "crawl", "batch":
 		// Dark until QUARRY_SCHEDULED_JOBS_ENABLED is 1 (WS15.S2): with the switch
 		// off these kinds stay unmapped and the reconciler creates nothing for them.

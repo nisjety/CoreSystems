@@ -141,7 +141,11 @@ func sendScheduleNotice(sink notify.Sink, sched store.Schedule, noticeType, idem
 		"reason":        reason,
 		"run_id":        runID,
 	}
-	if err := sink.NotifyScheduleRun(ctx, sched.OrgID, recipient, idempotencyKey, noticeType, scheduleZdr(sched), payload); err != nil {
+	// A skipped_zdr fire is denied because the org's effective posture is ZDR now. The
+	// create-time stamp can still say standard (an org that turns ZDR on keeps the stamp
+	// of its existing schedules), so that reason makes the notice ZDR whatever the stamp says.
+	zdr := scheduleZdr(sched) || reason == "skipped_zdr"
+	if err := sink.NotifyScheduleRun(ctx, sched.OrgID, recipient, idempotencyKey, noticeType, zdr, payload); err != nil {
 		log.Warn().Err(err).Str("schedule_id", string(sched.ID)).Str("type", noticeType).Msg("schedule notice delivery failed")
 	}
 }

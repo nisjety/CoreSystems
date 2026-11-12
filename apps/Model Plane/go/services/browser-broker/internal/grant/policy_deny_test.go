@@ -92,3 +92,37 @@ func TestSensitiveApprovalRefusesAHostTheParentSnapshotDenies(t *testing.T) {
 		t.Fatalf("approval beside the deny = %#v, %v", approval, err)
 	}
 }
+
+// A fill_otp origin is typed into, so the parent's deny rules hold for it as they
+// hold for the approval's hosts. A denied origin is refused whether or not the
+// approval's own hosts name it; the domains alone refuse the origin they cover.
+func TestFillOtpApprovalRefusesAnOriginTheParentSnapshotDenies(t *testing.T) {
+	store := NewMemoryRepository()
+	parent := session(t, store, CreateSessionParams{
+		AllowedDomains: []string{"example.com"}, TTL: 15 * time.Minute,
+		WebPolicy: &WebPolicySnapshot{V: 1, Rev: "1", DomainsDeny: []string{"evil.example.com"}},
+	})
+	otp := func(domains []string, origin string) ApprovalParams {
+		p := approvalOn(parent, domains, time.Minute)
+		p.AllowedActions = []string{ActionFillOtp}
+		p.MailConnectionID = "mail-1"
+		p.GrantOrigin = origin
+		return p
+	}
+	refused := []struct {
+		domains []string
+		origin  string
+	}{
+		{[]string{"example.com"}, "https://evil.example.com"},
+		{[]string{"docs.example.com"}, "https://evil.example.com"},
+	}
+	for _, c := range refused {
+		if _, err := store.CreateScopedSensitiveApproval(ctx, otp(c.domains, c.origin)); !errors.Is(err, ErrDomainDenied) {
+			t.Fatalf("fill_otp approval for %v origin %s error = %v; want ErrDomainDenied", c.domains, c.origin, err)
+		}
+	}
+	approval, err := store.CreateScopedSensitiveApproval(ctx, otp([]string{"docs.example.com"}, "https://docs.example.com"))
+	if err != nil || approval.GrantOrigin != "https://docs.example.com" {
+		t.Fatalf("fill_otp origin beside the deny = %#v, %v", approval, err)
+	}
+}
