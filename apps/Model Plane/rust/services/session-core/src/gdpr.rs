@@ -1034,8 +1034,10 @@ impl CheckedThreads {
 /// and before [`erase_user_space_memory_sources`].
 ///
 /// With the switch off ([`thread_memory_erasure_enabled`]) it returns [`CheckedThreads::none`] at
-/// once and asks nothing. Switched on, the candidates are, in this organization only: the person's
-/// personal threads that hold thread-bound memory (both kinds); for `user` only, the Space threads
+/// once and asks nothing here; the threads the person's Space rows cite are asked by
+/// [`erase_user_space_memory_sources`] (GDPR-order-rel2). Switched on, the candidates are, in this
+/// organization only: the person's personal threads that hold thread-bound memory (both kinds); for
+/// `user` only, the Space threads
 /// whose thread-bound memory carries a message of the person, and the threads
 /// [`erase_user_space_memory_sources`] will read to attribute Space rows (messages of the rows the
 /// person is a source of, and the saving thread of their explicit saves). Ids are never logged.
@@ -1167,15 +1169,37 @@ pub struct SpaceSourceSummary {
 /// and loses theirs. Space rows have no Letta copy (EP-8 S6), so this is the whole erasure.
 /// Idempotent: a redelivered event finds nothing of the person left.
 ///
+/// The organization's legal hold is asked inside that transaction, ahead of its first statement
+/// (EP-9 C4, OD-25): a held organization refuses with [`ErasureHoldError`] and no Space row of the
+/// person is deleted. With the hold switch on, the threads those rows cite are asked as well, after the
+/// rows are locked and before any of them is deleted or narrowed (GDPR-order-rel2, R2-DEC-OD-59). That
+/// holds whether or not the thread-memory switch is on: a held thread refuses the same way.
+///
 /// # Errors
 ///
-/// Returns an error if any statement or the commit fails; nothing is changed then.
+/// Returns [`ErasureHoldError`] (inside the `anyhow::Error`) when a hold covers the organization or one
+/// of the cited threads, or cannot be ruled out. Returns an error if any statement or the commit fails;
+/// nothing is changed then.
 pub async fn erase_user_space_memory_sources(
     pool: &Pool,
     org_id: &str,
     user_id: &str,
 ) -> anyhow::Result<SpaceSourceSummary> {
+    erase_user_space_memory_sources_gated(pool, org_id, user_id, erasure_hold_gate()).await
+}
+
+/// [`erase_user_space_memory_sources`] with the hold gate named by the caller, so a test can answer
+/// with its own org-core. Production always passes the process gate.
+async fn erase_user_space_memory_sources_gated(
+    pool: &Pool,
+    org_id: &str,
+    user_id: &str,
+    gate: &ErasureHoldGate,
+) -> anyhow::Result<SpaceSourceSummary> {
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
+    // EP-9 C4: the hold check is the first step of this erasure, ahead of every deletion. It runs
+    // inside the transaction, so a refusal rolls it back before any row is locked or deleted.
+    gate.ensure_not_held(org_id, &[]).await?;
     // The rows the person may be a source of, locked: a message they wrote, or an explicit save in
     // a thread they own.
     let rows: Vec<(String, Vec<String>, Option<String>)> = sqlx::query_as(
@@ -1197,6 +1221,22 @@ pub async fn erase_user_space_memory_sources(
     .fetch_all(&mut *tx)
     .await?;
 
+    // GDPR-order-rel2 (R2-DEC-OD-59): the threads the locked rows cite are asked before any row is deleted or
+    // narrowed, whether or not the thread-memory switch is on. A held thread refuses the whole erasure, and the
+    // transaction rolls back with it. Behind the hold switch only: switched off, nothing is read or asked. The
+    // threads are read in this transaction, after the lock, from the rows it has locked (as the Space deletion
+    // reads its cited threads, GDPR-order-rel1).
+    if !matches!(gate, ErasureHoldGate::Off) {
+        let links: Vec<String> = rows
+            .iter()
+            .flat_map(|(_, row_links, _)| row_links.iter().cloned())
+            .collect();
+        let cited = cited_thread_ids_in_tx(&mut tx, org_id, &links).await?;
+        if !cited.is_empty() {
+            gate.ensure_not_held(org_id, &cited).await?;
+        }
+    }
+
     let erased = erase_attributed_rows_in_tx(&mut tx, org_id, user_id, rows).await?;
     let summary = SpaceSourceSummary { deleted: erased.deleted.len() as u64, narrowed: erased.narrowed };
     tx.commit().await?;
@@ -1205,6 +1245,36 @@ pub async fn erase_user_space_memory_sources(
             .increment(summary.deleted);
     }
     Ok(summary)
+}
+
+/// The threads that `links` cite within one organization (GDPR-order-rel2): a `message:<id>` link resolves to
+/// the thread of that message, a `thread:<id>` link names its thread. Read in the caller's transaction. Sorted,
+/// so the ask names the same threads in the same order for the same rows.
+///
+/// # Errors
+///
+/// Returns an error if the statement fails; the caller's transaction is then to be rolled back.
+async fn cited_thread_ids_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    org_id: &str,
+    links: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let mut ids: Vec<String> = sqlx::query_scalar(
+        "SELECT t.id FROM unnest($2::text[]) AS sl(link) \
+           JOIN messages m ON m.id = substr(sl.link, 9) \
+           JOIN threads t ON t.id = m.thread_id \
+          WHERE sl.link LIKE 'message:%' AND t.org_id = $1 \
+         UNION \
+         SELECT t.id FROM unnest($2::text[]) AS sl(link) \
+           JOIN threads t ON t.id = substr(sl.link, 8) \
+          WHERE sl.link LIKE 'thread:%' AND t.org_id = $1",
+    )
+    .bind(org_id)
+    .bind(links)
+    .fetch_all(&mut **tx)
+    .await?;
+    ids.sort();
+    Ok(ids)
 }
 
 /// What [`erase_attributed_rows_in_tx`] did to the rows it was given.
@@ -1464,8 +1534,9 @@ pub async fn erase_user_personal_data(
     user_id: &str,
     letta: Option<&crate::letta_adapter::LettaMemoryAdapter>,
 ) -> anyhow::Result<UserErasureSummary> {
-    // The thread holds are asked here too, so this wrapper stays correct for a caller that did not run
-    // the consumer's check. Switch off: nothing is asked.
+    // The organization and thread holds are asked here, before any store, so this wrapper stays correct
+    // for a caller that did not run the consumer's checks. Switch off: nothing is asked.
+    ensure_user_erasure_not_held(org_id).await?;
     let checked =
         ensure_user_thread_erasure_not_held(pool, org_id, user_id, UserErasureKind::Erase).await?;
     erase_user_personal_data_for(pool, org_id, user_id, UserErasureKind::Erase, &checked, letta).await
@@ -1483,9 +1554,13 @@ pub async fn erase_user_personal_data(
 /// row then also carries the counts `thread_memory` and `thread_memory_narrowed`. With the switch off
 /// `checked` is empty and nothing of this runs.
 ///
+/// This function asks no legal hold. The caller asks the organization and the threads before any store
+/// is touched, and for `user` the Space erasure runs first. A check here would come after that erasure's
+/// deletes, so it could refuse a step whose rows of the same event are already gone (EP-9 C4, OD-25).
+///
 /// # Errors
 ///
-/// As [`erase_user_personal_data`].
+/// Returns an error when a statement or the commit fails; nothing of that transaction is kept.
 pub async fn erase_user_personal_data_for(
     pool: &Pool,
     org_id: &str,
@@ -1494,10 +1569,6 @@ pub async fn erase_user_personal_data_for(
     checked: &CheckedThreads,
     letta: Option<&crate::letta_adapter::LettaMemoryAdapter>,
 ) -> anyhow::Result<UserErasureSummary> {
-    // EP-9 C4: asked before the transaction opens, so a refusal touches nothing and the redelivery
-    // retries it after the release.
-    erasure_hold_gate().ensure_not_held(org_id, &[]).await?;
-
     let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
     crate::memory_control::lock_user(&mut tx, org_id, user_id).await?;
     let mut erased: Vec<String> = sqlx::query_scalar(
@@ -2492,5 +2563,397 @@ mod tests {
             .expect("the purge asks the hold gate");
         let begin = source.find("let mut tx: Transaction<'_, Postgres> = pool.begin()").expect("purge transaction");
         assert!(check < begin, "the hold check must precede the purge transaction");
+    }
+
+    /// W3-EP-8-S4-gdpr (verification 6.3 item 8): a legal hold refuses a per-user erasure before any row is
+    /// touched. The consumer asks the organization, then the threads, ahead of the Space erasure. The Space
+    /// erasure asks inside its own transaction, ahead of its first lock and delete. The standing-profile step
+    /// asks nothing, because it runs after the Space rows of the same event are gone.
+    #[test]
+    fn user_erasure_asks_holds_before_any_delete() {
+        let source = include_str!("gdpr.rs");
+        let production = &source[..source.find("#[cfg(test)]").expect("the test module")];
+        let handler = include_str!("gdpr_nats.rs");
+        let pos = |text: &str, needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("expected to find {needle:?}"))
+        };
+
+        let org_check = pos(handler, "ensure_user_erasure_not_held(&user.org_id)");
+        let thread_check = pos(handler, "ensure_user_thread_erasure_not_held(");
+        let space = pos(handler, "erase_user_space_memory_sources(pool");
+        let personal = pos(handler, "erase_user_personal_data_for(");
+        assert!(
+            org_check < thread_check && thread_check < space && space < personal,
+            "the consumer asks the organization, then the threads, before the Space erasure; the standing-profile step runs last"
+        );
+
+        let gated = function_body(
+            production,
+            "async fn erase_user_space_memory_sources_gated(",
+        );
+        let begin = pos(gated, "pool.begin()");
+        let asked = pos(gated, "gate.ensure_not_held(org_id, &[])");
+        let first_lock = pos(gated, "FOR UPDATE OF am");
+        assert!(
+            begin < asked && asked < first_lock,
+            "the Space erasure asks the hold gate inside its transaction, before any row is locked or deleted"
+        );
+
+        let personal_step = function_body(production, "pub async fn erase_user_personal_data_for(");
+        assert!(
+            !personal_step.contains("ensure_not_held"),
+            "the standing-profile step runs after the Space rows of its event are deleted, so it must not ask again"
+        );
+
+        let wrapper = function_body(production, "pub async fn erase_user_personal_data(");
+        assert!(
+            pos(wrapper, "ensure_user_erasure_not_held(org_id)")
+                < pos(wrapper, "ensure_user_thread_erasure_not_held("),
+            "the wrapper asks the organization hold before the thread holds"
+        );
+    }
+
+    /// The text of one production function: from its signature to its closing brace in column 0.
+    fn function_body<'a>(text: &'a str, signature: &str) -> &'a str {
+        let start = text
+            .find(signature)
+            .unwrap_or_else(|| panic!("expected to find {signature:?}"));
+        let rest = &text[start..];
+        let end = rest.find("\n}\n").expect("the function's closing brace");
+        &rest[..end + 2]
+    }
+
+    /// The organization's hold check, answered for one named organization. `mount_check` names `org_1` only.
+    async fn mount_org_check(
+        server: &wiremock::MockServer,
+        org: &str,
+        answer: wiremock::ResponseTemplate,
+    ) {
+        use wiremock::matchers::{header, method, path};
+        server.reset().await;
+        let route = format!("/internal/orgs/{org}/retention/check");
+        wiremock::Mock::given(method("POST"))
+            .and(path(route))
+            .and(header("x-service-id", "session-core"))
+            .and(header("x-service-token", "session-token"))
+            .respond_with(answer)
+            .mount(server)
+            .await;
+    }
+
+    /// W3-EP-8-S4-gdpr: a held organization erases nothing. The person's Space memory source is still there
+    /// after the refused erasure, and the same erasure completes once the hold is released.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn held_organization_keeps_user_space_memory_sources() {
+        use crate::space::test_support;
+        let Some(pool) = test_support::connect().await else {
+            return;
+        };
+        let server = wiremock::MockServer::start().await;
+        let gate = hold_gate(&server.uri());
+        let nonce = mp_ids::new_ulid();
+        let org = format!("gdpr-held-org-{nonce}");
+        let space = format!("gdpr-held-space-{nonce}");
+        let thread = format!("gdpr-held-thread-{nonce}");
+        let message = format!("gdpr-held-msg-{nonce}");
+        test_support::seed_space_thread(&pool, &org, &space, &thread, "owner-1").await;
+        test_support::seed_space_message(
+            &pool,
+            &space,
+            &thread,
+            &message,
+            "user",
+            Some("erased-user"),
+        )
+        .await;
+        let memory = mp_ids::new_ulid();
+        sqlx::query(
+            "INSERT INTO agent_memory (id, org_id, scope, scope_id, key, content, kind, confidence, owner, \
+             source_links, review_state, audience_hash, audience_revision, source_label) \
+             VALUES ($1, $2, 'space', $3, $4, 'c', 'fact', 0.9, '', $5, 'accepted', 'sha256:audience-1', 1, \
+             'room_statement')",
+        )
+        .bind(&memory)
+        .bind(&org)
+        .bind(&space)
+        .bind(format!("{space}/sole"))
+        .bind(vec![format!("thread:{thread}"), format!("message:{message}")])
+        .execute(&pool)
+        .await
+        .expect("seed space row");
+
+        mount_org_check(&server, &org, check_answer(true, &[])).await;
+        let refusal = erase_user_space_memory_sources_gated(&pool, &org, "erased-user", &gate)
+            .await
+            .expect_err("a held organization refuses the erasure");
+        assert_eq!(
+            refusal.downcast_ref::<ErasureHoldError>(),
+            Some(&ErasureHoldError::OrgHeld)
+        );
+        let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM agent_memory WHERE id = $1")
+            .bind(&memory)
+            .fetch_one(&pool)
+            .await
+            .expect("count the held row");
+        assert_eq!(
+            kept, 1,
+            "a held user loses nothing: the Space memory source is still there"
+        );
+
+        mount_org_check(&server, &org, check_answer(false, &[])).await;
+        let summary = erase_user_space_memory_sources_gated(&pool, &org, "erased-user", &gate)
+            .await
+            .expect("released: the erasure completes");
+        assert_eq!(
+            summary,
+            SpaceSourceSummary {
+                deleted: 1,
+                narrowed: 0
+            }
+        );
+
+        sqlx::query("DELETE FROM agent_memory WHERE org_id = $1")
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .ok();
+        test_support::clean_space(&pool, &org, &space).await;
+    }
+
+    /// GDPR-order-rel2: the Space erasure reads the threads its locked rows cite and asks the hold gate about them
+    /// behind the hold switch, after the rows are locked and before any row is deleted or narrowed. The thread-memory
+    /// switch does not change that order, and a message link resolves to its thread, a thread link names one.
+    #[test]
+    fn user_space_erasure_asks_cited_threads_before_any_delete() {
+        let source = include_str!("gdpr.rs");
+        let production = &source[..source.find("#[cfg(test)]").expect("the test module")];
+        let gated = function_body(
+            production,
+            "async fn erase_user_space_memory_sources_gated(",
+        );
+        let pos = |needle: &str| {
+            gated
+                .find(needle)
+                .unwrap_or_else(|| panic!("expected {needle:?} in the Space erasure"))
+        };
+        let locked = pos("FOR UPDATE OF am");
+        let switch = pos("if !matches!(gate, ErasureHoldGate::Off)");
+        let read = pos("let cited = cited_thread_ids_in_tx(&mut tx, org_id, &links).await?;");
+        let asked = pos("gate.ensure_not_held(org_id, &cited).await?;");
+        let erased = pos("erase_attributed_rows_in_tx(&mut tx, org_id, user_id, rows)");
+        assert!(
+            locked < switch && switch < read && read < asked && asked < erased,
+            "the cited threads are read after the lock, behind the switch, and asked before any row is erased"
+        );
+
+        let reader = function_body(production, "async fn cited_thread_ids_in_tx(");
+        assert!(
+            reader.contains("unnest($2::text[])")
+                && reader.contains("'message:%'")
+                && reader.contains("'thread:%'")
+                && reader.contains("t.org_id = $1"),
+            "a message link resolves to its thread and a thread link names one, both within the organization"
+        );
+    }
+
+    /// Answers the org-core check the way the route does: no organization hold, and of the threads it is asked
+    /// about, only the held ones come back. A refusal therefore names exactly the cited threads that are held.
+    struct HeldAmong(Vec<String>);
+
+    impl wiremock::Respond for HeldAmong {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let asked: Vec<String> = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .ok()
+                .and_then(|body| body["thread_ids"].as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|id| id.as_str().map(str::to_owned))
+                .collect();
+            let held: Vec<String> = asked.into_iter().filter(|id| self.0.contains(id)).collect();
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "organization_id": "org",
+                "window_days": null,
+                "revision": 0,
+                "org_held": false,
+                "held_thread_ids": held,
+            }))
+        }
+    }
+
+    /// Mounts [`HeldAmong`] on one organization's check route, with session-core's credentials required.
+    async fn mount_held_threads(server: &wiremock::MockServer, org: &str, held: &[String]) {
+        use wiremock::matchers::{header, method, path};
+        server.reset().await;
+        let route = format!("/internal/orgs/{org}/retention/check");
+        wiremock::Mock::given(method("POST"))
+            .and(path(route))
+            .and(header("x-service-id", "session-core"))
+            .and(header("x-service-token", "session-token"))
+            .respond_with(HeldAmong(held.to_vec()))
+            .mount(server)
+            .await;
+    }
+
+    /// One Space memory row of `org` in `space` that cites `links`, keyed `{space}/{key}`. Returns its id.
+    async fn insert_space_row(
+        pool: &Pool,
+        org: &str,
+        space: &str,
+        key: &str,
+        links: Vec<String>,
+    ) -> String {
+        let id = mp_ids::new_ulid();
+        sqlx::query(
+            "INSERT INTO agent_memory (id, org_id, scope, scope_id, key, content, kind, confidence, owner, \
+             source_links, review_state, audience_hash, audience_revision, source_label) \
+             VALUES ($1, $2, 'space', $3, $4, 'c', 'fact', 0.9, '', $5, 'accepted', 'sha256:audience-1', 1, \
+             'room_statement')",
+        )
+        .bind(&id)
+        .bind(org)
+        .bind(space)
+        .bind(format!("{space}/{key}"))
+        .bind(links)
+        .execute(pool)
+        .await
+        .expect("seed space row");
+        id
+    }
+
+    /// How many of `ids` are still rows.
+    async fn live_space_rows(pool: &Pool, ids: &[String]) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM agent_memory WHERE id = ANY($1)")
+            .bind(ids)
+            .fetch_one(pool)
+            .await
+            .expect("count the Space rows")
+    }
+
+    /// GDPR-order-rel2 (R2-DEC-OD-59): a legal hold on a thread that one of the person's Space rows cites refuses the
+    /// erasure before any Space row is deleted, with the thread-memory switch off. The thread is cited by a `thread:`
+    /// link, or through a `message:` link to a message in it. A thread that only someone else's row cites does not
+    /// block the person's erasure, and the same erasure completes once the holds are released.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn held_thread_cited_by_a_user_space_row_refuses_the_erasure() {
+        use crate::space::test_support;
+        let Some(pool) = test_support::connect().await else {
+            return;
+        };
+        let server = wiremock::MockServer::start().await;
+        let gate = hold_gate(&server.uri());
+        let nonce = mp_ids::new_ulid();
+        let org = format!("gdpr-cited-org-{nonce}");
+        let space = format!("gdpr-cited-space-{nonce}");
+        let message_thread = format!("gdpr-cited-msg-thread-{nonce}");
+        let linked_thread = format!("gdpr-cited-link-thread-{nonce}");
+        let other_thread = format!("gdpr-cited-other-thread-{nonce}");
+        let (mine, theirs) = (
+            format!("gdpr-cited-msg-{nonce}"),
+            format!("gdpr-cited-other-msg-{nonce}"),
+        );
+        for thread in [&message_thread, &linked_thread, &other_thread] {
+            test_support::seed_space_thread(&pool, &org, &space, thread, "owner-1").await;
+        }
+        test_support::seed_space_message(
+            &pool,
+            &space,
+            &message_thread,
+            &mine,
+            "user",
+            Some("erased-user"),
+        )
+        .await;
+        test_support::seed_space_message(
+            &pool,
+            &space,
+            &other_thread,
+            &theirs,
+            "user",
+            Some("other-user"),
+        )
+        .await;
+
+        // `sole` and `linked` cite the person's message; `linked` also names another thread. `theirs` is someone
+        // else's row, which the person's erasure does not touch.
+        let sole =
+            insert_space_row(&pool, &org, &space, "sole", vec![format!("message:{mine}")]).await;
+        let linked = insert_space_row(
+            &pool,
+            &org,
+            &space,
+            "linked",
+            vec![format!("thread:{linked_thread}"), format!("message:{mine}")],
+        )
+        .await;
+        let kept = insert_space_row(
+            &pool,
+            &org,
+            &space,
+            "theirs",
+            vec![
+                format!("thread:{other_thread}"),
+                format!("message:{theirs}"),
+            ],
+        )
+        .await;
+        let person_rows = [sole, linked];
+
+        // A held thread that one of the person's rows names with a thread link.
+        mount_held_threads(&server, &org, std::slice::from_ref(&linked_thread)).await;
+        let refusal = erase_user_space_memory_sources_gated(&pool, &org, "erased-user", &gate)
+            .await
+            .expect_err("a hold on a cited thread refuses the erasure");
+        assert_eq!(
+            refusal.downcast_ref::<ErasureHoldError>(),
+            Some(&ErasureHoldError::ThreadsHeld(1))
+        );
+        assert_eq!(
+            live_space_rows(&pool, &person_rows).await,
+            2,
+            "a refused erasure deletes nothing"
+        );
+
+        // A held thread that the person's message lives in, cited through a message link.
+        mount_held_threads(&server, &org, std::slice::from_ref(&message_thread)).await;
+        let refusal = erase_user_space_memory_sources_gated(&pool, &org, "erased-user", &gate)
+            .await
+            .expect_err("a hold on the thread of a cited message refuses the erasure");
+        assert_eq!(
+            refusal.downcast_ref::<ErasureHoldError>(),
+            Some(&ErasureHoldError::ThreadsHeld(1))
+        );
+        assert_eq!(
+            live_space_rows(&pool, &person_rows).await,
+            2,
+            "a refused erasure deletes nothing"
+        );
+
+        // A hold on a thread that only another member's row cites does not block the person's erasure.
+        mount_held_threads(&server, &org, std::slice::from_ref(&other_thread)).await;
+        let summary = erase_user_space_memory_sources_gated(&pool, &org, "erased-user", &gate)
+            .await
+            .expect("released: no cited thread is held, so the erasure completes");
+        assert_eq!(
+            summary,
+            SpaceSourceSummary {
+                deleted: 2,
+                narrowed: 0
+            }
+        );
+        assert_eq!(
+            live_space_rows(&pool, std::slice::from_ref(&kept)).await,
+            1,
+            "another member's row stays"
+        );
+
+        sqlx::query("DELETE FROM agent_memory WHERE org_id = $1")
+            .bind(&org)
+            .execute(&pool)
+            .await
+            .ok();
+        test_support::clean_space(&pool, &org, &space).await;
     }
 }
