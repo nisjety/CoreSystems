@@ -19,7 +19,8 @@
 //! empty value as off, but the compose file's `:-1` fills an empty value in
 //! with `1`, so in a deployment only an explicit `0` turns either one off.
 //! The third opt-in lever, [`LatencyLevers::speed_tier`], is off in the compose
-//! file (`MODEL_GATEWAY_SPEED_TIER:-false`), so only an explicit on word turns it on.
+//! file (`MODEL_GATEWAY_SPEED_TIER:-false`). Only the exact literal `true` turns it on;
+//! `TRUE`, `1`, `on`, `yes` and every other value leave it off.
 //!
 //! The values are read once per process ([`LatencyLevers::from_env`]) and
 //! carried on `AppState`, so a turn never changes its mind part-way. Tests set
@@ -63,7 +64,7 @@ pub const DATED_POST_SECTION_ONLY_ENV: &str = "MODEL_GATEWAY_DATED_POST_SECTION_
 /// explicit on word turns it on.
 pub const FINER_REVIEW_BATCHES_ENV: &str = "MODEL_GATEWAY_FINER_REVIEW_BATCHES";
 
-/// Switch for [`LatencyLevers::speed_tier`]. Opt-in: only an explicit on word turns it on.
+/// Switch for [`LatencyLevers::speed_tier`]. Opt-in: only the exact literal `true` turns it on.
 pub const SPEED_TIER_ENV: &str = "MODEL_GATEWAY_SPEED_TIER";
 
 /// Which latency levers are in force. The default is every lever that is on by
@@ -190,7 +191,8 @@ pub struct LatencyLevers {
     /// concurrent batches is still capped at four. Off: the batch count and
     /// the split are those of every other review, byte for byte.
     pub finer_review_batches: bool,
-    /// OPT-IN, off by default (`MODEL_GATEWAY_SPEED_TIER`, empty or unset means off).
+    /// OPT-IN, off by default (`MODEL_GATEWAY_SPEED_TIER`, read as the exact literal `true`:
+    /// unset, empty or any other value means off).
     /// A chat turn that asks for the priority speed tier (`speed: "priority"`) sends
     /// `InferRequest.speed_tier` on every model call of the turn, tool rounds
     /// included, but only where the picked model's catalogue record declares the
@@ -266,7 +268,7 @@ impl LatencyLevers {
             list_item_segments: switched_on(list_item_segments),
             dated_post_section_only: switched_on_explicitly(dated_post_section_only),
             finer_review_batches: switched_on_explicitly(finer_review_batches),
-            speed_tier: switched_on_explicitly(speed_tier),
+            speed_tier: switched_on_by_literal_true(speed_tier),
         }
     }
 
@@ -342,6 +344,13 @@ fn switched_on_explicitly(value: Option<&str>) -> bool {
             .as_str(),
         "1" | "on" | "true" | "yes" | "enabled"
     )
+}
+
+/// The strict reader for the speed-tier switch: on only for the exact literal
+/// `true`. Unset, empty, any other spelling (`TRUE`, ` true`, `1`, `on`, `yes`)
+/// and the off words all keep it off.
+fn switched_on_by_literal_true(value: Option<&str>) -> bool {
+    value == Some("true")
 }
 
 #[cfg(test)]
@@ -437,6 +446,78 @@ mod tests {
                 "{on:?}: nor does the section-only lever depend on it"
             );
         }
+    }
+
+    /// The speed-tier switch reads only the exact literal `true`. Every other
+    /// spelling leaves it off, the on words `1`, `on` and `yes` included, and it
+    /// neither depends on nor disturbs the other opt-in and default-on levers.
+    #[test]
+    fn the_speed_tier_lever_is_opt_in_and_reads_only_the_exact_true() {
+        assert!(!LatencyLevers::default().speed_tier);
+        assert!(
+            !LatencyLevers::ALL_ON.speed_tier,
+            "ALL_ON is the default set, not everything"
+        );
+        assert!(!LatencyLevers::ALL_OFF.speed_tier);
+        for off in [
+            None,
+            Some(""),
+            Some("  "),
+            Some("0"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+            Some("enabled"),
+            Some("off"),
+            Some("false"),
+            Some("TRUE"),
+            Some("True"),
+            Some(" true"),
+            Some("true "),
+            Some("true\n"),
+            Some("sometimes"),
+        ] {
+            let levers = LatencyLevers::parse(
+                None, None, None, None, None, None, None, None, None, None, None, off,
+            );
+            assert_eq!(levers, LatencyLevers::ALL_ON, "{off:?}");
+        }
+        let on = Some("true");
+        let zero = Some("0");
+        let one = Some("1");
+        let word_on = Some("on");
+        let exact = LatencyLevers::parse(
+            None, None, None, None, None, None, None, None, None, None, None, on,
+        );
+        assert_eq!(
+            exact,
+            LatencyLevers {
+                speed_tier: true,
+                ..LatencyLevers::ALL_ON
+            }
+        );
+        let alone = LatencyLevers::parse(
+            zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, zero, on,
+        );
+        assert_eq!(
+            alone,
+            LatencyLevers {
+                speed_tier: true,
+                ..LatencyLevers::ALL_OFF
+            }
+        );
+        let beside_others = LatencyLevers::parse(
+            None, None, None, None, None, None, None, None, None, one, word_on, on,
+        );
+        assert_eq!(
+            beside_others,
+            LatencyLevers {
+                dated_post_section_only: true,
+                finer_review_batches: true,
+                speed_tier: true,
+                ..LatencyLevers::ALL_ON
+            }
+        );
     }
 
     #[test]

@@ -698,8 +698,9 @@ services:
       # OFF by default (W5-095-b, the chat Fast chip). A chat turn that asks for the priority speed tier
       # (`speed: "priority"`) sends it on every model call of the turn, tool rounds included, but only where the
       # picked model's catalogue record declares the tier. A priced call served on that tier is multiplied by
-      # PRIORITY_TIER_COST_MULTIPLIER (default 2.0, clamped to 1 through 5), so the choice costs more. Only an
-      # explicit 1/on/true/yes/enabled turns it on. The frontend chip also needs VITE_CHAT_SPEED_TIER=true.
+      # PRIORITY_TIER_COST_MULTIPLIER (default 2.0, clamped to 1 through 5), so the choice costs more. Only the
+      # exact literal `true` turns it on (`1`, `on`, `yes`, `enabled` and `TRUE` leave it off). The frontend
+      # chip also needs VITE_CHAT_SPEED_TIER=true.
       MODEL_GATEWAY_SPEED_TIER: ${MODEL_GATEWAY_SPEED_TIER:-false}
       # The multiplier itself, passed so model-gateway and cost-core (which prices the ledger row) run with the
       # same value. Empty or unset means 2.0.

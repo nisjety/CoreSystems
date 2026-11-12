@@ -12329,9 +12329,9 @@ pub struct InvokeRequest {
     #[serde(default)]
     pub effort: Option<String>,
     /// The speed tier the composer's Fast chip asks for: `standard` or `priority`. Read only while
-    /// `MODEL_GATEWAY_SPEED_TIER` is on, and then honoured only as `priority` on a model whose catalogue
-    /// record declares the tier (`sse::speed_tier_for_model`). Any other value, and an absent one, is no
-    /// choice. It carries no content, so zero retention does not change it.
+    /// `MODEL_GATEWAY_SPEED_TIER` is exactly `true`, and then honoured only as `priority` on a model
+    /// whose catalogue record declares the tier (`sse::speed_tier_for_model`). Any other value, and an
+    /// absent one, is no choice. It carries no content, so zero retention does not change it.
     #[serde(default)]
     pub speed: Option<String>,
     /// Opt-in rich SSE event families the client understands (chat-parity §2:
