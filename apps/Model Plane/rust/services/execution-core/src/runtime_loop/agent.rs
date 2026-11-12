@@ -1781,7 +1781,8 @@ async fn begin_question_continuation(
 
 /// Spend a `resume` question's answer once (`ConsumeRunQuestion`) under this continuation's claim
 /// token, and classify what the spend decided ([`super::resume::classify_question_spend`]). A spend
-/// whose answer was lost in transit may have committed: the same claim token again replays it.
+/// whose answer was lost in transit may have committed: the same claim token again replays it, where
+/// the effect ledger fences that replay (the approval's rule, `consume_for_resume`).
 async fn consume_question(
     session_channel: &Channel,
     bearer: &str,
@@ -1810,7 +1811,7 @@ async fn consume_question(
         },
         Err(status) => Err(status),
     };
-    super::resume::classify_question_spend(outcome)
+    super::resume::classify_question_spend(outcome, runtime_loop::effect::ledger_enabled())
 }
 
 /// The release of a question's answer (build plan WS14 S5): this continuation cannot apply it in the

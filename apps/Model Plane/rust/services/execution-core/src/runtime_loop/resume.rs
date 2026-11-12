@@ -2180,7 +2180,11 @@ impl std::fmt::Debug for QuestionSpend {
 /// Classify the answer of `ConsumeRunQuestion`. TOTAL: every response and every status has an arm.
 ///
 /// * `consumed` with the question: [`QuestionSpend::Won`].
-/// * `already_consumed` by the same claim, with the question: [`QuestionSpend::Replayed`].
+/// * `already_consumed` by the same claim, with the question, and `replay_is_fenced`:
+///   [`QuestionSpend::Replayed`].
+/// * `already_consumed` by the same claim and not `replay_is_fenced`:
+///   [`Refusal::ContinuationAlreadyConsumed`], the refusal the approval gives the same replay
+///   (`consume_for_resume`). Nothing is closed: the first request of the claim may still run.
 /// * `already_consumed` by another claim: [`QuestionSpend::Spent`] (nothing is handed back).
 /// * The ZDR catalogue trailer, whatever the code: [`Refusal::DurableMutationForbidden`].
 /// * `question_not_answered`, `question_expired`, `question_run_ended` and `question_not_resumable`
@@ -2188,8 +2192,13 @@ impl std::fmt::Debug for QuestionSpend {
 /// * `permission_denied` or `unauthenticated`: [`Refusal::Forbidden`].
 /// * Anything else, including a response that is neither consumed nor already consumed, or that
 ///   lacks the question it must carry: [`Refusal::QuestionResumeUnavailable`].
+///
+/// `replay_is_fenced` is the effect ledger's switch (`effect::ledger_enabled()`): it is what fences a
+/// second dispatch of the continuation. A same-claim replay (a retried continuation whose first
+/// answer was lost in transit) is accepted only where it is on, as the approval's replay is.
 pub(crate) fn classify_question_spend(
     outcome: Result<pb::ConsumeRunQuestionResponse, tonic::Status>,
+    replay_is_fenced: bool,
 ) -> QuestionSpend {
     use tonic::Code;
     let unavailable = QuestionSpend::Refused(Refusal::QuestionResumeUnavailable);
@@ -2220,10 +2229,26 @@ pub(crate) fn classify_question_spend(
             };
         }
     };
-    match (response.consumed, response.already_consumed, response.same_claim, response.question) {
-        (true, false, _, Some(question)) => QuestionSpend::Won(question),
-        (false, true, true, Some(question)) => QuestionSpend::Replayed(question),
-        (false, true, _, _) => QuestionSpend::Spent,
+    // The same claim's replay is accepted only where the effect ledger fences a second dispatch of the
+    // continuation: the approval's rule (`consume_for_resume`), copied. With the ledger off nothing
+    // does, and the claim token is client-chosen, so two concurrent continues with one token would
+    // both apply the answer.
+    if !(response.consumed || (response.already_consumed && response.same_claim && replay_is_fenced)) {
+        // Ids only: the closed token is the whole answer.
+        if response.already_consumed && response.same_claim && !replay_is_fenced {
+            tracing::warn!(token = "continuation_already_consumed", "continue_replay_refused_ledger_off");
+            return QuestionSpend::Refused(Refusal::ContinuationAlreadyConsumed);
+        }
+        return if response.already_consumed {
+            QuestionSpend::Spent
+        } else {
+            unavailable
+        };
+    }
+    match (response.consumed, response.already_consumed, response.question) {
+        (true, false, Some(question)) => QuestionSpend::Won(question),
+        (false, true, Some(question)) => QuestionSpend::Replayed(question),
+        (false, true, None) => QuestionSpend::Spent,
         _ => unavailable,
     }
 }
