@@ -54,6 +54,27 @@ pub const METRIC_LABELS: &[&str] = &[
     // A closed enum: the origin a memory write claimed (`write_policy::Origin::label()`, six values) on
     // `mp_session_memory_origin_downgraded_total`. No id reaches it.
     "claimed",
+    // Audited in the R9 pass (2026-11-12): every emit site of each label below takes a closed value, an
+    // enum's `as_str` or `label()`, a bool, a literal, or a constant table. Sources, label by label:
+    //   severity: skill_lint `Severity::as_str`; action: "deleted"/"edited" and the four Space gate actions;
+    //   actor_class: `ReviseClass::as_str`; forced: a bool; purpose: `purpose_label` (closed match over
+    //   `InferPurpose`); planner: `planner_label` (two constants); trust: `TrustClass::label`; via, level:
+    //   literals; editor: "user"/"restore"; cause: `CauseCode::as_str` or ""; agrees: "true"/"false"/"n/a";
+    //   coverage: `Coverage::label`; posture: `ScreeningPosture::label`.
+    "severity",
+    "action",
+    "actor_class",
+    "forced",
+    "purpose",
+    "planner",
+    "trust",
+    "via",
+    "level",
+    "editor",
+    "cause",
+    "agrees",
+    "coverage",
+    "posture",
 ];
 
 /// Field names a span attribute, a span event attribute or a JSON log field may carry (F-t3-075).

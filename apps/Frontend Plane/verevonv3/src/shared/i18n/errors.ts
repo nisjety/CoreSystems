@@ -108,6 +108,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   // Inbox / tickets / conversations
   thread_id_required: { no: 'Ingen samtale er valgt.', en: 'No conversation is selected.' },
   thread_run_active: { no: 'Agenten jobber allerede i denne samtalen. Meldingen er lagt ut. Prøv igjen når den er ferdig.', en: 'An agent is already working in this conversation. Your message was posted. Try again when it finishes.' },
+  continue_space_scope_unsupported: { no: 'Kjøringen i rommet kan ikke fortsettes slik ennå. Ingenting er endret.', en: 'This run cannot be continued in the room this way yet. Nothing was changed.' },
   conversation_membership_required: { no: 'Du har ikke tilgang til denne samtalen.', en: 'You do not have access to this conversation.' },
   conversation_upstream_target_rejected: { no: 'Meldingen kunne ikke sendes til mottakeren.', en: 'The message could not be delivered to the recipient.' },
   // A channel send is not a normal retry: the provider may have received it
@@ -1286,6 +1287,9 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   approval_not_addressed_to_you: { no: 'Denne godkjenningen venter på medlemmet som startet kjøringen.', en: 'This approval is waiting for the member who started the run.' },
   approval_not_found: { no: 'Fant ikke godkjenningen.', en: 'The approval was not found.' },
   approval_scope_not_permitted: { no: 'Dette omfanget av godkjenning er ikke tilgjengelig her.', en: 'This approval scope is not available here.' },
+  authority_route_mismatch: { no: 'Kjøringen kan ikke fortsette med en annen modell eller leverandør enn da den ble satt på pause. Ingenting er endret.', en: 'The run cannot continue with a different model or provider than when it paused. Nothing was changed.' },
+  authority_space_mismatch: { no: 'Denne fortsettelsen gjelder et annet rom enn kjøringen. Ingenting er endret.', en: 'This continuation belongs to a different room than the run. Nothing was changed.' },
+  authority_widened: { no: 'Kjøringen kan ikke fortsette med mer tilgang enn da den ble satt på pause. Ingenting er endret.', en: 'The run cannot continue with more access than it had when it paused. Nothing was changed.' },
   feature_unavailable: { no: 'Denne funksjonen er ikke slått på for deg ennå.', en: 'This feature is not turned on for you yet.' },
   files_binding_unavailable: { no: 'Rommet er ikke koblet til en kunnskapskilde for filer.', en: 'This room is not connected to a knowledge target for files.' },
   files_read_not_authorized: { no: 'Du har ikke tilgang til å lese filene i dette rommet.', en: 'You are not allowed to read the files of this room.' },

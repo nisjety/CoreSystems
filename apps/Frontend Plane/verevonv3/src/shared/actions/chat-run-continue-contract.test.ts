@@ -1081,7 +1081,6 @@ describe('the question regime (chatRunContinueQuestionRefusalOf)', () => {
       'question_not_found',
       'question_not_resumable',
       'not_resumable',
-      'run_ended',
       'durable_mutation_forbidden',
       'resume_forbidden',
     ]) {
@@ -1092,6 +1091,8 @@ describe('the question regime (chatRunContinueQuestionRefusalOf)', () => {
       sendAsMessage: false,
       kind: 'retry',
     })
+    // The authority refusals are not in the table: they read unknown (the run is followed, nothing is
+    // resent), as does `run_ended`, which no path sends any more.
     for (const code of [
       'question_resume_unavailable',
       'question_not_answered',
@@ -1099,6 +1100,11 @@ describe('the question regime (chatRunContinueQuestionRefusalOf)', () => {
       'continue_refused',
       'continue_unreachable',
       'continue_outcome_unknown',
+      'authority_widened',
+      'authority_space_mismatch',
+      'authority_route_mismatch',
+      'continue_space_scope_unsupported',
+      'run_ended',
       'something_new',
     ]) {
       expect(chatRunContinueQuestionRefusalOf(questionFrame(code))).toEqual({ code, sendAsMessage: false, kind: 'unknown' })

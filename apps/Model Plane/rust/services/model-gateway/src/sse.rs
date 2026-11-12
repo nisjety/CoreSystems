@@ -22335,7 +22335,10 @@ fn question_continue_error(status: StatusCode, code: &str) -> (StatusCode, Json<
 
 /// The messages the executor refuses a question continuation with, exactly. A status whose message is
 /// in this list is a typed refusal the gateway can name; any other message is never echoed and becomes
-/// `continue_refused`.
+/// `continue_refused`. The three authority tokens are what the question path's `effective_authority` check
+/// refuses with; the scope token is the executor's own word for a Space scope it cannot restore, listed
+/// with the others so both lists carry the same executor words. `run_ended` is not listed: the executor
+/// sends a run that has ended as `not_resumable`, which is already here.
 pub(crate) const CONTINUE_QUESTION_EXECUTOR_TOKENS: &[&str] = &[
     "question_answer_released",
     "question_resume_unavailable",
@@ -22347,7 +22350,10 @@ pub(crate) const CONTINUE_QUESTION_EXECUTOR_TOKENS: &[&str] = &[
     "continue_in_progress",
     "not_resumable",
     "resume_forbidden",
-    "run_ended",
+    "authority_widened",
+    "authority_space_mismatch",
+    "authority_route_mismatch",
+    "continue_space_scope_unsupported",
     "continue_disabled",
     "resume_incomplete",
     "resume_checkpoint_unavailable",
@@ -22367,7 +22373,10 @@ pub(crate) const CONTINUE_QUESTION_FRAME_REFUSALS: &[&str] = &[
     "continue_in_progress",
     "not_resumable",
     "resume_forbidden",
-    "run_ended",
+    "authority_widened",
+    "authority_space_mismatch",
+    "authority_route_mismatch",
+    "continue_space_scope_unsupported",
     "continue_disabled",
     "resume_incomplete",
     "resume_checkpoint_unavailable",

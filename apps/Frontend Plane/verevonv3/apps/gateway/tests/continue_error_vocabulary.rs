@@ -27,7 +27,9 @@
 //!   typed ChatGPT-subscription failures a spent run can end on, final after a pre-consume)
 //!   = model-gateway's `CONTINUE_SPENT_SUBSCRIPTION_FRAMES`, disjoint from the run-end list
 //!   and from both refusal lists;
-//! * every `proxy_sse_stream_with_data_plane` caller other than `continue_run` passes `&[]`;
+//! * every relay caller (`proxy_sse_stream_with_data_plane` and `proxy_sse_stream_with_browser`) passes
+//!   `&[]`, except `continue_run`'s two calls (CONTINUE_RELAYED_ERRORS), the space live route's one call
+//!   (its own named RELAYED list) and the forwarder in upstream.rs, which passes on its caller's list;
 //! * the frame of a failed PARK continue (WS03 S8-A): model-gateway's `park_refusal_event`
 //!   writes `park_continue: true` and never `approval_spent`, the SPA's park reader reads that
 //!   marker, the tokens such a frame carries are in the closed frame lists, and the BFF reads
@@ -408,21 +410,24 @@ fn the_spa_frame_tuple_is_the_gateways_frame_list() {
             "question_expired",
             "question_not_found",
             "question_not_resumable",
-            "run_ended",
         ],
-        "the question form adds exactly seven frame tokens to the base list; parsed {question_only:?}"
+        "the question form adds exactly six frame tokens to the base list; parsed {question_only:?}"
     );
-    // `run_ended` is the one the SPA's tuple does not carry: the question reader
-    // (`chatRunContinueQuestionRefusalOf`) maps it by code, so it must name it.
-    assert!(
-        spa_contract_source().contains("'run_ended'"),
-        "the SPA's question reader no longer names run_ended"
-    );
-    let expected: Vec<String> = gateway
-        .iter()
-        .cloned()
-        .chain(question_only.into_iter().filter(|token| token != "run_ended"))
-        .collect();
+    // The question form's authority refusals are base tokens (the executor's refusals of the same
+    // check, which the approval also carries), so they sit in the base list and the SPA's tuple, and
+    // the question list must still name them: `question_refusal_event` debug-asserts that.
+    for token in [
+        "authority_widened",
+        "authority_space_mismatch",
+        "authority_route_mismatch",
+        "continue_space_scope_unsupported",
+    ] {
+        assert!(
+            question.iter().any(|known| known == token),
+            "the question form refuses with `{token}`, which CONTINUE_QUESTION_FRAME_REFUSALS does not list"
+        );
+    }
+    let expected: Vec<String> = gateway.iter().cloned().chain(question_only).collect();
     assert_eq!(
         spa, expected,
         "the SPA's CHAT_RUN_CONTINUE_FRAME_REFUSALS must be model-gateway's \
@@ -569,12 +574,15 @@ fn the_spa_subscription_frames_are_the_gateways_and_stay_out_of_every_other_list
     }
 }
 
-/// Every call of the relay other than `continue_run`'s passes the empty list, so no
-/// other route's error body is ever read or relayed by code.
+/// Every relay call that passes a non-empty list is one of the named ones, and no other route's error
+/// body is ever read or relayed by code: `continue_run`'s two calls (CONTINUE_RELAYED_ERRORS), the space
+/// live route's call (its own RELAYED list, the second and separately named relay) and upstream.rs's
+/// forwarder of the list its caller gave it.
 #[test]
 fn only_the_continue_handler_relays_upstream_error_codes() {
-    /// Every call of the relay in `source`: its last argument, and the text before it.
-    fn calls(source: &str) -> Vec<(String, String)> {
+    /// Every call of the relay `needle` (`name(`) in `source`: its last argument, and the text before
+    /// it. A name inside a string literal is not a call (a test's `matches("name(")` quotes it).
+    fn calls(source: &str, needle: &str) -> Vec<(String, String)> {
         // Whole-line comments never carry a call.
         let source: String = source
             .lines()
@@ -587,15 +595,14 @@ fn only_the_continue_handler_relays_upstream_error_codes() {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let needle = "proxy_sse_stream_with_data_plane(";
         let mut found = Vec::new();
         let mut from = 0;
         while let Some(at) = source[from..].find(needle) {
             let at = at + from;
             from = at + needle.len();
             let before = &source[..at];
-            if before.trim_end().ends_with("fn") {
-                continue; // the definition
+            if before.trim_end().ends_with("fn") || before.ends_with('"') {
+                continue; // the definition, or the name quoted in a string
             }
             let args = delimited(&source[at..], needle, '(', ')');
             // Split at top-level commas and take the last non-empty argument.
@@ -643,14 +650,37 @@ fn only_the_continue_handler_relays_upstream_error_codes() {
         files.len()
     );
 
-    let mut relaying = Vec::new();
+    /// The name of the innermost `fn` before `before` ends: the last `fn <name>` in it, as a whole word.
+    fn enclosing_fn(before: &str) -> String {
+        let at = before
+            .rmatch_indices("fn ")
+            .map(|(at, _)| at)
+            .find(|&at| match before[..at].chars().next_back() {
+                None => true,
+                Some(c) => !(c.is_alphanumeric() || c == '_'),
+            })
+            .expect("a relay call sits inside a function");
+        before[at + "fn ".len()..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect()
+    }
+
+    // (path under src/, last argument, enclosing fn) of every call that passes a non-empty list.
+    let mut relaying: Vec<(String, String, String)> = Vec::new();
     let mut total = 0usize;
+    let src_root = gateway_file("src");
     for path in files {
         let normalized = path.to_string_lossy().replace('\\', "/");
+        let relative = path
+            .strip_prefix(&src_root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
         let source = read(&path);
         // upstream.rs holds the relay itself and the unit tests of its error
         // branch; only the production text (before the first test module) is a
-        // caller scan, and its two wrappers must pass the empty list.
+        // caller scan.
         let scanned = if normalized.ends_with("src/upstream.rs") {
             let end = source
                 .find("#[cfg(test)]")
@@ -659,10 +689,12 @@ fn only_the_continue_handler_relays_upstream_error_codes() {
         } else {
             &source[..]
         };
-        for (last, before) in calls(scanned) {
-            total += 1;
-            if last != "&[]" {
-                relaying.push((normalized.clone(), last, before));
+        for needle in ["proxy_sse_stream_with_data_plane(", "proxy_sse_stream_with_browser("] {
+            for (last, before) in calls(scanned, needle) {
+                total += 1;
+                if last != "&[]" {
+                    relaying.push((relative.clone(), last, enclosing_fn(&before)));
+                }
             }
         }
     }
@@ -671,27 +703,25 @@ fn only_the_continue_handler_relays_upstream_error_codes() {
         "found only {total} relay callers; the scan is vacuous"
     );
 
-    // The one non-empty caller is `continue_run`, passing CONTINUE_RELAYED_ERRORS.
+    // The closed set: continue_run's two calls (the skip-site browser path and the plain relay) pass
+    // CONTINUE_RELAYED_ERRORS; the space live route passes its own named list, RELAYED; and upstream.rs's
+    // proxy_sse_stream_with_data_plane forwards the relayed_errors its caller gave it. Nothing else.
+    let mut actual = relaying.clone();
+    actual.sort();
+    let mut expected: Vec<(String, String, String)> = [
+        ("domains/orchestration.rs", "CONTINUE_RELAYED_ERRORS", "continue_run"),
+        ("domains/orchestration.rs", "CONTINUE_RELAYED_ERRORS", "continue_run"),
+        ("domains/spaces/run_live.rs", "RELAYED", "space_run_live"),
+        ("upstream.rs", "relayed_errors", "proxy_sse_stream_with_data_plane"),
+    ]
+    .map(|(file, list, handler)| (file.to_owned(), list.to_owned(), handler.to_owned()))
+    .into_iter()
+    .collect();
+    expected.sort();
     assert_eq!(
-        relaying.len(),
-        1,
-        "exactly one caller may pass a relay list; found {:?}",
-        relaying
-            .iter()
-            .map(|(file, last, _)| (file, last))
-            .collect::<Vec<_>>()
-    );
-    let (file, last, before) = &relaying[0];
-    assert!(file.ends_with("src/domains/orchestration.rs"), "{file}");
-    assert_eq!(last, "CONTINUE_RELAYED_ERRORS");
-    let handler = before
-        .rfind("pub(crate) async fn ")
-        .map(|at| &before[at..])
-        .expect("an enclosing function");
-    assert!(
-        handler.starts_with("pub(crate) async fn continue_run("),
-        "the relay list is passed from `{}`, not from continue_run",
-        handler.lines().next().unwrap_or("")
+        actual, expected,
+        "the calls that pass a non-empty relay list are not the closed set (file, list, enclosing fn); \
+         any other caller must pass &[]"
     );
 }
 

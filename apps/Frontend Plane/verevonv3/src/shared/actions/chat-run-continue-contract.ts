@@ -700,13 +700,13 @@ export type ChatRunContinueQuestionFailure = {
   readonly kind: 'released' | 'gone' | 'retry' | 'unknown'
 }
 
+// `run_ended` is not here: no executor or gateway path sends it (a run that has ended is `not_resumable`).
 const QUESTION_GONE_CODES = [
   'continuation_already_consumed',
   'question_expired',
   'question_not_found',
   'question_not_resumable',
   'not_resumable',
-  'run_ended',
   'durable_mutation_forbidden',
   'resume_forbidden',
 ] as const
@@ -717,7 +717,7 @@ const QUESTION_GONE_CODES = [
  * every other frame reader here is null for it. The code is mapped by this table alone:
  * `question_answer_released` is `released` and the only code with `sendAsMessage: true`;
  * `continuation_already_consumed`, `question_expired`, `question_not_found`,
- * `question_not_resumable`, `not_resumable`, `run_ended`, `durable_mutation_forbidden` and
+ * `question_not_resumable`, `not_resumable`, `durable_mutation_forbidden` and
  * `resume_forbidden` are `gone`; `continue_in_progress` is `retry`; anything else, a code outside
  * the closed vocabulary included (`question_resume_unavailable`, `question_not_answered`), is
  * `unknown` and never says resend. Pure.
