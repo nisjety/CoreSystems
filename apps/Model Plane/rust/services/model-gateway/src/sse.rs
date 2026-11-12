@@ -148,8 +148,9 @@ fn space_append_retrieval_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> 
 /// The switch that lets a Do run's `knowledge_search` retrieve under the Space decision its turn holds
 /// (WS18-S5). Opt-in: only the literal `true` enables it. Off, a Do run searches the organisation's own
 /// knowledge, as it always has. execution-core reads no switch of its own: this one decides whether the
-/// run carries the Space retrieval header at all. The inline loop reads it too, to refuse the
-/// organisation-wide document inventory on a Space-scoped turn (WS18-S5-b).
+/// run carries the Space retrieval header at all, and the knowledge receipt that follows it. It does not
+/// decide the inline loop's refusal of the organisation-wide document inventory, which reads
+/// `OWNER_LIST_SPACE_REFUSE` (C-05).
 const SPACE_AGENTIC_RETRIEVAL_VAR: &str = "AGENTIC_SPACE_RETRIEVAL_ENABLED";
 
 pub(crate) fn space_agentic_retrieval_enabled() -> bool {
@@ -158,6 +159,20 @@ pub(crate) fn space_agentic_retrieval_enabled() -> bool {
 
 fn space_agentic_retrieval_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
     get(SPACE_AGENTIC_RETRIEVAL_VAR).is_some_and(|value| value == "true")
+}
+
+/// The one switch that refuses the organisation-wide document inventory (`knowledge_list_documents`) on a
+/// Space-scoped turn of the inline loop (D2-769, D2-774, C-05). execution-core reads the same name for a Do
+/// run, so both paths refuse together. Strict: only the literal `true` enables it. Off, the inventory stays
+/// organisation-wide, as it always has.
+const OWNER_LIST_SPACE_REFUSE_VAR: &str = "OWNER_LIST_SPACE_REFUSE";
+
+pub(crate) fn owner_list_space_refuse_enabled() -> bool {
+    owner_list_space_refuse_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn owner_list_space_refuse_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(OWNER_LIST_SPACE_REFUSE_VAR).is_some_and(|value| value == "true")
 }
 
 /// The Space retrieval a Do run's `knowledge_search` is authorised with, forwarded to execution-core in
@@ -27664,6 +27679,33 @@ mod do_attachment_tests {
             );
         }
         assert!(space_agentic_retrieval_enabled_with(&|key| {
+            (key == SPACE_AGENTIC_RETRIEVAL_VAR).then(|| "true".to_owned())
+        }));
+    }
+
+    /// C-05: the inline Space listing refusal has one switch, `OWNER_LIST_SPACE_REFUSE`, read strictly, and the
+    /// retrieval switch does not decide it.
+    #[test]
+    fn the_owner_list_space_refuse_switch_is_strict_and_separate_from_retrieval() {
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some(" true"),
+            Some("yes"),
+            Some("false"),
+        ] {
+            let value = value.map(str::to_owned);
+            assert!(
+                !owner_list_space_refuse_enabled_with(&|_| value.clone()),
+                "{value:?}"
+            );
+        }
+        assert!(owner_list_space_refuse_enabled_with(&|key| {
+            (key == OWNER_LIST_SPACE_REFUSE_VAR).then(|| "true".to_owned())
+        }));
+        assert!(!owner_list_space_refuse_enabled_with(&|key| {
             (key == SPACE_AGENTIC_RETRIEVAL_VAR).then(|| "true".to_owned())
         }));
     }

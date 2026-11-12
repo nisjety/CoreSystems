@@ -451,6 +451,12 @@ services:
       # runs Space-scoped. Off by default (today's unscoped Do search). Deploy execution-core first, and turn on
       # MODEL_GATEWAY_SPACE_APPEND_RETRIEVAL before this switch.
       AGENTIC_SPACE_RETRIEVAL_ENABLED: ${AGENTIC_SPACE_RETRIEVAL_ENABLED:-false}
+      # C-05 (D2-769, D2-774): the one switch for the Space listing refusal, the same name execution-core reads. On, the
+      # inline loop refuses knowledge_list_documents on a Space-scoped turn (a tool error, before any Data Plane call).
+      # Off by default (the organisation-wide listing); only the literal `true`. Turn it on before
+      # MODEL_ACTION_ADMISSION=table, and no later than AGENTIC_SPACE_RETRIEVAL_ENABLED: the retrieval switch no
+      # longer refuses the listing.
+      OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-false}
       # Inline tool-loop guard (WS25-S1): off, shadow or enforce. Unset is off; the plan's shadow
       # release is an owner flip, not this file's default.
       LOOP_GUARD_MODE: ${LOOP_GUARD_MODE:-}

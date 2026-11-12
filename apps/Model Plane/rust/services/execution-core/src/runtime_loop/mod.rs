@@ -958,6 +958,34 @@ fn post_tool_denied(tool_name: &str, tool_input: &str, reason: &str) -> StepOutc
     StepOutcome::failed(&format!("blocked by post-tool hook: {reason}"))
 }
 
+/// The Space an owner-listing call on this step is scoped to, for the Space refusal (D2-769). The
+/// step's sandbox context carries its Space exactly. Without one, the single-step RPC's request names
+/// its Space (`ExecuteStepRequest.space_id`), even when no sandbox context was built for it. A step
+/// that holds a Space retrieval decision, or the withheld marker, with no Space named is Space-scoped
+/// without one: it is given the marker `"space-scoped"` and refused, never listed organisation-wide.
+/// Empty for a step outside any Space.
+fn owner_listing_space<'a>(
+    sandbox: Option<&crate::sandbox_lease::SandboxLeaseContext<'a>>,
+    request_space_id: &'a str,
+    space_retrieval: crate::knowledge_tools::SpaceRetrieval<'_>,
+) -> &'a str {
+    sandbox.map_or_else(
+        || {
+            if !request_space_id.trim().is_empty() {
+                request_space_id
+            } else if matches!(
+                space_retrieval,
+                crate::knowledge_tools::SpaceRetrieval::Organisation
+            ) {
+                ""
+            } else {
+                "space-scoped"
+            }
+        },
+        |sandbox| sandbox.space_id,
+    )
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn execute_step_inner(
     tool_name: &str,
@@ -1121,16 +1149,21 @@ async fn execute_step_inner(
         }
     }
     // The owner document listing reads on the user's bearer, so it runs only under the admission
-    // switch and never under retention (WS24-S8). Refused before the capability gate is asked.
-    if tool_name == crate::runtime_loop::owner_reads::TOOL_NAME
-        && !crate::runtime_loop::owner_reads::permitted(
+    // switch and never under retention (WS24-S8). Refused before the capability gate is asked. The
+    // Space refusal comes first, whatever the admission switch says (D2-774).
+    if tool_name == crate::runtime_loop::owner_reads::TOOL_NAME {
+        let space_refused = crate::runtime_loop::owner_reads::space_refused(owner_listing_space(
+            sandbox,
+            request_space_id,
+            space_retrieval,
+        ));
+        if let Some(refusal) = crate::runtime_loop::owner_reads::refusal_before_arguments(
+            space_refused,
             crate::runtime_loop::owner_reads::admission_table(),
             zdr || waived,
-        )
-    {
-        return StepOutcome::failed(&format!(
-            "{tool_name} is not available on this run: the owner document listing needs MODEL_ACTION_ADMISSION=table and a run that is not retention-bound"
-        ));
+        ) {
+            return StepOutcome::failed(&refusal);
+        }
     }
     // The class and floor this call's policy decision carried. A governed MCP call is
     // compared with them at dispatch (`execute_governed_mcp`).
@@ -1674,30 +1707,12 @@ async fn execute_step_inner(
     } else if crate::web_tools::is_crawl_tool(tool_name) {
         execute_web_crawl_tool(tool_name, tool_input, org_id).await
     } else if tool_name == crate::runtime_loop::owner_reads::TOOL_NAME {
-        // The run's Space: the sandbox context carries it exactly; a run that holds a Space retrieval
-        // decision (or the withheld marker) is Space-scoped without it, so it is refused as well
-        // rather than listed organisation-wide (D2-769). The agent loop refuses on its own
-        // `space_id` before it dispatches; this covers every other caller. The single-step RPC's
-        // request names its Space even when it carries no sandbox context, and that Space counts too.
-        let space_id = sandbox.map_or_else(
-            || {
-                if !request_space_id.trim().is_empty() {
-                    request_space_id
-                } else if matches!(
-                    space_retrieval,
-                    crate::knowledge_tools::SpaceRetrieval::Organisation
-                ) {
-                    ""
-                } else {
-                    "space-scoped"
-                }
-            },
-            |sandbox| sandbox.space_id,
-        );
+        // The run's Space, as the pre-gate above read it (D2-769). The agent loop refuses on its own
+        // `space_id` before it dispatches; this covers every other caller.
         crate::runtime_loop::owner_reads::execute(
             tool_input,
             org_id,
-            space_id,
+            owner_listing_space(sandbox, request_space_id, space_retrieval),
             crate::runtime_loop::owner_reads::admission_table(),
             zdr || waived,
             data_plane_bearer,
@@ -6776,6 +6791,150 @@ mod standing_grant_gate_tests {
                 "zdr={zdr} waived={waived}: eligible and switched on, yet no release is asked"
             );
         }
+    }
+}
+
+/// The owner listing on the single-step path (D2-769, D2-774, C-17). The ExecuteStep RPC hands its
+/// `ExecuteStepRequest.space_id` to `execute_step_with_browser_grant` as `request_space_id`, so these
+/// tests drive that function with the Space the RPC would name.
+#[cfg(test)]
+mod owner_listing_tests {
+    use super::*;
+    use crate::knowledge_tools::SpaceRetrieval;
+    use crate::runtime_loop::owner_reads::{test_switches::Switches, SPACE_REFUSAL, TOOL_NAME};
+
+    /// Allows every call. The owner listing's refusals come before the capability gate, so an allowing
+    /// gate is what lets a call that no refusal stops reach its own check.
+    struct AllowAll;
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for AllowAll {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, tonic::Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+    }
+
+    /// One owner-listing call with no sandbox context. The listing carries no bearer here, so a call
+    /// that no refusal stops ends at the credential check, with no RPC.
+    async fn listing_step(
+        request_space_id: &str,
+        space_retrieval: SpaceRetrieval<'_>,
+    ) -> StepOutcome {
+        execute_step_with_browser_grant(
+            TOOL_NAME,
+            "{}",
+            "auto",
+            "",
+            "org_test",
+            "user_test",
+            "run_test",
+            "step_test",
+            "",
+            None,
+            None,
+            None,
+            false,
+            false,
+            0,
+            None,
+            Some("session-token"),
+            Some("inference-token"),
+            &AllowAll,
+            None,
+            None,
+            None,
+            space_retrieval,
+            request_space_id,
+        )
+        .await
+    }
+
+    #[test]
+    fn the_listing_is_scoped_to_the_space_the_step_names_or_to_the_withheld_marker() {
+        assert_eq!(
+            owner_listing_space(None, "space-1", SpaceRetrieval::Organisation),
+            "space-1"
+        );
+        assert_eq!(
+            owner_listing_space(None, "space-1", SpaceRetrieval::Withheld),
+            "space-1"
+        );
+        assert_eq!(
+            owner_listing_space(None, "", SpaceRetrieval::Organisation),
+            ""
+        );
+        assert_eq!(
+            owner_listing_space(None, "  ", SpaceRetrieval::Organisation),
+            ""
+        );
+        assert_eq!(
+            owner_listing_space(None, "", SpaceRetrieval::Withheld),
+            "space-scoped"
+        );
+        assert_eq!(
+            owner_listing_space(None, "", SpaceRetrieval::Scoped("decision")),
+            "space-scoped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_space_step_is_refused_the_listing_before_the_admission_check() {
+        let _switches = Switches::set(Some("true"), None).await;
+        let outcome = listing_step("space-1", SpaceRetrieval::Organisation).await;
+        assert_eq!(outcome.status, "failed");
+        assert_eq!(outcome.error, SPACE_REFUSAL);
+    }
+
+    #[tokio::test]
+    async fn the_space_refusal_holds_with_the_admission_switch_on_too() {
+        let _switches = Switches::set(Some("true"), Some(true)).await;
+        let outcome = listing_step("space-1", SpaceRetrieval::Organisation).await;
+        assert_eq!(outcome.error, SPACE_REFUSAL);
+    }
+
+    #[tokio::test]
+    async fn a_withheld_step_with_no_space_id_is_refused_the_listing_as_space_scoped() {
+        let _switches = Switches::set(Some("true"), None).await;
+        let outcome = listing_step("", SpaceRetrieval::Withheld).await;
+        assert_eq!(outcome.error, SPACE_REFUSAL);
+    }
+
+    #[tokio::test]
+    async fn a_step_outside_any_space_keeps_the_admission_refusal() {
+        let _switches = Switches::set(Some("true"), None).await;
+        let outcome = listing_step("", SpaceRetrieval::Organisation).await;
+        assert!(
+            outcome.error.contains("MODEL_ACTION_ADMISSION=table"),
+            "{}",
+            outcome.error
+        );
+    }
+
+    #[tokio::test]
+    async fn with_the_space_switch_off_a_space_step_keeps_the_admission_refusal() {
+        let _switches = Switches::set(None, None).await;
+        let outcome = listing_step("space-1", SpaceRetrieval::Organisation).await;
+        assert!(
+            outcome.error.contains("MODEL_ACTION_ADMISSION=table"),
+            "{}",
+            outcome.error
+        );
+    }
+
+    #[tokio::test]
+    async fn with_the_space_switch_off_an_admitted_space_step_reaches_dispatch() {
+        let _switches = Switches::set(None, Some(true)).await;
+        let outcome = listing_step("space-1", SpaceRetrieval::Organisation).await;
+        assert!(
+            outcome.error.contains("verified user credential"),
+            "{}",
+            outcome.error
+        );
     }
 }
 

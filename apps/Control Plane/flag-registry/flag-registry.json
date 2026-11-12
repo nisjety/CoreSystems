@@ -1236,9 +1236,10 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "D2-769: a Space-scoped Do run is refused knowledge_list_documents with a typed error before any Data Plane call. Off, the listing stays org-wide. Enable before MODEL_ACTION_ADMISSION=table with Spaces. Only the literal true.",
+      "purpose": "D2-769, C-05: a Space-scoped Do or inline run is refused knowledge_list_documents with a typed error before any Data Plane call. Off, the listing stays org-wide. Enable before MODEL_ACTION_ADMISSION=table with Spaces. Only the literal true.",
       "codeDefault": "false",
       "declarations": [
+        { "service": "model-gateway", "env": "OWNER_LIST_SPACE_REFUSE", "default": "false" },
         { "service": "execution-core", "env": "OWNER_LIST_SPACE_REFUSE", "default": "false" }
       ]
     },

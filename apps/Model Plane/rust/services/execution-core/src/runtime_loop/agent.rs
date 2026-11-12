@@ -22787,6 +22787,55 @@ mod tests {
             .clone()
     }
 
+    /// The model calls the owner listing and then answers: the script of the two owner-listing runs below.
+    fn owner_listing_script() -> Vec<Scripted> {
+        vec![
+            Scripted::ToolCalls {
+                content: String::new(),
+                calls: vec![named_call("l1", "knowledge_list_documents", "{}")],
+            },
+            Scripted::Answer("done".to_owned()),
+        ]
+    }
+
+    /// A Space-scoped run the model calls the owner listing on is refused the Space refusal, before the
+    /// listing is dispatched (D2-769, D2-774). The listing is offered only under the admission switch,
+    /// so that switch is on: it is the one state in which a Space run can make the call at all.
+    #[tokio::test]
+    async fn a_space_run_is_refused_the_owner_listing_before_it_is_dispatched() {
+        let _switches = crate::runtime_loop::owner_reads::test_switches::Switches::set(
+            Some("true"),
+            Some(true),
+        )
+        .await;
+        let mut req = sample_request();
+        req.space_id = "space-1".to_owned();
+        let observed = drive_observing_messages(owner_listing_script(), req).await;
+        let seen = tool_context_seen_in(&observed, 1);
+        assert!(
+            seen.contains(crate::runtime_loop::owner_reads::SPACE_REFUSAL),
+            "{seen}"
+        );
+        assert!(!seen.contains("verified user credential"), "{seen}");
+    }
+
+    /// With the Space switch off, the same Space run reaches the listing as it always did: the listing's
+    /// own credential check refuses it, not the Space refusal.
+    #[tokio::test]
+    async fn with_the_space_switch_off_a_space_run_reaches_the_owner_listing_as_before() {
+        let _switches =
+            crate::runtime_loop::owner_reads::test_switches::Switches::set(None, Some(true)).await;
+        let mut req = sample_request();
+        req.space_id = "space-1".to_owned();
+        let observed = drive_observing_messages(owner_listing_script(), req).await;
+        let seen = tool_context_seen_in(&observed, 1);
+        assert!(
+            !seen.contains(crate::runtime_loop::owner_reads::SPACE_REFUSAL),
+            "{seen}"
+        );
+        assert!(seen.contains("verified user credential"), "{seen}");
+    }
+
     #[tokio::test]
     async fn external_content_guard_refuses_save_memory_beside_web_search_end_to_end() {
         let observed = drive_observing_messages(

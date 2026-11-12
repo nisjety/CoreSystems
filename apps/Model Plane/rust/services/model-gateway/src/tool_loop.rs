@@ -3239,6 +3239,13 @@ pub async fn dispatch_tool(
     ).await
 }
 
+/// Whether the inline loop refuses the organisation-wide document inventory (`knowledge_list_documents`) on a turn
+/// with this Space (C-05, D2-774). Any non-empty Space id is present, and is refused while `OWNER_LIST_SPACE_REFUSE`
+/// is on, failing closed as the sibling Space arms do. Off, nothing is refused.
+fn knowledge_list_space_refused(space_id: &str, owner_list_space_refuse: bool) -> bool {
+    owner_list_space_refuse && !space_id.is_empty()
+}
+
 /// Lowercase hex SHA-256 of `bytes`, the spelling a bundle manifest records.
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
@@ -5500,11 +5507,13 @@ async fn dispatch_tool_with_cost(
             .await,
         ),
         "knowledge_list_documents" | "knowledge.list_documents" => {
-            // WS18-S5 (D2-774): the organisation-wide document inventory is not a Space's inventory. With the Space
-            // retrieval switch on, a turn scoped to a Space is refused here, before any call crosses to Data Plane:
-            // a fixed token with no rows, so ZDR gets the same refusal and nothing is stored. Off, or with no Space,
-            // this arm is unchanged.
-            if !space_id.is_empty() && crate::sse::space_agentic_retrieval_enabled() {
+            // D2-774 and C-05: the organisation-wide document inventory is not a Space's inventory. With the one Space
+            // listing switch (OWNER_LIST_SPACE_REFUSE, the switch execution-core reads too) on, a turn scoped to a Space
+            // is refused here, before any call crosses to Data Plane: a fixed token with no rows, so ZDR gets the same
+            // refusal and nothing is stored. The refusal does not wait on MODEL_ACTION_ADMISSION, which this loop never
+            // reads, or on AGENTIC_SPACE_RETRIEVAL_ENABLED, which decides only the retrieval header and receipt. Off, or
+            // with no Space, this arm is unchanged.
+            if knowledge_list_space_refused(space_id, crate::sse::owner_list_space_refuse_enabled()) {
                 return err_outcome(call, "knowledge_list_documents refused: space_scoped");
             }
             let Some(bearer) = data_plane_bearer else {
@@ -12843,6 +12852,106 @@ mod tests {
         .await;
         let error = outcome.error.expect("missing bearer must error");
         assert!(error.contains("verified user bearer"), "{error}");
+    }
+
+    /// Sets one environment switch for a test and puts the previous value back when the guard drops, so a failed
+    /// assertion cannot leave it on for the next test.
+    struct SpaceListEnv {
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    impl SpaceListEnv {
+        fn set(name: &'static str, value: Option<&str>) -> Self {
+            let previous = std::env::var(name).ok();
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for SpaceListEnv {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    /// The error one `knowledge_list_documents` call gets on a turn in `space_id` with no verified bearer. A call
+    /// that is not refused reports the missing bearer, so the two outcomes are told apart by their text.
+    async fn knowledge_list_error(
+        state: &AppState,
+        call: &ToolCall,
+        space_id: &str,
+    ) -> Option<String> {
+        dispatch_tool(
+            state,
+            "run_1",
+            "org_1",
+            "user_1",
+            "thread_1",
+            space_id,
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            false,
+            false,
+            false,
+            call,
+            None,
+            None,
+            None,
+        )
+        .await
+        .error
+    }
+
+    /// C-05: the inline refusal needs the one listing switch and a Space id present on the turn. Any non-empty id
+    /// counts as present, so a malformed one is refused rather than let through.
+    #[test]
+    fn knowledge_list_space_refusal_needs_the_listing_switch_and_a_space_id() {
+        assert!(!knowledge_list_space_refused("space_1", false));
+        assert!(!knowledge_list_space_refused("", false));
+        assert!(knowledge_list_space_refused("space_1", true));
+        assert!(!knowledge_list_space_refused("", true));
+        assert!(knowledge_list_space_refused("   ", true));
+    }
+
+    /// C-05 on the real dispatch, both switch states. `OWNER_LIST_SPACE_REFUSE` alone decides the refusal on a
+    /// Space-scoped turn: `AGENTIC_SPACE_RETRIEVAL_ENABLED` does not gate it, and only the literal `true` enables it.
+    #[tokio::test]
+    async fn knowledge_list_documents_in_a_space_follows_owner_list_space_refuse_alone() {
+        const REFUSED: &str = "knowledge_list_documents refused: space_scoped";
+        const NEEDS_BEARER: &str = "knowledge.list_documents requires a verified user bearer";
+        let state = crate::state::AppState::new();
+        let call = tool_call("knowledge_list_documents", r#"{"limit":5}"#);
+        // (OWNER_LIST_SPACE_REFUSE, AGENTIC_SPACE_RETRIEVAL_ENABLED, space_id, the error the call must get)
+        let cases = [
+            (Some("true"), None, "space_1", REFUSED),
+            (Some("true"), Some("true"), "space_1", REFUSED),
+            (None, Some("true"), "space_1", NEEDS_BEARER),
+            (Some("false"), Some("true"), "space_1", NEEDS_BEARER),
+            (Some("1"), None, "space_1", NEEDS_BEARER),
+            (Some("true"), Some("true"), "", NEEDS_BEARER),
+        ];
+        for (owner, agentic, space_id, expected) in cases {
+            let _owner = SpaceListEnv::set("OWNER_LIST_SPACE_REFUSE", owner);
+            let _agentic = SpaceListEnv::set("AGENTIC_SPACE_RETRIEVAL_ENABLED", agentic);
+            let error = knowledge_list_error(&state, &call, space_id).await;
+            assert_eq!(
+                error.as_deref(),
+                Some(expected),
+                "OWNER_LIST_SPACE_REFUSE={owner:?} AGENTIC_SPACE_RETRIEVAL_ENABLED={agentic:?} space_id={space_id:?}"
+            );
+        }
     }
 
     // `AppState::new()` builds clients that need a reactor, so this is a
