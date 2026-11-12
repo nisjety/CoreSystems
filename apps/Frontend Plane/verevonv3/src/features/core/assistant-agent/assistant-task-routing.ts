@@ -3,6 +3,7 @@ import type { AssistantAgentView } from '@/features/core/components/GlobalAssist
 import type { AssistantNavigationAgentState } from './assistant-navigation-agent'
 import { assistantBrowserTarget } from './assistant-browser-agent'
 import { resolveAssistantChatDraft, type AssistantChatDraftAction } from '@/shared/actions/assistant-chat-draft'
+import { LocalizedError } from '@/shared/i18n/errors'
 
 type Translate = (no: string, en: string) => string
 
@@ -37,16 +38,15 @@ export async function submitAssistantTask(payload: DashboardComposerSubmitPayloa
   openChatDraft: (action: AssistantChatDraftAction) => boolean
   tr: Translate
 }): Promise<void> {
-  const { tr } = options
   if (typeof payload !== 'string' && (payload.attachments.length || payload.actions.length || payload.tools.length || payload.agentMode || payload.browserContext || payload.connectorScope?.length || (payload.retrievalScope && payload.retrievalScope !== 'auto'))) {
-    throw new Error(tr('Denne assistenten kan foreløpig bare finne og åpne sider. Utkastet er beholdt.', 'This assistant can currently only find and open pages. Your draft has been kept.'))
+    throw new LocalizedError({ no: 'Denne assistenten kan foreløpig bare finne og åpne sider. Utkastet er beholdt.', en: 'This assistant can currently only find and open pages. Your draft has been kept.' })
   }
-  if (isAssistantTaskBusy(options.browserStatus(), options.navigationStatus(), options.guiding())) throw new Error(tr('En oppgave er allerede i gang.', 'A task is already running.'))
+  if (isAssistantTaskBusy(options.browserStatus(), options.navigationStatus(), options.guiding())) throw new LocalizedError({ no: 'En oppgave er allerede i gang.', en: 'A task is already running.' })
   const text = typeof payload === 'string' ? payload : payload.text
   const chatDraft = resolveAssistantChatDraft(text)
   if (chatDraft) {
     if (!options.openChatDraft(chatDraft)) {
-      throw new Error(tr('Kunne ikke åpne utkastet i Chat. Teksten er beholdt her.', 'Could not open the draft in Chat. Your text is still here.'))
+      throw new LocalizedError({ no: 'Kunne ikke åpne utkastet i Chat. Teksten er beholdt her.', en: 'Could not open the draft in Chat. Your text is still here.' })
     }
     options.resetNavigation()
     return
@@ -56,10 +56,10 @@ export async function submitAssistantTask(payload: DashboardComposerSubmitPayloa
     const hosts = new Set<string>()
     for (const address of [target, ...otherTargets]) {
       const url = assistantBrowserTarget(address)
-      if (!url) throw new Error(tr('Oppgi en gyldig nettadresse.', 'Provide a valid web address.'))
+      if (!url) throw new LocalizedError({ no: 'Oppgi en gyldig nettadresse.', en: 'Provide a valid web address.' })
       hosts.add(url.hostname)
     }
-    if (hosts.size > 1) throw new Error(tr('Start én oppgave per domene. Du kan bruke flere adresser på samme domene.', 'Start one task per domain. You can include multiple addresses on the same domain.'))
+    if (hosts.size > 1) throw new LocalizedError({ no: 'Start én oppgave per domene. Du kan bruke flere adresser på samme domene.', en: 'Start one task per domain. You can include multiple addresses on the same domain.' })
     options.resetNavigation()
     await options.sendBrowser(text, target)
     return

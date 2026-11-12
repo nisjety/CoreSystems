@@ -6,6 +6,7 @@ import { isLocalRetentionAllowed, subscribeLocalRetention } from '@/features/cha
 import { isZdrCode, zdrRefusalPresentation, type Translate } from '@/shared/api/zdr-refusals'
 import { Upload } from '@/shared/icons'
 import { useI18n } from '@/shared/i18n'
+import { translateApiError } from '@/shared/i18n/errors'
 import './ImportConversationAction.css'
 
 /** Whether this build offers importing a conversation export (`VITE_THREAD_IMPORT`, read with the strict literal `true`). */
@@ -105,24 +106,23 @@ export function ImportConversationAction(props: { temporaryChat?: boolean; space
   )
 }
 
-type Failure = { code?: string; feature?: string; status?: number; message?: string }
+type Failure = { code?: string; feature?: string; status?: number }
 
 /** The parts of a refusal this control reads. Anything it does not recognise is left out, never guessed. */
 function failureOf(error: unknown): Failure {
   if (typeof error !== 'object' || error === null) return {}
-  const record = error as { code?: unknown; feature?: unknown; status?: unknown; message?: unknown }
+  const record = error as { code?: unknown; feature?: unknown; status?: unknown }
   return {
     code: typeof record.code === 'string' ? record.code : undefined,
     feature: typeof record.feature === 'string' ? record.feature : undefined,
     status: typeof record.status === 'number' ? record.status : undefined,
-    message: typeof record.message === 'string' ? record.message : undefined,
   }
 }
 
 /**
  * What the person is told when an import is refused. A zero-retention refusal is said in the reader's language; a
  * file that is too large is said here, since the gateway answers that size without a typed body; any other refusal
- * keeps the server's own sentence.
+ * gets the copy for its code, or a general sentence (the server's own text is never shown).
  */
 function refusalText(error: unknown, tr: Translate): string {
   const failure = failureOf(error)
@@ -134,8 +134,10 @@ function refusalText(error: unknown, tr: Translate): string {
   if (failure.code === 'thread_import_disabled' || failure.code === 'thread_export_disabled') {
     return tr('Import er ikke slått på her.', 'Import is not turned on here.')
   }
-  if (failure.code && failure.message) return failure.message
-  return tr('Samtalen kunne ikke importeres. Prøv igjen.', 'The conversation could not be imported. Try again.')
+  return translateApiError(error, tr, {
+    no: 'Samtalen kunne ikke importeres. Prøv igjen.',
+    en: 'The conversation could not be imported. Try again.',
+  })
 }
 
 function tooLargeText(tr: Translate): string {

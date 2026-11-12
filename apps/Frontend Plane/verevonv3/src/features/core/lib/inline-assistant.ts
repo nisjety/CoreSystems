@@ -3,6 +3,7 @@ import { appendInlinedAttachments, inlineTextAttachments, toStreamAttachments } 
 import { withBrregLookupAction } from '@/features/chat/lib/brreg-action'
 import { cancelInvocation, streamChat, type ChatInvokeRequest, type ChatStreamHandlers } from '@/shared/api/chat-client'
 import { cancelRun } from '@/shared/api/orchestration-client'
+import { LocalizedError, translateApiError } from '@/shared/i18n/errors'
 
 export type InlineAssistantTurn = { role: 'user' | 'assistant'; text: string }
 export type InlineAssistantState = {
@@ -122,15 +123,15 @@ export function createInlineAssistantController(options: {
 
   async function send(payload: DashboardComposerSubmitPayload, context: { spaceRef?: string; planMode?: boolean } = {}) {
     const scope = options.scope()
-    if (disposed) throw new Error(tr('Assistenten er ikke lenger tilgjengelig.', 'The assistant is no longer available.'))
-    if (!scope) throw new Error(tr('Ingen innlogget arbeidsflate er tilgjengelig.', 'No authenticated workspace is available.'))
-    if (active || preparing) throw new Error(tr('Et svar er allerede underveis.', 'An answer is already in progress.'))
+    if (disposed) throw new LocalizedError({ no: 'Assistenten er ikke lenger tilgjengelig.', en: 'The assistant is no longer available.' })
+    if (!scope) throw new LocalizedError({ no: 'Ingen innlogget arbeidsflate er tilgjengelig.', en: 'No authenticated workspace is available.' })
+    if (active || preparing) throw new LocalizedError({ no: 'Et svar er allerede underveis.', en: 'An answer is already in progress.' })
     if (context.planMode || payload.agentMode || payload.actions.length || payload.tools.length || payload.attachments.length) {
-      throw new Error(tr('Åpne Chat for å bruke verktøy, vedlegg eller agentmodus.', 'Open Chat to use tools, attachments or agent mode.'))
+      throw new LocalizedError({ no: 'Åpne Chat for å bruke verktøy, vedlegg eller agentmodus.', en: 'Open Chat to use tools, attachments or agent mode.' })
     }
     // The existing Chat controller does not consume this payload field. Refuse
     // rather than silently dropping an explicitly requested browser context.
-    if (payload.browserContext) throw new Error(tr('Nettleserkontekst er ikke tilgjengelig her. Åpne Chat for å fortsette.', 'Browser context is not available in the inline assistant. Open Chat to continue.'))
+    if (payload.browserContext) throw new LocalizedError({ no: 'Nettleserkontekst er ikke tilgjengelig her. Åpne Chat for å fortsette.', en: 'Browser context is not available in the inline assistant. Open Chat to continue.' })
     const generation = serial
     preparing = true
     let attachments: Awaited<ReturnType<typeof toStreamAttachments>>
@@ -141,7 +142,7 @@ export function createInlineAssistantController(options: {
     } finally {
       preparing = false
     }
-    if (generation !== serial || options.scope() !== scope) throw new Error(tr('Arbeidsflaten ble endret. Meldingen ble ikke sendt.', 'The workspace changed. Your message was not sent.'))
+    if (generation !== serial || options.scope() !== scope) throw new LocalizedError({ no: 'Arbeidsflaten ble endret. Meldingen ble ikke sendt.', en: 'The workspace changed. Your message was not sent.' })
     const zdr = payload.zdr === true
     const newPrivacy = previousZdr !== null && previousZdr !== zdr
     if (newPrivacy) sessionKey = id('assistant')
@@ -225,7 +226,7 @@ export function createInlineAssistantController(options: {
         await api.stream(request, handlers, run.abort.signal)
         if (current() && !terminal && !run.stopRequested) publish({ status: 'error', error: tr('Forbindelsen ble brutt før svaret var ferdig.', 'The connection closed before the answer finished.'), activity: null })
       } catch (error) {
-        if (current() && !run.stopRequested) publish({ status: 'error', error: error instanceof Error ? error.message : tr('Kunne ikke sende meldingen.', 'Could not send the message.'), activity: null })
+        if (current() && !run.stopRequested) publish({ status: 'error', error: translateApiError(error, tr, { no: 'Kunne ikke sende meldingen.', en: 'Could not send the message.' }), activity: null })
       } finally {
         if (current() && !run.stopRequested) active = null
       }

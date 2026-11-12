@@ -91,6 +91,7 @@ import { chatSurfaceClaimsFocus, isChatSurfaceAvailable, type ChatSurfaceAvailab
 import { isWorkStep } from './chat-normalizers'
 import type { ChatTab } from './chat-types'
 import { useI18n } from '@/shared/i18n'
+import { LocalizedError, translateApiError } from '@/shared/i18n/errors'
 import { speechPlayer } from '@/features/voice/speech-playback'
 import { latestVoiceReply } from '@/features/voice/voice-reply'
 import { pinnedMessagesFull } from '../lib/chat-pinned-messages'
@@ -323,14 +324,19 @@ export default function ChatPage() {
     members: number | null
     settle: (confirmed: boolean) => void
   } | null>(null)
-  const projectRefusalMessage = (refusal: ChatProjectRefusal) => {
+  // The copy of a refused project send, in both languages: a LocalizedError shows it as it is.
+  const projectRefusalCopy = (refusal: ChatProjectRefusal): { no: string; en: string } => {
     if (refusal === 'temporary') {
-      return i18n.tr('Midlertidig samtale kan ikke brukes i et prosjekt.', 'Temporary chat cannot be used in a project.')
+      return { no: 'Midlertidig samtale kan ikke brukes i et prosjekt.', en: 'Temporary chat cannot be used in a project.' }
     }
     if (refusal === 'role_not_allowed') {
-      return i18n.tr('Du kan lese dette rommet, men ikke starte samtaler i det.', 'You can read this room but cannot start conversations in it.')
+      return { no: 'Du kan lese dette rommet, men ikke starte samtaler i det.', en: 'You can read this room but cannot start conversations in it.' }
     }
-    return i18n.tr('Prosjektet er ikke tilgjengelig for nye samtaler.', 'This project is not available for new conversations.')
+    return { no: 'Prosjektet er ikke tilgjengelig for nye samtaler.', en: 'This project is not available for new conversations.' }
+  }
+  const projectRefusalMessage = (refusal: ChatProjectRefusal) => {
+    const copy = projectRefusalCopy(refusal)
+    return i18n.tr(copy.no, copy.en)
   }
   // Re-reads the Space and the caller's role before every project send: the same
   // question Control answers on the turn itself, asked here so a refusal reads as a
@@ -338,7 +344,7 @@ export default function ChatPage() {
   const confirmProjectAudience = async (spaceRef: string, temporary: boolean): Promise<boolean> => {
     const context = await readProjectContext(spaceRef)
     const refusal = chatProjectRefusal({ temporary, role: context?.role, space: context?.space })
-    if (!context || refusal) throw new Error(projectRefusalMessage(refusal ?? 'not_eligible'))
+    if (!context || refusal) throw new LocalizedError(projectRefusalCopy(refusal ?? 'not_eligible'))
     if (!audienceConfirmRequired({ kind: context.space.kind, confirmed: audienceConfirmed(spaceRef) })) return true
     const members = await readProjectAudience(spaceRef)
     return new Promise<boolean>((resolve) => {
@@ -370,7 +376,7 @@ export default function ChatPage() {
     if (!spaceRef) return handleComposerSubmit(submission, deckTemplate?.skillId)
     setProjectNotice('')
     const confirmed = await confirmProjectAudience(spaceRef, temporaryChat())
-    if (!confirmed) throw new Error(i18n.tr('Meldingen ble ikke sendt. Utkastet er beholdt.', 'The message was not sent. Your draft is kept.'))
+    if (!confirmed) throw new LocalizedError({ no: 'Meldingen ble ikke sendt. Utkastet er beholdt.', en: 'The message was not sent. Your draft is kept.' })
     return handleComposerSubmit(submission, deckTemplate?.skillId)
   }
   // The composer's own send. Its pick is for one turn: a send made while a run streams is queued into that run, and a
@@ -427,7 +433,7 @@ export default function ChatPage() {
     apply: (template) => {
       if (isStreaming() || !deckTemplatesAllowed()) return
       applyDeckTemplateTurn(template).catch((error: unknown) => {
-        setProjectNotice(error instanceof Error ? error.message : i18n.tr('Kunne ikke bruke malen.', 'Could not use the template.'))
+        setProjectNotice(translateApiError(error, i18n.tr, { no: 'Kunne ikke bruke malen.', en: 'Could not use the template.' }))
       })
     },
     busy: () => isStreaming(),

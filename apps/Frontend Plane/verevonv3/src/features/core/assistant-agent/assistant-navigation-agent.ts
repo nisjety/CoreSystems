@@ -2,6 +2,7 @@ import { ApiError, requestJson } from '@/shared/api/http'
 import { runWebSearch, type WebSearchPayload } from '@/shared/api/search-client'
 import { assistantTaskProposalSchema, type AssistantNavigationAction, type AssistantTaskProposal } from '@/shared/actions/assistant-navigation'
 import { assistantBrowserTarget } from './assistant-browser-agent'
+import { LocalizedError, translateApiError } from '@/shared/i18n/errors'
 
 export type AssistantNavigationAgentState = {
   status: 'idle' | 'thinking' | 'stopped' | 'error'
@@ -89,41 +90,41 @@ export function createAssistantNavigationAgent(options: {
   async function send(text: string): Promise<void> {
     const input = text.trim()
     const scope = options.scope()
-    if (disposed || !scope) throw new Error(tr('Ingen innlogget arbeidsflate er tilgjengelig.', 'No authenticated workspace is available.'))
-    if (!input || input.length > 2000) throw new Error(tr('Skriv en oppgave på opptil 2000 tegn.', 'Enter a task of at most 2000 characters.'))
-    if (active) throw new Error(tr('En oppgave er allerede i gang.', 'A task is already running.'))
+    if (disposed || !scope) throw new LocalizedError({ no: 'Ingen innlogget arbeidsflate er tilgjengelig.', en: 'No authenticated workspace is available.' })
+    if (!input || input.length > 2000) throw new LocalizedError({ no: 'Skriv en oppgave på opptil 2000 tegn.', en: 'Enter a task of at most 2000 characters.' })
+    if (active) throw new LocalizedError({ no: 'En oppgave er allerede i gang.', en: 'A task is already running.' })
     const run: Active = { abort: new AbortController(), scope, cancelled: false }
     active = run
     const mine = ++generation
     const current = () => !disposed && active === run && generation === mine && options.scope() === scope
     const requireCurrent = () => {
-      if (!current() || run.cancelled) throw new Error(tr('Oppgaven ble stoppet.', 'The task was stopped.'))
+      if (!current() || run.cancelled) throw new LocalizedError({ no: 'Oppgaven ble stoppet.', en: 'The task was stopped.' })
     }
     let handedOff = false
     publish({ status: 'thinking', error: null, runId: null, threadId: null })
     try {
       const result = await api.infer(input, run.abort.signal)
       requireCurrent()
-      if (!result || typeof result.content !== 'string') throw new Error(tr('Modellen returnerte et ugyldig svar.', 'The model returned an invalid response.'))
+      if (!result || typeof result.content !== 'string') throw new LocalizedError({ no: 'Modellen returnerte et ugyldig svar.', en: 'The model returned an invalid response.' })
       // The navigation classification is a durable run: surface its ids so the
       // task can be followed in the Model Plane trace and audit.
       if (result.runId || result.threadId) {
         publish({ runId: result.runId ?? null, threadId: result.threadId ?? null })
       }
       const action = parseAssistantTaskProposal(result.content)
-      if (!action || action.type === 'unsupported') throw new Error(tr('Hvilken side eller nettside vil du at jeg skal jobbe med?', 'Which app page or website should I work with?'))
+      if (!action || action.type === 'unsupported') throw new LocalizedError({ no: 'Hvilken side eller nettside vil du at jeg skal jobbe med?', en: 'Which app page or website should I work with?' })
       if (action.type === 'assistant.navigation.guide') {
-        if (!options.onAction(action)) throw new Error(tr('Siden er ikke tilgjengelig i navigasjonen akkurat nå.', 'That page is not available in navigation right now.'))
+        if (!options.onAction(action)) throw new LocalizedError({ no: 'Siden er ikke tilgjengelig i navigasjonen akkurat nå.', en: 'That page is not available in navigation right now.' })
         publish({ status: 'idle', error: null })
         return
       }
-      if (!options.onBrowserTask) throw new Error(tr('Nettleseragenten er ikke tilgjengelig.', 'The browser agent is unavailable.'))
+      if (!options.onBrowserTask) throw new LocalizedError({ no: 'Nettleseragenten er ikke tilgjengelig.', en: 'The browser agent is unavailable.' })
       const namedSite = action.type === 'assistant.browser.search' ? requestedSiteName(input) : null
       let target: string | null
       if (action.type === 'assistant.browser.current') {
         const address = await options.currentBrowserTarget?.(run.abort.signal)
         target = address ? assistantBrowserTarget(address)?.href ?? null : null
-        if (!target) throw new Error(tr('Åpne en side i Nett først, eller si hvilken nettside jeg skal finne.', 'Open a page in Web first, or tell me which website to find.'))
+        if (!target) throw new LocalizedError({ no: 'Åpne en side i Nett først, eller si hvilken nettside jeg skal finne.', en: 'Open a page in Web first, or tell me which website to find.' })
       } else {
         const initialTargets = publicSearchTargets(await search(action.query, run.abort.signal))
         requireCurrent()
@@ -140,13 +141,13 @@ export function createAssistantNavigationAgent(options: {
             // querying it with site:. Never construct a URL from the name.
             const home = matches[0] ?? publicSearchTargets(await search(`${namedSite} official website`, run.abort.signal)).find(sameName)
             requireCurrent()
-            if (!home) throw new Error(tr('Jeg fant ikke det navngitte nettstedet. Prøv å oppgi nettadressen.', 'I could not find the named website. Try providing its address.'))
+            if (!home) throw new LocalizedError({ no: 'Jeg fant ikke det navngitte nettstedet. Prøv å oppgi nettadressen.', en: 'I could not find the named website. Try providing its address.' })
             const domain = siteHost(home)
             const scoped = publicSearchTargets(await search(`site:${domain} ${action.query}`, run.abort.signal))
             target = (scoped.find(url => siteHost(url) === domain && hasDestination(url)) ?? home).href
           }
         }
-        if (!target) throw new Error(tr('Jeg fant ingen offentlig nettside for oppgaven. Prøv et nettsted eller litt mer informasjon.', 'I found no public website for the task. Try naming a site or adding a detail.'))
+        if (!target) throw new LocalizedError({ no: 'Jeg fant ingen offentlig nettside for oppgaven. Prøv et nettsted eller litt mer informasjon.', en: 'I found no public website for the task. Try naming a site or adding a detail.' })
       }
       requireCurrent()
       handedOff = true
@@ -165,7 +166,7 @@ export function createAssistantNavigationAgent(options: {
         await options.onBrowserTask(input, new URL('/', address).href)
       }
     } catch (error) {
-      if (!handedOff && current() && !run.cancelled) publish({ status: 'error', error: error instanceof Error ? error.message : tr('Oppgaven kunne ikke utføres.', 'The task could not be completed.') })
+      if (!handedOff && current() && !run.cancelled) publish({ status: 'error', error: translateApiError(error, tr, { no: 'Oppgaven kunne ikke utføres.', en: 'The task could not be completed.' }) })
       throw error
     } finally {
       if (active === run) active = null

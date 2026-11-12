@@ -5,6 +5,7 @@ import { isLocalRetentionAllowed, subscribeLocalRetention } from '@/features/cha
 import { isZdrCode, zdrRefusalPresentation, type Translate } from '@/shared/api/zdr-refusals'
 import { Download, Play } from '@/shared/icons'
 import { useI18n } from '@/shared/i18n'
+import { translateApiError } from '@/shared/i18n/errors'
 import { readThreadExport, type ThreadExport } from '../replay/thread-export-schema'
 import './ExportConversationAction.css'
 
@@ -179,12 +180,12 @@ export function ExportConversationAction(props: {
   )
 }
 
-type Failure = { code?: string; feature?: string; reason?: string; message?: string }
+type Failure = { code?: string; feature?: string; reason?: string }
 
 /** The parts of a refusal this menu reads. Anything it does not recognise is left out, never guessed. */
 function failureOf(error: unknown): Failure {
   if (typeof error !== 'object' || error === null) return {}
-  const record = error as { code?: unknown; feature?: unknown; message?: unknown; details?: unknown }
+  const record = error as { code?: unknown; feature?: unknown; details?: unknown }
   const details =
     typeof record.details === 'object' && record.details !== null && !Array.isArray(record.details)
       ? (record.details as Record<string, unknown>)
@@ -193,13 +194,12 @@ function failureOf(error: unknown): Failure {
     code: typeof record.code === 'string' ? record.code : undefined,
     feature: typeof record.feature === 'string' ? record.feature : undefined,
     reason: typeof details.reason === 'string' ? details.reason : undefined,
-    message: typeof record.message === 'string' ? record.message : undefined,
   }
 }
 
 /**
  * What the person is told when an export is refused. A zero-retention refusal and the refusals of a conversation
- * are said in the reader's language; any other refusal keeps the server's own sentence.
+ * are said in the reader's language; any other refusal gets the copy for its code, or a general sentence (the server's own text is never shown).
  */
 function refusalText(error: unknown, tr: Translate): string {
   const failure = failureOf(error)
@@ -221,6 +221,8 @@ function refusalText(error: unknown, tr: Translate): string {
   }
   if (failure.code === 'thread_not_found') return tr('Fant ikke samtalen.', 'The conversation was not found.')
   if (failure.code === 'thread_export_disabled') return tr('Eksport er ikke slått på her.', 'Export is not turned on here.')
-  if (failure.code && failure.message) return failure.message
-  return tr('Samtalen kunne ikke eksporteres. Prøv igjen.', 'The conversation could not be exported. Try again.')
+  return translateApiError(error, tr, {
+    no: 'Samtalen kunne ikke eksporteres. Prøv igjen.',
+    en: 'The conversation could not be exported. Try again.',
+  })
 }

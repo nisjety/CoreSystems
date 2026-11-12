@@ -108,7 +108,8 @@ describe('model-powered navigation', () => {
     expect(onBrowserTask).toHaveBeenCalledExactlyOnceWith('Hva står det på denne siden?', 'https://www.iana.org/domains')
     expect(search).not.toHaveBeenCalled()
     currentBrowserTarget.mockResolvedValueOnce(null)
-    await expect(agent.send('Hva står det på denne siden?')).rejects.toThrow('Åpne en side i Nett først')
+    await expect(agent.send('Hva står det på denne siden?')).rejects.toThrow('Open a page in Web first')
+    expect(agent.state().error).toBe('Åpne en side i Nett først, eller si hvilken nettside jeg skal finne.')
     expect(onBrowserTask).toHaveBeenCalledOnce()
   })
 

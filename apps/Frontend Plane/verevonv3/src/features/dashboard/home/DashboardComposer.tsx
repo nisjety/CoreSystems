@@ -3230,7 +3230,7 @@ export function DashboardComposer(props: {
 					: error.reason === 'too_large'
 						? i18n.tr('Vedleggene er for store for chat. Velg mindre filer og prøv igjen.', 'The attachments are too large for chat. Choose smaller files and retry.')
 						: i18n.tr('Kunne ikke overføre utkastet. Frigjør nettleserlagring og prøv igjen. Teksten og filene er beholdt.', 'Could not transfer the draft. Free browser storage and retry. Your text and files have been kept.')
-				: error instanceof Error ? error.message : i18n.tr('Kunne ikke sende. Prøv igjen.', 'Could not send. Please retry.');
+				: translateApiError(error, i18n.tr, { no: 'Kunne ikke sende. Prøv igjen.', en: 'Could not send. Please retry.' });
 			setSubmitError(message);
 			return { ok: false, message };
 		} finally {

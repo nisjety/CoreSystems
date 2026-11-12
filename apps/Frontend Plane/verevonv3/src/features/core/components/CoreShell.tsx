@@ -38,6 +38,7 @@ import { getBrowserSession } from '@/shared/api/browser-client'
 import { getNavbarData, type NavbarPayload } from '@/shared/api/navbar-client'
 import { getDeletionStatus } from '@/shared/api/org-deletion-client'
 import { useI18n } from '@/shared/i18n'
+import { LocalizedError } from '@/shared/i18n/errors'
 import { getSession, type SessionState } from '@/shared/session/session-store'
 import { RegionBoundary } from '@/shared/ui/resilience/RegionBoundary'
 import { ToastHost } from '@/shared/ui/toast/ToastHost'
@@ -230,11 +231,11 @@ export function CoreShell(props: { children?: JSX.Element }) {
     if (!selection) return submitOrdinaryAssistant(maybeRedact(goal))
     const redactedGoal = maybeRedact(goal)
     const current = await currentOwnedTab(AbortSignal.timeout(5000), selection.sessionId)
-    if (continueTab() !== selection) throw new Error(i18n.tr('Fanevalget er avbrutt. Utkastet er beholdt.', 'The tab selection was cancelled. Your draft has been kept.'))
-    if (assistantTaskBusy()) throw new Error(i18n.tr('En oppgave er allerede i gang.', 'A task is already running.'))
+    if (continueTab() !== selection) throw new LocalizedError({ no: 'Fanevalget er avbrutt. Utkastet er beholdt.', en: 'The tab selection was cancelled. Your draft has been kept.' })
+    if (assistantTaskBusy()) throw new LocalizedError({ no: 'En oppgave er allerede i gang.', en: 'A task is already running.' })
     if (current?.tab.tabId !== selection.tabId || current.tab.tabEpoch !== selection.tabEpoch ||
         current.tab.holder !== 'human' || current.url.origin !== selection.origin) {
-      throw new Error(i18n.tr('Fanen er endret. Velg fanen på nytt for å fortsette.', 'The tab has changed. Select it again to continue.'))
+      throw new LocalizedError({ no: 'Fanen er endret. Velg fanen på nytt for å fortsette.', en: 'The tab has changed. Select it again to continue.' })
     }
     navigationAgent.reset()
     await browserAgent.send(redactedGoal, selection.origin, {

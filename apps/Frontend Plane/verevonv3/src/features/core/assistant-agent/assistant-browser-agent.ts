@@ -7,6 +7,7 @@ import { controlBrowserAiRun, createAiRunStartKeyring, isAmbiguousAiRunStartFail
 import { listRunEventReplay, streamRunEvents, type BrowserActionApprovalRequiredEvent, type BrowserActionDecidedEvent, type BrowserAttachSharedJarEvent, type BrowserObservationReceivedEvent, type RunEventHandlers } from '@/shared/api/run-console-client'
 import { browserTerminalFailureCopy } from '@/features/chat/lib/browser-terminal-copy'
 import type { AssistantAgentView } from '@/features/core/components/GlobalAssistant'
+import { LocalizedError, translateApiError } from '@/shared/i18n/errors'
 
 type Scope = { userId: string; orgId: string; zdr?: boolean }
 type Capability = { available: boolean; policySupported: boolean; canAttach: boolean }
@@ -43,8 +44,11 @@ type BorrowedTab = BrowserTabContinuation & { sessionId: string }
 type Active = { scope: Scope; goal: string; target: string; borrowedTab?: BorrowedTab; redirected: boolean; cancelled: boolean; uncertain: boolean; startKey: string | null; sessionId: string | null; runId: string | null; planId: string | null; abort: AbortController; stopSent: boolean; replayTimer?: ReturnType<typeof setTimeout> }
 type SiteAccessRequest = { scope: Scope; goal: string; target: string; host: string }
 const siteAccessLifetimeMs = 10 * 60 * 1000
-const siteHandoffMessage = (tr: (no: string, en: string) => string) =>
-  tr('Nettstedet krever at du åpner siden selv. Du kan fortsette i din egen nettleser.', 'The site requires you to open the page yourself. You can continue in your own browser.')
+const siteHandoffCopy = {
+  no: 'Nettstedet krever at du åpner siden selv. Du kan fortsette i din egen nettleser.',
+  en: 'The site requires you to open the page yourself. You can continue in your own browser.',
+}
+const siteHandoffMessage = (tr: (no: string, en: string) => string) => tr(siteHandoffCopy.no, siteHandoffCopy.en)
 
 /** Only explicit HTTP(S) targets may become an agent browser session. */
 export function assistantBrowserTarget(raw: string): URL | null {
@@ -181,11 +185,11 @@ export function createAssistantBrowserAgent(options: {
     const scope = options.scope()
     const url = assistantBrowserTarget(target)
     const text = goal.trim()
-    if (!scope?.orgId || !scope.userId) throw new Error(tr('Ingen innlogget arbeidsflate er tilgjengelig.', 'No authenticated workspace is available.'))
-    if (!url || !text || text.length > 2000) throw new Error(tr('Oppgi en oppgave og en gyldig nettadresse.', 'Provide a task and a valid web address.'))
-    if (borrowedTab && borrowedTab.expectedOrigin !== url.origin) throw new Error(tr('Fanens adresse er endret.', 'The tab address has changed.'))
+    if (!scope?.orgId || !scope.userId) throw new LocalizedError({ no: 'Ingen innlogget arbeidsflate er tilgjengelig.', en: 'No authenticated workspace is available.' })
+    if (!url || !text || text.length > 2000) throw new LocalizedError({ no: 'Oppgi en oppgave og en gyldig nettadresse.', en: 'Provide a task and a valid web address.' })
+    if (borrowedTab && borrowedTab.expectedOrigin !== url.origin) throw new LocalizedError({ no: 'Fanens adresse er endret.', en: 'The tab address has changed.' })
     const retrying = Boolean(active?.uncertain && !active.runId && active.goal === text && active.target === url.href && active.scope.userId === scope.userId && active.scope.orgId === scope.orgId && active.borrowedTab === borrowedTab)
-    if (active && !retrying) throw new Error(tr('En oppgave er allerede i gang.', 'A task is already running.'))
+    if (active && !retrying) throw new LocalizedError({ no: 'En oppgave er allerede i gang.', en: 'A task is already running.' })
     clearSiteAccessRequest()
     if (!retrying) releaseRetained()
     const run: Active = retrying ? active! : { scope: { ...scope }, goal: text, target: url.href, borrowedTab, redirected: false, cancelled: false, uncertain: false, startKey: null, sessionId: borrowedTab?.sessionId ?? null, runId: null, planId: null, abort: new AbortController(), stopSent: false }
@@ -198,12 +202,12 @@ export function createAssistantBrowserAgent(options: {
       if (!retrying) {
         const cap = await api.capability()
         if (!current(run, gen) || run.cancelled) { if (current(run, gen)) emit({ status: 'stopped' }); return }
-        if (!cap.available || !cap.policySupported || !cap.canAttach) throw new Error(tr('Den tilkoblede nettleseragenten er ikke tilgjengelig med nødvendige begrensninger.', 'The connected browser agent is unavailable with the required restrictions.'))
+        if (!cap.available || !cap.policySupported || !cap.canAttach) throw new LocalizedError({ no: 'Den tilkoblede nettleseragenten er ikke tilgjengelig med nødvendige begrensninger.', en: 'The connected browser agent is unavailable with the required restrictions.' })
         emit({ available: true })
         if (!run.borrowedTab) {
           const session = await api.createSession(scope.orgId, { url: run.target, purpose: 'assistant_task', persistentProfile: false, viewport: { width: 1280, height: 800 }, ...(scope.zdr === true ? { zdr: true } : {}) })
           run.sessionId = session.session.id
-          if (!run.sessionId) throw new Error(tr('Nettleserøkten mangler identitet.', 'The browser session has no identity.'))
+          if (!run.sessionId) throw new LocalizedError({ no: 'Nettleserøkten mangler identitet.', en: 'The browser session has no identity.' })
           if (!current(run, gen) || run.cancelled) {
             void api.closeSession(scope.orgId, run.sessionId).catch(() => undefined)
             if (current(run, gen)) emit({ status: 'stopped' })
@@ -211,18 +215,18 @@ export function createAssistantBrowserAgent(options: {
           }
           if (session.resolvedStartUrl !== undefined) {
             const resolved = assistantBrowserTarget(session.resolvedStartUrl)
-            if (!resolved) throw new Error(tr('Nettleseren returnerte en ugyldig startadresse.', 'The browser returned an invalid start address.'))
+            if (!resolved) throw new LocalizedError({ no: 'Nettleseren returnerte en ugyldig startadresse.', en: 'The browser returned an invalid start address.' })
             run.redirected = resolved.href !== run.target
             run.target = resolved.href
           }
           if (session.observation?.challenge?.strength === 'strong') {
             emit({ siteHandoffUrl: run.target })
-            throw new Error(siteHandoffMessage(tr))
+            throw new LocalizedError(siteHandoffCopy)
           }
         }
         emit({ sessionId: run.sessionId })
       }
-      if (!run.sessionId) throw new Error(tr('Nettleserøkten mangler identitet.', 'The browser session has no identity.'))
+      if (!run.sessionId) throw new LocalizedError({ no: 'Nettleserøkten mangler identitet.', en: 'The browser session has no identity.' })
       const startUrl = new URL(run.target)
       const agentGoal = run.redirected || run.borrowedTab
         ? tr(`${text}\n\nNettleseren er allerede åpen på ${startUrl.origin}. Fortsett fra siden som er åpen.`, `${text}\n\nThe browser is already open on ${startUrl.origin}. Continue from the current page.`)
@@ -237,7 +241,7 @@ export function createAssistantBrowserAgent(options: {
       startSent = true
       run.startKey ??= keyring.keyFor(run.sessionId, params)
       const started = await api.startRun(scope.orgId, run.sessionId, params, undefined, { idempotencyKey: run.startKey })
-      if (!started.runId || !started.planId) throw new Error(tr('Agentkjøringen mangler identitet.', 'The agent run has no identity.'))
+      if (!started.runId || !started.planId) throw new LocalizedError({ no: 'Agentkjøringen mangler identitet.', en: 'The agent run has no identity.' })
       run.uncertain = false
       keyring.succeeded()
       run.runId = started.runId; run.planId = started.planId
@@ -433,7 +437,7 @@ export function createAssistantBrowserAgent(options: {
             ? tr('Nettstedet sender deg videre til en adresse agenten ikke har tilgang til. Sjekk nettsidevalgene. Utkastet er beholdt.', 'The site redirects to an address the agent cannot access. Check your site choices. Your draft has been kept.')
             : siteAccessRefused
             ? tr('Nettlesertilgang ble ikke innvilget. Kontroller nettsidevalgene og eventuelle begrensninger fra administratoren. Utkastet er beholdt.', 'Browser access was not granted. Review your site choices and any administrator restrictions. Your draft has been kept.')
-            : error instanceof Error ? error.message : tr('Agentoppgaven kunne ikke startes.', 'The agent task could not be started.'),
+            : translateApiError(error, tr, { no: 'Agentoppgaven kunne ikke startes.', en: 'The agent task could not be started.' }),
         })
       }
       throw error
@@ -442,13 +446,14 @@ export function createAssistantBrowserAgent(options: {
     }
   }
   const retry = async () => {
-    if (!active?.uncertain || active.runId) throw new Error(tr('Ingen usikker start å gjenoppta.', 'No uncertain start to recover.'))
+    if (!active?.uncertain || active.runId) throw new LocalizedError({ no: 'Ingen usikker start å gjenoppta.', en: 'No uncertain start to recover.' })
     return send(active.goal, active.target, active.borrowedTab)
   }
   const allowSiteAccess = async () => {
     const request = siteAccessRequest
-    const unavailable = tr('Kunne ikke bekrefte nettstedstilgangen. Utkastet er beholdt.', 'Could not confirm site access. Your draft has been kept.')
-    if (!request || siteAccessOperation || !siteAccessRequestIsCurrent(request)) throw new Error(unavailable)
+    const unavailableCopy = { no: 'Kunne ikke bekrefte nettstedstilgangen. Utkastet er beholdt.', en: 'Could not confirm site access. Your draft has been kept.' }
+    const unavailable = tr(unavailableCopy.no, unavailableCopy.en)
+    if (!request || siteAccessOperation || !siteAccessRequestIsCurrent(request)) throw new LocalizedError(unavailableCopy)
     const operation = new AbortController()
     siteAccessOperation = operation
     emit({ error: null })
@@ -456,13 +461,13 @@ export function createAssistantBrowserAgent(options: {
       const { scope, host } = request
       const explanation = await api.explainSite(scope.orgId, host, operation.signal)
       if (!siteAccessRequestIsCurrent(request) || explanation?.organization_id !== scope.orgId ||
-          explanation.user_id !== scope.userId || explanation.decision?.host !== host) throw new Error(unavailable)
+          explanation.user_id !== scope.userId || explanation.decision?.host !== host) throw new LocalizedError(unavailableCopy)
       if (explanation.decision.effective !== 'act') {
-        if (explanation.decision.effective !== 'ask' || explanation.decision.cap !== 'act') throw new Error(unavailable)
+        if (explanation.decision.effective !== 'ask' || explanation.decision.cap !== 'act') throw new LocalizedError(unavailableCopy)
         const expiresAt = new Date(Date.now() + siteAccessLifetimeMs).toISOString()
         await api.setSiteChoice(scope.orgId, host, explanation.revision, 'act', expiresAt, operation.signal)
       }
-      if (!siteAccessRequestIsCurrent(request)) throw new Error(unavailable)
+      if (!siteAccessRequestIsCurrent(request)) throw new LocalizedError(unavailableCopy)
     } catch (error) {
       if (siteAccessRequestIsCurrent(request)) emit({ error: unavailable })
       throw error
