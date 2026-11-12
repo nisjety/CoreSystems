@@ -42,9 +42,11 @@ fn zdr_token() -> Claims {
 /// the feature classifier.
 fn decided(body: &Value) -> Expect {
     let request = request(body);
+    // The connection the route names is the subscription one or, failing it, the customer-gateway one, as the
+    // stream and the invoke handler name it (`normalize::connection_named_by`).
     let route = Route::named(
         request.provider.as_deref(),
-        request.subscription_connection_id.as_deref(),
+        model_gateway::normalize::connection_named_by(&request),
         request.zdr,
     );
     match zdr_posture::decide_for(&zdr_token(), &route) {
@@ -82,6 +84,13 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
         (
             "subscription_connection_id",
             subscription,
+            refused_connection,
+        ),
+        // A customer-gateway connection is refused on the same route with the same code (W4-BYO-6): a ZDR token
+        // never reaches a connection, and the route names this one through `connection_named_by`.
+        (
+            "model_connection_id",
+            with("model_connection_id", json!("conn-1")),
             refused_connection,
         ),
         ("session_key", with("session_key", json!("s-1")), None),
@@ -245,6 +254,9 @@ fn cases() -> Vec<(&'static str, Value, Expect)> {
         ("agent_mode", with("agent_mode", json!("auto")), None),
         ("verbosity", with("verbosity", json!("concise")), None),
         ("effort", with("effort", json!("deep")), None),
+        // Inert: the priority tier is served only on a subscription route, which a ZDR turn never names, and
+        // sse.rs gates the tier on the turn not being ZDR. The request is accepted, not refused.
+        ("speed", with("speed", json!("priority")), None),
         (
             "features",
             with("features", json!(["agentic"])),
@@ -645,19 +657,40 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
 
 /// The knowledge receipt (WS18-S3) is built on the ordinary path only: the persistence-free ZDR branch
 /// returns before any Space knowledge is read, so a ZDR turn cannot carry a receipt.
+///
+/// Every build site is checked, not only the first. A site above the ZDR branch must be named in
+/// `SITES_ABOVE_THE_ZDR_RETURN`, and only `agentic_knowledge_frame` is: the Do run's `source_scope_applied`
+/// frame (WS18-S5-a) takes its mode from the Space decision alone, reads no Space knowledge, and nothing
+/// persists it, so no ZDR turn can carry anything a receipt would persist. Any other site fails this test.
 #[test]
 fn the_knowledge_receipt_is_built_after_the_zdr_branch_returns() {
+    const SITES_ABOVE_THE_ZDR_RETURN: &[&str] = &["fn agentic_knowledge_frame("];
     let sse = include_str!("../src/sse.rs");
     let zdr_return = sse
         .find("return zdr_direct_stream(")
         .expect("the ZDR branch returns its direct stream");
-    let receipt = sse
-        .find("knowledge_receipt::knowledge_receipt(")
-        .expect("the ordinary path builds the receipt");
-    assert!(
-        zdr_return < receipt,
-        "the knowledge receipt must not be built before the ZDR branch returns"
-    );
+    let allowed: Vec<std::ops::Range<usize>> = SITES_ABOVE_THE_ZDR_RETURN
+        .iter()
+        .copied()
+        .map(|signature| {
+            let start = sse
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature} is in sse.rs"));
+            start..start + function_body(sse, signature).len()
+        })
+        .collect();
+    let builds: Vec<usize> = sse
+        .match_indices("knowledge_receipt::knowledge_receipt(")
+        .map(|(offset, _)| offset)
+        .collect();
+    assert!(!builds.is_empty(), "the ordinary path builds the receipt");
+    for offset in builds {
+        let named = allowed.iter().any(|range| range.contains(&offset));
+        assert!(
+            named || offset > zdr_return,
+            "the knowledge receipt must not be built before the ZDR branch returns (byte {offset})"
+        );
+    }
 }
 
 /// The page reader is offered only in the tool loop, and only where a fetched page can be parked. A ZDR

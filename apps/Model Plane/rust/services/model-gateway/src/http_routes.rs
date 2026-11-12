@@ -359,9 +359,11 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
             post(prepare_mail_task_thread_for_gateway_bff),
         )
         // EP-7 S6: the completion judge of one unattended goal fire, called by orchestrator-core
-        // (`auth::SERVICE_ROUTE_GRANTS` names that caller). 404 while its two switches are off.
+        // (`auth::SERVICE_ROUTE_GRANTS` names that caller). 404 while its two switches are off. The path is a
+        // literal so the route lint reads it; `auth::GOAL_JUDGE_TURN_PATH` is the same path, and a test in
+        // zdr_posture holds the two equal.
         .route(
-            crate::auth::GOAL_JUDGE_TURN_PATH,
+            "/internal/v1/goals/:goal_id/judge-turn",
             post(crate::goal_unattended::judge_goal_turn_route),
         )
         .route("/v1/threads/:thread_id/messages", get(list_thread_messages))

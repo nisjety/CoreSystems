@@ -302,9 +302,8 @@ fn authorize_org_overlay_write(
     org_id: &str,
 ) -> Result<(), Status> {
     if caller.zdr() || caller.zdr_waiver().is_some() {
-        return Err(Status::failed_precondition(
-            "zdr_durable_mutation_forbidden: the organisation routing overlay cannot be changed under Zero Data Retention",
-        ));
+        return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::FailedPrecondition));
     }
     caller.authorize_org(org_id)?;
     let admin = !caller.is_api_key()

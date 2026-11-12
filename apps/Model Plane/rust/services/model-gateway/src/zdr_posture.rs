@@ -1056,6 +1056,15 @@ pub(crate) mod tests {
                 "generate_follow_ups",
                 "the turn's route, inherited (subscription_scoped_request)",
             ),
+            // The goal judge (EP-7 S3, S6), the one shared call. The attended settle builds its route in sse.rs
+            // (`judge_route`: the turn's provider hint, subscription connection and zdr) and judges only a turn that
+            // is neither ZDR nor waived; the unattended route passes a default route (no connection, zdr false, and
+            // the scheduled lane denies ZDR). goal_judge_request copies that route through subscription_scoped_request.
+            (
+                "thread_goal.rs",
+                "judge_goal_turn",
+                "the route its caller passes (the attended judge's route, or a default route unattended), copied by goal_judge_request through subscription_scoped_request",
+            ),
             (
                 "sse.rs",
                 "image_gen_stream",
@@ -1650,6 +1659,18 @@ pub(crate) mod tests {
         assert_eq!(computed, [("?".to_owned(), "<non-literal path>".to_owned())]);
         // A handler named like a verb is not a verb.
         assert!(non_get_routes(r#"Router::new().route("/a", get(get_chunks))"#).is_empty());
+    }
+
+    /// The judge route is written as a literal in `http_routes.rs`, so the lint above reads it; its service grant
+    /// in `auth.rs` names the same path through `GOAL_JUDGE_TURN_PATH`. The two must stay one path.
+    #[test]
+    fn the_goal_judge_route_literal_is_the_granted_path() {
+        let router = include_str!("http_routes.rs");
+        let literal = format!("\"{}\"", crate::auth::GOAL_JUDGE_TURN_PATH);
+        assert!(
+            router.contains(&literal),
+            "http_routes.rs does not register {literal}, the path the judge's service grant names"
+        );
     }
 
     #[test]
