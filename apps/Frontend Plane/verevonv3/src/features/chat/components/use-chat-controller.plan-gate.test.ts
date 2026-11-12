@@ -204,6 +204,8 @@ describe('plan-gate: proposed-plan wiring', () => {
         'writes its report',
         'plan_1',
         edits,
+        // No ZDR waiver here: the waiver UI is off in tests and this turn has no subscription connection.
+        undefined,
       )
       // setPlanMode(false) fires on approve.
       expect(controller.planMode()).toBe(false)
@@ -230,7 +232,7 @@ describe('plan-gate: proposed-plan wiring', () => {
       const turnId = controller.state.turns.at(-1)!.id
       await controller.rejectTurnPlan(turnId, 'Ikke nødvendig lenger')
 
-      expect(mockRejectPlan).toHaveBeenCalledWith('run-1', 'plan_1', 'Ikke nødvendig lenger')
+      expect(mockRejectPlan).toHaveBeenCalledWith('run-1', 'plan_1', 'Ikke nødvendig lenger', undefined)
       // setPlanMode(false) fires on reject too — the user must ask again in a
       // fresh message rather than silently retrying (owner ruling, no
       // revise-after-reject in this wave).

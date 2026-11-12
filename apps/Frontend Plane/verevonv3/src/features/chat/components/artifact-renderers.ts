@@ -89,4 +89,6 @@ export type DeckTemplateActions = {
   busy: () => boolean
 }
 
-export const DeckTemplateContext = createContext<DeckTemplateActions>()
+// The default is `null`, not `undefined`: Solid 2 throws when a context reads as `undefined` and no provider is above it.
+// Outside the chat page's provider the deck viewer reads `null` and offers no template control.
+export const DeckTemplateContext = createContext<DeckTemplateActions | null>(null)

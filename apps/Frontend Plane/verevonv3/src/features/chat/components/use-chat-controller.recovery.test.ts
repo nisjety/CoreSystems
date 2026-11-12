@@ -319,7 +319,7 @@ describe('Q15 a Stop that tells the truth', () => {
       // The immediate response is unchanged.
       expect(controller.state.turns.at(-1)?.status).toBe('stopped')
       expect(controller.state.status).toBe('idle')
-      expect(mocks.cancelInvocation).toHaveBeenCalledWith('req-1')
+      expect(mocks.cancelInvocation).toHaveBeenCalledWith('req-1', undefined)
       stream.resolve()
       await tick(12)
       const turn = controller.state.turns.at(-1)
@@ -378,7 +378,7 @@ describe('Q15 a Stop that tells the truth', () => {
 
       stream.handlers.onConnected?.({ ok: true, requestId: 'req-late', runId: RUN_ID })
       await tick()
-      expect(mocks.cancelInvocation).toHaveBeenCalledWith('req-late')
+      expect(mocks.cancelInvocation).toHaveBeenCalledWith('req-late', undefined)
       expect(stream.signal?.aborted).toBe(true)
       // Frames that were already on their way cannot reopen the turn.
       stream.handlers.onMessage?.({ content: 'late text' })

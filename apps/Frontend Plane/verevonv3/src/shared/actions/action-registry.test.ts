@@ -106,9 +106,10 @@ describe('action registry', () => {
   it('pins the continuation input keys and says in its description what a refusal or a spent frame means', () => {
     const continueRun = getActionDescriptor('chat.run.continue')
 
-    // The wire carries only the three identifiers; nothing else widens a continuation.
+    // The wire carries the three identifiers and the two forms that widen them: the skipped-site form (skipped) and the
+    // question form (questionId, answers, questionSkip). Nothing else widens a continuation.
     expect(Object.keys((continueRun?.inputSchema as unknown as { shape: Record<string, unknown> }).shape).sort())
-      .toEqual(['approvalId', 'claimToken', 'runId'])
+      .toEqual(['answers', 'approvalId', 'claimToken', 'questionId', 'questionSkip', 'runId', 'skipped'])
     expect(continueRun?.risk).toBe('high')
     expect(continueRun?.requiresApproval).toBe(false)
     expect(continueRun?.reversible).toBe(false)
@@ -167,9 +168,10 @@ describe('action registry', () => {
     expect(schema?.safeParse({ runId: 'run_1', claimToken: '' }).success).toBe(false)
     expect(schema?.safeParse({ runId: 'run_1', approvalId: 'appr_1' }).success).toBe(false)
 
-    // The wire still names only the three identifiers, and the action keeps its standing.
+    // The wire names the three identifiers and the two forms that widen them (skipped; questionId, answers, questionSkip),
+    // and the action keeps its standing.
     expect(Object.keys((schema as unknown as { shape: Record<string, unknown> }).shape).sort())
-      .toEqual(['approvalId', 'claimToken', 'runId'])
+      .toEqual(['answers', 'approvalId', 'claimToken', 'questionId', 'questionSkip', 'runId', 'skipped'])
     expect(continueRun?.risk).toBe('high')
     expect(continueRun?.requiresApproval).toBe(false)
     expect(isModelExecutableAction('chat.run.continue')).toBe(false)
@@ -326,10 +328,11 @@ describe('action registry', () => {
     expect(decide?.inputSchema.safeParse({ ...base, decision: 'reject', reason: 'not this one' }).success).toBe(true)
     expect(decide?.inputSchema.safeParse({ ...base, scope: 'once' }).success).toBe(true)
 
-    // A standing scope does not exist yet, and a decision is one of two words.
-    for (const scope of ['thread', 'run', 'forever']) {
-      expect(decide?.inputSchema.safeParse({ ...base, scope }).success).toBe(false)
+    // The standing scopes are thread and run; a forever grant is not in the schema, and a decision is one of two words.
+    for (const scope of ['thread', 'run']) {
+      expect(decide?.inputSchema.safeParse({ ...base, scope }).success).toBe(true)
     }
+    expect(decide?.inputSchema.safeParse({ ...base, scope: 'forever' }).success).toBe(false)
     expect(decide?.inputSchema.safeParse({ ...base, decision: 'maybe' }).success).toBe(false)
     expect(decide?.inputSchema.safeParse({ ...base, approvalId: '' }).success).toBe(false)
     expect(decide?.inputSchema.safeParse({ ...base, reason: 'x'.repeat(501) }).success).toBe(false)

@@ -82,6 +82,7 @@ export function ArtifactDeckView(props: ArtifactRendererProps): JSX.Element {
   let presenterRef: HTMLButtonElement | undefined
   const reasonId = `verevon-deck-present-reason-${createUniqueId()}`
   // "Bytt mal" (EP-5 S7): offered only when the chat page provides the templates and the gateway lists at least one.
+  // With no provider (`null`, e.g. the space artifact sheet) the control stays hidden.
   // The deck's own template is not in its manifest, so nothing is shown as current until this view makes a pick ('').
   const templates = useContext(DeckTemplateContext)
   const [templatesOffered, setTemplatesOffered] = createSignal(false)

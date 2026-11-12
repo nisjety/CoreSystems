@@ -3,8 +3,9 @@
 //! `GET /api/v1/org-flags` answers the active organisation's values for the presentation flags
 //! org-core lists in `OrgOverridableFlags`, as `{data:{flags:{name:value}, revision}}`. The read goes
 //! to org-core's internal route with the gateway's own service credential, never the viewer's, and
-//! one organisation's answer is reused for 30 seconds through the gateway cache. Every answer is
-//! `no-store`.
+//! one organisation's answer is reused for 30 seconds through the gateway cache, admitted through
+//! `CacheAdmission` like every content cache (a ZDR organisation is read on every request). Every
+//! answer is `no-store`.
 //!
 //! A read that fails answers `{data:{flags:{}, stale:true}}`, so each presentation flag falls back
 //! to its default, which the SPA reads as off. org-core's own 404, from its `ORG_FLAGS_ENABLED`
@@ -18,7 +19,7 @@ use std::time::Duration;
 
 use axum::{
     extract::{Extension, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -27,8 +28,7 @@ use reqwest::Method;
 use serde_json::{json, Map, Value};
 
 use crate::{
-    cache::scoped_key,
-    cache_admission::valid_org_scope,
+    cache_admission::{valid_org_scope, CacheAdmission},
     config::AppState,
     middleware::{require_session, AuthenticatedUser},
     upstream::{authorized_org_id, proxy_json},
@@ -53,6 +53,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
 async fn get_org_flags(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
 ) -> Response {
     // The organisation comes from the live membership the session resolved, never from the request.
     let org_id = authorized_org_id(&state, &user).await;
@@ -66,11 +67,22 @@ async fn get_org_flags(
     let Some(scope) = valid_org_scope(&org_id) else {
         return stale_answer();
     };
+    // Content admission decides whether this organisation's answer may be read from or written to
+    // the cache at all (a ZDR organisation, an unknown posture or a switched-off cache may not).
+    // A refused admission reads org-core on every request; it never changes the answer.
+    let admission = CacheAdmission::resolve(&state, &user, &headers, &Value::Null, false).await;
+    admission.record_bypass(CACHE_NAMESPACE);
     // The key carries the organisation id in clear and hashes the rest, so one organisation's
     // answer is never served for another.
-    let key = scoped_key(CACHE_NAMESPACE, scope, &["flags"]);
-    if let Some(data) = state.cache.lookup_within(&key, CACHE_TTL_SECS).await {
-        return answer(StatusCode::OK, json!({ "data": data }));
+    let key = admission.key(CACHE_NAMESPACE, &["flags"]);
+    if let (Some(key), true) = (key.as_deref(), admission.may_read) {
+        if let Some(data) = state
+            .cache
+            .lookup_within_scoped(key, scope, CACHE_TTL_SECS)
+            .await
+        {
+            return answer(StatusCode::OK, json!({ "data": data }));
+        }
     }
 
     let url = format!("{}/internal/orgs/{scope}/flags", state.org_core_url);
@@ -88,10 +100,9 @@ async fn get_org_flags(
     }
     match org_flags_from_core(&body) {
         Some(data) if status.is_success() => {
-            state
-                .cache
-                .store_for_secs(&key, &data, CACHE_TTL_SECS)
-                .await;
+            if let (Some(key), true) = (key.as_deref(), admission.may_write) {
+                state.cache.store_scoped(key, scope, &data).await;
+            }
             answer(StatusCode::OK, json!({ "data": data }))
         }
         _ => stale_answer(),

@@ -50,8 +50,8 @@ describe('ApiError hints survive the transport', () => {
     expect(extractError({ error: 'plain', code: 'c' }, 500)).toMatchObject({ code: 'c', message: 'plain' })
     expect(extractError({ code: 'EMAIL_NOT_VERIFIED', message: 'verify' }, 403)).toMatchObject({ code: 'EMAIL_NOT_VERIFIED', message: 'verify' })
     expect(extractError(null, 502)).toMatchObject({ code: null, message: 'Request failed (502)' })
-    // A details array or string is not a details object.
-    expect(extractError({ error: { code: 'x', details: ['a'] } }, 400).hints.details).toBeNull()
+    // A details array is kept whole (per-row issues); a string is not a details object.
+    expect(extractError({ error: { code: 'x', details: ['a'] } }, 400).hints.details).toEqual(['a'])
     expect(extractError({ error: { code: 'x', details: 'a' } }, 400).hints.details).toBeNull()
   })
 

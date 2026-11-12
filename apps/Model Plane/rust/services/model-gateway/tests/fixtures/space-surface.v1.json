@@ -1474,6 +1474,24 @@
       "reason": "A status text is stored free text: a write that carries text is refused for a ZDR org with the typed 412 before any Application call, while a state-only write (closed vocabulary, optional expiry) stays allowed."
     },
     {
+      "id": "bff:PUT:/api/v1/spaces/{space_ref}/agents/{binding_ref}/pin",
+      "kind": "route",
+      "plane": "frontend",
+      "service": "verevonv3-gateway",
+      "method": "PUT",
+      "path": "/api/v1/spaces/{space_ref}/agents/{binding_ref}/pin",
+      "handler": "domains/spaces/agent_policy.rs::set_space_agent_pin_route",
+      "route_class": "Config",
+      "decision_type": "membership",
+      "min_role": "manager",
+      "zdr_class": "n/a",
+      "basis": "path-rule",
+      "idempotency": "last_write_wins",
+      "flag": "agent_version_pinning",
+      "payload_allow_list": [],
+      "reason": "Pins one bound agent to a published version (a version number, or null to clear the pin): ids and a number with no content, so ZDR orgs behave the same; a Space owner or manager decided from Control's live role before the Application mutation."
+    },
+    {
       "id": "bff:PUT:/api/v1/spaces/{space_ref}/agents/{binding_ref}/tool-policy",
       "kind": "route",
       "plane": "frontend",

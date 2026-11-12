@@ -1435,7 +1435,7 @@ pub(crate) const CONTINUE_RELAYED_ERRORS: &[(&str, u16, &str)] = &[
         403,
         "Agent runs are paused for this organization.",
     ),
-    // The question form (WS14 S5). `not_resumable` (409) above is shared with it.
+    // The question form, WS14 S5. The `not_resumable` code above, a 409, is shared with it.
     ("question_not_found", 404, "The question was not found for this run."),
     ("question_expired", 410, "The question has expired and can no longer be answered."),
     (
@@ -2893,11 +2893,17 @@ mod tests {
             .split("pub(crate) async fn cancel_run(")
             .next()
             .expect("cancel_run follows");
+        // Two calls, each passing the closed list: the skip-site browser-bearer path (taken only
+        // for a skipped, non-waived continuation) and the plain relay every other one takes.
         assert_eq!(
             handler.matches("CONTINUE_RELAYED_ERRORS").count(),
-            1,
-            "continue_run passes the closed list once, unconditionally"
+            2,
+            "continue_run passes the closed list on exactly two calls: the skip-site browser path and the plain relay"
         );
+        assert_eq!(handler.matches("proxy_sse_stream_with_browser(").count(), 1);
+        // The name without its call paren: tests/continue_error_vocabulary.rs scans this file's
+        // test text for relay calls, and a literal `name(` here would count as one.
+        assert_eq!(handler.matches("proxy_sse_stream_with_data_plane").count(), 1);
         assert!(!handler.contains("&[]"), "continue_run never passes an empty list");
         assert!(!handler.contains("env::var"), "no switch is read here");
     }

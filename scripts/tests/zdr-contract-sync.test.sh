@@ -226,7 +226,7 @@ GOLDENS=(
   # model-gateway zdr_posture` (every non-GET route has a row) and the gateway
   # tests/space_routes_zdr_classes.rs (every /api/v1/spaces route has a row). The consumers vendor a
   # copy, with the pin, in the same slice as those lints (VENDORED and CONSUMERS rows then).
-  "apps/Model Plane/api/contracts/space-surface.v1.json|7543567fb6d10bc7264c8cd37f9a7e2b7b122469ad0c79657bba02ed175ab73c"
+  "apps/Model Plane/api/contracts/space-surface.v1.json|e5ebbecb59728cd68cbd94c74705f85e0b4d5c4565682732d2dc357333266825"
 
   # WS02-S3: the Space event stream vocabulary (SSE events, cursor grammar, kind registry, closing codes,
   # refs allowlist, HTTP error map). AUTHORED by hand with the slice that serves it (session-core

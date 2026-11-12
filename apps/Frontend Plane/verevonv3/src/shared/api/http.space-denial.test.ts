@@ -35,10 +35,12 @@ describe('extractError details', () => {
     expect(extracted.hints.details).toBeNull()
   })
 
-  it('ignores details that are not an object', () => {
-    for (const details of ['oops', 7, null, ['a']]) {
+  it('ignores details that are neither an object nor an array', () => {
+    for (const details of ['oops', 7, null]) {
       expect(extractError({ error: { code: 'x', message: 'm', details } }, 403).hints.details).toBeNull()
     }
+    // A bare array of details (per-row issues) is kept whole for the caller that reads it.
+    expect(extractError({ error: { code: 'x', message: 'm', details: ['a'] } }, 403).hints.details).toEqual(['a'])
   })
 })
 
