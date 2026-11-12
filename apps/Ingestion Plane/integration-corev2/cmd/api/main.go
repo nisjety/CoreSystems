@@ -236,10 +236,12 @@ func main() {
 		Msg("connection ZDR assessment reconcile")
 	// Retention sweep of the acknowledgement ledger: revoked rows are deleted once they are older than
 	// ZDR_ACK_RETENTION_DAYS, once at start and then every 24 hours. Active rows are never touched, and
-	// with nothing revoked it deletes nothing. Logs carry counts only.
+	// with nothing revoked it deletes nothing. Logs carry counts only. It runs only while the
+	// acknowledgement routes are on (ZDR_ACKNOWLEDGEMENT_ENABLED): with the switch off the sweep does not
+	// start, so revoked rows are kept until it is on again, whatever their age.
 	sweepCtx, cancelSweep := context.WithCancel(context.Background())
 	defer cancelSweep()
-	go runZDRAcknowledgementSweep(sweepCtx, repo, cfg.ZDRAcknowledgementRetentionDays, &logger)
+	startZDRAcknowledgementSweep(sweepCtx, cfg, repo, &logger)
 	// Inbound "forward an email to create a task" pipeline (chat-wave2
 	// mail-task spec, owner ruling 2026-09-28: Postmark inbound, self-forward
 	// only). Always constructed -- Handler itself stays off by default until
@@ -414,6 +416,16 @@ const zdrAcknowledgementSweepInterval = 24 * time.Hour
 
 // zdrAcknowledgementSweepBatch is how many revoked rows one delete statement removes.
 const zdrAcknowledgementSweepBatch = 500
+
+// startZDRAcknowledgementSweep starts the acknowledgement retention sweep only while the acknowledgement
+// routes are switched on (ZDR_ACKNOWLEDGEMENT_ENABLED, strict "true": the same value the routes read).
+// With the switch off nothing is started and no row is deleted.
+func startZDRAcknowledgementSweep(ctx context.Context, cfg config.Config, repo store.ConnectionZDRStore, logger *zerolog.Logger) {
+	if !cfg.ZDRAcknowledgementEnabled {
+		return
+	}
+	go runZDRAcknowledgementSweep(ctx, repo, cfg.ZDRAcknowledgementRetentionDays, logger)
+}
 
 // runZDRAcknowledgementSweep deletes revoked acknowledgements older than the retention window, once on
 // entry and then every 24 hours until ctx ends. A failure is logged and retried on the next tick; the

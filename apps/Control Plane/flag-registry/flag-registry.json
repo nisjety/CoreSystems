@@ -1666,7 +1666,7 @@
       "source": "code",
       "default": "false",
       "stage": "dark",
-      "purpose": "ZDR-Z-13: the connection ZDR acknowledgement routes in integration-corev2. Off, the routes do not exist. Only the literal true turns it on.",
+      "purpose": "ZDR-Z-13: the connection ZDR acknowledgement routes and the retention sweep in integration-corev2. Off, the routes do not exist and the sweep does not run, so revoked rows are kept until it is on. Only the literal true turns it on.",
       "codePath": "apps/Ingestion Plane/integration-corev2/internal/config/config.go"
     },
     {

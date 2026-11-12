@@ -2952,7 +2952,10 @@ func runGDPRDelete(ctx context.Context, cfg ServerConfig, body gdprRequestBody) 
 		}
 		if userID == "" {
 			// An organisation-wide delete is the organisation purge: its ZDR records and acknowledgements
-			// are erased. A user-level delete keeps the revoked rows for the retention window (ZDR_ACK_RETENTION_DAYS) instead; the daily sweep removes them.
+			// are erased. A user-level delete keeps the revoked rows instead. The daily sweep removes them
+			// once they are older than ZDR_ACK_RETENTION_DAYS, but only while ZDR_ACKNOWLEDGEMENT_ENABLED is on;
+			// with the switch off they are kept, with no time limit, until it is on again (D-ZDR-16, owner to
+			// confirm under OD-LEGAL).
 			purged, purgeErr := tx.PurgeOrganizationConnectionZDR(ctx, organizationID)
 			if purgeErr != nil {
 				return purgeErr
