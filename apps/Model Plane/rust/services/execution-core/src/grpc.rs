@@ -1359,18 +1359,30 @@ fn enforce_agent_route(
     })
 }
 
+/// The public identifier shape: 1 to 256 bytes of ASCII alphanumerics or
+/// `-`, `_`, `:` or `.`. The scheduled-step bindings and the Space id check at
+/// the RunAgent and ExecuteStep entries both use this one function.
+fn identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
+        })
+}
+
+/// A Space id is either absent (the run has no Space) or exactly the identifier
+/// shape. It is never trimmed or rewritten, because it is a signed id: a
+/// whitespace-only or malformed value is refused at handler entry, so no later
+/// site can read it as "no Space" while another reads it as a Space.
+fn space_id_shape_ok(space_id: &str) -> bool {
+    space_id.is_empty() || identifier(space_id)
+}
+
 /// Validate the public shape of the scheduled-step lane before it is wired to
 /// any authority or execution adapter. This keeps malformed Temporal activity
 /// input from becoming an implicit wildcard when the lane is enabled later.
 #[allow(clippy::result_large_err)]
 fn validate_scheduled_step_bindings(req: &pb::ExecuteScheduledStepRequest) -> Result<(), Status> {
-    fn identifier(value: &str) -> bool {
-        !value.is_empty()
-            && value.len() <= 256
-            && value.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
-            })
-    }
     fn digest(value: &str) -> bool {
         value.len() == 71
             && value.starts_with("sha256:")
@@ -1491,6 +1503,10 @@ impl ExecutionCore for ExecutionService {
         &self,
         request: Request<pb::ExecuteStepRequest>,
     ) -> Result<Response<pb::ExecuteStepResponse>, Status> {
+        // A malformed Space id is refused before any other work (see `space_id_shape_ok`).
+        if !space_id_shape_ok(&request.get_ref().space_id) {
+            return Err(Status::invalid_argument("space_id_invalid"));
+        }
         let session_bearer = delegated_session_bearer(&request)?;
         let caller = self.auth.authenticate(&request).await?;
         let data_plane_bearer = self
@@ -1969,6 +1985,10 @@ impl ExecutionCore for ExecutionService {
         &self,
         request: Request<pb::RunAgentRequest>,
     ) -> Result<Response<pb::RunAgentResponse>, Status> {
+        // A malformed Space id is refused before any other work (see `space_id_shape_ok`).
+        if !space_id_shape_ok(&request.get_ref().space_id) {
+            return Err(Status::invalid_argument("space_id_invalid"));
+        }
         let session_bearer = delegated_session_bearer(&request)?;
         let caller = self.auth.authenticate(&request).await?;
         let data_plane_bearer = self
@@ -2687,6 +2707,27 @@ mod auth_tests {
                 .code(),
             tonic::Code::InvalidArgument
         );
+    }
+
+    #[test]
+    fn space_id_shape_is_absent_or_an_untrimmed_identifier() {
+        // Absent: an organisation-level run with no Space stays allowed.
+        assert!(space_id_shape_ok(""));
+        assert!(space_id_shape_ok("space_01"));
+        assert!(space_id_shape_ok("spc_01"));
+        assert!(space_id_shape_ok("space-1.a:b"));
+        assert!(space_id_shape_ok(&"a".repeat(256)));
+        // Blank and padded ids are refused; the id is never trimmed into a valid one.
+        assert!(!space_id_shape_ok("  "));
+        assert!(!space_id_shape_ok(" space_01"));
+        assert!(!space_id_shape_ok("space_01\n"));
+        // Malformed ids: separators, query-like characters, non-ASCII, and over-long values.
+        assert!(!space_id_shape_ok("space/01"));
+        assert!(!space_id_shape_ok("space 01"));
+        assert!(!space_id_shape_ok("space_01?x=1"));
+        assert!(!space_id_shape_ok("sp\u{e9}ce"));
+        assert!(!space_id_shape_ok("*"));
+        assert!(!space_id_shape_ok(&"a".repeat(257)));
     }
 
     #[test]
