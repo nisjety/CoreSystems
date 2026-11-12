@@ -114,6 +114,13 @@ services:
       # validates the scheme and rejects loopback/HTTP before it can serve an
       # OAuth callback. Do not inherit the development localhost fallback.
       INTEGRATION_PUBLIC_BASE_URL: ${INTEGRATION_PUBLIC_BASE_URL:?INTEGRATION_PUBLIC_BASE_URL must be the public HTTPS OAuth callback origin}
+      # Integration Core switches, stated off in production. Each is on only for the literal "true". A value
+      # written here overrides integration-corev2/.env, so turning one on is a reviewed change to this file.
+      ZDR_ACKNOWLEDGEMENT_ENABLED: "false"
+      INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED: "false"
+      CUSTOMER_GATEWAY_CONNECTIONS_ENABLED: "false"
+      CREDENTIAL_BINDINGS_ENABLED: "false"
+      CUSTOM_REST_CONNECTORS_ENABLED: "false"
   shipping-core:
     <<: *hardened-runtime
     build:

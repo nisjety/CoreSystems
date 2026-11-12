@@ -186,6 +186,16 @@
       ]
     },
     {
+      "name": "CODEX_SUBSCRIPTION_ENABLED",
+      "kind": "switch",
+      "owner": "ingestion-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "Codex broker for the user's own ChatGPT subscription. Off, the broker is not built. Read as a Go bool: 1, t or true turn it on; on and yes do not. Needs CODEX_SUBSCRIPTION_HOME and CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY.",
+      "codePath": "apps/Ingestion Plane/integration-corev2/internal/config/config.go"
+    },
+    {
       "name": "CONNECTOR_SCOPE_RECORD_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -243,6 +253,16 @@
       ]
     },
     {
+      "name": "CREDENTIAL_BINDINGS_ENABLED",
+      "kind": "switch",
+      "owner": "ingestion-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "Credential-binding admin routes in integration-corev2: an org admin binds a secret to one host, sealed here and never returned. Off, the routes answer 404. Needs the credential encryption key. Only the literal true turns it on.",
+      "codePath": "apps/Ingestion Plane/integration-corev2/internal/config/config.go"
+    },
+    {
       "name": "CRON_SWEEPER_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -251,6 +271,26 @@
       "purpose": "Background cron sweeper in capability-core. Only the exact value false turns it off.",
       "onDefaultReason": "Background sweeper on by default. No compose line sets it, so only the process environment can opt out.",
       "codePath": "apps/Model Plane/go/services/capability-core/cmd/main.go"
+    },
+    {
+      "name": "CUSTOMER_GATEWAY_CONNECTIONS_ENABLED",
+      "kind": "switch",
+      "owner": "ingestion-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "Customer-gateway model connections: an org's own OpenAI-compatible endpoint, sealed here. Needs CUSTOMER_GATEWAY_MODEL_PLANE_API_KEY (or the Codex key) and the encryption key. Off, the routes answer 404. Only the literal true turns it on.",
+      "codePath": "apps/Ingestion Plane/integration-corev2/internal/config/config.go"
+    },
+    {
+      "name": "CUSTOM_REST_CONNECTORS_ENABLED",
+      "kind": "switch",
+      "owner": "ingestion-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "A server-side REST proxy for custom_rest connections, using a sealed credential binding's secret. Needs CREDENTIAL_BINDINGS_ENABLED (config refuses otherwise). Off, the provider is unknown. Only the literal true turns it on.",
+      "codePath": "apps/Ingestion Plane/integration-corev2/internal/config/config.go"
     },
     {
       "name": "DREAMING_LLM_EXTRACTION",
@@ -564,6 +604,17 @@
       "declarations": [
         { "service": "inference-core", "env": "INFERENCE_SPEED_TIER_SPLIT", "default": "false" }
       ]
+    },
+    {
+      "name": "INTEGRATION_RATE_LIMIT_ENABLED",
+      "kind": "switch",
+      "owner": "ingestion-plane",
+      "source": "code",
+      "default": "true",
+      "stage": "ga",
+      "purpose": "Rate limiter on the integration-corev2 API, sized by INTEGRATION_RATE_LIMIT_MAX per INTEGRATION_RATE_LIMIT_WINDOW. Only a Go false value (0, f, false) turns it off; off, no and disabled leave it on.",
+      "onDefaultReason": "A protective control: the API rate-limits every deployment unless a Go false value turns it off.",
+      "codePath": "apps/Ingestion Plane/integration-corev2/internal/config/config.go"
     },
     {
       "name": "INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED",
@@ -1091,6 +1142,17 @@
       "declarations": [
         { "service": "execution-core", "env": "PROVIDER_READ_TOOL_ENABLED", "default": "false" }
       ]
+    },
+    {
+      "name": "PYTRENDS_DEV_ENABLED",
+      "kind": "switch",
+      "owner": "ingestion-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "Dev escape hatch for the pytrends-dev sidecar. Integration Core sends trend requests only when this is on and the environment is local, development or test, and the sidecar answers /report only when the value is exactly 1.",
+      "devOnly": true,
+      "codePath": "apps/Ingestion Plane/integration-corev2/internal/config/config.go"
     },
     {
       "name": "QUARRY_BROWSER_AGENT_ENABLED",
