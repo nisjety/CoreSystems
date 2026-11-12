@@ -1334,7 +1334,7 @@
       "stage": "dark",
       "orgOverridable": false,
       "purpose": "WS13-S6: the thread's active approval grants, with Revoke. Built by W2-WS13-S6-spa-grants. Only the literal true turns it on.",
-      "codePath": "apps/Frontend Plane/verevonv3/src/features/chat/components/ThreadApprovalGrants.tsx"
+      "codePath": "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx"
     },
     {
       "name": "VITE_CHAT_CHANGED_FILES",

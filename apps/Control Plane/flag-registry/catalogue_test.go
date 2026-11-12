@@ -117,3 +117,30 @@ func TestShippedCodeFlagsAreStillRead(t *testing.T) {
 		}
 	}
 }
+
+// TestApprovalScopeGrantsCodePathNamesItsReader pins the codePath of
+// VITE_APPROVAL_SCOPE_GRANTS to the file that reads the switch. ChatPanels.tsx
+// gates the grants card on the literal "true"; ThreadApprovalGrants.tsx only
+// draws the card and never names the variable, so a codePath there leaves
+// TestShippedCodeFlagsAreStillRead red.
+func TestApprovalScopeGrantsCodePathNamesItsReader(t *testing.T) {
+	const (
+		name   = "VITE_APPROVAL_SCOPE_GRANTS"
+		reader = "apps/Frontend Plane/verevonv3/src/features/chat/components/ChatPanels.tsx"
+		gate   = "import.meta.env." + name + " === 'true'"
+	)
+	f, ok := loadShipped(t).Flag(name)
+	if !ok {
+		t.Fatalf("%s is not registered", name)
+	}
+	if f.CodePath != reader {
+		t.Errorf("%s: codePath is %s, want %s", name, f.CodePath, reader)
+	}
+	data, err := os.ReadFile(repoFile(reader))
+	if err != nil {
+		t.Fatalf("%s: read reader: %v", name, err)
+	}
+	if !bytes.Contains(data, []byte(gate)) {
+		t.Errorf("%s: %s does not gate on the literal true (want %q)", name, reader, gate)
+	}
+}
