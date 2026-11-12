@@ -628,7 +628,7 @@ pub(crate) enum Refusal {
     /// The park is not yet due: its earliest resume time has not passed. The run stays parked.
     ParkNotDue,
     /// A question continuation could not be applied: nothing was applied and nothing was
-    /// released. The answer stays recorded and unspent.
+    /// released. The server may already have spent the answer.
     QuestionResumeUnavailable,
     /// A question continuation won the single spend and the answer will never be applied in the
     /// run, so the client may send it once as the next message.
@@ -2166,10 +2166,11 @@ pub(crate) enum QuestionSpend {
     Won(pb::RunQuestion),
     /// The same claim token spent it earlier (a retried continuation): the stored question again.
     Replayed(pb::RunQuestion),
-    /// A claim spent it earlier and it was not this one, or the replay did not hand the answer
-    /// back: it is used or released already.
+    /// A claim spent it earlier and it was not this one: it is used or released already.
     Spent,
-    /// The spend was refused, or its answer cannot be read. Nothing was spent.
+    /// The spend was refused, or its answer cannot be read: the client applies nothing. A refusal
+    /// does not mean nothing was spent: a consumed response whose question is missing means the
+    /// server spent it, and the client still refuses safely.
     Refused(Refusal),
 }
 
@@ -2204,6 +2205,10 @@ impl std::fmt::Debug for QuestionSpend {
 /// `replay_is_fenced` is the effect ledger's switch (`effect::ledger_enabled()`): it is what fences a
 /// second dispatch of the continuation. A same-claim replay (a retried continuation whose first
 /// answer was lost in transit) is accepted only where it is on, as the approval's replay is.
+#[allow(
+    clippy::match_same_arms,
+    reason = "the same-claim replay without its question is named on purpose, not a catch-all"
+)]
 pub(crate) fn classify_question_spend(
     outcome: Result<pb::ConsumeRunQuestionResponse, tonic::Status>,
     replay_is_fenced: bool,
@@ -2256,7 +2261,7 @@ pub(crate) fn classify_question_spend(
     match (response.consumed, response.already_consumed, response.question) {
         (true, false, Some(question)) => QuestionSpend::Won(question),
         (false, true, Some(question)) => QuestionSpend::Replayed(question),
-        (false, true, None) => QuestionSpend::Spent,
+        (false, true, None) => unavailable,
         _ => unavailable,
     }
 }
@@ -4018,6 +4023,105 @@ mod tests {
             let refuses = matches!(code, Code::PermissionDenied | Code::Unauthenticated);
             assert_eq!(matches!(answer, QuestionClaim::Refuse(_)), refuses, "{code:?}");
         }
+    }
+
+    /// Every response shape the single spend can carry, against `replay_is_fenced` and the question's
+    /// presence: 2^5 rows, `false` first. The answers are what [`classify_question_spend`] returns.
+    ///
+    /// Session-core sends exactly three shapes (`consume_question_response`): a win with the question,
+    /// a same-claim replay with it, and another claim's spend without it. The other rows pin the
+    /// refusal each unsent shape gets.
+    #[test]
+    fn classify_question_spend_answers_every_response_shape_and_the_ledger_switch() {
+        let question = run_question(
+            "q_answer",
+            RUN,
+            mp_contracts::user_question::DELIVERY_RESUME,
+            pb::QuestionState::Answered,
+        );
+        let won = QuestionSpend::Won(question.clone());
+        let replayed = QuestionSpend::Replayed(question.clone());
+        let spent = QuestionSpend::Spent;
+        let already = QuestionSpend::Refused(Refusal::ContinuationAlreadyConsumed);
+        let unavailable = QuestionSpend::Refused(Refusal::QuestionResumeUnavailable);
+        // (consumed, already_consumed, same_claim, replay_is_fenced, question present, the answer)
+        let rows = [
+            // Neither consumed nor already consumed: unavailable, whatever else the response says.
+            (false, false, false, false, false, unavailable.clone()),
+            (false, false, false, false, true, unavailable.clone()),
+            (false, false, false, true, false, unavailable.clone()),
+            (false, false, false, true, true, unavailable.clone()),
+            (false, false, true, false, false, unavailable.clone()),
+            (false, false, true, false, true, unavailable.clone()),
+            (false, false, true, true, false, unavailable.clone()),
+            (false, false, true, true, true, unavailable.clone()),
+            // Already consumed by another claim: spent, nothing handed back, the ledger changes nothing.
+            (false, true, false, false, false, spent.clone()),
+            (false, true, false, false, true, spent.clone()),
+            (false, true, false, true, false, spent.clone()),
+            (false, true, false, true, true, spent.clone()),
+            // Already consumed by the same claim, ledger off: refused, and nothing is closed.
+            (false, true, true, false, false, already.clone()),
+            (false, true, true, false, true, already.clone()),
+            // Same claim, ledger on: replayed with the question; without one it is unavailable.
+            (false, true, true, true, false, unavailable.clone()),
+            (false, true, true, true, true, replayed.clone()),
+            // Consumed now: won with the question, unavailable without it. The other flags are not read.
+            (true, false, false, false, false, unavailable.clone()),
+            (true, false, false, false, true, won.clone()),
+            (true, false, false, true, false, unavailable.clone()),
+            (true, false, false, true, true, won.clone()),
+            (true, false, true, false, false, unavailable.clone()),
+            (true, false, true, false, true, won.clone()),
+            (true, false, true, true, false, unavailable.clone()),
+            (true, false, true, true, true, won.clone()),
+            // Consumed and already consumed at once: contradictory, so unavailable.
+            (true, true, false, false, false, unavailable.clone()),
+            (true, true, false, false, true, unavailable.clone()),
+            (true, true, false, true, false, unavailable.clone()),
+            (true, true, false, true, true, unavailable.clone()),
+            (true, true, true, false, false, unavailable.clone()),
+            (true, true, true, false, true, unavailable.clone()),
+            (true, true, true, true, false, unavailable.clone()),
+            (true, true, true, true, true, unavailable.clone()),
+        ];
+        for (consumed, already_consumed, same_claim, fenced, with_question, expected) in rows {
+            let response = pb::ConsumeRunQuestionResponse {
+                consumed,
+                already_consumed,
+                same_claim,
+                question: with_question.then(|| question.clone()),
+                ..Default::default()
+            };
+            assert_eq!(
+                classify_question_spend(Ok(response), fenced),
+                expected,
+                "consumed {consumed}, already_consumed {already_consumed}, same_claim {same_claim}, replay_is_fenced {fenced}, question {with_question}"
+            );
+        }
+    }
+
+    /// The ZDR catalogue trailer (`zdr_durable_mutation_forbidden`) is the refusal of a failed spend
+    /// whatever its code and whatever the ledger says. The same closed words without the trailer are
+    /// an ordinary refusal.
+    #[test]
+    fn classify_question_spend_refuses_the_zdr_trailer_whatever_the_code() {
+        for code in [Code::FailedPrecondition, Code::PermissionDenied, Code::NotFound, Code::Unavailable] {
+            for fenced in [false, true] {
+                let status = mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN.grpc_status(code);
+                assert_eq!(
+                    classify_question_spend(Err(status), fenced),
+                    QuestionSpend::Refused(Refusal::DurableMutationForbidden),
+                    "{code:?}, replay_is_fenced {fenced}"
+                );
+            }
+        }
+        let bare = tonic::Status::failed_precondition("zdr_durable_mutation_forbidden");
+        assert_eq!(
+            classify_question_spend(Err(bare), false),
+            QuestionSpend::Refused(Refusal::QuestionResumeUnavailable),
+            "the words without the trailer"
+        );
     }
 
     const INPUT_STEP_CALL: &str = "ask_user";
