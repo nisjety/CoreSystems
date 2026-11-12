@@ -520,10 +520,10 @@ func agentLaneInput(fireKey string) ScheduledRunInput {
 	}
 }
 
-// TestScheduledRun_AgentLaneCompletesWithWithheldEffects verifies that a contract-bearing fire
+// TestScheduledRun_AgentLaneWithheldEffectsFailNeedsReview verifies that a contract-bearing fire
 // that the start recorded as agent-lane takes one agent step, and that a withheld effect fails the
 // run with the closed code scheduled_agent_needs_review (decision D-f10-4), never as completed.
-func TestScheduledRun_AgentLaneCompletesWithWithheldEffects(t *testing.T) {
+func TestScheduledRun_AgentLaneWithheldEffectsFailNeedsReview(t *testing.T) {
 	env, _, stub := newTestEnv(t)
 	input := agentLaneInput("fire-agent-withheld")
 	env.OnActivity(

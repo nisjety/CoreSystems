@@ -1261,4 +1261,26 @@ mod tests {
 
         assert!(normalize_stream(&make_request("hi", Some("m")), AgenticSubscriptionPolicy::OFF).is_ok());
     }
+
+    /// The attended goal judge relies on this refusal. Its route (`judge_route` in `sse.rs`) names no
+    /// `model_connection_id`, which is safe only because an agentic turn that names a customer-gateway
+    /// connection is refused before any route is chosen (rule 17 / W4-BYO-6). If that refusal is ever
+    /// relaxed, the judge route must carry the connection too.
+    #[test]
+    fn an_agentic_turn_naming_a_customer_gateway_connection_is_refused_before_any_route() {
+        std::env::set_var("MODEL_GATEWAY_BYO_GATEWAY", "true");
+        let mut req = make_request("judge this turn", Some("gpt-5.6-terra"));
+        req.model_connection_id = Some("conn_judge_1".to_owned());
+        req.features = vec!["agentic".to_owned()];
+        // Both entry points, the streaming one with the agentic exception on: the refusal is the
+        // customer-gateway rule, not the subscription switch that admits a read-only run.
+        let streamed = normalize_stream(&req, ON);
+        let unary = normalize(&req);
+        std::env::remove_var("MODEL_GATEWAY_BYO_GATEWAY");
+        for result in [streamed, unary] {
+            let body = error_body(result);
+            assert_eq!(body["code"], "feature_not_supported");
+            assert_eq!(body["error"], CUSTOMER_GATEWAY_TEXT_ONLY_REFUSAL);
+        }
+    }
 }

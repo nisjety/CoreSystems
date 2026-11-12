@@ -751,7 +751,7 @@ func TestInternalRouteFoldsEntitlementsAndAnswersTypedFailures(t *testing.T) {
 	}
 }
 
-func TestRetentionPostureStillOnlyTwoBooleans(t *testing.T) {
+func TestRetentionPostureAnswerHasExactlyFiveFields(t *testing.T) {
 	reader := &fakeRetentionPostureReader{posture: &orgcore.RetentionPosture{ZDRIntent: true, Entitled: true}}
 	t.Setenv(serviceCredentialEnv, webPolicyRegistry())
 	server := NewServer(0, nil, nil, "", "")

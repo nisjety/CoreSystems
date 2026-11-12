@@ -63,12 +63,13 @@ pub fn budget(req: &pb::RunAgentRequest, waived: bool) -> u32 {
 /// [`budget`] with the switch given, so the rule is testable without the environment.
 #[must_use]
 pub fn budget_when(on: bool, req: &pb::RunAgentRequest, waived: bool) -> u32 {
+    // Exact, not trimmed: a whitespace-only Space id is a Space here, as the resume authority reads it.
     let may_ask = on
         && !req.zdr
         && !waived
         && !req.plan_mode
         && req.resume.is_none()
-        && req.space_id.trim().is_empty();
+        && req.space_id.is_empty();
     if !may_ask {
         return 0;
     }
@@ -99,7 +100,7 @@ pub fn resume_delivery_when(
         && !waived
         && !req.plan_mode
         && req.resume.is_none()
-        && req.space_id.trim().is_empty()
+        && req.space_id.is_empty()
         && req.provider_hint.is_empty()
 }
 
@@ -408,6 +409,8 @@ mod tests {
         assert_eq!(budget_when(true, &planning, false), 0, "a plan run is never asked");
         let in_space = pb::RunAgentRequest { space_id: "space-1".to_owned(), ..request(3) };
         assert_eq!(budget_when(true, &in_space, false), 0, "a Space run is never asked");
+        let blank_space = pb::RunAgentRequest { space_id: " ".to_owned(), ..request(3) };
+        assert_eq!(budget_when(true, &blank_space, false), 0, "a whitespace Space id is a Space");
         let continuation = pb::RunAgentRequest {
             resume: Some(pb::AgentResume::default()),
             ..request(3)
@@ -522,7 +525,7 @@ mod tests {
         let space = pb::RunAgentRequest { space_id: "space-1".to_owned(), ..request(3) };
         assert!(!resume_delivery_when(true, true, &space, false, 0), "a Space run");
         let blank = pb::RunAgentRequest { space_id: "  ".to_owned(), ..request(3) };
-        assert!(resume_delivery_when(true, true, &blank, false, 0), "a blank Space id is none");
+        assert!(!resume_delivery_when(true, true, &blank, false, 0), "a whitespace Space id is a Space");
         let pinned = pb::RunAgentRequest { provider_hint: "anthropic".to_owned(), ..request(3) };
         assert!(!resume_delivery_when(true, true, &pinned, false, 0), "a pinned run");
     }

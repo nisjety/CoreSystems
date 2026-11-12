@@ -92,6 +92,8 @@ moves a request between batches, never within-file order. Mark a batch done by e
 | 4 | T5 (M2.2) | WS11-S5 stream `MODEL_PLANE_SPACE_EVENTS` and durable `convex-space-attention` grants for `session-core-runtime` and `application-convex-model`; WS11-S5/S9 notification-core `space-attention` principal | open |
 | 5 | T6/T7 (M2.3 to M3.1) | WS14-S2 service-credential scopes and gRPC writer audit; WS17-S4 entitlement scopes; WS18-S2 `capability:owner-action:health:write` and probe scope (execution-core blocks); WS18-S4 `SPACE_AGENT_ADMISSION` | open |
 | 6 | T8 (M3.2) | WS20-S2 and WS20-S6 `browser:view` row (model-gateway block on `quarry`) | open |
+| 7 | none (filed after batch 6) | W3-EP-9-W3-a: `org:browser-site:read:any` on audience `org-core` for `execution-core` and `model-gateway` (compose credentials) | open |
+| 8 | none (filed after batch 6) | P0-D2-481: `session:memory-controls:read` on audience `session-core` for `orchestrator-core` | open |
 
 The WS-level scope names above come from each workstream's file-level table; the authoritative text for a request
 is its own slice row. When a slice builds, it adds its request to this table in the same PR (append a row cell,

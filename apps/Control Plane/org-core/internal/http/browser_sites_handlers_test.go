@@ -449,7 +449,7 @@ func TestOnlyTheBrowserBrokerMayHoldTheBrokerResolveScope(t *testing.T) {
   {"principal":"audit-core","audience":"org-core","token":%q,"scopes":["org:browser-site:read:any"]}
 ]`, browserBrokerTestToken)
 	if _, err := parseServiceCredentials(auditWithScope); err == nil {
-		t.Fatal("only browser-broker may hold org:browser-site:read:any")
+		t.Fatal("only the three allowed holders may hold org:browser-site:read:any: browser-broker, model-gateway, execution-core")
 	}
 	if _, err := parseServiceCredentials(browserSiteRegistry()); err != nil {
 		t.Fatalf("the browser-broker registry must parse: %v", err)
