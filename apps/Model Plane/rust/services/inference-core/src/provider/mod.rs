@@ -286,8 +286,28 @@ const VISION_DENYLIST_PREFIXES: &[&str] = &["deepseek", "o1-mini", "gpt-3.5"];
 /// Embedding and reranking ids carry no image input whatever their provider says.
 const VISION_DENYLIST_MARKERS: &[&str] = &["embed", "rerank"];
 
-/// True when `model` is on the vision denylist, built-in or `extra`.
-fn vision_denylisted(model: &str, extra: Option<&str>) -> bool {
+/// Parses the comma list of `INFERENCE_VISION_MODEL_DENYLIST_EXTRA` into its entries, each trimmed
+/// and lowercased, with empty entries dropped. An absent or blank list yields none.
+fn parse_vision_denylist_extra(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(|entry| entry.trim().to_ascii_lowercase())
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
+/// The extra denylist, read from the environment and parsed once per process, so a listing that
+/// asks about many models reads the environment once rather than once per model.
+fn vision_denylist_extra() -> &'static [String] {
+    static EXTRA: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    EXTRA.get_or_init(|| {
+        parse_vision_denylist_extra(std::env::var(VISION_DENYLIST_EXTRA_ENV).ok().as_deref())
+    })
+}
+
+/// True when `model` is on the vision denylist, built-in or in `extra`, the entries that
+/// [`parse_vision_denylist_extra`] produced. Pure: it reads no environment.
+fn vision_denylisted(model: &str, extra: &[String]) -> bool {
     let model = model.trim().to_ascii_lowercase();
     if model.is_empty() {
         return false;
@@ -301,15 +321,9 @@ fn vision_denylisted(model: &str, extra: Option<&str>) -> bool {
     {
         return true;
     }
-    extra.is_some_and(|extra| {
-        extra
-            .split(',')
-            .map(|entry| entry.trim().to_ascii_lowercase())
-            .filter(|entry| !entry.is_empty())
-            .any(|entry| match entry.strip_suffix('*') {
-                Some(prefix) => model.starts_with(prefix),
-                None => model == entry,
-            })
+    extra.iter().any(|entry| match entry.strip_suffix('*') {
+        Some(prefix) => model.starts_with(prefix),
+        None => model == entry.as_str(),
     })
 }
 
@@ -318,11 +332,7 @@ fn vision_denylisted(model: &str, extra: Option<&str>) -> bool {
 /// flag alone is per provider, so it over-claims for the families above.
 #[must_use]
 pub fn model_accepts_images(caps: &ProviderCapabilities, model: &str) -> bool {
-    caps.supports_vision
-        && !vision_denylisted(
-            model,
-            std::env::var(VISION_DENYLIST_EXTRA_ENV).ok().as_deref(),
-        )
+    caps.supports_vision && !vision_denylisted(model, vision_denylist_extra())
 }
 
 /// The feature list `list_models` advertises for one model: the provider's
@@ -1598,13 +1608,23 @@ mod vision_tests {
 
     #[test]
     fn the_extra_denylist_takes_exact_ids_and_trailing_wildcard_prefixes() {
-        let extra = Some(" my-text-model , Llama-*,,");
-        assert!(vision_denylisted("my-text-model", extra));
-        assert!(vision_denylisted("llama-3-70b", extra));
-        assert!(!vision_denylisted("my-text-model-2", extra), "no wildcard, no prefix match");
-        assert!(!vision_denylisted("gpt-4o", extra));
-        assert!(!vision_denylisted("gpt-4o", None));
-        assert!(!vision_denylisted("gpt-4o", Some("")));
+        let extra = parse_vision_denylist_extra(Some(" my-text-model , Llama-*,,"));
+        assert!(vision_denylisted("my-text-model", &extra));
+        assert!(vision_denylisted("llama-3-70b", &extra));
+        assert!(!vision_denylisted("my-text-model-2", &extra), "no wildcard, no prefix match");
+        assert!(!vision_denylisted("gpt-4o", &extra));
+        assert!(!vision_denylisted("gpt-4o", &parse_vision_denylist_extra(None)));
+        assert!(!vision_denylisted("gpt-4o", &parse_vision_denylist_extra(Some(""))));
+    }
+
+    #[test]
+    fn the_extra_list_parses_to_trimmed_lowercase_entries_and_drops_blanks() {
+        assert_eq!(
+            parse_vision_denylist_extra(Some(" My-Model , Llama-*,, ")),
+            vec!["my-model".to_owned(), "llama-*".to_owned()]
+        );
+        assert!(parse_vision_denylist_extra(None).is_empty());
+        assert!(parse_vision_denylist_extra(Some(" , ,")).is_empty());
     }
 
     #[test]
