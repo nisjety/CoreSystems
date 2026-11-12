@@ -4326,6 +4326,15 @@ pub async fn invoke_stream_sse(
     } else {
         Vec::new()
     };
+    // The org's agent policy withdraws the inline code interpreter from an Ask turn under a lockdown cap
+    // (D-f06-B, O-14), whatever the turn asked for. Off, shadow, a read-only or other cap, and a policy that
+    // cannot be read leave the list as it was. A turn with staged files and no code tool is refused below, as
+    // any turn without the tool is.
+    tool_defs = crate::org_agent_policy::ask_turn_tools_under_policy(
+        crate::org_agent_policy::policy_mode(),
+        tool_defs,
+        org_mode_cap,
+    );
     if conversation_only {
         tool_defs.retain(|tool| crate::tool_loop::conversation_tool_allowed(&tool.name));
         prompt.conversation_scope = Some(ChatMessage {
@@ -27966,6 +27975,38 @@ mod ask_turn_tests {
             + declared.len();
         let end = inference[start..].find('"').expect("a closing quote");
         assert_eq!(&inference[start..start + end], VISION_UNSUPPORTED);
+    }
+
+    /// The Ask turn's tool list is held to the org's agent policy with the cap the admission read (D-f06-B,
+    /// O-14), and that happens before the staged-file check that needs the code tool. A turn that skipped it
+    /// would offer the inline code interpreter under a lockdown cap.
+    #[test]
+    fn the_ask_turn_tool_list_is_held_to_the_org_policy_before_the_staged_files_are_checked() {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let body = source
+            .split("pub async fn invoke_stream_sse(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n#[cfg(test)]").next())
+            .expect("invoke_stream_sse is in this file");
+        let admitted = body
+            .find("let org_mode_cap = match crate::org_agent_policy::admit_turn(")
+            .expect("the turn's admission reads the org's mode cap");
+        let held = body
+            .find("crate::org_agent_policy::ask_turn_tools_under_policy(")
+            .expect("the Ask turn's tool list is held to the org policy");
+        let staged = body
+            .find("if !staged.is_empty() && !tool_defs.iter().any(|tool| tool.name == \"code_interpreter\")")
+            .expect("staged files need the code tool");
+        assert!(
+            admitted < held && held < staged,
+            "the admission reads the cap, the org policy holds the tool list, then the staged-file check runs"
+        );
+        assert_eq!(
+            body.matches("crate::org_agent_policy::ask_turn_tools_under_policy(")
+                .count(),
+            1,
+            "one withdrawal per turn"
+        );
     }
 }
 

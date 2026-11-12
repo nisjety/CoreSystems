@@ -23,7 +23,9 @@ use axum::http::StatusCode;
 use dashmap::DashMap;
 use mp_contracts::agent_mode::{self, AgentMode, Resolved};
 use mp_contracts::autonomy;
-use mp_contracts::model_plane::v1::{AutonomyRung, OrgPolicyContext, WebPolicyContext};
+use mp_contracts::model_plane::v1::{
+    AutonomyRung, OrgPolicyContext, ToolDefinition, WebPolicyContext,
+};
 use mp_contracts::org_agent_policy::{
     is_https_origin, Kind, SettingDef, MCP_APPS_NETWORK_ORIGINS, SETTINGS,
 };
@@ -625,6 +627,27 @@ pub async fn admit_standalone_run(
             }
         },
     }
+}
+
+/// The inline code interpreter, which a lockdown cap withdraws from an Ask turn (D-f06-B, O-14).
+const CODE_INTERPRETER_TOOL: &str = "code_interpreter";
+
+/// Withdraws the inline code interpreter from an Ask turn whose org caps its mode at lockdown (D-f06-B, O-14).
+/// `org_cap` is the mode cap [`admit_turn`] read for the turn. Enforced with a `Lockdown` cap, the tool is
+/// withdrawn whatever the turn asked for, a client's declared copy included. A read-only cap keeps it, because
+/// a read-only run may still compute and write files, and so does every other cap. Off and shadow never
+/// withdraw it: they apply no cap to an Ask turn, so `org_cap` is `None` for them. A policy that cannot be
+/// read is `None` too, so the turn keeps the floor it had.
+#[must_use]
+pub fn ask_turn_tools_under_policy(
+    mode: PolicyMode,
+    mut tools: Vec<ToolDefinition>,
+    org_cap: Option<AgentMode>,
+) -> Vec<ToolDefinition> {
+    if mode == PolicyMode::Enforce && org_cap == Some(AgentMode::Lockdown) {
+        tools.retain(|tool| tool.name != CODE_INTERPRETER_TOOL);
+    }
+    tools
 }
 
 /// The HTTP status, and the words a person reads, of a refusal the org policy makes: a paused org or a mode cap that
@@ -1633,4 +1656,165 @@ mod tests {
         );
     }
 
+    /// The builtin tools an Ask turn starts from, with a client's declared copy of the code interpreter added last.
+    fn ask_turn_tools_with_a_declared_copy() -> Vec<ToolDefinition> {
+        let mut tools = crate::tool_loop::builtin_tool_defs_with(false);
+        tools.push(ToolDefinition {
+            name: CODE_INTERPRETER_TOOL.to_owned(),
+            description: "a client's copy".to_owned(),
+            parameters_json: "{}".to_owned(),
+        });
+        tools
+    }
+
+    fn tool_names(tools: &[ToolDefinition]) -> Vec<String> {
+        tools.iter().map(|tool| tool.name.clone()).collect()
+    }
+
+    #[test]
+    fn org_agent_policy_lockdown_withdraws_the_ask_turns_code_interpreter_and_nothing_else() {
+        let offered = ask_turn_tools_with_a_declared_copy();
+        let before = tool_names(&offered);
+        assert_eq!(
+            before
+                .iter()
+                .filter(|name| *name == CODE_INTERPRETER_TOOL)
+                .count(),
+            2,
+            "the builtin list and a client copy both name it"
+        );
+        let withdrawn =
+            ask_turn_tools_under_policy(PolicyMode::Enforce, offered, Some(AgentMode::Lockdown));
+        let expected: Vec<String> = before
+            .into_iter()
+            .filter(|name| name != CODE_INTERPRETER_TOOL)
+            .collect();
+        assert_eq!(
+            tool_names(&withdrawn),
+            expected,
+            "a lockdown cap withdraws both copies and nothing else"
+        );
+    }
+
+    #[test]
+    fn org_agent_policy_read_only_and_normal_caps_keep_the_code_interpreter_on_an_ask_turn() {
+        let offered = ask_turn_tools_with_a_declared_copy();
+        for cap in [
+            Some(AgentMode::ReadOnly),
+            Some(AgentMode::AskFirst),
+            Some(AgentMode::Auto),
+            None,
+        ] {
+            assert_eq!(
+                tool_names(&ask_turn_tools_under_policy(
+                    PolicyMode::Enforce,
+                    offered.clone(),
+                    cap
+                )),
+                tool_names(&offered),
+                "{cap:?} keeps the Ask turn's list as it was"
+            );
+        }
+    }
+
+    #[test]
+    fn org_agent_policy_switch_off_or_shadow_never_withdraws_the_code_interpreter() {
+        let offered = ask_turn_tools_with_a_declared_copy();
+        for mode in [PolicyMode::Off, PolicyMode::Shadow] {
+            assert_eq!(
+                tool_names(&ask_turn_tools_under_policy(
+                    mode,
+                    offered.clone(),
+                    Some(AgentMode::Lockdown)
+                )),
+                tool_names(&offered),
+                "{mode:?} changes nothing, even against a lockdown cap"
+            );
+        }
+    }
+
+    /// Admits one Ask turn under `mode` against a registry that answers `body` for `org`, then applies the Ask turn's
+    /// rule to the builtin list. Returns the tool names offered and how many times the registry was asked.
+    async fn ask_turn_offer(mode: PolicyMode, org: &str, body: Value) -> (Vec<String>, usize) {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(document(org, 1, body)))
+            .mount(&server)
+            .await;
+        // A plain turn is never refused by the policy, so admission answers the cap it read, or nothing.
+        let cap = admit_turn(
+            mode,
+            &OrgPolicyCache::new(),
+            &reqwest::Client::new(),
+            &server.uri(),
+            org,
+            "token",
+            false,
+        )
+        .await
+        .expect("a plain turn is never refused by the policy");
+        let asked = server.received_requests().await.unwrap_or_default().len();
+        let offered =
+            ask_turn_tools_under_policy(mode, crate::tool_loop::builtin_tool_defs_with(false), cap);
+        (tool_names(&offered), asked)
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_a_lockdown_withdraws_the_ask_turn_code_interpreter() {
+        let (offered, asked) = ask_turn_offer(
+            PolicyMode::Enforce,
+            "org-ask-lock",
+            json!({"mode_cap": "lockdown"}),
+        )
+        .await;
+        assert!(
+            !offered.iter().any(|name| name == CODE_INTERPRETER_TOOL),
+            "an enforced lockdown withdraws it"
+        );
+        assert_eq!(asked, 1, "the turn reads the policy once");
+        let (offered, _) = ask_turn_offer(
+            PolicyMode::Enforce,
+            "org-ask-bundle",
+            json!({"lockdown": true}),
+        )
+        .await;
+        assert!(
+            !offered.iter().any(|name| name == CODE_INTERPRETER_TOOL),
+            "the lockdown bundle is the same cap"
+        );
+        for (org, body) in [
+            ("org-ask-ro", json!({"mode_cap": "read_only"})),
+            ("org-ask-ask", json!({"mode_cap": "ask_first"})),
+            ("org-ask-default", json!({})),
+        ] {
+            let (offered, _) = ask_turn_offer(PolicyMode::Enforce, org, body).await;
+            assert!(
+                offered.iter().any(|name| name == CODE_INTERPRETER_TOOL),
+                "{org} keeps the code interpreter"
+            );
+        }
+        let (offered, asked) = ask_turn_offer(
+            PolicyMode::Off,
+            "org-ask-off",
+            json!({"mode_cap": "lockdown"}),
+        )
+        .await;
+        assert!(
+            offered.iter().any(|name| name == CODE_INTERPRETER_TOOL),
+            "switch off keeps it"
+        );
+        assert_eq!(asked, 0, "switch off makes no call to the registry");
+        let (offered, asked) = ask_turn_offer(
+            PolicyMode::Shadow,
+            "org-ask-shadow",
+            json!({"mode_cap": "lockdown"}),
+        )
+        .await;
+        assert!(
+            offered.iter().any(|name| name == CODE_INTERPRETER_TOOL),
+            "shadow reads the lockdown and still keeps it"
+        );
+        assert_eq!(asked, 1, "shadow reads the policy");
+    }
 }
