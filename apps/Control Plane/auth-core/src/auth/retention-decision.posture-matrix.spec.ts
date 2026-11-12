@@ -246,12 +246,15 @@ describe('RetentionDecisionService against the ZDR posture matrix', () => {
     return { service: moduleRef.get(RetentionDecisionService), read };
   }
 
+  // The matrix rows model no request provider. A waiver row names the waiver's
+  // provider, as the gateway does on a subscription turn; every other row names
+  // none, so the rows that are not waivers run as they did before.
   const input = (row: MatrixRow) => ({
     userId: 'user-a',
     orgId: 'org-a',
     sessionId: 'session-a',
     connectionId: row.inputs.connection === 'none' ? null : CONNECTION_ID,
-    provider: null,
+    provider: row.inputs.waiver_route === true ? WAIVER_PROVIDER : null,
     explicitZdr: row.inputs.explicit_zdr,
   });
 
@@ -381,12 +384,14 @@ describe('RetentionDecisionService against the ZDR posture matrix', () => {
       >),
       ...overrides,
     });
+    // The request names the waiver's provider; the tests that want no provider
+    // say so.
     const ask = {
       userId: 'user-a',
       orgId: 'org-a',
       sessionId: 'session-a',
       connectionId: CONNECTION_ID,
-      provider: null,
+      provider: WAIVER_PROVIDER,
       explicitZdr: false,
     };
 
@@ -431,6 +436,88 @@ describe('RetentionDecisionService against the ZDR posture matrix', () => {
       await expect(
         service.decide({ ...ask, provider: WAIVER_PROVIDER }),
       ).resolves.toMatchObject({ kind: 'decided', decision: 'waived' });
+    });
+
+    it('never waives a request that names no provider, and signs nothing for it', async () => {
+      orgCoreServes(zdrOrg);
+      const signs = jest.fn();
+      const counting: RetentionDecisionSigner = {
+        available: () => signer.available(),
+        sign: (claims) => {
+          signs(claims);
+          return signer.sign(claims);
+        },
+        verify: (token) => signer.verify(token),
+      };
+      const { service } = await serviceWith(true, posture({}), counting);
+      await expect(
+        service.decide({ ...ask, provider: null }),
+      ).resolves.toMatchObject({
+        kind: 'refused',
+        code: 'zdr_waiver_route_mismatch',
+      });
+      expect(signs).not.toHaveBeenCalled();
+      // The same connection, asked for with its own provider, is waived.
+      await expect(
+        service.decide({ ...ask, provider: WAIVER_PROVIDER }),
+      ).resolves.toMatchObject({ kind: 'decided', decision: 'waived' });
+      expect(signs).toHaveBeenCalledTimes(1);
+    });
+
+    it('never waives a request that names no provider for a connection of another provider', async () => {
+      orgCoreServes(zdrOrg);
+      const { service } = await serviceWith(
+        true,
+        posture({ providerKey: 'some-other-provider' }),
+      );
+      await expect(
+        service.decide({ ...ask, provider: null }),
+      ).resolves.toMatchObject({
+        kind: 'refused',
+        code: 'zdr_connection_not_supported',
+      });
+      await expect(
+        service.decide({ ...ask, provider: 'some-other-provider' }),
+      ).resolves.toMatchObject({
+        kind: 'refused',
+        code: 'zdr_connection_not_supported',
+      });
+    });
+
+    it('keeps the other refusals and the non-waived answers for a request that names no provider', async () => {
+      orgCoreServes(zdrOrg);
+      const unacknowledged = await serviceWith(
+        true,
+        posture({ ackState: 'required', ackId: '' }),
+      );
+      await expect(
+        unacknowledged.service.decide({ ...ask, provider: null }),
+      ).resolves.toMatchObject({
+        kind: 'refused',
+        code: 'zdr_connection_not_acknowledged',
+      });
+      const off = await serviceWith(false, posture({}));
+      await expect(
+        off.service.decide({ ...ask, provider: null }),
+      ).resolves.toMatchObject({
+        kind: 'refused',
+        code: 'zdr_connection_not_supported',
+      });
+      const supported = await serviceWith(
+        true,
+        posture({
+          capability: 'supported',
+          ackState: 'not_required',
+          ackId: '',
+        }),
+      );
+      await expect(
+        supported.service.decide({ ...ask, provider: null }),
+      ).resolves.toMatchObject({
+        kind: 'decided',
+        decision: 'zdr',
+        reason: 'connection_supports_zdr',
+      });
     });
 
     it('refuses as unavailable when the signer has no key, and never signs with the switch off', async () => {
@@ -650,6 +737,30 @@ describe('RetentionDecisionService against the ZDR posture matrix', () => {
         action: 'retry',
       });
       expect(res.status).toHaveBeenCalledWith(503);
+    });
+
+    it('answers a waived decision that names no provider with a typed 412 refusal, no token and one audit event', async () => {
+      const { controller, nats } = build({});
+      const res = response();
+      const answer = (await controller.decide(bearer, request, res as never, {
+        ...validBody,
+        provider: null,
+      })) as { data?: unknown; error?: Record<string, unknown> };
+      expect(answer.data).toBeUndefined();
+      expect(answer.error).toMatchObject({
+        code: 'zdr_waiver_route_mismatch',
+        retryable: false,
+      });
+      expect(res.status).toHaveBeenCalledWith(412);
+      expect(nats.publishAuditDurable).toHaveBeenCalledTimes(1);
+      const [, payload] = nats.publishAuditDurable.mock.calls[0] as [
+        string,
+        Record<string, unknown>,
+      ];
+      expect(payload).toMatchObject({
+        outcome: 'zdr_waiver_route_mismatch',
+        details: { decision: 'refuse', decision_jti: '' },
+      });
     });
 
     it('keeps a non-waived answer when the audit event cannot be published', async () => {

@@ -44,8 +44,11 @@ import {
  *   7. O and an unsupported connection: the kill switch off, a connection with
  *      no waiver route, or a provider outside WAIVER_PROVIDERS refuses
  *      `zdr_connection_not_supported`; no acknowledgement in force refuses
- *      `zdr_connection_not_acknowledged`; otherwise `waived`, signed for one
- *      user, one connection and one session for 60 s.
+ *      `zdr_connection_not_acknowledged`; a request that names no provider
+ *      refuses `zdr_waiver_route_mismatch` (a waiver binds the route the
+ *      request names, and the Model Plane refuses one on the default chain);
+ *      otherwise `waived`, signed for one user, one connection and one session
+ *      for 60 s.
  *
  * The decision binds sub, org, sid, connection, provider, ack_id and digest
  * from the session and the integration-corev2 answer, never from the request
@@ -186,7 +189,10 @@ export type RetentionDecisionInput = Readonly<{
   sessionId: string;
   /** Connection the turn names, or null. */
   connectionId: string | null;
-  /** Provider the request names, or null. */
+  /**
+   * Provider the request names, or null for the default chain. A waiver is
+   * never decided for a request that names no provider (step 7).
+   */
   provider: string | null;
   /** The turn asked for ZDR itself (Temporary chat, x-zdr, body zdr). */
   explicitZdr: boolean;
@@ -368,6 +374,12 @@ export class RetentionDecisionService {
     }
     if (connection.ackState !== 'acknowledged') {
       return this.refused('zdr_connection_not_acknowledged', orgZdr, facts);
+    }
+    // The mismatch check above runs only when a provider is named, so a waiver
+    // must check its own: a request that names none is on the default chain,
+    // which a waiver never covers, so none is minted for it.
+    if (input.provider === null) {
+      return this.refused('zdr_waiver_route_mismatch', orgZdr, facts);
     }
     if (!this.signer.available()) {
       return this.refused('zdr_decision_unavailable', orgZdr, facts);
