@@ -80,6 +80,8 @@ const (
 	CodeTypedText Code = "procedure_typed_text"
 	// CodeRedactedMarker means a string carries a redaction marker.
 	CodeRedactedMarker Code = "procedure_redacted_marker"
+	// CodeNulCharacter means a string or a key carries a NUL character, which jsonb cannot store.
+	CodeNulCharacter Code = "procedure_nul_character"
 	// CodeBadSlot means a slot is malformed, duplicated, unused, or a typed step has none.
 	CodeBadSlot Code = "procedure_bad_slot"
 	// CodeBadName means the procedure name is empty, too long, or has a control character.
@@ -252,8 +254,9 @@ func marshalCanonical(v any) ([]byte, error) {
 }
 
 // scan walks a decoded tree and returns it with numbers normalised. It refuses an
-// approval_grant_id key anywhere, a string (or key) containing "[redacted" in any case, and nesting
-// deeper than maxDepth. A refusal never repeats the offending value.
+// approval_grant_id key anywhere, a string (or key) containing "[redacted" in any case, a string (or
+// key) with a NUL character (jsonb cannot store one), and nesting deeper than maxDepth. A refusal
+// never repeats the offending value.
 func scan(v any, depth int) (any, error) {
 	if depth > maxDepth {
 		return nil, refuse(CodeBodyTooDeep, "the body nests deeper than %d levels", maxDepth)
@@ -266,6 +269,9 @@ func scan(v any, depth int) (any, error) {
 			}
 			if hasRedactionMarker(k) {
 				return nil, refuse(CodeRedactedMarker, "a key carries a redaction marker")
+			}
+			if strings.ContainsRune(k, 0) {
+				return nil, refuse(CodeNulCharacter, "a key carries a NUL character")
 			}
 			out, err := scan(child, depth+1)
 			if err != nil {
@@ -287,6 +293,9 @@ func scan(v any, depth int) (any, error) {
 		if hasRedactionMarker(t) {
 			return nil, refuse(CodeRedactedMarker, "a string carries a redaction marker")
 		}
+		if strings.ContainsRune(t, 0) {
+			return nil, refuse(CodeNulCharacter, "a string carries a NUL character")
+		}
 		return t, nil
 	case json.Number:
 		if i, err := strconv.ParseInt(string(t), 10, 64); err == nil {
@@ -295,6 +304,11 @@ func scan(v any, depth int) (any, error) {
 		f, err := strconv.ParseFloat(string(t), 64)
 		if err != nil {
 			return nil, refuse(CodeInvalidJSON, "a number is out of range")
+		}
+		if f == 0 {
+			// A negative zero encodes as -0, which jsonb reads back as 0 and which re-canonicalizes to a
+			// different digest. Keep the one positive zero so the digest survives the round trip.
+			return float64(0), nil
 		}
 		return f, nil
 	default:

@@ -172,7 +172,7 @@ func TestOrgRetentionReadScopeIsMachineOnly(t *testing.T) {
 // accepted for a machine principal, and nothing beside the reviewed names is
 // accepted (a near-miss spelling is an unknown scope, which fails startup).
 func TestOrgKeysAndWebPolicyScopesAreMachineOnly(t *testing.T) {
-	for _, scope := range []string{"org:keys:wrap:any", "org:keys:unwrap:any", "org:web-policy:read:any"} {
+	for _, scope := range []string{"org:keys:wrap:any", "org:keys:unwrap:any", "org:keys:destroy:any", "org:web-policy:read:any"} {
 		if _, err := parseServiceCredentials(orgServiceTestRegistry(scope)); err == nil {
 			t.Fatalf("expected %s to be refused for the gateway principal", scope)
 		}
@@ -187,9 +187,17 @@ func TestOrgKeysAndWebPolicyScopesAreMachineOnly(t *testing.T) {
 			t.Fatalf("machine principal with %s rejected: credentials=%d err=%v", scope, len(credentials), err)
 		}
 	}
-	for _, scope := range []string{"org:keys:destroy:any", "org:keys:rotate:any", "org:keys:read:any", "org:web-policy:write:any", "org:web-policy:read:self"} {
+	for _, scope := range []string{"org:keys:rotate:any", "org:keys:read:any", "org:web-policy:write:any", "org:web-policy:read:self"} {
 		if _, err := parseServiceCredentials(`[{"principal":"quarry-edge","audience":"org-core","token":"fedcba9876543210fedcba9876543210","scopes":["` + scope + `"]}]`); err == nil {
 			t.Fatalf("expected unreviewed scope %s to fail startup validation", scope)
+		}
+	}
+	// The destroy scope crypto-shreds an org irreversibly, so quarry-edge is the
+	// only principal that may hold it (Q2-WS17.E2a): every other machine principal
+	// is refused at startup, as the gateway is for any :any scope.
+	for _, other := range []string{"auth-core", "billing-core", "session-core"} {
+		if _, err := parseServiceCredentials(`[{"principal":"` + other + `","audience":"org-core","token":"fedcba9876543210fedcba9876543210","scopes":["org:keys:destroy:any"]}]`); err == nil {
+			t.Fatalf("expected org:keys:destroy:any to be refused for %s", other)
 		}
 	}
 }

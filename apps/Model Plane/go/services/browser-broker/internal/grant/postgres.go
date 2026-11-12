@@ -455,6 +455,9 @@ func (s *PgStore) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalP
 				return ErrDeriveWidensParent
 			}
 		}
+		if err := parent.WebPolicy.checkDeny(domains); err != nil {
+			return err
+		}
 		scopes, err := NormalizeSensitiveScopes(
 			p.AllowedActions, p.AllowedFrameIDs, p.AllowedDialogIDs, p.AllowedArtifactIDs,
 		)

@@ -198,7 +198,7 @@ func MountEvents(r chi.Router, db store.DB, apiKey string, sink notify.Sink, opt
 			}
 			fanoutJobWebhook(db, batch[i], fanoutOrg)
 			notifyOnChange(sink, batch[i])
-			notifyOnScheduleRun(db, notices.scheduleSink, batch[i])
+			notifyOnScheduleRun(db, notices.scheduleSink, batch[i], fanoutOrg)
 		}
 		httpx.WriteJSON(w, r, http.StatusCreated, map[string]any{"accepted": len(batch)})
 	})

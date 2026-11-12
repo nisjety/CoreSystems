@@ -1,6 +1,7 @@
 package resources
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/triodelab/quarry-v2/pkg/quarrycontracts"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/httpx"
+	"github.com/triodelab/quarry-v2/services/quarry-control/internal/notify"
 	"github.com/triodelab/quarry-v2/services/quarry-control/internal/store"
 )
 
@@ -165,6 +167,71 @@ func TestRegisterRun_SkippedRowIsTerminalWithEvent(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected a schedule_skipped event with the reason, got %d events", len(events))
+	}
+}
+
+// skipNoticeCapture is a notify.Sink that keeps the schedule notices it is asked to
+// send. Only NotifyScheduleRun matters to this test.
+type skipNoticeCapture struct {
+	noticeTypes []string
+	payloads    []map[string]string
+}
+
+func (s *skipNoticeCapture) NotifyChange(context.Context, string, string, string, map[string]any) error {
+	return nil
+}
+
+func (s *skipNoticeCapture) NotifyScheduleRun(_ context.Context, _, _, _, noticeType string, _ bool, payload map[string]string) error {
+	s.noticeTypes = append(s.noticeTypes, noticeType)
+	s.payloads = append(s.payloads, payload)
+	return nil
+}
+
+// A skipped fire's notice carries the fire's closed skip code as its reason, so the
+// edge's specific reasons and the runtime sync's skipped_overlap reach the creator. A
+// reason outside the closed vocabulary, or none, is the preflight_denied fallback.
+func TestSkippedFireNoticeCarriesClosedSkipReason(t *testing.T) {
+	t.Parallel()
+	db := store.NewMemory()
+	sink := &skipNoticeCapture{}
+	r := chi.NewRouter()
+	r.Use(httpx.RequestID)
+	MountSchedules(r, db, WithScheduleNotices(sink))
+	s := seedExecutableSchedule(t, db, "batch", true)
+
+	cases := []struct{ key, reason, want string }{
+		{"skip_overlap", "skipped_overlap", "skipped_overlap"},
+		{"skip_zdr", "skipped_zdr", "skipped_zdr"},
+		{"skip_posture", "skipped_posture_unknown", "skipped_posture_unknown"},
+		{"skip_entitlement", "skipped_no_entitlement", "skipped_no_entitlement"},
+		{"skip_kind", "skipped_kind_disabled", "skipped_kind_disabled"},
+		{"skip_disabled", "skipped_disabled", "skipped_disabled"},
+		{"preflight", "preflight_denied", "preflight_denied"},
+		{"no_reason", "", "preflight_denied"},
+		{"raw_reason", "https://example.com/raw", "preflight_denied"},
+	}
+	for i, tc := range cases {
+		body, err := json.Marshal(map[string]string{
+			"run_key": tc.key,
+			"run_id":  "run_" + tc.key,
+			"status":  "skipped",
+			"reason":  tc.reason,
+		})
+		if err != nil {
+			t.Fatalf("encode body: %v", err)
+		}
+		if w := postScheduleRun(r, s.ID, string(body)); w.Code != http.StatusCreated {
+			t.Fatalf("reason %q: registration = %d; body=%s", tc.reason, w.Code, w.Body.String())
+		}
+		if len(sink.payloads) != i+1 {
+			t.Fatalf("reason %q: %d schedule notices sent, want %d", tc.reason, len(sink.payloads), i+1)
+		}
+		if sink.noticeTypes[i] != notify.ScheduleRunSkippedType {
+			t.Fatalf("reason %q: notice type = %q, want %q", tc.reason, sink.noticeTypes[i], notify.ScheduleRunSkippedType)
+		}
+		if got := sink.payloads[i]["reason"]; got != tc.want {
+			t.Fatalf("reason %q: notice reason = %q, want %q", tc.reason, got, tc.want)
+		}
 	}
 }
 

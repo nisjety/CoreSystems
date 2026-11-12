@@ -65,7 +65,9 @@ func noticeConfigOf(opts []NoticeOption) noticeConfig {
 
 // scheduleNoticeReasons is the closed vocabulary of the reason a schedule notice
 // carries: the orchestrator's ScheduledJobWF reasons and the two failure event
-// types. A reason outside it is replaced by the notice's fallback.
+// types. The closed skip codes (scheduleSkipReasons) are part of it too, since a
+// skipped fire's notice carries its skip code. A reason outside both is replaced
+// by the notice's fallback.
 var scheduleNoticeReasons = map[string]struct{}{
 	"preflight_denied": {},
 	"invalid_params":   {},
@@ -75,10 +77,15 @@ var scheduleNoticeReasons = map[string]struct{}{
 	"run_timed_out":    {},
 }
 
-// closedNoticeReason returns reason when it is in the closed vocabulary, else fallback.
+// closedNoticeReason returns reason when it is in the closed notice vocabulary (a
+// scheduleNoticeReasons entry or a closed skip code), else fallback.
 func closedNoticeReason(reason, fallback string) string {
-	if _, ok := scheduleNoticeReasons[strings.TrimSpace(reason)]; ok {
-		return strings.TrimSpace(reason)
+	r := strings.TrimSpace(reason)
+	if _, ok := scheduleNoticeReasons[r]; ok {
+		return r
+	}
+	if _, ok := scheduleSkipReasons[r]; ok {
+		return r
 	}
 	return fallback
 }
@@ -140,12 +147,14 @@ func sendScheduleNotice(sink notify.Sink, sched store.Schedule, noticeType, idem
 }
 
 // notifyOnScheduleRun sends the quarry.schedule_run_failed notice for a run_failed
-// or run_timed_out event of a job a schedule fired (Job.ScheduleID set). The
-// schedule is loaded within the job's org and the notice goes to its creator. The
+// or run_timed_out event of a job a schedule fired (Job.ScheduleID set). The job
+// must belong to fanoutOrg, the org that owns the event's run, so a job_id naming
+// another tenant's job sends nothing; an empty fanoutOrg sends nothing. The
+// schedule is loaded within that org and the notice goes to its creator. The
 // idempotency key is per job, so the wrapper's and the child's failure events of
 // one fire raise one notice.
-func notifyOnScheduleRun(db store.DB, sink notify.Sink, ev quarrycontracts.Event) {
-	if sink == nil {
+func notifyOnScheduleRun(db store.DB, sink notify.Sink, ev quarrycontracts.Event, fanoutOrg string) {
+	if sink == nil || fanoutOrg == "" {
 		return
 	}
 	if ev.Type != quarrycontracts.EvtRunFailed && ev.Type != quarrycontracts.EvtRunTimedOut {
@@ -161,7 +170,7 @@ func notifyOnScheduleRun(db store.DB, sink notify.Sink, ev quarrycontracts.Event
 	case ev.RunID != nil:
 		job, found = db.Jobs().GetByRunID(*ev.RunID)
 	}
-	if !found || job.ScheduleID == nil {
+	if !found || job.ScheduleID == nil || job.OrgID != fanoutOrg {
 		return
 	}
 	sched, ok := db.Schedules().GetByOrg(*job.ScheduleID, job.OrgID)

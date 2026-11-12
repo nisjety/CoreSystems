@@ -363,9 +363,10 @@ const quarryEdgeComposeToken = "compose-contract-quarry_org_core_service_token-0
 // TestQuarryEdgePrincipalHoldsOnlyRetentionRead pins what Quarry may do inside
 // org-core. Of every org-core read it holds the retention-posture read and
 // nothing broader (no org:read:*, no tenant, projection, siem, browser-site or
-// agent/model policy scope). Its only other scopes are the two key-custody scopes
-// (WS17.E2), which route to nothing until ORG_CORE_KEYS_ENABLED=1 and which no
-// other principal holds. Any new scope for quarry-edge must change this list.
+// agent/model policy scope). Its only other scopes are the three key-custody scopes
+// (WS17.E2 and the erasure shred hop, Q2-WS17.E2a), which route to nothing until
+// ORG_CORE_KEYS_ENABLED=1 and which no other principal holds. Any new scope for
+// quarry-edge must change this list.
 func TestQuarryEdgePrincipalHoldsOnlyRetentionRead(t *testing.T) {
 	_, credentials, tokens := composeOrgCoreRegistry(t)
 	var quarry *serviceCredential
@@ -379,7 +380,7 @@ func TestQuarryEdgePrincipalHoldsOnlyRetentionRead(t *testing.T) {
 	}
 	got := append([]string(nil), quarry.Scopes...)
 	sort.Strings(got)
-	want := []string{"org:keys:unwrap:any", "org:keys:wrap:any", "org:retention:read:any"}
+	want := []string{"org:keys:destroy:any", "org:keys:unwrap:any", "org:keys:wrap:any", "org:retention:read:any"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("quarry-edge org-core scopes=%v want exactly %v", got, want)
 	}
@@ -422,6 +423,7 @@ func TestComposeKeyAndWebPolicyScopeHolders(t *testing.T) {
 	want := map[string]string{
 		"org:keys:wrap:any":       "quarry-edge",
 		"org:keys:unwrap:any":     "quarry-edge",
+		"org:keys:destroy:any":    "quarry-edge",
 		"org:web-policy:read:any": "auth-core",
 	}
 	if len(holders) != len(want) {

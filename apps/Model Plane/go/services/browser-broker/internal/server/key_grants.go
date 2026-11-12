@@ -77,6 +77,17 @@ func (s *Server) acquireKeyGrant(ctx context.Context, req *AcquireGrantRequest, 
 		keyOutcome(ctx, "key_host_ceiling")
 		return nil, keyRefusal(codes.PermissionDenied, reasonKeyHostCeiling, "allowed_domains are outside the api key's host ceiling")
 	}
+	// WS7.K: the org web policy narrows the requested hosts as on the ordinary
+	// path. An allowed host may be a subdomain of a requested one, which the
+	// exact-host ceiling refuses, so the hosts that are granted are checked too.
+	webPolicy, domains, err := s.applyWebPolicy(ctx, principal, domains)
+	if err != nil {
+		return nil, err
+	}
+	if !withinHostCeiling(domains, principal.KeyHostCeiling) {
+		keyOutcome(ctx, "key_host_ceiling")
+		return nil, keyRefusal(codes.PermissionDenied, reasonKeyHostCeiling, "allowed_domains are outside the api key's host ceiling")
+	}
 	if err := s.cfg.Policy.CheckSession(ctx, principal.OrganizationID, domains); err != nil {
 		keyOutcome(ctx, grantOutcome(err))
 		return nil, mapErr(err)
@@ -121,6 +132,7 @@ func (s *Server) acquireKeyGrant(ctx context.Context, req *AcquireGrantRequest, 
 		Zdr:               zdr,
 		ReadOnly:          readOnly,
 		Budget:            budget,
+		WebPolicy:         webPolicy,
 		MaxActivePerOwner: s.cfg.MaxActivePerOwner,
 		KeyID:             principal.KeyID,
 		MaxActivePerKey:   s.cfg.MaxActivePerKey,
@@ -142,6 +154,7 @@ func (s *Server) acquireKeyGrant(ctx context.Context, req *AcquireGrantRequest, 
 	logGrantIssued(ctx, g)
 	resp := s.acquireResponse(g)
 	resp.ReadOnly = g.ReadOnly
+	resp.WebPolicy = s.webPolicyResponse(g)
 	resp.DeniedDomains = append(resp.DeniedDomains, denied...)
 	return resp, nil
 }

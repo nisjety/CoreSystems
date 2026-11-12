@@ -99,9 +99,9 @@ func (p StaticPolicy) ResolveHumanBrowse(_ context.Context, _, _ string) (HumanB
 }
 
 // ErrDomainDenied means a requested host is refused by the org web policy
-// (WS7.K): the claim's deny rules name it, or no host of the request falls
-// under the claim's allow rules. It wraps ErrDomainNotGrantable, so it maps to
-// the same refusal; the message never echoes the hosts.
+// (WS7.K): the claim's deny rules name it or a host under it, or no host of the
+// request falls under the claim's allow rules. It wraps ErrDomainNotGrantable,
+// so it maps to the same refusal; the message never echoes the hosts.
 var ErrDomainDenied = fmt.Errorf("%w: the org web policy denies it", ErrDomainNotGrantable)
 
 // ErrWebPolicyUnreadable means the verified token carries a web_policy claim
@@ -234,10 +234,12 @@ func (ClaimPolicyResolver) Snapshot(p authctx.Principal) (*WebPolicySnapshot, er
 // Narrow applies a snapshot's domain rules to a canonical requested host list
 // (the output of NormalizeAllowedDomains). A nil snapshot changes nothing. A
 // requested host under a deny rule (equal or below it, on a dot boundary) is
-// refused with ErrDomainDenied, never silently dropped. With an allow rule the
-// result is the intersection: a requested host equal to or below an allowed
+// refused with ErrDomainDenied, never silently dropped, and so is a kept host
+// that reaches a denied host: a grant covers the subdomains of its hosts, so a
+// deny rule below the host is reached too (reachesDenied). With an allow rule
+// the result is the intersection: a requested host equal to or below an allowed
 // host is kept, and an allowed host below a requested host replaces it; an
-// allowed host under a deny rule is never added. An empty result is
+// allowed host that reaches a denied host is never added. An empty result is
 // ErrDomainDenied. The result is canonical (sorted, unique).
 func Narrow(requested []string, s *WebPolicySnapshot) ([]string, error) {
 	if s == nil {
@@ -252,11 +254,14 @@ func Narrow(requested []string, s *WebPolicySnapshot) ([]string, error) {
 			return nil, ErrDomainDenied
 		}
 		if len(s.DomainsAllow) == 0 || hostWithin(host, allow) {
+			if reachesDenied(host, deny) {
+				return nil, ErrDomainDenied
+			}
 			kept = append(kept, host)
 			continue
 		}
 		for _, allowed := range allow {
-			if strings.HasSuffix(allowed, "."+host) && isCanonicalDomain(allowed) && !hostWithin(allowed, deny) {
+			if strings.HasSuffix(allowed, "."+host) && isCanonicalDomain(allowed) && !reachesDenied(allowed, deny) {
 				kept = append(kept, allowed)
 			}
 		}
@@ -280,6 +285,39 @@ func ruleNames(rules []string) []string {
 		}
 	}
 	return out
+}
+
+// reachesDenied reports whether a grant naming host would reach a denied host:
+// host is a deny rule or sits below one (hostWithin), or a deny rule sits below
+// host. A grant covers the subdomains of its hosts, so a grant for example.com
+// reaches evil.example.com when that is a deny rule.
+func reachesDenied(host string, deny []string) bool {
+	if hostWithin(host, deny) {
+		return true
+	}
+	for _, rule := range deny {
+		if strings.HasSuffix(rule, "."+host) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkDeny returns ErrDomainDenied when the snapshot's deny rules refuse any of
+// hosts. A derived or approval grant copies its parent's snapshot, so the
+// parent's deny rules hold for its hosts whether they were inherited or named.
+// A nil snapshot refuses nothing.
+func (s *WebPolicySnapshot) checkDeny(hosts []string) error {
+	if s == nil {
+		return nil
+	}
+	deny := ruleNames(s.DomainsDeny)
+	for _, host := range hosts {
+		if reachesDenied(host, deny) {
+			return ErrDomainDenied
+		}
+	}
+	return nil
 }
 
 // claimDomains copies a claim domain list after bounding it.

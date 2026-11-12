@@ -289,6 +289,11 @@ func planDerive(ctx context.Context, p DeriveParams, parent *Grant) (derivePlan,
 	if err != nil {
 		return derivePlan{}, err
 	}
+	// The child keeps the parent's snapshot, so its hosts must pass the
+	// parent's deny rules too (WS7.K), inherited or named alike.
+	if err := parent.WebPolicy.checkDeny(domains); err != nil {
+		return derivePlan{}, err
+	}
 	plan.domains = domains
 	plan.requestedBudget, err = NormalizeBudget(p.Budget)
 	if err != nil {

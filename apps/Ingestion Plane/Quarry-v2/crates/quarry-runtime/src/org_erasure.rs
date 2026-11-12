@@ -276,8 +276,9 @@ impl ProfileErasure {
     }
 
     /// W2-Q-U41b: run the crypto-shred hop and record its receipt. `None` when
-    /// the hop is off. 404 and 410 from org-core are done (`AlreadyGone`); any
-    /// other failure is an error, and the shred stays pending for the retry.
+    /// the hop is off. 410, and a 404 that names a gone org or key, are done
+    /// (`AlreadyGone`); any other failure, a plain 404 included, is an error, and
+    /// the shred stays pending for the retry.
     async fn shred_hop(&self, org_id: &str, needed: bool) -> QuarryResult<Option<KeyShredOutcome>> {
         let shredder = match &self.shred {
             KeyShredSetup::Off => return Ok(None),
@@ -815,8 +816,9 @@ const KEY_SHRED_ORG_ID_MAX_LEN: usize = 128;
 pub enum KeyShredOutcome {
     /// org-core destroyed the org's KEKs on this call (2xx).
     Destroyed,
-    /// org-core answered 404 (the org is gone, its keys went with it) or 410
-    /// (the keys were destroyed before): done.
+    /// org-core answered 404 with a typed `org_not_found` or `key_not_found` (the
+    /// org is gone, its keys went with it) or 410 (the keys were destroyed
+    /// before): done.
     AlreadyGone,
     /// No shred was needed: the provider is not `org_core` and the org had no
     /// `oc:`-sealed row.
@@ -837,6 +839,8 @@ impl KeyShredOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyShredError {
     /// org-core is down, slow, rate limiting, or answered 5xx (after one retry).
+    /// A 404 without a typed gone code is here too: the key routes are not
+    /// mounted (`ORG_CORE_KEYS_ENABLED=0`), so the keys were not destroyed.
     Unavailable,
     /// 401 or 403: the credential drifted, or it lacks `org:keys:destroy:any`.
     Denied,
@@ -854,16 +858,43 @@ impl KeyShredError {
     }
 }
 
-/// Map one org-core status of `DELETE .../keys` to the hop's result.
+/// Map one org-core status of `DELETE .../keys` to the hop's result. A bare 404
+/// is never `AlreadyGone`: [`key_shred_answer`] reads its body for that.
 pub fn key_shred_status(status: u16) -> Result<KeyShredOutcome, KeyShredError> {
     match status {
         200..=299 => Ok(KeyShredOutcome::Destroyed),
-        404 | 410 => Ok(KeyShredOutcome::AlreadyGone),
+        404 => Err(KeyShredError::Unavailable),
+        410 => Ok(KeyShredOutcome::AlreadyGone),
         401 | 403 => Err(KeyShredError::Denied),
         408 | 429 => Err(KeyShredError::Unavailable),
         s if s >= 500 => Err(KeyShredError::Unavailable),
         _ => Err(KeyShredError::Invalid),
     }
+}
+
+/// Map one org-core answer, body included, to the hop's result. A 404 is
+/// `AlreadyGone` only when org-core's typed envelope names a gone org or key. Any
+/// other 404 is gin's plain "404 page not found" from unmounted key routes
+/// (`ORG_CORE_KEYS_ENABLED=0`): the keys were not destroyed, so it stays retryable.
+pub fn key_shred_answer(status: u16, body: &[u8]) -> Result<KeyShredOutcome, KeyShredError> {
+    if status == 404 && body_names_gone_key(body) {
+        return Ok(KeyShredOutcome::AlreadyGone);
+    }
+    key_shred_status(status)
+}
+
+/// Whether an org-core error envelope (`{"error":{"code":...}}`) names a gone org
+/// or key.
+fn body_names_gone_key(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    matches!(
+        value
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str),
+        Some("org_not_found" | "key_not_found")
+    )
 }
 
 fn key_shred_err(class: &str) -> QuarryError {
@@ -873,10 +904,32 @@ fn key_shred_err(class: &str) -> QuarryError {
     )
 }
 
+/// Largest 404 body the shred hop reads for its typed code. org-core's error
+/// envelope is a few hundred bytes.
+const KEY_SHRED_MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
+
+/// Read a 404 body up to the cap. A body that is too large or unreadable reads as
+/// empty, which names no gone org or key.
+async fn read_shred_error_body(mut resp: reqwest::Response) -> Vec<u8> {
+    let mut buf = Vec::new();
+    loop {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                if buf.len() + chunk.len() > KEY_SHRED_MAX_ERROR_BODY_BYTES {
+                    return Vec::new();
+                }
+                buf.extend_from_slice(&chunk);
+            }
+            Ok(None) => return buf,
+            Err(_) => return Vec::new(),
+        }
+    }
+}
+
 /// The org-core client of the crypto-shred hop. Same principal and headers as
 /// the key provider (`X-Service-Id: quarry-edge`, `X-Service-Token`), no
-/// redirects, one retry on a 5xx or a transport error. The response body is
-/// never read and nothing about the call but its class is logged.
+/// redirects, one retry on a 5xx or a transport error. Only a 404 body is read,
+/// capped, for its typed code; nothing about the call but its class is logged.
 pub struct OrgKeyShredder {
     client: reqwest::Client,
     base: reqwest::Url,
@@ -950,7 +1003,8 @@ impl OrgKeyShredder {
     }
 
     /// Destroy every KEK of `org_id` in org-core. Idempotent: a second call
-    /// answers 410 (or 404 once the org is hard-deleted), which is `AlreadyGone`.
+    /// answers 410 (or a 404 with `org_not_found` once the org is hard-deleted),
+    /// which is `AlreadyGone`.
     pub async fn shred(&self, org_id: &str) -> Result<KeyShredOutcome, KeyShredError> {
         let url = self.url_for(org_id)?;
         let mut last = Err(KeyShredError::Unavailable);
@@ -965,9 +1019,15 @@ impl OrgKeyShredder {
                 .await;
             match sent {
                 Ok(resp) => {
-                    // The body (org id, state, a count) is not needed and not read.
                     let status = resp.status().as_u16();
-                    last = key_shred_status(status);
+                    // Only a 404 is read, for its typed code. The success body (org
+                    // id, state, a count) is never read.
+                    let body = if status == 404 {
+                        read_shred_error_body(resp).await
+                    } else {
+                        Vec::new()
+                    };
+                    last = key_shred_answer(status, &body);
                     if status >= 500 && attempt == 0 {
                         continue;
                     }
@@ -1524,7 +1584,8 @@ mod key_shred_tests {
     fn key_shred_status_maps_done_and_retryable_answers() {
         assert_eq!(key_shred_status(200), Ok(KeyShredOutcome::Destroyed));
         assert_eq!(key_shred_status(204), Ok(KeyShredOutcome::Destroyed));
-        assert_eq!(key_shred_status(404), Ok(KeyShredOutcome::AlreadyGone));
+        // A bare 404 proves nothing (the key routes may be unmounted): the body decides.
+        assert_eq!(key_shred_status(404), Err(KeyShredError::Unavailable));
         assert_eq!(key_shred_status(410), Ok(KeyShredOutcome::AlreadyGone));
         assert_eq!(key_shred_status(401), Err(KeyShredError::Denied));
         assert_eq!(key_shred_status(403), Err(KeyShredError::Denied));
@@ -1534,6 +1595,37 @@ mod key_shred_tests {
         assert!(OrgKeyShredder::new("", TOKEN).is_err());
         assert!(OrgKeyShredder::new("ftp://org-core", TOKEN).is_err());
         assert!(OrgKeyShredder::new("http://org-core:8080", " ").is_err());
+    }
+
+    /// A 404 is done only when org-core's typed envelope names a gone org or key.
+    /// gin's plain 404 (the key routes not mounted) is not done.
+    #[test]
+    fn key_shred_answer_reads_a_404_by_its_typed_code() {
+        let org_gone = br#"{"error":{"code":"org_not_found","message":"gone"}}"#;
+        let key_gone = br#"{"error":{"code":"key_not_found","message":"gone"}}"#;
+        assert_eq!(
+            key_shred_answer(404, org_gone),
+            Ok(KeyShredOutcome::AlreadyGone)
+        );
+        assert_eq!(
+            key_shred_answer(404, key_gone),
+            Ok(KeyShredOutcome::AlreadyGone)
+        );
+        assert_eq!(
+            key_shred_answer(404, b"404 page not found"),
+            Err(KeyShredError::Unavailable)
+        );
+        assert_eq!(
+            key_shred_answer(404, br#"{"error":{"code":"not_found"}}"#),
+            Err(KeyShredError::Unavailable)
+        );
+        assert_eq!(key_shred_answer(404, b""), Err(KeyShredError::Unavailable));
+        assert_eq!(key_shred_answer(410, b""), Ok(KeyShredOutcome::AlreadyGone));
+        assert_eq!(
+            key_shred_answer(503, org_gone),
+            Err(KeyShredError::Unavailable)
+        );
+        assert_eq!(key_shred_answer(200, b"{}"), Ok(KeyShredOutcome::Destroyed));
     }
 
     /// The hop off (the default) makes no call and leaves no receipt.
@@ -1670,6 +1762,71 @@ mod key_shred_tests {
         let retry = erasure.purge_org(&org).await.expect("retry");
         assert_eq!(retry.rows, 0);
         assert_eq!(retry.key_shred, Some(KeyShredOutcome::Destroyed));
+        server.verify().await;
+    }
+
+    /// The key routes not mounted (`ORG_CORE_KEYS_ENABLED=0`) answer gin's plain 404
+    /// to the shred. That proves nothing about the keys: the purge fails, and the
+    /// retry shreds once the routes answer.
+    #[tokio::test]
+    async fn an_unmounted_key_route_keeps_the_erasure_retryable() {
+        let server = MockServer::start().await;
+        let org = format!("org_shred_unmounted_{}", ProfileKind::new());
+        Mock::given(method("DELETE"))
+            .and(path(keys_path(&org)))
+            .respond_with(ResponseTemplate::new(404).set_body_string("404 page not found"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path(keys_path(&org)))
+            .respond_with(ResponseTemplate::new(200).set_body_json(destroyed_body(&org)))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let store = seeded(&org).await;
+        let erasure =
+            ProfileErasure::new(store.clone(), None, None).with_key_shred(shredder(&server));
+
+        let err = erasure
+            .purge_org(&org)
+            .await
+            .expect_err("an untyped 404 is not gone");
+        assert_eq!(err.code, ErrorCode::RuntimeNotReady);
+        assert!(
+            err.message.contains("(unavailable)"),
+            "the class names the retry"
+        );
+        assert!(
+            store.list(&org).await.unwrap().is_empty(),
+            "the rows went anyway"
+        );
+
+        let retry = erasure.purge_org(&org).await.expect("retry");
+        assert_eq!(retry.key_shred, Some(KeyShredOutcome::Destroyed));
+        server.verify().await;
+    }
+
+    /// A typed 404 (the org was hard-deleted, its cascade took the keys) is done:
+    /// the body is read, and its `org_not_found` code makes the shred `AlreadyGone`.
+    #[tokio::test]
+    async fn a_typed_404_for_a_gone_org_is_already_gone() {
+        let server = MockServer::start().await;
+        let org = format!("org_shred_typed_{}", ProfileKind::new());
+        let gone = serde_json::json!({"error": {"code": "org_not_found"}});
+        Mock::given(method("DELETE"))
+            .and(path(keys_path(&org)))
+            .respond_with(ResponseTemplate::new(404).set_body_json(gone))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let store = seeded(&org).await;
+        let erasure =
+            ProfileErasure::new(store.clone(), None, None).with_key_shred(shredder(&server));
+
+        let counts = erasure.purge_org(&org).await.expect("a gone org is done");
+        assert_eq!(counts.key_shred, Some(KeyShredOutcome::AlreadyGone));
         server.verify().await;
     }
 

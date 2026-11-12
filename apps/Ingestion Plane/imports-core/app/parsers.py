@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import math
+import os
 import posixpath
 import re
 import time
@@ -1569,6 +1570,11 @@ def _parse_tika(
         return response.text.strip()
 
 
+def _odf_epub_enabled() -> bool:
+    # Read on every call, so no value is fixed when the module is imported.
+    return os.getenv("IMPORTS_ODF_EPUB_ENABLED") == "true"
+
+
 def _parse_local(
     extension: str,
     content: bytes,
@@ -1597,6 +1603,9 @@ def _parse_local(
         # Like a workbook, only a chat turn is latency-bound.
         deadline = time.monotonic() + _PARSE_DEADLINE_SECONDS if max_chars is not None else None
         return _parse_pptx(content, deadline=deadline, max_chars=_PPTX_MAX_CHAT_CHARS if max_chars is not None else None)
+    if extension in {"odt", "ods", "odp", "epub"} and not _odf_epub_enabled():
+        # Dark until IMPORTS_ODF_EPUB_ENABLED is the literal "true": refused as an unknown type, as before.
+        raise UnsupportedFileTypeError(f"Unsupported file type: {extension}")
     if extension == "odt":
         return _parse_odt(content, max_chars=max_chars)
     if extension == "ods":

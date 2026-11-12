@@ -446,6 +446,9 @@ func (s *MemoryRepository) CreateScopedSensitiveApproval(_ context.Context, p Ap
 			return nil, ErrDeriveWidensParent
 		}
 	}
+	if err := parent.WebPolicy.checkDeny(domains); err != nil {
+		return nil, err
+	}
 	scopes, err := NormalizeSensitiveScopes(
 		p.AllowedActions, p.AllowedFrameIDs, p.AllowedDialogIDs, p.AllowedArtifactIDs,
 	)

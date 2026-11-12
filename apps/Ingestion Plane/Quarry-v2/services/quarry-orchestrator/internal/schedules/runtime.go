@@ -13,9 +13,10 @@ package schedules
 //     and PUTs the three runtime fields to control;
 //   - records each overlap skip that no row covers yet as a skipped run
 //     (POST /v1/internal/schedules/{id}/runs, reason skipped_overlap), at most ten
-//     rows per pass across all schedules. Only ScheduledJobWF schedules get rows:
-//     control refuses a change_monitor run (AdmissionKind), so a monitor's skips
-//     reach the runtime count only.
+//     rows per pass across all schedules. Only an enabled ScheduledJobWF schedule
+//     gets rows: control refuses a change_monitor run (AdmissionKind), so a
+//     monitor's skips reach the runtime count only, and it refuses a row for a
+//     disabled schedule, so that schedule's skips wait until it is enabled again.
 //
 // Only a desired schedule whose memo org is in the desired set is synced. A failure
 // is logged with the schedule id and a status, never a response body, and is
@@ -162,7 +163,10 @@ func (m *Manager) syncRuntime(ctx context.Context, sc client.ScheduleClient, exi
 		if t.describedAt.IsZero() || now.Sub(t.describedAt) >= runtimeDescribeEvery {
 			m.describeAndPush(ctx, sc, id, existing[id], t, now)
 		}
-		if desired[id].Workflow == ScheduledJobWorkflow {
+		// A paused (disabled) schedule keeps its skips until it is enabled again. Control
+		// refuses a skipped-run row for a disabled schedule with 409, so a row posted now
+		// would fail on every pass and use budget.
+		if desired[id].Workflow == ScheduledJobWorkflow && !desired[id].Paused {
 			budget = m.pushSkipRows(ctx, id, t, budget)
 		}
 	}
