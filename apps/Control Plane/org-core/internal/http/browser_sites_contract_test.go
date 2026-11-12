@@ -12,21 +12,34 @@ import (
 // not pass without it: the broker cannot read a member's site decision otherwise.
 const browserBrokerComposeToken = "compose-contract-browser_broker_org_core_service_token-0123456789abcdef"
 
-// TestComposeGivesBrowserBrokerExactlyTheResolveScope pins the one principal that
-// may read the site decision, and pins the variable its token is minted under.
+// TestComposeGivesBrowserBrokerExactlyTheResolveScope pins the exact principals that may read the
+// site decision (the broker, and the two Model services the compose registry also grants it), pins
+// that the broker holds exactly that scope, and pins the variable its token is minted under.
 func TestComposeGivesBrowserBrokerExactlyTheResolveScope(t *testing.T) {
 	_, credentials, tokens := composeOrgCoreRegistry(t)
 
+	allowed := map[string]bool{browserBrokerPrincipal: true, "execution-core": true, "model-gateway": true}
+	held := map[string]bool{}
 	var broker *serviceCredential
 	for index := range credentials {
 		credential := &credentials[index]
 		for _, scope := range credential.Scopes {
-			if scope == "org:browser-site:read:any" && credential.Principal != browserBrokerPrincipal {
-				t.Fatalf("compose gives %s the browser-site read scope", credential.Principal)
+			if scope == "org:browser-site:read:any" {
+				held[credential.Principal] = true
 			}
 		}
 		if credential.Principal == browserBrokerPrincipal {
 			broker = credential
+		}
+	}
+	for principal := range held {
+		if !allowed[principal] {
+			t.Fatalf("compose gives %s the browser-site read scope", principal)
+		}
+	}
+	for principal := range allowed {
+		if !held[principal] {
+			t.Fatalf("compose does not give %s the browser-site read scope", principal)
 		}
 	}
 	if broker == nil {

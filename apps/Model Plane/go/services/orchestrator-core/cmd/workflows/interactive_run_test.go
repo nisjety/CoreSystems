@@ -521,8 +521,8 @@ func agentLaneInput(fireKey string) ScheduledRunInput {
 }
 
 // TestScheduledRun_AgentLaneCompletesWithWithheldEffects verifies that a contract-bearing fire
-// that the start recorded as agent-lane takes one agent step, and that a withheld effect completes
-// the run as needs_review with counts only.
+// that the start recorded as agent-lane takes one agent step, and that a withheld effect fails the
+// run with the closed code scheduled_agent_needs_review (decision D-f10-4), never as completed.
 func TestScheduledRun_AgentLaneCompletesWithWithheldEffects(t *testing.T) {
 	env, _, stub := newTestEnv(t)
 	input := agentLaneInput("fire-agent-withheld")
@@ -545,10 +545,13 @@ func TestScheduledRun_AgentLaneCompletesWithWithheldEffects(t *testing.T) {
 	env.ExecuteWorkflow(ScheduledRunSupervision, input)
 
 	require.True(t, env.IsWorkflowCompleted())
-	require.NoError(t, env.GetWorkflowError())
+	require.Error(t, env.GetWorkflowError())
 	_, decoded := decodeOnlyEnvelope(t, stub.Events())
-	assert.Equal(t, "RUN_COMPLETED", decoded.EventType)
-	assert.Contains(t, string(decoded.Payload), "needs_review")
+	assert.Equal(t, "RUN_FAILED", decoded.EventType)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(decoded.Payload, &payload))
+	reason, _ := payload["reason"].(string)
+	assert.Equal(t, "scheduled_agent_needs_review", reason)
 	env.AssertExpectations(t)
 }
 
@@ -582,8 +585,8 @@ func TestScheduledRun_AgentLaneUnknownOutcomeStopsWithoutRetry(t *testing.T) {
 }
 
 // TestScheduledRun_AgentLaneIncompleteStepReportsFailed verifies that an agent-lane step that did
-// not complete (a refused contract, for example) is summarised as failed, even with no effect
-// withheld, and never as completed or needs_review.
+// not complete (a refused contract, for example) fails the run with the closed code
+// scheduled_agent_failed, even with no effect withheld, and never as completed or needs_review.
 func TestScheduledRun_AgentLaneIncompleteStepReportsFailed(t *testing.T) {
 	env, _, stub := newTestEnv(t)
 	input := agentLaneInput("fire-agent-incomplete")
@@ -602,10 +605,13 @@ func TestScheduledRun_AgentLaneIncompleteStepReportsFailed(t *testing.T) {
 	env.ExecuteWorkflow(ScheduledRunSupervision, input)
 
 	require.True(t, env.IsWorkflowCompleted())
-	require.NoError(t, env.GetWorkflowError())
+	require.Error(t, env.GetWorkflowError())
 	_, decoded := decodeOnlyEnvelope(t, stub.Events())
-	assert.Equal(t, "RUN_COMPLETED", decoded.EventType)
-	assert.Contains(t, string(decoded.Payload), "outcome failed")
+	assert.Equal(t, "RUN_FAILED", decoded.EventType)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(decoded.Payload, &payload))
+	reason, _ := payload["reason"].(string)
+	assert.Equal(t, "scheduled_agent_failed", reason)
 	assert.NotContains(t, string(decoded.Payload), "needs_review")
 	env.AssertExpectations(t)
 }

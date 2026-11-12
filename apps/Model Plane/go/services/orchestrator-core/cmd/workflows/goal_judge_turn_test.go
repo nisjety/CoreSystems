@@ -40,7 +40,8 @@ func expectScheduledFire(env *testsuite.TestWorkflowEnvironment, input Scheduled
 		Return(activities.StepResult{StepIndex: 0, ToolName: "scheduled-step", Completed: true, RoundsExecuted: 2}, nil).Once()
 }
 
-// registerGoalJudge stands in for the judge activity and records what it was given.
+// registerGoalJudge stands in for the judge activity and records what it was given. Call it before
+// expectScheduledFire: Temporal rejects RegisterActivity calls made after OnActivity mocks.
 func registerGoalJudge(env *testsuite.TestWorkflowEnvironment, result error) *[]GoalJudgeTurnInput {
 	calls := &[]GoalJudgeTurnInput{}
 	env.RegisterActivityWithOptions(func(_ context.Context, in GoalJudgeTurnInput) error {
@@ -57,8 +58,8 @@ func TestScheduledRunSupervisionJudgesGoalTurnBehindVersion(t *testing.T) {
 	t.Run("new history judges once after completion", func(t *testing.T) {
 		env, _, stub := newTestEnv(t)
 		input := goalFireInput("fire-goal-judged")
-		expectScheduledFire(env, input)
 		calls := registerGoalJudge(env, nil)
+		expectScheduledFire(env, input)
 
 		env.ExecuteWorkflow(ScheduledRunSupervision, input)
 
@@ -77,8 +78,8 @@ func TestScheduledRunSupervisionJudgesGoalTurnBehindVersion(t *testing.T) {
 	t.Run("pre-change history is not judged", func(t *testing.T) {
 		env, _, _ := newTestEnv(t)
 		input := goalFireInput("fire-goal-replayed")
-		expectScheduledFire(env, input)
 		calls := registerGoalJudge(env, nil)
+		expectScheduledFire(env, input)
 		env.OnGetVersion(goalJudgeTurnChange, workflow.DefaultVersion, goalJudgeTurnVersion).
 			Return(workflow.DefaultVersion)
 
@@ -92,8 +93,8 @@ func TestScheduledRunSupervisionJudgesGoalTurnBehindVersion(t *testing.T) {
 	t.Run("a fire without a goal is not judged", func(t *testing.T) {
 		env, _, _ := newTestEnv(t)
 		input := agentLaneInput("fire-no-goal")
-		expectScheduledFire(env, input)
 		calls := registerGoalJudge(env, nil)
+		expectScheduledFire(env, input)
 
 		env.ExecuteWorkflow(ScheduledRunSupervision, input)
 
@@ -105,8 +106,8 @@ func TestScheduledRunSupervisionJudgesGoalTurnBehindVersion(t *testing.T) {
 	t.Run("a failed judge never fails the completed run", func(t *testing.T) {
 		env, _, stub := newTestEnv(t)
 		input := goalFireInput("fire-goal-judge-down")
-		expectScheduledFire(env, input)
 		calls := registerGoalJudge(env, errors.New("judge unavailable"))
+		expectScheduledFire(env, input)
 
 		env.ExecuteWorkflow(ScheduledRunSupervision, input)
 
