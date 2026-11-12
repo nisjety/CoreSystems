@@ -30,15 +30,19 @@ type ComposeDecl struct {
 
 var (
 	composeTopLevel = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*:`)
-	composeService  = regexp.MustCompile(`^  ([a-z0-9][a-z0-9-]*):\s*$`)
+	composeService  = regexp.MustCompile(`^( +)([a-z0-9][a-z0-9-]*):\s*$`)
 	composeEnv      = regexp.MustCompile(`^\s+([A-Z][A-Z0-9_]*):\s*\$\{([A-Z][A-Z0-9_]*):-([^}]*)\}\s*(#.*)?$`)
 )
 
 // ScanCompose returns the interpolated environment entries under the top-level
 // services key. YAML anchors above services and every block after it are skipped.
+// A service name sits at the indent of the first service under services, so a file
+// may indent services by two spaces (Model Plane) or four (Control Plane). Keys
+// indented deeper than that are properties, not services.
 func ScanCompose(r io.Reader) ([]ComposeDecl, error) {
 	var decls []ComposeDecl
 	inServices := false
+	serviceIndent := ""
 	service := ""
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
@@ -57,8 +61,13 @@ func ScanCompose(r io.Reader) ([]ComposeDecl, error) {
 			continue
 		}
 		if m := composeService.FindStringSubmatch(line); m != nil {
-			service = m[1]
-			continue
+			if serviceIndent == "" {
+				serviceIndent = m[1]
+			}
+			if m[1] == serviceIndent {
+				service = m[2]
+				continue
+			}
 		}
 		if m := composeEnv.FindStringSubmatch(line); m != nil {
 			decls = append(decls, ComposeDecl{Service: service, Env: m[1], Host: m[2], Default: m[3]})

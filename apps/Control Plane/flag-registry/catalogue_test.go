@@ -12,6 +12,7 @@ import (
 const (
 	shippedRegistryFile = "flag-registry.json"
 	modelPlaneCompose   = "apps/Model Plane/deploy/docker-compose.yml"
+	controlPlaneCompose = "apps/Control Plane/docker-compose.yml"
 )
 
 // repoFile resolves a repository-relative path from this module, which lives at
@@ -34,23 +35,28 @@ func loadShipped(t *testing.T) *Registry {
 	return reg
 }
 
-func scanModelPlaneCompose(t *testing.T) map[string][]ComposeDecl {
+// scanRatchetedCompose scans every compose file the ratchet covers and returns the
+// declarations keyed by host variable, so a flag set in either file is checked
+// against the declarations of both.
+func scanRatchetedCompose(t *testing.T) map[string][]ComposeDecl {
 	t.Helper()
-	f, err := os.Open(repoFile(modelPlaneCompose))
-	if err != nil {
-		t.Fatalf("open compose file: %v", err)
-	}
-	defer f.Close()
-	decls, err := ScanCompose(f)
-	if err != nil {
-		t.Fatalf("scan compose file: %v", err)
-	}
-	if len(decls) == 0 {
-		t.Fatal("no declarations found; the scanner or the compose path is wrong")
-	}
 	byHost := make(map[string][]ComposeDecl)
-	for _, d := range decls {
-		byHost[d.Host] = append(byHost[d.Host], d)
+	for _, rel := range []string{modelPlaneCompose, controlPlaneCompose} {
+		f, err := os.Open(repoFile(rel))
+		if err != nil {
+			t.Fatalf("open %s: %v", rel, err)
+		}
+		decls, err := ScanCompose(f)
+		f.Close()
+		if err != nil {
+			t.Fatalf("scan %s: %v", rel, err)
+		}
+		if len(decls) == 0 {
+			t.Fatalf("%s: no declarations found; the scanner or the compose path is wrong", rel)
+		}
+		for _, d := range decls {
+			byHost[d.Host] = append(byHost[d.Host], d)
+		}
 	}
 	return byHost
 }
@@ -79,9 +85,9 @@ func TestShippedRegistryLoads(t *testing.T) {
 	}
 }
 
-func TestShippedRegistryMatchesModelPlaneCompose(t *testing.T) {
+func TestShippedRegistryMatchesComposeFiles(t *testing.T) {
 	reg := loadShipped(t)
-	compose := scanModelPlaneCompose(t)
+	compose := scanRatchetedCompose(t)
 	known := make(map[string]bool)
 	for _, f := range reg.Flags() {
 		known[f.Name] = true

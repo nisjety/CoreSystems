@@ -56,15 +56,21 @@ their posture in the owning service's matrix.
 
 ## Compose ratchet
 
-The tests read `apps/Model Plane/deploy/docker-compose.yml` and check:
+The tests read `apps/Model Plane/deploy/docker-compose.yml` and
+`apps/Control Plane/docker-compose.yml`, and check across both files:
 
 - Every registered flag's declarations equal the compose declarations for that
-  variable: service, container variable and default text, exactly.
+  variable: service, container variable and default text, exactly. A variable set
+  in both files is checked against the declarations of both.
 - Every variable named by the convention (`_ENABLED`, `_MODE`, `_CONFIRMED`,
   `_SAMPLE_RATE`, `_ALLOW_*`) and set in compose is registered or listed in
   `unregistered`.
 - Every name in `unregistered` is still set in compose.
 - Every `codePath` still mentions its variable.
+
+The scanner reads a service at the indent of the first service under `services:`,
+so the two-space Model Plane layout and the four-space Control Plane layout both
+scan. `control_compose_test.go` pins the Control Plane names and their services.
 
 `unregistered` is a visible baseline. It may only shrink. Registering a name means
 adding its entry and removing it from the list.
@@ -83,7 +89,14 @@ release process. The registry records the change; it does not make it.
 
 - Compose variables outside the convention (for example `DEEP_RESEARCH_PLAN_TURN`,
   `SPACE_WAKE_API`), which are often switch-shaped. They are not ratcheted.
-- Literal compose values such as `MP_COMPAT_MODE: v1_only`, which are not interpolated.
+- Literal compose values such as `MP_COMPAT_MODE: v1_only` in the Model Plane compose,
+  and `PPROF_ENABLED`, `DRAGONFLY_ENABLED`, `GIN_MODE`, `GF_USERS_ALLOW_SIGN_UP` and
+  `NATS_SHARED_ALLOW_TOKEN_FALLBACK` in the Control Plane compose, which are not
+  interpolated.
+- Compose files other than the two above: the Control Plane's
+  `docker-compose.production.yml`, `docker-compose.legacy-bridge.yml`,
+  `docker-compose.recovery.override.yml` and `docker-compose.shared-nats.yml`, and
+  `apps/Model Plane/deploy/docker-compose.production.yml`.
 - User and org settings (user-core `AISettings`, org entitlements). They need a typed
   value store before they can be registered.
 - Compose files of the Data, Ingestion and Application planes. Frontend build-time

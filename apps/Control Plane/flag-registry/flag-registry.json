@@ -80,6 +80,19 @@
       ]
     },
     {
+      "name": "API_KEY_AGENT_EXCHANGE_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "0",
+      "stage": "dark",
+      "purpose": "API-key exchange route for browser:agent grants (auth-core api-key-exchange.controller.ts). Needs API_KEY_ENABLED too. Only the literal true turns it on; off, the route answers 404.",
+      "declarations": [
+        { "service": "auth-core", "env": "API_KEY_AGENT_EXCHANGE_ENABLED", "default": "0" }
+      ],
+      "codePath": "apps/Control Plane/auth-core/src/auth/api-key-metadata.ts"
+    },
+    {
       "name": "APPROVAL_AUDIT_EVENTS_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -139,6 +152,72 @@
       ]
     },
     {
+      "name": "AUDIT_CHAIN_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "0",
+      "stage": "dark",
+      "purpose": "Audit hash chain on audit-core ingest (cmd/server). Only the literal 1 turns it on. In production it needs the chain signing keys.",
+      "declarations": [
+        { "service": "audit-core", "env": "AUDIT_CHAIN_ENABLED", "default": "0" }
+      ],
+      "codePath": "apps/Control Plane/audit-core/cmd/server/main.go"
+    },
+    {
+      "name": "AUDIT_CHAIN_PRUNE_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "0",
+      "stage": "dark",
+      "purpose": "Pruning of audit rows, each batch signed by a chain checkpoint (audit-core cmd/server). Only the literal 1 turns it on; AUDIT_CHAIN_PRUNE_DRYRUN=1 wins and never deletes. Needs the chain signing keys when on.",
+      "declarations": [
+        { "service": "audit-core", "env": "AUDIT_CHAIN_PRUNE_ENABLED", "default": "0" }
+      ],
+      "codePath": "apps/Control Plane/audit-core/cmd/server/main.go"
+    },
+    {
+      "name": "AUDIT_CHAIN_VERIFY_ENABLED",
+      "kind": "text",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "",
+      "stage": "dark",
+      "purpose": "Chain verifier on audit-core (cmd/server, verifier.Enabled). Blank follows AUDIT_CHAIN_ENABLED. Only the literal 0 turns verification off, and it is always off with the chain off. Read-only.",
+      "declarations": [
+        { "service": "audit-core", "env": "AUDIT_CHAIN_VERIFY_ENABLED", "default": "" }
+      ],
+      "codePath": "apps/Control Plane/audit-core/cmd/server/main.go"
+    },
+    {
+      "name": "AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "0",
+      "stage": "dark",
+      "devOnly": true,
+      "purpose": "Dev-only lift of the SIEM address check for private destinations (audit-core cmd/siem-exporter). Only the literal 1 turns it on; with ENVIRONMENT=production the exporter refuses to start.",
+      "declarations": [
+        { "service": "audit-siem-exporter", "env": "AUDIT_SIEM_ALLOW_PRIVATE_DESTINATIONS", "default": "0" }
+      ],
+      "codePath": "apps/Control Plane/audit-core/cmd/siem-exporter/main.go"
+    },
+    {
+      "name": "AUDIT_SIEM_EXPORT_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "0",
+      "stage": "dark",
+      "purpose": "SIEM export of the audit chain (audit-core cmd/siem-exporter). Only the literal 1 turns it on; off, the process serves metrics and exports nothing.",
+      "declarations": [
+        { "service": "audit-siem-exporter", "env": "AUDIT_SIEM_EXPORT_ENABLED", "default": "0" }
+      ],
+      "codePath": "apps/Control Plane/audit-core/cmd/siem-exporter/main.go"
+    },
+    {
       "name": "AUTH_CORE_ZDR_EFFECTIVE_POSTURE_ENABLED",
       "kind": "switch",
       "owner": "control-plane",
@@ -146,6 +225,9 @@
       "default": "false",
       "stage": "dark",
       "purpose": "ZDR-Z-03b: Auth Core reads the effective ZDR posture that org-core computes (effectiveZdr) instead of keeping its own plan-lapse rule. Off keeps the stored-intent rule. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "auth-core", "env": "AUTH_CORE_ZDR_EFFECTIVE_POSTURE_ENABLED", "default": "false" }
+      ],
       "codePath": "apps/Control Plane/auth-core/src/auth/interactive-retention-policy.ts"
     },
     {
@@ -291,6 +373,20 @@
       "stage": "dark",
       "purpose": "A server-side REST proxy for custom_rest connections, using a sealed credential binding's secret. Needs CREDENTIAL_BINDINGS_ENABLED (config refuses otherwise). Off, the provider is unknown. Only the literal true turns it on.",
       "codePath": "apps/Ingestion Plane/integration-corev2/internal/config/config.go"
+    },
+    {
+      "name": "DISPOSABLE_EMAIL_BLOCKLIST_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "true",
+      "stage": "ga",
+      "purpose": "Blocks disposable e-mail domains (auth-core security/disposable-email.ts). On unless the value is the literal false, in any case; 0 and off keep it on.",
+      "onDefaultReason": "Protective control: the disposable-domain blocklist is on unless an operator sets the literal false.",
+      "declarations": [
+        { "service": "auth-core", "env": "DISPOSABLE_EMAIL_BLOCKLIST_ENABLED", "default": "true" }
+      ],
+      "codePath": "apps/Control Plane/auth-core/src/security/disposable-email.ts"
     },
     {
       "name": "DREAMING_LLM_EXTRACTION",
@@ -506,6 +602,18 @@
       "stage": "dark",
       "purpose": "ZDR-Z-03c: the BFF's one org-posture reader answers from org-core's effective_zdr instead of parsing the stored intent. Off keeps the intent-only rule. Only the literal true turns it on.",
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "GRAFANA_ANONYMOUS_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "Anonymous Viewer access to the Control Plane Grafana, set as GF_AUTH_ANONYMOUS_ENABLED on controlplane-grafana. Off keeps Grafana behind its login. The Grafana image reads it, not repo code.",
+      "declarations": [
+        { "service": "controlplane-grafana", "env": "GF_AUTH_ANONYMOUS_ENABLED", "default": "false" }
+      ]
     },
     {
       "name": "INFERENCE_BYO_GATEWAY_ENABLED",
@@ -1071,6 +1179,58 @@
       ]
     },
     {
+      "name": "ORG_CORE_KEYS_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "0",
+      "stage": "dark",
+      "purpose": "Organisation key custody routes in org-core (orgkeys/masterkey.go). Off, the routes are not mounted. On with 1 or true, the master keys must parse or org-core refuses to start.",
+      "declarations": [
+        { "service": "org-core", "env": "ORG_CORE_KEYS_ENABLED", "default": "0" }
+      ],
+      "codePath": "apps/Control Plane/org-core/internal/orgkeys/masterkey.go"
+    },
+    {
+      "name": "ORG_DOMAIN_VERIFICATION_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "0",
+      "stage": "dark",
+      "purpose": "Domain verification routes (DNS TXT proof) and the SSO policy gate in org-core (identity_handlers.go). Off, the routes answer 404. Only 1 or true turns it on.",
+      "declarations": [
+        { "service": "org-core", "env": "ORG_DOMAIN_VERIFICATION_ENABLED", "default": "0" }
+      ],
+      "codePath": "apps/Control Plane/org-core/internal/http/identity_handlers.go"
+    },
+    {
+      "name": "ORG_SCIM_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "0",
+      "stage": "dark",
+      "purpose": "SCIM provisioning routes in org-core (scim_handlers.go). Off, every SCIM path answers 404. Only 1 or true turns it on.",
+      "declarations": [
+        { "service": "org-core", "env": "ORG_SCIM_ENABLED", "default": "0" }
+      ],
+      "codePath": "apps/Control Plane/org-core/internal/http/scim_handlers.go"
+    },
+    {
+      "name": "ORG_SIEM_DESTINATIONS_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "0",
+      "stage": "dark",
+      "purpose": "SIEM destination routes in org-core (siem_handlers.go). Off, the routes answer 404. Only 1 or true turns it on.",
+      "declarations": [
+        { "service": "org-core", "env": "ORG_SIEM_DESTINATIONS_ENABLED", "default": "0" }
+      ],
+      "codePath": "apps/Control Plane/org-core/internal/http/siem_handlers.go"
+    },
+    {
       "name": "OWNER_LIST_SPACE_REFUSE",
       "kind": "switch",
       "owner": "model-plane",
@@ -1336,9 +1496,12 @@
       "name": "USER_CORE_ORG_ERASURE_CONSUMER_ENABLED",
       "kind": "switch",
       "owner": "control-plane",
-      "source": "code",
+      "source": "compose",
       "default": "false",
       "purpose": "user-core deletes a purged organisation's resource grants when org-core fans out the organisation erasure. Only the literal true subscribes. Needs the user-core-org-erasure durable from audit-core first.",
+      "declarations": [
+        { "service": "user-core", "env": "USER_CORE_ORG_ERASURE_CONSUMER_ENABLED", "default": "false" }
+      ],
       "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
     },
     {
@@ -1471,6 +1634,19 @@
       "codePath": "apps/Model Plane/go/services/capability-core/cmd/main.go"
     },
     {
+      "name": "WEB_POLICY_CLAIM_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "0",
+      "stage": "dark",
+      "purpose": "Web-policy claim on tokens for the audiences that carry it (auth-core web-policy.ts). Off, such a token carries rev 0 and org-core is never asked. Only 1 or true turns it on.",
+      "declarations": [
+        { "service": "auth-core", "env": "WEB_POLICY_CLAIM_ENABLED", "default": "0" }
+      ],
+      "codePath": "apps/Control Plane/auth-core/src/auth/web-policy.ts"
+    },
+    {
       "name": "WIDE_RESEARCH_FAN_OUT_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -1514,6 +1690,9 @@
       "stage": "dark",
       "killSwitch": true,
       "purpose": "ZDR-Z-14: the per-connection ZDR waiver issuer. Off refuses every waiver with zdr_connection_not_supported. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "auth-core", "env": "ZDR_WAIVER_ENABLED", "default": "false" }
+      ],
       "codePath": "apps/Control Plane/auth-core/src/auth/retention-decision.service.ts"
     },
     {
