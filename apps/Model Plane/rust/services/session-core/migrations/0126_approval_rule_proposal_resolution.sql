@@ -120,8 +120,9 @@ BEGIN
         WHERE conrelid = 'approval_rule_proposals'::regclass
           AND conname = 'approval_rule_proposals_confirm_shape'
     ) THEN
+        -- NOT VALID: existing confirmed rows have policy_id '' (new column) and would fail the check.
         ALTER TABLE approval_rule_proposals
             ADD CONSTRAINT approval_rule_proposals_confirm_shape
-            CHECK (state <> 'confirmed' OR policy_id <> '');
+            CHECK (state <> 'confirmed' OR policy_id <> '') NOT VALID;
     END IF;
 END$$;

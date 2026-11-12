@@ -16,6 +16,8 @@
 --
 -- Safe to run twice (every statement is IF EXISTS or guarded).
 
+BEGIN;
+
 UPDATE approval_rule_proposals
    SET state = 'proposed', claimed_at = NULL
  WHERE state = 'confirming';
@@ -58,3 +60,5 @@ BEGIN
             CHECK ((state = 'proposed') = (resolved_at IS NULL));
     END IF;
 END$$;
+
+COMMIT;

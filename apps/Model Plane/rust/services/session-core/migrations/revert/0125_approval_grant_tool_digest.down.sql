@@ -14,5 +14,9 @@
 --
 -- Safe to run twice (every statement is IF EXISTS).
 
+BEGIN;
+
 ALTER TABLE approval_scope_grants DROP CONSTRAINT IF EXISTS approval_scope_grants_tool_digest_shape;
 ALTER TABLE approval_scope_grants DROP COLUMN IF EXISTS tool_digest;
+
+COMMIT;
