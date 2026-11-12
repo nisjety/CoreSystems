@@ -2454,10 +2454,10 @@ export function DashboardComposer(props: {
 				"Import job started. The files will be available in organisation knowledge when it finishes.",
 			));
 		} catch (error) {
-			setKnowledgeImportNotice(error instanceof Error ? error.message : i18n.tr(
-				"Kunne ikke starte importen.",
-				"Could not start the import.",
-			));
+			setKnowledgeImportNotice(translateApiError(error, i18n.tr, {
+				no: "Kunne ikke starte importen.",
+				en: "Could not start the import.",
+			}));
 		} finally {
 			setKnowledgeImporting(false);
 		}

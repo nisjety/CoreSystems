@@ -600,17 +600,17 @@ export default function ChatPage() {
   // imports-core enforce its own file policy and ZDR rejection.
   const importAttachmentsToKnowledge = async (attachments: DashboardComposerAttachment[]) => {
     const orgId = session.activeOrg?.id?.trim()
-    if (!orgId) throw new Error('Ingen aktiv organisasjon er tilgjengelig for import.')
-    if (temporaryChat()) throw new Error('Midlertidig chat kan ikke lagre filer i kunnskapsbasen.')
+    if (!orgId) throw new LocalizedError({ no: 'Ingen aktiv organisasjon er tilgjengelig for import.', en: 'No active organization is available for import.' })
+    if (temporaryChat()) throw new LocalizedError({ no: 'Midlertidig chat kan ikke lagre filer i kunnskapsbasen.', en: 'Temporary chat cannot save files to the knowledge base.' })
     const files = await Promise.all(attachments.map(async (attachment) => {
       const response = await fetch(attachment.url)
-      if (!response.ok) throw new Error(`Kunne ikke lese ${attachment.name}.`)
+      if (!response.ok) throw new LocalizedError({ no: `Kunne ikke lese ${attachment.name}.`, en: `Could not read ${attachment.name}.` })
       const blob = await response.blob()
       return new File([blob], attachment.name, {
         type: attachment.type || blob.type || 'application/octet-stream',
       })
     }))
-    if (files.length === 0) throw new Error('Ingen filer er valgt.')
+    if (files.length === 0) throw new LocalizedError({ no: 'Ingen filer er valgt.', en: 'No files are selected.' })
     await importUpload(orgId, files, { zdr: false })
   }
 

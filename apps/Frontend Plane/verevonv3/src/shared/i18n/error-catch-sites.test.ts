@@ -103,9 +103,9 @@ const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
   'features/dashboard/home/BrowserTimelineDetail.tsx': { sites: 1, reason: UNREVIEWED },
   'features/dashboard/home/DashboardCards.tsx': { sites: 3, reason: UNREVIEWED },
   'features/dashboard/home/DashboardComposer.tsx': {
-    sites: 2,
+    sites: 1,
     reason:
-      'the knowledge import notice and the gateway-load failure line are unreviewed (the send failure and the pick error at the same place were converted)',
+      'the gateway-load failure line is unreviewed (the knowledge import notice, the send failure and the pick error at the same place were converted)',
   },
   'features/inbox/components/InboxPage.tsx': {
     sites: 1,

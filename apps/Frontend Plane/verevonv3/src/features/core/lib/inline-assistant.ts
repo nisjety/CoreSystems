@@ -216,7 +216,7 @@ export function createInlineAssistantController(options: {
         publish(event.stopReason === 'stream_incomplete' ? { status: 'error', error: tr('Svaret ble ikke fullført.', 'The answer did not finish.'), activity: null } : { status: 'idle', activity: null })
       },
       onStopped: () => { if (current()) { terminal = true; if (run.timer) clearTimeout(run.timer); active = null; publish({ status: 'stopped', activity: null }) } },
-      onError: (event) => { if (current() && !run.stopRequested) { terminal = true; publish({ status: 'error', error: event.message, activity: null }) } },
+      onError: (event) => { if (current() && !run.stopRequested) { terminal = true; publish({ status: 'error', error: translateApiError(event, tr, { no: 'Kunne ikke sende meldingen.', en: 'Could not send the message.' }), activity: null }) } },
     }
     // Return once preparation and dispatch have started. Waiting for the whole
     // answer here would make DashboardComposer clear a newer draft when the
