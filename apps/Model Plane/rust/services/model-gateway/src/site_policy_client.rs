@@ -39,10 +39,49 @@ pub const SITE_BLOCKED_CODE: &str = "org_site_blocked";
 /// The process's switch, read once so it cannot change under a request.
 #[must_use]
 pub fn policy_mode() -> WebDomainPolicyMode {
+    #[cfg(test)]
+    {
+        if let Some(mode) = test_seam::mode() {
+            return mode;
+        }
+    }
     static MODE: OnceLock<WebDomainPolicyMode> = OnceLock::new();
     *MODE.get_or_init(|| {
         WebDomainPolicyMode::from_env_value(std::env::var(WEB_DOMAIN_POLICY_MODE_ENV).ok().as_deref())
     })
+}
+
+/// A test seam for the switch. The process's switch is read once, so a test cannot set it through the environment
+/// without changing every other test in the binary. A test names the mode its own thread sees instead, and the guard
+/// restores what the thread saw before.
+#[cfg(test)]
+pub(crate) mod test_seam {
+    use std::cell::Cell;
+
+    use mp_contracts::site_policy::WebDomainPolicyMode;
+
+    thread_local! {
+        static MODE: Cell<Option<WebDomainPolicyMode>> = const { Cell::new(None) };
+    }
+
+    /// The mode this thread's calls see, when a test has named one.
+    pub(crate) fn mode() -> Option<WebDomainPolicyMode> {
+        MODE.with(Cell::get)
+    }
+
+    /// Makes `mode` what this thread's calls see until the guard is dropped.
+    pub(crate) fn set(mode: WebDomainPolicyMode) -> Guard {
+        Guard(MODE.with(|cell| cell.replace(Some(mode))))
+    }
+
+    /// Restores the mode this thread saw before [`set`] named one.
+    pub(crate) struct Guard(Option<WebDomainPolicyMode>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            MODE.with(|cell| cell.set(self.0));
+        }
+    }
 }
 
 /// The process's checker, so every turn shares one cache.

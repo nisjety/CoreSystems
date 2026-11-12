@@ -3050,6 +3050,22 @@ impl ModelGateway for GatewayService {
         if req.url.trim().is_empty() {
             return Err(Status::invalid_argument("url is required"));
         }
+        // The org's domain rules, as the tool loop's `fetch_url` applies them (EP-9 W3, C-09). The org is the verified
+        // identity's: authorize_rpc matched the request's org to it and refused an empty one, so every call has an org
+        // and there is no org-less path to keep unchanged. The requested host is checked before any page is read, and
+        // the host the page ended on before its text is returned. Under `off` nothing is read and nothing changes.
+        if let Some(refusal) = crate::site_policy_client::fetch_refusal(
+            crate::site_policy_client::policy_mode(),
+            crate::site_policy_client::shared_checker(),
+            &crate::site_policy_client::SiteOwner::of(&self.state),
+            identity.org_id(),
+            &[req.url.as_str()],
+            "fetch",
+        )
+        .await
+        {
+            return Err(Status::permission_denied(refusal));
+        }
 
         let render = render_hints_from_proto(req.render.as_ref());
         let result = self
@@ -3064,6 +3080,19 @@ impl ModelGateway for GatewayService {
             )
             .await
             .map_err(quarry_err_to_status)?;
+        if let Some(refusal) = crate::site_policy_client::final_url_refusal(
+            crate::site_policy_client::policy_mode(),
+            crate::site_policy_client::shared_checker(),
+            &crate::site_policy_client::SiteOwner::of(&self.state),
+            identity.org_id(),
+            &req.url,
+            &result.final_url,
+            "fetch",
+        )
+        .await
+        {
+            return Err(Status::permission_denied(refusal));
+        }
 
         Ok(Response::new(FetchResponse {
             request_id: req.request_id,
@@ -3113,8 +3142,34 @@ impl ModelGateway for GatewayService {
             ));
         }
         spec.user_id = identity.user_id().unwrap_or_default().to_owned();
+        // The org's domain rules, as the tool loop's `extract_structured` applies them (EP-9 W3, C-09). Every URL the call
+        // names is checked before any page is read. Each page is checked again on the host it ended on, before its text
+        // reaches inference: web_extraction's final-URL check, which `from_request` switches on. The org is the verified
+        // identity's, as in `fetch`.
+        let urls: Vec<&str> = spec.urls.iter().map(String::as_str).collect();
+        if let Some(refusal) = crate::site_policy_client::fetch_refusal(
+            crate::site_policy_client::policy_mode(),
+            crate::site_policy_client::shared_checker(),
+            &crate::site_policy_client::SiteOwner::of(&self.state),
+            identity.org_id(),
+            &urls,
+            "extract_structured",
+        )
+        .await
+        {
+            return Err(Status::permission_denied(refusal));
+        }
 
         let mut outcomes = crate::web_extraction::extract(&self.state, &spec).await;
+        // A page the rules refuse was dropped before any inference call. As the tool loop does, the whole call is refused
+        // with the typed message, and no page's data is returned.
+        if let Some(refusal) = outcomes
+            .iter()
+            .map(|outcome| outcome.result.error_message.as_str())
+            .find(|message| message.starts_with(crate::site_policy_client::SITE_BLOCKED_CODE))
+        {
+            return Err(Status::permission_denied(refusal.to_owned()));
+        }
         if single {
             // One page, as before: a page the edge could not read is the edge's status.
             if let Some(error) = outcomes.first_mut().and_then(|o| o.fetch_error.take()) {
@@ -3552,6 +3607,7 @@ mod tests {
         TerminalOutcome, Trajectory, TranscribeSpeechRequest, TranscribeSpeechResponse,
         TranslateTextRequest, TranslateTextResponse, TranslationDetection, TranslationLanguageInfo,
     };
+    use mp_contracts::site_policy::WebDomainPolicyMode;
     use mp_events::publisher::InMemoryPublisher;
     use std::{
         pin::Pin,
@@ -5128,6 +5184,254 @@ mod tests {
             assert_eq!(status.code(), tonic::Code::InvalidArgument, "{why}");
             assert!(status.message().contains(why), "{why}: {}", status.message());
         }
+    }
+
+    /// The org-core answer the domain-rule RPC tests use: `blocked.c09.example` is denied and `allowed.c09.example` is
+    /// read. `resolves` is how many resolve calls the test expects.
+    async fn org_rules(org_core: &MockServer, org_id: &str, resolves: u64) {
+        Mock::given(method("GET"))
+            .and(path(format!("/internal/orgs/{org_id}/browser-sites/resolve")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "organization_id": org_id,
+                "revision": 1,
+                "decisions": [
+                    {"host": "blocked.c09.example", "effective": "deny", "cap": "none", "source": "org_block"},
+                    {"host": "allowed.c09.example", "effective": "read", "cap": "read", "source": "default"}
+                ]
+            })))
+            .expect(resolves)
+            .mount(org_core)
+            .await;
+    }
+
+    /// A Quarry scrape whose page ended at `final_url`. `scrapes` is how many scrapes the test expects.
+    async fn scrape_page(quarry: &MockServer, final_url: &str, scrapes: u64) {
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"status": 200, "url": {"final": final_url}, "formats": {"markdown": "Price 5"}}
+            })))
+            .expect(scrapes)
+            .mount(quarry)
+            .await;
+    }
+
+    /// The gateway with its org-core and Quarry edges on the mock servers. Each inference call publishes one usage
+    /// envelope, so [`published`] counts the inference calls an RPC made.
+    async fn site_policy_service(
+        org_core: &MockServer,
+        quarry: &MockServer,
+    ) -> (GatewayService, Arc<DynPublisher>) {
+        let (mut service, publisher, _) = test_service_with_lifecycle(MockInferenceOk).await;
+        service.state.quarry = crate::quarry::Client::new(crate::quarry::Config {
+            base_url: quarry.uri(),
+            token: "test-token".to_owned(),
+            timeout: std::time::Duration::from_secs(5),
+        });
+        service.state.org_core_base_url = org_core.uri();
+        service.state.org_core_service_token = "test-token".to_owned();
+        (service, publisher)
+    }
+
+    fn published(publisher: &DynPublisher) -> usize {
+        match publisher {
+            DynPublisher::InMemory(publisher) => publisher.drain().len(),
+            DynPublisher::Nats(_) => unreachable!("the test harness uses the in-memory publisher"),
+        }
+    }
+
+    fn fetch_of(org_id: &str, url: &str) -> FetchRequest {
+        FetchRequest {
+            org_id: org_id.to_owned(),
+            url: url.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn extract_of(org_id: &str, url: &str) -> ExtractStructuredRequest {
+        ExtractStructuredRequest {
+            request_id: "req-c09".to_owned(),
+            org_id: org_id.to_owned(),
+            url: url.to_owned(),
+            schema_json: r#"{"type":"object","required":["price"]}"#.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// C-09: the gRPC `fetch` applies the org's domain rules. A host the rules refuse is refused before any page is read.
+    #[tokio::test]
+    async fn fetch_refuses_a_requested_host_the_org_blocks_before_any_page_is_read() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Enforce);
+        let org_core = MockServer::start().await;
+        org_rules(&org_core, "org_c09_fetch_host", 1).await;
+        let quarry = MockServer::start().await;
+        scrape_page(&quarry, "https://blocked.c09.example/a", 0).await;
+        let (service, _) = site_policy_service(&org_core, &quarry).await;
+
+        let status = service
+            .fetch(authenticated_as(
+                fetch_of("org_c09_fetch_host", "https://blocked.c09.example/a"),
+                "org_c09_fetch_host",
+                "user_test",
+            ))
+            .await
+            .expect_err("a host the org blocks is refused");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        assert!(
+            status.message().starts_with("org_site_blocked: "),
+            "{}",
+            status.message()
+        );
+        assert!(
+            status.message().contains("blocked.c09.example"),
+            "{}",
+            status.message()
+        );
+    }
+
+    /// C-09: a page that ended on a host the org blocks is refused before its text is returned.
+    #[tokio::test]
+    async fn fetch_refuses_a_page_that_ended_on_a_host_the_org_blocks() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Enforce);
+        let org_core = MockServer::start().await;
+        // One answer for the requested host, which is allowed, and one for the host the page ended on, which is not.
+        org_rules(&org_core, "org_c09_fetch_final", 2).await;
+        let quarry = MockServer::start().await;
+        scrape_page(&quarry, "https://blocked.c09.example/landing", 1).await;
+        let (service, _) = site_policy_service(&org_core, &quarry).await;
+
+        let status = service
+            .fetch(authenticated_as(
+                fetch_of("org_c09_fetch_final", "https://allowed.c09.example/a"),
+                "org_c09_fetch_final",
+                "user_test",
+            ))
+            .await
+            .expect_err("a page that ended on a blocked host is refused");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        assert!(
+            status.message().starts_with("org_site_blocked: "),
+            "{}",
+            status.message()
+        );
+        assert!(
+            status.message().contains("blocked.c09.example"),
+            "{}",
+            status.message()
+        );
+    }
+
+    /// C-09: with the switch off the gRPC `fetch` reads a blocked host as it always did, and asks org-core nothing.
+    #[tokio::test]
+    async fn fetch_is_unchanged_with_the_domain_switch_off() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Off);
+        let org_core = MockServer::start().await;
+        org_rules(&org_core, "org_c09_fetch_off", 0).await;
+        let quarry = MockServer::start().await;
+        scrape_page(&quarry, "https://blocked.c09.example/a", 1).await;
+        let (service, _) = site_policy_service(&org_core, &quarry).await;
+
+        let reply = service
+            .fetch(authenticated_as(
+                fetch_of("org_c09_fetch_off", "https://blocked.c09.example/a"),
+                "org_c09_fetch_off",
+                "user_test",
+            ))
+            .await
+            .expect("off reads the page")
+            .into_inner();
+        assert_eq!(reply.final_url, "https://blocked.c09.example/a");
+        assert!(reply.markdown.contains("Price 5"), "{}", reply.markdown);
+    }
+
+    /// C-09: the gRPC `extract_structured` refuses a requested host the org blocks before any page is read, so no
+    /// inference call is made.
+    #[tokio::test]
+    async fn extract_structured_refuses_a_requested_host_the_org_blocks_before_inference() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Enforce);
+        let org_core = MockServer::start().await;
+        org_rules(&org_core, "org_c09_extract_host", 1).await;
+        let quarry = MockServer::start().await;
+        scrape_page(&quarry, "https://blocked.c09.example/a", 0).await;
+        let (service, publisher) = site_policy_service(&org_core, &quarry).await;
+
+        let status = service
+            .extract_structured(authenticated_as(
+                extract_of("org_c09_extract_host", "https://blocked.c09.example/a"),
+                "org_c09_extract_host",
+                "user_test",
+            ))
+            .await
+            .expect_err("a host the org blocks is refused");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        assert!(
+            status.message().starts_with("org_site_blocked: "),
+            "{}",
+            status.message()
+        );
+        assert_eq!(published(&publisher), 0, "no inference call was made");
+    }
+
+    /// C-09: a page that ended on a host the org blocks is refused before its text reaches inference, and the whole call
+    /// is refused, as the tool loop refuses it.
+    #[tokio::test]
+    async fn extract_structured_refuses_a_page_that_ended_on_a_blocked_host_before_inference() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Enforce);
+        let org_core = MockServer::start().await;
+        org_rules(&org_core, "org_c09_extract_final", 2).await;
+        let quarry = MockServer::start().await;
+        scrape_page(&quarry, "https://blocked.c09.example/landing", 1).await;
+        let (service, publisher) = site_policy_service(&org_core, &quarry).await;
+
+        let status = service
+            .extract_structured(authenticated_as(
+                extract_of("org_c09_extract_final", "https://allowed.c09.example/a"),
+                "org_c09_extract_final",
+                "user_test",
+            ))
+            .await
+            .expect_err("a page that ended on a blocked host is refused");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        assert!(
+            status.message().starts_with("org_site_blocked: "),
+            "{}",
+            status.message()
+        );
+        assert!(
+            status.message().contains("blocked.c09.example"),
+            "{}",
+            status.message()
+        );
+        assert_eq!(published(&publisher), 0, "no inference call was made");
+    }
+
+    /// C-09: with the switch off the gRPC `extract_structured` reads and extracts a blocked host as it always did, and
+    /// asks org-core nothing.
+    #[tokio::test]
+    async fn extract_structured_is_unchanged_with_the_domain_switch_off() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Off);
+        let org_core = MockServer::start().await;
+        org_rules(&org_core, "org_c09_extract_off", 0).await;
+        let quarry = MockServer::start().await;
+        scrape_page(&quarry, "https://blocked.c09.example/a", 1).await;
+        let (service, publisher) = site_policy_service(&org_core, &quarry).await;
+
+        let reply = service
+            .extract_structured(authenticated_as(
+                extract_of("org_c09_extract_off", "https://blocked.c09.example/a"),
+                "org_c09_extract_off",
+                "user_test",
+            ))
+            .await
+            .expect("off reads the page; a bad answer is a structured failure")
+            .into_inner();
+        assert_eq!(reply.results.len(), 1);
+        assert_eq!(reply.results[0].url, "https://blocked.c09.example/a");
+        assert_eq!(
+            reply.error_message,
+            "the model did not return a JSON object"
+        );
+        assert!(published(&publisher) > 0, "the inference call was made");
     }
 
     fn authenticated_as<T>(value: T, org_id: &str, user_id: &str) -> Request<T> {

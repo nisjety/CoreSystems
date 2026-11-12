@@ -161,7 +161,8 @@ pub struct ExtractSpec {
     /// `grpc` or `tool_loop`, for the usage envelope.
     pub transport: &'static str,
     /// The tool name to check each page's final URL under, against the org's domain rules (`WEB_DOMAIN_POLICY_MODE`),
-    /// after the fetch and before any inference call. `None` for a caller that applies no domain rules (the gRPC method).
+    /// after the fetch and before any inference call. `None` for a caller that applies no domain rules; the tool loop and
+    /// the gRPC method both set it.
     pub site_policy_tool: Option<&'static str>,
 }
 
@@ -225,7 +226,8 @@ impl ExtractSpec {
             max_output_tokens,
             inference_bearer: inference_bearer.to_owned(),
             transport: "grpc",
-            site_policy_tool: None,
+            // The gRPC method applies the org's domain rules to each page's final URL, as the tool loop does (C-09).
+            site_policy_tool: Some("extract_structured"),
         })
     }
 }
@@ -1818,6 +1820,7 @@ mod tests {
         assert_eq!(spec.urls, vec!["https://b.example", "https://c.example"], "urls win over url");
         assert_eq!(spec.max_output_tokens, MAX_OUTPUT_TOKENS);
         assert!(spec.zdr);
+        assert_eq!(spec.site_policy_tool, Some("extract_structured"));
         let single = ExtractStructuredRequest {
             url: " https://a.example ".into(),
             schema_json: SCHEMA.into(),
