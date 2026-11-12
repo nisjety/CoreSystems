@@ -108,6 +108,10 @@ type CreateHumanBrowseParams struct {
 	// past the first expiry.
 	AbsoluteTTL time.Duration
 	Zdr         bool
+	// WebPolicy is the org web-policy snapshot read from the verified token (WS7.K);
+	// nil is none. The grant keeps it, so an attach child derived from it must pass
+	// the snapshot's deny rules (planDerive).
+	WebPolicy *WebPolicySnapshot
 	// MaxActivePerOwner > 0 refuses creation with ErrTooManyGrants when the
 	// owner already holds that many active ordinary grants (session and
 	// human_browse together). The check and the insert are one atomic step.
@@ -308,8 +312,10 @@ func planDerive(ctx context.Context, p DeriveParams, parent *Grant) (derivePlan,
 }
 
 // deriveDomainsFrom is deriveDomains for a parent grant: an open-web parent has
-// no host list to narrow, so its child must name hosts (never inherited) and
-// none may be under the parent's deny-list.
+// no host list to narrow, so its child must name hosts (never inherited). The
+// org web policy the grant carries narrows those hosts as it narrows an ordinary
+// grant's (Narrow): an allow rule narrows them to the hosts it covers and a deny
+// rule refuses them. None may be under the parent's deny-list.
 func deriveDomainsFrom(parent *Grant, requested []string, maxRun int, explicitRequired bool) ([]string, error) {
 	if parent.PolicyMode != PolicyModeOpenWeb {
 		return deriveDomains(parent, requested, maxRun, explicitRequired)
@@ -318,6 +324,12 @@ func deriveDomainsFrom(parent *Grant, requested []string, maxRun int, explicitRe
 		return nil, ErrDeriveNeedsExplicitDomains
 	}
 	domains, err := NormalizeAllowedDomains(requested)
+	if err != nil {
+		return nil, err
+	}
+	// Narrowing can name an allowed host below a requested one, so the run bound
+	// is read from what it returns.
+	domains, err = Narrow(domains, parent.WebPolicy)
 	if err != nil {
 		return nil, err
 	}
@@ -352,6 +364,7 @@ func (s *MemoryRepository) CreateHumanBrowse(_ context.Context, p CreateHumanBro
 		SessionKey:        p.SessionKey,
 		ScopeURL:          p.ScopeURL,
 		Zdr:               p.Zdr,
+		WebPolicy:         p.WebPolicy.Clone(),
 		PolicyMode:        PolicyModeOpenWeb,
 		DeniedDomains:     denied,
 		ExpiresAt:         now.Add(p.TTL),

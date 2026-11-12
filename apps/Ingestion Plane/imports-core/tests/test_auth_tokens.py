@@ -110,3 +110,56 @@ def test_shared_tenant_key_is_disabled_by_default(monkeypatch: pytest.MonkeyPatc
         asyncio.run(require_internal_auth(request))
 
     assert exc.value.status_code == 401
+
+
+def _extract_request(token: str, path: str) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": path,
+            "headers": [(b"authorization", f"Bearer {token}".encode())],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("switch", "path", "admitted"),
+    [
+        (None, "/api/v1/import/extract", False),
+        ("false", "/api/v1/import/extract", False),
+        ("TRUE", "/api/v1/import/extract", False),
+        ("true", "/api/v1/import/extract", True),
+        ("true", "/api/v1/import/jobs/upload", False),
+    ],
+)
+def test_read_only_service_token_reaches_extract_only_behind_switch(
+    monkeypatch: pytest.MonkeyPatch, switch: str | None, path: str, admitted: bool
+) -> None:
+    private_key, jwks, settings = _fixture()
+    token = _token(
+        private_key,
+        sub="quarry-edge",
+        principal_type="service",
+        service_id="quarry-edge",
+        scopes=["imports:read"],
+    )
+
+    async def _keys(_settings: object, *, force: bool = False) -> dict:
+        return jwks
+
+    monkeypatch.setattr(auth_middleware, "_load_jwks", _keys)
+    if switch is None:
+        monkeypatch.delenv("IMPORTS_EXTRACT_READ_SCOPE", raising=False)
+    else:
+        monkeypatch.setenv("IMPORTS_EXTRACT_READ_SCOPE", switch)
+    request = _extract_request(token, path)
+
+    if admitted:
+        principal = asyncio.run(auth_middleware._bearer_context(request, settings))
+        assert principal.principal_type == "service"
+        assert principal.org_id == "org-1"
+    else:
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(auth_middleware._bearer_context(request, settings))
+        assert exc.value.status_code == 403

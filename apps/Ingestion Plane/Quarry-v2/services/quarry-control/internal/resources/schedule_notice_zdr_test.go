@@ -56,9 +56,11 @@ func seedStampedSchedule(t *testing.T, db store.DB, name string, stamp *bool) st
 	return s
 }
 
-// A skipped_zdr fire is denied because the org's effective posture is ZDR now, so its
-// notice is ZDR whatever the create-time stamp says: an org that turns ZDR on keeps the
-// stamp of the schedules it already had. Every other skip code keeps the stamp's retention.
+// A skipped_zdr fire is denied because the org's effective posture is ZDR now, and a
+// skipped_posture_unknown fire because the posture could not be read (fail closed). Their
+// notices are ZDR whatever the create-time stamp says: an org that turns ZDR on keeps the
+// stamp of the schedules it already had, and an unread posture may be ZDR. Every other skip
+// code keeps the stamp's retention.
 func TestSkippedFireNoticeZdrFollowsStampOrSkippedZdr(t *testing.T) {
 	t.Parallel()
 	db := store.NewMemory()
@@ -76,6 +78,8 @@ func TestSkippedFireNoticeZdrFollowsStampOrSkippedZdr(t *testing.T) {
 	}{
 		{"legacy_unstamped_skipped_zdr", nil, "skipped_zdr", true},
 		{"stamped_standard_skipped_zdr", &no, "skipped_zdr", true},
+		{"legacy_unstamped_skipped_posture_unknown", nil, "skipped_posture_unknown", true},
+		{"stamped_standard_skipped_posture_unknown", &no, "skipped_posture_unknown", true},
 		{"legacy_unstamped_skipped_overlap", nil, "skipped_overlap", false},
 		{"stamped_zdr_skipped_overlap", &yes, "skipped_overlap", true},
 	}

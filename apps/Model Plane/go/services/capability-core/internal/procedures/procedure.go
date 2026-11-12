@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -137,6 +138,134 @@ var allowedActionTypes = map[string]bool{
 
 // typedActionTypes are the actions that type a value, so they must name a slot and carry no text.
 var typedActionTypes = map[string]bool{"type": true, "type_semantic": true}
+
+// actionKeys is the closed field set of each action, by its type: the serde shape of the Quarry AgentAction
+// variant the v2 compile keeps (its type tag and its own fields). A field outside the set is refused, so text
+// is accepted only on a typed action, where it must be empty, and a type cannot carry a field it does not have.
+var actionKeys = map[string]map[string]bool{
+	"navigate":          {"type": true, "url": true},
+	"click":             {"type": true, "selector": true},
+	"click_semantic":    {"type": true, "snapshot_id": true, "generation": true, "locator": true},
+	"type":              {"type": true, "selector": true, "text": true},
+	"type_semantic":     {"type": true, "snapshot_id": true, "generation": true, "locator": true, "text": true},
+	"select_semantic":   {"type": true, "snapshot_id": true, "generation": true, "locator": true, "value": true},
+	"wait_for_semantic": {"type": true, "snapshot_id": true, "generation": true, "locator": true, "timeout_ms": true},
+	"press":             {"type": true, "key": true},
+	"scroll":            {"type": true, "target": true},
+	"wait":              {"type": true, "ms": true},
+	"back":              {"type": true},
+	"get_content":       {"type": true},
+}
+
+// stepObjectKeys is the closed field set of a step's target (StepTarget) and expect (StepExpectation), the
+// shapes Quarry writes.
+var stepObjectKeys = map[string]map[string]bool{
+	"target": {"locator": true, "fingerprint_id": true, "tag": true},
+	"expect": {"all": true},
+}
+
+// locatorKeys is the closed field set of each SemanticLocator kind, by its serde tag (the enum in Quarry's
+// quarry-core contracts.rs). The enum has no deny_unknown_fields, so a field outside its kind's set would be
+// kept in the stored body and replayed without error. The locator of an action and of a target are both closed.
+var locatorKeys = map[string]map[string]bool{
+	"role":        {"kind": true, "role": true, "name": true, "exact": true},
+	"text":        {"kind": true, "text": true, "exact": true},
+	"label":       {"kind": true, "label": true, "exact": true},
+	"placeholder": {"kind": true, "placeholder": true, "exact": true},
+	"test_id":     {"kind": true, "test_id": true, "exact": true},
+	"nth":         {"kind": true, "selector": true, "index": true},
+}
+
+// expectConditionKeys is the closed field set of each ExpectCondition kind, by its serde tag (the enum in Quarry's
+// quarry-core step_expect.rs). Quarry denies unknown fields there, so a replay fails loudly, but the store must not
+// keep an unvetted value until then. A condition's locator and within are closed as locators (checkLocator).
+var expectConditionKeys = map[string]map[string]bool{
+	"url_matches":     {"kind": true, "pattern": true},
+	"element_present": {"kind": true, "locator": true},
+	"element_absent":  {"kind": true, "locator": true},
+	"text_present":    {"kind": true, "text": true, "within": true},
+	"text_absent":     {"kind": true, "text": true, "within": true},
+}
+
+// fieldType is the JSON type a closed field holds: the scalar its Quarry serde field expects. A value of any other type
+// is refused, so a typed value cannot sit under a field that holds a string, a flag or a number. The zero value holds
+// no type, so a field with no entry in a type table is refused.
+type fieldType uint8
+
+const (
+	typeNone fieldType = iota
+	typeString
+	typeBool
+	// typeU32 is a non-negative integer no larger than math.MaxUint32, the serde type of Quarry's u32 fields.
+	typeU32
+	// typeObject is a JSON object. Its own closed set is checked by the rule of its kind (a locator, a target, an expect).
+	typeObject
+	typeArray
+	// typeObjectOrNull is an object, or null where Quarry writes an Option without skip_serializing_if: a text condition
+	// writes within as null when it names no element.
+	typeObjectOrNull
+	// typeOutcome is one of the ActionOutcomeStatus tokens: verified, failed or unknown.
+	typeOutcome
+)
+
+// holds reports whether v, a value of a scanned body, has the type. An integer is an int64 after scan, and a number
+// with a fraction or an exponent is a float64, which no type here holds.
+func (t fieldType) holds(v any) bool {
+	switch t {
+	case typeString:
+		_, ok := v.(string)
+		return ok
+	case typeBool:
+		_, ok := v.(bool)
+		return ok
+	case typeU32:
+		n, ok := v.(int64)
+		return ok && n >= 0 && n <= math.MaxUint32
+	case typeObject:
+		_, ok := v.(map[string]any)
+		return ok
+	case typeArray:
+		_, ok := v.([]any)
+		return ok
+	case typeObjectOrNull:
+		if v == nil {
+			return true
+		}
+		_, ok := v.(map[string]any)
+		return ok
+	case typeOutcome:
+		s, ok := v.(string)
+		return ok && (s == "verified" || s == "failed" || s == "unknown")
+	default:
+		return false
+	}
+}
+
+// actionFieldTypes is the type each action field holds, by its serde name. A name means the same type in every action
+// that carries it, so one table types the fields of all twelve. actionKeys says which fields each action may hold.
+var actionFieldTypes = map[string]fieldType{
+	"type": typeString, "url": typeString, "selector": typeString, "snapshot_id": typeString,
+	"generation": typeU32, "locator": typeObject, "text": typeString, "value": typeString,
+	"timeout_ms": typeU32, "key": typeString, "target": typeString, "ms": typeU32,
+}
+
+// locatorFieldTypes is the type each SemanticLocator field holds, by its serde name. A name means the same type in
+// every kind, so one table types the fields of all six kinds. A role's name is written only when it is set.
+var locatorFieldTypes = map[string]fieldType{
+	"kind": typeString, "role": typeString, "name": typeString, "exact": typeBool,
+	"text": typeString, "label": typeString, "placeholder": typeString, "test_id": typeString,
+	"selector": typeString, "index": typeU32,
+}
+
+// expectFieldTypes is the type each ExpectCondition field holds, by its serde name. A within is an object or null.
+var expectFieldTypes = map[string]fieldType{
+	"kind": typeString, "pattern": typeString, "locator": typeObject, "text": typeString, "within": typeObjectOrNull,
+}
+
+// stepObjectFieldTypes is the type each field of a step's target and expect holds, by its serde name.
+var stepObjectFieldTypes = map[string]fieldType{
+	"locator": typeObject, "fingerprint_id": typeString, "tag": typeString, "all": typeArray,
+}
 
 var (
 	topLevelKeys = map[string]bool{
@@ -383,10 +512,39 @@ func checkShape(root map[string]any) (Summary, error) {
 		if !ok || !allowedActionTypes[actionType] {
 			return Summary{}, refuse(CodeActionNotAllowed, "step %d: the action type is not in the allowed vocabulary", i)
 		}
+		for k := range action {
+			if !actionKeys[actionType][k] {
+				return Summary{}, refuse(CodeBadShape, "step %d: the action has an unknown field %q", i, k)
+			}
+		}
+		if loc, present := action["locator"]; present {
+			if err := checkLocator(i, "action", loc); err != nil {
+				return Summary{}, err
+			}
+		}
 		for _, field := range []string{"target", "expect"} {
 			if v, present := step[field]; present {
-				if _, ok := v.(map[string]any); !ok {
+				obj, ok := v.(map[string]any)
+				if !ok {
 					return Summary{}, refuse(CodeBadShape, "step %d: %s must be an object", i, field)
+				}
+				for k, child := range obj {
+					if !stepObjectKeys[field][k] {
+						return Summary{}, refuse(CodeBadShape, "step %d: %s has an unknown field %q", i, field, k)
+					}
+					if !stepObjectFieldTypes[k].holds(child) {
+						return Summary{}, refuse(CodeBadShape, "step %d: %s field %q has the wrong type", i, field, k)
+					}
+				}
+				if loc, present := obj["locator"]; present {
+					if err := checkLocator(i, field, loc); err != nil {
+						return Summary{}, err
+					}
+				}
+				if field == "expect" {
+					if err := checkExpectConditions(i, obj["all"]); err != nil {
+						return Summary{}, err
+					}
 				}
 			}
 		}
@@ -394,6 +552,9 @@ func checkShape(root map[string]any) (Summary, error) {
 			if _, ok := v.(bool); !ok {
 				return Summary{}, refuse(CodeBadShape, "step %d: redacted_input must be a boolean", i)
 			}
+		}
+		if v, present := step["expected_outcome"]; present && !typeOutcome.holds(v) {
+			return Summary{}, refuse(CodeBadShape, "step %d: expected_outcome must be verified, failed or unknown", i)
 		}
 
 		slotRaw, hasSlot := step["slot"]
@@ -423,6 +584,13 @@ func checkShape(root map[string]any) (Summary, error) {
 		} else if hasSlot {
 			return Summary{}, refuse(CodeBadSlot, "step %d: only a typed step names a slot", i)
 		}
+		// Each field of the action holds the scalar its Quarry field expects. A typed step's text was checked above, so a
+		// text that is not an empty string still reports CodeTypedText.
+		for k, v := range action {
+			if !actionFieldTypes[k].holds(v) {
+				return Summary{}, refuse(CodeBadShape, "step %d: the action field %q has the wrong type", i, k)
+			}
+		}
 	}
 	for _, name := range slotNames {
 		if !used[name] {
@@ -435,6 +603,72 @@ func checkShape(root map[string]any) (Summary, error) {
 		names = []string{}
 	}
 	return Summary{StepCount: len(steps), SlotNames: names}, nil
+}
+
+// checkLocator refuses a locator (owner names whether it is an action's or a target's) that is not an object of
+// a known kind, that holds a field its kind does not allow, or that holds a field of the wrong type. The refusal
+// names the step and no field, since a typed value can sit under any key; a wrong type names the field, which the
+// kind's closed set has already admitted, and never the value.
+func checkLocator(step int, owner string, v any) error {
+	loc, ok := v.(map[string]any)
+	if !ok {
+		return refuse(CodeBadShape, "step %d: the %s locator must be an object", step, owner)
+	}
+	kind, _ := loc["kind"].(string)
+	fields, known := locatorKeys[kind]
+	if !known {
+		return refuse(CodeBadShape, "step %d: the %s locator has an unknown kind", step, owner)
+	}
+	for k, child := range loc {
+		if !fields[k] {
+			return refuse(CodeBadShape, "step %d: the %s locator has a field its kind does not allow", step, owner)
+		}
+		if !locatorFieldTypes[k].holds(child) {
+			return refuse(CodeBadShape, "step %d: the %s locator field %q has the wrong type", step, owner, k)
+		}
+	}
+	return nil
+}
+
+// checkExpectConditions refuses an expect.all that is not an array of condition objects, a condition of an unknown
+// kind, and a condition that holds a field its kind does not allow or a field of the wrong type. A condition's locator,
+// and a within that is set, are checked as locators. Quarry writes within as null when a text condition names no
+// element, so a null within is absent.
+func checkExpectConditions(step int, all any) error {
+	conditions, ok := all.([]any)
+	if !ok {
+		return refuse(CodeBadShape, "step %d: expect.all must be an array of conditions", step)
+	}
+	for _, raw := range conditions {
+		cond, ok := raw.(map[string]any)
+		if !ok {
+			return refuse(CodeBadShape, "step %d: an expect condition must be an object", step)
+		}
+		kind, _ := cond["kind"].(string)
+		fields, known := expectConditionKeys[kind]
+		if !known {
+			return refuse(CodeBadShape, "step %d: an expect condition has an unknown kind", step)
+		}
+		for k, child := range cond {
+			if !fields[k] {
+				return refuse(CodeBadShape, "step %d: an expect condition has a field its kind does not allow", step)
+			}
+			if !expectFieldTypes[k].holds(child) {
+				return refuse(CodeBadShape, "step %d: an expect condition field %q has the wrong type", step, k)
+			}
+		}
+		if loc, present := cond["locator"]; present {
+			if err := checkLocator(step, "expect", loc); err != nil {
+				return err
+			}
+		}
+		if loc, present := cond["within"]; present && loc != nil {
+			if err := checkLocator(step, "expect", loc); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // readSlots reads the optional slots array. It returns, per slot name, the step number the slot
@@ -486,14 +720,15 @@ func readSlots(root map[string]any) (map[string]int64, []string, error) {
 	return declared, names, nil
 }
 
-// optionalInt reads an optional non-negative integer field of an already scanned object.
+// optionalInt reads an optional field of an already scanned object that Quarry holds as a u32: a non-negative integer
+// no larger than math.MaxUint32.
 func optionalInt(m map[string]any, key string) (int64, bool, error) {
 	v, present := m[key]
 	if !present {
 		return 0, false, nil
 	}
 	n, ok := v.(int64)
-	if !ok || n < 0 {
+	if !ok || n < 0 || n > math.MaxUint32 {
 		return 0, true, errors.New("not a non-negative integer")
 	}
 	return n, true, nil

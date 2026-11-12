@@ -3,6 +3,7 @@
 import asyncio
 import hmac
 import logging
+import os
 import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Optional
@@ -183,8 +184,15 @@ def _legacy_context(request: Request, settings: Any) -> AuthContext | None:
 # The one non-GET route a service token holding only imports:read may call:
 # POST /api/v1/import/extract is ephemeral (no storage, no embedding, no model
 # call, no third-party egress), so reading scope is enough. Exact method and
-# exact path; there is no prefix or pattern match.
+# exact path; there is no prefix or pattern match. Dark until
+# IMPORTS_EXTRACT_READ_SCOPE is the literal "true", so by default this route
+# needs imports:write like every other non-GET call.
 _EPHEMERAL_EXTRACT_PATH = "/api/v1/import/extract"
+
+
+def _extract_read_scope_enabled() -> bool:
+    # Read on every call, so no value is fixed when the module is imported.
+    return os.getenv("IMPORTS_EXTRACT_READ_SCOPE") == "true"
 
 
 def _is_ephemeral_extract_call(request: Request) -> bool:
@@ -217,7 +225,7 @@ async def _bearer_context(request: Request, settings: Any) -> AuthContext:
 
     if principal.principal_type == "service":
         required = "imports:read" if request.method in {"GET", "HEAD", "OPTIONS"} else "imports:write"
-        if _is_ephemeral_extract_call(request):
+        if _extract_read_scope_enabled() and _is_ephemeral_extract_call(request):
             # Ephemeral text extraction: nothing is stored, embedded or sent on, so
             # a read-only service token (quarry-edge, manifest row office-extract)
             # may make exactly this one call. Every other non-GET call still needs

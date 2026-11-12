@@ -1360,6 +1360,8 @@ Nothing is switched on by this section. Every switch below is at its default in 
 | `QUARRY_CONTROL__ZDR_EVENT_CONSUMER` | control | `off` | `observe` logs would-pause; `enforce` writes events and pauses | 1 (observe), 2 (enforce) |
 | `QUARRY_EDGE__ZDR_REFUSE_DURABLE_RESOURCES` | edge | `false` (observe) | Refuses ZDR create, unpause, trigger and backfill with 403 | Not part of this go-live (ADR-4) |
 | `QUARRY_EDGE__SAVED_JOBS` | edge | unset (off) | `1` lets `POST /v1/schedules` take a `source_id` (a schedule from a saved crawl definition) and turns on the definition routes. Firing still needs `QUARRY_SCHEDULED_JOBS_ENABLED` | 1 |
+| `QUARRY_EDGE__MONITOR_TAGS` | edge | unset (off) | `1` turns on `PATCH /v1/sources/{id}` and `PATCH /v1/schedules/{id}` (set or clear a monitor tag). Off answers 501 `UNSUPPORTED`, naming the switch. The `tag` on `POST` and the `?tag=` filter are not behind it. A label only: no run changes | none |
+| `QUARRY_EDGE__SCHEDULE_RUNS` | edge | unset (off) | `1` turns on `GET /v1/schedules/{id}/runs` (a schedule's fires, newest first). Off answers 501 `UNSUPPORTED`, naming the switch. A read only: no run changes | none |
 | `QUARRY_CONTROL__SCHEDULE_REQUESTS` | control | off | `1` answers trigger and backfill with 202 request rows | 4 |
 | `QUARRY_SCHEDULE_REQUESTS` | orchestrator | off | `1` runs the request loop | 4 |
 | `QUARRY_SCHEDULE_CAPABILITIES` | gateway (Frontend Plane) | every capability off | Lets the SPA offer the kinds, trigger, backfill and overlap | 5 |

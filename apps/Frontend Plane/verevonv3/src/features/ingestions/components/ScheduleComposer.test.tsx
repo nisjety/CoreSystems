@@ -120,4 +120,21 @@ describe('ScheduleComposer (WS15.S0 capability gating)', () => {
     await waitFor(() => expect(screen.getByText('Nightly docs')).toBeTruthy())
     expect(screen.queryByRole('button', { name: /utløs/i })).toBeNull()
   })
+
+  it('hides Show runs unless the installation reports runs', async () => {
+    stubApi({ trigger: false, backfill: false, overlap: false, kinds: ['batch'], needsActivation: false })
+    await openSchedules()
+
+    // The kind select fills only once the capability read has landed, so the check below is not vacuous.
+    await waitFor(() => expect(kindSelect().options.length).toBe(1))
+    await waitFor(() => expect(screen.getByText('Nightly docs')).toBeTruthy())
+    expect(screen.queryByRole('button', { name: /vis kjøringer/i })).toBeNull()
+  })
+
+  it('shows Show runs when the gateway reports runs', async () => {
+    stubApi({ trigger: false, backfill: false, overlap: false, kinds: ['batch'], needsActivation: false, runs: true })
+    await openSchedules()
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /vis kjøringer/i })).toBeTruthy())
+  })
 })

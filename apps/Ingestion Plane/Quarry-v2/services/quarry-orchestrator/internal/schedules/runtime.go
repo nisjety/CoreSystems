@@ -93,6 +93,10 @@ type runtimeTrack struct {
 	// rowsPushed is the sequence number of the last skipped run control accepted.
 	// Every overlap skip up to it is recorded.
 	rowsPushed int64
+	// incarnation is the creation time of the schedule the counter belongs to, in unix
+	// milliseconds (Temporal's ScheduleInfo.CreatedAt). A schedule recreated under the
+	// same id has a new one, so its skip run keys never repeat the old schedule's.
+	incarnation int64
 }
 
 // runtimeBody is the body of PUT /v1/internal/schedules/{id}/runtime. Control reads
@@ -186,14 +190,17 @@ func (m *Manager) describeAndPush(ctx context.Context, sc client.ScheduleClient,
 		return
 	}
 	total := int64(desc.Info.NumActionsSkippedOverlap)
-	if !t.seeded {
+	incarnation := desc.Info.CreatedAt.UnixMilli()
+	switch {
+	case !t.seeded:
 		t.seeded = true
 		t.rowsPushed = total
+	case incarnation != t.incarnation || total < t.rowsPushed:
+		// The schedule was recreated under the same id: its creation time changed, or its
+		// count went back. Its counter starts again, so none of its skips is recorded yet.
+		t.rowsPushed = 0
 	}
-	if total < t.rowsPushed {
-		// The count went back, so the schedule was recreated under the same id.
-		t.rowsPushed = total
-	}
+	t.incarnation = incarnation
 	t.skips = total
 
 	body := runtimeBody{
@@ -216,7 +223,7 @@ func (m *Manager) pushSkipRows(ctx context.Context, id string, t *runtimeTrack, 
 	for t.rowsPushed < t.skips && budget > 0 && ctx.Err() == nil {
 		n := t.rowsPushed + 1
 		body := skipRowBody{
-			RunKey: fmt.Sprintf("sched:%s:skip:%d", id, n),
+			RunKey: fmt.Sprintf("sched:%s:%d:skip:%d", id, t.incarnation, n),
 			RunID:  string(quarrycontracts.NewID(quarrycontracts.KindRun)),
 			Status: "skipped",
 			Reason: runtimeSkipReason,

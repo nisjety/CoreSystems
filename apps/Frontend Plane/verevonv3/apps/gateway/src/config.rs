@@ -640,6 +640,10 @@ pub(crate) struct ScheduleCapabilities {
     /// (QUARRY_EDGE__JOB_CONTROL on at the edge). The SPA draws the crawl
     /// controls only when this is true. Key `job_control` in the JSON value.
     pub(crate) job_control: bool,
+    /// WS15.S4e: the newest fires of one schedule are read (QUARRY_EDGE__SCHEDULE_RUNS on at
+    /// the edge). The SPA draws the Show runs control only when this is true, so a default
+    /// deploy never offers a read the edge answers with 501. Key `runs` in the JSON value.
+    pub(crate) runs: bool,
 }
 
 /// Parse `QUARRY_SCHEDULE_CAPABILITIES` (a JSON object). Unset, blank or

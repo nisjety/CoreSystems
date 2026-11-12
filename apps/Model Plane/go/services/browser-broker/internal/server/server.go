@@ -449,21 +449,33 @@ func (s *Server) DeriveRunGrant(ctx context.Context, req *DeriveRunGrantRequest)
 	}, nil
 }
 
-// applyWebPolicy reads the org web-policy snapshot from the verified token
-// (WS7.K) and narrows an ordinary grant's canonical hosts by it. With
-// BROWSER_BROKER_WEB_POLICY_SNAPSHOT off it reads nothing and changes nothing.
-// On, an unreadable claim refuses the mint (InvalidArgument
-// web_policy_unreadable), a denied host refuses it (browser host is not
-// grantable), and a token without the claim mints with no snapshot. The
+// readWebPolicy reads the org web-policy snapshot from the verified token
+// (WS7.K). With BROWSER_BROKER_WEB_POLICY_SNAPSHOT off it reads nothing and
+// returns nil. On, an unreadable claim refuses the mint (InvalidArgument
+// web_policy_unreadable), and a token without the claim has no snapshot. The
 // snapshot is never read from the request.
-func (s *Server) applyWebPolicy(ctx context.Context, principal authctx.Principal, domains []string) (*grant.WebPolicySnapshot, []string, error) {
+func (s *Server) readWebPolicy(ctx context.Context, principal authctx.Principal) (*grant.WebPolicySnapshot, error) {
 	if !s.cfg.WebPolicySnapshot {
-		return nil, domains, nil
+		return nil, nil
 	}
 	snapshot, err := grant.ClaimPolicyResolver{}.Snapshot(principal)
 	if err != nil {
 		telemetry.GrantsDeniedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "web_policy_unreadable")))
-		return nil, nil, status.Error(codes.InvalidArgument, grant.ErrWebPolicyUnreadable.Error())
+		return nil, status.Error(codes.InvalidArgument, grant.ErrWebPolicyUnreadable.Error())
+	}
+	return snapshot, nil
+}
+
+// applyWebPolicy narrows an ordinary grant's canonical hosts by the org web-policy
+// snapshot (readWebPolicy). With no snapshot it changes nothing. A denied host
+// refuses the mint (browser host is not grantable).
+func (s *Server) applyWebPolicy(ctx context.Context, principal authctx.Principal, domains []string) (*grant.WebPolicySnapshot, []string, error) {
+	snapshot, err := s.readWebPolicy(ctx, principal)
+	if err != nil {
+		return nil, nil, err
+	}
+	if snapshot == nil {
+		return nil, domains, nil
 	}
 	narrowed, err := grant.Narrow(domains, snapshot)
 	if err != nil {

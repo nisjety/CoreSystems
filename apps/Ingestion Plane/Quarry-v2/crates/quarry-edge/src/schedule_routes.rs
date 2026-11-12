@@ -923,10 +923,27 @@ pub async fn get_schedule_request(
     Ok(Json(Envelope::ok(request_id, view)))
 }
 
+/// Turns the schedule run list on. Off (the default), `GET /v1/schedules/:id/runs` answers 501
+/// before control is called. Read per request from the edge's environment.
+pub const ENV_SCHEDULE_RUNS: &str = "QUARRY_EDGE__SCHEDULE_RUNS";
+
+/// The check the run list makes first, as `job_results_routes::gate` makes its own: a dark route
+/// answers 501 whoever asks, and the message names the switch.
+fn schedule_runs_gate(enabled: bool) -> Result<(), QuarryError> {
+    if enabled {
+        return Ok(());
+    }
+    Err(QuarryError::new(
+        ErrorCode::Unsupported,
+        format!("schedule runs are not enabled on this edge: set {ENV_SCHEDULE_RUNS}=1"),
+    ))
+}
+
 /// `GET /v1/schedules/:id/runs` (WS15.S3a): the fires of one schedule, newest first, as control's
 /// page of job rows (`items`, `next_cursor`). `limit` is clamped to the page bounds and `cursor`
-/// passes through. The id is parsed before it reaches the path, and the org is the verified claim.
-/// No ZDR refusal, as for the schedule list.
+/// passes through. Dark behind `QUARRY_EDGE__SCHEDULE_RUNS`: the switch is read before the id, so a
+/// dark edge answers 501 whoever asks. The id is parsed before it reaches the path, and the org is
+/// the verified claim. No ZDR refusal, as for the schedule list.
 pub async fn list_schedule_runs(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -934,6 +951,9 @@ pub async fn list_schedule_runs(
     Query(q): Query<ScheduleRunsQuery>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
+    let enabled =
+        crate::job_results_routes::flag_is_on(std::env::var(ENV_SCHEDULE_RUNS).ok().as_deref());
+    schedule_runs_gate(enabled).map_err(|e| err_response(&request_id, e))?;
     let id = parse_schedule_id(&request_id, &id)?;
     let path = format!("/v1/schedules/{id}/runs");
     let limit = q
@@ -1003,11 +1023,28 @@ fn parse_request_id(
         })
 }
 
+/// Turns the monitor tag PATCH on. Off (the default), `PATCH /v1/schedules/:id` answers 501 before
+/// control is called. Read per request from the edge's environment.
+pub const ENV_MONITOR_TAGS: &str = "QUARRY_EDGE__MONITOR_TAGS";
+
+/// The check the tag PATCH makes first, as `schedule_runs_gate` does: a dark route answers 501
+/// whoever asks, and the message names the switch.
+pub(crate) fn monitor_tags_gate(enabled: bool) -> Result<(), QuarryError> {
+    if enabled {
+        return Ok(());
+    }
+    Err(QuarryError::new(
+        ErrorCode::Unsupported,
+        format!("monitor tags are not enabled on this edge: set {ENV_MONITOR_TAGS}=1"),
+    ))
+}
+
 /// `PATCH /v1/schedules/{id}` (E3.5-6): set the monitor's tag, or clear it with `""`. The id must
 /// parse as a schedule id, so the path segment cannot reach another control route; the org is the
 /// verified JWT org. The answer is control's updated schedule view, passed through unchanged. This
 /// route does not call the ZDR refusal: it only relabels a row that already exists, as pause and
-/// delete do, and starts no run and creates no resource.
+/// delete do, and starts no run and creates no resource. Dark behind `QUARRY_EDGE__MONITOR_TAGS`:
+/// the switch is read before the id, so a dark edge answers 501 whoever asks.
 pub async fn patch_schedule(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -1015,6 +1052,9 @@ pub async fn patch_schedule(
     Json(req): Json<TagPatchRequest>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
+    let enabled =
+        crate::job_results_routes::flag_is_on(std::env::var(ENV_MONITOR_TAGS).ok().as_deref());
+    monitor_tags_gate(enabled).map_err(|e| err_response(&request_id, e))?;
     let id = id
         .parse::<quarry_core::ids::kinds::ScheduleKind>()
         .map_err(|_| {
@@ -1164,5 +1204,29 @@ mod tests {
         assert!(s.contains("\"start_at\":"));
         assert!(s.contains("\"end_at\":"));
         assert!(s.contains("\"overlap_policy\":\"allow\""));
+    }
+
+    #[test]
+    fn schedule_runs_is_dark_until_its_switch_is_on() {
+        let dark = schedule_runs_gate(false).expect_err("a dark run list answers 501");
+        assert_eq!(dark.code, ErrorCode::Unsupported);
+        assert!(dark.message.contains(ENV_SCHEDULE_RUNS));
+        assert!(schedule_runs_gate(true).is_ok());
+        assert!(
+            !crate::job_results_routes::flag_is_on(None),
+            "the switch is off when unset"
+        );
+    }
+
+    #[test]
+    fn monitor_tag_patch_is_dark_until_its_switch_is_on() {
+        let dark = monitor_tags_gate(false).expect_err("a dark tag patch answers 501");
+        assert_eq!(dark.code, ErrorCode::Unsupported);
+        assert!(dark.message.contains(ENV_MONITOR_TAGS));
+        assert!(monitor_tags_gate(true).is_ok());
+        assert!(
+            !crate::job_results_routes::flag_is_on(None),
+            "the switch is off when unset"
+        );
     }
 }

@@ -424,6 +424,7 @@ pub(super) async fn schedule_capabilities(State(state): State<AppState>) -> Resp
         "kinds": caps.kinds,
         "needsActivation": caps.needs_activation,
         "jobControl": caps.job_control,
+        "runs": caps.runs,
     }))
 }
 
@@ -500,6 +501,7 @@ mod capability_tests {
         assert!(!defaults.backfill);
         assert!(!defaults.overlap);
         assert!(!defaults.needs_activation);
+        assert!(!defaults.runs);
         assert!(defaults.kinds.is_empty());
 
         assert_eq!(schedule_capabilities_from_env(None), defaults);
@@ -510,6 +512,8 @@ mod capability_tests {
         assert_eq!(crawl_only.kinds, vec!["crawl".to_owned()]);
         assert!(!crawl_only.trigger);
         assert!(!crawl_only.overlap);
+        assert!(!crawl_only.runs);
+        assert!(schedule_capabilities_from_env(Some(r#"{"runs":true}"#)).runs);
     }
 
     #[test]
@@ -587,6 +591,7 @@ mod capability_tests {
         state.schedule_capabilities = ScheduleCapabilities {
             kinds: vec!["crawl".into()],
             needs_activation: true,
+            runs: true,
             ..Default::default()
         };
         let response = schedule_capabilities(State(state)).await;
@@ -598,6 +603,7 @@ mod capability_tests {
         assert_eq!(body["data"]["kinds"], json!(["crawl"]));
         assert_eq!(body["data"]["needsActivation"], true);
         assert_eq!(body["data"]["jobControl"], false);
+        assert_eq!(body["data"]["runs"], true);
     }
 }
 

@@ -834,7 +834,9 @@ pub async fn delete_source(
 /// `PATCH /v1/sources/{id}` (E3.5-6): set the source's monitor tag, or clear it with `""`. The id
 /// must parse as a source id, so the path segment cannot reach another control route; the org is
 /// the verified JWT org. Control answers the updated source in its own wire shape, which is passed
-/// through unchanged, as `POST /v1/sources` passes its answer through.
+/// through unchanged, as `POST /v1/sources` passes its answer through. Dark behind
+/// `QUARRY_EDGE__MONITOR_TAGS`, as the schedule tag PATCH is: the switch is read before the id, so
+/// a dark edge answers 501 whoever asks.
 pub async fn patch_source(
     State(state): State<AppState>,
     Extension(claims): Extension<crate::auth::Claims>,
@@ -842,6 +844,12 @@ pub async fn patch_source(
     Json(req): Json<TagPatchRequest>,
 ) -> Result<Json<Envelope<serde_json::Value>>, (StatusCode, Json<Envelope<()>>)> {
     let request_id = crate::request_id::current();
+    let enabled = crate::job_results_routes::flag_is_on(
+        std::env::var(crate::schedule_routes::ENV_MONITOR_TAGS)
+            .ok()
+            .as_deref(),
+    );
+    crate::schedule_routes::monitor_tags_gate(enabled).map_err(|e| err_response(&request_id, e))?;
     let id = id
         .parse::<quarry_core::ids::kinds::SourceKind>()
         .map_err(|_| {
@@ -1854,6 +1862,16 @@ mod tests {
         assert!(VALID_SOURCE_KINDS.contains(&"scrape"));
         assert!(VALID_SOURCE_KINDS.contains(&"search"));
         assert!(!VALID_SOURCE_KINDS.contains(&"agent"));
+    }
+
+    #[test]
+    fn source_tag_patch_is_dark_until_its_switch_is_on() {
+        let dark = crate::schedule_routes::monitor_tags_gate(false)
+            .expect_err("a dark source tag patch answers 501");
+        assert_eq!(dark.code, ErrorCode::Unsupported);
+        let switch = crate::schedule_routes::ENV_MONITOR_TAGS;
+        assert!(dark.message.contains(switch));
+        assert!(crate::schedule_routes::monitor_tags_gate(true).is_ok());
     }
 }
 

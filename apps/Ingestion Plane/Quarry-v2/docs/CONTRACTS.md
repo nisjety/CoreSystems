@@ -1124,6 +1124,7 @@ A monitor tag is an operator label that groups one organization's sources and sc
 - **Grammar.** The value is trimmed and lowercased first, and blank is untagged. Otherwise it is 1 to 32 characters of `a` to `z`, `0` to `9`, `.`, `_` and `-`, starting with a letter or a digit. The edge checks it before it forwards anything, and control checks it again.
 - **Create and list.** `POST /v1/sources` and `POST /v1/schedules` take `tag`. A repeat registration of a source keeps the tag the row already has. `GET /v1/sources?tag=` and `GET /v1/schedules?tag=` keep only the rows with that tag, after the same normalisation; a blank value is no filter. A value that fails the grammar is a `400` with reason `invalid_tag`, never an empty page.
 - **PATCH.** `PATCH /v1/sources/{source_id}` and `PATCH /v1/schedules/{schedule_id}` take `{ "tag": "<tag>" }` and set it; `""` clears it. The answer is the row, in the wire shape above. A body that names no `tag` is a `400` with reason `tag_required`, so a PATCH never clears a tag by omission. A source's PATCH moves its `updated_at`; a schedule's does not, and it keeps the create or enable/disable stamp. The tag routes do not check ZDR: they relabel an existing row and start nothing.
+- **The switch.** While `QUARRY_EDGE__MONITOR_TAGS` is off (the default; read from the edge's process environment, so a change takes an edge restart), both PATCH routes answer `501 UNSUPPORTED` before the id is read, with a message that names the switch. The `tag` on `POST` and the `?tag=` filter are not behind it.
 - **Refusals.** A bad or missing tag is a `400 BAD_REQUEST` with `error.details` `{ "field": "tag", "reason": "invalid_tag" }` or `{ "field": "tag", "reason": "tag_required" }`. The edge and control answer alike.
 - **Scope and storage.** Every tag read and write is scoped to the caller's organization: another organization's row is a `404` on PATCH, and a tag filter never lists another tenant's row. The column is `TEXT NOT NULL DEFAULT ''` on `schedules` and `quarry_sources`, and a row from before migration 027 reads back untagged.
 
@@ -1292,6 +1293,8 @@ WS15.L2; empty and zero until then), `workflow_id`, `deadline_at`, `terminal_rea
 page ceiling, not a prediction), `warnings` (closed codes; `max_pages_clamped` when the
 requested page limit was lowered), `control` (`desired`, `pending`), `schedule_id`,
 `run_id`. A foreign id and a kind mismatch are both 404.
+
+**Schedule fires (WS15.S3a).** `GET /v1/schedules/{schedule_id}/runs` lists one schedule's fires, newest first, as control's page of job rows (`items`, `next_cursor`). `limit` is clamped to the page bounds and `cursor` passes through. The org is the verified token's, and there is no ZDR refusal, as for the schedule list. It is off unless `QUARRY_EDGE__SCHEDULE_RUNS=1`: a dark edge answers `501 UNSUPPORTED`, with a message that names the switch, before the id is read.
 
 **Credits per job (INNH-9, built, NOT run, 2026-10-31).** `GET /v1/crawl/{id}`, `/v1/batch/{id}`,
 `/v1/jobs/{id}` and the list rows (`GET /v1/{kind}/jobs`, `/v1/crawl/ongoing`, `/v1/batch/ongoing`)

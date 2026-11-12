@@ -3020,12 +3020,14 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 		// route's assertConnectionAccess.
 		principal, authenticated := auth.PrincipalFromContext(c)
 		if authenticated && !auth.IsInternalCall(c) && principal.PrincipalType == "service" &&
-			actions.IsMailOTPReadOperation(body.Operation) {
+			actions.IsMailOTPReadOperation(body.Operation) && cfg.Actions.OTPReadEnabled() {
 			// mail.otp.read (E3.1-g, D-E31g-5): the executor's service token
 			// names no end user, so the acting user comes from
 			// params.acting_user_id and must equal the personal connection's
 			// owner (org-shared connections: the org match above is enough).
-			// The value is never logged.
+			// The value is never logged. This rule runs only while the flag is
+			// on; a dark call takes the ordinary owner rule below and is then
+			// refused before the capability rule (see the check after this block).
 			if err := assertOTPConnectionOwner(connection, otpActingUserID(body.Params)); err != nil {
 				return actions.ExecuteResult{}, err
 			}
@@ -3038,6 +3040,22 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 				return actions.ExecuteResult{}, err
 			}
 		}
+	}
+	// mail.otp.read is dark while INTEGRATION_OTP_READ is off. Its OTP owner rule
+	// does not run, so a dark call gets the ordinary owner answer. An admitted dark
+	// call is refused here, before the capability rule and the provider token, with
+	// the unsupported-operation answer (400 operation_not_supported, see actionError),
+	// whatever acting_user_id it names.
+	if !cfg.Actions.OTPReadEnabled() && actions.IsMailOTPReadOperation(body.Operation) {
+		return actions.ExecuteResult{}, actions.ErrOTPReadDisabled
+	}
+	// A token scoped to integration:otp:read alone may reach only mail.otp.read.
+	// Refuse every other operation here, before the capability rule and the
+	// provider token: acquiring the token can refresh and persist the
+	// connection's credentials, which a refused caller must not cause.
+	// actions.Service keeps the same check as its own gate.
+	if err := actions.RefuseOTPOnlyCaller(actionCallerIdentity(c), body.Operation); err != nil {
+		return actions.ExecuteResult{}, err
 	}
 	if err := requireActionCapability(c, connection, body); err != nil {
 		return actions.ExecuteResult{}, err

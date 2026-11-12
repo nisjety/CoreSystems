@@ -2422,8 +2422,8 @@ describeIfPolicy(
 
 // Q3-REG: the manifest row office-extract (imports-core POST /api/v1/import/extract,
 // ephemeral text extraction). imports:read is read-only: imports-core admits it for
-// that one POST and no other write, and the ingestion lane is ZDR, so nothing the
-// token reaches is stored.
+// that one POST and no other write, only behind its IMPORTS_EXTRACT_READ_SCOPE switch
+// (default off), and the ingestion lane is ZDR, so nothing the token reaches is stored.
 describeIfPolicy(
   'principal bundle Q3-REG: imports:read for quarry-edge on ingestion',
   () => {

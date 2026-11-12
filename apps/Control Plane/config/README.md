@@ -318,7 +318,7 @@ each from every principal on every audience.
 | `quarry-edge` | `model-gateway` | `models:invoke` | `tenant` | the user-ingress bearer of an org-bound model call (WS16.S2); manifest row `model-extract` |
 | `quarry-edge` | `inference-core` | `inference:invoke`, `models:invoke` | `tenant` | the second bearer, `x-inference-authorization` (WS16.S2); manifest row `model-extract-inference` |
 | `quarry-edge` | `ingestion` | `integration:otp:read` | `zdr` | the executor-only one-time-code read of integration-corev2 (ADR-2a, E3.1-g) |
-| `quarry-edge` | `ingestion` | `imports:read` | `zdr` | the ephemeral Office text extraction of imports-core, `POST /api/v1/import/extract` only (imports-core admits `imports:read` for that one POST; every other write needs `imports:write`); manifest row `office-extract` (Q3-REG) |
+| `quarry-edge` | `ingestion` | `imports:read` | `zdr` | the ephemeral Office text extraction of imports-core, `POST /api/v1/import/extract` only (imports-core admits `imports:read` for that one POST only while its `IMPORTS_EXTRACT_READ_SCOPE` is `true`, default off; every other write needs `imports:write`); manifest row `office-extract` (Q3-REG) |
 | `execution-core` | `quarry` | `parse:write`, beside its scrape scopes | `zdr` | `POST /v1/parse` for a service principal (INNH-11); a user token needs no scope |
 
 `quarry-edge`'s `consumerEnv` (`QUARRY_SERVICE_API_KEY`) is unchanged, so there is no

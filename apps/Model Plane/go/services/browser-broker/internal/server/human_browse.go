@@ -53,6 +53,13 @@ func (s *Server) acquireHumanBrowse(ctx context.Context, req *AcquireGrantReques
 		telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "human_browse_disabled")))
 		return nil, mapErr(grant.ErrHumanBrowseDisabled)
 	}
+	// The org web policy rides on the grant (WS7.K). An open-web grant names no
+	// hosts to narrow here, but the attach children it derives must pass the org's
+	// deny rules, read from the snapshot the grant keeps.
+	webPolicy, err := s.readWebPolicy(ctx, principal)
+	if err != nil {
+		return nil, err
+	}
 	zdr := req.GetZdr() || principal.ZeroDataRetention
 	g, err := s.grants.CreateHumanBrowse(ctx, grant.CreateHumanBrowseParams{
 		OrgID:             orgID,
@@ -63,6 +70,7 @@ func (s *Server) acquireHumanBrowse(ctx context.Context, req *AcquireGrantReques
 		TTL:               s.cfg.TTL,
 		AbsoluteTTL:       s.cfg.HumanAbsoluteTTL,
 		Zdr:               zdr,
+		WebPolicy:         webPolicy,
 		MaxActivePerOwner: s.cfg.MaxActivePerOwner,
 	})
 	if err != nil {
@@ -71,7 +79,9 @@ func (s *Server) acquireHumanBrowse(ctx context.Context, req *AcquireGrantReques
 	}
 	telemetry.GrantsIssuedTotal.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "created")))
 	logGrantIssued(ctx, g)
-	return s.acquireResponse(g), nil
+	resp := s.acquireResponse(g)
+	resp.WebPolicy = s.webPolicyResponse(g)
+	return resp, nil
 }
 
 // acquireResponse is the AcquireGrant answer for any kind.

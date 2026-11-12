@@ -156,6 +156,12 @@ func IsMailOTPReadOperation(operation string) bool {
 	return isMailOTPReadOperation(operation)
 }
 
+// RefuseOTPOnlyCaller is refuseOTPOnlyCaller for the HTTP layer, which calls it
+// before the connection's provider token is acquired (executeConnectionAction).
+func RefuseOTPOnlyCaller(caller CallerIdentity, operation string) error {
+	return refuseOTPOnlyCaller(caller, operation)
+}
+
 // refuseOTPOnlyCaller keeps a token scoped to integration:otp:read off every
 // other operation, independent of the HTTP layer's own admission rule.
 func refuseOTPOnlyCaller(caller CallerIdentity, operation string) error {
@@ -176,6 +182,13 @@ func otpReadFlagFromEnv() bool {
 // and tests).
 func (s *Service) SetOTPReadEnabled(enabled bool) {
 	s.otpReadEnabled = enabled
+}
+
+// OTPReadEnabled reports whether mail.otp.read is live. The HTTP layer reads it
+// so the executor owner rule and the dark refusal in executeConnectionAction
+// follow the same flag that executeMailOTPRead enforces.
+func (s *Service) OTPReadEnabled() bool {
+	return s.otpReadEnabled
 }
 
 // SetOTPAuditPublisher wires the events publisher mail.otp.read audits

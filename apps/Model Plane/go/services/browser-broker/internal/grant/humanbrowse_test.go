@@ -22,6 +22,7 @@ var humanBrowseContract = []struct {
 	{"Renew_RefusesExpiredRevokedOrNonOwner", contractRenew_RefusesExpiredRevokedOrNonOwner},
 	{"Renew_RefusesRunAttachAndApprovalKinds", contractRenew_RefusesRunAttachAndApprovalKinds},
 	{"Derive_FromHumanBrowseRequiresExplicitDomains", contractDerive_FromHumanBrowseRequiresExplicitDomains},
+	{"Derive_FromHumanBrowseNarrowsByTheOrgWebPolicy", contractDerive_FromHumanBrowseNarrowsByTheOrgWebPolicy},
 	{"DeriveAttach_BindsResourceAndIsNotRenewable", contractDeriveAttach_BindsResourceAndIsNotRenewable},
 	{"DeriveAttach_OtherOwnersParentIsNotFound", contractDeriveAttach_OtherOwnersParentIsNotFound},
 	{"DeriveAttach_RejectsInheritFromOpenWeb", contractDeriveAttach_RejectsInheritFromOpenWeb},
@@ -356,6 +357,47 @@ func contractDerive_FromHumanBrowseRequiresExplicitDomains(t *testing.T, mk stor
 	}
 	if run.ExpiresAt.After(h.ExpiresAt) {
 		t.Fatalf("run outlives its parent: %v > %v", run.ExpiresAt, h.ExpiresAt)
+	}
+}
+
+// contractDerive_FromHumanBrowseNarrowsByTheOrgWebPolicy: the explicit hosts of a
+// child of an open-web grant are narrowed by the org web policy the grant
+// carries, as an ordinary grant's hosts are (WS7.K). An allow rule narrows a host
+// to the allowed hosts it covers and refuses one outside it; a deny rule refuses
+// the host it covers. A run child and an attach child are narrowed alike.
+func contractDerive_FromHumanBrowseNarrowsByTheOrgWebPolicy(t *testing.T, mk storeFactory) {
+	store, _ := mk(t)
+	h := human(t, store, CreateHumanBrowseParams{
+		WebPolicy: &WebPolicySnapshot{V: 1, Rev: "1", DomainsAllow: []string{"example.com"}, DomainsDeny: []string{"evil.example.com"}},
+	})
+	if _, err := store.Derive(ctx, deriveParams(h, "off-list", "example.org")); !errors.Is(err, ErrDomainDenied) {
+		t.Fatalf("run host outside the allow rule: error = %v, want ErrDomainDenied", err)
+	}
+	if _, err := store.Derive(ctx, attachParams(h, "attach-off-list", "run-1", "example.org")); !errors.Is(err, ErrDomainDenied) {
+		t.Fatalf("attach host outside the allow rule: error = %v, want ErrDomainDenied", err)
+	}
+	if _, err := store.Derive(ctx, deriveParams(h, "denied", "evil.example.com")); !errors.Is(err, ErrDomainDenied) {
+		t.Fatalf("run host under the deny rule: error = %v, want ErrDomainDenied", err)
+	}
+	run, err := store.Derive(ctx, deriveParams(h, "ok", "docs.example.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !equalStrings(run.AllowedDomains, []string{"docs.example.com"}) {
+		t.Fatalf("run hosts = %v, want docs.example.com", run.AllowedDomains)
+	}
+	// A requested host above an allowed host is narrowed to that allowed host,
+	// never kept as requested.
+	wide := human(t, store, CreateHumanBrowseParams{
+		SessionKey: "human-b",
+		WebPolicy:  &WebPolicySnapshot{V: 1, Rev: "1", DomainsAllow: []string{"docs.example.com"}},
+	})
+	run, err = store.Derive(ctx, deriveParams(wide, "narrow", "example.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !equalStrings(run.AllowedDomains, []string{"docs.example.com"}) {
+		t.Fatalf("run hosts = %v, want the allowed docs.example.com", run.AllowedDomains)
 	}
 }
 

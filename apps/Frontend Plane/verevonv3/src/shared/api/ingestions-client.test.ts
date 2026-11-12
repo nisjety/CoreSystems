@@ -78,6 +78,17 @@ describe('ingestions client capabilities (WS15.L5)', () => {
     expect((await getScheduleCapabilities()).jobControl).toBe(false)
   })
 
+  it('reports runs only when the gateway says exactly true', async () => {
+    stubFetch({ data: { trigger: true, kinds: ['crawl'], runs: true } })
+    expect((await getScheduleCapabilities()).runs).toBe(true)
+
+    stubFetch({ data: { trigger: true, kinds: ['crawl'], runs: 'yes' } })
+    expect((await getScheduleCapabilities()).runs).toBe(false)
+
+    stubFetch({ data: { trigger: true, kinds: ['crawl'] } })
+    expect((await getScheduleCapabilities()).runs).toBe(false)
+  })
+
   it('has job control off in the all-off default and when the read fails', async () => {
     expect(NO_SCHEDULE_CAPABILITIES.jobControl).toBe(false)
     stubFetch({ error: { code: 'upstream_unavailable', message: 'down' } }, 502)

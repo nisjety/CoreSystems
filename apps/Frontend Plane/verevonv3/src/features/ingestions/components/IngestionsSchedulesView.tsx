@@ -33,6 +33,7 @@ export function IngestionsSchedulesView(props: {
   form: ScheduleFormState
   kinds: string[]
   canTrigger: boolean
+  canShowRuns: boolean
   schedules: ScheduleItem[]
   onFormChange: (patch: Partial<ScheduleFormState>) => void
   onSubmit: () => Promise<void>
@@ -191,13 +192,15 @@ export function IngestionsSchedulesView(props: {
                         {tr('Utløs', 'Trigger')}
                       </Button>
                     </Show>
-                    <Button
-                      size="xs"
-                      aria-expanded={runsOpen(schedule.id) ? 'true' : 'false'}
-                      onClick={() => toggleRuns(schedule.id)}
-                    >
-                      {runsOpen(schedule.id) ? tr('Skjul kjøringer', 'Hide runs') : tr('Vis kjøringer', 'Show runs')}
-                    </Button>
+                    <Show when={props.canShowRuns}>
+                      <Button
+                        size="xs"
+                        aria-expanded={runsOpen(schedule.id) ? 'true' : 'false'}
+                        onClick={() => toggleRuns(schedule.id)}
+                      >
+                        {runsOpen(schedule.id) ? tr('Skjul kjøringer', 'Hide runs') : tr('Vis kjøringer', 'Show runs')}
+                      </Button>
+                    </Show>
                     <Button size="xs" onClick={() => void props.onAction('delete_schedule', schedule.id)}>
                       <Trash2 class="size-4" strokeWidth={1.9} />
                       {tr('Legg ned', 'Retire')}

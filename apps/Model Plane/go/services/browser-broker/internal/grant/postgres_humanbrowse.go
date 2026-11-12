@@ -32,6 +32,7 @@ func (s *PgStore) CreateHumanBrowse(ctx context.Context, p CreateHumanBrowsePara
 		ID: id, Kind: KindHumanBrowse, OrgID: p.OrgID, OwnerID: p.OwnerID, SessionKey: p.SessionKey,
 		ScopeURL: p.ScopeURL, PolicyMode: PolicyModeOpenWeb, DeniedDomains: denied,
 		ExpiresAt: now.Add(p.TTL), AbsoluteExpiresAt: absoluteFrom(now, p.TTL, p.AbsoluteTTL),
+		WebPolicy: p.WebPolicy.Clone(),
 	}
 	err = s.inTx(ctx, "create_human_browse", func(tx pgx.Tx) error {
 		if p.MaxActivePerOwner > 0 {

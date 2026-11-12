@@ -804,6 +804,7 @@ export default function VerevonIngestionsPage() {
             form={scheduleForm()}
             kinds={scheduleCapabilities().kinds}
             canTrigger={scheduleCapabilities().trigger}
+            canShowRuns={scheduleCapabilities().runs}
             schedules={schedules()}
             onFormChange={(patch) => setScheduleForm((current) => ({ ...current, ...patch }))}
             onSubmit={createSchedule}

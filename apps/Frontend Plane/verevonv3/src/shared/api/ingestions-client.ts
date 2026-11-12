@@ -302,6 +302,8 @@ export type ScheduleCapabilities = {
   needsActivation: boolean
   /** WS15.L5: the edge honours pause/resume/cancel of a running job. Off hides the job-row controls. */
   jobControl: boolean
+  /** WS15.S4e: the edge serves the run history of a schedule. Off hides the Show runs control. */
+  runs: boolean
 }
 
 /** Every capability off: what the page shows when the capability read fails. */
@@ -312,6 +314,7 @@ export const NO_SCHEDULE_CAPABILITIES: ScheduleCapabilities = {
   kinds: [],
   needsActivation: false,
   jobControl: false,
+  runs: false,
 }
 
 /** Reads GET /api/ingestions/schedules/capabilities. Any failure yields the all-off default. */
@@ -326,6 +329,7 @@ export async function getScheduleCapabilities(signal?: AbortSignal): Promise<Sch
       kinds: Array.isArray(data.kinds) ? data.kinds.filter((kind): kind is string => typeof kind === 'string') : [],
       needsActivation: data.needsActivation === true,
       jobControl: data.jobControl === true,
+      runs: data.runs === true,
     }
   } catch {
     return { ...NO_SCHEDULE_CAPABILITIES, kinds: [] }
