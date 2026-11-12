@@ -1392,6 +1392,9 @@ fn continue_question_upstream_body(body: &ContinueRunBody, question_form: bool) 
 /// `org_agents_paused` (403) is relayed too: an org's agent-run pause refuses a
 /// continuation before its approval is read, so a retry after a spend can be refused with it.
 ///
+/// `org_policy_unavailable` (503) is relayed too (C-14-mg-rel1): an org whose agent policy cannot be read inside its
+/// bound refuses a continuation before its approval is read, on the approval, park and question forms alike.
+///
 /// Not here, on purpose: `continue_incomplete` (this handler's own blank check
 /// answers first) and `missing_bearer` (a 401, which stays `unauthorized`).
 /// Everything else the gateway answers (the owner check, a read, a consume
@@ -1434,6 +1437,11 @@ pub(crate) const CONTINUE_RELAYED_ERRORS: &[(&str, u16, &str)] = &[
         "org_agents_paused",
         403,
         "Agent runs are paused for this organization.",
+    ),
+    (
+        "org_policy_unavailable",
+        503,
+        "The agent policy for this organization cannot be read right now. Try again shortly.",
     ),
     // The question form, WS14 S5. The `not_resumable` code above, a 409, is shared with it.
     ("question_not_found", 404, "The question was not found for this run."),
@@ -2709,6 +2717,7 @@ mod tests {
                 ("continuation_already_consumed", 409),
                 ("continue_unavailable", 503),
                 ("org_agents_paused", 403),
+                ("org_policy_unavailable", 503),
                 ("question_not_found", 404),
                 ("question_expired", 410),
                 ("question_already_answered", 409),

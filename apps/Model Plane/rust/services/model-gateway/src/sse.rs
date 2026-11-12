@@ -21270,11 +21270,17 @@ fn continue_error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
 }
 
 /// The HTTP answer of a continuation the org's agent policy refuses (F-t3-083, WS25-S9): the closed code, its status and
-/// the words a person reads, from [`crate::org_agent_policy::refusal_answer`]. Its codes are kept out of
-/// [`CONTINUE_HTTP_REFUSALS`] on purpose: the BFF's relay list and the SPA's list are pinned to that one, so the two
-/// codes join it only in the same change as those lists.
+/// the words a person reads, from [`crate::org_agent_policy::refusal_answer`]. The codes are listed in
+/// [`CONTINUE_HTTP_REFUSALS`] and in [`CONTINUE_QUESTION_HTTP_REFUSALS`] (C-14-mg-rel1), so the answer is a closed one on
+/// every form of the route. The BFF's relay list and the SPA's list are pinned to the first of them: a change to these
+/// two codes reaches them in the same change.
 fn continue_policy_error(code: &'static str) -> (StatusCode, Json<Value>) {
     let (status, message) = crate::org_agent_policy::refusal_answer(code);
+    debug_assert!(
+        CONTINUE_HTTP_REFUSALS.contains(&(code, status))
+            && CONTINUE_QUESTION_HTTP_REFUSALS.contains(&(code, status)),
+        "{code} with {status} is not in the closed continue HTTP vocabulary of both forms"
+    );
     (
         status,
         Json(json!({ "error": { "code": code, "message": message } })),
@@ -21294,6 +21300,10 @@ fn continue_policy_error(code: &'static str) -> (StatusCode, Json<Value>) {
 /// preempts it) and `missing_bearer` (which it maps to `unauthorized`). Every other
 /// HTTP answer of the route keeps `grpc_status_to_http`'s body. Closed and
 /// test-pinned; the BFF's and the SPA's lists are scanned against this one.
+///
+/// The last two rows are the org's agent-policy refusals that [`continue_policy_error`] sends (F-t3-083, WS25-S9,
+/// C-14-mg-rel1), each with the status [`crate::org_agent_policy::refusal_answer`] gives it. The question form lists
+/// them too, in [`CONTINUE_QUESTION_HTTP_REFUSALS`].
 pub(crate) const CONTINUE_HTTP_REFUSALS: &[(&str, StatusCode)] = &[
     ("continue_disabled", StatusCode::CONFLICT),
     ("not_resumable", StatusCode::CONFLICT),
@@ -21305,6 +21315,8 @@ pub(crate) const CONTINUE_HTTP_REFUSALS: &[(&str, StatusCode)] = &[
     ("approval_not_resumable", StatusCode::CONFLICT),
     ("continuation_already_consumed", StatusCode::CONFLICT),
     ("continue_unavailable", StatusCode::SERVICE_UNAVAILABLE),
+    ("org_agents_paused", StatusCode::FORBIDDEN),
+    ("org_policy_unavailable", StatusCode::SERVICE_UNAVAILABLE),
 ];
 
 /// The messages the executor's refusals of a continuation carry, exactly. A status
@@ -22331,14 +22343,17 @@ fn ask_resume_switch(raw: Option<&str>) -> bool {
 }
 
 /// The HTTP refusals of the question form, each with the status it is sent with. The first four are the
-/// route's own closed vocabulary ([`CONTINUE_HTTP_REFUSALS`]); the last three are the question's. A
-/// refusal Session Core makes of the answer itself (`invalid_answer` 422) keeps its typed body from
+/// route's own closed vocabulary ([`CONTINUE_HTTP_REFUSALS`]); the next two are the org's agent-policy refusals,
+/// which the question form's admission sends too ([`continue_policy_error`], C-14-mg-rel1); the last three are the
+/// question's. A refusal Session Core makes of the answer itself (`invalid_answer` 422) keeps its typed body from
 /// `http_routes::record_question_answer`.
 pub(crate) const CONTINUE_QUESTION_HTTP_REFUSALS: &[(&str, StatusCode)] = &[
     ("continue_disabled", StatusCode::CONFLICT),
     ("continue_incomplete", StatusCode::BAD_REQUEST),
     ("not_resumable", StatusCode::CONFLICT),
     ("missing_bearer", StatusCode::UNAUTHORIZED),
+    ("org_agents_paused", StatusCode::FORBIDDEN),
+    ("org_policy_unavailable", StatusCode::SERVICE_UNAVAILABLE),
     ("question_not_found", StatusCode::NOT_FOUND),
     ("question_not_resumable", StatusCode::CONFLICT),
     ("question_expired", StatusCode::GONE),
@@ -23796,7 +23811,7 @@ mod continue_run_tests {
     #[test]
     fn the_continue_vocabularies_have_the_designed_shape() {
         let http: Vec<&str> = CONTINUE_HTTP_REFUSALS.iter().map(|(code, _)| *code).collect();
-        assert_eq!(http.len(), 10, "{http:?}");
+        assert_eq!(http.len(), 12, "{http:?}");
         assert_distinct(&http);
         assert_eq!(CONTINUE_EXECUTOR_MESSAGE_TOKENS.len(), 21);
         assert_distinct(CONTINUE_EXECUTOR_MESSAGE_TOKENS);
@@ -23827,6 +23842,241 @@ mod continue_run_tests {
         }
     }
 
+    /// C-14, the model-gateway part: the question form's closed lists and the pinned `/continue` lists must
+    /// not drift. The question form answers with lists of its own (WS14 S5), so a code added to one side and
+    /// not the other is either answered as the anonymous `continue_refused` or never named at all. Each
+    /// difference is NAMED below with the reason it exists, so a new code on either side fails this test
+    /// until its partner is added or the difference is named here.
+    #[test]
+    fn the_question_form_lists_agree_with_the_pinned_continue_lists() {
+        use std::collections::BTreeSet;
+        let set =
+            |words: &[&'static str]| -> BTreeSet<&'static str> { words.iter().copied().collect() };
+
+        // The pinned message tokens the question form never receives. Its launch is a `loop` resume that names
+        // no approval, step, tool or brief, and its preflight refuses a non-empty approval id and a skipped
+        // site. So these are the approval's own refusals, the skipped site's closer and the park resume's.
+        const PINNED_NOT_ON_QUESTION: [&str; 10] = [
+            "approval_not_granted",
+            "approval_expired",
+            "approval_not_resumable",
+            "approval_action_mismatch",
+            "approval_snapshot_mismatch",
+            "not_releasable",
+            "skip_authority_unavailable",
+            "park_not_restorable",
+            "park_route_unavailable",
+            "park_not_due",
+        ];
+        // The six words only the question form's own spend and read of the question name.
+        const QUESTION_ONLY: [&str; 6] = [
+            "question_answer_released",
+            "question_resume_unavailable",
+            "question_not_answered",
+            "question_expired",
+            "question_not_found",
+            "question_not_resumable",
+        ];
+        let pinned = set(CONTINUE_EXECUTOR_MESSAGE_TOKENS);
+        let question = set(CONTINUE_QUESTION_EXECUTOR_TOKENS);
+        let pinned_frames = set(CONTINUE_FRAME_REFUSALS);
+        let question_frames = set(CONTINUE_QUESTION_FRAME_REFUSALS);
+        assert_distinct(CONTINUE_QUESTION_EXECUTOR_TOKENS);
+        assert_distinct(CONTINUE_QUESTION_FRAME_REFUSALS);
+        let off_question = set(&PINNED_NOT_ON_QUESTION[..]);
+        let question_only = set(&QUESTION_ONLY[..]);
+
+        // The names are true: each is on the list it is named against, and no pinned list carries a question word.
+        for word in &off_question {
+            assert!(
+                pinned.contains(word),
+                "{word} is named off the question form, but CONTINUE_EXECUTOR_MESSAGE_TOKENS does not list it"
+            );
+        }
+        for word in &question_only {
+            assert!(
+                question.contains(word) && !pinned.contains(word) && !pinned_frames.contains(word),
+                "{word} is named a question-only word, but it is missing from the question list or on a pinned list"
+            );
+        }
+
+        // The message tokens: the question list is the pinned list less the named words, plus the named question words.
+        let mut expected: BTreeSet<&str> = pinned.difference(&off_question).copied().collect();
+        expected.extend(question_only.iter().copied());
+        assert_eq!(
+            question,
+            expected,
+            "CONTINUE_QUESTION_EXECUTOR_TOKENS drifted: the question list has these but must not {:?}, and lacks these it must have {:?}",
+            question.difference(&expected).collect::<Vec<_>>(),
+            expected.difference(&question).collect::<Vec<_>>(),
+        );
+
+        // The frame list: the question's tokens plus the four the gateway makes or the zero-retention trailer carries.
+        let mut expected_frames = expected.clone();
+        expected_frames.extend([
+            "durable_mutation_forbidden",
+            "continue_refused",
+            "continue_unreachable",
+            "continue_outcome_unknown",
+        ]);
+        assert_eq!(
+            question_frames,
+            expected_frames,
+            "CONTINUE_QUESTION_FRAME_REFUSALS is not the question tokens plus the four gateway and catalogue codes"
+        );
+        // The pinned frame list differs from the question's by the named words and by `approval_not_found`: the
+        // executor derives it from NotFound on the approval path, and the question form answers NotFound with
+        // `question_not_found` or `continue_refused`. Nothing else differs.
+        let mut off_question_frames = off_question.clone();
+        off_question_frames.insert("approval_not_found");
+        assert_eq!(
+            pinned_frames.difference(&question_frames).copied().collect::<BTreeSet<_>>(),
+            off_question_frames,
+            "the pinned frame list differs from the question frame list by a word not named off the question form"
+        );
+        assert_eq!(
+            question_frames.difference(&pinned_frames).copied().collect::<BTreeSet<_>>(),
+            question_only,
+            "the question frame list has a word no pinned frame list has that is not named a question word"
+        );
+
+        // The HTTP list: the six shared codes are sent by both forms with the same status. Four are the route's own;
+        // the last two are the org-policy refusals `admit_continuation` can return, which both forms answer through
+        // `continue_policy_error` (C-14-mg-rel1). The three question codes after them are the question's
+        // (`question_disposition`). The route's other six are approval refusals of its pre-consume, which the question
+        // form never makes: it has no pre-consume.
+        const SHARED_HTTP: [&str; 6] = [
+            "continue_disabled",
+            "continue_incomplete",
+            "not_resumable",
+            "missing_bearer",
+            "org_agents_paused",
+            "org_policy_unavailable",
+        ];
+        const QUESTION_ONLY_HTTP: [&str; 3] = [
+            "question_not_found",
+            "question_not_resumable",
+            "question_expired",
+        ];
+        const PINNED_HTTP_NOT_ON_QUESTION: [&str; 6] = [
+            "approval_not_found",
+            "approval_not_granted",
+            "approval_expired",
+            "approval_not_resumable",
+            "continuation_already_consumed",
+            "continue_unavailable",
+        ];
+        let status_of = |list: &[(&str, StatusCode)], code: &str| -> Option<StatusCode> {
+            list.iter()
+                .find(|(listed, _)| *listed == code)
+                .map(|(_, status)| *status)
+        };
+        for code in SHARED_HTTP {
+            assert!(
+                status_of(CONTINUE_HTTP_REFUSALS, code).is_some(),
+                "{code} is named shared, but CONTINUE_HTTP_REFUSALS does not list it"
+            );
+            assert_eq!(
+                status_of(CONTINUE_QUESTION_HTTP_REFUSALS, code),
+                status_of(CONTINUE_HTTP_REFUSALS, code),
+                "{code} is sent with another status by the question form"
+            );
+        }
+        let question_codes: Vec<&str> = CONTINUE_QUESTION_HTTP_REFUSALS
+            .iter()
+            .map(|(code, _)| *code)
+            .collect();
+        assert_distinct(&question_codes);
+        let question_codes: BTreeSet<&str> = question_codes.into_iter().collect();
+        let route_codes: BTreeSet<&str> = CONTINUE_HTTP_REFUSALS
+            .iter()
+            .map(|(code, _)| *code)
+            .collect();
+        assert_eq!(
+            question_codes
+                .intersection(&route_codes)
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            set(&SHARED_HTTP[..]),
+            "the question and route HTTP lists share a code that is not named as shared"
+        );
+        assert_eq!(
+            question_codes.difference(&route_codes).copied().collect::<BTreeSet<_>>(),
+            set(&QUESTION_ONLY_HTTP[..]),
+            "the question HTTP list has a code the route list lacks that is not named a question code"
+        );
+        assert_eq!(
+            route_codes.difference(&question_codes).copied().collect::<BTreeSet<_>>(),
+            set(&PINNED_HTTP_NOT_ON_QUESTION[..]),
+            "the route HTTP list has a code the question list lacks that is not named off the question form"
+        );
+    }
+
+    /// C-14-mg-rel1: the org's agent-policy refusals of `/continue` are closed codes. `admit_continuation` refuses with
+    /// only the two below (the next test pins that), every form of the route answers them through `continue_policy_error`,
+    /// and both HTTP lists hold each one with the status `refusal_answer` gives it, so the body is the route's typed
+    /// `{ error: { code, message } }`. A lockdown cap is `org_agents_paused` on that route on purpose, so
+    /// `mode_lockdown` is not among them.
+    #[test]
+    fn the_org_policy_refusals_of_continue_are_closed_codes_with_their_refusal_answer_status() {
+        for code in [
+            crate::org_agent_policy::AGENTS_PAUSED_CODE,
+            crate::org_agent_policy::POLICY_UNAVAILABLE_CODE,
+        ] {
+            let (status, message) = crate::org_agent_policy::refusal_answer(code);
+            assert!(
+                CONTINUE_HTTP_REFUSALS.contains(&(code, status)),
+                "{code} with {status} is sent by continue_run but CONTINUE_HTTP_REFUSALS does not list it"
+            );
+            assert!(
+                CONTINUE_QUESTION_HTTP_REFUSALS.contains(&(code, status)),
+                "{code} with {status} is sent by the question form but CONTINUE_QUESTION_HTTP_REFUSALS does not list it"
+            );
+            let (sent, Json(body)) = continue_policy_error(code);
+            assert_eq!(
+                sent, status,
+                "{code} is sent with its refusal_answer status"
+            );
+            assert_eq!(
+                body,
+                json!({ "error": { "code": code, "message": message } }),
+                "{code} is sent in the route's typed refusal shape"
+            );
+        }
+    }
+
+    /// The codes `admit_continuation` can refuse with are the two above and no other: a code it gains without a row in
+    /// both HTTP lists would reach the browser as an unlisted refusal, so a new one fails here first. Scope: the body
+    /// of `admit_continuation` in `org_agent_policy.rs`, by name. Lowercase `Err(error)` is a match arm's binding.
+    #[test]
+    fn admit_continuation_refuses_only_with_the_two_listed_policy_codes() {
+        let policy = include_str!("org_agent_policy.rs").replace("\r\n", "\n");
+        let body = policy
+            .split("pub async fn admit_continuation(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("admit_continuation is in org_agent_policy.rs");
+        let mut refused = std::collections::BTreeSet::new();
+        for part in body.split("Err(").skip(1) {
+            let path: String = part
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == ':')
+                .collect();
+            let name = path.rsplit("::").next().unwrap_or_default();
+            if name.chars().any(|c| c.is_ascii_uppercase()) {
+                refused.insert(name.to_owned());
+            }
+        }
+        assert_eq!(
+            refused,
+            std::collections::BTreeSet::from([
+                "AGENTS_PAUSED_CODE".to_owned(),
+                "POLICY_UNAVAILABLE_CODE".to_owned(),
+            ]),
+            "admit_continuation refuses with a code other than the two listed org-policy codes"
+        );
+    }
+
     /// The HTTP list states each code with the status it is sent with, and the three
     /// statuses of the codes the BFF relays are the ones the BFF's own list pins.
     #[test]
@@ -23851,6 +24101,11 @@ mod continue_run_tests {
         assert_eq!(find("missing_bearer"), StatusCode::UNAUTHORIZED);
         assert_eq!(find("approval_not_found"), StatusCode::NOT_FOUND);
         assert_eq!(find("continue_unavailable"), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(find("org_agents_paused"), StatusCode::FORBIDDEN);
+        assert_eq!(
+            find("org_policy_unavailable"),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     /// Every `(StatusCode::X, "code")` pair a route function states is in the HTTP

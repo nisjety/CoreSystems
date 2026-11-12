@@ -2,9 +2,10 @@
 //! the SPA, and pins that only the continue handler relays upstream error codes.
 //!
 //! The vocabulary has three homes that must agree: model-gateway (which says the
-//! codes), the BFF's `CONTINUE_RELAYED_ERRORS` (which relays fourteen of them with
-//! their upstream status: the approval and park forms' nine and the question form's five), and the SPA's `chat-run-continue-contract.ts` (which
-//! reads them). A code added in one place and not the others fails silently: the
+//! codes), the BFF's `CONTINUE_RELAYED_ERRORS` (which relays fifteen of them with
+//! their upstream status: the approval and park forms' nine, the question form's five and
+//! `org_policy_unavailable`, which every form sends), and the SPA's `chat-run-continue-contract.ts`
+//! (which reads them). A code added in one place and not the others fails silently: the
 //! BFF turns an unlisted code into `model_error` and the SPA's guard returns null.
 //!
 //! Source-scanning, in the style of `tests/sse_relay_no_allowlist.rs`, with the
@@ -18,6 +19,9 @@
 //!   status for every code, and the difference is exactly `continue_incomplete` (the BFF's
 //!   own blank check answers first) and `missing_bearer` (a 401, which stays
 //!   `unauthorized`);
+//! * the question form's HTTP codes (`CONTINUE_QUESTION_HTTP_REFUSALS` less the two the BFF never
+//!   relays, and the answer route's `question_already_answered` and `invalid_answer`) are inside the
+//!   BFF's list under the same statuses, and the codes the BFF's list adds beyond them are named;
 //! * the SPA's stream-frame tuple = model-gateway's `CONTINUE_FRAME_REFUSALS`, in order, then
 //!   the tokens only the question form's `CONTINUE_QUESTION_FRAME_REFUSALS` adds (WS14 S5);
 //! * the SPA's run-end list (`CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES`, the three frames that
@@ -176,8 +180,8 @@ fn the_bff_relay_list_is_the_spa_http_list() {
     let spa = spa_http_refusals();
     assert_eq!(
         bff.len(),
-        14,
-        "the BFF relays exactly fourteen closed codes; parsed {bff:?}"
+        15,
+        "the BFF relays exactly fifteen closed codes; parsed {bff:?}"
     );
     assert_eq!(
         bff, spa,
@@ -237,6 +241,7 @@ fn gateway_http_refusals() -> Vec<(String, u16)> {
             "UNAUTHORIZED" => 401,
             "NOT_FOUND" => 404,
             "CONFLICT" => 409,
+            "FORBIDDEN" => 403,
             "SERVICE_UNAVAILABLE" => 503,
             other => panic!(
                 "StatusCode::{other} is not in this test's table: add its number, do not skip the entry"
@@ -271,6 +276,8 @@ fn gateway_question_http_refusals() -> Vec<(String, u16)> {
             "NOT_FOUND" => 404,
             "CONFLICT" => 409,
             "GONE" => 410,
+            "FORBIDDEN" => 403,
+            "SERVICE_UNAVAILABLE" => 503,
             other => panic!(
                 "StatusCode::{other} is not in this test's table: add its number, do not skip the entry"
             ),
@@ -314,8 +321,8 @@ fn the_bff_relay_list_is_the_gateways_http_list_less_the_two_codes_it_never_rela
     let gateway = gateway_http_refusals();
     assert_eq!(
         gateway.len(),
-        10,
-        "model-gateway's CONTINUE_HTTP_REFUSALS has ten rows; parsed {gateway:?}"
+        12,
+        "model-gateway's CONTINUE_HTTP_REFUSALS has twelve rows; parsed {gateway:?}"
     );
     no_duplicates(
         "model-gateway's CONTINUE_HTTP_REFUSALS",
@@ -323,23 +330,12 @@ fn the_bff_relay_list_is_the_gateways_http_list_less_the_two_codes_it_never_rela
     );
     let bff = bff_relayed();
     // The codes the gateway sends outside CONTINUE_HTTP_REFUSALS, each pinned to the source that
-    // writes it: the question form's own list (WS14 S5), the answer route's two typed refusals
-    // (the question form relays them from the same Session Core statuses), and the org pause.
+    // writes it: the question form's own list (WS14 S5) and the answer route's two typed refusals
+    // (the question form relays them from the same Session Core statuses). The org pause and the
+    // org policy refusal are in CONTINUE_HTTP_REFUSALS; their constants are pinned below.
     let mut sent = gateway.clone();
     sent.extend(gateway_question_http_refusals());
-    let routes = read(&gateway_file(
-        "../../../../Model Plane/rust/services/model-gateway/src/http_routes.rs",
-    ));
-    assert!(
-        routes.contains("StatusCode::CONFLICT, \"question_already_answered\""),
-        "http_routes.rs no longer sends question_already_answered with 409"
-    );
-    assert!(
-        routes.contains("StatusCode::UNPROCESSABLE_ENTITY,\n                \"invalid_answer\""),
-        "http_routes.rs no longer sends invalid_answer with 422"
-    );
-    sent.push(("question_already_answered".to_owned(), 409));
-    sent.push(("invalid_answer".to_owned(), 422));
+    sent.extend(answer_route_refusals());
     let policy = read(&gateway_file(
         "../../../../Model Plane/rust/services/model-gateway/src/org_agent_policy.rs",
     ));
@@ -347,7 +343,10 @@ fn the_bff_relay_list_is_the_gateways_http_list_less_the_two_codes_it_never_rela
         policy.contains("pub const AGENTS_PAUSED_CODE: &str = \"org_agents_paused\";"),
         "org_agent_policy.rs no longer names org_agents_paused"
     );
-    sent.push(("org_agents_paused".to_owned(), 403));
+    assert!(
+        policy.contains("pub const POLICY_UNAVAILABLE_CODE: &str = \"org_policy_unavailable\";"),
+        "org_agent_policy.rs no longer names org_policy_unavailable"
+    );
     for (code, status) in &bff {
         match sent.iter().find(|(known, _)| known == code) {
             None => panic!(
@@ -372,6 +371,79 @@ fn the_bff_relay_list_is_the_gateways_http_list_less_the_two_codes_it_never_rela
         "the BFF leaves out `continue_incomplete` (its own blank check answers first) and \
          `missing_bearer` (a 401 stays `unauthorized`) and nothing else: a gateway code the BFF \
          does not relay reaches the browser as `model_error`"
+    );
+}
+
+/// The two typed refusals of the answer route that the question form relays: `question_already_answered`
+/// (409) and `invalid_answer` (422). Each is pinned to the line of `http_routes.rs` that sends it.
+fn answer_route_refusals() -> Vec<(String, u16)> {
+    let routes = read(&gateway_file(
+        "../../../../Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    ));
+    assert!(
+        routes.contains("StatusCode::CONFLICT, \"question_already_answered\""),
+        "http_routes.rs no longer sends question_already_answered with 409"
+    );
+    assert!(
+        routes.contains("StatusCode::UNPROCESSABLE_ENTITY,\n                \"invalid_answer\""),
+        "http_routes.rs no longer sends invalid_answer with 422"
+    );
+    vec![
+        ("question_already_answered".to_owned(), 409),
+        ("invalid_answer".to_owned(), 422),
+    ]
+}
+
+/// The (code, status) pairs the question form sends over HTTP: model-gateway's question list less the two
+/// codes the BFF never relays on any route (`continue_incomplete`, `missing_bearer`), and the answer route's
+/// two typed refusals.
+fn question_form_codes() -> Vec<(String, u16)> {
+    let mut codes: Vec<(String, u16)> = gateway_question_http_refusals()
+        .into_iter()
+        .filter(|(code, _)| code != "continue_incomplete" && code != "missing_bearer")
+        .collect();
+    codes.extend(answer_route_refusals());
+    codes
+}
+
+/// The question form sends a subset of the codes the BFF relays, each under the status the BFF relays it
+/// with. The codes the BFF relays beyond that subset are exactly the approval and park forms' codes, and they
+/// are named here. A code added to the question form and not to CONTINUE_RELAYED_ERRORS fails (the BFF would
+/// turn it into `model_error`); a code added to CONTINUE_RELAYED_ERRORS that the question form does not send
+/// fails until it is named here.
+#[test]
+fn the_bff_relay_list_covers_the_question_form_and_names_each_code_it_adds() {
+    let bff = bff_relayed();
+    let question = question_form_codes();
+    for (code, status) in &question {
+        match bff.iter().find(|(known, _)| known == code) {
+            None => panic!(
+                "the question form sends `{code}`, which CONTINUE_RELAYED_ERRORS does not list: the \
+                 BFF would relay it as model_error"
+            ),
+            Some((_, relayed)) => assert_eq!(
+                relayed, status,
+                "the question form sends `{code}` with {status} but the BFF relays it under {relayed}"
+            ),
+        }
+    }
+    let added: BTreeSet<&str> = bff
+        .iter()
+        .map(|(code, _)| code.as_str())
+        .filter(|code| !question.iter().any(|(known, _)| known.as_str() == *code))
+        .collect();
+    assert_eq!(
+        added,
+        BTreeSet::from([
+            "approval_not_found",
+            "approval_not_granted",
+            "approval_expired",
+            "approval_not_resumable",
+            "continuation_already_consumed",
+            "continue_unavailable",
+        ]),
+        "CONTINUE_RELAYED_ERRORS lists a code beyond the question form that this test does not name: name \
+         each approval or park code here, or the question form must send it too"
     );
 }
 

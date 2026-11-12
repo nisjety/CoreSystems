@@ -9,7 +9,7 @@
 // There are two surfaces.
 //
 // HTTP. A refusal that arrives before the stream opens. The model-gateway route
-// answers `{ error: { code, message } }`; the BFF relays the fourteen codes below,
+// answers `{ error: { code, message } }`; the BFF relays the fifteen codes below,
 // with the upstream status and its own fixed message, and turns every other
 // upstream error into `model_error` (a 401 into `unauthorized`).
 //
@@ -80,7 +80,7 @@
 // `approval_not_found` for an approval that WAS spent. Those three are `unknown`.
 //
 // Reading rule for callers. Read a thrown value with
-// [chatRunContinueHttpRefusalOf] first (the fourteen listed pairs), then with
+// [chatRunContinueHttpRefusalOf] first (the fifteen listed pairs), then with
 // [chatRunContinueTransportFailureOf] (everything else that failed: a 502
 // `upstream_unavailable`, a 504, a network error, an unlisted body). Between them
 // they read every failed request, and none of them says the approval was unspent
@@ -131,6 +131,9 @@ export const CHAT_RUN_CONTINUE_HTTP_REFUSALS = [
   { code: 'continuation_already_consumed', status: 409 },
   { code: 'continue_unavailable', status: 503 },
   { code: 'org_agents_paused', status: 403 },
+  // The org's agent policy cannot be read inside its bound (C-14-mg-rel1): refused before the approval is read,
+  // on the approval, park and question forms alike.
+  { code: 'org_policy_unavailable', status: 503 },
   // The question form (WS14 S5). `not_resumable` (409) above is shared with it.
   { code: 'question_not_found', status: 404 },
   { code: 'question_expired', status: 410 },
@@ -334,6 +337,9 @@ export const CHAT_RUN_CONTINUE_HTTP_EFFECTS: Readonly<
   // so a retry after a spend can be refused by it too, as with a switch flipped off: the spend
   // stays unknown, and no retry is offered.
   org_agents_paused: UNKNOWN_FOLLOW,
+  // The org's agent policy cannot be read inside its bound (C-14-mg-rel1). It is read before the approval, as the
+  // pause is, so a retry after a spend can be refused by it too: the spend stays unknown, and no retry is offered.
+  org_policy_unavailable: UNKNOWN_FOLLOW,
   // The question form (WS14 S5) reads no approval, so there was nothing to spend: `no` says only
   // that. A question that is gone, already answered, or refused for its answer is not followed; a
   // question that is not in a state to continue the run is, because the run read says what became

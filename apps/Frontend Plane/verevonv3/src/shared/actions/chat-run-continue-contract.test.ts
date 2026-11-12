@@ -49,6 +49,7 @@ const HTTP_PAIRS = [
   ['continuation_already_consumed', 409],
   ['continue_unavailable', 503],
   ['org_agents_paused', 403],
+  ['org_policy_unavailable', 503],
   ['question_not_found', 404],
   ['question_expired', 410],
   ['question_already_answered', 409],
@@ -101,12 +102,34 @@ const EXECUTOR_TOKENS = [
 const CODE_DERIVED = ['approval_not_found', 'durable_mutation_forbidden'] as const
 const GATEWAY_MADE = ['continue_refused', 'continue_unreachable', 'continue_outcome_unknown'] as const
 
+// The HTTP codes the question form (WS14 S5) sends: the five only it produces, the two it shares with the approval
+// and park forms, and the two org-policy refusals every form sends (model-gateway's CONTINUE_QUESTION_HTTP_REFUSALS
+// names all of them; C-14-mg-rel1).
+const QUESTION_FORM_HTTP_CODES = [
+  ...QUESTION_HTTP_CODES,
+  'continue_disabled',
+  'not_resumable',
+  'org_agents_paused',
+  'org_policy_unavailable',
+] as const
+
+// The six codes the approval and park forms add beyond the question form's. The BFF test names the same six
+// (apps/gateway/tests/continue_error_vocabulary.rs), so a new pinned code is named on both sides or sent by both.
+const APPROVAL_AND_PARK_ONLY_HTTP_CODES = [
+  'approval_not_found',
+  'approval_not_granted',
+  'approval_expired',
+  'approval_not_resumable',
+  'continuation_already_consumed',
+  'continue_unavailable',
+] as const
+
 describe('the closed vocabularies', () => {
-  it('lists exactly the 14 relayed HTTP refusals with their statuses', () => {
+  it('lists exactly the 15 relayed HTTP refusals with their statuses', () => {
     expect(CHAT_RUN_CONTINUE_HTTP_REFUSALS.map((entry) => [entry.code, entry.status])).toEqual(
       HTTP_PAIRS.map((pair) => [...pair]),
     )
-    expect(CHAT_RUN_CONTINUE_HTTP_REFUSALS).toHaveLength(14)
+    expect(CHAT_RUN_CONTINUE_HTTP_REFUSALS).toHaveLength(15)
   })
 
   it('lists exactly the 32 stream refusals: 21 executor tokens, 2 code-derived, 3 gateway-made, 6 of the question form', () => {
@@ -136,6 +159,20 @@ describe('the closed vocabularies', () => {
     expect(rows).toEqual(CHAT_RUN_CONTINUE_HTTP_REFUSALS.map((entry) => entry.code).sort())
   })
 
+  it('covers the question form HTTP codes with the pinned list under the same statuses, and names each code the pinned list adds', () => {
+    const questionCodes = QUESTION_FORM_HTTP_CODES as readonly string[]
+    const pinned = new Map<string, number>(
+      CHAT_RUN_CONTINUE_HTTP_REFUSALS.map((entry): [string, number] => [entry.code, entry.status]),
+    )
+    const questionForm = HTTP_PAIRS.filter(([code]) => questionCodes.includes(code))
+    expect(questionForm.map(([code]) => code).sort()).toEqual([...QUESTION_FORM_HTTP_CODES].sort())
+    for (const [code, status] of questionForm) {
+      expect(pinned.get(code), `the question form sends ${code} with ${status}`).toBe(status)
+    }
+    const added = [...pinned.keys()].filter((code) => !questionCodes.includes(code))
+    expect(added.sort()).toEqual([...APPROVAL_AND_PARK_ONLY_HTTP_CODES].sort())
+  })
+
   it('keeps the HTTP codes that the stream can also carry inside the stream list', () => {
     // The gateway's HTTP codes and its stream tokens overlap on the refusal
     // class. The HTTP-only ones (a refusal before any stream exists) are the
@@ -145,6 +182,7 @@ describe('the closed vocabularies', () => {
     expect(httpOnly).toEqual([
       'continue_unavailable',
       'org_agents_paused',
+      'org_policy_unavailable',
       'question_already_answered',
       'invalid_answer',
     ])
@@ -181,6 +219,7 @@ const HTTP_EFFECT_TABLE = {
   continuation_already_consumed: ['yes', false, true],
   continue_unavailable: ['unknown', true, true],
   org_agents_paused: ['unknown', false, true],
+  org_policy_unavailable: ['unknown', false, true],
   // The question form reads no approval: nothing was spent.
   question_not_found: ['no', false, false],
   question_expired: ['no', false, false],
@@ -254,7 +293,7 @@ describe('chatRunContinueHttpRefusalOf', () => {
     expect(chatRunContinueHttpRefusalOf({ code: 'continuation_already_consumed', status: 200 })).toBeNull()
   })
 
-  it('is null for any failure that is not one of the eight, which the transport guard then reads as unknown', () => {
+  it('is null for any failure that is not one of the listed refusals, which the transport guard then reads as unknown', () => {
     // A request the BFF could not complete after delivering it upstream (a send
     // failure, a dropped connection) reaches the client as 502 upstream_unavailable
     // although the gateway may already have consumed the approval. A 401, a
@@ -952,7 +991,7 @@ describe('chatRunContinueTransportFailureOf (a failure that says nothing about t
     }
   })
 
-  it('is null for the eight listed refusals: the HTTP guard reads those, and never both', () => {
+  it('is null for the fifteen listed refusals: the HTTP guard reads those, and never both', () => {
     for (const [code, status] of HTTP_PAIRS) {
       expect(chatRunContinueTransportFailureOf({ code, status })).toBeNull()
       expect(chatRunContinueHttpRefusalOf({ code, status })).not.toBeNull()
