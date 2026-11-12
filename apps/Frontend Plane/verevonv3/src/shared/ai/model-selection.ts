@@ -5,6 +5,7 @@ import {
 } from '@/shared/api/chatgpt-subscription-client'
 import { VEREVON_BALANCE_MODE_ID } from '@/shared/api/chat-client'
 import { normalizePrivacyTier, type PrivacyTier } from '@/shared/api/privacy-tier'
+import { LocalizedError } from '@/shared/i18n/errors'
 
 export type AiModelSelection = Readonly<{
   model: string
@@ -137,7 +138,12 @@ export async function resolveAiModelSelection(orgId: string): Promise<AiModelSel
   if (selected.provider !== OPENAI_CODEX_SUBSCRIPTION_PROVIDER) return selected
   const connections = await listChatGptSubscriptions(orgId)
   const active = activeSubscriptionConnection(connections, selected.subscriptionConnectionId)
-  if (!active) throw new Error('ChatGPT-abonnementet er ikke tilkoblet. Koble til under Profil → ChatGPT-abonnement, eller velg en annen modell.')
+  if (!active) {
+    throw new LocalizedError({
+      no: 'ChatGPT-abonnementet er ikke tilkoblet. Koble til under Profil → ChatGPT-abonnement, eller velg en annen modell.',
+      en: 'The ChatGPT subscription is not connected. Connect it under Profile → ChatGPT subscription, or choose another model.',
+    })
+  }
   return { ...selected, subscriptionConnectionId: active.id }
 }
 

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { listChatGptSubscriptions } from '@/shared/api/chatgpt-subscription-client'
+import { LocalizedError, translateApiError } from '@/shared/i18n/errors'
 import {
   lastKnownAiModelPrivacyTier,
   readAiModelSelection,
@@ -15,13 +16,31 @@ vi.mock('@/shared/api/chatgpt-subscription-client', () => ({
 }))
 
 const selection = { model: 'gpt-5.6-terra', provider: 'openai-codex-subscription', label: 'ChatGPT Terra', subscriptionConnectionId: 'connected' } as const
+const NOT_CONNECTED_NO = 'ChatGPT-abonnementet er ikke tilkoblet. Koble til under Profil → ChatGPT-abonnement, eller velg en annen modell.'
+const NOT_CONNECTED_EN = 'The ChatGPT subscription is not connected. Connect it under Profile → ChatGPT subscription, or choose another model.'
 describe('explicit subscription selection', () => {
   beforeEach(() => { localStorage.clear(); vi.resetAllMocks() })
   it('fails before inference when the subscription is unavailable and preserves the choice', async () => {
     rememberAiModelSelection('org', selection)
     vi.mocked(listChatGptSubscriptions).mockResolvedValue([])
-    await expect(resolveAiModelSelection('org')).rejects.toThrow('ikke tilkoblet')
+    const failure = await resolveAiModelSelection('org').catch((error: unknown) => error)
+    expect(failure).toBeInstanceOf(LocalizedError)
+    expect((failure as LocalizedError).copy).toEqual({ no: NOT_CONNECTED_NO, en: NOT_CONNECTED_EN })
     expect(readAiModelSelection('org')).toEqual(selection)
+  })
+  it('shows its own sentence in each language, not the caller fallback', async () => {
+    rememberAiModelSelection('org', selection)
+    vi.mocked(listChatGptSubscriptions).mockResolvedValue([])
+    const failure = await resolveAiModelSelection('org').catch((error: unknown) => error)
+    const fallback = { no: 'Kunne ikke sende meldingen.', en: 'Could not send the message.' }
+    expect(translateApiError(failure, (no) => no, fallback)).toBe(NOT_CONNECTED_NO)
+    expect(translateApiError(failure, (_no, en) => en, fallback)).toBe(NOT_CONNECTED_EN)
+  })
+  it('leaves a selection that is not the subscription untouched, with no connection lookup', async () => {
+    const catalogue = { model: 'verevon-balance', label: 'Verevon Balance' } as const
+    rememberAiModelSelection('org', catalogue)
+    expect(await resolveAiModelSelection('org')).toEqual(catalogue)
+    expect(listChatGptSubscriptions).not.toHaveBeenCalled()
   })
   it('keeps Terra on the active connection after reconnecting', async () => {
     rememberAiModelSelection('org', selection)
