@@ -1041,8 +1041,16 @@ type AppendMessageRequest struct {
 	// Stored only on a turn row: a zero-retention caller cannot append at all, and a post ignores it.
 	// Empty = a platform turn, today's behaviour; a send without one never touches the column.
 	ModelConnectionId string `protobuf:"bytes,22,opt,name=model_connection_id,json=modelConnectionId,proto3" json:"model_connection_id,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// The subscription connection (the caller's own ChatGPT subscription, `openai-codex-subscription`) that
+	// served or will serve this turn: the opaque Integration Core subscription connection id. It is kept on the
+	// turn so that a side question about the thread is answered on the same subscription connection and never on
+	// the platform chain (DEC-V-R8). An opaque id only, never a key or a secret; the shape rule is the one
+	// `model_connection_id` has, and a malformed id is refused (invalid_argument). Stored only on a turn row: a
+	// zero-retention caller cannot append at all, and a post ignores it. Empty = not a subscription turn; a send
+	// without one never touches the column.
+	SubscriptionConnectionId string `protobuf:"bytes,23,opt,name=subscription_connection_id,json=subscriptionConnectionId,proto3" json:"subscription_connection_id,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *AppendMessageRequest) Reset() {
@@ -1225,6 +1233,13 @@ func (x *AppendMessageRequest) GetEntry() *MessageEntry {
 func (x *AppendMessageRequest) GetModelConnectionId() string {
 	if x != nil {
 		return x.ModelConnectionId
+	}
+	return ""
+}
+
+func (x *AppendMessageRequest) GetSubscriptionConnectionId() string {
+	if x != nil {
+		return x.SubscriptionConnectionId
 	}
 	return ""
 }
@@ -4828,8 +4843,13 @@ type SessionMessage struct {
 	// and for every row written before the column existed. The gateway reads it off the source turn
 	// of a regenerate or an edit and replays on the same connection.
 	ModelConnectionId string `protobuf:"bytes,20,opt,name=model_connection_id,json=modelConnectionId,proto3" json:"model_connection_id,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// The subscription connection this turn was written under (see
+	// AppendMessageRequest.subscription_connection_id): an opaque id, never a key. Empty for a platform or a
+	// customer-gateway turn and for every row written before the column existed. The gateway's side-chat route
+	// reads it off the thread to answer a side question on the same subscription connection.
+	SubscriptionConnectionId string `protobuf:"bytes,21,opt,name=subscription_connection_id,json=subscriptionConnectionId,proto3" json:"subscription_connection_id,omitempty"`
+	unknownFields            protoimpl.UnknownFields
+	sizeCache                protoimpl.SizeCache
 }
 
 func (x *SessionMessage) Reset() {
@@ -4998,6 +5018,13 @@ func (x *SessionMessage) GetAgentFollowedUp() bool {
 func (x *SessionMessage) GetModelConnectionId() string {
 	if x != nil {
 		return x.ModelConnectionId
+	}
+	return ""
+}
+
+func (x *SessionMessage) GetSubscriptionConnectionId() string {
+	if x != nil {
+		return x.SubscriptionConnectionId
 	}
 	return ""
 }
@@ -10551,7 +10578,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x16trigger_content_digest\x18\x0e \x01(\tR\x14triggerContentDigest\x12(\n" +
 	"\x10agent_subject_id\x18\x0f \x01(\tR\x0eagentSubjectId\x12\x1f\n" +
 	"\vturn_origin\x18\x10 \x01(\tR\n" +
-	"turnOrigin\"\xde\a\n" +
+	"turnOrigin\"\x9c\b\n" +
 	"\x14AppendMessageRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12\x18\n" +
@@ -10576,7 +10603,8 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\tpost_kind\x18\x13 \x01(\tR\bpostKind\x128\n" +
 	"\bmentions\x18\x14 \x03(\v2\x1c.model_plane.v1.MentionInputR\bmentions\x122\n" +
 	"\x05entry\x18\x15 \x01(\v2\x1c.model_plane.v1.MessageEntryR\x05entry\x12.\n" +
-	"\x13model_connection_id\x18\x16 \x01(\tR\x11modelConnectionId\"\xae\x01\n" +
+	"\x13model_connection_id\x18\x16 \x01(\tR\x11modelConnectionId\x12<\n" +
+	"\x1asubscription_connection_id\x18\x17 \x01(\tR\x18subscriptionConnectionId\"\xae\x01\n" +
 	"\x15AppendMessageResponse\x12\x1a\n" +
 	"\bsequence\x18\x01 \x01(\x04R\bsequence\x12\x1d\n" +
 	"\n" +
@@ -10860,7 +10888,7 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\x13include_human_posts\x18\t \x01(\bR\x11includeHumanPosts\x12(\n" +
 	"\x10post_context_cap\x18\n" +
 	" \x01(\rR\x0epostContextCap\x12#\n" +
-	"\rinclude_first\x18\v \x01(\bR\fincludeFirst\"\xd3\x06\n" +
+	"\rinclude_first\x18\v \x01(\bR\fincludeFirst\"\x91\a\n" +
 	"\x0eSessionMessage\x12\x12\n" +
 	"\x04role\x18\x01 \x01(\tR\x04role\x12\x18\n" +
 	"\acontent\x18\x02 \x01(\tR\acontent\x12\x1d\n" +
@@ -10887,7 +10915,8 @@ const file_model_plane_v1_sessions_proto_rawDesc = "" +
 	"\vrevision_no\x18\x12 \x01(\rR\n" +
 	"revisionNo\x12*\n" +
 	"\x11agent_followed_up\x18\x13 \x01(\bR\x0fagentFollowedUp\x12.\n" +
-	"\x13model_connection_id\x18\x14 \x01(\tR\x11modelConnectionId\"\x98\x01\n" +
+	"\x13model_connection_id\x18\x14 \x01(\tR\x11modelConnectionId\x12<\n" +
+	"\x1asubscription_connection_id\x18\x15 \x01(\tR\x18subscriptionConnectionId\"\x98\x01\n" +
 	"\x18ListConversationResponse\x12:\n" +
 	"\bmessages\x18\x01 \x03(\v2\x1e.model_plane.v1.SessionMessageR\bmessages\x12\x19\n" +
 	"\bhas_more\x18\x02 \x01(\bR\ahasMore\x12%\n" +

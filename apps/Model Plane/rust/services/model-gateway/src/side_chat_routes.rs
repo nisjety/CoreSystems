@@ -13,6 +13,15 @@
 //!
 //! The route answers 404 `side_chat_disabled` while `MODEL_GATEWAY_SIDE_CHAT_ENABLED` is not the
 //! literal `true`. The switch is read at each call.
+//!
+//! A thread whose turns were written under a connection is answered on that connection and never on the
+//! platform chain (W4-BYO, DEC-V-R8). The connection is the stored `messages.model_connection_id` (a
+//! customer-gateway connection) or `messages.subscription_connection_id` (the caller's ChatGPT subscription).
+//! The posture is decided on the connection route, the call names the connection and the `model` the request
+//! gives (required: 400 `side_chat_model_required` without it), and a thread whose turns name two or more
+//! connections, of either kind, is refused 409 `connection_ambiguous`. A turn written before those columns
+//! existed names no connection, so such a thread is answered as before. With `MODEL_GATEWAY_BYO_GATEWAY` not
+//! the literal `true` every thread is answered as before.
 
 use axum::{
     extract::{Path, State},
@@ -20,11 +29,13 @@ use axum::{
     routing::post,
     Extension, Json, Router,
 };
+use mp_contracts::agentic_subscription::PROVIDER_ID;
 use mp_contracts::model_plane::v1::{
     ArchiveFilter, ChatMessage, InferPurpose, InferRequest, ListConversationRequest,
     ListThreadsRequest, SessionMessage,
 };
 use mp_contracts::user_content::UserContent;
+use mp_contracts::zdr_refusal::Refusal;
 use mp_ids::new_ulid;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -49,6 +60,8 @@ const SNAPSHOT_READ_TURNS: u32 = 40;
 const SIDE_CHAT_MAX_TOKENS: i32 = 1_500;
 /// Low, so that the answer follows the transcript rather than inventing one.
 const SIDE_CHAT_TEMPERATURE: f32 = 0.2;
+/// The provider hint a customer-gateway call carries, as `normalize` names it for a customer-gateway turn.
+const CUSTOMER_GATEWAY_PROVIDER: &str = "customer-gateway";
 
 const SYSTEM_PROMPT: &str = concat!(
     "You answer one question about one conversation between a person and an assistant. ",
@@ -68,6 +81,9 @@ const SYSTEM_PROMPT: &str = concat!(
 pub(crate) struct SideChatRequest {
     question: UserContent,
     zdr: bool,
+    /// The model the thread's own connection serves, a customer gateway's or the subscription's. Read only on a
+    /// thread whose turns were written under a connection (W4-BYO, DEC-V-R8); a platform thread never reads it.
+    model: String,
 }
 
 /// A request the gateway refuses before any call.
@@ -240,19 +256,195 @@ fn user_message(question: &UserContent, transcript: &Transcript, nonce: &str) ->
     message
 }
 
-/// The one model call of a side chat: no tools, a low temperature, the caller's org and posture.
-/// Its request id is fresh. Nothing here is stored by this route.
+/// Where the one call of a side chat is served (W4-BYO, DEC-V-R8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SideRoute {
+    /// The platform chain, as a side chat always was: the call names neither a model nor a connection.
+    Platform,
+    /// The thread's own connection, with the model the request names for it. A customer gateway or subscription call
+    /// names its own model, and inference-core serves it on that connection alone.
+    Connection {
+        connection: ThreadConnection,
+        model: String,
+    },
+}
+
+/// A connection a thread's turns were written under: one of the caller's customer-gateway connections (W4-BYO,
+/// `messages.model_connection_id`), or the caller's own ChatGPT subscription connection (DEC-V-R8,
+/// `messages.subscription_connection_id`). Both are opaque Integration Core ids, never keys.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ThreadConnection {
+    CustomerGateway(String),
+    Subscription(String),
+}
+
+impl ThreadConnection {
+    /// The provider the call names for this connection: the customer-gateway registry id, or the subscription one.
+    fn provider(&self) -> &'static str {
+        match self {
+            Self::CustomerGateway(_) => CUSTOMER_GATEWAY_PROVIDER,
+            Self::Subscription(_) => PROVIDER_ID,
+        }
+    }
+
+    /// The opaque connection id.
+    fn id(&self) -> &str {
+        match self {
+            Self::CustomerGateway(id) | Self::Subscription(id) => id,
+        }
+    }
+}
+
+/// The connection a thread's turns were written under, read over the turns the side chat reads. `None` when the
+/// switch is off, or when no turn names one: a platform thread, served as before. A thread whose turns name two or
+/// more connections, of either kind, has no one connection that can serve its whole transcript, so it is refused
+/// rather than served on one of them or on the platform chain.
+fn thread_connection(
+    byo_enabled: bool,
+    messages: &[SessionMessage],
+) -> Result<Option<ThreadConnection>, HttpJsonError> {
+    if !byo_enabled {
+        return Ok(None);
+    }
+    let mut named: Vec<ThreadConnection> = Vec::new();
+    for message in messages {
+        let gateway = message.model_connection_id.trim();
+        if !gateway.is_empty() {
+            named.push(ThreadConnection::CustomerGateway(gateway.to_owned()));
+        }
+        let subscription = message.subscription_connection_id.trim();
+        if !subscription.is_empty() {
+            named.push(ThreadConnection::Subscription(subscription.to_owned()));
+        }
+    }
+    named.sort_unstable();
+    named.dedup();
+    match named.len() {
+        0 => Ok(None),
+        1 => Ok(named.pop()),
+        _ => Err(typed(
+            StatusCode::CONFLICT,
+            "connection_ambiguous",
+            "side chat is not available for a thread whose turns were written under more than one connection",
+        )),
+    }
+}
+
+/// The posture of a side chat served on a connection. The connection route decides it, as it decides a chat turn
+/// that names the connection: a zero-retention token or an explicit zero-retention request is refused typed before
+/// any call, because neither a customer gateway nor a subscription is zero retention. A waiver binds one
+/// subscription connection, so on any other connection it is refused as a route mismatch.
+fn connection_posture(
+    claims: &Claims,
+    connection: &ThreadConnection,
+    explicit_zdr: bool,
+) -> Result<(), HttpJsonError> {
+    let zdr = crate::zdr_posture::zdr_or_refuse(
+        claims,
+        &crate::zdr_posture::Route::named(
+            Some(connection.provider()),
+            Some(connection.id()),
+            explicit_zdr,
+        ),
+    )?;
+    if zdr {
+        // The resolver refuses every zero-retention request on a connection route, so this is not reached. It is
+        // kept so that a change there fails closed here.
+        return Err(crate::zdr_posture::http(
+            &Refusal::CONNECTION_NOT_ACKNOWLEDGED,
+        ));
+    }
+    Ok(())
+}
+
+/// The route the one call is served on. A platform thread is served on the platform chain. A thread on a connection
+/// is served on that connection with the model the request names: a customer gateway or subscription call names its
+/// own model, so a request that names none is refused, and so is a model the deployment allowlist leaves out, as on
+/// every turn.
+fn side_route(
+    connection: Option<ThreadConnection>,
+    model: &str,
+    allowed: Option<&[String]>,
+) -> Result<SideRoute, HttpJsonError> {
+    let Some(connection) = connection else {
+        return Ok(SideRoute::Platform);
+    };
+    let model = model.trim();
+    if model.is_empty() {
+        return Err(typed(
+            StatusCode::BAD_REQUEST,
+            "side_chat_model_required",
+            "a side chat on a customer gateway or subscription thread names the model the connection serves",
+        ));
+    }
+    if let Some(refusal) = crate::normalize::deployment_allowlist_refusal(allowed, model) {
+        return Err(refusal);
+    }
+    Ok(SideRoute::Connection {
+        connection,
+        model: model.to_owned(),
+    })
+}
+
+/// The cost basis of the answer. A platform answer is priced as it always was. A customer-gateway answer is billed
+/// by the gateway, and a subscription answer is the user's own subscription, so neither carries a platform price. A
+/// call the platform served is never labelled as either.
+fn answer_basis(route: &SideRoute, provider_used: &str) -> CostBasis {
+    let basis = match route {
+        SideRoute::Platform => CostBasis::of_route("", ""),
+        SideRoute::Connection {
+            connection: ThreadConnection::CustomerGateway(id),
+            ..
+        } => CostBasis::of_gateway(id),
+        SideRoute::Connection {
+            connection: ThreadConnection::Subscription(id),
+            ..
+        } => CostBasis::of_route(PROVIDER_ID, id),
+    };
+    basis.served_by(provider_used)
+}
+
+/// The one model call of a side chat: no tools, a low temperature, the caller's org and posture. On the platform
+/// route it names neither a model nor a connection, as before; on a connection route it names the connection and
+/// its model. Its request id is fresh. Nothing here is stored by this route.
 fn side_chat_request(
     question: &UserContent,
     transcript: &Transcript,
     nonce: &str,
     org_id: &str,
     zdr: bool,
+    route: &SideRoute,
 ) -> InferRequest {
+    // The call names the connection of its kind: a customer-gateway id, or a subscription id with its provider.
+    let (model, provider_hint, model_connection_id, subscription_connection_id) = match route {
+        SideRoute::Platform => (String::new(), String::new(), String::new(), String::new()),
+        SideRoute::Connection {
+            connection: ThreadConnection::CustomerGateway(id),
+            model,
+        } => (
+            model.clone(),
+            CUSTOMER_GATEWAY_PROVIDER.to_owned(),
+            id.clone(),
+            String::new(),
+        ),
+        SideRoute::Connection {
+            connection: ThreadConnection::Subscription(id),
+            model,
+        } => (
+            model.clone(),
+            PROVIDER_ID.to_owned(),
+            String::new(),
+            id.clone(),
+        ),
+    };
     InferRequest {
         request_id: format!("{nonce}-side-chat"),
         purpose: InferPurpose::Answer as i32,
         org_id: org_id.to_owned(),
+        model,
+        provider_hint,
+        model_connection_id,
+        subscription_connection_id,
         messages: vec![
             ChatMessage {
                 compaction_summary: String::new(),
@@ -383,8 +575,21 @@ pub(crate) async fn side_chat_with(
     let (messages, has_more) =
         read_active_path(&state, &claims, &session_bearer, thread_id).await?;
     let transcript = newest_transcript(&messages, has_more);
+    let connection = thread_connection(crate::normalize::byo_gateway_enabled(), &messages)?;
+    let zdr = match &connection {
+        Some(connection) => {
+            connection_posture(&claims, connection, req.zdr)?;
+            false
+        }
+        None => zdr,
+    };
+    let route = side_route(
+        connection,
+        &req.model,
+        crate::normalize::load_allowed_models().as_deref(),
+    )?;
     let nonce = new_ulid();
-    let request = side_chat_request(&question, &transcript, &nonce, &claims.org_id, zdr);
+    let request = side_chat_request(&question, &transcript, &nonce, &claims.org_id, zdr, &route);
     let resp = state
         .inference_client
         .clone()
@@ -403,7 +608,7 @@ pub(crate) async fn side_chat_with(
     let cost_usd = if zdr {
         None
     } else {
-        let basis = CostBasis::of_route("", "").served_by(&resp.provider_used);
+        let basis = answer_basis(&route, &resp.provider_used);
         state
             .pricing
             .cost_usd_for(
@@ -427,4 +632,385 @@ pub(crate) async fn side_chat_with(
             },
         }
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::ZdrWaiverClaim;
+    use mp_contracts::zdr_refusal::code;
+
+    fn claims(zdr: bool, org_zdr: Option<bool>) -> Claims {
+        Claims {
+            key_id: None,
+            acting_user_id: None,
+            sub: "user-a".to_owned(),
+            iss: "test-issuer".to_owned(),
+            exp: i64::MAX,
+            org_id: "org-a".to_owned(),
+            user_id: "user-a".to_owned(),
+            nbf: None,
+            aud: Some("model-gateway".to_owned()),
+            scopes: Vec::new(),
+            zdr,
+            sovereign: None,
+            org_zdr,
+            zdr_waiver: None,
+            principal_type: Some("user".to_owned()),
+            service_id: None,
+            reason: None,
+        }
+    }
+
+    /// A turn the caller wrote under a customer-gateway connection ("" writes none).
+    fn turn(role: &str, content: &str, connection: &str) -> SessionMessage {
+        SessionMessage {
+            role: role.to_owned(),
+            content: content.to_owned(),
+            model_connection_id: connection.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// A turn the caller wrote under a subscription connection ("" writes none).
+    fn subscription_turn(role: &str, content: &str, connection: &str) -> SessionMessage {
+        SessionMessage {
+            role: role.to_owned(),
+            content: content.to_owned(),
+            subscription_connection_id: connection.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// A two-turn thread. `connection` is the customer-gateway id its user turn was written under; "" makes it a
+    /// platform thread.
+    fn thread(connection: &str) -> Vec<SessionMessage> {
+        vec![
+            turn("user", "Hei", connection),
+            turn("assistant", "Hei!", ""),
+        ]
+    }
+
+    /// A two-turn thread whose user turn was written under the subscription `connection`; "" makes it a platform
+    /// thread.
+    fn subscription_thread(connection: &str) -> Vec<SessionMessage> {
+        vec![
+            subscription_turn("user", "Hei", connection),
+            turn("assistant", "Hei!", ""),
+        ]
+    }
+
+    fn customer_gateway(id: &str) -> ThreadConnection {
+        ThreadConnection::CustomerGateway(id.to_owned())
+    }
+
+    fn subscription(id: &str) -> ThreadConnection {
+        ThreadConnection::Subscription(id.to_owned())
+    }
+
+    fn refusal_code(error: &HttpJsonError) -> &str {
+        let Json(body) = &error.1;
+        body["error"]["code"].as_str().unwrap_or_default()
+    }
+
+    fn request_on(route: &SideRoute, zdr: bool) -> InferRequest {
+        let transcript = Transcript {
+            turns: Vec::new(),
+            earlier_omitted: false,
+        };
+        side_chat_request(
+            &UserContent::from("Hva ble sagt?".to_owned()),
+            &transcript,
+            "nonce-1",
+            "org-a",
+            zdr,
+            route,
+        )
+    }
+
+    #[test]
+    fn a_platform_thread_is_served_on_the_platform_chain_as_before() {
+        let messages = thread("");
+        let connection =
+            thread_connection(true, &messages).expect("a platform thread is not refused");
+        assert_eq!(connection, None);
+        let route = side_route(connection, "", None).expect("a platform route needs no model");
+        assert_eq!(route, SideRoute::Platform);
+        let request = request_on(&route, false);
+        assert!(request.model.is_empty());
+        assert!(request.provider_hint.is_empty());
+        assert!(request.model_connection_id.is_empty());
+        assert!(request.subscription_connection_id.is_empty());
+        assert!(!request.zdr);
+    }
+
+    #[test]
+    fn a_blank_connection_id_is_no_connection() {
+        let messages = thread("   ");
+        assert_eq!(
+            thread_connection(true, &messages).expect("not refused"),
+            None
+        );
+        let messages = subscription_thread("   ");
+        assert_eq!(
+            thread_connection(true, &messages).expect("not refused"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_byo_thread_is_served_on_its_own_connection_with_the_model_named() {
+        let messages = thread("conn-a");
+        let connection = thread_connection(true, &messages).expect("not refused");
+        assert_eq!(connection, Some(customer_gateway("conn-a")));
+        let route = side_route(connection, " gpt-4o-mini ", None).expect("a named model is served");
+        assert_eq!(
+            route,
+            SideRoute::Connection {
+                connection: customer_gateway("conn-a"),
+                model: "gpt-4o-mini".to_owned(),
+            }
+        );
+        let request = request_on(&route, false);
+        assert_eq!(request.model_connection_id, "conn-a");
+        assert_eq!(request.provider_hint, CUSTOMER_GATEWAY_PROVIDER);
+        assert_eq!(request.model, "gpt-4o-mini");
+        assert!(request.subscription_connection_id.is_empty());
+        assert!(!request.zdr);
+    }
+
+    #[test]
+    fn a_byo_thread_without_a_model_is_refused_typed() {
+        let messages = thread("conn-a");
+        let connection = thread_connection(true, &messages).expect("not refused");
+        let error = side_route(connection, "  ", None).expect_err("no model, no call");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(refusal_code(&error), "side_chat_model_required");
+    }
+
+    #[test]
+    fn a_byo_model_outside_the_deployment_allowlist_is_refused_as_on_a_turn() {
+        let messages = thread("conn-a");
+        let connection = thread_connection(true, &messages).expect("not refused");
+        let allowed = vec!["gpt-4o".to_owned()];
+        let error = side_route(connection.clone(), "gpt-x", Some(&allowed))
+            .expect_err("a model the allowlist leaves out is refused");
+        assert_eq!(error.0, StatusCode::FORBIDDEN);
+        assert!(side_route(connection, "gpt-4o", Some(&allowed)).is_ok());
+    }
+
+    #[test]
+    fn a_thread_on_two_customer_gateway_connections_is_refused_typed() {
+        let mut messages = thread("conn-a");
+        messages.push(turn("user", "Igjen", "conn-b"));
+        let error =
+            thread_connection(true, &messages).expect_err("two connections, no single route");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(refusal_code(&error), "connection_ambiguous");
+    }
+
+    #[test]
+    fn with_the_switch_off_a_byo_thread_is_served_on_the_platform_chain_as_before() {
+        let messages = thread("conn-a");
+        let connection = thread_connection(false, &messages).expect("not refused");
+        assert_eq!(connection, None);
+        // A model sent with the request is not read on a platform route.
+        let route = side_route(connection, "gpt-4o-mini", None).expect("platform route");
+        assert_eq!(route, SideRoute::Platform);
+        let request = request_on(&route, false);
+        assert!(request.model.is_empty());
+        assert!(request.provider_hint.is_empty());
+        assert!(request.model_connection_id.is_empty());
+        assert!(request.subscription_connection_id.is_empty());
+    }
+
+    #[test]
+    fn a_zero_retention_token_or_request_is_refused_typed_on_a_connection() {
+        let refused = connection_posture(
+            &claims(true, Some(true)),
+            &customer_gateway("conn-a"),
+            false,
+        )
+        .expect_err("a ZDR org cannot use a customer gateway");
+        assert_eq!(refusal_code(&refused), code::CONNECTION_NOT_ACKNOWLEDGED);
+        let refused = connection_posture(&claims(false, None), &customer_gateway("conn-a"), true)
+            .expect_err("an explicit ZDR request cannot use a customer gateway");
+        assert_eq!(
+            refusal_code(&refused),
+            code::EXPLICIT_REQUEST_NOT_SUPPORTED_BY_CONNECTION
+        );
+    }
+
+    #[test]
+    fn a_persistent_turn_on_a_connection_passes_the_posture_check() {
+        assert!(
+            connection_posture(&claims(false, None), &customer_gateway("conn-a"), false).is_ok()
+        );
+        assert!(connection_posture(
+            &claims(false, Some(false)),
+            &customer_gateway("conn-a"),
+            false
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_waiver_for_another_route_is_refused_on_a_customer_gateway_connection() {
+        // A waiver binds one subscription connection (rule 17). A customer gateway is not that route, so the
+        // connection route refuses the waived token as a route mismatch, before any call.
+        let waived = Claims {
+            org_zdr: Some(true),
+            zdr_waiver: Some(ZdrWaiverClaim {
+                version: 1,
+                provider: "openai-codex-subscription".to_owned(),
+                connection: "conn-a".to_owned(),
+            }),
+            ..claims(false, None)
+        };
+        let refused = connection_posture(&waived, &customer_gateway("conn-a"), false)
+            .expect_err("a waiver names no customer gateway");
+        assert_eq!(refusal_code(&refused), code::WAIVER_ROUTE_MISMATCH);
+    }
+
+    #[test]
+    fn a_subscription_thread_is_served_on_its_own_subscription_connection_not_the_platform_chain() {
+        // The R8 gap: a subscription turn names its connection, so the thread is never read as a platform thread.
+        let messages = subscription_thread("conn_sub");
+        let connection = thread_connection(true, &messages).expect("not refused");
+        assert_eq!(connection, Some(subscription("conn_sub")));
+        let route = side_route(connection, " gpt-4o-mini ", None).expect("a named model is served");
+        assert_ne!(route, SideRoute::Platform);
+        assert_eq!(
+            route,
+            SideRoute::Connection {
+                connection: subscription("conn_sub"),
+                model: "gpt-4o-mini".to_owned(),
+            }
+        );
+        let request = request_on(&route, false);
+        assert_eq!(request.provider_hint, PROVIDER_ID);
+        assert_eq!(request.subscription_connection_id, "conn_sub");
+        assert!(request.model_connection_id.is_empty());
+        assert_eq!(request.model, "gpt-4o-mini");
+        assert!(!request.zdr);
+    }
+
+    #[test]
+    fn a_subscription_thread_with_many_turns_on_one_connection_is_one_connection() {
+        let mut messages = subscription_thread("conn_sub");
+        messages.push(subscription_turn("user", "Igjen", "conn_sub"));
+        assert_eq!(
+            thread_connection(true, &messages).expect("one connection is not refused"),
+            Some(subscription("conn_sub"))
+        );
+    }
+
+    #[test]
+    fn a_subscription_thread_without_a_model_is_refused_typed() {
+        let messages = subscription_thread("conn_sub");
+        let connection = thread_connection(true, &messages).expect("not refused");
+        let error = side_route(connection, "", None).expect_err("no model, no call");
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(refusal_code(&error), "side_chat_model_required");
+    }
+
+    #[test]
+    fn a_subscription_thread_with_the_switch_off_is_served_on_the_platform_chain_as_before() {
+        let messages = subscription_thread("conn_sub");
+        let connection = thread_connection(false, &messages).expect("not refused");
+        assert_eq!(connection, None);
+        let route = side_route(connection, "gpt-4o-mini", None).expect("platform route");
+        assert_eq!(route, SideRoute::Platform);
+        let request = request_on(&route, false);
+        assert!(request.provider_hint.is_empty());
+        assert!(request.subscription_connection_id.is_empty());
+        assert!(request.model_connection_id.is_empty());
+    }
+
+    #[test]
+    fn a_zero_retention_token_or_request_is_refused_typed_on_a_subscription() {
+        let refused =
+            connection_posture(&claims(true, Some(true)), &subscription("conn_sub"), false)
+                .expect_err("a ZDR org cannot use a subscription");
+        assert_eq!(refusal_code(&refused), code::CONNECTION_NOT_ACKNOWLEDGED);
+        let refused = connection_posture(&claims(false, None), &subscription("conn_sub"), true)
+            .expect_err("an explicit ZDR request cannot use a subscription");
+        assert_eq!(
+            refusal_code(&refused),
+            code::EXPLICIT_REQUEST_NOT_SUPPORTED_BY_CONNECTION
+        );
+    }
+
+    #[test]
+    fn a_persistent_turn_on_a_subscription_passes_the_posture_check() {
+        assert!(connection_posture(&claims(false, None), &subscription("conn_sub"), false).is_ok());
+        assert!(connection_posture(
+            &claims(false, Some(false)),
+            &subscription("conn_sub"),
+            false
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_waiver_binds_its_own_subscription_connection_and_no_other() {
+        let waiver = |connection: &str| Claims {
+            org_zdr: Some(true),
+            zdr_waiver: Some(ZdrWaiverClaim {
+                version: 1,
+                provider: PROVIDER_ID.to_owned(),
+                connection: connection.to_owned(),
+            }),
+            ..claims(false, None)
+        };
+        assert!(connection_posture(&waiver("conn_sub"), &subscription("conn_sub"), false).is_ok());
+        let refused = connection_posture(&waiver("conn_other"), &subscription("conn_sub"), false)
+            .expect_err("a waiver for another subscription connection is a route mismatch");
+        assert_eq!(refusal_code(&refused), code::WAIVER_ROUTE_MISMATCH);
+    }
+
+    #[test]
+    fn a_subscription_and_a_customer_gateway_on_one_thread_are_refused_typed() {
+        let mut messages = subscription_thread("conn_sub");
+        messages.push(turn("user", "Igjen", "conn-gw"));
+        let error = thread_connection(true, &messages).expect_err("two kinds, no single route");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(refusal_code(&error), "connection_ambiguous");
+    }
+
+    #[test]
+    fn a_subscription_answer_is_billed_as_a_subscription_and_a_platform_answer_is_not_relabelled() {
+        let route = SideRoute::Connection {
+            connection: subscription("conn_sub"),
+            model: "m".to_owned(),
+        };
+        assert_eq!(answer_basis(&route, PROVIDER_ID), CostBasis::Subscription);
+        assert_eq!(answer_basis(&route, "azure-openai"), CostBasis::Metered);
+    }
+
+    #[test]
+    fn a_connection_answer_is_customer_billed_and_a_platform_answer_is_not_relabelled() {
+        let route = SideRoute::Connection {
+            connection: customer_gateway("conn-a"),
+            model: "m".to_owned(),
+        };
+        assert_eq!(
+            answer_basis(&route, "customer-gateway.conn-a"),
+            CostBasis::CustomerBilled
+        );
+        assert_eq!(
+            answer_basis(&SideRoute::Platform, "azure-openai"),
+            CostBasis::Metered
+        );
+    }
+
+    #[test]
+    fn the_body_names_an_optional_model() {
+        let named: SideChatRequest =
+            serde_json::from_value(json!({ "question": "Hva?", "model": "m" })).expect("parses");
+        assert_eq!(named.model, "m");
+        let bare: SideChatRequest =
+            serde_json::from_value(json!({ "question": "Hva?" })).expect("parses");
+        assert!(bare.model.is_empty());
+    }
 }

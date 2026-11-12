@@ -346,35 +346,58 @@ pub async fn with_user_context_refs<F: std::future::Future>(
 }
 
 tokio::task_local! {
-    /// The customer-gateway connection id of the chat send whose run is being prepared (W4-BYO).
-    /// Scoped by [`with_user_model_connection`] around that one preparation, so the user message it
-    /// appends records the connection the turn is served on, and every other append sees none.
-    static USER_TURN_MODEL_CONNECTION: String;
+    /// The connection ids of the chat send whose run is being prepared (W4-BYO, DEC-V-R8). Scoped by
+    /// [`with_user_turn_connections`] around that one preparation, so the user message it appends records the
+    /// connection the turn is served on, and every other append sees none.
+    static USER_TURN_CONNECTIONS: UserTurnConnections;
 }
 
-/// Runs `preparation` (the chat send's run preparation) so the user message it appends records
-/// `model_connection_id` on the turn. A regenerate, edit or retry of that turn, reloaded from
-/// history, then replays on the same customer-gateway connection (see [`plan_version_move`]).
-/// With a blank id the future runs exactly as it would alone. A zero-retention turn appends no
-/// user message, so nothing is recorded for one even when an id is named.
-pub async fn with_user_model_connection<F: std::future::Future>(
+/// The connection ids a user message records: the customer-gateway id and the subscription id of the send.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct UserTurnConnections {
+    model: String,
+    subscription: String,
+}
+
+/// Runs `preparation` (the chat send's run preparation) so the user message it appends records the connection the
+/// turn is served on: `model_connection_id` for a customer-gateway turn, `subscription_connection_id` for a
+/// subscription turn (DEC-V-R8). A regenerate, edit or retry of a customer-gateway turn, reloaded from history, then
+/// replays on the same connection (see [`plan_version_move`]). With blank ids the future runs exactly as it would
+/// alone. A zero-retention turn appends no user message, so nothing is recorded for one even when an id is named.
+pub async fn with_user_turn_connections<F: std::future::Future>(
     model_connection_id: &str,
+    subscription_connection_id: &str,
     zdr: bool,
     preparation: F,
 ) -> F::Output {
-    let id = model_connection_id.trim();
-    if zdr || id.is_empty() {
+    let connections = UserTurnConnections {
+        model: model_connection_id.trim().to_owned(),
+        subscription: recorded_subscription(
+            crate::normalize::byo_gateway_enabled(),
+            subscription_connection_id,
+        ),
+    };
+    if zdr || (connections.model.is_empty() && connections.subscription.is_empty()) {
         return preparation.await;
     }
-    USER_TURN_MODEL_CONNECTION
-        .scope(id.to_owned(), preparation)
-        .await
+    USER_TURN_CONNECTIONS.scope(connections, preparation).await
 }
 
-/// The connection id the user message being appended records: the scoped one, or empty outside
-/// [`with_user_model_connection`] (every caller but the chat send, and every send without one).
-fn user_turn_model_connection() -> String {
-    USER_TURN_MODEL_CONNECTION
+/// The subscription connection a user turn records: the send's id while `MODEL_GATEWAY_BYO_GATEWAY` is on, the
+/// switch the side features read it under (DEC-V-R8), and none otherwise, so a deployment with the switch off
+/// appends exactly what it appended before.
+fn recorded_subscription(byo_enabled: bool, subscription_connection_id: &str) -> String {
+    if byo_enabled {
+        subscription_connection_id.trim().to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// The connection ids the user message being appended records: the scoped ones, or none outside
+/// [`with_user_turn_connections`] (every caller but the chat send, and every send without one).
+fn user_turn_connections() -> UserTurnConnections {
+    USER_TURN_CONNECTIONS
         .try_with(Clone::clone)
         .unwrap_or_default()
 }
@@ -482,8 +505,10 @@ async fn append_user_message(
             payload_digest: space.payload_digest,
             idempotency_key: space.idempotency_key,
             client_message_id: client_message_id.unwrap_or_default().to_owned(),
-            // The customer-gateway connection the turn is served on, when the send scoped one (W4-BYO).
-            model_connection_id: user_turn_model_connection(),
+            // The customer-gateway connection the turn is served on, when the send scoped one (W4-BYO), and the
+            // subscription connection it is served on, when the send scoped one (DEC-V-R8).
+            model_connection_id: user_turn_connections().model,
+            subscription_connection_id: user_turn_connections().subscription,
             ..Default::default()
         },
         bearer,
@@ -2771,6 +2796,44 @@ impl StringExt for String {
 
 #[cfg(test)]
 mod tests {
+    /// DEC-V-R8: a chat send scopes its customer-gateway id and its subscription id to the user turn it appends.
+    /// A zero-retention send records neither, and nothing outside a send does.
+    #[tokio::test]
+    async fn a_chat_send_records_its_connections_on_its_user_turn_only() {
+        let scoped = super::with_user_turn_connections("conn_gw", "conn_sub", false, async {
+            super::user_turn_connections()
+        })
+        .await;
+        assert_eq!(scoped.model, "conn_gw");
+        assert_eq!(
+            scoped.subscription,
+            super::recorded_subscription(crate::normalize::byo_gateway_enabled(), "conn_sub")
+        );
+        let zdr = super::with_user_turn_connections("conn_gw", "conn_sub", true, async {
+            super::user_turn_connections()
+        })
+        .await;
+        assert_eq!(zdr, super::UserTurnConnections::default());
+        let blank = super::with_user_turn_connections("  ", "", false, async {
+            super::user_turn_connections()
+        })
+        .await;
+        assert_eq!(blank, super::UserTurnConnections::default());
+        assert_eq!(
+            super::user_turn_connections(),
+            super::UserTurnConnections::default()
+        );
+    }
+
+    /// DEC-V-R8: a subscription id is recorded on a user turn only while the side features' switch is on, so a
+    /// deployment with the switch off appends exactly what it appended before.
+    #[test]
+    fn a_subscription_id_is_recorded_only_while_the_switch_is_on() {
+        assert_eq!(super::recorded_subscription(true, " conn_sub "), "conn_sub");
+        assert_eq!(super::recorded_subscription(true, "   "), "");
+        assert_eq!(super::recorded_subscription(false, "conn_sub"), "");
+    }
+
     /// EP-2 S5 (D12): a plan turn stores its plan beside the answer, except on a ZDR or waived turn,
     /// and a turn with no plan leaves the metadata exactly as it was.
     #[test]

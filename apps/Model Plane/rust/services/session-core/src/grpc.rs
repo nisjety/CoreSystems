@@ -236,6 +236,9 @@ struct ConversationRow {
     /// The customer-gateway connection the turn was written under (W4-BYO): an opaque id, NULL for
     /// a platform turn and for rows written before the column existed.
     model_connection_id: Option<String>,
+    /// The subscription connection the turn was written under (DEC-V-R8): an opaque id, NULL for every
+    /// other turn and for rows written before the column existed.
+    subscription_connection_id: Option<String>,
 }
 
 /// The sibling count of a turn, read where the tree is read: a thread that has never been
@@ -308,6 +311,8 @@ fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb:
         entry,
         // The opaque connection id only, so a regenerate or an edit replays on the same connection.
         model_connection_id: row.model_connection_id.unwrap_or_default(),
+        // The opaque subscription connection id only, so a side question is answered on the same subscription.
+        subscription_connection_id: row.subscription_connection_id.unwrap_or_default(),
     }
 }
 
@@ -412,7 +417,7 @@ async fn conversation_rows_ordered(
                 rv.actor_subject_id AS revised_by_subject_id,
                 COALESCE(rv.revision_no, 0) AS revision_no,
                 {fold_followed_up} AS agent_followed_up,
-                m.model_connection_id
+                m.model_connection_id, m.subscription_connection_id
          FROM messages m
          JOIN threads t ON t.id = m.thread_id
          {fold_join}
@@ -2093,12 +2098,26 @@ async fn record_scheduled_step_receipt_inner(
 
 /// The fire status a terminal step outcome settles to. An unknown outcome is not
 /// a failure: the step may have run, so the fire says so, the same word the sweeper
-/// uses for fires it cannot match (build plan WS20 S8).
+/// uses for fires it cannot match (build plan WS20 S8). A `needs_review` run is a
+/// failed run (orchestrator-core records it RUN_FAILED), so its fire is `failed` too,
+/// and the fire's outcome names the review (DEC-V-R14).
 fn scheduled_fire_status(step_status: &str) -> &'static str {
     match step_status {
         "completed" => "completed",
         "unknown_outcome" => "unknown",
         _ => "failed",
+    }
+}
+
+/// The run outcome a scheduled result records (DEC-V-R14). A completed step that withheld
+/// effects for the owner ends `needs_review`, never `completed`: the orchestrator fails such a
+/// run (`scheduled_agent_needs_review`), so its fire and its goal turn must not read completed.
+/// Every other status is its own outcome. The receipt and the RPC response keep the step status.
+fn scheduled_result_outcome(step_status: &str, withheld_effects: i32) -> &str {
+    if step_status == "completed" && withheld_effects > 0 {
+        "needs_review"
+    } else {
+        step_status
     }
 }
 
@@ -2291,6 +2310,9 @@ async fn record_scheduled_run_result_with(
     .execute(&mut *tx)
     .await
     .map_err(|error| Status::internal(error.to_string()))?;
+    // The run's own outcome: a needs_review run is recorded failed, with the review as its outcome
+    // (DEC-V-R14). The receipt above and the response below keep the step's own status.
+    let run_outcome = scheduled_result_outcome(&req.status, withheld_effects);
     sqlx::query(
         "UPDATE cron_fires
          SET status = $3, completed_at = now(), run_id = $4, thread_id = $5,
@@ -2299,10 +2321,10 @@ async fn record_scheduled_run_result_with(
     )
     .bind(&schedule_id)
     .bind(&fire_key)
-    .bind(scheduled_fire_status(&req.status))
+    .bind(scheduled_fire_status(run_outcome))
     .bind(&req.run_id)
     .bind(&thread_id)
-    .bind(&req.status)
+    .bind(run_outcome)
     .bind(withheld_effects)
     .execute(&mut *tx)
     .await
@@ -2315,7 +2337,7 @@ async fn record_scheduled_run_result_with(
                 org_id: &req.org_id,
                 run_id: &req.run_id,
                 scheduled_thread_id: &thread_id,
-                outcome: unattended_turn_outcome(&req.status),
+                outcome: unattended_turn_outcome(run_outcome),
                 input_tokens: i64::from(req.input_tokens),
                 output_tokens: i64::from(req.output_tokens),
             },
@@ -2349,11 +2371,12 @@ struct UnattendedFire<'a> {
     output_tokens: i64,
 }
 
-/// The goal-turn outcome of a scheduled step status (the `thread_goal_turns` CHECK).
-fn unattended_turn_outcome(step_status: &str) -> &'static str {
-    match step_status {
+/// The goal-turn outcome of a scheduled run outcome (the `thread_goal_turns` CHECK). A
+/// `needs_review` run is a failed run, so its turn is failed (DEC-V-R14).
+fn unattended_turn_outcome(run_outcome: &str) -> &'static str {
+    match run_outcome {
         "completed" => "completed",
-        "failed" => "failed",
+        "failed" | "needs_review" => "failed",
         _ => "unknown",
     }
 }
@@ -2519,8 +2542,9 @@ async fn record_unattended_goal_turn(
 #[cfg(test)]
 mod unattended_goal_tests {
     use super::{
-        claim_scheduled_step_inner, pb, record_scheduled_run_result_with, unattended_stop_state,
-        unattended_turn_outcome, UnattendedGoalCounters,
+        claim_scheduled_step_inner, pb, record_scheduled_run_result_with, scheduled_fire_status,
+        scheduled_result_outcome, unattended_stop_state, unattended_turn_outcome,
+        UnattendedGoalCounters,
     };
 
     fn counters(tokens: (Option<i64>, i64), turns: (i32, i32)) -> UnattendedGoalCounters {
@@ -2541,6 +2565,50 @@ mod unattended_goal_tests {
         assert_eq!(unattended_turn_outcome("failed"), "failed");
         assert_eq!(unattended_turn_outcome("unknown_outcome"), "unknown");
         assert_eq!(unattended_turn_outcome("anything else"), "unknown");
+    }
+
+    /// DEC-V-R14: the run outcome settles the fire and the goal turn. A completed step that
+    /// withheld effects is a `needs_review` run, which is failed; a run with nothing withheld
+    /// stays completed; every other status keeps its own outcome.
+    #[test]
+    fn scheduled_result_outcome_records_a_review_as_failed() {
+        assert_eq!(scheduled_result_outcome("completed", 0), "completed");
+        assert_eq!(scheduled_result_outcome("completed", 2), "needs_review");
+        assert_eq!(scheduled_result_outcome("failed", 2), "failed");
+        assert_eq!(
+            scheduled_result_outcome("unknown_outcome", 1),
+            "unknown_outcome"
+        );
+
+        assert_eq!(
+            scheduled_fire_status(scheduled_result_outcome("completed", 0)),
+            "completed"
+        );
+        assert_eq!(
+            scheduled_fire_status(scheduled_result_outcome("completed", 2)),
+            "failed"
+        );
+        assert_eq!(
+            scheduled_fire_status(scheduled_result_outcome("failed", 0)),
+            "failed"
+        );
+        assert_eq!(
+            scheduled_fire_status(scheduled_result_outcome("unknown_outcome", 0)),
+            "unknown"
+        );
+
+        assert_eq!(
+            unattended_turn_outcome(scheduled_result_outcome("completed", 0)),
+            "completed"
+        );
+        assert_eq!(
+            unattended_turn_outcome(scheduled_result_outcome("completed", 2)),
+            "failed"
+        );
+        assert_eq!(
+            unattended_turn_outcome(scheduled_result_outcome("unknown_outcome", 2)),
+            "unknown"
+        );
     }
 
     #[test]
@@ -2811,6 +2879,95 @@ mod unattended_goal_tests {
                 .expect("read counters");
         assert_eq!((tokens, turns), (1_500, 1), "a replay adds nothing");
         assert_eq!(schedule_state(&pool, &seeded.schedule_id).await, (true, None));
+    }
+
+    /// DEC-V-R14: a scheduled run that completed its step but withheld an effect ends
+    /// `needs_review`, so its fire records `failed` with the outcome `needs_review`, and its goal
+    /// turn is `failed`. The receipt and the response keep the step's `completed`, and the answer
+    /// is still appended. A run with nothing withheld still records `completed` on its fire and
+    /// its goal turn.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn scheduled_result_records_a_needs_review_run_as_failed() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 5).await;
+
+        let clean_fire = mp_ids::new_ulid();
+        let clean = claimed_fire(&pool, &seeded, &clean_fire).await;
+        let clean_result = record_scheduled_run_result_with(&pool, clean.clone(), true)
+            .await
+            .expect("clean result")
+            .into_inner();
+        assert_eq!(clean_result.status, "completed");
+
+        let review_fire = mp_ids::new_ulid();
+        let review = claimed_fire(&pool, &seeded, &review_fire).await;
+        let review = pb::RecordScheduledRunResultRequest {
+            withheld_effects: 2,
+            ..review
+        };
+        let first = record_scheduled_run_result_with(&pool, review.clone(), true)
+            .await
+            .expect("review result")
+            .into_inner();
+        assert_eq!(first.status, "completed", "receipt keeps status");
+        assert!(!first.message_id.is_empty(), "the answer is still appended");
+        let replay = record_scheduled_run_result_with(&pool, review.clone(), true)
+            .await
+            .expect("replayed review result")
+            .into_inner();
+        assert_eq!(replay.message_id, first.message_id);
+
+        let clean_row = fire_row(&pool, &seeded.schedule_id, &format!("fire-{clean_fire}")).await;
+        assert_eq!(clean_row.status, "completed");
+        assert_eq!(clean_row.outcome, "completed");
+        assert_eq!(clean_row.withheld_effects, 0);
+        let review_row = fire_row(&pool, &seeded.schedule_id, &format!("fire-{review_fire}")).await;
+        assert_eq!(review_row.status, "failed");
+        assert_eq!(review_row.outcome, "needs_review");
+        assert_eq!(review_row.withheld_effects, 2);
+        assert_eq!(review_row.run_id, review.run_id, "the fire names its run");
+
+        let clean_turn = goal_turn_outcome(&pool, &seeded.goal_id, &clean.run_id).await;
+        assert_eq!(clean_turn, "completed");
+        let review_turn = goal_turn_outcome(&pool, &seeded.goal_id, &review.run_id).await;
+        assert_eq!(review_turn, "failed");
+    }
+
+    /// One fire row, read back for the assertions above.
+    #[derive(sqlx::FromRow)]
+    struct FireRow {
+        status: String,
+        outcome: String,
+        withheld_effects: i32,
+        run_id: String,
+    }
+
+    /// The fire row of one schedule's fire key.
+    async fn fire_row(pool: &sqlx::PgPool, schedule_id: &str, fire_key: &str) -> FireRow {
+        sqlx::query_as(
+            "SELECT status, outcome, withheld_effects, run_id FROM cron_fires
+             WHERE schedule_id = $1 AND fire_key = $2",
+        )
+        .bind(schedule_id)
+        .bind(fire_key)
+        .fetch_one(pool)
+        .await
+        .expect("read fire")
+    }
+
+    /// The settled outcome of the unattended goal turn one run wrote.
+    async fn goal_turn_outcome(pool: &sqlx::PgPool, goal_id: &str, run_id: &str) -> String {
+        sqlx::query_scalar(
+            "SELECT outcome FROM thread_goal_turns WHERE goal_id = $1 AND run_id = $2",
+        )
+        .bind(goal_id)
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("read goal turn")
     }
 
     /// EP-7 S6: a goal that leaves `active` pauses its schedule in the same transaction, and the
@@ -5538,10 +5695,10 @@ async fn append_message_inner_as(
     }))
 }
 
-/// A customer-gateway `model_connection_id` has the shape the `messages` column allows (non-empty, at
-/// most 128 bytes of ASCII letters, digits, `-`, `_` and `.`), so a malformed one is refused as a bad
-/// argument here instead of surfacing as a database error from the CHECK.
-fn valid_model_connection_id(id: &str) -> bool {
+/// A connection id (a customer-gateway `model_connection_id` or a `subscription_connection_id`) has the shape the
+/// `messages` columns allow (non-empty, at most 128 bytes of ASCII letters, digits, `-`, `_` and `.`), so a
+/// malformed one is refused as a bad argument here instead of surfacing as a database error from the CHECK.
+fn valid_connection_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && id
@@ -5625,9 +5782,17 @@ pub(crate) async fn append_message_in_tx_as(
     // The customer-gateway connection id a turn is written under (W4-BYO). Only the opaque id is
     // stored, never a key; a malformed one is refused before anything is written.
     let model_connection_id = req.model_connection_id.trim();
-    if !model_connection_id.is_empty() && !valid_model_connection_id(model_connection_id) {
+    if !model_connection_id.is_empty() && !valid_connection_id(model_connection_id) {
         return Err(Status::invalid_argument(
             "model_connection_id must be at most 128 characters of letters, digits, '-', '_' and '.'",
+        ));
+    }
+    // The subscription connection id a turn is written under (DEC-V-R8). Only the opaque id is stored, never a
+    // key; the same shape rule as the customer-gateway id, and a malformed one is refused before anything is written.
+    let subscription_connection_id = req.subscription_connection_id.trim();
+    if !subscription_connection_id.is_empty() && !valid_connection_id(subscription_connection_id) {
+        return Err(Status::invalid_argument(
+            "subscription_connection_id must be at most 128 characters of letters, digits, '-', '_' and '.'",
         ));
     }
     // "" and "turn" are the conversation turn every caller has always written; "post" is a
@@ -5967,6 +6132,17 @@ pub(crate) async fn append_message_in_tx_as(
         sqlx::query("UPDATE messages SET model_connection_id = $2 WHERE id = $1")
             .bind(&msg_id)
             .bind(model_connection_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+    }
+
+    // The same for a subscription turn (DEC-V-R8): a separate statement, and only when an id came with the send,
+    // so a send without one never touches the column. A human post keeps none.
+    if !subscription_connection_id.is_empty() && post_kind == "turn" && !member {
+        sqlx::query("UPDATE messages SET subscription_connection_id = $2 WHERE id = $1")
+            .bind(&msg_id)
+            .bind(subscription_connection_id)
             .execute(&mut **tx)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -11344,6 +11520,51 @@ impl SessionCore for SessionService {
             .fetch_all(&mut *tx)
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
+
+            // EP-9 C4: a held organisation, or a held thread, is not erased. The candidates are the
+            // owner's locked Space threads and every thread the Space and agent memory rows this
+            // deletion removes cite (GDPR-order-rel1): a `message:` link resolves to its thread,
+            // and a `thread:` link names one, both within this organisation. A hold on any
+            // candidate refuses the whole deletion, as `ensure_user_thread_erasure_not_held` does
+            // for a user erasure (OD-59). The cited threads are read in this transaction, and only
+            // with the check on, so with the switch off the statements are exactly those before it.
+            // The gate is asked after the locks and that read, and before any receipt, memory or
+            // thread delete below. A refusal, or an org-core outage, drops the transaction; the
+            // event-log purge above rolls back with it, so nothing is erased.
+            let mut held_candidates: std::collections::BTreeSet<String> =
+                thread_ids.iter().map(|(id,)| id.clone()).collect();
+            if !matches!(crate::gdpr::erasure_hold_gate(), crate::gdpr::ErasureHoldGate::Off) {
+                let cited: Vec<(String,)> = sqlx::query_as(
+                    "WITH cited_rows AS (
+                       SELECT am.source_links FROM agent_memory am
+                       WHERE am.org_id = $1
+                         AND ((am.scope = 'space' AND am.scope_id = $2)
+                           OR (am.scope = 'agent'
+                               AND left(am.scope_id, length($2) + 1) = $2 || ':'))
+                     )
+                     SELECT t.id FROM cited_rows c
+                       CROSS JOIN LATERAL unnest(c.source_links) AS sl(link)
+                       JOIN messages m ON m.id = substr(sl.link, 9)
+                       JOIN threads t ON t.id = m.thread_id
+                      WHERE sl.link LIKE 'message:%' AND t.org_id = $1
+                     UNION
+                     SELECT t.id FROM cited_rows c
+                       CROSS JOIN LATERAL unnest(c.source_links) AS sl(link)
+                       JOIN threads t ON t.id = substr(sl.link, 8)
+                      WHERE sl.link LIKE 'thread:%' AND t.org_id = $1",
+                )
+                .bind(&req.org_id)
+                .bind(&req.space_id)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+                held_candidates.extend(cited.into_iter().map(|(id,)| id));
+            }
+            let held_candidates: Vec<String> = held_candidates.into_iter().collect();
+            crate::gdpr::erasure_hold_gate()
+                .ensure_not_held(&req.org_id, &held_candidates)
+                .await
+                .map_err(crate::gdpr::ErasureHoldError::into_status)?;
 
             // New background thread memories are mirrored into Letta with the
             // exact durable ID. Capture those IDs before the local deletion;
@@ -19101,6 +19322,71 @@ mod tests {
         );
     }
 
+    /// EP-9 C4: a Space deletion asks the legal-hold gate before it erases any memory or
+    /// thread. The gate is asked after the owner's Space threads are locked, so it checks the
+    /// same set the loop erases (the order `delete_threads` uses), and before the first
+    /// receipt, memory delete or thread delete. The Space's event-log purge runs in the same
+    /// transaction and rolls back with a refusal. The threads the Space and agent memory rows cite
+    /// are asked with them (GDPR-order-rel1): read in the same transaction after the owner's lock,
+    /// behind the switch, and joined to the candidates the final ask checks.
+    #[test]
+    fn delete_space_threads_asks_holds_before_any_erasure() {
+        let source = include_str!("grpc.rs");
+        let production = &source[..source.find("\nmod tests {").expect("the test module")];
+        let from_handler = &production[production
+            .find("    async fn delete_space_threads(")
+            .expect("the Space deletion handler")..];
+        let body = &from_handler[..from_handler
+            .find("record_metrics(\"delete_space_threads\"")
+            .expect("the handler's end")];
+        let pos = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("expected {needle:?} in the Space deletion handler"))
+        };
+        assert!(
+            body.contains("thread_ids.iter().map(|(id,)| id.clone())")
+                && body.contains(".ensure_not_held(&req.org_id, &held_candidates)"),
+            "the gate must be asked with the owner's locked Space threads"
+        );
+        let locked = pos("ORDER BY id FOR UPDATE");
+        let asked = pos("crate::gdpr::erasure_hold_gate()");
+        assert!(
+            locked < asked,
+            "the gate is asked only after the Space threads are locked"
+        );
+        // GDPR-order-rel1: the cited-thread read sits behind the switch, after the owner's lock.
+        // Its result joins the candidates, and the final ask (the one that names them) comes after
+        // the join and before every erasure.
+        let switch = pos(
+            "if !matches!(crate::gdpr::erasure_hold_gate(), crate::gdpr::ErasureHoldGate::Off)",
+        );
+        let cited = pos("cited_rows AS (");
+        let joined = pos("held_candidates.extend(cited.into_iter().map(|(id,)| id))");
+        let built =
+            pos("let held_candidates: Vec<String> = held_candidates.into_iter().collect();");
+        let ask = pos(".ensure_not_held(&req.org_id, &held_candidates)");
+        assert!(
+            locked < switch && switch < cited && cited < joined && joined < built && built < ask,
+            "the cited Space threads must be read after the owner's lock, behind the switch, and \
+             join the candidates before the final ask"
+        );
+        for erasure in [
+            "INSERT INTO space_deletion_semantic_memory_receipts",
+            "delete_thread_rows(&mut tx, thread_id)",
+            "DELETE FROM threads WHERE id = $1",
+            "DELETE FROM agent_memory",
+        ] {
+            assert!(
+                asked < pos(erasure),
+                "{erasure} runs before the legal-hold gate is asked"
+            );
+            assert!(
+                ask < pos(erasure),
+                "{erasure} runs before the final legal-hold ask over the cited threads"
+            );
+        }
+    }
+
     /// D12. A thread a trusted workload owns INSIDE a person's Space -- a
     /// schedule's result thread -- is that person's content, not the org's.
     /// `authorize_owner_row` used to admit any org member to any system-owned
@@ -25566,9 +25852,58 @@ mod thread_list_db_tests {
 mod conversation_page_tests {
     use super::{
         clamp_conversation_page_limit, conversation_tail_page, session_message_from_row,
-        ConversationRow,
+        valid_connection_id, ConversationRow,
     };
     use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn a_turn_carries_its_subscription_connection_id_and_no_other() {
+        let stored = Utc.with_ymd_and_hms(2026, 11, 12, 10, 0, 0).unwrap();
+        let turn = |model: Option<&str>, subscription: Option<&str>| ConversationRow {
+            id: "m-2".to_owned(),
+            role: "user".to_owned(),
+            content: "hei".to_owned(),
+            agent_name: None,
+            metadata: None,
+            author_subject_id: None,
+            post_kind: "turn".to_owned(),
+            created_at: stored,
+            parent_message_id: None,
+            sibling_ordinal: 0,
+            sibling_count: 0,
+            on_active_path: true,
+            versioned: false,
+            revision_state: String::new(),
+            revised_at: None,
+            revised_by_subject_id: None,
+            revision_no: 0,
+            agent_followed_up: false,
+            model_connection_id: model.map(str::to_owned),
+            subscription_connection_id: subscription.map(str::to_owned),
+        };
+        let on_subscription = session_message_from_row(turn(None, Some("conn_0f9c")), false);
+        assert_eq!(on_subscription.subscription_connection_id, "conn_0f9c");
+        assert!(on_subscription.model_connection_id.is_empty());
+        let on_gateway = session_message_from_row(turn(Some("conn_gw"), None), false);
+        assert_eq!(on_gateway.model_connection_id, "conn_gw");
+        assert!(on_gateway.subscription_connection_id.is_empty());
+        let platform = session_message_from_row(turn(None, None), false);
+        assert!(platform.subscription_connection_id.is_empty());
+        assert!(platform.model_connection_id.is_empty());
+    }
+
+    #[test]
+    fn a_connection_id_has_the_shape_the_column_allows() {
+        assert!(valid_connection_id(
+            "conn_0f9c3e2a-1b7d-4c55-9e0a-2f6b8d1c7a90"
+        ));
+        assert!(valid_connection_id("conn-1"));
+        assert!(valid_connection_id(&"c".repeat(128)));
+        assert!(!valid_connection_id(""));
+        assert!(!valid_connection_id("conn 1"));
+        assert!(!valid_connection_id("conn/1"));
+        assert!(!valid_connection_id(&"c".repeat(129)));
+    }
 
     #[test]
     fn a_stored_turn_carries_the_time_it_was_stored() {
@@ -25594,6 +25929,7 @@ mod conversation_page_tests {
             revision_no: 0,
             agent_followed_up: false,
             model_connection_id: None,
+            subscription_connection_id: None,
         };
         let message = session_message_from_row(row, false);
         let created_at = message.created_at.expect("created_at is set on every row");

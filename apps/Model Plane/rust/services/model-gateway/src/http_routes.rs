@@ -18118,9 +18118,10 @@ async fn invoke(
         }
         None => None,
     };
-    // The user turn the run appends records the customer-gateway connection it is served on (W4-BYO), so a
-    // later regenerate or edit of it replays on the same connection. Nothing is recorded for a ZDR turn.
-    let started = session_flow::with_user_model_connection(&normalized.model_connection_id, effective_zdr, async { match version_thread.as_ref() {
+    // The user turn the run appends records the connection it is served on: the customer-gateway connection (W4-BYO),
+    // so a later regenerate or edit of it replays on the same connection, and the subscription connection (DEC-V-R8),
+    // so a side question on the thread is answered on it. Nothing is recorded for a ZDR turn.
+    let started = session_flow::with_user_turn_connections(&normalized.model_connection_id, &normalized.subscription_connection_id, effective_zdr, async { match version_thread.as_ref() {
         Some((thread_id, turn)) => {
             session_flow::prepare_version_run_authenticated(
                 &state,
