@@ -229,15 +229,15 @@ fn every_awaiting_approval_site_is_inventoried_and_states_its_cause() {
 /// `approval_cause_not_persisted_under_zdr`: a zero-retention caller's pause stores no cause. The
 /// stored metadata drops the cause for a zero-retention caller, and `create_approval` builds that
 /// metadata from the caller's own posture. Behavioural proof: session-core's
-/// `a_zero_retention_caller_stores_no_cause`. A waiver's credential has `zdr` false, so this covers
-/// a zero-retention caller only; a waived run still stores its cause (open, WS13 S8 depth finding).
+/// `a_zero_retention_caller_stores_no_cause`. The filter reads `durable_forbidden`, which is a
+/// zero-retention caller or a waived one while the waiver refusal is on, so a waived caller is covered too.
 #[test]
 fn approval_cause_not_persisted_under_zdr() {
     let grpc = production("../session-core/src/orchestration_grpc.rs");
     let metadata = body_of(&grpc, "fn new_approval_metadata(");
     assert!(
-        metadata.contains(".filter(|_| !zdr)"),
-        "new_approval_metadata must drop the cause for a zero-retention caller"
+        metadata.contains(".filter(|_| !durable_forbidden)"),
+        "new_approval_metadata must drop the cause for a zero-retention or waived caller (durable_forbidden)"
     );
     let create = body_of(&grpc, "fn create_approval(");
     assert!(

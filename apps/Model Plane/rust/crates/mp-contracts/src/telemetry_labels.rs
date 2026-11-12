@@ -48,6 +48,12 @@ pub const METRIC_LABELS: &[&str] = &[
     // `unavailable`) and the effect class of the reviewed call (`write`, `external`).
     "verdict",
     "tool_class",
+    // A closed enum: the `FailureClass` label of a failed or benched platform provider call on
+    // `mp_inference_provider_failures_total` and `mp_inference_provider_benched_total`. Never a request value.
+    "class",
+    // A closed enum: the origin a memory write claimed (`write_policy::Origin::label()`, six values) on
+    // `mp_session_memory_origin_downgraded_total`. No id reaches it.
+    "claimed",
 ];
 
 /// Field names a span attribute, a span event attribute or a JSON log field may carry (F-t3-075).

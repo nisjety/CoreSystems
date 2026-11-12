@@ -23715,9 +23715,21 @@ mod continue_run_tests {
             state.matches("consume_client").count() >= 5,
             "AppState declares, builds and overrides consume_client in new() and in both from_env branches"
         );
+        // consume_client's own binding, up to the end of its statement. The session-core clients
+        // bound after it (approval grant, rule proposal) do not move this check.
+        let built = state
+            .split("let consume_client = ")
+            .nth(1)
+            .and_then(|rest| rest.split_once(";\n"))
+            .map(|(construction, _)| construction)
+            .expect("from_env binds consume_client");
         assert!(
-            state.contains("\"SESSION_CORE_URL\",\n            \"SESSION_CORE_ADDR\",\n            \"http://localhost:9091\",\n        )?);\n        let orchestration_client"),
-            "from_env points consume_client at the session endpoint"
+            built.contains("\"SESSION_CORE_URL\",\n            \"SESSION_CORE_ADDR\",\n            \"http://localhost:9091\",\n        )?)"),
+            "from_env points consume_client at the session endpoint, found: {built}"
+        );
+        assert!(
+            !built.contains("ORCHESTRATOR_CORE"),
+            "consume_client never reaches orchestrator-core, found: {built}"
         );
     }
 
@@ -27259,9 +27271,10 @@ mod execute_turn_tests {
             !continuation.contains("execute_granted"),
             "a continuation never names the flag; its slot is a literal false"
         );
+        // `code_of` drops the comment lines, so the slots are matched on their code alone.
         assert!(
             continuation.contains(
-                "CONTINUE_PERMISSION_MODE.to_owned(),\n            // The org's read-only cap holds the continuation to plan mode (D2-1117); false when the cap states none.\n            org_plan_mode,\n            // A continuation is never an execute turn: its authority is the pause's.\n            false,\n"
+                "CONTINUE_PERMISSION_MODE.to_owned(),\n            org_plan_mode,\n            false,\n"
             ),
             "plan_mode is the org cap's flag, execute_granted false: {continuation}"
         );

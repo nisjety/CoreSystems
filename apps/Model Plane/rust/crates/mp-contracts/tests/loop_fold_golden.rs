@@ -357,6 +357,9 @@ fn park_extension_keys_and_park_ref_are_pinned() {
         serde_json::to_value(&fold.extensions).expect("serialize"),
         serde_json::json!({
             "effect_ledger": true,
+            // The fold writer records the connector taint on every fold (EXT_CONNECTOR_TAINT). The round
+            // golden carries it as false, and a park fold built from that golden keeps it.
+            "connector_taint": false,
             "parks": 2,
             "route_model": "model-golden",
             "route_connection_id": "conn-golden",

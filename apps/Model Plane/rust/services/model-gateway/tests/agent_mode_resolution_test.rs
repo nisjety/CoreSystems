@@ -121,9 +121,10 @@ fn agent_mode_resolves_before_admission_in_the_stream_path() {
         .expect("the stream entry is in sse.rs");
     let stream = &source[entry..];
     // Since WS25-S9 the stream path resolves through `org_agent_policy::resolve_turn`, strictest-wins over the
-    // floor, the org cap and the choice; the ordering it must keep is the same.
+    // floor, the org cap and the choice. The agent's autonomy cap is one more ceiling, and the stream calls
+    // `resolve_turn_with_agent_cap` (which resolves through that function) in its place; the ordering is the same.
     let resolve = stream
-        .find("crate::org_agent_policy::resolve_turn(")
+        .find("resolve_turn_with_agent_cap(")
         .expect("the stream path resolves a chosen mode");
     let admission = stream
         .find("crate::normalize::normalize_stream(")

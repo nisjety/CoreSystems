@@ -2793,14 +2793,22 @@ mod tests {
     }
 
     /// An approval pause names itself `{run_id}:{step_id}` as before; an input pause carries the
-    /// reference its caller gives it, as kind `input`. A writer with no credential makes no RPC,
-    /// so only the pause the fold was built with is observable here.
+    /// reference its caller gives it, as kind `input`. A writer with no credential is off and makes
+    /// no RPC, so its zero is checked first. The active writers save to a port nothing listens on,
+    /// as the sibling tests do: each save is refused at once, and only the pause naming is observed.
     #[tokio::test]
     async fn save_input_writes_an_input_pause_and_save_keeps_the_approval_pause() {
         let probe = Probe::bind();
         let channel = probe.channel();
+        let mut off = FoldWriter::new(&channel, None, "run-1", all_good());
+        assert!(
+            off.pause_fold(fold_with(Vec::new())).is_none(),
+            "no credential, no pause fold"
+        );
+        assert_eq!(probe.connections(), 0, "no credential, no RPC");
 
-        let mut writer = FoldWriter::new(&channel, None, "run-1", all_good());
+        let closed = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let mut writer = FoldWriter::new(&closed, Some("b"), "run-1", all_good());
         let mut approval = writer
             .pause_fold(fold_with(Vec::new()))
             .expect("an active writer");
@@ -2819,7 +2827,7 @@ mod tests {
             })
         );
 
-        let mut writer = FoldWriter::new(&channel, None, "run-1", all_good());
+        let mut writer = FoldWriter::new(&closed, Some("b"), "run-1", all_good());
         let mut input = writer
             .pause_fold(fold_with(Vec::new()))
             .expect("an active writer");
@@ -2844,7 +2852,6 @@ mod tests {
                 action_fingerprint: "fp".to_owned(),
             })
         );
-        assert_eq!(probe.connections(), 0, "no credential, no RPC");
     }
 
     /// Every save entry point of a writer, driven once.

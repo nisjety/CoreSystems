@@ -12,9 +12,9 @@
 -- STARTS UNAVAILABLE ON PURPOSE. No attestation names either capability yet, so the gate refuses both names and
 -- this migration never fabricates an attestation.
 --
--- The approval floor of custom_rest.write stays 'none', as tests/tool_class_registry_parity.rs requires. The pause
--- for each write belongs to execution-core's permission gate, which pauses every custom_rest.write on every posture
--- but deny. The high risk of the capability also asks through the policy engine.
+-- The approval floor of custom_rest.write is 'ask', as tests/tool_class_registry_parity.rs requires. The gate pauses
+-- every custom_rest.write on every posture but deny (execution-core's permission gate), so the seed must agree with it.
+-- A floor only tightens: 'none' would let auto allow it. The high risk also asks through the policy engine.
 
 INSERT INTO capabilities (
     id,
@@ -158,7 +158,7 @@ INSERT INTO capability_tools
     (org_id, capability_id, tool_name, side_effect_class, approval_floor, call_refinement, source)
 VALUES
     ('global', 'cap.custom_rest.read', 'custom_rest.read', 'read', 'none', NULL, 'seed'),
-    ('global', 'cap.custom_rest.write', 'custom_rest.write', 'external_write', 'none', NULL, 'seed')
+    ('global', 'cap.custom_rest.write', 'custom_rest.write', 'external_write', 'ask', NULL, 'seed')
 ON CONFLICT (org_id, capability_id, tool_name) DO UPDATE SET
     side_effect_class = EXCLUDED.side_effect_class,
     approval_floor = EXCLUDED.approval_floor,

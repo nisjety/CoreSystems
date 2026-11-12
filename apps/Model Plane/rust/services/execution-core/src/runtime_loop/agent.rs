@@ -17115,8 +17115,12 @@ mod tests {
         (result, observed_routes, rec)
     }
 
-    #[tokio::test]
-    async fn every_round_of_a_pinned_run_and_of_its_delegated_child_carries_the_route() {
+    #[test]
+    fn every_round_of_a_pinned_run_and_of_its_delegated_child_carries_the_route() {
+        run_on_delegation_stack(every_round_of_a_pinned_run_and_of_its_delegated_child_carries_the_route_body);
+    }
+
+    async fn every_round_of_a_pinned_run_and_of_its_delegated_child_carries_the_route_body() {
         // Parent delegates, the child runs a tool round and answers, the parent
         // answers: four rounds, two loops. With EXECUTION_AGENT_MODEL set to
         // the compose default, which a pinned run must ignore.
@@ -17271,8 +17275,36 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_child_loop_stop_does_not_stop_the_parent() {
+    /// Runs a test body on a thread with room for it. A delegation nests whole loops, and in a debug
+    /// build that nesting holds more stack than the default 2 MiB test thread: the body overflows there.
+    /// Measured for `a_child_loop_stop_does_not_stop_the_parent`: it passes with 3 MiB and overflows with
+    /// the default, and boxing the child future at its spawn point did not change that. The runtime is
+    /// the single-threaded one `#[tokio::test]` builds, so the body runs as it would under that attribute.
+    fn run_on_delegation_stack<Fut>(body: fn() -> Fut)
+    where
+        Fut: std::future::Future<Output = ()> + 'static,
+    {
+        let handle = std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("a test runtime")
+                    .block_on(body());
+            })
+            .expect("the test thread spawns");
+        if let Err(payload) = handle.join() {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    #[test]
+    fn a_child_loop_stop_does_not_stop_the_parent() {
+        run_on_delegation_stack(child_loop_stop_does_not_stop_the_parent_body);
+    }
+
+    async fn child_loop_stop_does_not_stop_the_parent_body() {
         // The parent delegates; the child repeats a failing call until its own guard stops it. The
         // stop reaches the parent as one failed delegation, and the parent answers.
         let _guard = LoopGuardSwitch::set(LoopGuardMode::Enforce);
@@ -17460,8 +17492,12 @@ mod tests {
         assert_eq!(observed, vec![(0, 0), (0, 0)]);
     }
 
-    #[tokio::test]
-    async fn delegated_rounds_carry_the_run_level() {
+    #[test]
+    fn delegated_rounds_carry_the_run_level() {
+        run_on_delegation_stack(delegated_rounds_carry_the_run_level_body);
+    }
+
+    async fn delegated_rounds_carry_the_run_level_body() {
         // Parent delegates, the child runs a tool round and answers, the parent answers: four
         // rounds, two loops. A child's context carries the parent's request, so all four
         // rounds carry the level.
@@ -17597,8 +17633,12 @@ mod tests {
         assert_eq!(observed.lock().unwrap().len(), 2);
     }
 
-    #[tokio::test]
-    async fn a_delegated_child_and_its_parent_both_stop_at_the_one_shared_deadline() {
+    #[test]
+    fn a_delegated_child_and_its_parent_both_stop_at_the_one_shared_deadline() {
+        run_on_delegation_stack(a_delegated_child_and_its_parent_both_stop_at_the_one_shared_deadline_body);
+    }
+
+    async fn a_delegated_child_and_its_parent_both_stop_at_the_one_shared_deadline_body() {
         // The parent's round ends at about 700 ms, inside the 1000 ms budget, so
         // the delegation starts. The child's first round ends at about 1400 ms:
         // past the shared deadline, so the child starts no second round, and the
@@ -18455,8 +18495,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_usage_limit_in_one_fan_out_item_stops_its_siblings_and_the_parent() {
+    #[test]
+    fn a_usage_limit_in_one_fan_out_item_stops_its_siblings_and_the_parent() {
+        run_on_delegation_stack(a_usage_limit_in_one_fan_out_item_stops_its_siblings_and_the_parent_body);
+    }
+
+    async fn a_usage_limit_in_one_fan_out_item_stops_its_siblings_and_the_parent_body() {
         // Six items, four in flight at once. The first one to call the route is
         // refused. Its three siblings in flight each got a tool round and must
         // not start a second; the two items still waiting for a permit must not
@@ -18742,8 +18786,12 @@ mod tests {
 
     /// A delegated child's rounds count in the run's cumulative usage and reach the run's stream
     /// (build plan WS27 S9): the child shares the parent's tally and runs under its run id.
-    #[tokio::test]
-    async fn delegated_rounds_are_included() {
+    #[test]
+    fn delegated_rounds_are_included() {
+        run_on_delegation_stack(delegated_rounds_are_included_body);
+    }
+
+    async fn delegated_rounds_are_included_body() {
         // Parent delegates, the delegate runs a tool round and answers, the parent answers from it:
         // four provider responses, each reporting 1 in and 1 out.
         let (result, progress) = run_with_usage_progress(
@@ -23062,8 +23110,12 @@ mod tests {
     // Asserts the whole delegation contract in one run: nesting, isolation,
     // result propagation, observability, and terminal-once.
     #[allow(clippy::too_many_lines)]
-    #[tokio::test]
-    async fn subagent_runs_a_real_nested_loop_in_an_isolated_context_and_returns_its_answer() {
+    #[test]
+    fn subagent_runs_a_real_nested_loop_in_an_isolated_context_and_returns_its_answer() {
+        run_on_delegation_stack(subagent_runs_a_real_nested_loop_in_an_isolated_context_and_returns_its_answer_body);
+    }
+
+    async fn subagent_runs_a_real_nested_loop_in_an_isolated_context_and_returns_its_answer_body() {
         const DELEGATED_GOAL: &str = "Find the current Bergen weather";
         const SUBAGENT_ANSWER: &str = "Bergen: 8 degrees and raining.";
 
@@ -23920,8 +23972,12 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn subagent_may_not_spawn_another_subagent() {
+    #[test]
+    fn subagent_may_not_spawn_another_subagent() {
+        run_on_delegation_stack(subagent_may_not_spawn_another_subagent_body);
+    }
+
+    async fn subagent_may_not_spawn_another_subagent_body() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
 
@@ -24001,8 +24057,12 @@ mod tests {
     /// too: a delegated subagent that fans out would multiply the tree by its item
     /// count (8 x 8 children under the default ceiling) and put nested loops
     /// outside every audit view this depth limit exists to keep legible.
-    #[tokio::test]
-    async fn a_delegated_subagent_cannot_fan_out() {
+    #[test]
+    fn a_delegated_subagent_cannot_fan_out() {
+        run_on_delegation_stack(a_delegated_subagent_cannot_fan_out_body);
+    }
+
+    async fn a_delegated_subagent_cannot_fan_out_body() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
         let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
@@ -24466,8 +24526,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn leaf_subagent_may_grep_but_not_edit() {
+    #[test]
+    fn leaf_subagent_may_grep_but_not_edit() {
+        run_on_delegation_stack(leaf_subagent_may_grep_but_not_edit_body);
+    }
+
+    async fn leaf_subagent_may_grep_but_not_edit_body() {
         // WS24-S4: a Space workspace write is a restricted context write, so a delegated subagent is
         // refused it as it is refused `save_memory`, under `auto` as under `ask`. Its reads are not
         // restricted: the grep in the same round passes the blocklist and meets the switch instead,
@@ -25017,8 +25081,12 @@ mod tests {
         assert!(rec.lock().unwrap().run_questions.is_empty());
     }
 
-    #[tokio::test]
-    async fn subagent_honors_a_requested_budget_and_reports_exhaustion_honestly() {
+    #[test]
+    fn subagent_honors_a_requested_budget_and_reports_exhaustion_honestly() {
+        run_on_delegation_stack(subagent_honors_a_requested_budget_and_reports_exhaustion_honestly_body);
+    }
+
+    async fn subagent_honors_a_requested_budget_and_reports_exhaustion_honestly_body() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
 
@@ -25220,8 +25288,12 @@ mod tests {
         assert_eq!(snapshot.input_tokens, 210);
     }
 
-    #[tokio::test]
-    async fn a_run_reports_the_sum_of_its_rounds_including_delegated_ones() {
+    #[test]
+    fn a_run_reports_the_sum_of_its_rounds_including_delegated_ones() {
+        run_on_delegation_stack(a_run_reports_the_sum_of_its_rounds_including_delegated_ones_body);
+    }
+
+    async fn a_run_reports_the_sum_of_its_rounds_including_delegated_ones_body() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
         // Parent delegates, the delegate runs a tool round and answers, the parent
@@ -25486,8 +25558,12 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn subagent_budget_cannot_exceed_the_parents_remaining_rounds() {
+    #[test]
+    fn subagent_budget_cannot_exceed_the_parents_remaining_rounds() {
+        run_on_delegation_stack(subagent_budget_cannot_exceed_the_parents_remaining_rounds_body);
+    }
+
+    async fn subagent_budget_cannot_exceed_the_parents_remaining_rounds_body() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
 
@@ -26531,8 +26607,12 @@ mod tests {
     /// starve at least two of them down to 1 round and fail them with
     /// "spent its whole 1-round budget". Even division proves all three
     /// succeed instead.
-    #[tokio::test]
-    async fn research_fan_out_pre_divides_the_round_budget_evenly_across_items() {
+    #[test]
+    fn research_fan_out_pre_divides_the_round_budget_evenly_across_items() {
+        run_on_delegation_stack(research_fan_out_pre_divides_the_round_budget_evenly_across_items_body);
+    }
+
+    async fn research_fan_out_pre_divides_the_round_budget_evenly_across_items_body() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
         let inference_channel = spawn_inference_channel(vec![
@@ -26883,8 +26963,12 @@ mod tests {
     /// answer it never got to give. Five rounds: one parent round, two items
     /// sharing the remaining four minus the parent's reserve (2 + 1), and the
     /// parent's final round.
-    #[tokio::test]
-    async fn research_fan_out_keeps_a_round_for_the_parent_to_read_the_digest() {
+    #[test]
+    fn research_fan_out_keeps_a_round_for_the_parent_to_read_the_digest() {
+        run_on_delegation_stack(research_fan_out_keeps_a_round_for_the_parent_to_read_the_digest_body);
+    }
+
+    async fn research_fan_out_keeps_a_round_for_the_parent_to_read_the_digest_body() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
         let observed: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
@@ -27070,8 +27154,12 @@ mod tests {
         assert!(rec.lock().unwrap().tool_retries.is_empty());
     }
 
-    #[tokio::test]
-    async fn every_delegated_child_announces_its_stop_on_the_parent_runs_stream() {
+    #[test]
+    fn every_delegated_child_announces_its_stop_on_the_parent_runs_stream() {
+        run_on_delegation_stack(every_delegated_child_announces_its_stop_on_the_parent_runs_stream_body);
+    }
+
+    async fn every_delegated_child_announces_its_stop_on_the_parent_runs_stream_body() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
         let inference_channel = spawn_inference_channel(vec![
@@ -27713,8 +27801,12 @@ mod tests {
     /// knows: the receipt was refused (`InvalidArgument`), so a failed child sat
     /// open until the deadline watchdog force-failed it as `outcome_unknown`. Two of
     /// the three research children of the live proof failed.
-    #[tokio::test]
-    async fn a_failed_delegated_child_is_settled_with_a_failure_code_session_core_accepts() {
+    #[test]
+    fn a_failed_delegated_child_is_settled_with_a_failure_code_session_core_accepts() {
+        run_on_delegation_stack(a_failed_delegated_child_is_settled_with_a_failure_code_session_core_accepts_body);
+    }
+
+    async fn a_failed_delegated_child_is_settled_with_a_failure_code_session_core_accepts_body() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let rules = real_rules_for(&rec);
         let session_channel = spawn_session_channel(rec.clone()).await;
@@ -27965,8 +28057,12 @@ mod tests {
     /// again, it asked, and the loop ended exhausted with nothing. Now round 3 has
     /// none, the model answers from what rounds 1 and 2 gathered, and the parent
     /// receives that answer, labelled as partial.
-    #[tokio::test]
-    async fn a_delegated_child_that_keeps_researching_is_made_to_conclude_on_its_last_round() {
+    #[test]
+    fn a_delegated_child_that_keeps_researching_is_made_to_conclude_on_its_last_round() {
+        run_on_delegation_stack(a_delegated_child_that_keeps_researching_is_made_to_conclude_on_its_last_round_body);
+    }
+
+    async fn a_delegated_child_that_keeps_researching_is_made_to_conclude_on_its_last_round_body() {
         const FINDINGS: &str = "Gathered: the harbour ferry stops at 22:00.";
 
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
@@ -28065,8 +28161,12 @@ mod tests {
     /// If a model proposes tools although none were offered, the proposal is not
     /// run: there is no round left to read its result in. With nothing else to
     /// say, the child ends exhausted exactly as before, and the parent is told so.
-    #[tokio::test]
-    async fn a_concluding_round_that_asks_for_tools_anyway_runs_none_and_fails_honestly() {
+    #[test]
+    fn a_concluding_round_that_asks_for_tools_anyway_runs_none_and_fails_honestly() {
+        run_on_delegation_stack(a_concluding_round_that_asks_for_tools_anyway_runs_none_and_fails_honestly_body);
+    }
+
+    async fn a_concluding_round_that_asks_for_tools_anyway_runs_none_and_fails_honestly_body() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
         let observed_tooling: ObservedTooling = Arc::default();
@@ -28142,8 +28242,12 @@ mod tests {
 
     /// The same, when the model wrote its conclusion alongside the tool proposal:
     /// the text is the best conclusion there is, so it is kept and labelled.
-    #[tokio::test]
-    async fn a_concluding_round_that_asks_for_tools_but_wrote_a_conclusion_keeps_the_text() {
+    #[test]
+    fn a_concluding_round_that_asks_for_tools_but_wrote_a_conclusion_keeps_the_text() {
+        run_on_delegation_stack(a_concluding_round_that_asks_for_tools_but_wrote_a_conclusion_keeps_the_text_body);
+    }
+
+    async fn a_concluding_round_that_asks_for_tools_but_wrote_a_conclusion_keeps_the_text_body() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let session_channel = spawn_session_channel(rec.clone()).await;
         let inference_channel = spawn_inference_channel(vec![
@@ -28288,8 +28392,12 @@ mod tests {
     /// used to end exhausted. Each now concludes, so the parent reads three
     /// labelled partial findings instead of three failures, and the three durable
     /// child runs are settled as completed.
-    #[tokio::test]
-    async fn a_wide_research_fan_out_of_researchers_that_keep_going_returns_their_findings() {
+    #[test]
+    fn a_wide_research_fan_out_of_researchers_that_keep_going_returns_their_findings() {
+        run_on_delegation_stack(a_wide_research_fan_out_of_researchers_that_keep_going_returns_their_findings_body);
+    }
+
+    async fn a_wide_research_fan_out_of_researchers_that_keep_going_returns_their_findings_body() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let rules = real_rules_for(&rec);
         let session_channel = spawn_session_channel(rec.clone()).await;
@@ -31198,8 +31306,12 @@ mod tests {
 
     /// A delegated loop shares the run's id but not its fold: only the root loop
     /// writes, so the child's rounds never move the parent's `expected_seq`.
-    #[tokio::test]
-    async fn loop_fold_a_delegated_loop_never_saves() {
+    #[test]
+    fn loop_fold_a_delegated_loop_never_saves() {
+        run_on_delegation_stack(loop_fold_a_delegated_loop_never_saves_body);
+    }
+
+    async fn loop_fold_a_delegated_loop_never_saves_body() {
         let run = drive_fold_run(
             FoldKnobs::ON,
             vec![
@@ -34723,8 +34835,12 @@ mod tests {
     /// the root loop's to read (WS08-S6): the child's program finds no `attachments/` directory
     /// and is never handed the parent's files to stage. Where the OS sandbox is unavailable,
     /// staging is refused outright, so that refusal would show in the child's own result.
-    #[tokio::test]
-    async fn a_child_code_interpreter_step_sees_no_attached_files() {
+    #[test]
+    fn a_child_code_interpreter_step_sees_no_attached_files() {
+        run_on_delegation_stack(a_child_code_interpreter_step_sees_no_attached_files_body);
+    }
+
+    async fn a_child_code_interpreter_step_sees_no_attached_files_body() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
         let req = pb::RunAgentRequest {
             // `auto`, so the child's program runs rather than waiting for an approval.
