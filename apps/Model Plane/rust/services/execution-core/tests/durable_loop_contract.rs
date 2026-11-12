@@ -5021,7 +5021,7 @@ fn the_park_resume_guards_go_red_when_the_code_they_guard_regresses() {
             &mutate_in(
                 &agent,
                 "async fn resume_parked_run(",
-                "    super::park::admit(&req, session_bearer.is_some())?;",
+                "    super::park::admit(&req, caller, session_bearer.is_some())?;",
                 "",
             ),
             &park,
@@ -5033,8 +5033,8 @@ fn the_park_resume_guards_go_red_when_the_code_they_guard_regresses() {
             &mutate_in(
                 &agent,
                 "async fn resume_parked_run(",
-                "    super::park::admit(&req, session_bearer.is_some())?;",
-                "    let _ = super::park::claim_parked(&session_channel, \"\", &req.run_id, \"\").await;\n    super::park::admit(&req, session_bearer.is_some())?;",
+                "    super::park::admit(&req, caller, session_bearer.is_some())?;",
+                "    let _ = super::park::claim_parked(&session_channel, \"\", &req.run_id, \"\").await;\n    super::park::admit(&req, caller, session_bearer.is_some())?;",
             ),
             &park,
         ),

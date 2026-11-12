@@ -607,6 +607,9 @@ pub(crate) fn is_park_resume(req: &pb::RunAgentRequest) -> bool {
 /// * a request that names a route: the route is the fold's, never the caller's;
 /// * a Space: a park never belongs to one (a Space run never parks);
 /// * a zero-retention request: it keeps no durable state, so it resumes none;
+/// * a waived caller (Z-18): the same, on the one route its waiver binds. That route is the
+///   fold's and is known only after the claim, so the refusal is taken here, before any claim
+///   (`run_agent_with_offered` refuses the same park once its route is rebuilt, as a backstop);
 /// * the resume switches (the in-place resume, the continue switch, the fold writer and the
 ///   effect ledger) not all on: `continue_disabled`. The PARKING switch is not read: with it
 ///   off no new park is written, and the parks that exist stay resumable;
@@ -618,6 +621,7 @@ pub(crate) fn is_park_resume(req: &pb::RunAgentRequest) -> bool {
 #[allow(clippy::result_large_err)]
 pub(crate) fn admit(
     req: &pb::RunAgentRequest,
+    caller: &crate::auth::AuthenticatedUser,
     has_session_bearer: bool,
 ) -> Result<(), tonic::Status> {
     if !req.provider_hint.is_empty() || !req.subscription_connection_id.is_empty() {
@@ -627,6 +631,9 @@ pub(crate) fn admit(
         return Err(ResumeRefusal::AuthoritySpaceMismatch.status());
     }
     if req.zdr {
+        return Err(ResumeRefusal::DurableMutationForbidden.status());
+    }
+    if caller.zdr_waiver.is_some() {
         return Err(ResumeRefusal::DurableMutationForbidden.status());
     }
     if !park_resume_active() {
@@ -1623,15 +1630,22 @@ mod tests {
         }
     }
 
-    /// The admission, in order, with no RPC: a named route, a Space, zero retention, the
-    /// resume switches, a credential. The PARKING switch is not one of them.
+    /// The admission, in order, with no RPC: a named route, a Space, zero retention, a waived
+    /// caller, the resume switches, a credential. The PARKING switch is not one of them.
     #[test]
     fn admit_refuses_in_order_and_never_reads_the_parking_switch() {
         use crate::runtime_loop::resume::LoopResumeSwitch;
         let _on = all_on();
-        assert!(admit(&park_request(), true).is_ok());
+        let plain = crate::auth::AuthenticatedUser::for_test("org-1", "user-1");
+        let waived = crate::auth::AuthenticatedUser::for_test_with_waiver(
+            "org-1",
+            "user-1",
+            "conn-1",
+            "ack-1",
+        );
+        assert!(admit(&park_request(), &plain, true).is_ok());
         let refused = |req: pb::RunAgentRequest, bearer: bool| {
-            admit(&req, bearer).expect_err("refused").message().to_owned()
+            admit(&req, &plain, bearer).expect_err("refused").message().to_owned()
         };
         assert_eq!(
             refused(pb::RunAgentRequest { provider_hint: "x".to_owned(), ..park_request() }, true),
@@ -1653,14 +1667,18 @@ mod tests {
             refused(pb::RunAgentRequest { space_id: "space_1".to_owned(), ..park_request() }, true),
             "authority_space_mismatch"
         );
-        let zdr = admit(&pb::RunAgentRequest { zdr: true, ..park_request() }, true)
+        let zdr = admit(&pb::RunAgentRequest { zdr: true, ..park_request() }, &plain, true)
             .expect_err("zero retention");
         assert!(mp_contracts::zdr_refusal::Refusal::from_status(&zdr).is_some());
+        // A waived caller gets the same catalogue refusal, before any claim.
+        let waived_refusal = admit(&park_request(), &waived, true).expect_err("a waived caller");
+        assert!(mp_contracts::zdr_refusal::Refusal::from_status(&waived_refusal).is_some());
+        assert_eq!(waived_refusal.message(), zdr.message());
         assert_eq!(refused(park_request(), false), "resume_checkpoint_unavailable");
         // Parking off: no new parks, and the parks that exist are still admitted.
         let _parking_off = ParkSwitch::set(false);
         assert!(!parking_active());
-        assert!(admit(&park_request(), true).is_ok());
+        assert!(admit(&park_request(), &plain, true).is_ok());
         // A resume switch off (a guard's drop clears its override, so this is the last check).
         let _off = LoopResumeSwitch::set(false);
         assert_eq!(refused(park_request(), true), "continue_disabled");

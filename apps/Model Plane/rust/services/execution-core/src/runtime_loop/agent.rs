@@ -1313,7 +1313,7 @@ async fn resume_parked_run(
     sandbox_tokens: &crate::sandbox_lease::SandboxManagerTokenProvider,
     process_host: Option<&crate::process_host::ProcessHost>,
 ) -> Result<pb::RunAgentResponse, tonic::Status> {
-    super::park::admit(&req, session_bearer.is_some())?;
+    super::park::admit(&req, caller, session_bearer.is_some())?;
     let derived =
         super::park::derivable_tool_defs(&req.run_id, &req.org_id, &req.user_id, capability_policy)
             .await
@@ -33840,9 +33840,9 @@ mod tests {
         }
     }
 
-    /// A zero-retention request is refused before anything is claimed, and a waived caller is
-    /// refused on the rebuilt route before anything is fenced or inferred: neither keeps
-    /// durable state, so neither resumes one (the Park store proof of the executor).
+    /// A zero-retention request and a waived caller are each refused before anything is claimed,
+    /// fenced or inferred: neither keeps durable state, so neither resumes one (the Park store
+    /// proof of the executor).
     #[tokio::test]
     async fn loop_park_a_park_resume_refuses_a_zdr_or_waived_caller() {
         let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
@@ -33895,6 +33895,7 @@ mod tests {
             "the catalogue's own refusal: {refused:?}"
         );
         let r = rec.lock().unwrap();
+        assert!(r.claim_calls.is_empty(), "a waived resume claims nothing");
         assert_eq!(r.loop_saves.len(), saves, "no fence, no fold of any kind");
         assert!(r.close_calls.is_empty(), "a refused route closes nothing");
         assert!(waived.observed.lock().unwrap().is_empty(), "nothing inferred");

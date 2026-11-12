@@ -139,7 +139,6 @@ import {
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
 import { isZdrWaiverUiEnabled } from '@/shared/api/connection-zdr-client'
 import type { WaivedRunConnection } from '@/shared/api/waived-continuation'
-import { isZdrCode } from '@/shared/api/zdr-refusals'
 import { readAiModelSelection, resolveReplaySubscriptionConnectionId } from '@/shared/ai/model-selection'
 import { getSession } from '@/shared/session/session-store'
 import { blobToDataUrl } from '@/shared/lib/blob-data'
@@ -3528,14 +3527,14 @@ export function useChatController() {
   }
 
   /**
-   * The words under a plan card for a refused approval or rejection. A zero-retention refusal (for example
-   * `zdr_durable_mutation_forbidden` on a waived run's continuation) reads from the refusal copy in the reader's
-   * language, never as the gateway's raw text; any other failure reads as it always did.
+   * The words under a plan card for a refused approval or rejection, through translateApiError: a zero-retention
+   * refusal (for example `zdr_durable_mutation_forbidden` on a waived run's continuation) reads from the refusal copy
+   * in the reader's language, a known code from its own copy, a lost session, refusal, rate limit or connection from
+   * its own words, and anything else from `fallback`, which carries both languages. The gateway's text is English
+   * operator wording and is never shown.
    */
-  const planDecisionErrorText = (error: unknown, fallback: string): string => {
-    if (error instanceof ApiError && isZdrCode(error.code)) return translateApiError(error, i18n.tr)
-    return error instanceof Error ? error.message : fallback
-  }
+  const planDecisionErrorText = (error: unknown, fallback: { no: string; en: string }): string =>
+    translateApiError(error, i18n.tr, fallback)
 
   const approveTurnPlan = async (
     turnId: string,
@@ -3631,7 +3630,10 @@ export function useChatController() {
     } catch (error) {
       setPlanApprovalError((prev) => ({
         ...prev,
-        [turnId]: planDecisionErrorText(error, 'Godkjenningen gikk ikke gjennom.'),
+        [turnId]: planDecisionErrorText(error, {
+          no: 'Godkjenningen gikk ikke gjennom.',
+          en: 'The approval did not go through.',
+        }),
       }))
     } finally {
       setPlanApprovalPending(null)
@@ -3679,7 +3681,10 @@ export function useChatController() {
     } catch (error) {
       setPlanApprovalError((prev) => ({
         ...prev,
-        [turnId]: planDecisionErrorText(error, 'Avvisningen gikk ikke gjennom.'),
+        [turnId]: planDecisionErrorText(error, {
+          no: 'Avvisningen gikk ikke gjennom.',
+          en: 'The rejection did not go through.',
+        }),
       }))
     } finally {
       setPlanApprovalPending(null)
