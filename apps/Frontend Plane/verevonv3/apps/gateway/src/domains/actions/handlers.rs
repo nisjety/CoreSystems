@@ -167,21 +167,27 @@ fn agent_web_toolset_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
-/// The agent web toolset (E3.7.10): each Model-facing id runs the existing user-session
-/// dispatcher of the action it names, so it carries exactly that action's authority and
-/// checks and nothing more. `web.crawl_site` is `knowledge.crawl_site`, so the E3.7.9
-/// approval above the page threshold (enforced on the crawl dispatch path) applies to it
-/// unchanged; the job verbs are the WS15.L5 run-control dispatchers (the caller's own org,
-/// crawl jobs only). There is deliberately no resume arm: the toolset names status, pause
-/// and cancel.
+/// The legacy `web.*` ids of the agent web toolset (E3.7.10), each with the registry action it
+/// runs. Each id runs the existing user-session dispatcher of the action it names, so it carries
+/// exactly that action's authority and checks and nothing more. `web.crawl_site` is
+/// `knowledge.crawl_site`, so the E3.7.9 approval above the page threshold (enforced on the crawl
+/// dispatch path) applies to it unchanged; the job verbs are the WS15.L5 run-control dispatchers
+/// (the caller's own org, crawl jobs only). There is deliberately no resume entry: the toolset
+/// names status, pause and cancel. These keys are not registry contract ids, so the action-surface
+/// contract test (`scripts/action-surface-contract.test.mjs`) reads past this table.
+const LEGACY_ACTION_ALIASES: [(&str, &str); 4] = [
+    ("web.crawl_site", "knowledge.crawl_site"),
+    ("web.job_status", "ingestions.get_run_status"),
+    ("web.pause_job", "ingestions.pause_run"),
+    ("web.cancel_job", "ingestions.cancel_run"),
+];
+
+/// The registry action a legacy toolset id runs, or `None` for any other id.
 fn agent_web_tool_target(action_id: &str) -> Option<&'static str> {
-    match action_id {
-        "web.crawl_site" => Some("knowledge.crawl_site"),
-        "web.job_status" => Some("ingestions.get_run_status"),
-        "web.pause_job" => Some("ingestions.pause_run"),
-        "web.cancel_job" => Some("ingestions.cancel_run"),
-        _ => None,
-    }
+    LEGACY_ACTION_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == action_id)
+        .map(|(_, target)| *target)
 }
 
 /// The page count above which a Model-started crawl needs the person's E3.7.9 approval.
@@ -220,7 +226,7 @@ pub(super) async fn execute_action(
     let toolset_enabled =
         agent_web_tool_target(&body.action_id).is_some() && agent_web_toolset_enabled();
     if toolset_enabled
-        && body.action_id == "web.crawl_site"
+        && agent_web_tool_target(&body.action_id) == Some("knowledge.crawl_site")
         && agent_crawl_needs_approval(&body.input)
     {
         return (
@@ -1507,26 +1513,51 @@ mod ingestions_dispatch_tests {
         }
     }
 
-    async fn run(action_id: &str, input: Value) -> StatusCode {
-        execute_action(
-            State(crate::tests::test_state(false)),
-            Extension(caller()),
-            HeaderMap::new(),
-            Json(ExecuteActionRequest {
-                action_id: action_id.to_owned(),
-                idempotency_key: String::new(),
-                input,
-            }),
-        )
-        .await
-        .status()
+    /// Stack for one dispatch. The debug build of the ~370-arm `execute_action` match gives every
+    /// arm its own slot in one poll frame, which needs more than the 2 MiB of a libtest thread
+    /// (measured: 2 MiB overflows, 4 MiB passes), so the test binary aborts with
+    /// STATUS_STACK_OVERFLOW. Boxing the future does not help: it is only ~20 KB, and the cost is
+    /// the poll frame. 32 MiB matches the execution-core delegation tests. The image is built with
+    /// `cargo build --release`, and production code is unchanged here.
+    const DISPATCH_TEST_STACK_BYTES: usize = 32 * 1024 * 1024;
+
+    /// One request through `execute_action` on a thread with [`DISPATCH_TEST_STACK_BYTES`] of
+    /// stack, so the result does not depend on RUST_MIN_STACK. A dispatch panic is re-raised here.
+    fn run(action_id: &str, input: Value) -> StatusCode {
+        let action_id = action_id.to_owned();
+        std::thread::Builder::new()
+            .name("execute-action-test".to_owned())
+            .stack_size(DISPATCH_TEST_STACK_BYTES)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("test runtime")
+                    .block_on(async move {
+                        execute_action(
+                            State(crate::tests::test_state(false)),
+                            Extension(caller()),
+                            HeaderMap::new(),
+                            Json(ExecuteActionRequest {
+                                action_id,
+                                idempotency_key: String::new(),
+                                input,
+                            }),
+                        )
+                        .await
+                        .status()
+                    })
+            })
+            .expect("spawn the dispatch test thread")
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     }
 
     /// The registry (WS15.L5) split `run_schedule_action` into two actions and added
     /// four run-control ones. Each new id has a live dispatch (an empty input is a
     /// 400 from its own validation, not the 501 of an unknown id); the old id has none.
-    #[tokio::test]
-    async fn the_new_ids_dispatch_and_the_removed_id_does_not() {
+    #[test]
+    fn the_new_ids_dispatch_and_the_removed_id_does_not() {
         for id in [
             "ingestions.get_run_status",
             "ingestions.pause_run",
@@ -1535,16 +1566,37 @@ mod ingestions_dispatch_tests {
             "ingestions.pause_schedule",
             "ingestions.change_schedule_state",
         ] {
-            assert_eq!(run(id, json!({})).await, StatusCode::BAD_REQUEST, "{id}");
+            assert_eq!(run(id, json!({})), StatusCode::BAD_REQUEST, "{id}");
         }
         assert_eq!(
-            run("ingestions.run_schedule_action", json!({ "action": "delete_schedule", "scheduleId": "sch_1" })).await,
+            run(
+                REMOVED_SCHEDULE_ACTION_ID,
+                json!({ "action": "delete_schedule", "scheduleId": "sch_1" })
+            ),
             StatusCode::NOT_IMPLEMENTED
         );
     }
 
-    const AGENT_WEB_TOOL_IDS: [&str; 4] =
-        ["web.crawl_site", "web.job_status", "web.pause_job", "web.cancel_job"];
+    /// The legacy toolset ids, each with the registry action it must resolve to. Test-only: the
+    /// action-surface contract test does not read `#[cfg(test)]` code as dispatch surface.
+    const AGENT_WEB_TOOL_TARGETS: [(&str, &str); 4] = [
+        ("web.crawl_site", "knowledge.crawl_site"),
+        ("web.job_status", "ingestions.get_run_status"),
+        ("web.pause_job", "ingestions.pause_run"),
+        ("web.cancel_job", "ingestions.cancel_run"),
+    ];
+
+    /// Ids that must stay unaliased: the toolset has no resume, map or batch verb, and a registry
+    /// action is not an alias of itself.
+    const UNALIASED_TEST_IDS: [&str; 4] = [
+        "web.resume_job",
+        "web.map_site",
+        "web.batch_scrape",
+        "knowledge.crawl_site",
+    ];
+
+    /// The id that WS15.L5 split away when it replaced `run_schedule_action`.
+    const REMOVED_SCHEDULE_ACTION_ID: &str = "ingestions.run_schedule_action";
 
     /// E3.7.10: the switch is the exact word `true`; every other spelling is off.
     #[test]
@@ -1559,12 +1611,11 @@ mod ingestions_dispatch_tests {
     /// itself, so the E3.7.9 page-threshold approval cannot be bypassed through it.
     #[test]
     fn each_agent_web_tool_runs_an_existing_action_and_crawl_site_keeps_its_approval_path() {
-        assert_eq!(resolve_action_id("web.crawl_site", true), "knowledge.crawl_site");
-        assert_eq!(resolve_action_id("web.job_status", true), "ingestions.get_run_status");
-        assert_eq!(resolve_action_id("web.pause_job", true), "ingestions.pause_run");
-        assert_eq!(resolve_action_id("web.cancel_job", true), "ingestions.cancel_run");
+        for (id, target) in AGENT_WEB_TOOL_TARGETS {
+            assert_eq!(resolve_action_id(id, true), target, "{id}");
+        }
         // No resume, no map or batch, and no other prefix is aliased.
-        for id in ["web.resume_job", "web.map_site", "web.batch_scrape", "knowledge.crawl_site"] {
+        for id in UNALIASED_TEST_IDS {
             assert_eq!(agent_web_tool_target(id), None, "{id}");
             assert_eq!(resolve_action_id(id, true), id, "{id}");
         }
@@ -1583,15 +1634,29 @@ mod ingestions_dispatch_tests {
 
     /// Off (the default), a toolset id is not resolved and the request gets the 501 of an
     /// unknown action, before any input is read.
-    #[tokio::test]
-    async fn the_agent_web_tool_ids_are_unknown_actions_while_the_switch_is_off() {
+    #[test]
+    fn the_agent_web_tool_ids_are_unknown_actions_while_the_switch_is_off() {
         if agent_web_toolset_enabled() {
             // The surrounding environment switched it on; the off path is not observable here.
             return;
         }
-        for id in AGENT_WEB_TOOL_IDS {
+        for (id, _) in AGENT_WEB_TOOL_TARGETS {
             assert_eq!(resolve_action_id(id, false), id, "{id}");
-            assert_eq!(run(id, json!({})).await, StatusCode::NOT_IMPLEMENTED, "{id}");
+            assert_eq!(run(id, json!({})), StatusCode::NOT_IMPLEMENTED, "{id}");
         }
+    }
+
+    /// Pins the stack fix. [`DISPATCH_TEST_STACK_BYTES`] must stay at or above the 4 MiB that the
+    /// debug poll frame was measured to need (2 MiB overflows), and a dispatch through the helper
+    /// still answers as the dispatcher does. A smaller stack aborts the whole test binary rather
+    /// than failing one test, so the compile-time check below is what names the cause.
+    #[test]
+    fn the_dispatch_test_stack_stays_above_the_measured_debug_need() {
+        const MEASURED_DEBUG_NEED_BYTES: usize = 4 * 1024 * 1024;
+        const _: () = assert!(DISPATCH_TEST_STACK_BYTES >= MEASURED_DEBUG_NEED_BYTES);
+        assert_eq!(
+            run("ingestions.get_run_status", json!({})),
+            StatusCode::BAD_REQUEST
+        );
     }
 }
