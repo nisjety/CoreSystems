@@ -8812,9 +8812,14 @@ async fn gate_and_ground_web_search_outcome(
 
     let budget = grounding::fetch_budget(tier);
     let started = std::time::Instant::now();
+    // The org's domain rules reach a grounding read as they reach `fetch_url` (C-09): the owner and the tool name are
+    // read once here, and each page is checked against the host it ended on, not only the host the search returned.
+    let owner = crate::site_policy_client::SiteOwner::of(state);
+    let tool = outcome.name.clone();
     let grounded = grounding::ground_pages(question, &pages, budget, |url| {
         let quarry = state.quarry.clone();
         let org_id = org_id.to_owned();
+        let tool = tool.clone();
         async move {
             // `scrape_readable`, not `scrape`, for the same reason `fetch_url`
             // uses it: it resolves Quarry's artifact-referenced page text and
@@ -8824,6 +8829,23 @@ async fn gate_and_ground_web_search_outcome(
             // make a selected passage readable as a quotation.
             match quarry.scrape_readable(&url, &org_id, zdr).await {
                 Ok(page) => {
+                    // The search dropped every hit on a host the org does not allow, but a redirect, or the browser
+                    // escalation, can land the page on one. That page is an unread page here: neither its text nor its
+                    // structured facts become a passage, and the hit keeps its engine snippet, labelled as one. Under
+                    // `off` nothing is refused and the page is read as it always was.
+                    if let Some(refusal) = crate::site_policy_client::final_url_refusal(
+                        crate::site_policy_client::policy_mode(),
+                        crate::site_policy_client::shared_checker(),
+                        &owner,
+                        &org_id,
+                        &url,
+                        &page.final_url,
+                        &tool,
+                    )
+                    .await
+                    {
+                        return Err(refusal);
+                    }
                     // The second channel. `ScrapeResult` projects the prose and
                     // keeps the full envelope under `raw`, which is where
                     // Quarry's structured harvest rides — so it is read from
@@ -15769,6 +15791,199 @@ mod tests {
             beyond_cap.contains("[SNIPPET ONLY"),
             "the hit past the page cap was never read: {beyond_cap:?}"
         );
+    }
+
+    // --- the grounding read and the org's domain rules (C-09, grounding path) ---
+
+    /// The question the page-read tests ground on. Its prose quotes both of its terms.
+    const GROUNDING_QUESTION: &str = "strømpris i Norge";
+
+    /// The org-core answer the grounding tests use: `blocked.rel1.example` is denied and `allowed.rel1.example` is
+    /// read. `resolves` is how many resolve calls the test expects.
+    async fn grounding_org_rules(org_core: &wiremock::MockServer, org_id: &str, resolves: u64) {
+        let decisions = serde_json::json!([
+            {
+                "host": "blocked.rel1.example",
+                "effective": "deny",
+                "cap": "none",
+                "source": "org_block"
+            },
+            {
+                "host": "allowed.rel1.example",
+                "effective": "read",
+                "cap": "read",
+                "source": "default"
+            }
+        ]);
+        let body = serde_json::json!({
+            "organization_id": org_id,
+            "revision": 1,
+            "decisions": decisions,
+        });
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(format!(
+                "/internal/orgs/{org_id}/browser-sites/resolve"
+            )))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(body))
+            .expect(resolves)
+            .mount(org_core)
+            .await;
+    }
+
+    /// A Quarry scrape whose page ended at `final_url`. Its prose quotes the question and carries a marker, and its
+    /// structured harvest carries a price figure; only that page holds either. `scrapes` is how many scrapes the test
+    /// expects.
+    async fn grounding_scrape(quarry: &wiremock::MockServer, final_url: &str, scrapes: u64) {
+        let markdown = "Strømpris i Norge REL1-MARKER-7f3a for uke 46 følger kraftbørsen time for time. Prisen \
+                        varierer mellom prisområdene i Norge gjennom døgnet, og oversikten over strømpris i Norge \
+                        oppdateres hver time fra nettselskapene i landet.";
+        let body = serde_json::json!({
+            "data": {
+                "status": 200,
+                "url": {"final": final_url},
+                "formats": {"markdown": markdown},
+                "structured": {"figures": [{
+                    "label": "Strømpris",
+                    "value": "4,56",
+                    "unit": "kr/kWh",
+                    "period": "uke 46 2026"
+                }]}
+            }
+        });
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/scrape"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(body))
+            .expect(scrapes)
+            .mount(quarry)
+            .await;
+    }
+
+    /// The gateway state for a grounding read, with Quarry and org-core on the mock servers.
+    fn grounding_state(
+        org_core: &wiremock::MockServer,
+        quarry: &wiremock::MockServer,
+    ) -> crate::state::AppState {
+        let mut state = crate::state::AppState::new();
+        state.quarry = crate::quarry::Client::new(crate::quarry::Config {
+            base_url: quarry.uri(),
+            token: "test-token".to_owned(),
+            timeout: std::time::Duration::from_secs(5),
+        });
+        state.org_core_base_url = org_core.uri();
+        state.org_core_service_token = "test-token".to_owned();
+        state
+    }
+
+    /// Reads one kept hit on `allowed.rel1.example` through the grounding phase for `org_id`. Returns the gate and the
+    /// outcome the model would read.
+    async fn ground_one_hit(
+        state: &crate::state::AppState,
+        org_id: &str,
+    ) -> (WebSearchGate, ToolOutcome) {
+        let mut outcome = web_search_outcome(&[(
+            "https://allowed.rel1.example/strompris",
+            "Strømpris i Norge",
+            "Oversikt over strømpris i Norge.",
+        )]);
+        let gate = gate_and_ground_web_search_outcome(
+            state,
+            GROUNDING_QUESTION,
+            org_id,
+            false,
+            grounding::Tier::Balance,
+            &mut outcome,
+        )
+        .await;
+        (gate, outcome)
+    }
+
+    /// The line of the output that lists the kept hit, which carries the hit's own label. The assertions read the label
+    /// from this line: the output's legend names both labels whatever the outcome, so the whole output cannot tell a
+    /// read page from an unread one.
+    fn hit_line(output: &str) -> &str {
+        output
+            .lines()
+            .find(|line| line.contains("https://allowed.rel1.example/strompris"))
+            .expect("the kept hit is listed in the output")
+    }
+
+    /// C-09, grounding path: a hit on an allowed host whose page ended on a host the org blocks is not read under
+    /// enforce. Neither its prose nor its structured fact becomes a passage, and the hit keeps its engine snippet,
+    /// labelled as one with the refusal's typed code.
+    #[tokio::test]
+    async fn a_page_that_ended_on_a_host_the_org_blocks_is_not_quoted_under_enforce() {
+        let _mode = crate::site_policy_client::test_seam::set(
+            mp_contracts::site_policy::WebDomainPolicyMode::Enforce,
+        );
+        let org_core = wiremock::MockServer::start().await;
+        grounding_org_rules(&org_core, "org_rel1_enforce", 1).await;
+        let quarry = wiremock::MockServer::start().await;
+        grounding_scrape(&quarry, "https://blocked.rel1.example/landing", 1).await;
+        let state = grounding_state(&org_core, &quarry);
+
+        let (gate, outcome) = ground_one_hit(&state, "org_rel1_enforce").await;
+        let output = outcome.output.as_str();
+        let line = hit_line(output);
+
+        assert_eq!(gate.kept, 1, "{output}");
+        assert!(
+            !output.contains("REL1-MARKER-7f3a"),
+            "the blocked page's prose reached the model: {output}"
+        );
+        assert!(
+            !output.contains("4,56"),
+            "the blocked page's structured fact reached the model: {output}"
+        );
+        assert!(!line.contains("[PAGE READ]"), "{line}");
+        assert!(line.contains("[SNIPPET ONLY"), "{line}");
+        assert!(line.contains("org_site_blocked"), "{line}");
+    }
+
+    /// C-09, grounding path: with the switch off the page is read as it always was. Nothing is asked of org-core, and
+    /// the page's prose and its structured fact reach the model.
+    #[tokio::test]
+    async fn a_page_that_ended_on_another_host_is_read_as_before_with_the_switch_off() {
+        let _mode = crate::site_policy_client::test_seam::set(
+            mp_contracts::site_policy::WebDomainPolicyMode::Off,
+        );
+        let org_core = wiremock::MockServer::start().await;
+        grounding_org_rules(&org_core, "org_rel1_off", 0).await;
+        let quarry = wiremock::MockServer::start().await;
+        grounding_scrape(&quarry, "https://blocked.rel1.example/landing", 1).await;
+        let state = grounding_state(&org_core, &quarry);
+
+        let (gate, outcome) = ground_one_hit(&state, "org_rel1_off").await;
+        let output = outcome.output.as_str();
+        let line = hit_line(output);
+
+        assert_eq!(gate.kept, 1, "{output}");
+        assert!(line.contains("[PAGE READ]"), "{line}");
+        assert!(output.contains("REL1-MARKER-7f3a"), "{output}");
+        assert!(output.contains("4,56"), "{output}");
+        assert!(!line.contains("org_site_blocked"), "{line}");
+    }
+
+    /// C-09, grounding path: under shadow the final host's rules are read and the refusal is only logged, so the page
+    /// is read as it is under off.
+    #[tokio::test]
+    async fn a_page_that_ended_on_a_blocked_host_is_only_logged_under_shadow() {
+        let _mode = crate::site_policy_client::test_seam::set(
+            mp_contracts::site_policy::WebDomainPolicyMode::Shadow,
+        );
+        let org_core = wiremock::MockServer::start().await;
+        grounding_org_rules(&org_core, "org_rel1_shadow", 1).await;
+        let quarry = wiremock::MockServer::start().await;
+        grounding_scrape(&quarry, "https://blocked.rel1.example/landing", 1).await;
+        let state = grounding_state(&org_core, &quarry);
+
+        let (gate, outcome) = ground_one_hit(&state, "org_rel1_shadow").await;
+        let output = outcome.output.as_str();
+        let line = hit_line(output);
+
+        assert_eq!(gate.kept, 1, "{output}");
+        assert!(line.contains("[PAGE READ]"), "{line}");
+        assert!(output.contains("REL1-MARKER-7f3a"), "{output}");
+        assert!(!line.contains("org_site_blocked"), "{line}");
     }
 
     // --- the authoritative short-circuit ------------------------------------
