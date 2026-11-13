@@ -3217,6 +3217,16 @@ function streamConnectionFailure(err: unknown, fallback: string): ChatErrorEvent
       retryable: false,
     }
   }
+  // The organisation's agent policy cannot be read (C-14-mg-rel1), a 503 refused before the run started. It is not a lost
+  // connection: that would reattach into the same refusal, and read the English server text. It keeps its code, so the
+  // turn reads the words of the code (streamFailurePresentation) and offers a retry; the server says it may clear.
+  if (err instanceof ApiError && err.code === 'org_policy_unavailable') {
+    return {
+      code: err.code,
+      message: 'Organisasjonens agentpolicy kan ikke leses akkurat nå, så agenten startet ikke. Ingenting ble kjørt.',
+      retryable: true,
+    }
+  }
   // A typed Space denial (a policy, entitlement, role or ZDR refusal) is the
   // server's answer about the room, not a sign-in problem: keep its code and
   // details so the room can say why. An untyped 403 still reads as lost access.

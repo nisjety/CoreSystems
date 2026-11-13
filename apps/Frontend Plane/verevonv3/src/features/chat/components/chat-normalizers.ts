@@ -45,7 +45,7 @@ import {
 import { getSession } from '@/shared/session/session-store'
 import { supportQuestionFromPrompt } from '@/shared/chat/support-context-envelope'
 import { en as enStrings } from '@/shared/i18n/en'
-import { LocalizedError } from '@/shared/i18n/errors'
+import { LocalizedError, ORG_POLICY_UNAVAILABLE_COPY } from '@/shared/i18n/errors'
 import { localeIntl, type Locale } from '@/shared/i18n/locales'
 import { no as noStrings } from '@/shared/i18n/no'
 import type { RunDetail } from '@/shared/api/runs-client'
@@ -458,6 +458,22 @@ function agentsPausedStreamPresentation(tr: Translate): StreamFailurePresentatio
 }
 
 /**
+ * The organisation's agent policy cannot be read inside its bound (C-14-mg-rel1): a Do turn refused before any model
+ * ran, so nothing was run or saved. Unlike the pause, this clears when the policy can be read again, and the server
+ * says the same request may succeed then, so the reader is offered a retry. It is a refusal, not an outage of the
+ * model service, so it is not `unavailable`. The words are the copy of errors.ts, shared with a continuation refused
+ * over HTTP, which offers no retry; the server's English text is never shown.
+ */
+function orgPolicyUnavailableStreamPresentation(tr: Translate): StreamFailurePresentation {
+  return {
+    message: tr(ORG_POLICY_UNAVAILABLE_COPY.no, ORG_POLICY_UNAVAILABLE_COPY.en),
+    unsaved: true,
+    unavailable: false,
+    action: 'retry',
+  }
+}
+
+/**
  * The words for a refusal by the server's attachment contract. Nothing was sent
  * to a model, so each says what to change, not to retry.
  */
@@ -577,8 +593,10 @@ function limitStreamPresentation(
  * deployment. Nothing ran, a retry cannot help, so each says so in words and
  * offers none. `org_agents_paused` is the organisation's agent-run pause
  * (F-t3-083): a Do turn refused before any model ran, so nothing was run, the
- * words say plain chat still works, and no retry is offered. `prompt_too_long`,
- * `inference_stream_error` and `model_plane_unavailable` are translated too;
+ * words say plain chat still works, and no retry is offered. `org_policy_unavailable`
+ * (C-14-mg-rel1) is a Do turn refused before any model ran while the organisation's agent
+ * policy cannot be read: nothing ran, and a retry is offered, since the policy may be readable
+ * again. `prompt_too_long`, `inference_stream_error` and `model_plane_unavailable` are translated too;
  * the last one's server text is raw transport detail and is never shown.
  * With VITE_CHAT_LIMIT_NOTICES on, `budget_exceeded`, `quota_exceeded`, `run_ceiling_reached` and `rate_limited` are
  * worded for the reader's role by `limitNotice` instead, and the server's text is not shown for them.
@@ -595,6 +613,8 @@ export function streamFailurePresentation(
   if (isModelEntitlementCode(code)) return modelEntitlementStreamPresentation(code, tr)
   // The organisation's agent-run pause (F-t3-083): a refusal before any model ran, typed on the stream's error frame.
   if (code === 'org_agents_paused') return agentsPausedStreamPresentation(tr)
+  // The organisation's agent policy cannot be read inside its bound (C-14-mg-rel1): a Do turn refused before any model ran.
+  if (code === 'org_policy_unavailable') return orgPolicyUnavailableStreamPresentation(tr)
   const server = serverMessage.trim()
   const now = details.now ?? Date.now()
   if (isLimitCode(code) && chatLimitNoticesEnabled()) return limitStreamPresentation(code, details, now, tr)

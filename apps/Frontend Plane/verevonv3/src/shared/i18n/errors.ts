@@ -67,6 +67,17 @@ export class LocalizedError extends Error {
   }
 }
 
+/**
+ * The organisation's agent policy cannot be read inside its bound (C-14-mg-rel1): refused before the run or the approval
+ * is read, on a Do turn's stream and on a continuation over HTTP. Nothing ran. The words carry no retry: a continuation
+ * offers none (its spend is unknown, chat-run-continue-contract.ts), and a Do turn's stream offers its retry as the
+ * turn's action (chat-normalizers.ts), not in these words. Both paths read these words from here.
+ */
+export const ORG_POLICY_UNAVAILABLE_COPY: ErrorCopy = {
+  no: 'Organisasjonens agentpolicy kan ikke leses akkurat nå, så agenten startet ikke. Ingenting ble kjørt.',
+  en: 'The agent policy for this organisation cannot be read right now, so the agent did not start. Nothing was run.',
+}
+
 export const ERROR_COPY: Record<string, ErrorCopy> = {
   // Cross-cutting / structural
   validation_error: { no: 'Noen av feltene er ikke gyldige. Sjekk og prøv igjen.', en: 'Some fields are invalid. Check and try again.' },
@@ -215,6 +226,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Organisasjonen har satt agentkjøringer på pause. Vanlig chat fungerer som før. Ingenting ble kjørt.',
     en: 'Your organisation has paused agent runs. Plain chat works as before. Nothing was run.',
   },
+  org_policy_unavailable: ORG_POLICY_UNAVAILABLE_COPY,
   shipping_auth_unavailable: { no: 'Fraktintegrasjonen er ikke koblet til ennå.', en: 'The shipping integration is not connected yet.' },
   social_core_unavailable: { no: 'Sosiale medier-tjenesten er utilgjengelig akkurat nå.', en: 'The social service is unavailable right now.' },
   search_provider_unconfigured: { no: 'Søketjenesten er ikke satt opp ennå.', en: 'The search provider is not configured yet.' },
