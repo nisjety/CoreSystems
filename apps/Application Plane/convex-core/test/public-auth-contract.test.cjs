@@ -4,15 +4,36 @@ const path = require('node:path');
 const test = require('node:test');
 
 const convexDirectory = path.resolve(__dirname, '..', 'convex');
+const authorizationCall = /require(?:Identity|Viewer|Editor|Org)/;
 
 function publicFunctions(fileName) {
-  const source = fs.readFileSync(path.join(convexDirectory, fileName), 'utf8');
+  return publicFunctionsInSource(fs.readFileSync(path.join(convexDirectory, fileName), 'utf8'));
+}
+
+function publicFunctionsInSource(source) {
   const starts = [...source.matchAll(/export\s+const\s+(\w+)\s*=\s*(query|mutation)\s*\(/g)];
-  return starts.map((match, index) => ({
-    name: match[1],
-    kind: match[2],
-    source: source.slice(match.index, starts[index + 1]?.index ?? source.length),
-  }));
+  return starts.map((match, index) => {
+    const block = source.slice(match.index, starts[index + 1]?.index ?? source.length);
+    // `handler: getByRunIdHandler` names a function declared above its export, so the
+    // export's own slice cannot contain the authorization call. Check the declaration too.
+    const handlerName = /\bhandler:\s*(\w+)\s*[,}]/.exec(block)?.[1];
+    return {
+      name: match[1],
+      kind: match[2],
+      source: handlerName ? `${block}\n${namedHandlerSource(source, handlerName)}` : block,
+    };
+  });
+}
+
+// A top-level `function <name>(` declaration, up to the next top-level statement. A handler
+// not declared in this file is not resolved, so it is judged on its export slice alone.
+function namedHandlerSource(source, name) {
+  const declaration = new RegExp(`^(?:export\\s+)?(?:async\\s+)?function\\s+${name}\\s*\\(`, 'm');
+  const match = declaration.exec(source);
+  if (!match) return '';
+  const bodyStart = match.index + match[0].length;
+  const next = source.slice(bodyStart).search(/^(?:export\s|async\s|function\s|const\s|let\s|type\s|\/\*\*)/m);
+  return source.slice(match.index, next < 0 ? source.length : bodyStart + next);
 }
 
 test('sensitive public Convex functions authorize inside their own handler', () => {
@@ -25,7 +46,7 @@ test('sensitive public Convex functions authorize inside their own handler', () 
     'projects.ts',
   ]) {
     for (const fn of publicFunctions(fileName)) {
-      if (!/require(?:Identity|Viewer|Editor|Org)/.test(fn.source)) {
+      if (!authorizationCall.test(fn.source)) {
         failures.push(`${fileName}:${fn.name}`);
       }
     }
@@ -35,6 +56,25 @@ test('sensitive public Convex functions authorize inside their own handler', () 
     [],
     `public functions without in-handler authorization:\n${failures.join('\n')}`,
   );
+});
+
+test('a named handler is checked through its own declaration', () => {
+  const authorized = publicFunctionsInSource(`
+export async function readHandler(ctx) {
+  await requireViewerMembership(ctx, 'org');
+  return null;
+}
+export const read = query({ args: {}, handler: readHandler });
+`);
+  const unauthorized = publicFunctionsInSource(`
+export async function readHandler(ctx) {
+  return ctx.db.query('notes').collect();
+}
+export const read = query({ args: {}, handler: readHandler });
+`);
+  assert.equal(authorized.length, 1);
+  assert.match(authorized[0].source, authorizationCall);
+  assert.doesNotMatch(unauthorized[0].source, authorizationCall);
 });
 
 test('Control session projection writes are internal-only', () => {
