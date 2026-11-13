@@ -9,6 +9,16 @@ import {
 } from 'crypto';
 import { readFileSync } from 'fs';
 import { ConvexTokenService } from './convex-token.service';
+import {
+  createVerifiedRetentionDecision,
+  RetentionDecisionInvalidError,
+  VerifiedRetentionDecision,
+} from './retention-decision.verified';
+
+// The verified type and the invalid-decision error live in the dependency-free
+// retention-decision.verified module, so the token issuer can check them at
+// runtime. They are re-exported here for existing importers.
+export { RetentionDecisionInvalidError, VerifiedRetentionDecision };
 
 /**
  * Dedicated retention-decision signer (ZDR.md section 5.3, decision D-ZDR-01).
@@ -81,83 +91,6 @@ export class RetentionDecisionUnavailableError extends Error {
     super('Retention decision signer is unavailable');
     this.name = 'RetentionDecisionUnavailableError';
   }
-}
-
-/** Raised for a malformed claim set or a token that does not verify. */
-export class RetentionDecisionInvalidError extends Error {
-  constructor(message = 'Retention decision is not valid') {
-    super(message);
-    this.name = 'RetentionDecisionInvalidError';
-  }
-}
-
-type VerifiedFields = {
-  userId: string;
-  orgId: string;
-  sessionId: string;
-  connection: string;
-  provider: string;
-  ackId: string;
-  digest: string;
-  jti: string;
-  keyId: string;
-  issuedAt: number;
-  expiresAt: number;
-};
-
-// Not exported: only this module can build a VerifiedRetentionDecision.
-const VERIFIED_GUARD = Symbol('VerifiedRetentionDecisionGuard');
-
-/**
- * A retention decision that this module verified. The constructor is private
- * and guarded by a module-private symbol, so no other code can construct one
- * from request data; callers must obtain it from `RetentionDecisionSigner.verify`.
- */
-export class VerifiedRetentionDecision {
-  readonly decision = 'waived' as const;
-  readonly userId: string;
-  readonly orgId: string;
-  readonly sessionId: string;
-  readonly connection: string;
-  readonly provider: string;
-  readonly ackId: string;
-  readonly digest: string;
-  readonly jti: string;
-  readonly keyId: string;
-  /** Issued-at, seconds since the epoch. */
-  readonly issuedAt: number;
-  /** Expiry, seconds since the epoch. */
-  readonly expiresAt: number;
-
-  private constructor(guard: symbol, fields: VerifiedFields) {
-    if (guard !== VERIFIED_GUARD) {
-      throw new RetentionDecisionInvalidError(
-        'A verified retention decision can only be created by the signer',
-      );
-    }
-    this.userId = fields.userId;
-    this.orgId = fields.orgId;
-    this.sessionId = fields.sessionId;
-    this.connection = fields.connection;
-    this.provider = fields.provider;
-    this.ackId = fields.ackId;
-    this.digest = fields.digest;
-    this.jti = fields.jti;
-    this.keyId = fields.keyId;
-    this.issuedAt = fields.issuedAt;
-    this.expiresAt = fields.expiresAt;
-    Object.freeze(this);
-  }
-}
-
-function createVerifiedRetentionDecision(
-  fields: VerifiedFields,
-): VerifiedRetentionDecision {
-  const construct = VerifiedRetentionDecision as unknown as new (
-    guard: symbol,
-    fields: VerifiedFields,
-  ) => VerifiedRetentionDecision;
-  return new construct(VERIFIED_GUARD, fields);
 }
 
 /** The one interface callers depend on; the key can move to an HSM later. */
