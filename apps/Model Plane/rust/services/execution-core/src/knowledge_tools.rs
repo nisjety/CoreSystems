@@ -70,9 +70,13 @@ impl<'a> SpaceRetrieval<'a> {
 /// Whether this deployment withholds a Space-scoped `knowledge_search` on the direct `ExecuteStep`
 /// RPC (`EXECUTE_STEP_SPACE_SEARCH_WITHHOLD`). Strict: only the literal `true` switches it on, so the
 /// step keeps its organisation-wide search everywhere else. Dark by default (D2-771, D2-776).
+/// The value is read raw, not through the trimming `env_value`, so a padded value such as ` true`
+/// stays off.
 #[must_use]
 pub(crate) fn execute_step_space_search_withhold_enabled() -> bool {
-    crate::control_http_client::env_value("EXECUTE_STEP_SPACE_SEARCH_WITHHOLD").as_deref()
+    std::env::var("EXECUTE_STEP_SPACE_SEARCH_WITHHOLD")
+        .ok()
+        .as_deref()
         == Some("true")
 }
 
@@ -1122,6 +1126,235 @@ pub(crate) mod tests {
         assert!(
             production.contains("let url = retrieval_endpoint_from_env()?;"),
             "KnowledgeClient::from_env must use the shared resolver"
+        );
+    }
+}
+
+/// Section 3.4: `EXECUTE_STEP_SPACE_SEARCH_WITHHOLD` is documented strict: only the literal `true`
+/// switches it on. A padded or differently cased value must leave it off.
+#[cfg(test)]
+mod withhold_switch_parse {
+    use super::execute_step_space_search_withhold_enabled;
+
+    const SWITCH: &str = "EXECUTE_STEP_SPACE_SEARCH_WITHHOLD";
+
+    #[test]
+    fn only_the_literal_true_switches_the_withhold_on() {
+        let previous = std::env::var(SWITCH).ok();
+        let mut wrong = Vec::new();
+        for (raw, on) in [
+            ("true", true),
+            (" true", false),
+            ("true\n", false),
+            ("TRUE", false),
+            ("1", false),
+            ("", false),
+        ] {
+            std::env::set_var(SWITCH, raw);
+            if execute_step_space_search_withhold_enabled() != on {
+                wrong.push(raw);
+            }
+        }
+        std::env::remove_var(SWITCH);
+        let unset = execute_step_space_search_withhold_enabled();
+        match previous {
+            Some(value) => std::env::set_var(SWITCH, value),
+            None => std::env::remove_var(SWITCH),
+        }
+        assert!(!unset, "unset is off");
+        assert!(wrong.is_empty(), "values read wrongly: {wrong:?}");
+    }
+}
+
+/// F-f05-01 / D2-771 at the step path: what the `ExecuteStep` handler composes, from the request's
+/// `space_id` and the retrieval header to the knowledge search it runs. A Space step with the
+/// withhold switch on and no header is refused with the typed degraded envelope and never dials
+/// Data Plane; the header's decision scopes the search; switch off, the search is the
+/// organisation's own exactly as before.
+#[cfg(test)]
+mod execute_step_space_withhold_path {
+    use super::{step_space_retrieval, SpaceRetrieval};
+    use mp_contracts::dataplane::retrieval_v2::{
+        retrieval_service_server::{RetrievalService, RetrievalServiceServer},
+        GetChunksRequest, GetChunksResponse, GetSourcesRequest, GetSourcesResponse,
+        GetTraceRequest, GetTraceResponse, PackContextRequest, PackContextResponse, RetrievalChunk,
+        RetrieveRequest, RetrieveResponse,
+    };
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use tonic::{Request, Response, Status};
+
+    /// The `x-space-decision` each `Retrieve` carried (None: no decision sent).
+    type Seen = Arc<Mutex<Vec<Option<String>>>>;
+
+    struct Stub(Seen);
+
+    type NoStream =
+        Pin<Box<dyn futures::Stream<Item = Result<RetrievalChunk, Status>> + Send + 'static>>;
+
+    #[tonic::async_trait]
+    impl RetrievalService for Stub {
+        async fn retrieve(
+            &self,
+            request: Request<RetrieveRequest>,
+        ) -> Result<Response<RetrieveResponse>, Status> {
+            let decision = request
+                .metadata()
+                .get("x-space-decision")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            self.0.lock().expect("seen").push(decision);
+            Ok(Response::new(RetrieveResponse::default()))
+        }
+        type RetrieveStreamStream = NoStream;
+        async fn retrieve_stream(
+            &self,
+            _: Request<RetrieveRequest>,
+        ) -> Result<Response<Self::RetrieveStreamStream>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+        async fn get_trace(
+            &self,
+            _: Request<GetTraceRequest>,
+        ) -> Result<Response<GetTraceResponse>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+        async fn get_sources(
+            &self,
+            _: Request<GetSourcesRequest>,
+        ) -> Result<Response<GetSourcesResponse>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+        async fn get_chunks(
+            &self,
+            _: Request<GetChunksRequest>,
+        ) -> Result<Response<GetChunksResponse>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+        async fn pack_context(
+            &self,
+            _: Request<PackContextRequest>,
+        ) -> Result<Response<PackContextResponse>, Status> {
+            Err(Status::unimplemented("stub"))
+        }
+    }
+
+    struct AllowAll;
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for AllowAll {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, Status> {
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+    }
+
+    async fn step(
+        space_id: &str,
+        retrieval: SpaceRetrieval<'_>,
+    ) -> crate::runtime_loop::StepOutcome {
+        crate::runtime_loop::execute_step_with_browser_grant(
+            "knowledge_search",
+            r#"{"query":"quarterly revenue"}"#,
+            "auto",
+            "",
+            "org-1",
+            "user-1",
+            "run-1",
+            "step-1",
+            "",
+            None,
+            None,
+            None,
+            false,
+            false,
+            0,
+            Some("user-token"),
+            Some("session-token"),
+            Some("inference-token"),
+            &AllowAll,
+            None,
+            None,
+            None,
+            retrieval,
+            space_id,
+        )
+        .await
+    }
+
+    /// One test drives every case, because the search endpoint is read from the process
+    /// environment.
+    #[tokio::test]
+    async fn the_step_path_withholds_a_space_search_without_the_header_and_never_dials() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stub");
+        let address = listener.local_addr().expect("stub address");
+        let seen: Seen = Arc::default();
+        let stub = Stub(Arc::clone(&seen));
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(RetrievalServiceServer::new(stub))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let previous = std::env::var("DATAPLANE_RETRIEVAL_URL").ok();
+        std::env::set_var("DATAPLANE_RETRIEVAL_URL", format!("http://{address}"));
+
+        // Switch on, Space step, no header: withheld, typed, and Data Plane is never dialled.
+        let withheld = step("space-1", step_space_retrieval(true, "space-1", None)).await;
+        let calls_after_withheld = seen.lock().expect("seen").len();
+        // Switch on, Space step, the header carries a decision: the search is scoped by it.
+        let scoped = step(
+            "space-1",
+            step_space_retrieval(true, "space-1", Some("decision-1")),
+        )
+        .await;
+        // Switch on, Space step, an empty header: withheld as well.
+        let empty = step("space-1", step_space_retrieval(true, "space-1", Some(""))).await;
+        let calls_after_empty = seen.lock().expect("seen").len();
+        // Switch off: the organisation's own search, with no decision, as before.
+        let off = step("space-1", step_space_retrieval(false, "space-1", None)).await;
+
+        match previous {
+            Some(value) => std::env::set_var("DATAPLANE_RETRIEVAL_URL", value),
+            None => std::env::remove_var("DATAPLANE_RETRIEVAL_URL"),
+        }
+
+        assert_eq!(
+            calls_after_withheld, 0,
+            "a withheld search never dials Data Plane"
+        );
+        assert_ne!(withheld.status, "completed", "{withheld:?}");
+        let envelope: serde_json::Value =
+            serde_json::from_str(&withheld.error).expect("typed degraded envelope");
+        assert_eq!(envelope["reason"], "project knowledge unavailable");
+        assert!(withheld.output.is_empty(), "no result: {}", withheld.output);
+
+        assert!(
+            scoped.error.is_empty(),
+            "the scoped search runs: {scoped:?}"
+        );
+        assert!(
+            !empty.error.is_empty(),
+            "an empty header withholds: {empty:?}"
+        );
+        assert_eq!(calls_after_empty, 1, "only the scoped search dialled");
+        assert!(
+            off.error.is_empty(),
+            "switch off searches as before: {off:?}"
+        );
+
+        let seen = seen.lock().expect("seen").clone();
+        assert_eq!(
+            seen,
+            vec![Some("decision-1".to_owned()), None],
+            "the scoped search carries its decision, the switch-off search none"
         );
     }
 }
