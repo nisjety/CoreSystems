@@ -1185,3 +1185,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "inbox_posture_tests.rs"]
+mod posture_tests;

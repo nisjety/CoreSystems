@@ -532,3 +532,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "zdr_posture_matrix_tests.rs"]
+mod posture_matrix_tests;

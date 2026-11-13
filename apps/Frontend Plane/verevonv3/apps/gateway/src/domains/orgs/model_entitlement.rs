@@ -1334,3 +1334,7 @@ mod tests {
         assert_eq!(attested_from_verdicts(&json!({"state": "role"})), None);
     }
 }
+
+#[cfg(test)]
+#[path = "model_entitlement_posture_tests.rs"]
+mod posture_tests;

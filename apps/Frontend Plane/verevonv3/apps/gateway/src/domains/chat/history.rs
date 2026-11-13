@@ -3024,3 +3024,7 @@ mod fork_handler_tests {
         assert!(summary.forked_from_thread_id.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "history_relay_tests.rs"]
+mod relay_tests;

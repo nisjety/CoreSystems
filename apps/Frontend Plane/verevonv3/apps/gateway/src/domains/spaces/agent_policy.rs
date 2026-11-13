@@ -746,3 +746,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "agent_policy_pin_tests.rs"]
+mod pin_tests;

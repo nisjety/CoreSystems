@@ -559,3 +559,7 @@ pub(crate) async fn turn_retention(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "retention_decision_tests.rs"]
+mod tests;

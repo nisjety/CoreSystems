@@ -11,6 +11,8 @@ mod sync_jobs;
 mod algolia;
 #[cfg(test)]
 mod algolia_tests;
+#[cfg(test)]
+mod zdr_ack_tests;
 
 use axum::{
     routing::{delete, get, post},
