@@ -79,9 +79,10 @@ export const connectionZdrRevokeInput = z.object({ connectionId }).strict()
 
 const connectionZdrAssessmentCapability = z.enum(['supported', 'not_supported', 'cannot_verify'])
 
+// `superseded` is an active row below the minimum text version: Integration Core names it, and it is not in force.
 const connectionZdrAcknowledgementSummary = z.object({
   id: z.string(),
-  state: z.enum(['active', 'revoked']),
+  state: z.enum(['active', 'superseded', 'revoked']),
   digest: z.string(),
   textVersion: z.string(),
   locale: z.string(),

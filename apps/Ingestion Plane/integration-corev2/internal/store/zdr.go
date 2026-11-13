@@ -274,8 +274,8 @@ type ConnectionZDRStore interface {
 	// created is false when an active acknowledgement for the same connection and digest
 	// already exists, which is returned unchanged (an idempotent replay). The replay does not look at
 	// the text version: the store does not know the minimum, so a caller that must not replay an
-	// acknowledgement below it revokes that row first (RevokeConnectionZDRAcknowledgement). ErrConflict
-	// means a stale digest; ErrNotFound means no such connection, record or owner.
+	// acknowledgement on another text version revokes that row first (RevokeConnectionZDRAcknowledgement).
+	// ErrConflict means a stale digest; ErrNotFound means no such connection, record or owner.
 	InsertConnectionZDRAcknowledgement(ctx context.Context, ack NewConnectionZDRAcknowledgement) (saved ConnectionZDRAcknowledgement, created bool, err error)
 	// ListConnectionZDRAcknowledgements returns a connection's ledger rows, newest first.
 	ListConnectionZDRAcknowledgements(ctx context.Context, connectionID string, activeOnly bool) ([]ConnectionZDRAcknowledgement, error)
@@ -286,8 +286,8 @@ type ConnectionZDRStore interface {
 	// RevokeConnectionZDRAcknowledgement revokes one active acknowledgement of a connection, named by its
 	// id, with a closed reason, and returns the row it revoked. ErrNotFound when the connection has no
 	// active acknowledgement with that id (it belongs to another connection, or it is already revoked).
-	// It takes one row out of force on its own: an acknowledgement given against a text below the minimum
-	// is superseded this way when the member acknowledges the current text.
+	// It takes one row out of force on its own: an acknowledgement given against an older text, below the
+	// minimum or not, is superseded this way when the member acknowledges the text they were shown.
 	RevokeConnectionZDRAcknowledgement(ctx context.Context, connectionID, acknowledgementID, reason string, at time.Time) (ConnectionZDRAcknowledgement, error)
 	// PurgeOrganizationConnectionZDR erases an organisation's ZDR records and acknowledgements (the
 	// organisation purge). It is the only operation that deletes ledger rows; a second run finds
@@ -317,6 +317,10 @@ type ConnectionZDRAcknowledgementList struct {
 	// Active and Revoked count every row of the organisation, not only the ones in Items.
 	Active  int
 	Revoked int
+	// ActiveByTextVersion splits Active by the text version each active row was given against, over every row of
+	// the organisation; its values sum to Active. The store does not compare versions: a caller that holds the
+	// minimum decides which of these rows are in force.
+	ActiveByTextVersion map[string]int
 }
 
 // ZDRAcknowledgementRevokedEventType is the audit event written for each acknowledgement a

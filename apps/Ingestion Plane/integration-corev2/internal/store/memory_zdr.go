@@ -252,7 +252,7 @@ func (r *MemoryRepository) ListOrganizationConnectionZDRAcknowledgements(_ conte
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	var list ConnectionZDRAcknowledgementList
+	list := ConnectionZDRAcknowledgementList{ActiveByTextVersion: map[string]int{}}
 	all := []ConnectionZDRAcknowledgement{}
 	for _, ack := range r.zdrAcks {
 		if ack.OrganizationID != organizationID {
@@ -261,6 +261,7 @@ func (r *MemoryRepository) ListOrganizationConnectionZDRAcknowledgements(_ conte
 		all = append(all, cloneZDRAcknowledgement(ack))
 		if ack.RevokedAt == nil {
 			list.Active++
+			list.ActiveByTextVersion[ack.TextVersion]++
 		} else {
 			list.Revoked++
 		}

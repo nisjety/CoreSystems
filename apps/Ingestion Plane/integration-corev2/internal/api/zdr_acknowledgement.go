@@ -209,32 +209,47 @@ func zdrAckInForce(c *fiber.Ctx, cfg ServerConfig, connectionID, digest, minimum
 	}
 	for _, ack := range rows {
 		if ack.Digest == digest && ack.Active() && zdr.TextVersionAtLeast(ack.TextVersion, minimum) {
-			return zdrAckSummary(ack), nil
+			return zdrAckSummary(ack, minimum), nil
 		}
 	}
 	return nil, nil
 }
 
-func zdrAckSummary(ack store.ConnectionZDRAcknowledgement) fiber.Map {
+func zdrAckSummary(ack store.ConnectionZDRAcknowledgement, minimum string) fiber.Map {
 	return fiber.Map{
-		"id": ack.ID, "state": zdrAckState(ack), "digest": ack.Digest, "textVersion": ack.TextVersion,
+		"id": ack.ID, "state": zdrAckState(ack, minimum), "digest": ack.Digest, "textVersion": ack.TextVersion,
 		"locale": ack.Locale, "acknowledgedVia": ack.AcknowledgedVia, "acknowledgedAt": ack.AcknowledgedAt,
 	}
 }
 
-func zdrAckState(ack store.ConnectionZDRAcknowledgement) string {
-	if ack.Active() {
-		return "active"
+// The states of one ledger row as the API names it: the state of a summary and the status of the admin list. An
+// active row is in force only while its text is at or above the minimum. An active row below the minimum is
+// superseded: it is not in force, exactly as the posture read rules, so it is never shown as active.
+const (
+	zdrAckStateActive     = "active"
+	zdrAckStateSuperseded = "superseded"
+	zdrAckStateRevoked    = "revoked"
+)
+
+// zdrAckState names one ledger row. A revoked row is revoked whatever its text.
+func zdrAckState(ack store.ConnectionZDRAcknowledgement, minimum string) string {
+	switch {
+	case !ack.Active():
+		return zdrAckStateRevoked
+	case !zdr.TextVersionAtLeast(ack.TextVersion, minimum):
+		return zdrAckStateSuperseded
+	default:
+		return zdrAckStateActive
 	}
-	return "revoked"
 }
 
 // zdrAcknowledge records the member's acknowledgement. The digest and text version must be the
 // ones the member was shown; a change in either is a 409 with the current assessment. The text is
 // composed on the server from the versioned wording and stored with its hash, and the acknowledgement,
-// its audit row and the outbox event commit together. A replay returns the stored acknowledgement. An
-// acknowledgement of the same digest whose text is below the minimum is not in force, so it is superseded
-// first, in the same transaction, and the member's acknowledgement of the current text is then created.
+// its audit row and the outbox event commit together. A replay returns the stored acknowledgement, and only one
+// on the same text version. An acknowledgement of the same digest on another text version (below the minimum, or
+// simply older) is superseded first, in the same transaction, and the acknowledgement of the text the member was
+// shown is then created.
 func zdrAcknowledge(c *fiber.Ctx, cfg ServerConfig) error {
 	connection, err := zdrOwnedModelConnection(c, cfg)
 	if err != nil {
@@ -316,9 +331,9 @@ func zdrAcknowledge(c *fiber.Ctx, cfg ServerConfig) error {
 	var saved store.ConnectionZDRAcknowledgement
 	var created bool
 	err = withAuditTransaction(c.UserContext(), cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
-		// The row below the minimum holds the one active slot of this digest, so the insert below would answer
-		// with it as a replay. It is superseded first, in this transaction, with its audit row.
-		if err := zdrSupersedeBelowMinimum(c.UserContext(), tx, persist, connection.ID, body.Digest, wording.MinimumVersion(), time.Now().UTC()); err != nil {
+		// An active row of this digest on another text version holds the one active slot the insert needs, so the
+		// insert would answer with it as a replay. It is superseded first, in this transaction, with its audit row.
+		if err := zdrSupersedeOlderText(c.UserContext(), tx, persist, connection.ID, body.Digest, text.Version, wording.MinimumVersion(), time.Now().UTC()); err != nil {
 			return err
 		}
 		var insertErr error
@@ -368,22 +383,24 @@ func zdrAcknowledge(c *fiber.Ctx, cfg ServerConfig) error {
 	}
 	return c.Status(status).JSON(fiber.Map{
 		"success": true,
-		"data":    fiber.Map{"created": created, "acknowledgement": zdrAckSummary(saved)},
+		"data":    fiber.Map{"created": created, "acknowledgement": zdrAckSummary(saved, wording.MinimumVersion())},
 	})
 }
 
-// zdrSupersedeBelowMinimum revokes the active acknowledgement of the digest whose text is below the minimum,
-// with reason text_version_superseded, and audits the revocation through persist, in the caller's transaction.
-// Such a row is not in force, and it holds the one active slot the (connection, digest) index allows, so it
-// must be taken out of force before the acknowledgement of the current text is inserted. A row that a
-// concurrent request has already revoked is no longer in force, so it is skipped.
-func zdrSupersedeBelowMinimum(ctx context.Context, tx store.AuditTransaction, persist func(store.AuditEvent) error, connectionID, digest, minimum string, at time.Time) error {
+// zdrSupersedeOlderText revokes the active acknowledgements of the digest that the one being recorded replaces,
+// with reason text_version_superseded, and audits each revocation through persist, in the caller's transaction.
+// The (connection, digest) index allows one active row, so a row that stays in force must be the one being
+// recorded: an active row on the text being recorded and at or above the minimum is left alone, and the insert
+// answers with it as a replay. Any other active row of the digest is taken out of force first: one on another text
+// version, and one below the minimum, which is not in force. A row that a concurrent request has already revoked is
+// no longer in force, so it is skipped.
+func zdrSupersedeOlderText(ctx context.Context, tx store.AuditTransaction, persist func(store.AuditEvent) error, connectionID, digest, textVersion, minimum string, at time.Time) error {
 	rows, err := tx.ListConnectionZDRAcknowledgements(ctx, connectionID, true)
 	if err != nil {
 		return err
 	}
 	for _, ack := range rows {
-		if ack.Digest != digest || zdr.TextVersionAtLeast(ack.TextVersion, minimum) {
+		if ack.Digest != digest || (ack.TextVersion == textVersion && zdr.TextVersionAtLeast(ack.TextVersion, minimum)) {
 			continue
 		}
 		revoked, revokeErr := tx.RevokeConnectionZDRAcknowledgement(ctx, connectionID, ack.ID, store.ZDRRevokeTextVersionOutdated, at)
@@ -559,7 +576,8 @@ func zdrWaiverRoute(record store.ConnectionZDR) bool {
 }
 
 // zdrAdminList is the organisation's ledger for its admins: ids, states and counts, never the text
-// the member accepted and never a request id.
+// the member accepted and never a request id. A row's status is active (in force), superseded (active but its text
+// is below the minimum, so not in force) or revoked; counts are over every row of the organisation.
 func zdrAdminList(c *fiber.Ctx, cfg ServerConfig) error {
 	principal, ok := auth.PrincipalFromContext(c)
 	if !ok || auth.IsInternalCall(c) || strings.TrimSpace(principal.OrganizationID) == "" {
@@ -579,24 +597,43 @@ func zdrAdminList(c *fiber.Ctx, cfg ServerConfig) error {
 	if cfg.Repo == nil {
 		return writeZDRError(c, zdrRefuse(fiber.StatusServiceUnavailable, "repository_unavailable", "The connection store is unavailable."))
 	}
+	wording, err := zdrWording(cfg)
+	if err != nil {
+		return writeZDRError(c, err)
+	}
 	list, err := cfg.Repo.ListOrganizationConnectionZDRAcknowledgements(c.UserContext(), principal.OrganizationID, limit)
 	if err != nil {
 		return writeZDRError(c, err)
 	}
+	minimum := wording.MinimumVersion()
+	inForce, superseded := zdrActiveSplit(list.ActiveByTextVersion, minimum)
 	items := make([]fiber.Map, 0, len(list.Items))
 	for _, ack := range list.Items {
 		items = append(items, fiber.Map{
 			"id": ack.ID, "connectionId": ack.ConnectionID, "userId": ack.UserID, "providerKey": ack.ProviderKey,
 			"capability": string(ack.Capability), "textVersion": ack.TextVersion, "locale": ack.Locale,
 			"acknowledgedVia": ack.AcknowledgedVia, "acknowledgedAt": ack.AcknowledgedAt,
-			"revokedAt": ack.RevokedAt, "revokeReason": ack.RevokeReason, "status": zdrAckState(ack),
+			"revokedAt": ack.RevokedAt, "revokeReason": ack.RevokeReason, "status": zdrAckState(ack, minimum),
 		})
 	}
 	return success(c, fiber.Map{
 		"items":     items,
-		"counts":    fiber.Map{"active": list.Active, "revoked": list.Revoked},
+		"counts":    fiber.Map{"active": inForce, "superseded": superseded, "revoked": list.Revoked},
 		"truncated": list.Active+list.Revoked > len(list.Items),
 	})
+}
+
+// zdrActiveSplit splits the organisation's active rows, counted by the text version each was given against, into
+// the rows in force (at or above the minimum) and the superseded rows below it. Each active row is counted once.
+func zdrActiveSplit(activeByVersion map[string]int, minimum string) (inForce, superseded int) {
+	for version, count := range activeByVersion {
+		if zdr.TextVersionAtLeast(version, minimum) {
+			inForce += count
+		} else {
+			superseded += count
+		}
+	}
+	return inForce, superseded
 }
 
 // zdrHasOrgAdminRole reports whether an organisation role grants the admin view. Roles are the

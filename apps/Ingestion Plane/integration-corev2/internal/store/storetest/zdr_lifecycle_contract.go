@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/triodelab/integration-corev2/internal/store"
+	"github.com/triodelab/integration-corev2/internal/zdr"
 )
 
 // RunConnectionZDRLifecycleContract covers what Z-13 adds to the ledger: revocation when a
@@ -140,6 +141,43 @@ func RunConnectionZDRLifecycleContract(t *testing.T, h ZDRHarness) {
 		limited, err := f.repo.ListOrganizationConnectionZDRAcknowledgements(context.Background(), f.org, 1)
 		if err != nil || len(limited.Items) != 1 || limited.Active != 1 || limited.Revoked != 1 {
 			t.Fatalf("a limit must cap the rows, not the counts: %+v err=%v", limited, err)
+		}
+	})
+
+	t.Run("the admin listing splits the active rows by text version and counts no revoked row", func(t *testing.T) {
+		f := newFixture(t, h)
+		ctx := context.Background()
+		f.apply(1)
+		f.acknowledge(digestOf(1)) // on text version 2026-10-a
+		second := f.seedConnection(f.org, f.user)
+		third := f.seedConnection(f.org, f.user)
+		for _, connection := range []string{second, third} {
+			if _, err := f.repo.ApplyConnectionZDRAssessment(ctx, assessmentFor(connection, zdr.CapabilityNotSupported, zdr.BasisProviderTermsKnown, 1)); err != nil {
+				t.Fatalf("assess %s: %v", connection, err)
+			}
+		}
+		onText := func(connection, version string) {
+			t.Helper()
+			in := f.ackInput(digestOf(1))
+			in.ConnectionID, in.TextVersion = connection, version
+			if _, created, err := f.repo.InsertConnectionZDRAcknowledgement(ctx, in); err != nil || !created {
+				t.Fatalf("acknowledge %s on %s: created=%v err=%v", connection, version, created, err)
+			}
+		}
+		onText(second, "2026-10-b")
+		onText(third, "2026-10-c")
+		if _, err := f.repo.RevokeConnectionZDRAcknowledgements(ctx, third, store.ZDRRevokeOwnerRevoked, time.Time{}); err != nil {
+			t.Fatalf("revoke the third connection: %v", err)
+		}
+
+		list, err := f.repo.ListOrganizationConnectionZDRAcknowledgements(ctx, f.org, 10)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if list.Active != 2 || list.Revoked != 1 || len(list.ActiveByTextVersion) != 2 ||
+			list.ActiveByTextVersion["2026-10-a"] != 1 || list.ActiveByTextVersion["2026-10-b"] != 1 {
+			t.Fatalf("listing = active %d, revoked %d, active by text version %v; want 2, 1, one active row each on 2026-10-a and 2026-10-b",
+				list.Active, list.Revoked, list.ActiveByTextVersion)
 		}
 	})
 }
