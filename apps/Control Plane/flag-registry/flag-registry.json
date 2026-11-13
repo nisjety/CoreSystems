@@ -38,6 +38,16 @@
       ]
     },
     {
+      "name": "AGENT_DEFINITION_VERSIONS",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "EP-6 S7/S8: the agent builder routes (draft, publish, versions) and the draft preview of a chat body. Off, the builder routes answer 404 and a chat body's agent_preview is left as it came. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
       "name": "ALLOWED_MODELS",
       "kind": "text",
       "owner": "model-plane",
@@ -268,6 +278,46 @@
       ]
     },
     {
+      "name": "CHAT_MEDIA_TRANSCRIPTS_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "W5, F-t3-090: POST /api/v1/chat/transcripts, which transcribes one audio upload and saves the text as a private media_transcript document. Off, the route answers 404 media_transcripts_disabled. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "CHAT_PROCESS_OUTPUT_READ_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "W4-P3: the owner's read of one background process's output, GET /api/v1/chat/runs/{run_id}/processes/{pid}/output. Off, the route answers 404 process_output_disabled. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "CHAT_SNAPSHOTS_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "W4-SH-6: the owner's governed snapshot links and the member's read of a shared snapshot. Off, every snapshot route answers 404 chat_snapshots_disabled. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "CLIENT_ENV_IDENTITY",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "F-t3-098: GET /api/v1/client-config reports the closed environment label (production, staging, development or other) derived from APP_ENV. Off, the key is left out. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
       "name": "CODEX_SUBSCRIPTION_ENABLED",
       "kind": "switch",
       "owner": "ingestion-plane",
@@ -358,6 +408,16 @@
       "codePath": "apps/Ingestion Plane/integration-corev2/internal/config/config.go"
     },
     {
+      "name": "CREDENTIAL_BINDINGS_UI_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "W4-CC-8: the org credential-binding routes and the custom REST connector route. Off, each answers 404 credential_bindings_disabled and nothing is sent to Integration Core. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
       "name": "CRON_SWEEPER_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -424,6 +484,16 @@
       "declarations": [
         { "service": "session-core", "env": "EVENT_TRIGGERS_ENABLED", "default": "false" }
       ]
+    },
+    {
+      "name": "EVENT_TRIGGERS_UI_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "W4-T7: the event trigger routes (/api/v1/event-triggers and its dry run). Off, the paths are absent and answer the fallback 404. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
       "name": "EVENT_TRIGGER_FIRE_ENABLED",
@@ -1543,6 +1613,16 @@
         { "service": "user-core", "env": "USER_CORE_ORG_ERASURE_CONSUMER_ENABLED", "default": "false" }
       ],
       "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
+    },
+    {
+      "name": "VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "WS14 S5: the orchestration continue route forwards the question form (a question_id with the answers or a skip) that continues a run paused for its owner's answer. Off, such a body is 400 invalid_request. Only the literal true turns it on.",
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
       "name": "VEREVON_INTENT_ENABLED",
