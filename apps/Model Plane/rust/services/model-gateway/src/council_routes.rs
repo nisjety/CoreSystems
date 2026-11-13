@@ -36,7 +36,7 @@ use crate::http_routes::{authenticated_inference_request, grpc_status_to_http, H
 use crate::pricing::{CostBasis, RateSnapshot};
 use crate::state::AppState;
 
-/// The opt-in switch. Only the literal `true` (case-insensitive) turns it on.
+/// The opt-in switch. Only the literal `true` turns it on.
 pub const ENABLED_ENV: &str = "MODEL_GATEWAY_MODEL_COUNCIL_ENABLED";
 /// The question is bounded in characters. A longer one is refused, not cut.
 pub const MAX_QUESTION_CHARS: usize = 4_000;
@@ -114,7 +114,10 @@ fn synthesis_schema() -> Value {
 /// Whether the council is on in this process. Read at each call, as the other turn switches are.
 #[must_use]
 pub fn enabled() -> bool {
-    mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
+    std::env::var(ENABLED_ENV)
+        .ok()
+        .as_deref()
+        .is_some_and(|value| value.trim() == "true")
 }
 
 /// The switch first, so a deployment without the feature answers the same for every caller.

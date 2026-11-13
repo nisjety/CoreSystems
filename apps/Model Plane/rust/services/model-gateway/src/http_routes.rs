@@ -14991,7 +14991,35 @@ const NAMED_AGENT_THREADS_ENV: &str = "MODEL_GATEWAY_NAMED_AGENT_THREADS";
 
 /// Whether the named-agent thread filter is on in this process (EP-6 P3).
 fn named_agent_threads_enabled() -> bool {
-    mp_contracts::loop_fold::switch_from(std::env::var(NAMED_AGENT_THREADS_ENV).ok().as_deref())
+    named_agent_threads_enabled_with(&|key| std::env::var(key).ok())
+}
+
+/// [`named_agent_threads_enabled`] over an injected lookup, so the parsing is testable. Only the
+/// literal `true`, with surrounding whitespace ignored, turns it on.
+fn named_agent_threads_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(NAMED_AGENT_THREADS_ENV).is_some_and(|value| value.trim() == "true")
+}
+
+#[cfg(test)]
+mod named_agent_threads_switch_tests {
+    use super::*;
+
+    #[test]
+    fn named_agent_threads_switch_is_only_the_literal_true() {
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("yes"),
+            Some("TRUE"),
+            Some("True"),
+        ] {
+            let get = |_: &str| value.map(str::to_owned);
+            assert!(!named_agent_threads_enabled_with(&get), "{value:?}");
+        }
+        let get = |_: &str| Some("true".to_owned());
+        assert!(named_agent_threads_enabled_with(&get));
+    }
 }
 
 /// The longest agent subject id a thread listing filters by (EP-6 P3).

@@ -28,7 +28,7 @@ use crate::auth::{Claims, VerifiedInferenceBearer};
 use crate::http_routes::{authenticated_inference_request, grpc_status_to_http, HttpJsonError};
 use crate::state::AppState;
 
-/// The opt-in switch. Only the literal `true` (case-insensitive) turns it on.
+/// The opt-in switch. Only the literal `true` turns it on.
 pub const ENABLED_ENV: &str = "MODEL_GATEWAY_REASONING_TRANSLATE_ENABLED";
 /// The operator's model for this route. Unset or blank, the route runs on the title-class model
 /// that the other side tasks use.
@@ -112,7 +112,10 @@ fn input_refusal(error: InputError) -> HttpJsonError {
 /// switches are.
 #[must_use]
 pub fn enabled() -> bool {
-    mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
+    std::env::var(ENABLED_ENV)
+        .ok()
+        .as_deref()
+        .is_some_and(|value| value.trim() == "true")
 }
 
 /// The switch first, so a deployment without the feature answers the same for every caller.

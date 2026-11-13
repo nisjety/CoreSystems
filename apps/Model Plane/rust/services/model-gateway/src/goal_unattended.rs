@@ -52,7 +52,13 @@ const MAX_GOAL_ID_LEN: usize = 64;
 /// Whether the switch is on in this process. Read at each call, as the other goal switches are.
 #[must_use]
 pub fn enabled() -> bool {
-    mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
+    enabled_with(&|key| std::env::var(key).ok())
+}
+
+/// [`enabled`] over an injected lookup, so the parsing is testable. Only the literal `true`, with
+/// surrounding whitespace ignored, turns it on; `TRUE`, `True` and `1` leave it off.
+fn enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(ENABLED_ENV).is_some_and(|value| value.trim() == "true")
 }
 
 /// Whether a goal can be set to keep working while away on this deployment: this switch, the
@@ -548,12 +554,23 @@ mod tests {
     }
 
     #[test]
-    fn unattended_switch_reads_true_in_any_case_and_nothing_else() {
-        for value in [None, Some(""), Some("1"), Some("yes")] {
-            assert!(!mp_contracts::loop_fold::switch_from(value), "{value:?}");
+    fn unattended_switch_reads_only_the_literal_true() {
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("yes"),
+            Some("TRUE"),
+            Some("True"),
+            Some("tRuE"),
+        ] {
+            let get = |_: &str| value.map(str::to_owned);
+            assert!(!enabled_with(&get), "{value:?}");
         }
-        assert!(mp_contracts::loop_fold::switch_from(Some("true")));
-        assert!(mp_contracts::loop_fold::switch_from(Some("TRUE")));
+        let get = |_: &str| Some("true".to_owned());
+        assert!(enabled_with(&get));
+        let get = |_: &str| Some(" true ".to_owned());
+        assert!(enabled_with(&get));
     }
 
     #[test]
