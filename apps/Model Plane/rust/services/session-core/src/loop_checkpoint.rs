@@ -4110,3 +4110,8 @@ mod revocation_tests {
         close_rpc(&pool, &owner, &run_id, 1).await.expect("unscoped close");
     }
 }
+
+/// Input-pause fold tests (build plan WS14 S5 b3).
+#[cfg(test)]
+#[path = "loop_checkpoint_input_pause_tests.rs"]
+mod input_pause_tests;

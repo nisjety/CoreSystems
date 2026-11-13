@@ -1088,3 +1088,8 @@ mod db_tests {
         assert_eq!(b[0].user_id, user_b);
     }
 }
+
+/// EP-7 S5: the goal item build.
+#[cfg(test)]
+#[path = "attention_events_goal_tests.rs"]
+mod goal_tests;

@@ -1012,3 +1012,8 @@ mod tests {
         assert_eq!(refused.message(), DISABLED);
     }
 }
+
+/// F-f10-16: a Space skill's history is never read through an owner match.
+#[cfg(test)]
+#[path = "skill_versions_space_tests.rs"]
+mod space_tests;

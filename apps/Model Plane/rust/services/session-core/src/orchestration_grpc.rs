@@ -10998,3 +10998,8 @@ mod approval_edit_tests {
         assert!(fields.is_empty());
     }
 }
+
+/// Owed rule-proposal edge tests (verification plan 3.2).
+#[cfg(test)]
+#[path = "orchestration_grpc_owed_tests.rs"]
+mod owed_tests;

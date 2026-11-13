@@ -26343,3 +26343,7 @@ mod space_memory_tests;
 #[cfg(test)]
 #[path = "grpc_space_mentions_tests.rs"]
 mod space_mentions_tests;
+
+#[cfg(test)]
+#[path = "grpc_owed_tests.rs"]
+mod owed_tests;

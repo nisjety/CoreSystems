@@ -2957,3 +2957,8 @@ mod tests {
         test_support::clean_space(&pool, &org, &space).await;
     }
 }
+
+/// Owed GDPR tests (verification plan 3.2).
+#[cfg(test)]
+#[path = "gdpr_owed_tests.rs"]
+mod owed_tests;

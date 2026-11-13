@@ -662,7 +662,11 @@ mod tests {
         // many versions a turn has, inactive ones included. Erasing a thread removes every turn.
         // The bootstrap-send replay check is a resend lookup too: it asks whether this
         // client_message_id was already stored, on any branch.
-        const WRITER_SIDE: [&str; 8] = [
+        // The Space-deletion legal-hold candidate read (GDPR-order-rel1) resolves a memory row's
+        // `message:` citation to its thread, whichever branch the cited turn is on: a citation of
+        // an inactive version is still a citation, and a hold on that thread must refuse the
+        // erasure. It returns thread ids only, never content.
+        const WRITER_SIDE: [&str; 9] = [
             "SELECT id, sequence, role, content FROM messages",
             "SELECT id, sequence, role, content, post_kind, author_subject_id FROM messages",
             "SELECT id FROM messages",
@@ -671,6 +675,7 @@ mod tests {
             "SELECT COUNT(*) FROM messages AS s",
             "DELETE FROM messages",
             "SELECT EXISTS(SELECT 1 FROM messages WHERE thread_id = $1 AND client_message_id = $2)",
+            "JOIN messages m ON m.id = substr(sl.link, 9)",
         ];
         let sources = [
             ("grpc.rs", include_str!("grpc.rs")),

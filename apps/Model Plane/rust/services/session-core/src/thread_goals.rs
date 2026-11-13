@@ -367,6 +367,14 @@ fn refuse_service_writer(caller: &VerifiedIdentity) -> Result<(), Status> {
 /// The pump guard every goal turn claim runs, and the audit mark of a pump-sent turn (EP-7 S4).
 mod claim_guard;
 
+/// Goal verdict and judge-gate tests (EP-7 S3, OD-58).
+#[cfg(test)]
+mod verdict_tests;
+
+/// The judge's unattended turn read on held threads (EP-7 S6, OD-58).
+#[cfg(test)]
+mod judge_read_tests;
+
 fn invalid(detail: &str) -> Status {
     Status::invalid_argument(format!("{INVALID_GOAL}: {detail}"))
 }

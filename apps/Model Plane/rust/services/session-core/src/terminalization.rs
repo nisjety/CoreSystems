@@ -5017,3 +5017,13 @@ mod zdr_refusal_tests {
         assert!(validate_managed_start_request(&start(""), true).is_ok());
     }
 }
+
+/// Build plan EP-1 S5: a timed-out takeover pause ends its run as browser_help_timed_out.
+#[cfg(test)]
+#[path = "terminalization_browser_timeout_tests.rs"]
+mod browser_timeout_db_tests;
+
+/// EP-6 S9: the agent version pin on the run row.
+#[cfg(test)]
+#[path = "terminalization_agent_pin_tests.rs"]
+mod agent_pin_tests;

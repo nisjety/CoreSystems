@@ -8767,3 +8767,8 @@ mod approval_edit_db_tests {
         assert_eq!((call.revision, call.original_action_fingerprint.as_str()), (0, ""));
     }
 }
+
+/// Owed approvals tests (verification plan 3.2, 3.3).
+#[cfg(test)]
+#[path = "orchestration_store_owed_tests.rs"]
+mod owed_tests;
