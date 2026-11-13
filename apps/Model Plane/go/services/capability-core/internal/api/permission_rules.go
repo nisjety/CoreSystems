@@ -222,10 +222,12 @@ func toolPatternMatches(pattern, tool string) bool {
 
 // targetPatternMatches reads a rule's target against the call's. A rule of kind "any" covers every call whatever its
 // target, so it still applies on a ZDR or waived run, which sends no value. Any other rule needs the call's kind to be
-// its kind, and a "*" pattern then covers every target of that kind, including one whose value is withheld. Domains and
-// recipients compare case-insensitively: "*.suffix" covers the suffix itself and every subdomain of it, and any other
-// pattern is that exact domain. A command prefix is that exact token, or every token with the prefix when the pattern
-// ends in "*".
+// its kind, and a "*" pattern then covers every target of that kind. A ZDR or waived run sends the kind and withholds
+// the value (execution-core a_retention_bound_call_names_no_target_value). A rule of the kind cannot be ruled out of
+// covering the withheld target, so it covers the call as a "*" pattern does: a deny it makes stands and an ask it makes
+// asks. Such a run is never decided more loosely than the same call on a persistent run. Domains and recipients compare
+// case-insensitively: "*.suffix" covers the suffix itself and every subdomain of it, and any other pattern is that exact
+// domain. A command prefix is that exact token, or every token with the prefix when the pattern ends in "*".
 func targetPatternMatches(ruleKind, pattern, kind, value string) bool {
 	if ruleKind == PermissionTargetAny {
 		return true
@@ -238,13 +240,19 @@ func targetPatternMatches(ruleKind, pattern, kind, value string) bool {
 	}
 	switch ruleKind {
 	case PermissionTargetCommandPrefix:
+		if value == "" {
+			return true
+		}
 		if strings.HasSuffix(pattern, "*") {
-			return value != "" && strings.HasPrefix(value, strings.TrimSuffix(pattern, "*"))
+			return strings.HasPrefix(value, strings.TrimSuffix(pattern, "*"))
 		}
 		return pattern != "" && pattern == value
 	case PermissionTargetDomain, PermissionTargetRecipient:
+		if value == "" {
+			return true
+		}
 		host, want := strings.ToLower(value), strings.ToLower(pattern)
-		if host == "" || want == "" {
+		if want == "" {
 			return false
 		}
 		if suffix, wildcard := strings.CutPrefix(want, "*."); wildcard {

@@ -717,8 +717,9 @@ const orgPermissionRulesUnavailableReason = "org_rules_unavailable"
 // applyPermissionRules tightens a decision with the org's permission rules (W5-074). It never loosens. A deny stands.
 // A rule that denies makes a deny; a rule that asks makes an ask, whether the decision was an allow or an ask already.
 // A failed read of the table makes an ask for an effect class and leaves a read class as it was. The target is the one
-// execution-core derived for the call; a ZDR or waived run sends the kind alone, so only the rules that need no value
-// apply to it.
+// execution-core derived for the call. A ZDR or waived run sends the kind alone, and a rule of that kind then covers
+// the call whatever its value (targetPatternMatches), so the rules decide such a run as they decide a persistent one,
+// and never more loosely.
 func (s *Server) applyPermissionRules(
 	ctx context.Context,
 	orgID string,
