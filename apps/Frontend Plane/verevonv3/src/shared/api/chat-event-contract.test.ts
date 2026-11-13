@@ -57,6 +57,7 @@ const UNUSED_KEYS: Record<string, readonly string[]> = {
   reasoning_delta: ['request_id'],
   queued_input: ['request_id'],
   memory_recall: ['request_id'],
+  search_provenance: ['request_id'],
   verification: ['request_id'],
   // The pause frame is a signal to open the question card: the SPA reads the run, request and question ids
   // and does not read the status the frame repeats (FU-11 regenerated the golden with it).
@@ -88,7 +89,8 @@ const TABLES: Tables = {
 /** Helpers in chat-client.ts that read the payload they are given; their reads belong to the case that calls them. */
 const READING_HELPERS: readonly string[] = [
   'emitCitation', 'failureTiming', 'failureFeature', 'parseTurnTiming', 'usageProgressFrame', 'sourceScopeAppliedEvent',
-  'citationPassage', 'artifactProvenance', 'artifactEditor', 'goalProgressEventOf',
+  'citationPassage', 'artifactProvenance', 'artifactEditor', 'goalProgressEventOf', 'searchProvenanceEvent',
+  'questionOrigin',
 ]
 /** Helpers that read the payload in another module, which that module's own tests cover. */
 const READ_ELSEWHERE: readonly string[] = ['servedByField', 'runParkedFrameOf']

@@ -261,6 +261,7 @@ export type ChatEventPayloads = {
     residency?: string
     retention_class?: string
     retention_reason?: string
+    routing_decision?: Record<string, unknown>
     unpriced_calls: number
   }
   /** Rust variants: UsageProgress. */
@@ -277,6 +278,7 @@ export type ChatEventPayloads = {
     output_tokens: number
     phase: string
     routing?: string
+    routing_decision?: Record<string, unknown>
     unpriced_calls?: number
     warning?: string
   }

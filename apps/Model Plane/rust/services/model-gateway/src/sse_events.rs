@@ -3852,6 +3852,18 @@ mod payload_contract {
         ChatEvent::Grounding { grounding }
     }
 
+    /// The routing decision an answer's route note states (W5-073-b): one of each closed token `route_decision`
+    /// writes. The golden records the key as an object, so the tokens themselves never reach it.
+    fn route_decision_sample() -> Value {
+        json!({
+            "mode": "balance",
+            "complexity": "moderate",
+            "reason": "mode_cell",
+            "role": "follow_ups",
+            "role_source": "table",
+        })
+    }
+
     fn usage(full: bool) -> ChatEvent {
         ChatEvent::Usage {
             input_tokens: 12,
@@ -3880,7 +3892,8 @@ mod payload_contract {
                 cache_write_usd: 0.0,
                 output_usd: 0.0005,
             }),
-            routing_decision: None,
+            // The full sample states its route note's decision; the minimal one keeps its shape.
+            routing_decision: full.then(route_decision_sample),
         }
     }
 
@@ -3892,10 +3905,11 @@ mod payload_contract {
         basis: Option<crate::pricing::CostBasis>,
         unpriced_calls: u32,
     ) -> ChatEvent {
-        usage_progress_with_ceiling(calls, cost_usd, basis, unpriced_calls, None, None)
+        usage_progress_with_ceiling(calls, cost_usd, basis, unpriced_calls, None, None, None)
     }
 
-    /// A progress frame of the same turn, carrying the run ceiling it states.
+    /// A progress frame of the same turn, carrying the run ceiling it states, the budget's routing token and
+    /// the routing decision its route note states (W5-073-b).
     fn usage_progress_with_ceiling(
         calls: u32,
         cost_usd: Option<f64>,
@@ -3903,6 +3917,7 @@ mod payload_contract {
         unpriced_calls: u32,
         ceiling: Option<crate::sse_events::run_ceiling::CeilingProgress>,
         routing: Option<&'static str>,
+        routing_decision: Option<Value>,
     ) -> ChatEvent {
         ChatEvent::UsageProgress {
             phase: crate::usage_meter::CallPhase::ToolRound,
@@ -3924,7 +3939,7 @@ mod payload_contract {
             },
             ceiling,
             routing,
-            routing_decision: None,
+            routing_decision,
         }
     }
 
@@ -4110,9 +4125,28 @@ mod payload_contract {
                     warning: Some(crate::sse_events::run_ceiling::CeilingWarning::Eighty),
                 }),
                 None,
+                None,
             ),
             // A frame whose call the budget moved states its routing (WS27-S7).
-            usage_progress_with_ceiling(2, Some(0.001), Some(crate::pricing::CostBasis::Metered), 0, None, Some("tier_shifted")),
+            usage_progress_with_ceiling(
+                2,
+                Some(0.001),
+                Some(crate::pricing::CostBasis::Metered),
+                0,
+                None,
+                Some("tier_shifted"),
+                None,
+            ),
+            // The answer's own frame states the routing decision its route note stated (W5-073-b).
+            usage_progress_with_ceiling(
+                2,
+                Some(0.001),
+                Some(crate::pricing::CostBasis::Metered),
+                0,
+                None,
+                None,
+                Some(route_decision_sample()),
+            ),
             turn_timing(false),
             turn_timing(true),
             ChatEvent::Title { title: s("") },
@@ -4528,6 +4562,20 @@ mod payload_contract {
             VARIANTS.iter().copied().collect::<BTreeSet<_>>(),
             "samples() and VARIANTS name different variants"
         );
+    }
+
+    /// The golden states `routing_decision` on both usage families: the terminal frame and the answer's progress
+    /// frame carry it, so the key the SPA reads is in the contract (W5-073-b).
+    #[test]
+    fn the_golden_states_a_routing_decision_on_both_usage_families() {
+        let carries = |family: &str| {
+            samples().iter().any(|event| {
+                event.name() == family && event.payload(REQUEST_ID)["routing_decision"].is_object()
+            })
+        };
+        for family in ["usage", "usage_progress"] {
+            assert!(carries(family), "{family} states no routing_decision");
+        }
     }
 
     #[test]

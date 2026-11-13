@@ -1252,6 +1252,12 @@
           ],
           "presence": "optional"
         },
+        "routing_decision": {
+          "types": [
+            "object"
+          ],
+          "presence": "optional"
+        },
         "unpriced_calls": {
           "types": [
             "integer"
@@ -1336,6 +1342,12 @@
         "routing": {
           "types": [
             "string"
+          ],
+          "presence": "optional"
+        },
+        "routing_decision": {
+          "types": [
+            "object"
           ],
           "presence": "optional"
         },
