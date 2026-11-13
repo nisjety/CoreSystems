@@ -335,6 +335,9 @@ services:
       SPACE_ENTRY_LINKS_UI: ${SPACE_ENTRY_LINKS_UI:-true}
       SPACE_COMMAND_PALETTE_UI: ${SPACE_COMMAND_PALETTE_UI:-true}
       SPACE_THREAD_FORK_API: ${SPACE_THREAD_FORK_API:-false}
+      # D2-461: a follow-up turn on an existing thread resolves its Space server-side, or is refused typed.
+      # It also gates the ZDR retention thread-Space lookup (ZDR-Z-19a). Only the literal true enables it; off, unchanged.
+      SPACE_THREAD_SCOPE_RESOLVE: ${SPACE_THREAD_SCOPE_RESOLVE:-false}
       # EP-11 S1: members may author private skills (BFF). Only the literal true enables it; off, the admin-only answer stands.
       SKILL_MEMBER_AUTHORING: ${SKILL_MEMBER_AUTHORING:-false}
       # WS11-S7: the attention inbox (/attention) and the thread follow control. Rollout controls only; the

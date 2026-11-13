@@ -1924,3 +1924,7 @@ mod human_browse_flag_tests {
         assert!(human_browse_enabled(Some("yes")));
     }
 }
+
+#[cfg(test)]
+#[path = "config_zdr_switch_tests.rs"]
+mod zdr_switch_tests;
