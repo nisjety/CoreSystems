@@ -3023,7 +3023,10 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 		// capability check — same placement as every other connection
 		// route's assertConnectionAccess.
 		principal, authenticated := auth.PrincipalFromContext(c)
+		// Only the executor's integration:otp:read token takes the OTP owner rule; any
+		// other service token names no end user here and takes the ordinary owner rule.
 		if authenticated && !auth.IsInternalCall(c) && principal.PrincipalType == "service" &&
+			principal.HasScope(auth.IntegrationOTPReadScope) &&
 			actions.IsMailOTPReadOperation(body.Operation) && cfg.Actions.OTPReadEnabled() {
 			// mail.otp.read (E3.1-g, D-E31g-5): the executor's service token
 			// names no end user, so the acting user comes from

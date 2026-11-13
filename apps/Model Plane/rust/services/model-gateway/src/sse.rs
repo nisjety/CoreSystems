@@ -2120,23 +2120,72 @@ mod ended_research_record_tests {
         stop_for_ended_record("rsr_ended", &running, &cancel);
         assert!(!cancel.load(Ordering::Relaxed));
     }
+
+    #[test]
+    fn a_stored_end_keeps_its_closed_word_and_a_running_record_names_no_end() {
+        assert_eq!(ended_research_status("expired"), Some("expired"));
+        assert_eq!(ended_research_status("cancelled"), Some("cancelled"));
+        assert_eq!(ended_research_status("running"), None);
+        assert_eq!(ended_research_status("paused"), None);
+    }
 }
 
-/// Ends a run's record (E4.6 062b). A refused or failed end is logged by its class and never fails the turn: the record
-/// then runs to its deadline, as a run whose stream dropped does.
+/// Ends a run's record (E4.6 062b). Returns whether the stream may announce the run's end: `false` only when the
+/// record refused the end because it had already ended (cancelled or expired elsewhere), so the stored end stands and
+/// the stream must not contradict it. A failed end is logged by its class and never fails the turn: the record then
+/// runs to its deadline, as a run whose stream dropped does, and the stream announces its status as before.
 async fn finish_research_run(
     state: &AppState,
     bearer: &VerifiedModelBearer,
     request: mp_contracts::model_plane::v1::FinishRequest,
-) {
+) -> bool {
     let run_id = request.id.clone();
     let client = crate::research_runs::ResearchRunsClient::new(state.research_run_client.clone());
-    if let Err(status) = client.finish(bearer, request).await {
-        tracing::warn!(
-            code = ?status.code(),
-            run_id = %run_id,
-            "research run could not be finished"
-        );
+    match client.finish(bearer, request).await {
+        Ok(applied) => applied,
+        Err(status) => {
+            tracing::warn!(
+                code = ?status.code(),
+                run_id = %run_id,
+                "research run could not be finished"
+            );
+            true
+        }
+    }
+}
+
+/// The stored end of a research record that ended elsewhere before this stream's own end (E4.6 062b), read back after
+/// that end was refused: its closed status word, `expired` included. `None` when the read fails or the record holds no
+/// ended word, so the stream then announces its own end, as it does when an end fails.
+async fn stored_research_run_end(
+    state: &AppState,
+    bearer: &VerifiedModelBearer,
+    run_id: &str,
+) -> Option<&'static str> {
+    let client = crate::research_runs::ResearchRunsClient::new(state.research_run_client.clone());
+    match client.get(bearer, run_id).await {
+        Ok(run) => ended_research_status(&run.status),
+        Err(status) => {
+            tracing::warn!(
+                code = ?status.code(),
+                run_id = %run_id,
+                "research run could not be read back after its end was refused"
+            );
+            None
+        }
+    }
+}
+
+/// The closed status word a research record ends with (E4.6 062b), `expired` included. `running`, and any word this
+/// build does not know, names no end: `None`.
+fn ended_research_status(stored: &str) -> Option<&'static str> {
+    match stored {
+        "completed" => Some("completed"),
+        "stopped" => Some("stopped"),
+        "cancelled" => Some("cancelled"),
+        "failed" => Some("failed"),
+        "expired" => Some("expired"),
+        _ => None,
     }
 }
 
@@ -4976,8 +5025,25 @@ pub async fn invoke_stream_sse(
             // than answering from evidence the user already declined to wait
             // for. Same terminal shape as the streaming loop's cancel branch.
             if research.cancelled {
+                // The run's end is written first. A record that ended elsewhere before it (a sweep expired it past its
+                // deadline) refuses that end and keeps its stored one, so the stream reports the stored end rather than
+                // a client stop the record contradicts. A stored end that cannot be read back gets the stream's own end,
+                // as a failed end does.
+                let mut run_status = research_status(research.stop);
+                let mut stop_reason = "client cancelled";
+                if let Some(id) = &research_run {
+                    let ended = research_finish(id, &research, &req_id, effective_zdr);
+                    if !finish_research_run(&session_state, &session_bearer, ended).await {
+                        if let Some(stored) =
+                            stored_research_run_end(&session_state, &session_bearer, id).await
+                        {
+                            run_status = stored;
+                            stop_reason = stored;
+                        }
+                    }
+                }
                 // The run's end goes out before the stream's terminal frame, so it is buffered before the stream is
-                // marked ended. Its status is the one the finish below records.
+                // marked ended.
                 if let Some(id) = &research_run {
                     emit_and_buffer(
                         &tx,
@@ -4988,7 +5054,7 @@ pub async fn invoke_stream_sse(
                         &req_id,
                         crate::sse_events::ChatEvent::ResearchRun {
                             id: id.clone(),
-                            status: research_status(research.stop),
+                            status: run_status,
                         },
                     )
                     .await;
@@ -5002,7 +5068,7 @@ pub async fn invoke_stream_sse(
                 )
                 .await;
                 let stopped = crate::sse_events::ChatEvent::Stopped {
-                    reason: "client cancelled".to_owned(),
+                    reason: stop_reason.to_owned(),
                 };
                 emit_and_buffer(
                     &tx,
@@ -5015,10 +5081,6 @@ pub async fn invoke_stream_sse(
                 )
                 .await;
                 end_resume_buffer(&stream_buffers, &buffer_key, seq).await;
-                if let Some(id) = &research_run {
-                    let ended = research_finish(id, &research, &req_id, effective_zdr);
-                    finish_research_run(&session_state, &session_bearer, ended).await;
-                }
                 if let Err(error) = crate::session_flow::cancel_direct_inference_run_authenticated(
                     &session_state,
                     &session_run_for_terminal,
@@ -5034,20 +5096,23 @@ pub async fn invoke_stream_sse(
             deep_research_ran = true;
             if let Some(id) = &research_run {
                 let ended = research_finish(id, &research, &req_id, effective_zdr);
-                finish_research_run(&session_state, &session_bearer, ended).await;
-                emit_and_buffer(
-                    &tx,
-                    &stream_buffers,
-                    &buffer_key,
-                    &mut seq,
-                    &features,
-                    &req_id,
-                    crate::sse_events::ChatEvent::ResearchRun {
-                        id: id.clone(),
-                        status: research_status(research.stop),
-                    },
-                )
-                .await;
+                // A record that ended elsewhere refused this end, and its stored end stands: the stream announces no
+                // status of its own for the run, since that status would contradict the record.
+                if finish_research_run(&session_state, &session_bearer, ended).await {
+                    emit_and_buffer(
+                        &tx,
+                        &stream_buffers,
+                        &buffer_key,
+                        &mut seq,
+                        &features,
+                        &req_id,
+                        crate::sse_events::ChatEvent::ResearchRun {
+                            id: id.clone(),
+                            status: research_status(research.stop),
+                        },
+                    )
+                    .await;
+                }
                 seq = sink.sync_cursor(seq).await;
             }
             turn_evidence.tool_successes += research.tool_successes;

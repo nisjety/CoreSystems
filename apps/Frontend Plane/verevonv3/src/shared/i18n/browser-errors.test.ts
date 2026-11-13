@@ -152,6 +152,15 @@ describe('browser error copy', () => {
     'visual_change',
     'persistent_profile',
     'global_run_cap',
+    // Also not codes: Quarry's attach and tab-control reasons. browser_attach_refusal (browser.rs, called by
+    // forward_quarry_failure) matches them against a closed set and answers each one with the gateway's own code
+    // (browser_attach_exists, browser_attach_unavailable, browser_attach_zdr_unsupported, browser_tab_control_forbidden),
+    // so the raw reason never reaches the person.
+    'attach_exists',
+    'no_attached_agent',
+    'attach_disabled',
+    'attach_zdr_refused',
+    'control_transition_requires_human',
   ])
 
   it('has copy for every code the gateway browser and scrape handlers emit', () => {

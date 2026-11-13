@@ -99,6 +99,11 @@ const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
     reason:
       'shows the backend sentence on purpose: the org-deletion replies are flat text without a code and the component tests pin them; converting needs a code from the backend first',
   },
+  'features/dashboard/home/BrowserChrome.tsx': {
+    sites: 1,
+    reason:
+      'reviewed: a comparison, not a display. isStaleTabEpoch reads the envelope message only to recognise stale_tab_epoch; the text shown is browserErrorMessage (describeApiError) with the copy of that code, so no raw text is rendered',
+  },
   'features/dashboard/home/BrowserTimelineDetail.tsx': { sites: 1, reason: UNREVIEWED },
   'features/dashboard/home/DashboardCards.tsx': { sites: 3, reason: UNREVIEWED },
   'features/dashboard/home/DashboardComposer.tsx': {

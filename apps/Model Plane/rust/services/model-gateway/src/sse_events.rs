@@ -502,8 +502,9 @@ pub enum ChatEvent {
     ResearchRun {
         /// The run's id, `rsr_` followed by a ULID, assigned by Session Core.
         id: String,
-        /// `running`, or the terminal status the end records: `completed`, `stopped`, `cancelled` or `failed`.
-        /// Session Core's `expired` (a run past its deadline) is never written by this stream, so it is not here.
+        /// `running`, or the terminal status the end records: `completed`, `stopped`, `cancelled` or `failed`. A run
+        /// that ended elsewhere first carries the status its record holds, `expired` for a run past its deadline, since
+        /// this stream never writes `expired` itself.
         status: &'static str,
     },
     /// Deterministic "memory was used" indicator (harness-adoption §7.9,

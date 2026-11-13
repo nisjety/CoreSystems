@@ -651,6 +651,19 @@ export function streamFailurePresentation(
         unavailable: false,
         action: 'none',
       }
+    case 'research_run_active':
+      // The Model Plane refused a deep-research turn before any search or model ran, because the thread already
+      // runs a research run (Q4 E4.6 062b). No answer was saved. The server's text is English operator wording with
+      // that run's id, and is never shown. Trying again only helps once the running run has finished.
+      return {
+        message: tr(
+          'Denne tråden har allerede en dyp research som kjører. Prøv igjen når den er ferdig. Ingen svar ble laget.',
+          'This thread already has a deep research run in progress. Try again when it finishes. No answer was produced.',
+        ),
+        unsaved: true,
+        unavailable: false,
+        action: 'retry',
+      }
     case 'agentic_subscription_disabled':
       // The server refused Do on the ChatGPT subscription because its switch is
       // off, before any model ran. Sending the same turn again would be refused

@@ -412,6 +412,10 @@ Callers execute named provider operations against an exact Verevon connection:
 }
 ```
 
+The operation catalog at `GET /api/v1/actions/catalog` lists these operations with their
+capability and kind. It is dark: the route is registered only while
+`INTEGRATION_ACTIONS_CATALOG=true`, and without it the path answers 404.
+
 Supported operation families:
 
 - Microsoft: `profile`, `calendar.events`, `mail.messages`, `drive.files`,
