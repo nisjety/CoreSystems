@@ -9130,6 +9130,41 @@ pub async fn run_tool_rounds_for_model(
     .await
 }
 
+/// The typed refusal a failed subscription tool decision ends the phase on (V3-mg-1): a zero-retention or
+/// model-entitlement refusal, which keeps its catalogue code. The refusal waits on the sink for the stream handler, which
+/// words it as the refusal and not as the route's generic failure. `None` for any other failure.
+fn subscription_decision_refusal(
+    error: &tonic::Status,
+    sink: Option<&crate::sse_events::RichEventSink>,
+) -> Option<&'static str> {
+    let refusal = crate::sse_events::TypedRefusal::from_status(error)?;
+    let code = refusal.code();
+    tracing::warn!(code, "selected subscription refused the tool decision");
+    if let Some(sink) = sink {
+        sink.set_typed_refusal(refusal);
+    }
+    Some(code)
+}
+
+/// Keeps the typed zero-retention or model-entitlement refusal an artifact source check ended on (V3-mg-1-rel2), so the
+/// stream frames it under the refusal's own code. It is kept on and off the subscription route alike: without it the
+/// check's failure would be worded as a failed draft, when the turn was refused. Any other failure keeps its reason.
+fn keep_source_check_refusal(
+    error: &tonic::Status,
+    sink: Option<&crate::sse_events::RichEventSink>,
+) {
+    let Some(refusal) = crate::sse_events::TypedRefusal::from_status(error) else {
+        return;
+    };
+    tracing::warn!(
+        code = refusal.code(),
+        "a typed refusal ended the artifact source check"
+    );
+    if let Some(sink) = sink {
+        sink.set_typed_refusal(refusal);
+    }
+}
+
 /// [`run_tool_rounds_for_model`] for a turn whose attached files are staged into
 /// `code_interpreter` (WS08-S5). The files are validated request state: the model
 /// is told what `attachments/` holds, and every `code_interpreter` call carries
@@ -9722,8 +9757,13 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                         round_call.finish("error", None);
                     }
                     if !subscription_connection_id.is_empty() {
-                        // A typed refusal ends the phase on its own reason;
-                        // its timing waits on the sink for the stream handler.
+                        // A typed zero-retention or model-entitlement refusal ends the phase under its own code
+                        // (V3-mg-1); its frame waits on the sink for the stream handler, which words it.
+                        if let Some(code) = subscription_decision_refusal(&e, sink) {
+                            return Err(code);
+                        }
+                        // A typed subscription reason ends the phase on its own
+                        // code; its timing waits on the sink for the stream handler.
                         if let Some(failure) = crate::subscription_failure::on_route(&e, true) {
                             tracing::warn!(code = failure.code, "selected subscription refused the tool decision");
                             let code = failure.code;
@@ -10058,7 +10098,12 @@ pub async fn run_tool_rounds_for_model_with_attachments(
                             }
                             Err(code)
                         }
-                        None => Err(crate::result_validation::check_failure_reason(&status)),
+                        None => {
+                            // A typed zero-retention or model-entitlement refusal ends the check under its own code,
+                            // on and off the subscription route (V3-mg-1-rel2); its frame waits on the sink.
+                            keep_source_check_refusal(&status, sink);
+                            Err(crate::result_validation::check_failure_reason(&status))
+                        }
                     },
                     Ok(Ok(checked)) => Ok(checked),
                 },
@@ -18268,10 +18313,24 @@ mod tests {
     }
 
     /// The inference core a decision-round test serves. It keeps every `Infer` request and
-    /// answers each with no tool call, which ends the tool phase after its first decision.
-    /// The loop makes no other RPC, so every other method refuses.
+    /// answers each with no tool call, which ends the tool phase after its first decision,
+    /// or with the status [`RecordingCore::refusing`] gave it. The loop makes no other RPC,
+    /// so every other method refuses.
     #[derive(Default)]
-    struct RecordingCore(std::sync::Arc<std::sync::Mutex<Vec<mpv1::InferRequest>>>);
+    struct RecordingCore(
+        std::sync::Arc<std::sync::Mutex<Vec<mpv1::InferRequest>>>,
+        std::sync::Arc<std::sync::Mutex<Option<tonic::Status>>>,
+    );
+
+    impl RecordingCore {
+        /// A core that keeps every request and refuses each `Infer` with `status` (V3-mg-1).
+        fn refusing(status: tonic::Status) -> Self {
+            Self(
+                Default::default(),
+                std::sync::Arc::new(std::sync::Mutex::new(Some(status))),
+            )
+        }
+    }
 
     type RecordedInferStream = std::pin::Pin<
         Box<dyn futures::Stream<Item = Result<mpv1::InferChunk, tonic::Status>> + Send>,
@@ -18294,6 +18353,10 @@ mod tests {
             request: tonic::Request<mpv1::InferRequest>,
         ) -> Result<tonic::Response<mpv1::InferResponse>, tonic::Status> {
             self.0.lock().expect("recorded requests").push(request.into_inner());
+            let refusal = self.1.lock().expect("refusal").clone();
+            if let Some(status) = refusal {
+                return Err(status);
+            }
             Ok(tonic::Response::new(mpv1::InferResponse {
                 model_used: "mock".to_owned(),
                 stop_reason: "end_turn".to_owned(),
@@ -18549,6 +18612,468 @@ mod tests {
         };
         let request = Box::pin(first_decision_request(head, Some(plan))).await;
         assert_eq!(request.prompt_tiers, None);
+    }
+
+    /// One tool phase whose first decision round the inference core refuses with `status`, on the subscription
+    /// connection `conn-1` when `subscription` is set. Returns the phase's outcome and the sink it reported on.
+    async fn decision_refused(
+        status: tonic::Status,
+        subscription: bool,
+    ) -> (Result<(), &'static str>, crate::sse_events::RichEventSink) {
+        let mut state = crate::state::AppState::new();
+        state.inference_client = serve_recording_core(RecordingCore::refusing(status)).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let sink = crate::sse_events::RichEventSink::new(tx, Vec::new(), "req-decision".to_owned());
+        let (provider, connection) = if subscription {
+            ("openai-codex-subscription", "conn-1")
+        } else {
+            ("openai", "")
+        };
+        let outcome = run_tool_rounds_for_model(
+            &state,
+            "req-decision",
+            "run-decision",
+            "org_test",
+            "user_test",
+            "thread_test",
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            None,
+            false,
+            None,
+            false,
+            0,
+            "gpt-5.6-terra",
+            "",
+            provider,
+            connection,
+            vec![ChatMessage {
+                role: "user".to_owned(),
+                content: "hello".to_owned(),
+                ..Default::default()
+            }],
+            vec![ToolDefinition {
+                name: "fetch_url".to_owned(),
+                description: "Fetch a page.".to_owned(),
+                parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+            }],
+            "auto".to_owned(),
+            None,
+            None,
+            Some(&sink),
+            &crate::vision::parts::ImageParts::none(),
+            None,
+        )
+        .await
+        .map(|_| ());
+        (outcome, sink)
+    }
+
+    /// V3-mg-1: a typed zero-retention or model-entitlement refusal that ends a subscription decision keeps its code:
+    /// the phase ends under it, and the refusal waits on the sink for the stream handler, not the subscription reason.
+    #[tokio::test]
+    async fn a_typed_refusal_ends_the_subscription_decision_under_its_own_code() {
+        use mp_contracts::model_entitlement::{
+            code as entitlement_code, Reason, Refusal as EntitlementRefusal,
+        };
+        use mp_contracts::zdr_refusal::{code as zdr_code, Refusal as ZdrRefusal};
+
+        let zdr =
+            ZdrRefusal::CONNECTION_NOT_ACKNOWLEDGED.grpc_status(tonic::Code::FailedPrecondition);
+        let (outcome, sink) = decision_refused(zdr, true).await;
+        assert_eq!(outcome, Err(zdr_code::CONNECTION_NOT_ACKNOWLEDGED));
+        let kept = sink
+            .take_typed_refusal()
+            .expect("the refusal waits on the sink");
+        assert_eq!(kept.code(), zdr_code::CONNECTION_NOT_ACKNOWLEDGED);
+        assert!(!kept.retryable());
+        assert!(sink.take_subscription_failure().is_none());
+
+        let entitled =
+            EntitlementRefusal::not_entitled("gpt-x", Reason::NotInAllowList).grpc_status();
+        let (outcome, sink) = decision_refused(entitled, true).await;
+        assert_eq!(outcome, Err(entitlement_code::MODEL_NOT_ENTITLED));
+        let kept = sink
+            .take_typed_refusal()
+            .expect("the refusal waits on the sink");
+        assert_eq!(kept.code(), entitlement_code::MODEL_NOT_ENTITLED);
+        assert!(sink.take_subscription_failure().is_none());
+    }
+
+    /// V3-mg-1: an ordinary subscription decision failure is still the route's generic failure, and a typed subscription
+    /// reason is still its own, with no typed refusal kept.
+    #[tokio::test]
+    async fn an_ordinary_subscription_decision_failure_keeps_the_route_failure() {
+        let ordinary = tonic::Status::unavailable("upstream said: token expired for acct 42");
+        let (outcome, sink) = decision_refused(ordinary, true).await;
+        assert_eq!(
+            outcome,
+            Err(crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE)
+        );
+        assert!(sink.take_typed_refusal().is_none());
+        assert!(sink.take_subscription_failure().is_none());
+
+        let mut usage = tonic::Status::resource_exhausted("upstream said: quota for acct 42");
+        usage.metadata_mut().insert(
+            crate::compaction::PROVIDER_ERROR_KIND_TRAILER,
+            crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT
+                .parse()
+                .expect("ascii"),
+        );
+        let (outcome, sink) = decision_refused(usage, true).await;
+        assert_eq!(
+            outcome,
+            Err(crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT)
+        );
+        assert!(sink.take_typed_refusal().is_none());
+        assert_eq!(
+            sink.take_subscription_failure()
+                .map(|(failure, _)| failure.code),
+            Some(crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT)
+        );
+    }
+
+    /// V3-mg-1: off the subscription route a refused decision keeps the loop's own handling: the phase is not ended
+    /// with a reason, and no refusal is kept for a stream that never reads one.
+    #[tokio::test]
+    async fn off_the_subscription_route_a_refused_decision_keeps_the_loop_going() {
+        let zdr = mp_contracts::zdr_refusal::Refusal::CONNECTION_NOT_ACKNOWLEDGED
+            .grpc_status(tonic::Code::FailedPrecondition);
+        let (outcome, sink) = decision_refused(zdr, false).await;
+        assert!(outcome.is_ok(), "{outcome:?}");
+        assert!(sink.take_typed_refusal().is_none());
+    }
+
+    /// The inference core an artifact source-check test serves (V3-mg-1-rel2). The first decision round proposes one
+    /// `create_artifact` call. Every validation request, the check's own review, is refused with the status it holds,
+    /// on the unary route and on the stream route alike. Every other method refuses, as in [`RecordingCore`].
+    struct DraftCheckCore(tonic::Status);
+
+    #[tonic::async_trait]
+    impl mpv1::inference_core_server::InferenceCore for DraftCheckCore {
+        type InferStreamStream = RecordedInferStream;
+        type StreamVideoGenerationContentStream = RecordedVideoStream;
+
+        async fn infer(
+            &self,
+            request: tonic::Request<mpv1::InferRequest>,
+        ) -> Result<tonic::Response<mpv1::InferResponse>, tonic::Status> {
+            let request = request.into_inner();
+            if request.purpose == mpv1::InferPurpose::Validation as i32 {
+                return Err(self.0.clone());
+            }
+            let arguments = serde_json::json!({
+                "id": "note-1",
+                "title": "Notat",
+                "kind": "document",
+                "content": "Prosjektet er godkjent.",
+            });
+            Ok(tonic::Response::new(mpv1::InferResponse {
+                model_used: request.model,
+                provider_used: if request.subscription_connection_id.is_empty() {
+                    "openai".to_owned()
+                } else {
+                    "openai-codex-subscription".to_owned()
+                },
+                stop_reason: "tool_use".to_owned(),
+                tool_calls: vec![mpv1::ToolCall {
+                    id: "call-1".to_owned(),
+                    name: "create_artifact".to_owned(),
+                    arguments_json: arguments.to_string(),
+                }],
+                ..Default::default()
+            }))
+        }
+
+        async fn infer_stream(
+            &self,
+            _: tonic::Request<mpv1::InferRequest>,
+        ) -> Result<tonic::Response<RecordedInferStream>, tonic::Status> {
+            Err(self.0.clone())
+        }
+        async fn create_embedding(
+            &self,
+            _: tonic::Request<mpv1::CreateEmbeddingRequest>,
+        ) -> Result<tonic::Response<mpv1::CreateEmbeddingResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("create_embedding"))
+        }
+        async fn get_model_access(
+            &self,
+            _: tonic::Request<mpv1::GetModelAccessRequest>,
+        ) -> Result<tonic::Response<mpv1::GetModelAccessResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("get_model_access"))
+        }
+        async fn list_models(
+            &self,
+            _: tonic::Request<mpv1::ListModelsRequest>,
+        ) -> Result<tonic::Response<mpv1::ListModelsResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("list_models"))
+        }
+        async fn synthesize_speech(
+            &self,
+            _: tonic::Request<mpv1::SynthesizeSpeechRequest>,
+        ) -> Result<tonic::Response<mpv1::SynthesizeSpeechResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("synthesize_speech"))
+        }
+        async fn transcribe_speech(
+            &self,
+            _: tonic::Request<mpv1::TranscribeSpeechRequest>,
+        ) -> Result<tonic::Response<mpv1::TranscribeSpeechResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("transcribe_speech"))
+        }
+        async fn list_speech_voices(
+            &self,
+            _: tonic::Request<mpv1::ListSpeechVoicesRequest>,
+        ) -> Result<tonic::Response<mpv1::ListSpeechVoicesResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("list_speech_voices"))
+        }
+        async fn translate_text(
+            &self,
+            _: tonic::Request<mpv1::TranslateTextRequest>,
+        ) -> Result<tonic::Response<mpv1::TranslateTextResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("translate_text"))
+        }
+        async fn batch_translate_text(
+            &self,
+            _: tonic::Request<mpv1::BatchTranslateTextRequest>,
+        ) -> Result<tonic::Response<mpv1::BatchTranslateTextResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("batch_translate_text"))
+        }
+        async fn detect_text_language(
+            &self,
+            _: tonic::Request<mpv1::DetectTextLanguageRequest>,
+        ) -> Result<tonic::Response<mpv1::DetectTextLanguageResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("detect_text_language"))
+        }
+        async fn list_translation_languages(
+            &self,
+            _: tonic::Request<mpv1::ListTranslationLanguagesRequest>,
+        ) -> Result<tonic::Response<mpv1::ListTranslationLanguagesResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("list_translation_languages"))
+        }
+        async fn generate_image(
+            &self,
+            _: tonic::Request<mpv1::GenerateImageRequest>,
+        ) -> Result<tonic::Response<mpv1::GenerateImageResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("generate_image"))
+        }
+        async fn analyze_image(
+            &self,
+            _: tonic::Request<mpv1::AnalyzeImageRequest>,
+        ) -> Result<tonic::Response<mpv1::AnalyzeImageResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("analyze_image"))
+        }
+        async fn extract_image_text(
+            &self,
+            _: tonic::Request<mpv1::ExtractImageTextRequest>,
+        ) -> Result<tonic::Response<mpv1::ExtractImageTextResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("extract_image_text"))
+        }
+        async fn analyze_document(
+            &self,
+            _: tonic::Request<mpv1::AnalyzeDocumentRequest>,
+        ) -> Result<tonic::Response<mpv1::AnalyzeDocumentResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("analyze_document"))
+        }
+        async fn analyze_language(
+            &self,
+            _: tonic::Request<mpv1::AnalyzeLanguageRequest>,
+        ) -> Result<tonic::Response<mpv1::AnalyzeLanguageResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("analyze_language"))
+        }
+        async fn create_realtime_session(
+            &self,
+            _: tonic::Request<mpv1::CreateRealtimeSessionRequest>,
+        ) -> Result<tonic::Response<mpv1::CreateRealtimeSessionResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("create_realtime_session"))
+        }
+        async fn create_video_generation_job(
+            &self,
+            _: tonic::Request<mpv1::CreateVideoGenerationJobRequest>,
+        ) -> Result<tonic::Response<mpv1::CreateVideoGenerationJobResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("create_video_generation_job"))
+        }
+        async fn get_video_generation_job(
+            &self,
+            _: tonic::Request<mpv1::GetVideoGenerationJobRequest>,
+        ) -> Result<tonic::Response<mpv1::GetVideoGenerationJobResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("get_video_generation_job"))
+        }
+        async fn stream_video_generation_content(
+            &self,
+            _: tonic::Request<mpv1::StreamVideoGenerationContentRequest>,
+        ) -> Result<tonic::Response<RecordedVideoStream>, tonic::Status> {
+            Err(tonic::Status::unimplemented(
+                "stream_video_generation_content",
+            ))
+        }
+    }
+
+    /// Serves `core` on a loopback port and returns a client connected to it.
+    async fn serve_draft_core(
+        core: DraftCheckCore,
+    ) -> mpv1::inference_core_client::InferenceCoreClient<tonic::transport::Channel> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the draft core");
+        let addr = listener.local_addr().expect("draft core address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(mpv1::inference_core_server::InferenceCoreServer::new(core))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .ok();
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{addr}"))
+            .expect("draft core endpoint")
+            .connect()
+            .await
+            .expect("connect to the draft core");
+        mpv1::inference_core_client::InferenceCoreClient::new(channel)
+    }
+
+    /// One artifact turn whose source check the inference core refuses with `refusal`, on the subscription connection
+    /// `conn-1` when `subscription` is set. The turn attaches one source, so the check runs (V3-mg-1-rel2). Returns the
+    /// phase's outcome and the sink it reported on.
+    async fn source_check_refused(
+        refusal: tonic::Status,
+        subscription: bool,
+    ) -> (Result<(), &'static str>, crate::sse_events::RichEventSink) {
+        let mut state = crate::state::AppState::new();
+        state.inference_client = serve_draft_core(DraftCheckCore(refusal)).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let sink = crate::sse_events::RichEventSink::new(tx, Vec::new(), "req-check".to_owned());
+        let (provider, connection) = if subscription {
+            ("openai-codex-subscription", "conn-1")
+        } else {
+            ("openai", "")
+        };
+        let outcome = run_tool_rounds_for_model(
+            &state,
+            "req-check",
+            "run-check",
+            "org_test",
+            "user_test",
+            "thread_test",
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            None,
+            false,
+            None,
+            false,
+            0,
+            "gpt-5.6-terra",
+            "",
+            provider,
+            connection,
+            vec![
+                ChatMessage {
+                    role: "system".to_owned(),
+                    content: crate::source_validation::CONVERSATION_SCOPE_NOTICE.to_owned(),
+                    ..Default::default()
+                },
+                ChatMessage {
+                    role: "user".to_owned(),
+                    content: "Skriv et notat om kilden.\n\n--- VEDLEGG: kilde.txt ---\nProsjektet er godkjent.\n--- SLUTT PÅ VEDLEGG: kilde.txt ---".to_owned(),
+                    ..Default::default()
+                },
+            ],
+            vec![ToolDefinition {
+                name: "create_artifact".to_owned(),
+                description: "Create an artifact.".to_owned(),
+                parameters_json: r#"{"type":"object","properties":{}}"#.to_owned(),
+            }],
+            "auto".to_owned(),
+            None,
+            None,
+            Some(&sink),
+            &crate::vision::parts::ImageParts::none(),
+            None,
+        )
+        .await
+        .map(|_| ());
+        (outcome, sink)
+    }
+
+    /// V3-mg-1-rel2: a typed zero-retention or model-entitlement refusal that ends an artifact source check keeps its own
+    /// code, on and off the subscription route. The turn ends under that code, the refusal waits on the sink for the
+    /// stream frame, and the draft is not reported as failing its check.
+    #[tokio::test]
+    async fn a_typed_refusal_ends_the_source_check_under_its_own_code() {
+        use mp_contracts::model_entitlement::{
+            code as entitlement_code, Reason, Refusal as EntitlementRefusal,
+        };
+        use mp_contracts::zdr_refusal::{code as zdr_code, Refusal as ZdrRefusal};
+
+        for subscription in [false, true] {
+            let zdr = ZdrRefusal::CONNECTION_NOT_ACKNOWLEDGED
+                .grpc_status(tonic::Code::FailedPrecondition);
+            let (outcome, sink) = source_check_refused(zdr, subscription).await;
+            assert_eq!(
+                outcome,
+                Err(zdr_code::CONNECTION_NOT_ACKNOWLEDGED),
+                "subscription route: {subscription}"
+            );
+            let kept = sink
+                .take_typed_refusal()
+                .expect("the refusal waits on the sink");
+            assert_eq!(kept.code(), zdr_code::CONNECTION_NOT_ACKNOWLEDGED);
+            assert!(!kept.retryable());
+            assert!(sink.take_subscription_failure().is_none());
+
+            let entitled =
+                EntitlementRefusal::not_entitled("gpt-x", Reason::NotInAllowList).grpc_status();
+            let (outcome, sink) = source_check_refused(entitled, subscription).await;
+            assert_eq!(
+                outcome,
+                Err(entitlement_code::MODEL_NOT_ENTITLED),
+                "subscription route: {subscription}"
+            );
+            let kept = sink
+                .take_typed_refusal()
+                .expect("the refusal waits on the sink");
+            assert_eq!(kept.code(), entitlement_code::MODEL_NOT_ENTITLED);
+            assert!(sink.take_subscription_failure().is_none());
+        }
+    }
+
+    /// V3-mg-1-rel2: a source check that fails for any other reason keeps the reason it had. That is the checker's own
+    /// verdict off the route, and a subscription's typed reason on it. No refusal is kept for a stream to frame.
+    #[tokio::test]
+    async fn an_ordinary_source_check_failure_keeps_its_reason() {
+        let plain = tonic::Status::failed_precondition("upstream said: bad draft for acct 42");
+        let (outcome, sink) = source_check_refused(plain, false).await;
+        assert_eq!(outcome, Err(crate::result_validation::VALIDATION_FAILED));
+        assert!(sink.take_typed_refusal().is_none());
+
+        let mut usage = tonic::Status::resource_exhausted("upstream said: quota for acct 42");
+        usage.metadata_mut().insert(
+            crate::compaction::PROVIDER_ERROR_KIND_TRAILER,
+            crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT
+                .parse()
+                .expect("ascii"),
+        );
+        let (outcome, sink) = source_check_refused(usage, true).await;
+        assert_eq!(
+            outcome,
+            Err(crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT)
+        );
+        assert!(sink.take_typed_refusal().is_none());
+        assert_eq!(
+            sink.take_subscription_failure()
+                .map(|(failure, _)| failure.code),
+            Some(crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT)
+        );
     }
 
     /// A tool definition with only its name, for the offer tests below.

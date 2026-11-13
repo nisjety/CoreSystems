@@ -32,10 +32,16 @@ pub const MAX_CANDIDATES: u8 = 3;
 /// explanation can say what actually stopped it. `rate_limited` is not read
 /// here: any provider may throttle, and only a caller that knows the turn is
 /// on the subscription route may treat it as the subscription's.
+///
+/// A typed zero-retention or model-entitlement refusal is its own reason as well (V3-mg-1-rel2): the turn was refused,
+/// not checked, so it is never the checker's `FailedPrecondition` verdict.
 #[must_use]
 pub fn check_failure_reason(status: &tonic::Status) -> &'static str {
     if let Some(failure) = crate::subscription_failure::on_route(status, false) {
         return failure.code;
+    }
+    if let Some(refusal) = crate::sse_events::TypedRefusal::from_status(status) {
+        return refusal.code();
     }
     let own = matches!(status.message(), VALIDATION_FAILED | VALIDATION_TIMEOUT);
     match status.code() {
@@ -1098,6 +1104,34 @@ mod tests {
         }
         assert_eq!(check_failure_reason(&typed("rate_limited")), VALIDATION_UNAVAILABLE);
         assert_eq!(check_failure_reason(&typed("too_long")), VALIDATION_UNAVAILABLE);
+    }
+
+    /// V3-mg-1-rel2: a typed zero-retention or model-entitlement refusal is its own reason. A bare `FailedPrecondition`
+    /// would otherwise read as the checker's verdict on a draft that was never judged.
+    #[test]
+    fn a_typed_zdr_or_entitlement_refusal_is_its_own_check_failure_reason() {
+        use mp_contracts::model_entitlement::{
+            code as entitlement_code, Reason, Refusal as EntitlementRefusal,
+        };
+        use mp_contracts::zdr_refusal::{code as zdr_code, Refusal as ZdrRefusal};
+
+        let zdr =
+            ZdrRefusal::CONNECTION_NOT_ACKNOWLEDGED.grpc_status(tonic::Code::FailedPrecondition);
+        assert_eq!(
+            check_failure_reason(&zdr),
+            zdr_code::CONNECTION_NOT_ACKNOWLEDGED
+        );
+        let entitled =
+            EntitlementRefusal::not_entitled("gpt-x", Reason::NotInAllowList).grpc_status();
+        assert_eq!(
+            check_failure_reason(&entitled),
+            entitlement_code::MODEL_NOT_ENTITLED
+        );
+        let unavailable = EntitlementRefusal::unavailable().grpc_status();
+        assert_eq!(
+            check_failure_reason(&unavailable),
+            entitlement_code::ENTITLEMENT_UNAVAILABLE
+        );
     }
 
     #[test]

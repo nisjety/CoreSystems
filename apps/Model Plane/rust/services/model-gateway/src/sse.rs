@@ -956,6 +956,193 @@ async fn emit_subscription_failure(
     end_resume_buffer(buffers, buffer_key, *seq).await;
 }
 
+/// Emit a typed zero-retention or model-entitlement refusal as the stream's terminal `error` frame, after durably
+/// terminalizing the run under the refusal's own code (V3-mg-1). The twin of [`emit_subscription_failure`]: the frame
+/// keeps the catalogue's code and retry flag (and a zero-retention refusal's action and feature), so the client is not
+/// offered a retry the refusal cannot take.
+#[allow(clippy::too_many_arguments)] // mirrors emit_subscription_failure
+async fn emit_typed_refusal(
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    state: &AppState,
+    run: &crate::session_flow::SessionRun,
+    bearer: &VerifiedModelBearer,
+    request_id: &str,
+    refusal: crate::sse_events::TypedRefusal,
+    timing: &crate::turn_timing::TurnTiming,
+    resume: (
+        &crate::stream_buffer::StreamBufferStore,
+        &str,
+        &mut u64,
+        &[String],
+    ),
+) {
+    let code = refusal.code();
+    let terminalized = terminalize_prepared_failure(state, run, bearer, code).await;
+    let event = if terminalized {
+        refusal.into_event()
+    } else {
+        let message = refusal.message();
+        let (code, message, retryable) =
+            prepared_failure_report(code, &message, refusal.retryable(), false);
+        crate::sse_events::ChatEvent::Error {
+            code: code.to_owned(),
+            message: message.to_owned(),
+            retryable,
+        }
+    };
+    let (buffers, buffer_key, seq, features) = resume;
+    emit_turn_timing(
+        tx,
+        timing,
+        crate::turn_timing::Outcome::of_failure(code),
+        request_id,
+        (buffers, buffer_key, &mut *seq, features),
+    )
+    .await;
+    emit_and_buffer(tx, buffers, buffer_key, seq, features, request_id, event).await;
+    end_resume_buffer(buffers, buffer_key, *seq).await;
+}
+
+/// How a failed open of the answer stream ends its turn, before any fallback (V3-mg-1, V3-mg-1-rel3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SubscriptionOpenEnd {
+    /// A typed refusal: the run ends under the refusal's own code, and no fallback is tried.
+    Refusal(crate::sse_events::TypedRefusal),
+    /// The subscription's own failure: a typed reason, or the generic route failure.
+    Failure(crate::subscription_failure::SubscriptionFailure),
+}
+
+/// The zero-retention refusal a turn off the subscription route ends on (V3-mg-1-rel3), and only while the typed-refusals
+/// switch (`ZDR_TYPED_REFUSALS_ENABLED`) is on. Off the switch, and for any other status, `None`: nothing is typed off the
+/// route, as before.
+fn off_route_zdr_refusal(
+    error: &tonic::Status,
+    typed_refusals: bool,
+) -> Option<mp_contracts::zdr_refusal::Refusal> {
+    if typed_refusals {
+        mp_contracts::zdr_refusal::Refusal::from_status(error)
+    } else {
+        None
+    }
+}
+
+/// How a failed open of the answer stream ends its turn (V3-mg-1, V3-mg-1-rel3).
+///
+/// On the subscription tool round a typed zero-retention or model-entitlement refusal keeps its own catalogue code and
+/// frame, whatever the switch: it is not the route's generic failure, which a client may retry. Off the round a typed
+/// zero-retention refusal does the same when `typed_refusals` is on (V3-mg-1-rel3): the unary fallback passes the same
+/// route check, so it would be refused again and the turn would end on a retryable outage. Any other failure is the
+/// route's failure, its typed reason or the generic `subscription_route_unavailable`, except an overflow, which the
+/// stream compacts (`None`). Off the round the subscription reason is read as it always was, and no entitlement refusal
+/// ends the open.
+fn subscription_open_end(
+    error: &tonic::Status,
+    subscription_round: bool,
+    typed_refusals: bool,
+) -> Option<SubscriptionOpenEnd> {
+    let refusal = if subscription_round {
+        crate::sse_events::TypedRefusal::from_status(error)
+    } else {
+        off_route_zdr_refusal(error, typed_refusals).map(crate::sse_events::TypedRefusal::Zdr)
+    };
+    if let Some(refusal) = refusal {
+        return Some(SubscriptionOpenEnd::Refusal(refusal));
+    }
+    crate::subscription_failure::on_route(error, subscription_round)
+        .or_else(|| {
+            (subscription_round && !crate::compaction::is_context_length_status(error)).then(|| {
+                crate::subscription_failure::SubscriptionFailure::bare(
+                    crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE,
+                )
+            })
+        })
+        .map(SubscriptionOpenEnd::Failure)
+}
+
+/// The typed refusal a failed answer stream ends a subscription tool-round turn on, mid-stream (V3-mg-1-rel1).
+///
+/// A word-range candidate, and its source review or repair, runs inside the answer stream, so a typed zero-retention or
+/// model-entitlement refusal from any of them arrives as the stream's own error. On the subscription round it keeps its
+/// catalogue code and frame, as it does when the stream opens, and is not the generic `inference_stream_error` that
+/// the failure path words. Off the round, and for any other failure, this is `None`.
+fn subscription_stream_refusal(
+    error: &tonic::Status,
+    subscription_round: bool,
+) -> Option<crate::sse_events::TypedRefusal> {
+    if !subscription_round {
+        return None;
+    }
+    crate::sse_events::TypedRefusal::from_status(error)
+}
+
+/// How a failed unary fallback ends its turn: the run's terminal code and the stream's terminal `error` frame (V3-mg-1,
+/// V3-mg-1-rel3).
+///
+/// On the subscription route a typed zero-retention or model-entitlement refusal keeps its own catalogue code and frame,
+/// and is not offered as a retry. Off the route a typed zero-retention refusal does the same when `typed_refusals` is on
+/// (V3-mg-1-rel3), and a vision refusal and a model-entitlement refusal keep their frames as before. Any other
+/// subscription failure is its typed reason or the generic route failure, never the raw status text; any other failure
+/// off the route is `model_plane_unavailable`.
+fn fallback_failure_end(
+    error: &tonic::Status,
+    subscription_route: bool,
+    typed_refusals: bool,
+) -> (&'static str, crate::sse_events::ChatEvent) {
+    use crate::sse_events::ChatEvent;
+    let typed_refusal = if subscription_route {
+        crate::sse_events::TypedRefusal::from_status(error)
+    } else {
+        off_route_zdr_refusal(error, typed_refusals).map(crate::sse_events::TypedRefusal::Zdr)
+    };
+    if let Some(refusal) = typed_refusal {
+        return (refusal.code(), refusal.into_event());
+    }
+    let subscription_failure = crate::subscription_failure::on_route(error, subscription_route)
+        .or_else(|| {
+            subscription_route.then_some(crate::subscription_failure::SubscriptionFailure::bare(
+                crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE,
+            ))
+        });
+    // A refusal the picked model declared for an image it cannot read is the turn's own answer, not an outage: the run
+    // ends under that code, and so does the frame.
+    let vision_refusal = vision_unsupported_refusal(error);
+    let terminal_code = match (&subscription_failure, vision_refusal) {
+        (Some(failure), _) => failure.code,
+        (None, Some((code, _, _))) => code,
+        (None, None) => "inference_unavailable",
+    };
+    let event = match &subscription_failure {
+        Some(failure) => ChatEvent::subscription_error(
+            failure,
+            crate::subscription_failure::message(
+                failure,
+                crate::subscription_failure::FailureContext::Answer,
+            ),
+        ),
+        None => match mp_contracts::model_entitlement::Refusal::from_status(error) {
+            // The organisation's policy refused the model at inference-core: the frame names that, not an outage.
+            Some(refusal) => ChatEvent::Error {
+                code: refusal.code().to_owned(),
+                message: refusal.message(),
+                retryable: refusal.retryable(),
+            },
+            None => match vision_refusal {
+                Some((code, message, retryable)) => ChatEvent::Error {
+                    code: code.to_owned(),
+                    message: message.to_owned(),
+                    retryable,
+                },
+                None => ChatEvent::Error {
+                    code: "model_plane_unavailable".to_owned(),
+                    message: error.message().to_owned(),
+                    retryable: true,
+                },
+            },
+        },
+    };
+    (terminal_code, event)
+}
+
 /// Safe public explanations for private draft failures. Keep an elapsed deadline
 /// distinct from a rejected candidate without exposing source/provider text.
 /// A model service that did not answer during the check is a third case: the
@@ -1644,6 +1831,305 @@ mod subscription_route_tests {
         let mut structured = schema();
         share_tool_round_prefix(&mut structured, true, tools);
         assert_eq!(structured, schema());
+    }
+}
+
+/// V3-mg-1: the subscription outcome of a failed open of the answer stream, and of a failed unary fallback. On the
+/// subscription route a typed zero-retention or model-entitlement refusal keeps its own catalogue code and frame; an
+/// ordinary failure is the route's generic failure, and an overflow is compacted. Off the route only a typed
+/// zero-retention refusal changes, and only while `ZDR_TYPED_REFUSALS_ENABLED` is on (V3-mg-1-rel3); every other
+/// failure is as before.
+#[cfg(test)]
+mod typed_refusal_route_tests {
+    use super::*;
+    use crate::subscription_failure::{SUBSCRIPTION_ROUTE_UNAVAILABLE, SUBSCRIPTION_USAGE_LIMIT};
+    use mp_contracts::model_entitlement::{
+        code as entitlement_code, Reason, Refusal as EntitlementRefusal,
+    };
+    use mp_contracts::zdr_refusal::{code as zdr_code, Refusal as ZdrRefusal};
+
+    fn zdr_status() -> tonic::Status {
+        ZdrRefusal::CONNECTION_NOT_ACKNOWLEDGED.grpc_status(tonic::Code::FailedPrecondition)
+    }
+
+    fn entitlement_status() -> tonic::Status {
+        EntitlementRefusal::not_entitled("gpt-x", Reason::NotInAllowList).grpc_status()
+    }
+
+    fn ordinary_status() -> tonic::Status {
+        tonic::Status::unavailable("upstream said: token expired for acct 42")
+    }
+
+    fn overflow_status() -> tonic::Status {
+        let mut status = tonic::Status::invalid_argument("upstream said: too long for acct 42");
+        status.metadata_mut().insert(
+            crate::compaction::PROVIDER_ERROR_KIND_TRAILER,
+            "too_long".parse().expect("ascii"),
+        );
+        status
+    }
+
+    fn subscription_status(kind: &str) -> tonic::Status {
+        let mut status = tonic::Status::resource_exhausted("upstream said: quota for acct 42");
+        status.metadata_mut().insert(
+            crate::compaction::PROVIDER_ERROR_KIND_TRAILER,
+            kind.parse().expect("ascii"),
+        );
+        status
+    }
+
+    /// The code a stream open ends on, or `None` when it is not the route's to end.
+    fn open_code(end: Option<SubscriptionOpenEnd>) -> Option<&'static str> {
+        end.map(|end| match end {
+            SubscriptionOpenEnd::Refusal(refusal) => refusal.code(),
+            SubscriptionOpenEnd::Failure(failure) => failure.code,
+        })
+    }
+
+    #[test]
+    fn a_typed_refusal_ends_a_subscription_stream_open_under_its_own_code() {
+        assert_eq!(
+            open_code(subscription_open_end(&zdr_status(), true, true)),
+            Some(zdr_code::CONNECTION_NOT_ACKNOWLEDGED)
+        );
+        assert_eq!(
+            open_code(subscription_open_end(&entitlement_status(), true, true)),
+            Some(entitlement_code::MODEL_NOT_ENTITLED)
+        );
+        assert_eq!(
+            open_code(subscription_open_end(&ordinary_status(), true, true)),
+            Some(SUBSCRIPTION_ROUTE_UNAVAILABLE),
+            "an ordinary failure is the generic route failure"
+        );
+        assert_eq!(
+            open_code(subscription_open_end(&overflow_status(), true, true)),
+            None,
+            "an overflow is compacted by the stream, not ended"
+        );
+        assert_eq!(
+            open_code(subscription_open_end(
+                &subscription_status(SUBSCRIPTION_USAGE_LIMIT),
+                true,
+                true
+            )),
+            Some(SUBSCRIPTION_USAGE_LIMIT),
+            "a typed subscription reason keeps its own code"
+        );
+    }
+
+    #[test]
+    fn off_the_subscription_round_only_a_zdr_refusal_ends_a_stream_open() {
+        // V3-mg-1-rel3: with the switch on, a zero-retention refusal is not retried through the unary fallback off the
+        // route either.
+        assert_eq!(
+            open_code(subscription_open_end(&zdr_status(), false, true)),
+            Some(zdr_code::CONNECTION_NOT_ACKNOWLEDGED)
+        );
+        // An entitlement refusal and an ordinary failure still fall back, as before.
+        for status in [entitlement_status(), ordinary_status()] {
+            assert_eq!(open_code(subscription_open_end(&status, false, true)), None);
+        }
+        // As before, a typed subscription reason other than a throttle is read even off the round.
+        assert_eq!(
+            open_code(subscription_open_end(
+                &subscription_status(SUBSCRIPTION_USAGE_LIMIT),
+                false,
+                true
+            )),
+            Some(SUBSCRIPTION_USAGE_LIMIT)
+        );
+    }
+
+    #[test]
+    fn a_typed_refusal_ends_a_subscription_fallback_under_its_own_code_and_frame() {
+        let (code, event) = fallback_failure_end(&zdr_status(), true, true);
+        assert_eq!(code, zdr_code::CONNECTION_NOT_ACKNOWLEDGED);
+        let payload = event.payload("req-1");
+        assert_eq!(payload["code"], zdr_code::CONNECTION_NOT_ACKNOWLEDGED);
+        assert_eq!(payload["retryable"], false);
+        assert!(payload["action"].is_string(), "{payload}");
+
+        let (code, event) = fallback_failure_end(&entitlement_status(), true, true);
+        assert_eq!(code, entitlement_code::MODEL_NOT_ENTITLED);
+        let payload = event.payload("req-1");
+        assert_eq!(payload["code"], entitlement_code::MODEL_NOT_ENTITLED);
+        assert_eq!(payload["retryable"], false);
+    }
+
+    #[test]
+    fn an_ordinary_fallback_failure_on_the_route_is_the_generic_failure() {
+        let (code, event) = fallback_failure_end(&ordinary_status(), true, true);
+        assert_eq!(code, SUBSCRIPTION_ROUTE_UNAVAILABLE);
+        let payload = event.payload("req-1");
+        assert_eq!(payload["code"], SUBSCRIPTION_ROUTE_UNAVAILABLE);
+        assert_eq!(payload["retryable"], true);
+        assert!(!payload.to_string().contains("acct 42"), "{payload}");
+
+        let (code, _) =
+            fallback_failure_end(&subscription_status(SUBSCRIPTION_USAGE_LIMIT), true, true);
+        assert_eq!(code, SUBSCRIPTION_USAGE_LIMIT);
+    }
+
+    #[test]
+    fn off_the_subscription_route_a_fallback_zdr_refusal_keeps_its_code_and_frame() {
+        // V3-mg-1-rel3, with the switch on: the unary fallback passes the same route check, so the refusal is the turn's
+        // answer, not a retryable outage.
+        let (code, event) = fallback_failure_end(&zdr_status(), false, true);
+        assert_eq!(code, zdr_code::CONNECTION_NOT_ACKNOWLEDGED);
+        let payload = event.payload("req-1");
+        assert_eq!(payload["code"], zdr_code::CONNECTION_NOT_ACKNOWLEDGED);
+        assert_eq!(payload["retryable"], false);
+        assert!(payload["action"].is_string(), "{payload}");
+    }
+
+    #[test]
+    fn off_the_subscription_route_other_fallback_failures_end_as_before() {
+        // Any other failure is still the run's outage off the route, switch on or off, and an entitlement refusal keeps
+        // only the code of its frame, as it did before.
+        for typed in [false, true] {
+            let (code, event) = fallback_failure_end(&ordinary_status(), false, typed);
+            assert_eq!(code, "inference_unavailable");
+            let payload = event.payload("req-1");
+            assert_eq!(payload["code"], "model_plane_unavailable");
+            assert_eq!(payload["retryable"], true);
+            let (code, event) = fallback_failure_end(&entitlement_status(), false, typed);
+            assert_eq!(code, "inference_unavailable");
+            assert_eq!(
+                event.payload("req-1")["code"],
+                entitlement_code::MODEL_NOT_ENTITLED
+            );
+        }
+    }
+
+    #[test]
+    fn the_off_route_zdr_refusal_is_typed_only_while_the_switch_is_on() {
+        // Switch off: today's behaviour, byte for byte. The open falls back to the unary Infer, and a refused fallback is
+        // the outage it always was.
+        assert_eq!(
+            open_code(subscription_open_end(&zdr_status(), false, false)),
+            None
+        );
+        let (code, event) = fallback_failure_end(&zdr_status(), false, false);
+        assert_eq!(code, "inference_unavailable");
+        let payload = event.payload("req-1");
+        assert_eq!(payload["code"], "model_plane_unavailable");
+        assert_eq!(payload["retryable"], true);
+
+        // Switch on: the refusal ends the turn under its own code.
+        assert_eq!(
+            open_code(subscription_open_end(&zdr_status(), false, true)),
+            Some(zdr_code::CONNECTION_NOT_ACKNOWLEDGED)
+        );
+        let (code, _) = fallback_failure_end(&zdr_status(), false, true);
+        assert_eq!(code, zdr_code::CONNECTION_NOT_ACKNOWLEDGED);
+    }
+
+    #[test]
+    fn the_subscription_route_keeps_its_typed_refusals_whatever_the_switch() {
+        for typed in [false, true] {
+            assert_eq!(
+                open_code(subscription_open_end(&zdr_status(), true, typed)),
+                Some(zdr_code::CONNECTION_NOT_ACKNOWLEDGED)
+            );
+            let (code, _) = fallback_failure_end(&zdr_status(), true, typed);
+            assert_eq!(code, zdr_code::CONNECTION_NOT_ACKNOWLEDGED);
+        }
+    }
+
+    /// The code a failed answer stream ends on mid-stream, when the refusal is the subscription round's to end.
+    fn mid_stream_code(status: &tonic::Status, round: bool) -> Option<&'static str> {
+        subscription_stream_refusal(status, round).map(|refusal| refusal.code())
+    }
+
+    #[test]
+    fn a_typed_refusal_mid_stream_on_the_subscription_round_keeps_its_own_code_and_frame() {
+        assert_eq!(
+            mid_stream_code(&zdr_status(), true),
+            Some(zdr_code::CONNECTION_NOT_ACKNOWLEDGED)
+        );
+        assert_eq!(
+            mid_stream_code(&entitlement_status(), true),
+            Some(entitlement_code::MODEL_NOT_ENTITLED)
+        );
+        let refusal = subscription_stream_refusal(&zdr_status(), true).expect("a typed refusal");
+        let payload = refusal.into_event().payload("req-1");
+        assert_eq!(payload["code"], zdr_code::CONNECTION_NOT_ACKNOWLEDGED);
+        assert_eq!(payload["retryable"], false);
+        assert!(payload["action"].is_string(), "{payload}");
+        let refusal =
+            subscription_stream_refusal(&entitlement_status(), true).expect("a typed refusal");
+        let payload = refusal.into_event().payload("req-1");
+        assert_eq!(payload["code"], entitlement_code::MODEL_NOT_ENTITLED);
+        assert_eq!(payload["retryable"], false);
+    }
+
+    #[test]
+    fn a_mid_stream_failure_that_is_not_a_refusal_is_left_to_its_own_path() {
+        // An ordinary failure is the failure path's own, and an overflow is compacted by the stream.
+        assert_eq!(mid_stream_code(&ordinary_status(), true), None);
+        assert_eq!(mid_stream_code(&overflow_status(), true), None);
+        // A typed subscription reason is read by the route's own branch, not taken for a refusal.
+        assert_eq!(
+            mid_stream_code(&subscription_status(SUBSCRIPTION_USAGE_LIMIT), true),
+            None
+        );
+    }
+
+    #[test]
+    fn off_the_subscription_round_no_refusal_ends_a_mid_stream_failure() {
+        for status in [zdr_status(), entitlement_status(), ordinary_status()] {
+            assert_eq!(mid_stream_code(&status, false), None);
+        }
+    }
+
+    /// The answer stream's error arm asks for a refusal before it reads the route's own reason, since a refusal is
+    /// not a route reason and the route branch would otherwise be the only one to see it. A source scan, as the
+    /// continue-run gate test is: the arm runs inside the stream, where no pure helper reaches it.
+    #[test]
+    fn the_mid_stream_error_arm_asks_for_a_refusal_before_the_routes_reason() {
+        let source = include_str!("sse.rs");
+        let arm = source
+            .split("\"gRPC stream error\");")
+            .nth(1)
+            .and_then(|rest| rest.split("checked_stream_failure(e.message()").next())
+            .expect("the answer stream's error arm is in this file");
+        let refusal = arm
+            .find("subscription_stream_refusal(&e, subscription_tool_round)")
+            .expect("the error arm asks for a typed refusal");
+        let route = arm
+            .find("subscription_failure::on_route(&e, subscription_tool_round)")
+            .expect("the error arm reads the route's own reason");
+        assert!(
+            refusal < route,
+            "the refusal is asked for before the route's reason"
+        );
+    }
+
+    /// The stream open's refusal arm emits the typed refusal and returns before the unary fallback is asked for, on either
+    /// route (V3-mg-1-rel3). A source scan, as the mid-stream test above is: the open is inside the invoke handler, where
+    /// no pure helper reaches it. The needles are split with `concat!` so this test does not match its own text.
+    #[test]
+    fn the_stream_open_refusal_arm_returns_before_the_unary_fallback() {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let arm = source
+            .split(concat!(
+                "Some(SubscriptionOpenEnd::Refusal(refusal)) ",
+                "=>"
+            ))
+            .nth(1)
+            .and_then(|rest| {
+                rest.split(concat!("infer_stream unavailable; falling ", "back"))
+                    .next()
+            })
+            .expect("the stream open's refusal arm is in this file, before its fallback");
+        let emitted = arm
+            .find("emit_typed_refusal(")
+            .expect("the refusal arm emits the typed refusal");
+        let returned = arm.find("return;").expect("the refusal arm returns");
+        assert!(
+            emitted < returned,
+            "the refusal arm emits the typed refusal before it returns"
+        );
     }
 }
 
@@ -5151,8 +5637,19 @@ pub async fn invoke_stream_sse(
                     return;
                 }
                 let typed_failure = sink.take_subscription_failure();
-                let (failure_code, failure_message, failure_retryable) =
-                    tool_phase_failure(reason, subscription_tool_round, typed_failure.as_ref());
+                // A typed zero-retention or model-entitlement refusal the tool decision ended on keeps its own code,
+                // message and retry flag (V3-mg-1); the reason is otherwise worded by the subscription catalogue.
+                let typed_refusal = sink
+                    .take_typed_refusal()
+                    .filter(|refusal| refusal.code() == reason);
+                let (failure_code, failure_message, failure_retryable) = match &typed_refusal {
+                    Some(refusal) => (refusal.code(), refusal.message(), refusal.retryable()),
+                    None => tool_phase_failure(
+                        reason,
+                        subscription_tool_round,
+                        typed_failure.as_ref(),
+                    ),
+                };
                 // A failed draft still needs an honest durable reply. Persist
                 // only this fixed explanation, never the private candidate.
                 if !effective_zdr {
@@ -5162,7 +5659,19 @@ pub async fn invoke_stream_sse(
                         tracing::warn!(%error, request_id = %req_id, "failed to persist draft failure explanation");
                     }
                 }
-                if crate::subscription_failure::known_code(failure_code).is_some() {
+                if let Some(refusal) = typed_refusal {
+                    emit_typed_refusal(
+                        &tx,
+                        &session_state,
+                        &session_run_for_terminal,
+                        &session_bearer,
+                        &req_id,
+                        refusal,
+                        &timing,
+                        (&stream_buffers, &buffer_key, &mut seq, &features),
+                    )
+                    .await;
+                } else if crate::subscription_failure::known_code(failure_code).is_some() {
                     // A subscription failure's frame carries the timing the
                     // tool loop kept, so the SPA can say when to retry.
                     let failure = typed_failure
@@ -5445,19 +5954,69 @@ pub async fn invoke_stream_sse(
                 Ok(response) => break Some(Box::pin(response.into_inner()) as std::pin::Pin<Box<dyn Stream<Item = Result<mp_contracts::model_plane::v1::InferChunk, tonic::Status>> + Send>>),
                 Err(error) => error,
             };
-            // On the subscription route a failed open is the turn's outcome.
-            // A typed refusal names its reason; any other failure except an
-            // overflow (compacted below) is the generic route failure. There
-            // is no unary fallback: it would ask the same refused account
-            // again, and no other model or provider may answer instead.
-            let subscription_failure = crate::subscription_failure::on_route(&error, subscription_tool_round)
-                .or_else(|| {
-                    (subscription_tool_round && !crate::compaction::is_context_length_status(&error)).then_some(
-                        crate::subscription_failure::SubscriptionFailure::bare(
-                            crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE,
-                        ),
-                    )
-                });
+            // A typed refusal at the open keeps its own catalogue code and
+            // frame, and no unary fallback is tried for it (V3-mg-1,
+            // V3-mg-1-rel3): on the subscription route a zero-retention or
+            // model-entitlement refusal, elsewhere a zero-retention one while
+            // ZDR_TYPED_REFUSALS_ENABLED is on. On the subscription route a
+            // typed reason names its subscription failure; any other failure
+            // except an overflow (compacted below) is the generic route failure.
+            // There is no unary fallback there: it would ask the same refused
+            // account again, and no other model or provider may answer instead.
+            let subscription_failure =
+                match subscription_open_end(
+                    &error,
+                    subscription_tool_round,
+                    crate::zdr_posture::typed_refusals_enabled(),
+                ) {
+                    Some(SubscriptionOpenEnd::Refusal(refusal)) => {
+                        tracing::warn!(
+                            request_id = %req_id,
+                            code = refusal.code(),
+                            subscription = subscription_tool_round,
+                            "answer stream refused; no fallback"
+                        );
+                        if let Some(call) = answer_call.take() {
+                            call.finish("error", None);
+                        }
+                        // A held draft publishes nothing, so a turn that is not zero-retention keeps the refusal as
+                        // its explanation, as the subscription failure below does.
+                        if hold_artifact_answer && !effective_zdr {
+                            if let Err(error) =
+                                crate::session_flow::append_assistant_message_authenticated(
+                                    &session_state,
+                                    &session_thread_id,
+                                    &refusal.message(),
+                                    &session_bearer,
+                                    session_agent_name.as_deref(),
+                                    None,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    %error,
+                                    request_id = %req_id,
+                                    "failed to persist unpublished draft explanation"
+                                );
+                            }
+                        }
+                        emit_typed_refusal(
+                            &tx,
+                            &session_state,
+                            &session_run_for_terminal,
+                            &session_bearer,
+                            &req_id,
+                            refusal,
+                            &timing,
+                            (&stream_buffers, &buffer_key, &mut seq, &features),
+                        )
+                        .await;
+                        finish_stream_registrations(&cancels, &queued_inputs, &req_id);
+                        return;
+                    }
+                    Some(SubscriptionOpenEnd::Failure(failure)) => Some(failure),
+                    None => None,
+                };
             if let Some(failure) = subscription_failure {
                 tracing::warn!(
                     request_id = %req_id,
@@ -7218,6 +7777,58 @@ pub async fn invoke_stream_sse(
                 }
                 Err(e) => {
                     tracing::error!(error = %e, request_id = %req_id, "gRPC stream error");
+                    // A typed zero-retention or model-entitlement refusal on the subscription round (a word-range
+                    // candidate, or its review or repair, refused mid-stream) keeps its own catalogue code and frame,
+                    // as the open of the stream does (V3-mg-1-rel1). It is not the generic failure below, which the
+                    // client may retry.
+                    let typed_refusal = subscription_stream_refusal(&e, subscription_tool_round);
+                    if let Some(refusal) = typed_refusal {
+                        tracing::warn!(
+                            request_id = %req_id,
+                            code = refusal.code(),
+                            "subscription answer stream refused mid-stream; no fallback"
+                        );
+                        if let Some(call) = answer_call.take() {
+                            call.finish("error", None);
+                        }
+                        // A held draft publishes nothing, so a turn that is not zero-retention keeps the refusal as its
+                        // explanation, as the open of the stream does.
+                        if hold_artifact_answer && !effective_zdr {
+                            if let Err(error) =
+                                crate::session_flow::append_assistant_message_authenticated(
+                                    &session_state,
+                                    &session_thread_id,
+                                    &refusal.message(),
+                                    &session_bearer,
+                                    session_agent_name.as_deref(),
+                                    None,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    %error,
+                                    request_id = %req_id,
+                                    "failed to persist unpublished draft explanation"
+                                );
+                            }
+                        }
+                        // The run is terminalized under the refusal's own code before its frame goes out, and that call
+                        // also ends the resume buffer. `terminal_assigned` keeps the tail below from terminalizing the run
+                        // a second time.
+                        emit_typed_refusal(
+                            &tx,
+                            &session_state,
+                            &session_run_for_terminal,
+                            &session_bearer,
+                            &req_id,
+                            refusal,
+                            &timing,
+                            (&stream_buffers, &buffer_key, &mut seq, &features),
+                        )
+                        .await;
+                        terminal_assigned = true;
+                        break;
+                    }
                     // A typed refusal mid-stream (a word-range candidate, or
                     // its review or repair, refused by the subscription) ends
                     // the turn on its own reason and timing. The candidate's
@@ -10349,22 +10960,13 @@ async fn run_infer_fallback(
                 request_id = %request_id,
                 "infer fallback also failed; emitting error event"
             );
-            // On the subscription route the reason is typed, or the generic
-            // route failure: never the raw status text.
-            let subscription_failure = crate::subscription_failure::on_route(&e, subscription_route)
-                .or_else(|| {
-                    subscription_route.then_some(crate::subscription_failure::SubscriptionFailure::bare(
-                        crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE,
-                    ))
-                });
-            // A refusal the picked model declared for an image it cannot read is the turn's own answer,
-            // not an outage: the run ends under that code, and so does the frame (below).
-            let vision_refusal = vision_unsupported_refusal(&e);
-            let terminal_code = match (&subscription_failure, vision_refusal) {
-                (Some(failure), _) => failure.code,
-                (None, Some((code, _, _))) => code,
-                (None, None) => "inference_unavailable",
-            };
+            // The run's end and its frame: a typed refusal on the subscription route keeps its own code (V3-mg-1); the
+            // reason is otherwise typed, or the generic route failure, never the raw status text.
+            let (terminal_code, err_evt) = fallback_failure_end(
+                &e,
+                subscription_route,
+                crate::zdr_posture::typed_refusals_enabled(),
+            );
             let mut seq = first_seq;
             if let Err(error) = crate::session_flow::terminalize_direct_inference_run_authenticated(
                 state,
@@ -10400,36 +11002,6 @@ async fn run_infer_fallback(
             // chat-parity §20: structured error — stable `code` + `retryable`
             // so the client can branch (the `message` field is preserved for
             // back-compat with existing error handlers).
-            let err_evt = match &subscription_failure {
-                Some(failure) => crate::sse_events::ChatEvent::subscription_error(
-                    failure,
-                    crate::subscription_failure::message(
-                        failure,
-                        crate::subscription_failure::FailureContext::Answer,
-                    ),
-                ),
-                None => match mp_contracts::model_entitlement::Refusal::from_status(&e) {
-                    // The organisation's policy refused the model at
-                    // inference-core: the frame names that, not an outage.
-                    Some(refusal) => crate::sse_events::ChatEvent::Error {
-                        code: refusal.code().to_owned(),
-                        message: refusal.message(),
-                        retryable: refusal.retryable(),
-                    },
-                    None => match vision_refusal {
-                        Some((code, message, retryable)) => crate::sse_events::ChatEvent::Error {
-                            code: code.to_owned(),
-                            message: message.to_owned(),
-                            retryable,
-                        },
-                        None => crate::sse_events::ChatEvent::Error {
-                            code: "model_plane_unavailable".to_owned(),
-                            message: e.message().to_owned(),
-                            retryable: true,
-                        },
-                    },
-                },
-            };
             // Buffered like every other terminal frame: a client that resumed
             // after a reload must learn the provider failed, not tail until
             // the inactivity limit and report a lost connection.
@@ -26847,7 +27419,7 @@ mod approve_then_execute_tests {
     #[test]
     fn the_switch_takes_only_the_literal_true() {
         assert!(plan_execute_on_approve_from(Some("true")));
-        assert!(plan_execute_on_approve_from(Some(" true ")));
+        assert!(!plan_execute_on_approve_from(Some(" true ")));
         for value in [None, Some(""), Some("false"), Some("1"), Some("yes"), Some("on")] {
             assert!(!plan_execute_on_approve_from(value), "{value:?} must not enable the path");
         }

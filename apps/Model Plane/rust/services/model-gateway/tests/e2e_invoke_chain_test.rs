@@ -10661,6 +10661,71 @@ async fn a_throttle_off_the_subscription_route_keeps_the_unary_fallback() {
     clear_model_auth_env();
 }
 
+/// The zero-retention refusal inference-core sends when the connection has not been acknowledged: its catalogue code as a
+/// trailer, beside a status message the gateway must never show.
+fn zdr_connection_refusal() -> Status {
+    let mut metadata = tonic::metadata::MetadataMap::new();
+    metadata.insert(
+        mp_contracts::zdr_refusal::KIND_TRAILER,
+        "zdr_connection_not_acknowledged".parse().unwrap(),
+    );
+    Status::with_metadata(
+        tonic::Code::FailedPrecondition,
+        format!("no acknowledged connection {REFUSAL_CANARY}"),
+        metadata,
+    )
+}
+
+/// V3-mg-1-rel3: with `ZDR_TYPED_REFUSALS_ENABLED` on, a zero-retention refusal at the open of the answer stream on a
+/// turn off the subscription route is the turn's answer. It is not retried through the unary `Infer` (the same route
+/// check would refuse it again), and the client gets one `error` frame with the refusal's own code and action, and no
+/// retry.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_zdr_refusal_at_stream_open_off_the_route_is_one_frame_when_the_switch_is_on() {
+    let _switch = EnvGuard::set("ZDR_TYPED_REFUSALS_ENABLED", Some("true"));
+    let calls: CapturedCalls = Arc::new(Mutex::new(Vec::new()));
+    let (body, handles, _) = run_direct_turn(
+        MockOk {
+            captured_calls: Some(calls.clone()),
+            refusal: Some(MockRefusal {
+                at: RefusalPoint::AnswerStream,
+                status: zdr_connection_refusal(),
+            }),
+            ..MockOk::default()
+        },
+        r#"{"content":"hi","model":"m"}"#,
+        |_| {},
+    )
+    .await;
+
+    let errors = error_frames(&body);
+    assert_eq!(errors.len(), 1, "{body}");
+    assert_eq!(
+        errors[0]["code"], "zdr_connection_not_acknowledged",
+        "{body}"
+    );
+    assert_eq!(errors[0]["retryable"], false, "{body}");
+    assert!(errors[0]["action"].is_string(), "{body}");
+    assert!(
+        !body.contains("CANARY"),
+        "the status text never reaches the client: {body}"
+    );
+    assert!(
+        !body.contains("event: chunk") && !body.contains("event: done"),
+        "{body}"
+    );
+    assert_eq!(rpc_count(&calls, "infer_stream"), 1);
+    assert_eq!(rpc_count(&calls, "infer"), 0, "no unary fallback: {body}");
+    assert_direct_terminal_for_prepared_run(
+        &handles,
+        TerminalOutcome::Failed,
+        "inference_failed",
+        "a refused zero-retention turn closes its run as a failed request, not a provider outage",
+    );
+    clear_model_auth_env();
+}
+
 /// A tool-decision round refused because the ChatGPT sign-in must be
 /// renewed ends the turn on that reason: the frame says to reconnect, a
 /// retry is not offered as it stands, and the fixed explanation is saved.

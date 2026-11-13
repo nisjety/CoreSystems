@@ -1418,6 +1418,71 @@ impl ChatEvent {
     }
 }
 
+/// A typed refusal inference-core declared on a subscription call (V3-mg-1): a zero-retention refusal or a
+/// model-entitlement one. On the subscription route it keeps its own catalogue code (and, for a zero-retention refusal,
+/// its action and feature), and the run ends under that code. It is not the route's generic failure, which a client
+/// may retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypedRefusal {
+    Zdr(mp_contracts::zdr_refusal::Refusal),
+    Entitlement(mp_contracts::model_entitlement::Refusal),
+}
+
+impl TypedRefusal {
+    /// The refusal a failed call carries, zero-retention first, as the direct run and the side chat check them.
+    /// `None` for any other status.
+    #[must_use]
+    pub fn from_status(status: &tonic::Status) -> Option<Self> {
+        mp_contracts::zdr_refusal::Refusal::from_status(status)
+            .map(Self::Zdr)
+            .or_else(|| {
+                mp_contracts::model_entitlement::Refusal::from_status(status).map(Self::Entitlement)
+            })
+    }
+
+    /// The catalogue code the run ends under.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Zdr(refusal) => refusal.code(),
+            Self::Entitlement(refusal) => refusal.code(),
+        }
+    }
+
+    /// The catalogue's English fallback message.
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::Zdr(refusal) => refusal.message(),
+            Self::Entitlement(refusal) => refusal.message(),
+        }
+    }
+
+    /// Whether sending the same turn again could succeed, as the catalogue says.
+    #[must_use]
+    pub fn retryable(&self) -> bool {
+        match self {
+            Self::Zdr(refusal) => refusal.retryable(),
+            Self::Entitlement(refusal) => refusal.retryable(),
+        }
+    }
+
+    /// The stream's terminal frame. A zero-retention refusal is the `ZdrError` frame, which carries its action and
+    /// feature; a model-entitlement refusal is an `error` frame with its code, message and retry flag, as the
+    /// ephemeral answer sends it.
+    #[must_use]
+    pub fn into_event(self) -> ChatEvent {
+        match self {
+            Self::Zdr(refusal) => ChatEvent::ZdrError { refusal },
+            Self::Entitlement(refusal) => ChatEvent::Error {
+                code: refusal.code().to_owned(),
+                message: refusal.message(),
+                retryable: refusal.retryable(),
+            },
+        }
+    }
+}
+
 /// Emits [`ChatEvent`]s onto an SSE channel, honoring the client's opt-in
 /// `features[]`. Cheap to clone the inputs; holds the sender + gating context.
 pub struct RichEventSink {
@@ -1477,6 +1542,9 @@ pub struct RichEventSink {
             crate::subscription_failure::FailureContext,
         )>,
     >,
+    /// A typed zero-retention or model-entitlement refusal the tool phase ended on (V3-mg-1), kept whole so its frame
+    /// keeps the catalogue's code, action and feature. The tool loop can only return a reason string.
+    typed_refusal: std::sync::Mutex<Option<TypedRefusal>>,
 }
 
 /// What a sink keeps of a turn's calls: the running total every progress frame states, and the turn's
@@ -1677,6 +1745,7 @@ impl RichEventSink {
             search_provenance: None,
             resume: None,
             subscription_failure: std::sync::Mutex::new(None),
+            typed_refusal: std::sync::Mutex::new(None),
         }
     }
 
@@ -1700,6 +1769,22 @@ impl RichEventSink {
         crate::subscription_failure::FailureContext,
     )> {
         self.subscription_failure
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+    }
+
+    /// Keep the typed zero-retention or model-entitlement refusal a tool phase ended on. The first one is kept, as
+    /// the subscription failure is.
+    pub fn set_typed_refusal(&self, refusal: TypedRefusal) {
+        if let Ok(mut slot) = self.typed_refusal.lock() {
+            slot.get_or_insert(refusal);
+        }
+    }
+
+    /// Take the typed refusal the tool phase ended on, if it ended on one.
+    pub fn take_typed_refusal(&self) -> Option<TypedRefusal> {
+        self.typed_refusal
             .lock()
             .ok()
             .and_then(|mut slot| slot.take())
@@ -2174,6 +2259,76 @@ mod tests {
             ))
         );
         assert!(sink.take_subscription_failure().is_none());
+    }
+
+    /// V3-mg-1: a typed refusal keeps its catalogue code, action and feature on the frame that ends the turn, and its
+    /// retry flag is the catalogue's. Only a catalogue kind is a typed refusal, and the sink keeps the first one until
+    /// the stream takes it.
+    #[test]
+    fn a_typed_refusal_keeps_its_catalogue_frame_and_the_sink_keeps_the_first() {
+        use mp_contracts::model_entitlement::{
+            code as entitlement_code, Reason, Refusal as EntitlementRefusal,
+        };
+        use mp_contracts::zdr_refusal::{code as zdr_code, Refusal as ZdrRefusal};
+
+        let zdr = TypedRefusal::from_status(
+            &ZdrRefusal::CONNECTION_NOT_ACKNOWLEDGED.grpc_status(tonic::Code::FailedPrecondition),
+        )
+        .expect("a catalogue ZDR kind is typed");
+        assert_eq!(zdr.code(), zdr_code::CONNECTION_NOT_ACKNOWLEDGED);
+        assert!(!zdr.retryable());
+        let payload = zdr.clone().into_event().payload("req-1");
+        assert_eq!(payload["code"], zdr_code::CONNECTION_NOT_ACKNOWLEDGED);
+        assert_eq!(payload["retryable"], false);
+        assert_eq!(payload["message"].as_str(), Some(zdr.message().as_str()));
+        assert!(payload["action"].is_string(), "{payload}");
+        assert_eq!(payload["request_id"], "req-1");
+
+        let entitled = TypedRefusal::from_status(
+            &EntitlementRefusal::not_entitled("gpt-x", Reason::NotInAllowList).grpc_status(),
+        )
+        .expect("a model-entitlement kind is typed");
+        assert_eq!(entitled.code(), entitlement_code::MODEL_NOT_ENTITLED);
+        let payload = entitled.clone().into_event().payload("req-1");
+        assert_eq!(payload["code"], entitlement_code::MODEL_NOT_ENTITLED);
+        assert_eq!(payload["retryable"], false);
+        assert_eq!(
+            payload["message"].as_str(),
+            Some(entitled.message().as_str())
+        );
+
+        let unavailable =
+            TypedRefusal::from_status(&EntitlementRefusal::unavailable().grpc_status())
+                .expect("the unavailable entitlement kind is typed");
+        assert_eq!(
+            unavailable.code(),
+            entitlement_code::ENTITLEMENT_UNAVAILABLE
+        );
+        assert_eq!(
+            unavailable.into_event().payload("req-1")["retryable"],
+            true,
+            "the catalogue says to try again shortly"
+        );
+
+        // A subscription reason and an untyped failure are not typed refusals.
+        assert_eq!(
+            TypedRefusal::from_status(&tonic::Status::unavailable("upstream said: nope")),
+            None
+        );
+        let mut usage = tonic::Status::resource_exhausted("quota");
+        usage.metadata_mut().insert(
+            crate::compaction::PROVIDER_ERROR_KIND_TRAILER,
+            "subscription_usage_limit".parse().expect("ascii"),
+        );
+        assert_eq!(TypedRefusal::from_status(&usage), None);
+
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let sink = RichEventSink::new(tx, Vec::new(), "r".into());
+        assert_eq!(sink.take_typed_refusal(), None);
+        sink.set_typed_refusal(zdr.clone());
+        sink.set_typed_refusal(entitled);
+        assert_eq!(sink.take_typed_refusal(), Some(zdr));
+        assert_eq!(sink.take_typed_refusal(), None);
     }
 
     /// Q15: tool calls, tool results and steps went out on the live channel
