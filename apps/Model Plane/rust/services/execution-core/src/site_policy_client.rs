@@ -9,7 +9,8 @@
 //!
 //! `WEB_DOMAIN_POLICY_MODE` decides how far this binds. Under `off` nothing is read and the request is exactly what it was.
 //! Under `shadow` the same refusals are logged and nothing is refused. Under `enforce` a host whose answer cannot be read is
-//! refused, and so is a URL with no host the rules can name. A check sends org-core canonical hosts only.
+//! refused, and so is a URL with no host the rules can name. A check sends org-core canonical hosts only. The host a page
+//! ended on is checked the same way (`final_url_refusal`) when the extract reply names it.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
@@ -334,6 +335,51 @@ pub async fn fetch_refusal(
     }
 }
 
+/// The refusal a fetch meets when the page it read ended on a host the org's rules do not allow, for example an allowed
+/// address that redirected onto a blocked one. `requested` is the URL the call named, which [`fetch_refusal`] has already
+/// checked; `final_url` is the address the extract reply says the page ended on. An empty or absent `final_url` is the
+/// requested URL, so it adds no check of its own. Under `off` nothing is read. A final URL on the requested URL's canonical
+/// host passes without a call to org-core. Otherwise the refusal is logged with the closed fields of [`fetch_refusal`] (no
+/// path, no query), and under `enforce` the typed message for the FINAL host is returned. Under `shadow` it is logged and
+/// `None` is returned. An answer that cannot be read, or a final URL with no host the rules can name, counts as refused.
+pub async fn final_url_refusal(
+    mode: WebDomainPolicyMode,
+    checker: &SiteChecker,
+    owner: &SiteOwner,
+    org_id: &str,
+    requested: &str,
+    final_url: &str,
+    tool: &str,
+) -> Option<String> {
+    if mode == WebDomainPolicyMode::Off {
+        return None;
+    }
+    let final_url = if final_url.trim().is_empty() {
+        requested.trim()
+    } else {
+        final_url.trim()
+    };
+    let final_host = host_of_url(final_url);
+    if final_host.is_some() && final_host == host_of_url(requested) {
+        return None;
+    }
+    let hosts: Vec<String> = final_host.into_iter().collect();
+    let verdicts = checker.verdicts(owner, org_id, &hosts).await;
+    let refusal = refusal_for(final_url, &verdicts)?;
+    tracing::info!(
+        %org_id,
+        %tool,
+        reason = refusal.reason(),
+        host = refusal.host().unwrap_or(""),
+        enforced = mode == WebDomainPolicyMode::Enforce,
+        "org web domain policy refused the page a web call ended on"
+    );
+    match mode {
+        WebDomainPolicyMode::Enforce => Some(refusal.message(tool)),
+        WebDomainPolicyMode::Off | WebDomainPolicyMode::Shadow => None,
+    }
+}
+
 fn hit_url(hit: &Value) -> Option<&str> {
     hit.get("url").and_then(Value::as_str)
 }
@@ -418,6 +464,26 @@ impl SitePolicy {
     /// The refusal a web call over these URLs meets under the switch, or `None` when it may proceed.
     pub async fn fetch_refusal(&self, org_id: &str, urls: &[&str], tool: &str) -> Option<String> {
         fetch_refusal(self.mode, &self.checker, &self.owner, org_id, urls, tool).await
+    }
+
+    /// The refusal a fetch meets when the page it read ended on a host the org's rules do not allow, under the switch.
+    pub async fn final_url_refusal(
+        &self,
+        org_id: &str,
+        requested: &str,
+        final_url: &str,
+        tool: &str,
+    ) -> Option<String> {
+        final_url_refusal(
+            self.mode,
+            &self.checker,
+            &self.owner,
+            org_id,
+            requested,
+            final_url,
+            tool,
+        )
+        .await
     }
 
     /// Drops the search hits on refused hosts under the switch, and returns how many were refused.
@@ -660,6 +726,121 @@ mod tests {
         assert_eq!(policy.drop_denied_results(ORG, &mut results).await, 0);
         assert_eq!(results.len(), 1);
         assert_eq!(requests(&server).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_redirect_onto_a_blocked_host_is_refused_under_enforce_and_logged_under_shadow() {
+        let server = MockServer::start().await;
+        answer(
+            &server,
+            200,
+            json!({"organization_id": ORG, "revision": 6, "decisions": [
+                {"host": "example.com", "effective": "ask", "cap": "act", "source": "default"},
+                {"host": "blocked.example", "effective": "deny", "cap": "none", "source": "org_block"}
+            ]}),
+        )
+        .await;
+        let base = server.uri();
+        let enforce = SitePolicy::new(
+            WebDomainPolicyMode::Enforce,
+            owner(&base),
+            Arc::new(SiteChecker::default()),
+        );
+        let refusal = enforce
+            .final_url_refusal(
+                ORG,
+                "https://example.com/start",
+                "https://blocked.example/landing?q=private-query",
+                "web_fetch",
+            )
+            .await
+            .expect("a redirect onto a blocked host is refused");
+        assert!(refusal.starts_with("org_site_blocked: "), "{refusal}");
+        assert!(
+            refusal.contains("'blocked.example'"),
+            "names the FINAL host: {refusal}"
+        );
+        assert!(refusal.contains("'web_fetch'"), "{refusal}");
+        assert!(
+            !refusal.contains("/landing") && !refusal.contains("private-query"),
+            "no path or query in the refusal: {refusal}"
+        );
+
+        let before = requests(&server).await;
+        let shadow = SitePolicy::new(
+            WebDomainPolicyMode::Shadow,
+            owner(&base),
+            Arc::new(SiteChecker::default()),
+        );
+        assert_eq!(
+            shadow
+                .final_url_refusal(
+                    ORG,
+                    "https://example.com/start",
+                    "https://blocked.example/landing",
+                    "web_fetch",
+                )
+                .await,
+            None,
+            "shadow refuses nothing"
+        );
+        assert!(
+            requests(&server).await > before,
+            "shadow still asks org-core"
+        );
+    }
+
+    #[tokio::test]
+    async fn off_a_same_host_final_url_and_an_empty_one_ask_org_core_nothing() {
+        let server = MockServer::start().await;
+        answer(
+            &server,
+            200,
+            json!({"organization_id": ORG, "revision": 6, "decisions": [
+                {"host": "example.com", "effective": "ask", "cap": "act", "source": "default"},
+                {"host": "blocked.example", "effective": "deny", "cap": "none", "source": "org_block"}
+            ]}),
+        )
+        .await;
+        let base = server.uri();
+        for (mode, final_url) in [
+            (WebDomainPolicyMode::Off, "https://blocked.example/landing"),
+            (WebDomainPolicyMode::Enforce, "https://EXAMPLE.com/other"),
+            (WebDomainPolicyMode::Enforce, ""),
+            (WebDomainPolicyMode::Enforce, "   "),
+        ] {
+            let policy = SitePolicy::new(mode, owner(&base), Arc::new(SiteChecker::default()));
+            assert_eq!(
+                policy
+                    .final_url_refusal(ORG, "https://example.com/start", final_url, "web_fetch")
+                    .await,
+                None,
+                "{mode:?} {final_url:?}"
+            );
+        }
+        assert_eq!(requests(&server).await, 0, "none of these needs org-core");
+    }
+
+    #[tokio::test]
+    async fn a_final_url_with_no_host_is_refused_under_enforce_without_a_request() {
+        let server = MockServer::start().await;
+        answer(
+            &server,
+            200,
+            json!({"organization_id": ORG, "revision": 6, "decisions": []}),
+        )
+        .await;
+        let base = server.uri();
+        let policy = SitePolicy::new(
+            WebDomainPolicyMode::Enforce,
+            owner(&base),
+            Arc::new(SiteChecker::default()),
+        );
+        let refusal = policy
+            .final_url_refusal(ORG, "https://example.com/start", "not a url", "web_fetch")
+            .await;
+        assert!(refusal.is_some_and(|message| message.contains("cannot be checked")));
+        assert_eq!(requests(&server).await, 0, "no host, no call");
     }
 
     #[test]
