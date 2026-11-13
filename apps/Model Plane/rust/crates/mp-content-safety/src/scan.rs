@@ -410,3 +410,8 @@ mod tests {
         assert!(report.is_hit());
     }
 }
+
+/// Subdivision flags in the raw-character pass (W2-WS26-S2-b step 4).
+#[cfg(test)]
+#[path = "scan_subdivision_tests.rs"]
+mod subdivision_tests;

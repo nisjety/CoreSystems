@@ -6547,3 +6547,8 @@ mod resolution_tests {
         assert_eq!(platform_calls.load(Ordering::SeqCst), 0, "never moved onto a platform route");
     }
 }
+
+/// Chain benching under `INFERENCE_PROVIDER_BENCHING` (R2-OD-40-b3).
+#[cfg(test)]
+#[path = "fallback_bench_tests.rs"]
+mod bench_tests;

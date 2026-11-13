@@ -697,3 +697,8 @@ mod tests {
         }
     }
 }
+
+/// Switch parsers and the switch-off path (verification plan 3.4).
+#[cfg(test)]
+#[path = "config_switch_tests.rs"]
+mod switch_tests;

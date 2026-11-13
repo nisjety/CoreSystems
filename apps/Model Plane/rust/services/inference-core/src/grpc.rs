@@ -3410,6 +3410,11 @@ mod real_rules_tests;
 #[cfg(test)]
 mod zdr_waiver_route_tests;
 
+/// The wire form of `providers_benched` (R2-OD-40-b2). A file of its own, like
+/// `real_rules_tests`.
+#[cfg(test)]
+mod providers_benched_status_tests;
+
 /// The zero-data-retention refusals of the modality surface are typed through the
 /// catalogue: every handler that refuses a modality under ZDR does it through
 /// `reject_unattested_zdr_modality`, every operation it names comes back as the

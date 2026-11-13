@@ -468,3 +468,8 @@ impl BenchBoard {
         self.lock().remove(&board_key(provider, model));
     }
 }
+
+/// Failure classes and the bench board, under an injected clock (R2-OD-40-a).
+#[cfg(test)]
+#[path = "health_tests.rs"]
+mod tests;

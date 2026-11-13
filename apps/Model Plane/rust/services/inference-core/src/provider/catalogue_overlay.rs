@@ -430,3 +430,8 @@ pub fn org_overlay_enabled() -> bool {
     *ENABLED
         .get_or_init(|| org_overlay_enabled_from(std::env::var(ORG_OVERLAY_ENV).ok().as_deref()))
 }
+
+/// Switch parsers and the switch-off path (verification plan 3.4).
+#[cfg(test)]
+#[path = "catalogue_overlay_switch_tests.rs"]
+mod switch_tests;

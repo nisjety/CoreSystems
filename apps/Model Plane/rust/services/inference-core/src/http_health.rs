@@ -559,3 +559,8 @@ mod tests {
         );
     }
 }
+
+/// The promotion routes' refusals and wiring (W3-EP-14-S10-a).
+#[cfg(test)]
+#[path = "http_health_promotion_tests.rs"]
+mod promotion_tests;
