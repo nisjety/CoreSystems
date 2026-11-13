@@ -298,7 +298,7 @@ Rule for all: apply to a copy of the dev database first; run the down file; appl
 
 ### 5.5 Control Plane
 
-- org-core `032_org_flag_values` [W5-079-b], behind `ORG_FLAGS_ENABLED`. The internal org-flags route needs a separate principal and a deploy-time grant.
+- org-core `032_org_flag_values` [W5-079-b], behind `ORG_FLAGS_ENABLED`. The gateway reads the member route `GET /orgs/:id/flags` (org:read:self) on the signed-in viewer's delegation, so it needs no new principal or grant. The internal route `GET /internal/orgs/:orgId/flags` (org:flags:read:any) is granted to no credential in code; a backend reader that needs it would need its own principal and grant.
 - No SQL for FU-27 (provisioner durable and NATS conf only).
 
 ### 5.6 Data Plane v2
