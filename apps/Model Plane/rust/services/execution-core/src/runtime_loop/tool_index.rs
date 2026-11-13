@@ -47,11 +47,11 @@ const MCP_TOOL_PREFIX: &str = "mcp__";
 /// The most characters of a tool's description one match shows.
 const DESCRIPTION_CHARS: usize = 240;
 
-/// Whether an explicit value turns the switch on. Only the literal `true` counts, after trimming,
-/// the same strict reading as the other Do-loop switches.
+/// Whether an explicit value turns the switch on. Only the literal `true` counts, with no
+/// trimming: a padded value such as `" true"` or `"true\n"` leaves the index off.
 #[must_use]
 pub(crate) fn parse_enabled(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    raw == Some("true")
 }
 
 /// Whether this process indexes the deferred tools of a Do loop.
@@ -327,4 +327,58 @@ fn clip(text: &str, max_chars: usize) -> String {
     let mut clipped: String = text.chars().take(max_chars).collect();
     clipped.push_str("...");
     clipped
+}
+
+/// 3.4 switch sweep: `EXECUTION_DEFERRED_TOOL_INDEX_ENABLED` is documented (module doc, flag
+/// registry, coding-complete section 6) as on for the literal `true` only, and off leaves the
+/// offer exactly the catalogue.
+#[cfg(test)]
+mod switch_literal {
+    use super::*;
+
+    fn def(name: &str) -> pb::ToolDefinition {
+        pb::ToolDefinition {
+            name: name.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn only_the_literal_true_switches_the_index_on() {
+        assert!(parse_enabled(Some("true")));
+        for value in [
+            "", "false", "1", "on", "yes", "TRUE", "True", " true", "true ", "true\n", "\ttrue",
+        ] {
+            assert!(
+                !parse_enabled(Some(value)),
+                "{value:?} must leave the deferred index off"
+            );
+        }
+        assert!(!parse_enabled(None));
+    }
+
+    #[test]
+    fn off_offers_the_whole_catalogue_unchanged() {
+        let catalogue: Vec<pb::ToolDefinition> = (0..40)
+            .map(|i| def(&format!("tool_{i}")))
+            .chain([def("mcp__srv__echo"), def("client_tool")])
+            .collect();
+        let untrusted: BTreeSet<String> = ["client_tool".to_owned()].into_iter().collect();
+        let index = DeferredIndex::plan(false, 1, &catalogue, &untrusted);
+        assert!(!index.is_active());
+        let offered = index.offer(&catalogue, &RevealedTools::default());
+        let names = |tools: &[pb::ToolDefinition]| -> Vec<String> {
+            tools.iter().map(|tool| tool.name.clone()).collect()
+        };
+        assert_eq!(
+            names(&offered),
+            names(&catalogue),
+            "off: the catalogue, in order, and no tool_search"
+        );
+        assert!(index
+            .not_loaded_refusal("mcp__srv__echo", &RevealedTools::default())
+            .is_none());
+        // On, the same catalogue defers its MCP and client tools (the control for the off case).
+        assert!(DeferredIndex::plan(true, 1, &catalogue, &untrusted).is_active());
+    }
 }
