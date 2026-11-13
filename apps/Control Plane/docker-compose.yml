@@ -633,6 +633,10 @@ services:
             ORG_SIEM_DESTINATIONS_ENABLED: ${ORG_SIEM_DESTINATIONS_ENABLED:-0}
             # WS05-S6: DNS domain verification routes. Off (404) unless 1 or true; never an authorization input.
             ORG_DOMAIN_VERIFICATION_ENABLED: ${ORG_DOMAIN_VERIFICATION_ENABLED:-0}
+            # W5-079-b: organisation flag routes. Off (404) unless the literal true; never an authorization input.
+            ORG_FLAGS_ENABLED: ${ORG_FLAGS_ENABLED:-false}
+            # EP-9 C1: retention policy and legal-hold routes. Off (404) unless the literal true.
+            ORG_RETENTION_POLICY_ENABLED: ${ORG_RETENTION_POLICY_ENABLED:-false}
             # WS05-S7: SSO provider administration and enforcement go through auth-core.
             AUTH_CORE_URL: http://auth-core:3011
             ORG_CORE_IDENTITY_SERVICE_TOKEN: ${ORG_CORE_IDENTITY_SERVICE_TOKEN:-}

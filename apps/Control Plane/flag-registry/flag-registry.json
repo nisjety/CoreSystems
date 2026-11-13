@@ -1205,6 +1205,32 @@
       "codePath": "apps/Control Plane/org-core/internal/http/identity_handlers.go"
     },
     {
+      "name": "ORG_FLAGS_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "W5-079-b organisation flag values in org-core (org_flags_handler.go): the member routes and the internal read. Off, every flag route answers 404 and no value is read or written. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "org-core", "env": "ORG_FLAGS_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/org-core/internal/http/org_flags_handler.go"
+    },
+    {
+      "name": "ORG_RETENTION_POLICY_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "EP-9 C1 retention policy and legal-hold routes in org-core (retention/types.go). Off, no route is mounted, so every path answers as it did before. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "org-core", "env": "ORG_RETENTION_POLICY_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/org-core/internal/retention/types.go"
+    },
+    {
       "name": "ORG_SCIM_ENABLED",
       "kind": "switch",
       "owner": "control-plane",
