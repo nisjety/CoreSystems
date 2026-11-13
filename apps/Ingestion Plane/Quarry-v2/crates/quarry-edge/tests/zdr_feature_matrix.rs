@@ -413,7 +413,14 @@ fn in_catalogue(list: &[String], name: &str) -> bool {
 /// (X-16: existing codes only, so WS4.I does not add them). Quarry uses its own
 /// names for them, and they are listed here so a new one is a visible decision,
 /// not drift.
-const PENDING_CODES: &[&str] = &["BAD_REQUEST", "FORBIDDEN"];
+const PENDING_CODES: &[&str] = &[
+    "BAD_REQUEST",
+    "FORBIDDEN",
+    // W5-081-a / F-t3-081: the procedure-draft route answers a ZDR run `409` with
+    // `details.reason` `zdr_not_supported` under the envelope code `CONFLICT`; Quarry
+    // refusals do not carry a catalogue code yet.
+    "CONFLICT",
+];
 const PENDING_FEATURES: &[&str] = &[
     "durable_job",
     "persistent_profile",
@@ -433,6 +440,9 @@ const PENDING_FEATURES: &[&str] = &[
     // INNH-8: `/v1/answer` and `/v1/answer/stream` are refused under ZDR (ADR-4), because the Model
     // Plane hop carries no ZDR posture. The catalogue has no key for answer synthesis.
     "answer_synthesis",
+    // W5-081-a / F-t3-081: the read-only procedure-draft route refuses a ZDR run. The
+    // catalogue's `teach_mode` covers Model Gateway's skill-draft write (W5-081-c), not this read.
+    "procedure_draft",
 ];
 
 fn refusals_named_by_the_matrix() -> (BTreeSet<&'static str>, BTreeSet<&'static str>) {
@@ -455,11 +465,12 @@ fn every_code_and_feature_the_matrix_names_is_in_the_closed_catalogue_list() {
     assert_eq!(catalogue_codes.len(), 10, "the plan's closed list has 10 codes");
     assert_eq!(
         catalogue_features.len(),
-        47,
-        "the closed list has 47 feature keys: the plan's 30, connector_read and message_versions \
+        53,
+        "the closed list has 53 feature keys: the plan's 30, connector_read and message_versions \
          (Model Plane W2-25), sandbox_workspace (W2-33), browser_tool (W2-35), user_profile (W3-08), \
-         agent_api, conversation_export, conversation_share and conversation_import (W3-10), and \
-         run_inspection (W3-11), and the keys the later catalogue additions brought"
+         agent_api, conversation_export, conversation_share and conversation_import (W3-10), \
+         run_inspection (W3-11), the keys the later catalogue additions brought, and process_output_spill, \
+         mcp_secret_ref, custom_rest, teach_mode, reasoning_translation and artifact_output (W4/W5)"
     );
     let (codes, features) = refusals_named_by_the_matrix();
     assert!(!codes.is_empty() && !features.is_empty(), "no refusal row names a code: the premise is gone");
@@ -512,10 +523,14 @@ fn the_vendored_catalogue_is_the_one_its_pin_names() {
 #[test]
 fn the_pending_codes_are_quarry_error_wire_names() {
     use quarry_core::error::ErrorCode;
-    let wire: BTreeSet<&str> = [ErrorCode::Forbidden, ErrorCode::BadRequest]
-        .iter()
-        .map(|code| code.wire_name())
-        .collect();
+    let wire: BTreeSet<&str> = [
+        ErrorCode::Forbidden,
+        ErrorCode::BadRequest,
+        ErrorCode::Conflict,
+    ]
+    .iter()
+    .map(|code| code.wire_name())
+    .collect();
     for code in PENDING_CODES {
         assert!(wire.contains(code), "{code} is not an ErrorCode wire name");
     }
