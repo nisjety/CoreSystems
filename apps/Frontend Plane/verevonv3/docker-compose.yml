@@ -268,6 +268,10 @@ services:
       # connector (/api/v1/connectors/custom-rest). Only the literal `true` enables them; off, they answer 404
       # credential_bindings_disabled. Pairs with the Ingestion Plane's CREDENTIAL_BINDINGS_ENABLED. Owners and admins only.
       CREDENTIAL_BINDINGS_UI_ENABLED: ${CREDENTIAL_BINDINGS_UI_ENABLED:-false}
+      # W4-T7: the event trigger routes (/api/v1/event-triggers and its dry run). Only the literal true enables it; off, the routes are not mounted.
+      EVENT_TRIGGERS_UI_ENABLED: ${EVENT_TRIGGERS_UI_ENABLED:-false}
+      # F-t3-098: client-config reports the closed environment label. Only the literal true enables it; off, no environment identity is reported.
+      CLIENT_ENV_IDENTITY: ${CLIENT_ENV_IDENTITY:-false}
       # EP-6 S7/S8: the agent builder routes (draft, publish, versions) and the draft preview of a chat turn.
       # Only the literal `true` enables them; off, the builder routes answer 404. Pairs with VITE_AGENT_BUILDER
       # on the frontend service, which mounts the page. Both default off.
