@@ -43,6 +43,10 @@ const PROVIDER_HOSTS: &[&str] = &[
     "calendar.google.com",
 ];
 const NOT_AVAILABLE: &str = "read_provider_action is not available on this turn";
+/// The refusal for a link to a GitHub or Notion document. The resolver names `execute_provider_action` for such a
+/// link, and this loop neither offers that call nor allows it, so the refusal names no call.
+const DOCUMENT_URL_NOT_OFFERED_IN_CHAT: &str =
+    "read_provider_action does not read this document, and this chat offers no read of GitHub or Notion content";
 /// The capability whose stored tool policy governs the connected-app read (EP-10 S7).
 const READ_CAPABILITY: &str = "cap.tool.provider.read";
 /// How long one person's read level is reused before capability-core is asked again, so a turn costs at
@@ -367,7 +371,14 @@ pub fn resolve_document_args(mut args: ReadArgs, switched_on: bool) -> Result<Re
     let params = Value::Object(std::mem::take(&mut args.params));
     let (operation, params) =
         provider_reads::resolve_read_request(operation, &params, Some(document_url.as_str()))
-            .map_err(|error| error.message().to_owned())?;
+            .map_err(|error| match error {
+                // The Ask loop offers no execute_provider_action (inline_tool_allowed denies it), so a refusal that
+                // names it would point the model at a call it cannot make. The no-call refusal is given instead.
+                provider_reads::DocumentUrlError::Refused(_) => {
+                    DOCUMENT_URL_NOT_OFFERED_IN_CHAT.to_owned()
+                }
+                other => other.message().to_owned(),
+            })?;
     args.operation = operation;
     if let Value::Object(params) = params {
         args.params = params;
@@ -1195,6 +1206,26 @@ mod tests {
         assert_eq!(parsed.connection_id, "conn_1");
         assert_eq!(parsed.max_results, Some(5));
         assert_eq!(parsed.page_token.as_deref(), Some("p2"));
+    }
+
+    #[test]
+    fn a_link_to_a_github_or_notion_document_names_no_call_in_the_ask_loop() {
+        // The resolver names execute_provider_action for these links, and the Ask loop never offers that call, so the
+        // refusal must name none. A link to a document the loop does read still resolves.
+        for url in [
+            "https://github.com/acme/widgets/blob/main/README.md",
+            "https://www.notion.so/Plan-0123456789abcdef0123456789abcdef",
+        ] {
+            let input = format!(r#"{{"connection_id":"conn_1","document_url":"{url}"}}"#);
+            let error = resolve_document_args(args(&input), true)
+                .expect_err("a link to a document this loop does not read is refused");
+            assert_eq!(error, DOCUMENT_URL_NOT_OFFERED_IN_CHAT, "{url}");
+            assert!(!error.contains("execute_provider_action"), "{url}: {error}");
+        }
+        let drive = r#"{"connection_id":"conn_1","document_url":"https://docs.google.com/document/d/abc123/edit"}"#;
+        let served = resolve_document_args(args(drive), true).expect("a Google document is read");
+        assert_eq!(served.operation, "drive.file.content");
+        assert_eq!(served.params.get("fileId"), Some(&json!("abc123")));
     }
 
     #[test]
