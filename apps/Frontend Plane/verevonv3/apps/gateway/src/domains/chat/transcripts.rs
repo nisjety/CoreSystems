@@ -7,8 +7,9 @@
 //! id, title and character count, and nothing else.
 //!
 //! Off while `CHAT_MEDIA_TRANSCRIPTS_ENABLED` is not the literal `true`: 404 `media_transcripts_disabled`. A Zero Data
-//! Retention caller is refused with 412 `zdr_transcript_refused` before the recording leaves the gateway, because a
-//! transcript document is durable content.
+//! Retention caller is refused with 412 `zdr_durable_mutation_forbidden` before the recording leaves the gateway, because
+//! a transcript document is durable content. An organisation whose posture cannot be read is refused with 503
+//! `zdr_decision_unavailable` (retryable), the answer every durable write of chat content gives.
 
 use axum::{
     body::Bytes,
@@ -19,12 +20,9 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-use crate::{config::AppState, domains::ai, middleware::AuthenticatedUser, zdr::request_zdr};
+use crate::{config::AppState, domains::ai, middleware::AuthenticatedUser};
 
-use super::{
-    documents::{text_field, CHAT_TRANSCRIPT_ORIGIN, CHAT_TRANSCRIPT_TYPE},
-    shared,
-};
+use super::documents::{text_field, CHAT_TRANSCRIPT_ORIGIN, CHAT_TRANSCRIPT_TYPE};
 
 /// The longest title a transcript document carries, in characters.
 const MAX_TITLE_CHARS: usize = 120;
@@ -86,12 +84,12 @@ pub(crate) async fn create_chat_transcript(
     };
 
     // Refused before anything is sent: the request's own flag (the header, or a body `zdr`) and then the organisation's
-    // standing posture, read the way a chat turn reads them. A posture that cannot be read counts as ZDR, which is how
-    // `apply_org_zdr_posture` already reads it, so the default below is the refusal too.
-    let mut posture = json!({ "zdr": request_zdr(&headers, Some(&payload)) });
-    shared::apply_org_zdr_posture(&state, &user, &mut posture).await;
-    if posture.get("zdr").and_then(Value::as_bool).unwrap_or(true) {
-        return zdr_refusal();
+    // standing posture, decided by the gate every durable write of chat content passes. A posture that cannot be read is
+    // the typed, retryable 503 that gate answers, never a guess either way.
+    if let Some(refusal) =
+        crate::zdr::durable_write_refusal(&state, &user, Some(&headers), Some(&payload)).await
+    {
+        return refusal.into_response();
     }
 
     let Some(title) =
@@ -244,18 +242,14 @@ fn invalid_body(message: &'static str) -> Response {
         .into_response()
 }
 
-/// The Zero Data Retention refusal, in the catalogue's shape (`code`, `message`, `retryable`, `action`).
+/// The Zero Data Retention refusal of a transcript, in the catalogue's shape. A transcript document is durable content,
+/// so the catalogue's `zdr_durable_mutation_forbidden` (not retryable, no action) is the answer.
 fn zdr_refusal() -> Response {
     (
         StatusCode::PRECONDITION_FAILED,
-        Json(json!({
-            "error": {
-                "code": "zdr_transcript_refused",
-                "message": "Zero Data Retention applies, so this recording cannot be saved as a transcript document.",
-                "retryable": false,
-                "action": "none",
-            }
-        })),
+        Json(crate::zdr::zdr_refusal_body(
+            crate::zdr::ZDR_DURABLE_MUTATION_FORBIDDEN,
+        )),
     )
         .into_response()
 }

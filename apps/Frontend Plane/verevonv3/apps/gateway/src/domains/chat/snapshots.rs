@@ -81,6 +81,9 @@ pub(super) async fn create_snapshot(
     headers: HeaderMap,
     Path(thread_id): Path<String>,
 ) -> Response {
+    if !state.chat_snapshots_enabled {
+        return disabled_response();
+    }
     let thread_id = match checked_id(&thread_id, "thread_id") {
         Ok(id) => id,
         Err(response) => return response,
@@ -109,6 +112,9 @@ pub(super) async fn list_snapshots(
     headers: HeaderMap,
     Path(thread_id): Path<String>,
 ) -> Response {
+    if !state.chat_snapshots_enabled {
+        return disabled_response();
+    }
     let thread_id = match checked_id(&thread_id, "thread_id") {
         Ok(id) => id,
         Err(response) => return response,
@@ -138,6 +144,9 @@ pub(super) async fn revoke_snapshot(
     headers: HeaderMap,
     Path(snapshot_id): Path<String>,
 ) -> Response {
+    if !state.chat_snapshots_enabled {
+        return disabled_response();
+    }
     let snapshot_id = match checked_id(&snapshot_id, "snapshot_id") {
         Ok(id) => id,
         Err(response) => return response,
@@ -167,6 +176,9 @@ pub(super) async fn grant_snapshot(
     Path(snapshot_id): Path<String>,
     body: Bytes,
 ) -> Response {
+    if !state.chat_snapshots_enabled {
+        return disabled_response();
+    }
     relay_grant(&state, &user, &headers, &snapshot_id, Method::POST, &body).await
 }
 
@@ -178,6 +190,9 @@ pub(super) async fn ungrant_snapshot(
     Path(snapshot_id): Path<String>,
     body: Bytes,
 ) -> Response {
+    if !state.chat_snapshots_enabled {
+        return disabled_response();
+    }
     relay_grant(&state, &user, &headers, &snapshot_id, Method::DELETE, &body).await
 }
 
@@ -188,6 +203,9 @@ pub(super) async fn list_snapshot_grants(
     headers: HeaderMap,
     Path(snapshot_id): Path<String>,
 ) -> Response {
+    if !state.chat_snapshots_enabled {
+        return disabled_response();
+    }
     let snapshot_id = match checked_id(&snapshot_id, "snapshot_id") {
         Ok(id) => id,
         Err(response) => return response,
@@ -213,6 +231,9 @@ pub(super) async fn get_shared_snapshot(
     headers: HeaderMap,
     Path(snapshot_id): Path<String>,
 ) -> Response {
+    if !state.chat_snapshots_enabled {
+        return disabled_response();
+    }
     let snapshot_id = match checked_id(&snapshot_id, "snapshot_id") {
         Ok(id) => id,
         Err(response) => return response,
@@ -272,7 +293,8 @@ fn grants_url(state: &AppState, snapshot_id: &str) -> String {
     )
 }
 
-/// The steps of the module doc after the shape checks: switch, membership, bearers, relay.
+/// The steps of the module doc after the switch and the shape checks: membership, bearers, relay. Each public handler
+/// checks the switch before it checks any id or body, so this is reached only while the switch is on.
 async fn relay(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -282,14 +304,6 @@ async fn relay(
     body: Option<Value>,
     mode: Relay,
 ) -> Response {
-    // 1. The rollout switch, read once by build_state. Off, the routes are not there for anyone.
-    if !state.chat_snapshots_enabled {
-        return no_store(refuse(
-            StatusCode::NOT_FOUND,
-            DISABLED,
-            "Sharing a conversation as a snapshot is not enabled.",
-        ));
-    }
     // 2. Membership. The org is this server's own, and a caller without one has nothing to share with.
     let org_id = authorized_org_id(state, user).await;
     if org_id.trim().is_empty() {
@@ -388,4 +402,14 @@ fn no_store(mut response: Response) -> Response {
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
+}
+
+/// The answer while the rollout switch is off. Every public handler returns it before it checks the id or the body,
+/// so a malformed request gets the same answer as a well-formed one.
+fn disabled_response() -> Response {
+    no_store(refuse(
+        StatusCode::NOT_FOUND,
+        DISABLED,
+        "Sharing a conversation as a snapshot is not enabled.",
+    ))
 }

@@ -13,6 +13,8 @@ pub(crate) mod support;
 mod transcripts;
 #[cfg(test)]
 mod bff_turn_tests;
+#[cfg(test)]
+mod phase_switch_off_tests;
 
 use axum::{
     extract::DefaultBodyLimit,
