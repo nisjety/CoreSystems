@@ -52,8 +52,10 @@ pub(crate) fn enabled() -> bool {
     enabled_from(std::env::var(SWITCH_ENV).ok().as_deref())
 }
 
+/// Exactly `true`: no trimming and no case folding, unlike the durable-loop parser
+/// `mp_contracts::loop_fold::switch_from`, which this lane does not use.
 fn enabled_from(value: Option<&str>) -> bool {
-    mp_contracts::loop_fold::switch_from(value)
+    value == Some("true")
 }
 
 /// Verify the stored contract a step carries before any work: its digest over the exact text,
