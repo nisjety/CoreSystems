@@ -458,4 +458,59 @@ mod tests {
         let contract = ScheduledContract::parse(CONTRACT).unwrap();
         assert_eq!(loop_scope(&contract).max_tokens_per_round, 2048);
     }
+
+    /// F-f10-29 / DEC-M2: the lane's first check reads the run's retention from the step context
+    /// Session Core states. ZDR and waived are refused `scheduled_zdr_refused`; a context carrying both
+    /// flags is a state Session Core never writes and fails closed `scheduled_retention_unknown`; only a
+    /// persistent context proceeds. The thin wrapper `refuses_retention` keeps its table.
+    #[test]
+    fn the_step_context_retention_refusal_is_closed_and_fails_closed_on_both_flags() {
+        let context = |zdr: bool, zdr_waived: bool| pb::ScheduledStepContext {
+            run_id: "run-s".to_owned(),
+            org_id: "org-s".to_owned(),
+            zdr,
+            zdr_waived,
+            ..Default::default()
+        };
+        assert_eq!(
+            refuses_step_retention(&context(true, false)),
+            Some(REFUSAL_RETENTION)
+        );
+        assert_eq!(
+            refuses_step_retention(&context(false, true)),
+            Some(REFUSAL_RETENTION)
+        );
+        assert_eq!(
+            refuses_step_retention(&context(true, true)),
+            Some(REFUSAL_RETENTION_UNKNOWN)
+        );
+        assert_eq!(refuses_step_retention(&context(false, false)), None);
+        assert_eq!(REFUSAL_RETENTION, "scheduled_zdr_refused");
+        assert_eq!(REFUSAL_RETENTION_UNKNOWN, "scheduled_retention_unknown");
+        // The loop's request carries the run's zero retention, so the loop refuses persistence too.
+        let contract = ScheduledContract::parse(CONTRACT).unwrap();
+        assert!(run_request(&step(), "goal", &contract, true).zdr);
+        assert!(!run_request(&step(), "goal", &contract, false).zdr);
+    }
+}
+
+/// 3.4 switch sweep: `EXECUTION_SCHEDULED_AGENT_ENABLED` is documented on [`enabled`] as on for the
+/// literal `true` only. Off, a step with a stored contract keeps the single-inference lane.
+#[cfg(test)]
+mod switch_literal {
+    use super::*;
+
+    #[test]
+    fn only_the_literal_true_switches_the_agent_lane_on() {
+        assert!(enabled_from(Some("true")));
+        assert!(!enabled_from(None));
+        for value in [
+            "", "false", "1", "on", "yes", "TRUE", "True", " true", "true ", "true\n", "\ttrue",
+        ] {
+            assert!(
+                !enabled_from(Some(value)),
+                "{value:?} must leave the scheduled agent lane off"
+            );
+        }
+    }
 }

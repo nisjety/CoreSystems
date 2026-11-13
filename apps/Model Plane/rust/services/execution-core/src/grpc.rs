@@ -3562,3 +3562,481 @@ mod run_attachment_tests {
         assert_eq!(refusal.feature(), Some("sandbox_workspace"));
     }
 }
+
+/// F-f10-29 lane level: a scheduled agent step whose run Session Core states as zero-retention
+/// or waived ends `failed` with `scheduled_zdr_refused` through the real
+/// `execute_scheduled_step_runtime`, with no inference call, no tool call and no capability
+/// decision. Session Core, inference and Auth Core are in-process fakes that record every call.
+#[cfg(test)]
+mod scheduled_agent_lane_tests {
+    use super::*;
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use tonic::codegen::{empty_body, http, Body, BoxFuture, Context, Poll, Service, StdError};
+    use tonic::transport::{Endpoint, Server};
+
+    #[derive(Default)]
+    struct Seen {
+        session_paths: Vec<String>,
+        inference_calls: usize,
+        results: Vec<pb::RecordScheduledRunResultRequest>,
+        receipts: Vec<pb::RecordScheduledStepReceiptRequest>,
+    }
+
+    type Shared = Arc<Mutex<Seen>>;
+
+    struct Handler<F>(Arc<F>);
+
+    impl<Req, Resp, F> tonic::server::UnaryService<Req> for Handler<F>
+    where
+        Req: Send + 'static,
+        Resp: Send + 'static,
+        F: Fn(Req) -> Result<Resp, Status> + Send + Sync + 'static,
+    {
+        type Response = Resp;
+        type Future = BoxFuture<tonic::Response<Resp>, Status>;
+
+        fn call(&mut self, request: tonic::Request<Req>) -> Self::Future {
+            let handler = Arc::clone(&self.0);
+            Box::pin(async move { handler(request.into_inner()).map(tonic::Response::new) })
+        }
+    }
+
+    fn unary<B, Req, Resp, F>(
+        request: http::Request<B>,
+        handler: F,
+    ) -> BoxFuture<http::Response<tonic::body::BoxBody>, Infallible>
+    where
+        B: Body + Send + 'static,
+        B::Error: Into<StdError> + Send + 'static,
+        Req: prost::Message + Default + Send + 'static,
+        Resp: prost::Message + Send + 'static,
+        F: Fn(Req) -> Result<Resp, Status> + Send + Sync + 'static,
+    {
+        Box::pin(async move {
+            let mut grpc =
+                tonic::server::Grpc::new(tonic::codec::ProstCodec::<Resp, Req>::default());
+            Ok(grpc.unary(Handler(Arc::new(handler)), request).await)
+        })
+    }
+
+    fn unimplemented_response() -> BoxFuture<http::Response<tonic::body::BoxBody>, Infallible> {
+        Box::pin(async {
+            let mut response = http::Response::new(empty_body());
+            response.headers_mut().insert(
+                Status::GRPC_STATUS,
+                (tonic::Code::Unimplemented as i32).into(),
+            );
+            response.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                tonic::metadata::GRPC_CONTENT_TYPE,
+            );
+            Ok(response)
+        })
+    }
+
+    #[derive(Clone)]
+    struct Lane {
+        seen: Shared,
+        context: pb::ScheduledStepContext,
+    }
+
+    impl Lane {
+        fn route<B>(
+            &self,
+            request: http::Request<B>,
+        ) -> BoxFuture<http::Response<tonic::body::BoxBody>, Infallible>
+        where
+            B: Body + Send + 'static,
+            B::Error: Into<StdError> + Send + 'static,
+        {
+            let path = request.uri().path().to_owned();
+            if path.starts_with("/model_plane.v1.InferenceCore/") {
+                self.seen.lock().unwrap().inference_calls += 1;
+                return unimplemented_response();
+            }
+            self.seen.lock().unwrap().session_paths.push(path.clone());
+            match path.as_str() {
+                "/model_plane.v1.SessionCore/ClaimScheduledStep" => {
+                    unary(request, |_: pb::ClaimScheduledStepRequest| {
+                        Ok(pb::ClaimScheduledStepResponse {
+                            claimed: true,
+                            receipt_id: "receipt-1".to_owned(),
+                            status: "claimed".to_owned(),
+                        })
+                    })
+                }
+                "/model_plane.v1.RunService/GetScheduledStepContext" => {
+                    let context = self.context.clone();
+                    unary(request, move |_: pb::GetScheduledStepContextRequest| {
+                        Ok(context.clone())
+                    })
+                }
+                "/model_plane.v1.SessionCore/RecordScheduledRunResult" => {
+                    let seen = Arc::clone(&self.seen);
+                    unary(
+                        request,
+                        move |result: pb::RecordScheduledRunResultRequest| {
+                            let status = result.status.clone();
+                            seen.lock().unwrap().results.push(result);
+                            Ok(pb::RecordScheduledRunResultResponse {
+                                receipt_id: "receipt-1".to_owned(),
+                                status,
+                                ..Default::default()
+                            })
+                        },
+                    )
+                }
+                "/model_plane.v1.SessionCore/RecordScheduledStepReceipt" => {
+                    let seen = Arc::clone(&self.seen);
+                    unary(
+                        request,
+                        move |receipt: pb::RecordScheduledStepReceiptRequest| {
+                            let status = receipt.status.clone();
+                            seen.lock().unwrap().receipts.push(receipt);
+                            Ok(pb::RecordScheduledStepReceiptResponse {
+                                receipt_id: "receipt-1".to_owned(),
+                                status,
+                                recorded: true,
+                            })
+                        },
+                    )
+                }
+                _ => unimplemented_response(),
+            }
+        }
+    }
+
+    macro_rules! named_fake {
+        ($name:ident, $service:literal) => {
+            #[derive(Clone)]
+            struct $name(Lane);
+
+            impl tonic::server::NamedService for $name {
+                const NAME: &'static str = $service;
+            }
+
+            impl<B> Service<http::Request<B>> for $name
+            where
+                B: Body + Send + 'static,
+                B::Error: Into<StdError> + Send + 'static,
+            {
+                type Response = http::Response<tonic::body::BoxBody>;
+                type Error = Infallible;
+                type Future = BoxFuture<Self::Response, Self::Error>;
+
+                fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+                    Poll::Ready(Ok(()))
+                }
+
+                fn call(&mut self, request: http::Request<B>) -> Self::Future {
+                    self.0.route(request)
+                }
+            }
+        };
+    }
+
+    named_fake!(FakeSessionCore, "model_plane.v1.SessionCore");
+    named_fake!(FakeRunService, "model_plane.v1.RunService");
+    named_fake!(FakeInferenceCore, "model_plane.v1.InferenceCore");
+
+    struct CountingPolicy(Arc<AtomicUsize>);
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for CountingPolicy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, Status> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+    }
+
+    struct StaticTokens;
+
+    #[tonic::async_trait]
+    impl ManagedRunTokenProvider for StaticTokens {
+        async fn terminalize_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, crate::session_terminal_auth::SessionTerminalTokenError> {
+            Ok("test-terminalize-token".to_owned())
+        }
+
+        async fn heartbeat_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, crate::session_terminal_auth::SessionTerminalTokenError> {
+            Ok("test-heartbeat-token".to_owned())
+        }
+
+        async fn scheduled_step_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, crate::session_terminal_auth::SessionTerminalTokenError> {
+            Ok("test-scheduled-step-token".to_owned())
+        }
+    }
+
+    async fn verifier(server: &wiremock::MockServer) -> JwtVerifier {
+        use base64::Engine;
+        use rsa::traits::PublicKeyParts;
+        use wiremock::{
+            matchers::{method, path},
+            Mock, ResponseTemplate,
+        };
+        let private = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).expect("RSA key");
+        let public = rsa::RsaPublicKey::from(&private);
+        let n = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.n().to_bytes_be());
+        let e = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.e().to_bytes_be());
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [{ "kty": "RSA", "use": "sig", "alg": "RS256", "kid": "lane", "n": n, "e": e }]
+            })))
+            .mount(server)
+            .await;
+        JwtVerifier::from_config(crate::auth::AuthConfig {
+            jwks_url: format!("{}/jwks", server.uri()),
+            issuer: "auth-core".to_owned(),
+            audience: "data-plane".to_owned(),
+            jwks_ttl: Duration::from_secs(300),
+            leeway_secs: 0,
+        })
+        .await
+        .expect("test verifier")
+    }
+
+    struct Harness {
+        service: ExecutionService,
+        seen: Shared,
+        evaluations: Arc<AtomicUsize>,
+        _auth: wiremock::MockServer,
+    }
+
+    async fn harness(zdr: bool, zdr_waived: bool) -> Harness {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let seen: Shared = Arc::default();
+        let lane = Lane {
+            seen: Arc::clone(&seen),
+            context: pb::ScheduledStepContext {
+                run_id: "run-1".to_owned(),
+                thread_id: "thread-1".to_owned(),
+                org_id: "org-1".to_owned(),
+                goal: "summarise the week".to_owned(),
+                status: "running".to_owned(),
+                // Any stored contract routes the step to the agent lane; the retention check comes
+                // before the contract is read, so it need not verify.
+                contract_json: "{}".to_owned(),
+                contract_digest: "sha256:none".to_owned(),
+                contract_expires_at: "2099-01-01T00:00:00Z".to_owned(),
+                zdr,
+                zdr_waived,
+                ..Default::default()
+            },
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fakes");
+        let address = listener.local_addr().expect("fake address");
+        tokio::spawn(
+            Server::builder()
+                .add_service(FakeSessionCore(lane.clone()))
+                .add_service(FakeRunService(lane.clone()))
+                .add_service(FakeInferenceCore(lane))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let channel = Endpoint::from_shared(format!("http://{address}"))
+            .expect("endpoint")
+            .connect()
+            .await
+            .expect("connect fakes");
+
+        let auth = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/inference-core/internal-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "inference-token",
+                "expiresInSeconds": 300,
+                "audience": "inference-core",
+            })))
+            .mount(&auth)
+            .await;
+        let evaluations = Arc::new(AtomicUsize::new(0));
+        let service = ExecutionService::new_with_scheduled_step_runtime(
+            StateStore::new(),
+            verifier(&auth).await,
+            channel.clone(),
+            channel,
+            Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            Arc::new(CountingPolicy(Arc::clone(&evaluations))),
+            Arc::new(StaticTokens),
+            None,
+            Some(Arc::new(ScheduledInferenceTokenProvider::new_for_test(
+                &auth.uri(),
+            ))),
+            None,
+            SandboxManagerClient::from_env().expect("default sandbox-manager endpoint"),
+            None,
+            "test-backend".to_owned(),
+            Arc::new(
+                crate::sandbox_lease::SandboxManagerTokenProvider::new_for_test(
+                    "http://127.0.0.1:1",
+                    "execution-core",
+                    "test-service-secret-at-least-32-bytes",
+                ),
+            ),
+            None,
+        );
+        Harness {
+            service,
+            seen,
+            evaluations,
+            _auth: auth,
+        }
+    }
+
+    fn step() -> pb::ExecuteScheduledStepRequest {
+        pb::ExecuteScheduledStepRequest {
+            run_id: "run-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            subject_id: "user-1".to_owned(),
+            space_id: "space-1".to_owned(),
+            step_id: "step-1".to_owned(),
+            idempotency_key: "idem-1".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// The agent lane is reached only with its switch on; it is read on every step.
+    fn switch_on() {
+        std::env::set_var(runtime_loop::scheduled_agent::SWITCH_ENV, "true");
+    }
+
+    async fn drive(zdr: bool, zdr_waived: bool) -> (pb::ExecuteScheduledStepResponse, Harness) {
+        switch_on();
+        let harness = harness(zdr, zdr_waived).await;
+        let response = harness
+            .service
+            .execute_scheduled_step_runtime(step())
+            .await
+            .expect("the lane answers with a recorded outcome")
+            .into_inner();
+        (response, harness)
+    }
+
+    fn assert_refused_before_any_work(
+        response: &pb::ExecuteScheduledStepResponse,
+        harness: &Harness,
+        code: &str,
+    ) {
+        assert_eq!(response.error, code);
+        assert_eq!(response.status, "failed");
+        assert!(!response.unknown_outcome);
+        assert_eq!(
+            (
+                response.rounds_executed,
+                response.tool_calls,
+                response.withheld_effects
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!((response.input_tokens, response.output_tokens), (0, 0));
+        assert!(response.output.is_empty());
+        let seen = harness.seen.lock().unwrap();
+        assert_eq!(seen.inference_calls, 0, "no inference for a refused run");
+        assert_eq!(
+            harness.evaluations.load(Ordering::SeqCst),
+            0,
+            "no tool reached a capability decision"
+        );
+        assert_eq!(
+            seen.session_paths,
+            [
+                "/model_plane.v1.SessionCore/ClaimScheduledStep",
+                "/model_plane.v1.RunService/GetScheduledStepContext",
+                "/model_plane.v1.SessionCore/RecordScheduledRunResult",
+            ],
+            "claim, context, one result row and nothing else"
+        );
+        assert!(seen.receipts.is_empty());
+        let [result] = seen.results.as_slice() else {
+            panic!("exactly one result row, got {}", seen.results.len());
+        };
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.error_code, code);
+        assert!(
+            result.output.is_empty(),
+            "the refused result carries no content"
+        );
+        assert_eq!(
+            (
+                result.rounds_executed,
+                result.tool_calls,
+                result.input_tokens,
+                result.output_tokens
+            ),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(result.receipt_id, "receipt-1");
+    }
+
+    #[tokio::test]
+    async fn a_zdr_scheduled_agent_step_fails_closed_with_no_inference_and_no_tools() {
+        let (response, harness) = drive(true, false).await;
+        assert_refused_before_any_work(
+            &response,
+            &harness,
+            runtime_loop::scheduled_agent::REFUSAL_RETENTION,
+        );
+    }
+
+    #[tokio::test]
+    async fn a_waived_scheduled_agent_step_fails_closed_with_no_inference_and_no_tools() {
+        let (response, harness) = drive(false, true).await;
+        assert_refused_before_any_work(
+            &response,
+            &harness,
+            runtime_loop::scheduled_agent::REFUSAL_RETENTION,
+        );
+    }
+
+    #[tokio::test]
+    async fn both_retention_flags_fail_closed_as_unknown_retention() {
+        let (response, harness) = drive(true, true).await;
+        assert_refused_before_any_work(
+            &response,
+            &harness,
+            runtime_loop::scheduled_agent::REFUSAL_RETENTION_UNKNOWN,
+        );
+    }
+
+    /// The control: a persistent run reaches the lane's next check (the stored contract, which
+    /// this fake does not sign) rather than the retention refusal, so the three refusals above
+    /// are the retention check and not a lane that refuses everything.
+    #[tokio::test]
+    async fn a_persistent_step_passes_the_retention_check_to_the_contract_check() {
+        let (response, harness) = drive(false, false).await;
+        assert_ne!(
+            response.error,
+            runtime_loop::scheduled_agent::REFUSAL_RETENTION
+        );
+        assert_ne!(
+            response.error,
+            runtime_loop::scheduled_agent::REFUSAL_RETENTION_UNKNOWN
+        );
+        assert_eq!(
+            response.error,
+            runtime_loop::scheduled_agent::REFUSAL_INVALID
+        );
+        assert_eq!(harness.seen.lock().unwrap().inference_calls, 0);
+    }
+}

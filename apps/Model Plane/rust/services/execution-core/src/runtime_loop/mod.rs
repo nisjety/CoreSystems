@@ -7076,3 +7076,111 @@ mod edit_note_tests {
         assert_eq!(edit_step_note("The person edited subject before approving.\nx"), "");
     }
 }
+
+/// W2-WS14-S5-c2: the two resume helpers' tables. An unknown taint is held, and a resumed run's connector
+/// selection is never wider than the one the paused turn recorded, whatever the continue request states.
+#[cfg(test)]
+mod resume_carry_tables {
+    use super::{connector_taint_on_resume, resumed_connector_scope};
+    use mp_contracts::loop_fold::TaintRead;
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn connector_taint_on_resume_holds_an_unknown_taint() {
+        for (read, held) in [
+            (TaintRead::Marked, true),
+            (TaintRead::Clear, false),
+            (TaintRead::Absent, true),
+        ] {
+            assert_eq!(connector_taint_on_resume(read), held, "{read:?}");
+        }
+    }
+
+    #[test]
+    fn resumed_connector_scope_never_widens_the_carried_selection() {
+        // (carried, requested, resumed)
+        let table: Vec<(Option<Vec<String>>, Vec<String>, Vec<String>)> = vec![
+            // Nothing recorded: none selected, whatever the request asks for.
+            (None, ids(&[]), ids(&[])),
+            (None, ids(&["conn-a"]), ids(&[])),
+            (None, ids(&["conn-a", "conn-b"]), ids(&[])),
+            // A recorded selection with a request that states none keeps the recorded one.
+            (Some(ids(&["conn-a"])), ids(&[]), ids(&["conn-a"])),
+            (
+                Some(ids(&["conn-b", "conn-a"])),
+                ids(&[]),
+                ids(&["conn-b", "conn-a"]),
+            ),
+            // Both: the intersection, in the carried order.
+            (
+                Some(ids(&["conn-b", "conn-a"])),
+                ids(&["conn-a", "conn-b"]),
+                ids(&["conn-b", "conn-a"]),
+            ),
+            (
+                Some(ids(&["conn-a", "conn-b"])),
+                ids(&["conn-b"]),
+                ids(&["conn-b"]),
+            ),
+            // A request naming an id the paused turn never selected does not add it.
+            (
+                Some(ids(&["conn-a"])),
+                ids(&["conn-a", "conn-x"]),
+                ids(&["conn-a"]),
+            ),
+            (Some(ids(&["conn-a"])), ids(&["conn-x"]), ids(&[])),
+        ];
+        for (carried, requested, resumed) in table {
+            let got = resumed_connector_scope(carried.clone(), &requested);
+            assert_eq!(got, resumed, "carried {carried:?} requested {requested:?}");
+            if let Some(carried) = carried.as_ref() {
+                assert!(
+                    got.iter().all(|id| carried.contains(id)),
+                    "never wider than the carried selection"
+                );
+            } else {
+                assert!(got.is_empty());
+            }
+        }
+    }
+}
+
+/// W2-WS13-S7-producers-b: only `awaiting_approval_with` carries facts. Every other step outcome, the plain
+/// `awaiting_approval` included, carries empty facts, so no outcome offers a rule by default.
+#[cfg(test)]
+mod pause_facts_defaults {
+    use super::{approval_cause, CauseCode, StepOutcome};
+
+    #[test]
+    fn every_other_constructor_carries_empty_pause_facts() {
+        let empty = approval_cause::CallFacts::default();
+        let outcomes = [
+            StepOutcome::completed("out".to_owned()),
+            StepOutcome::failed("err"),
+            StepOutcome::awaiting_approval(CauseCode::CapabilityHighRisk),
+            StepOutcome::permission_denied(),
+            StepOutcome::permission_denied_with_reason("why".to_owned()),
+            StepOutcome::timed_out("slow".to_owned()),
+            StepOutcome::resource_exhausted("budget".to_owned()),
+            StepOutcome::cancelled("stop".to_owned()),
+            StepOutcome::aborted("abort".to_owned()),
+        ];
+        for outcome in outcomes {
+            assert_eq!(outcome.pause_facts, empty, "{}", outcome.status);
+        }
+        let facts = approval_cause::CallFacts {
+            effect_class: "read".to_owned(),
+            tool_digest: "d".repeat(64),
+            capability_id: "cap.mcp.srv.echo".to_owned(),
+        };
+        let with =
+            StepOutcome::awaiting_approval_with(CauseCode::CapabilityHighRisk, facts.clone());
+        let plain = StepOutcome::awaiting_approval(CauseCode::CapabilityHighRisk);
+        assert_eq!(with.pause_facts, facts);
+        assert_eq!(with.status, plain.status);
+        assert_eq!(with.cause, plain.cause);
+    }
+}

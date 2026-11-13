@@ -36577,3 +36577,276 @@ mod subagent_role_tests {
         assert!(!offer_subagent_roles(&mut bare, &roles));
     }
 }
+
+/// Wave 3 EP-6 S9 (Do side): the agent tool allowlist on `RunAgentRequest` only narrows the offered set and
+/// the dispatch, never widens it; a tool with no governed capability is dropped; a request without the field
+/// keeps its offer and its dispatch exactly as before.
+#[cfg(test)]
+mod do_agent_allowlist {
+    use super::{agent_allowlist_refusal, narrow_offered_to_agent_allowlist, pb};
+
+    fn tool(name: &str) -> pb::ToolDefinition {
+        pb::ToolDefinition {
+            name: name.to_owned(),
+            description: format!("{name} description"),
+            parameters_json: "{\"type\":\"object\"}".to_owned(),
+        }
+    }
+
+    fn names(tools: &[pb::ToolDefinition]) -> Vec<&str> {
+        tools.iter().map(|tool| tool.name.as_str()).collect()
+    }
+
+    fn with_allowlist(capability_ids: &[&str]) -> pb::RunAgentRequest {
+        pb::RunAgentRequest {
+            run_id: "run-allow".to_owned(),
+            org_id: "org-allow".to_owned(),
+            agent_tool_allowlist: Some(pb::AgentToolAllowlist {
+                agent_ref: "agent-1".to_owned(),
+                version: 3,
+                capability_ids: capability_ids.iter().map(|id| (*id).to_owned()).collect(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn capability(name: &str) -> String {
+        crate::capability_policy::trusted_capability_id(name)
+            .unwrap_or_else(|| panic!("{name} has a governed capability"))
+    }
+
+    #[test]
+    fn allowlist_narrows_never_widens() {
+        let shell = capability("shell");
+        let sandbox = capability("code_interpreter");
+        // The allowlist names a capability the offer does not hold (code_interpreter's) and one it does
+        // (shell's). The narrowed offer keeps shell only: a listed capability never adds its tool.
+        let req = with_allowlist(&[shell.as_str(), sandbox.as_str()]);
+        let mut tools = vec![tool("shell"), tool("knowledge_search"), tool("web_fetch")];
+        let before = tools.clone();
+        narrow_offered_to_agent_allowlist(&req, &mut tools);
+        assert_eq!(names(&tools), ["shell"]);
+        assert!(
+            tools.iter().all(|kept| before.contains(kept)),
+            "a kept definition is the offered one, byte for byte"
+        );
+        assert!(
+            !names(&tools).contains(&"code_interpreter"),
+            "never adds a tool"
+        );
+
+        // The dispatch agrees with the offer: an allowlisted call runs, any other is refused with the closed code.
+        assert_eq!(agent_allowlist_refusal(&req, "shell"), None);
+        for outside in ["knowledge_search", "web_fetch", "code_interpreter_typo"] {
+            let refusal = agent_allowlist_refusal(&req, outside)
+                .unwrap_or_else(|| panic!("{outside} is outside the allowlist"));
+            assert!(refusal.starts_with("agent_tool_not_allowed:"), "{refusal}");
+        }
+
+        // An empty allowlist is the narrowest: nothing is offered and nothing runs.
+        let empty = with_allowlist(&[]);
+        let mut all = before.clone();
+        narrow_offered_to_agent_allowlist(&empty, &mut all);
+        assert!(all.is_empty(), "{:?}", names(&all));
+        assert!(agent_allowlist_refusal(&empty, "shell").is_some());
+
+        // Narrowing an already narrowed set changes nothing.
+        let mut again = tools.clone();
+        narrow_offered_to_agent_allowlist(&req, &mut again);
+        assert_eq!(again, tools);
+    }
+
+    #[test]
+    fn unmapped_tool_dropped() {
+        // A tool with no governed capability (an MCP tool, a caller's client tool, an unknown name) is dropped
+        // and refused even when the allowlist names a capability id that looks like it: the check is on the
+        // id this process maps the name to, never on the name the model or a caller chose (fail closed).
+        for unmapped in ["mcp__server__tool", "client_tool_x", "totally_unknown"] {
+            assert!(
+                crate::capability_policy::trusted_capability_id(unmapped).is_none(),
+                "{unmapped} must have no mapping for this test to mean anything"
+            );
+        }
+        let req = with_allowlist(&[
+            "mcp__server__tool",
+            "client_tool_x",
+            "cap.mcp_tool.abc",
+            "",
+            capability("shell").as_str(),
+        ]);
+        let mut tools = vec![
+            tool("mcp__server__tool"),
+            tool("client_tool_x"),
+            tool("totally_unknown"),
+            tool("shell"),
+        ];
+        narrow_offered_to_agent_allowlist(&req, &mut tools);
+        assert_eq!(names(&tools), ["shell"]);
+        for unmapped in ["mcp__server__tool", "client_tool_x", "totally_unknown"] {
+            assert!(
+                agent_allowlist_refusal(&req, unmapped).is_some(),
+                "{unmapped} is refused at dispatch"
+            );
+        }
+    }
+
+    #[test]
+    fn field_absent_unchanged() {
+        let req = pb::RunAgentRequest {
+            run_id: "run-allow".to_owned(),
+            org_id: "org-allow".to_owned(),
+            ..Default::default()
+        };
+        assert!(req.agent_tool_allowlist.is_none());
+        let mut tools = vec![
+            tool("shell"),
+            tool("mcp__server__tool"),
+            tool("client_tool_x"),
+            tool("knowledge_search"),
+        ];
+        let before = tools.clone();
+        narrow_offered_to_agent_allowlist(&req, &mut tools);
+        assert_eq!(
+            tools, before,
+            "no allowlist: the offer is byte for byte unchanged"
+        );
+        for name in ["shell", "mcp__server__tool", "client_tool_x", "anything"] {
+            assert_eq!(agent_allowlist_refusal(&req, name), None, "{name}");
+        }
+    }
+}
+
+/// W2-WS14-S5-c2 / W2-WS14-S5-d: the state a continuation carries over. Read from the fold or the retained
+/// descriptor, an unknown taint is held, and the continue request's own selection only ever narrows.
+#[cfg(test)]
+mod carried_run_state {
+    use super::CarriedRunState;
+    use mp_contracts::loop_fold::TaintRead;
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_fold_carries_marked_clear_and_absent_through_to_the_taint() {
+        for (read, held) in [
+            (TaintRead::Marked, true),
+            (TaintRead::Clear, false),
+            (TaintRead::Absent, true),
+        ] {
+            let state = CarriedRunState::from_reads(read, None, &[]);
+            assert_eq!(state.taint, held, "{read:?}");
+            assert!(state.connector_scope.is_empty());
+        }
+    }
+
+    #[test]
+    fn build_segment_takes_the_descriptor_taint_and_holds_an_absent_one() {
+        for (taint, held) in [(Some(true), true), (Some(false), false), (None, true)] {
+            let state = CarriedRunState::from_descriptor(taint, &[], &[]);
+            assert_eq!(state.taint, held, "{taint:?}");
+        }
+    }
+
+    #[test]
+    fn a_request_scope_never_widens_a_carried_one() {
+        let carried = ids(&["conn-a", "conn-b"]);
+        // From a fold.
+        assert_eq!(
+            CarriedRunState::from_reads(TaintRead::Clear, Some(carried.clone()), &ids(&["conn-x"]))
+                .connector_scope,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            CarriedRunState::from_reads(TaintRead::Clear, None, &ids(&["conn-x"])).connector_scope,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            CarriedRunState::from_reads(TaintRead::Clear, Some(carried.clone()), &ids(&["conn-b"]))
+                .connector_scope,
+            ids(&["conn-b"])
+        );
+        // From a descriptor: an empty descriptor selection is "none recorded", never "everything".
+        assert_eq!(
+            CarriedRunState::from_descriptor(Some(false), &[], &ids(&["conn-x"])).connector_scope,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            CarriedRunState::from_descriptor(Some(false), &carried, &[]).connector_scope,
+            carried
+        );
+        // The strictest state has a marked taint and no selection.
+        let strictest = CarriedRunState::strictest();
+        assert!(strictest.taint);
+        assert!(strictest.connector_scope.is_empty());
+    }
+
+    #[test]
+    fn an_in_place_restore_combines_fold_and_descriptor_strictly() {
+        let state = |taint: bool, scope: &[&str]| CarriedRunState {
+            taint,
+            connector_scope: ids(scope),
+        };
+        // The taint is marked when either is.
+        for (fold, descriptor, marked) in [
+            (false, false, false),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            assert_eq!(
+                state(fold, &[]).combined(state(descriptor, &[])).taint,
+                marked
+            );
+        }
+        // Both name a selection: the intersection. One names one: that one. Neither: none.
+        assert_eq!(
+            state(false, &["conn-a", "conn-b"])
+                .combined(state(false, &["conn-b", "conn-c"]))
+                .connector_scope,
+            ids(&["conn-b"])
+        );
+        assert_eq!(
+            state(false, &["conn-a"])
+                .combined(state(false, &[]))
+                .connector_scope,
+            ids(&["conn-a"])
+        );
+        assert_eq!(
+            state(false, &[])
+                .combined(state(false, &["conn-c"]))
+                .connector_scope,
+            ids(&["conn-c"])
+        );
+        assert!(state(false, &[])
+            .combined(state(false, &[]))
+            .connector_scope
+            .is_empty());
+    }
+}
+
+/// Section 3.4: the switch is documented as "only the literal true". A padded, differently cased or
+/// truthy-word value must leave it off, so a mis-set deployment keeps today's behaviour.
+#[cfg(test)]
+mod coordinator_switch_literal_parse {
+    #[test]
+    fn only_the_literal_true_switches_it_on() {
+        assert!(super::coordinator_switch_on(Some("true")));
+        for raw in [
+            None,
+            Some(""),
+            Some(" true"),
+            Some("true\n"),
+            Some("TRUE"),
+            Some("True"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+        ] {
+            assert!(
+                !super::coordinator_switch_on(raw),
+                "{raw:?} must leave the switch off"
+            );
+        }
+    }
+}

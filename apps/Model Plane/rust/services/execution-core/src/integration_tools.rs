@@ -2397,4 +2397,95 @@ mod tests {
             );
         }
     }
+
+    /// W2-WS23-S3-b: the connection id is spliced into the gateway path, so `execute_action` holds it
+    /// to the read paths' guard. A value that could leave the connection path is refused before any
+    /// credential is minted or any action is sent; a well-formed id still reaches the gateway.
+    #[tokio::test]
+    async fn execute_action_refuses_a_connection_id_that_could_leave_the_path_with_no_call() {
+        let auth_core = MockServer::start().await;
+        let integration = MockServer::start().await;
+        let client = test_client(&auth_core.uri(), &integration.uri());
+        for hostile in [
+            "../x",
+            "a/b",
+            "conn?x=1",
+            "conn#frag",
+            "..",
+            "a b",
+            &"c".repeat(129),
+        ] {
+            for approval in [None, Some("approval-1")] {
+                let refused = client
+                    .execute_action(
+                        "org-1",
+                        hostile,
+                        "mail.send",
+                        serde_json::json!({}),
+                        serde_json::json!({}),
+                        "user-1",
+                        approval,
+                        None,
+                    )
+                    .await;
+                let Err(error) = refused else {
+                    panic!("{hostile:?} {approval:?}: a hostile connection id is refused");
+                };
+                assert_eq!(
+                    error, "execute_provider_action requires a valid connection_id",
+                    "{hostile:?} {approval:?}"
+                );
+            }
+        }
+        assert!(
+            auth_core
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "no credential is minted for a refused id"
+        );
+        assert!(
+            integration
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "no action is sent for a refused id"
+        );
+
+        // The positive control: a well-formed id passes the guard and reaches the gateway path.
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/internal-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"token": "org-scoped-token"})),
+            )
+            .expect(1)
+            .mount(&auth_core)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/connections/conn-1/actions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {"ok": true}})),
+            )
+            .expect(1)
+            .mount(&integration)
+            .await;
+        let _ = client
+            .execute_action(
+                "org-1",
+                "conn-1",
+                "mail.messages",
+                serde_json::json!({}),
+                serde_json::json!({}),
+                "user-1",
+                None,
+                None,
+            )
+            .await;
+        let sent = integration.received_requests().await.unwrap_or_default();
+        assert_eq!(sent.len(), 1, "a well-formed id reaches the gateway");
+        assert_eq!(sent[0].url.path(), "/api/v1/connections/conn-1/actions");
+    }
 }

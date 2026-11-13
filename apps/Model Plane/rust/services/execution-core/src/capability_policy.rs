@@ -4006,4 +4006,70 @@ mod tests {
         assert_eq!(calls[0].user_id, "");
     }
 
+    /// W2-WS13-S7-rule-use-a: the request each entry point sends states the run's retention as
+    /// execution-core resolved it: "persistent" or "retention_bound" only where the caller stated the
+    /// posture (`evaluate_tool_call_with_input`), and empty where it did not, so a caller that never
+    /// stated one never claims "persistent". In every gate mode, since the field is sent always.
+    #[tokio::test]
+    async fn every_entry_point_states_persistent_retention_bound_or_nothing() {
+        for gate in ALL_GATES {
+            let (policy, state) = harness(gate).await;
+            policy
+                .evaluate_tool_call_with_input("web_fetch", "{}", "run-a", "org-a", "user-a", false)
+                .await
+                .expect("persistent evaluates");
+            policy
+                .evaluate_tool_call_with_input("web_fetch", "{}", "run-a", "org-a", "user-a", true)
+                .await
+                .expect("retention-bound evaluates");
+            policy
+                .evaluate_tool_call("web_fetch", "run-a", "org-a", "user-a")
+                .await
+                .expect("no stated posture evaluates");
+            policy
+                .evaluate_with_evidence("web_fetch", "run-a", "org-a")
+                .await
+                .expect("with evidence evaluates");
+            policy
+                .evaluate("web_fetch", "run-a", "org-a")
+                .await
+                .expect("no user evaluates");
+            let stated: Vec<String> = state
+                .evaluated
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|request| request.run_retention.clone())
+                .collect();
+            assert_eq!(
+                stated,
+                ["persistent", "retention_bound", "", "", ""],
+                "{gate:?}"
+            );
+        }
+    }
+
+    /// The retention-bound posture is a closed word on the wire and withholds the call's target
+    /// value, while the persistent one names it (only once permission rules ask for targets).
+    #[tokio::test]
+    async fn a_retention_bound_call_names_no_target_value() {
+        let (mut policy, state) = harness(ToolClassGate::Enforce).await;
+        policy.permission_rules = true;
+        let input = r#"{"url":"https://example.org/a"}"#;
+        policy
+            .evaluate_tool_call_with_input("web_fetch", input, "run-a", "org-a", "user-a", true)
+            .await
+            .expect("retention-bound evaluates");
+        policy
+            .evaluate_tool_call_with_input("web_fetch", input, "run-a", "org-a", "user-a", false)
+            .await
+            .expect("persistent evaluates");
+        let calls = state.evaluated.lock().unwrap();
+        assert_eq!(calls[0].run_retention, "retention_bound");
+        assert_eq!(
+            calls[0].target_value, "",
+            "no content of a retention-bound call"
+        );
+        assert_eq!(calls[1].run_retention, "persistent");
+    }
 }

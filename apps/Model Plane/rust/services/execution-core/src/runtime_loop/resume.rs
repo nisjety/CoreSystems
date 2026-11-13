@@ -5909,3 +5909,78 @@ mod tests {
         assert_eq!(noted.with_edit(None), plain);
     }
 }
+
+/// W2-WS14-S5-d: a stage-1 pause's descriptor carries the screening taint (always) and the turn's connector
+/// selection (only when it names one), beside the authority, whose digest neither changes.
+#[cfg(test)]
+mod carried_state_snapshot {
+    use super::{offered_snapshot, pb, with_carried_state, Authority};
+
+    fn snapshot() -> serde_json::Value {
+        let tools = vec![pb::ToolDefinition {
+            name: "read_provider_action".to_owned(),
+            description: "read".to_owned(),
+            parameters_json: "{}".to_owned(),
+        }];
+        let authority = Authority {
+            mode: "ask".to_owned(),
+            plan_mode: false,
+            autonomy_rung: String::new(),
+            space_id: String::new(),
+            min_privacy_tier: 0,
+            provider_hint: String::new(),
+            tool_names: vec!["read_provider_action".to_owned()],
+            max_rounds: 8,
+        };
+        offered_snapshot(&tools, &authority)
+    }
+
+    #[test]
+    fn with_carried_state_writes_the_taint_always_and_the_scope_only_when_named() {
+        let base = snapshot();
+        let digest = base["authority"]["digest"].clone();
+
+        let mut clear = base.clone();
+        with_carried_state(&mut clear, false, &[]);
+        assert_eq!(clear["connector_taint"], serde_json::Value::Bool(false));
+        assert!(
+            clear.get("connector_scope").is_none(),
+            "an empty selection is omitted, never written as []"
+        );
+
+        let mut marked = base.clone();
+        let scope = vec!["conn-a".to_owned(), "conn-b".to_owned()];
+        with_carried_state(&mut marked, true, &scope);
+        assert_eq!(marked["connector_taint"], serde_json::Value::Bool(true));
+        assert_eq!(
+            marked["connector_scope"],
+            serde_json::json!(["conn-a", "conn-b"])
+        );
+
+        // Only the two keys are added: the tools and the authority (and so its digest) are untouched.
+        for written in [&clear, &marked] {
+            assert_eq!(written["tools"], base["tools"]);
+            assert_eq!(written["authority"], base["authority"]);
+            assert_eq!(written["authority"]["digest"], digest);
+            let keys: std::collections::BTreeSet<&str> = written
+                .as_object()
+                .expect("an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            let base_keys: std::collections::BTreeSet<&str> = base
+                .as_object()
+                .expect("an object")
+                .keys()
+                .map(String::as_str)
+                .collect();
+            let added: Vec<&str> = keys.difference(&base_keys).copied().collect();
+            assert!(
+                added
+                    .iter()
+                    .all(|key| matches!(*key, "connector_taint" | "connector_scope")),
+                "{added:?}"
+            );
+        }
+    }
+}

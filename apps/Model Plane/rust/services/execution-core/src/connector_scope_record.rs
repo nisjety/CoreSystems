@@ -95,3 +95,26 @@ pub async fn record(
         }
     }
 }
+
+/// Section 3.4: the switch is documented as "only the literal true". A padded, differently cased or
+/// truthy-word value must leave it off, so a mis-set deployment keeps today's behaviour.
+#[cfg(test)]
+mod switch_literal_parse {
+    #[test]
+    fn only_the_literal_true_switches_it_on() {
+        assert!(super::switch_on(Some("true")));
+        for raw in [
+            None,
+            Some(""),
+            Some(" true"),
+            Some("true\n"),
+            Some("TRUE"),
+            Some("True"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+        ] {
+            assert!(!super::switch_on(raw), "{raw:?} must leave the switch off");
+        }
+    }
+}
