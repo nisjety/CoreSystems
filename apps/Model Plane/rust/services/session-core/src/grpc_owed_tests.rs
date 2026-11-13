@@ -197,16 +197,32 @@ async fn owned_thread(pool: &PgPool, org: &str, user: &str, thread: &str) {
         .unwrap();
 }
 
+/// One completed run of `thread`. A run an agent ran on was woken by the post that named it, so the
+/// post and the agent are set together or not at all (`runs_wake_pair_chk`, migration 0075).
 async fn agent_run(pool: &PgPool, org: &str, user: &str, thread: &str, agent: Option<&str>) {
+    let trigger = match agent {
+        Some(_) => {
+            let post = format!("ep6-msg-{}", mp_ids::new_ulid());
+            sqlx::query("INSERT INTO messages (id, thread_id, role, content) VALUES ($1, $2, 'user', 'hei')")
+                .bind(&post)
+                .bind(thread)
+                .execute(pool)
+                .await
+                .unwrap();
+            Some(post)
+        }
+        None => None,
+    };
     sqlx::query(
-        "INSERT INTO runs (id, thread_id, goal, org_id, user_id, status, agent_subject_id)
-         VALUES ($1, $2, 'g', $3, $4, 'completed', $5)",
+        "INSERT INTO runs (id, thread_id, goal, org_id, user_id, status, agent_subject_id, trigger_message_id)
+         VALUES ($1, $2, 'g', $3, $4, 'completed', $5, $6)",
     )
     .bind(format!("ep6-run-{}", mp_ids::new_ulid()))
     .bind(thread)
     .bind(org)
     .bind(user)
     .bind(agent)
+    .bind(trigger)
     .execute(pool)
     .await
     .unwrap();

@@ -419,7 +419,47 @@ async fn an_unpinned_mcp_external_write_is_not_grantable() {
     assert_eq!(grants, 0);
 }
 
+/// The approval a person's own run raised in `org`: the decision a proposal names as the one that
+/// created it (`created_from_approval_id`, migration 0070). Written as production writes it: a
+/// thread, a run on it, then a requested approval on that run. Returns the approval id.
+async fn seed_requested_approval(pool: &Pool, org: &str, user: &str) -> String {
+    let sfx = mp_ids::new_ulid();
+    let (thread_id, run_id, approval_id) = (
+        format!("arp-t-{sfx}"),
+        format!("arp-r-{sfx}"),
+        format!("appr_{sfx}"),
+    );
+    sqlx::query("INSERT INTO threads (id,session_key,org_id,user_id) VALUES ($1,$1,$2,$3)")
+        .bind(&thread_id)
+        .bind(org)
+        .bind(user)
+        .execute(pool)
+        .await
+        .expect("seed thread");
+    sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,$4)")
+        .bind(&run_id)
+        .bind(&thread_id)
+        .bind(org)
+        .bind(user)
+        .execute(pool)
+        .await
+        .expect("seed run");
+    sqlx::query(
+        "INSERT INTO approvals (id,run_id,kind,status,org_id,user_id) \
+         VALUES ($1,$2,'tool_call','requested',$3,$4)",
+    )
+    .bind(&approval_id)
+    .bind(&run_id)
+    .bind(org)
+    .bind(user)
+    .execute(pool)
+    .await
+    .expect("seed approval");
+    approval_id
+}
+
 async fn insert_proposal(pool: &Pool, org: &str, user: &str, capability_id: &str) -> String {
+    let approval = seed_requested_approval(pool, org, user).await;
     let id = format!("arp_{}", mp_ids::new_ulid());
     sqlx::query(
         "INSERT INTO approval_rule_proposals \
@@ -429,7 +469,7 @@ async fn insert_proposal(pool: &Pool, org: &str, user: &str, capability_id: &str
     .bind(&id)
     .bind(org)
     .bind(user)
-    .bind(format!("appr_{}", mp_ids::new_ulid()))
+    .bind(&approval)
     .bind(format!(
         "{:0>64}",
         mp_ids::new_ulid()

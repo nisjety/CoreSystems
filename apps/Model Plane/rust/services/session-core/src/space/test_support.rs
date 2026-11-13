@@ -74,7 +74,9 @@ pub(crate) async fn seed_space_message(
     .expect("seed space message");
 }
 
-/// A Space run in `status` under `retention_class` (`persistent` or `zdr`).
+/// A Space run in `status` under `retention_class` (`persistent`, `zdr` or `zdr_waived`). A waived
+/// run names its acknowledgement and connection, and no other class does, as production writes its
+/// receipt (`runs_retention_waiver_consistent`, migration 0044).
 pub(crate) async fn seed_space_run(
     pool: &PgPool,
     org: &str,
@@ -84,12 +86,17 @@ pub(crate) async fn seed_space_run(
     status: &str,
     retention_class: &str,
 ) {
+    let (waiver_ack_id, waiver_connection_id) = match retention_class {
+        "zdr_waived" => (Some("ack-1"), Some("conn-1")),
+        _ => (None, None),
+    };
     sqlx::query(
         "INSERT INTO runs (id, thread_id, goal, status, org_id, user_id, space_id, space_decision_ref, \
          recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, \
-         privacy_policy_ref, resource_authorization_ref, authority_revision, retention_class) \
+         privacy_policy_ref, resource_authorization_ref, authority_revision, retention_class, \
+         waiver_ack_id, waiver_connection_id) \
          VALUES ($1, $2, 'goal', $3, $4, 'owner-1', $5, 'decision-1', 'audience-1', 1, \
-         'sha256:audience-1', 'privacy-1', 'resource-1', 1, $6)",
+         'sha256:audience-1', 'privacy-1', 'resource-1', 1, $6, $7, $8)",
     )
     .bind(run_id)
     .bind(thread_id)
@@ -97,6 +104,8 @@ pub(crate) async fn seed_space_run(
     .bind(org)
     .bind(space)
     .bind(retention_class)
+    .bind(waiver_ack_id)
+    .bind(waiver_connection_id)
     .execute(pool)
     .await
     .expect("seed space run");

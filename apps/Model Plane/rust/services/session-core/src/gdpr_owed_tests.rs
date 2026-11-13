@@ -131,6 +131,37 @@ async fn personal_thread(pool: &Pool, org: &str, thread: &str, owner: &str) {
         .expect("seed personal thread");
 }
 
+/// The approval a person's own run raised on `thread`: the decision a proposal or grant names as the
+/// one that created it. Returns its id. Written as production writes it: a run, then a requested
+/// approval on that run (`approvals.run_id` references `runs`).
+async fn requested_approval(pool: &Pool, org: &str, thread: &str, user: &str) -> String {
+    let nonce = mp_ids::new_ulid();
+    let run = format!("od59-run-{nonce}");
+    sqlx::query(
+        "INSERT INTO runs (id, thread_id, goal, org_id, user_id) VALUES ($1, $2, 'g', $3, $4)",
+    )
+    .bind(&run)
+    .bind(thread)
+    .bind(org)
+    .bind(user)
+    .execute(pool)
+    .await
+    .expect("seed run");
+    let approval = format!("appr_{nonce}");
+    sqlx::query(
+        "INSERT INTO approvals (id, run_id, kind, status, org_id, user_id) \
+         VALUES ($1, $2, 'tool_call', 'requested', $3, $4)",
+    )
+    .bind(&approval)
+    .bind(&run)
+    .bind(org)
+    .bind(user)
+    .execute(pool)
+    .await
+    .expect("seed approval");
+    approval
+}
+
 /// One thread-bound memory row of `thread`, with `owner` and `links`. Returns its id.
 async fn thread_row(
     pool: &Pool,
@@ -355,18 +386,22 @@ async fn a_person_erasure_removes_their_grants_and_proposals_and_no_one_elses() 
     };
     let nonce = mp_ids::new_ulid();
     let org = format!("od59-auth-org-{nonce}");
-    let thread = format!("od59-auth-t-{nonce}");
-    personal_thread(&pool, &org, &thread, "erased-user").await;
     for user in ["erased-user", "other-user"] {
+        let thread = format!("od59-auth-t-{user}-{nonce}");
+        personal_thread(&pool, &org, &thread, user).await;
+        // Each proposal and grant names the approval the person's own run raised: both reference
+        // approvals (migrations 0062 and 0070), so the approval is seeded first.
+        let approval = requested_approval(&pool, &org, &thread, user).await;
         let proposal = format!("arp_{}", mp_ids::new_ulid());
         sqlx::query(
             "INSERT INTO approval_rule_proposals \
              (id, org_id, user_id, created_from_approval_id, tool_name, tool_digest, capability_id) \
-             VALUES ($1, $2, $3, 'appr_x', 'mcp__fixture__create_note', repeat('a', 64), '')",
+             VALUES ($1, $2, $3, $4, 'mcp__fixture__create_note', repeat('a', 64), '')",
         )
         .bind(&proposal)
         .bind(&org)
         .bind(user)
+        .bind(&approval)
         .execute(&pool)
         .await
         .expect("seed proposal");
@@ -375,12 +410,13 @@ async fn a_person_erasure_removes_their_grants_and_proposals_and_no_one_elses() 
              (id, org_id, user_id, thread_id, run_id, scope, tool_name, action_key, effect_class, \
               cause_code, created_from_approval_id, expires_at, rule_id, tool_digest) \
              VALUES ($1, $2, $3, $4, NULL, 'thread', 'knowledge_search', 'knowledge_search', 'read', \
-                     'consent_to_disclose', 'appr_x', now() + interval '1 hour', $5, '')",
+                     'consent_to_disclose', $5, now() + interval '1 hour', $6, '')",
         )
         .bind(format!("apg_{}", mp_ids::new_ulid()))
         .bind(&org)
         .bind(user)
         .bind(&thread)
+        .bind(&approval)
         .bind(&proposal)
         .execute(&pool)
         .await
@@ -415,9 +451,13 @@ async fn a_person_erasure_removes_their_grants_and_proposals_and_no_one_elses() 
     assert_eq!(left("approval_rule_proposals", "erased-user").await, 0);
     assert_eq!(left("approval_scope_grants", "other-user").await, 1);
     assert_eq!(left("approval_rule_proposals", "other-user").await, 1);
+    // Grants and proposals reference approvals, approvals reference runs, and runs reference threads,
+    // so they go in that order.
     for table in [
         "approval_scope_grants",
         "approval_rule_proposals",
+        "approvals",
+        "runs",
         "threads",
     ] {
         sqlx::query(&format!("DELETE FROM {table} WHERE org_id = $1"))

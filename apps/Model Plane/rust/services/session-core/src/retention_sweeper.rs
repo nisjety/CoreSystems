@@ -1399,14 +1399,18 @@ mod tests {
             thread_id
         }
 
+        /// A Space thread idle for `idle_hours`. Origin `space` goes with a space id, and the full
+        /// authority context and audience revision and hash go with the space (migrations 0023, 0024
+        /// and 0034).
         async fn seed_space_thread(pool: &PgPool, org: &Org, name: &str, idle_hours: i32) -> String {
             let thread_id = org.thread(name);
             sqlx::query(
-                "INSERT INTO threads (id, session_key, org_id, user_id, last_activity_at, space_id,
-                                      space_decision_ref, recipient_audience_ref, privacy_policy_ref,
-                                      resource_authorization_ref, authority_revision)
-                 VALUES ($1, $1, $2, 'u1', now() - make_interval(hours => $3), 'space-1',
-                         'dec-1', 'aud-1', 'priv-1', 'res-1', 1)",
+                "INSERT INTO threads (id, session_key, org_id, user_id, last_activity_at, origin, space_id,
+                                      space_decision_ref, recipient_audience_ref, recipient_audience_revision,
+                                      recipient_audience_hash, privacy_policy_ref, resource_authorization_ref,
+                                      authority_revision)
+                 VALUES ($1, $1, $2, 'u1', now() - make_interval(hours => $3), 'space', 'space-1',
+                         'dec-1', 'aud-1', 1, 'sha256:aud-1', 'priv-1', 'res-1', 1)",
             )
             .bind(&thread_id)
             .bind(&org.id)
@@ -1730,7 +1734,7 @@ mod tests {
                 "INSERT INTO thread_goals (id, thread_id, org_id, user_id, objective, max_turns, status)
                  VALUES ($1, $2, $3, 'u1', 'old objective', 10, 'active')",
             )
-            .bind(format!("{thread_id}-goal"))
+            .bind(format!("goal_{thread_id}"))
             .bind(thread_id)
             .bind(&org.id)
             .execute(pool)
