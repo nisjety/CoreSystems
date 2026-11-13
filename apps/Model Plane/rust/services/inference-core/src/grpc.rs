@@ -13,7 +13,7 @@ use crate::auth::{AuthenticatedPrincipal, JwtVerifier};
 use crate::entitlement::{tier_from_label, RequestAccess, Resolved};
 use crate::provider;
 use crate::provider::doc_intel::{AnalyzeDocumentRequest, DocIntelChain};
-use crate::provider::fallback::{is_unspecified_model, FallbackChain};
+use crate::provider::fallback::{is_unspecified_model, FallbackChain, HidingOverlay};
 use crate::provider::language::{
     LanguageAnalyticsChain, LanguageAnalyticsRequest, LanguageOperation,
 };
@@ -244,6 +244,26 @@ impl InferenceService {
             principal.authorize_org(org_id)?;
         }
         Ok(principal)
+    }
+
+    /// The catalogue overlays over a listing, in the order ListModels applies them and GetModelAccess judges by
+    /// (V3-inf-1): the platform overlay, then the caller's organisation overlay. The platform overlay hides models,
+    /// puts the ones its order names first and lists each alias as its target; the organisation overlay can only hide
+    /// and reorder. A read that fails leaves the listing as the platform overlay made it. Each overlay is a no-op
+    /// while its switch is off.
+    async fn apply_catalogue_overlays(&self, org_id: &str, models: &mut Vec<pb::ModelInfo>) {
+        if provider::catalogue_overlay::catalogue_overlay_enabled() {
+            self.chain
+                .policy_handle()
+                .load()
+                .catalogue_overlay
+                .apply_to_listing(models);
+        }
+        if provider::catalogue_overlay::org_overlay_enabled() {
+            if let Some(client) = self.chain.policy_client() {
+                client.org_overlay(org_id).await.apply_to_listing(models);
+            }
+        }
     }
 
     /// The customer-gateway adapter a chat call must be served by (W4-BYO-5), when the call names a connection
@@ -646,28 +666,10 @@ impl InferenceCore for InferenceService {
         // distinct ids and are unaffected.
         let mut seen = std::collections::HashSet::new();
         models.retain(|model| seen.insert(model.id.clone()));
-        // The platform catalogue overlay, while INFERENCE_CATALOGUE_OVERLAY is on: hidden
-        // models drop out, each alias lists as its target, and the order the policy names
-        // comes first. It runs before the entitlement filter, which still applies to what
-        // is left.
-        if provider::catalogue_overlay::catalogue_overlay_enabled() {
-            self.chain
-                .policy_handle()
-                .load()
-                .catalogue_overlay
-                .apply_to_listing(&mut models);
-        }
-        // The caller's own organisation overlay (INFERENCE_ORG_OVERLAY), after the platform's: it can only hide
-        // models and move some to the front, never add or rename one. A read that fails leaves the listing as the
-        // platform overlay made it. The entitlement filter below still applies to what is left.
-        if provider::catalogue_overlay::org_overlay_enabled() {
-            if let Some(client) = self.chain.policy_client() {
-                client
-                    .org_overlay(&principal.org_id)
-                    .await
-                    .apply_to_listing(&mut models);
-            }
-        }
+        // The catalogue overlays, the platform's first and then the caller's organisation's. The entitlement filter
+        // below still applies to what is left.
+        self.apply_catalogue_overlays(&principal.org_id, &mut models)
+            .await;
 
         // The caller's organisation policy applies to chat models only; every
         // other modality passes unfiltered. Without a policy answer to apply
@@ -692,12 +694,24 @@ impl InferenceCore for InferenceService {
             .resolve(&principal)
             .await
             .map_err(provider_error_to_status)?;
-        model_access_response(
-            &self.chain.list_models("chat", ""),
-            request.into_inner(),
-            resolved,
-        )
-        .map(Response::new)
+        // The chat listing the answer judges carries the catalogue overlays ListModels applies to it (V3-inf-1).
+        let mut chat: Vec<pb::ModelInfo> = self
+            .chain
+            .list_models("chat", "")
+            .into_iter()
+            .map(pb::ModelInfo::from)
+            .collect();
+        self.apply_catalogue_overlays(&principal.org_id, &mut chat)
+            .await;
+        let req = request.into_inner();
+        // Read before the answer is built: infer refuses a model an overlay hides before anything is sent, so the
+        // answer must not report it as available whatever the caller's policy says.
+        let hidden = self
+            .chain
+            .hiding_overlay(&principal.org_id, &req.model)
+            .await;
+        let answer = model_access_response(&chat, req, resolved)?;
+        Ok(Response::new(with_overlay_refusal(answer, hidden)))
     }
 
     async fn synthesize_speech(
@@ -1531,7 +1545,7 @@ fn attests_zdr(model: &provider::ModelInfo) -> bool {
 /// caller it is refused, and when nothing was resolved (off, an unreadable
 /// answer in shadow) it is unavailable rather than answered from nothing.
 fn model_access_response(
-    chat: &[provider::ModelInfo],
+    chat: &[pb::ModelInfo],
     req: pb::GetModelAccessRequest,
     resolved: Resolved,
 ) -> Result<pb::GetModelAccessResponse, Status> {
@@ -1582,8 +1596,12 @@ fn model_access_response(
                     provider: known.provider.clone(),
                     entitled: verdict.is_ok(),
                     reason: verdict.err().map_or(String::new(), |r| r.as_str().to_owned()),
-                    // From the unfiltered chat list, whatever the draft refuses.
-                    zdr_attested: attests_zdr(known),
+                    // From the unfiltered chat list, whatever the draft refuses. The wire listing states the
+                    // attestation as `data_use`, which the `From` conversion sets exactly when `attests_zdr` holds.
+                    zdr_attested: known
+                        .data_use
+                        .as_ref()
+                        .is_some_and(|data_use| data_use.zdr_attested == Some(true)),
                 }
             })
             .collect()
@@ -1611,6 +1629,31 @@ fn model_access_response(
         can_manage: access.can_manage,
         catalogue,
     })
+}
+
+/// The entitlement reason a model a catalogue overlay hides is answered with (V3-inf-1): the platform's own deployment
+/// ceiling for the platform overlay, and the organisation's own turn-off for its overlay. Both are closed reasons of
+/// the entitlement matrix, so the answer names no new one.
+fn overlay_refusal_reason(hidden: HidingOverlay) -> mp_contracts::model_entitlement::Reason {
+    use mp_contracts::model_entitlement::Reason;
+    match hidden {
+        HidingOverlay::Platform => Reason::DeploymentAllowlist,
+        HidingOverlay::Organisation => Reason::ExplicitlyDenied,
+    }
+}
+
+/// The answer with a model an overlay hides marked as not available (V3-inf-1). `hidden` is the overlay that refuses
+/// the named model, if one does; a refused model is not available whatever the policy says, so the policy's verdict
+/// gives way to the overlay's. `None` leaves the answer as the policy made it.
+fn with_overlay_refusal(
+    mut answer: pb::GetModelAccessResponse,
+    hidden: Option<HidingOverlay>,
+) -> pb::GetModelAccessResponse {
+    if let Some(hidden) = hidden {
+        answer.model_allowed = false;
+        answer.reason = overlay_refusal_reason(hidden).as_str().to_owned();
+    }
+    answer
 }
 
 /// Bundle of every provider chain required to construct an [`InferenceService`].
@@ -2871,16 +2914,10 @@ mod tests {
         }
     }
 
-    fn chat_models() -> Vec<provider::ModelInfo> {
+    fn chat_models() -> Vec<pb::ModelInfo> {
         catalogue()
             .into_iter()
             .filter(|model| model.modality == "chat")
-            .map(|model| provider::ModelInfo {
-                id: model.id,
-                provider: model.provider,
-                modality: model.modality,
-                ..Default::default()
-            })
             .collect()
     }
 
@@ -3041,6 +3078,7 @@ mod tests {
             chat("gpt-eu", &["tools"], provider::PrivacyTier::EuResident),
             chat("gpt-open", &[], provider::PrivacyTier::Global),
         ];
+        let models: Vec<pb::ModelInfo> = models.into_iter().map(pb::ModelInfo::from).collect();
         // The draft allows only the open model, so the attested ones are refused.
         let request = pb::GetModelAccessRequest {
             draft: Some(pb::ModelPolicyDoc {
@@ -3068,6 +3106,71 @@ mod tests {
                 ("gpt-open", true, false),
             ]
         );
+    }
+
+    #[test]
+    fn a_model_an_overlay_hides_is_not_available_whatever_the_policy_says() {
+        use mp_contracts::model_entitlement::Reason;
+        // The caller's policy allows the model, so the policy's own verdict is "available".
+        let allowed = || {
+            model_access_response(&chat_models(), access_request("gpt-5-mini"), Resolved::Off)
+                .expect("a readable answer")
+        };
+        assert!(allowed().model_allowed);
+
+        let by_platform = with_overlay_refusal(allowed(), Some(HidingOverlay::Platform));
+        assert!(!by_platform.model_allowed);
+        assert_eq!(by_platform.reason, Reason::DeploymentAllowlist.as_str());
+
+        let by_organisation = with_overlay_refusal(allowed(), Some(HidingOverlay::Organisation));
+        assert!(!by_organisation.model_allowed);
+        assert_eq!(by_organisation.reason, Reason::ExplicitlyDenied.as_str());
+
+        // Nothing hides it: the answer is the policy's, as it was.
+        let unhidden = with_overlay_refusal(allowed(), None);
+        assert!(unhidden.model_allowed);
+        assert_eq!(unhidden.reason, "");
+    }
+
+    #[test]
+    fn the_access_catalogue_lists_only_what_the_catalogue_overlays_leave() {
+        use mp_contracts::model_entitlement::{Mode, ResolvedAccess};
+        use provider::catalogue_overlay::{CatalogueOverlay, OrgOverlay};
+        // The listing ListModels builds: the platform overlay hides gpt-5 and the organisation's hides gpt-5-mini.
+        let mut listing = chat_models();
+        CatalogueOverlay {
+            hidden: std::collections::BTreeSet::from(["gpt-5".to_owned()]),
+            ..CatalogueOverlay::default()
+        }
+        .apply_to_listing(&mut listing);
+        OrgOverlay {
+            hidden: vec!["gpt-5-mini".to_owned()],
+            ..OrgOverlay::default()
+        }
+        .apply_to_listing(&mut listing);
+        let manager = Resolved::Access(std::sync::Arc::new(RequestAccess::new(
+            std::sync::Arc::new(
+                ResolvedAccess::from_body(&serde_json::json!({
+                    "state": "org", "revision": 2, "role": "owner", "can_manage": true,
+                    "policy": {"allow_mode": "all", "allow": [], "deny": []},
+                    "sources": [{"layer": "org_default"}],
+                }))
+                .unwrap(),
+            ),
+            Mode::Enforce,
+            "org-1",
+        )));
+        let request = pb::GetModelAccessRequest {
+            include_catalogue: true,
+            ..access_request("")
+        };
+        let answer = model_access_response(&listing, request, manager).unwrap();
+        let listed: Vec<&str> = answer
+            .catalogue
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        assert_eq!(listed, ["claude-sonnet-4-5"]);
     }
 
     #[test]

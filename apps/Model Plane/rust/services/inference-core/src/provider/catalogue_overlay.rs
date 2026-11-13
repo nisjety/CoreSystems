@@ -60,13 +60,15 @@ impl CatalogueOverlay {
         self.hidden.is_empty() && self.order.is_empty() && self.aliases.is_empty()
     }
 
-    /// Whether the overlay hides `id`. Ids match without regard to ASCII case,
-    /// as the rest of admission matches them.
+    /// Whether the overlay hides `id`. Ids match without regard to ASCII case or
+    /// surrounding whitespace, on either side, as `retired_successor` and
+    /// `is_reserved_id` read theirs.
     #[must_use]
     pub fn is_hidden(&self, id: &str) -> bool {
+        let id = id.trim();
         self.hidden
             .iter()
-            .any(|hidden| hidden.eq_ignore_ascii_case(id))
+            .any(|hidden| hidden.trim().eq_ignore_ascii_case(id))
     }
 
     /// The concrete model id an alias stands for, when `id` is one of the aliases.
@@ -352,12 +354,14 @@ impl OrgOverlay {
         self.hidden.is_empty() && self.order.is_empty() && self.roles.is_empty()
     }
 
-    /// Whether the overlay hides `id`, matching ids without regard to ASCII case.
+    /// Whether the overlay hides `id`, matching ids without regard to ASCII case or surrounding whitespace, as
+    /// [`CatalogueOverlay::is_hidden`] does.
     #[must_use]
     pub fn is_hidden(&self, id: &str) -> bool {
+        let id = id.trim();
         self.hidden
             .iter()
-            .any(|hidden| hidden.eq_ignore_ascii_case(id))
+            .any(|hidden| hidden.trim().eq_ignore_ascii_case(id))
     }
 
     /// Apply the overlay to a listing, after the platform overlay. Hidden models drop out and the models the
@@ -435,3 +439,30 @@ pub fn org_overlay_enabled() -> bool {
 #[cfg(test)]
 #[path = "catalogue_overlay_switch_tests.rs"]
 mod switch_tests;
+
+#[cfg(test)]
+mod match_tests {
+    use super::*;
+
+    /// Surrounding whitespace is not part of an id, on either side: a padded hidden entry hides the model it names,
+    /// and a padded id asked about is the same model.
+    #[test]
+    fn a_padded_id_on_either_side_names_the_same_model() {
+        let platform = CatalogueOverlay {
+            hidden: BTreeSet::from([" gpt-5-mini ".to_owned()]),
+            ..CatalogueOverlay::default()
+        };
+        assert!(platform.is_hidden("gpt-5-mini"));
+        assert!(platform.is_hidden(" GPT-5-MINI\n"));
+        assert!(!platform.is_hidden("gpt-5"));
+        assert!(!platform.is_hidden("gpt-5-nano"));
+
+        let organisation = OrgOverlay {
+            hidden: vec!["\tgpt-4o-mini".to_owned()],
+            ..OrgOverlay::default()
+        };
+        assert!(organisation.is_hidden("gpt-4o-mini "));
+        assert!(organisation.is_hidden("GPT-4o-Mini"));
+        assert!(!organisation.is_hidden("gpt-4o"));
+    }
+}

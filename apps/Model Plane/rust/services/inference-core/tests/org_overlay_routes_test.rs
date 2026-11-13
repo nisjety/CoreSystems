@@ -16,7 +16,7 @@
 //! - `org-hides-5` hides `gpt-5-mini`.
 //! - `org-open` hides nothing (the control: it proves each route really reaches the model the others hide).
 
-use std::sync::Once;
+use std::sync::{Arc, Once};
 
 use inference_core::config::InferenceConfig;
 use inference_core::provider::fallback::FallbackChain;
@@ -294,6 +294,27 @@ async fn the_intent_layer_never_opens_a_stream_on_a_model_the_org_hides() {
     assert!(
         !asked.iter().any(|d| d.eq_ignore_ascii_case(MINI)),
         "the intent layer streamed from the hidden model: {asked:?}"
+    );
+}
+
+/// With no tool ladder, an intent pick the organisation hides is served by the policy's cheap fallback, a visible model,
+/// and the hidden pick is never sent (V3-inf-1). The built-in cell for a simple `verevon-balance` turn is `gpt-4o-mini`,
+/// which `org-hides-mini` hides; the cheap fallback is set to `gpt-5-nano`, which that organisation does not hide.
+#[tokio::test]
+async fn a_ladderless_intent_pick_the_org_hides_is_served_by_the_cheap_fallback() {
+    let (chain, azure) = chain().await;
+    let mut policy = (**chain.policy_handle().load()).clone();
+    policy.tool_fallback_ladder.clear();
+    policy.cheap_fallback = NANO.to_owned();
+    chain.policy_handle().store(Arc::new(policy));
+    chain
+        .infer(&request("org-hides-mini", "i4", "verevon-balance", false))
+        .await
+        .expect("the cheap fallback serves it");
+    assert_eq!(
+        deployments_asked(&azure).await,
+        [NANO],
+        "the hidden intent pick was sent"
     );
 }
 
