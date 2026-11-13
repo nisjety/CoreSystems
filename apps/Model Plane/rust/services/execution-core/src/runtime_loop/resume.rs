@@ -1487,6 +1487,11 @@ pub(crate) struct Restored {
     pub taint: mp_contracts::loop_fold::TaintRead,
     /// The connector selection the claimed fold recorded; `None` when it recorded none.
     pub connector_scope: Option<Vec<String>>,
+    /// The paused `ask_user` call an in-place question continuation answered, by its index in
+    /// `response` ([`Restored::seed_answer`]). Its result is the owner's answer given in an earlier
+    /// turn, not a question this loop put, so the seeded round must not end the turn on it again.
+    /// `None` for every other restored round.
+    pub answered_call: Option<usize>,
 }
 
 impl Restored {
@@ -1519,6 +1524,7 @@ impl std::fmt::Debug for Restored {
             .field("edit", &self.edit)
             .field("taint", &self.taint)
             .field("connector_scope", &self.connector_scope.as_ref().map(Vec::len))
+            .field("answered_call", &self.answered_call)
             .finish()
     }
 }
@@ -2359,10 +2365,11 @@ impl Restored {
     /// Seed the answered `ask_user` call: its slot at `pending` becomes `Resolved` with the
     /// question's answer as the call's result ([`super::ask::answer_result`]) and no error. The
     /// answer is information the model reads as the tool result, never an instruction and never a
-    /// grant. `false`, with nothing changed, when the slot at `pending` is not the placeholder
-    /// [`restore_input`] made.
+    /// grant. `pending` is recorded as [`Restored::answered_call`], so the round does not count the
+    /// answer as a question of its own. `false`, with nothing changed, when the slot at `pending`
+    /// is not the placeholder [`restore_input`] made.
     pub(crate) fn seed_answer(&mut self, pending: usize, question: &pb::RunQuestion) -> bool {
-        match self.slots.get_mut(pending) {
+        let seeded = match self.slots.get_mut(pending) {
             Some(SeedSlot::Resolved { output, error, .. })
                 if error.as_deref() == Some(ANSWER_NOT_APPLIED) =>
             {
@@ -2371,7 +2378,11 @@ impl Restored {
                 true
             }
             _ => false,
+        };
+        if seeded {
+            self.answered_call = Some(pending);
         }
+        seeded
     }
 }
 
@@ -2527,6 +2538,7 @@ fn rebuild_round(
         edit,
         taint: mp_contracts::loop_fold::connector_taint_in(fold),
         connector_scope: mp_contracts::loop_fold::connector_scope_in(fold),
+        answered_call: None,
     }
 }
 
