@@ -6309,6 +6309,26 @@ mod run_question_db_tests {
         Seed { run_id, thread_id, org, user }
     }
 
+    /// A second run of `seed`'s own owner, org and thread. `seed_run` mints a fresh org for every call,
+    /// so a run that must sit beside `seed` in one org is seeded here.
+    async fn seed_sibling_run(pool: &Pool, seed: &Seed, tag: &str) -> Seed {
+        let run_id = format!("rq-r-{tag}-{}", mp_ids::new_ulid());
+        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,$4)")
+            .bind(&run_id)
+            .bind(&seed.thread_id)
+            .bind(&seed.org)
+            .bind(&seed.user)
+            .execute(pool)
+            .await
+            .expect("seed sibling run");
+        Seed {
+            run_id,
+            thread_id: seed.thread_id.clone(),
+            org: seed.org.clone(),
+            user: seed.user.clone(),
+        }
+    }
+
     fn spec() -> JsonValue {
         serde_json::json!([{
             "id": "scope", "kind": "single", "prompt": "Which one?",
@@ -6743,7 +6763,8 @@ mod run_question_db_tests {
     async fn run_question_a_spend_is_refused_for_another_owner_run_delivery_or_state() {
         let Some(pool) = scratch_pool().await else { return };
         let seed = seed_run(&pool, "refuse").await;
-        let other_run = seed_run(&pool, "refuse-other").await;
+        // Same owner, org and thread as `seed`, so only the run id differs.
+        let other_run = seed_sibling_run(&pool, &seed, "refuse-other").await;
         let question = resume_question(&pool, &seed, "refuse-1", chrono::Duration::hours(1)).await;
         answer(&pool, &seed, &question.id, "a", false).await;
 
