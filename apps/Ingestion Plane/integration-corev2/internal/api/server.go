@@ -425,7 +425,11 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		})
 	})
 
-	app.Get("/api/v1/actions/catalog", chainHandlers(rateLimited, internalOrBearerAuth, actionsCatalogReadScope, actionsCatalogHandler(cfg.Config.NotionPageContentReadEnabled))...)
+	// The provider operation catalog is dark while INTEGRATION_ACTIONS_CATALOG is off: its route
+	// is not registered, so the path answers 404 like any unknown route.
+	if cfg.Config.ActionsCatalogEnabled {
+		app.Get("/api/v1/actions/catalog", chainHandlers(rateLimited, internalOrBearerAuth, actionsCatalogReadScope, actionsCatalogHandler(cfg.Config.NotionPageContentReadEnabled))...)
+	}
 
 	app.Patch("/api/v1/connections/:id/capabilities", internalOrBearerAuth, requireServiceIntegrationWrite, func(c *fiber.Ctx) error {
 		connection, err := scopedConnection(c, cfg, c.Params("id"))

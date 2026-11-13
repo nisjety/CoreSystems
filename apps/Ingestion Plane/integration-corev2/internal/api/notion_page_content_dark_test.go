@@ -45,6 +45,8 @@ func notionPageContentApp(t *testing.T, notionPageContentRead bool) (*fiber.App,
 	cfg, repo, oauthService := testOAuthStack(t)
 	cfg.NotionAPIBaseURL = notionServer.URL
 	cfg.NotionPageContentReadEnabled = notionPageContentRead
+	// The catalog route is dark by default; these tests read it, so its own switch is on.
+	cfg.ActionsCatalogEnabled = true
 	vault, err := secretcrypto.NewVault(cfg.EncryptionKey)
 	if err != nil {
 		t.Fatalf("NewVault error: %v", err)

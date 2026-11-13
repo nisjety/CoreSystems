@@ -104,6 +104,7 @@ type Config struct {
 	// database.
 	ZDRAcknowledgementEnabled          bool
 	NotionPageContentReadEnabled       bool
+	ActionsCatalogEnabled              bool
 	CodexSubscriptionEnabled           bool
 	CodexAppServerCommand              string
 	CodexSubscriptionHome              string
@@ -409,6 +410,7 @@ func Load() (Config, error) {
 
 		ZDRAcknowledgementEnabled:          envBool("ZDR_ACKNOWLEDGEMENT_ENABLED", false),
 		NotionPageContentReadEnabled:       envBool("INTEGRATION_NOTION_PAGE_CONTENT_READ", false),
+		ActionsCatalogEnabled:              envBool("INTEGRATION_ACTIONS_CATALOG", false),
 		CodexSubscriptionEnabled:           envBool("CODEX_SUBSCRIPTION_ENABLED", false),
 		CodexAppServerCommand:              strings.TrimSpace(envOr("CODEX_APP_SERVER_COMMAND", "codex")),
 		CodexSubscriptionHome:              strings.TrimSpace(os.Getenv("CODEX_SUBSCRIPTION_HOME")),
