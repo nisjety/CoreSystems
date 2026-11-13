@@ -375,6 +375,10 @@ mod verdict_tests;
 #[cfg(test)]
 mod judge_read_tests;
 
+/// Seeds the goal judge's DB tests share: a completed run that carries a retention receipt.
+#[cfg(test)]
+mod test_support;
+
 fn invalid(detail: &str) -> Status {
     Status::invalid_argument(format!("{INVALID_GOAL}: {detail}"))
 }
@@ -1528,7 +1532,7 @@ pub(crate) async fn get_goal_turn_for_judge(
     let outcome = turn.outcome.unwrap_or_default();
     let answer: Option<(String,)> = match turn.scheduled_thread_id.as_deref() {
         Some(thread_id) if outcome == "completed" => sqlx::query_as(
-            "SELECT right(content, $4) FROM messages
+            "SELECT right(content, $3) FROM messages
              WHERE thread_id = $1 AND role = 'assistant' AND metadata->>'run_id' = $2
                AND metadata->>'source_scope' = 'scheduled_run'
              ORDER BY sequence DESC LIMIT 1",

@@ -8,7 +8,9 @@
 //!   revision, a verdict is idempotent per turn, a verdict row keeps no reasons or evidence ids, and a
 //!   verdict on a thread that holds a waived run is refused and changes no row.
 
+use super::test_support::insert_completed_run;
 use super::*;
+use crate::retention_receipt::RunRetention;
 
 const ORG: &str = "org-goal-verdicts";
 const OWNER: &str = "user-goal-verdict-owner";
@@ -354,17 +356,14 @@ async fn a_repeated_verdict_on_a_judged_turn_changes_nothing() {
 async fn a_verdict_on_a_thread_holding_a_waived_run_is_refused_and_changes_no_row() {
     let pool = connect().await;
     let (goal, thread) = settled_goal(&pool).await;
-    sqlx::query(
-        "INSERT INTO runs (id, thread_id, goal, org_id, user_id, status, retention_class)
-         VALUES ($1, $2, 'g', $3, $4, 'completed', 'zdr_waived')",
+    insert_completed_run(
+        &pool,
+        ORG,
+        OWNER,
+        &thread,
+        &RunRetention::waived("ack-1", "conn-1"),
     )
-    .bind(format!("run-waived-{}", new_ulid()))
-    .bind(&thread)
-    .bind(ORG)
-    .bind(OWNER)
-    .execute(&pool)
-    .await
-    .unwrap();
+    .await;
     let before = turn_verdict(&pool, &goal.id).await;
     let goal_before: (String, i64, i64) = sqlx::query_as(
         "SELECT status, tokens_used, revision::bigint FROM thread_goals WHERE id = $1",

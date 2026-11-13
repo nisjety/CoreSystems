@@ -6,7 +6,9 @@
 //! thread or a fire thread that holds a zero-retention or waived run is refused with the closed
 //! durable-mutation refusal, so neither the objective nor the answer leaves session-core.
 
+use super::test_support::{held_receipts, insert_completed_run};
 use super::*;
+use crate::retention_receipt::RunRetention;
 
 const ORG: &str = "org-goal-judge-read";
 const OWNER: &str = "user-goal-judge-read";
@@ -129,20 +131,9 @@ async fn settled_fire(pool: &PgPool) -> Fire {
     }
 }
 
-async fn hold(pool: &PgPool, thread: &str, retention_class: &str) {
-    exec(
-        pool,
-        "INSERT INTO runs (id, thread_id, goal, org_id, user_id, status, retention_class)
-         VALUES ($1, $2, 'g', $3, $4, 'completed', $5)",
-        &[
-            &format!("judge-read-held-{}", new_ulid()),
-            thread,
-            ORG,
-            OWNER,
-            retention_class,
-        ],
-    )
-    .await;
+/// Hold `thread` with a completed run that carries `retention` as its receipt.
+async fn hold(pool: &PgPool, thread: &str, retention: &RunRetention) {
+    insert_completed_run(pool, ORG, OWNER, thread, retention).await;
 }
 
 fn assert_refused(refused: Status) {
@@ -179,12 +170,12 @@ async fn a_persistent_fire_answers_the_turn_and_its_answer_tail() {
 #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
 async fn a_goal_thread_holding_a_zdr_or_waived_run_is_refused_before_any_read() {
     let pool = connect().await;
-    for class in ["zdr", "zdr_waived"] {
+    for receipt in held_receipts() {
         let fire = settled_fire(&pool).await;
-        hold(&pool, &fire.goal_thread, class).await;
+        hold(&pool, &fire.goal_thread, &receipt).await;
         let refused = get_goal_turn_for_judge(&pool, &judge(), fire.request.clone())
             .await
-            .expect_err(class);
+            .expect_err(receipt.class.as_str());
         assert_refused(refused);
     }
 }
@@ -193,12 +184,12 @@ async fn a_goal_thread_holding_a_zdr_or_waived_run_is_refused_before_any_read() 
 #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
 async fn a_fire_thread_holding_a_zdr_or_waived_run_is_refused_before_the_answer() {
     let pool = connect().await;
-    for class in ["zdr", "zdr_waived"] {
+    for receipt in held_receipts() {
         let fire = settled_fire(&pool).await;
-        hold(&pool, &fire.fire_thread, class).await;
+        hold(&pool, &fire.fire_thread, &receipt).await;
         let refused = get_goal_turn_for_judge(&pool, &judge(), fire.request.clone())
             .await
-            .expect_err(class);
+            .expect_err(receipt.class.as_str());
         assert_refused(refused);
     }
 }
