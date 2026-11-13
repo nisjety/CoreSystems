@@ -358,6 +358,160 @@ mod tests {
         assert!(production.contains("ALLOW_INSECURE_DEV_DEFAULTS: \"0\""));
     }
 
+    /// The `KEY: value` pairs of a compose file's `gateway` service block, quotes dropped. The
+    /// block starts at the service's `gateway:` line and ends at the next non-blank line that is
+    /// not indented deeper, so one reader serves the 2-space base file and the 4-space overlay.
+    fn compose_gateway_env(compose: &str) -> Vec<(&str, &str)> {
+        let mut lines = compose
+            .lines()
+            .skip_while(|line| line.trim_end() != "services:")
+            .skip(1);
+        let header = lines
+            .by_ref()
+            .find(|line| line.trim() == "gateway:")
+            .expect("the gateway service");
+        let depth = header.len() - header.trim_start().len();
+        let mut pairs = Vec::new();
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if line.len() - line.trim_start().len() <= depth {
+                break;
+            }
+            if let Some((key, value)) = trimmed.split_once(':') {
+                let value = value.split(" #").next().unwrap_or_default().trim();
+                pairs.push((key.trim(), value.trim_matches(|c| c == '"' || c == '\'')));
+            }
+        }
+        pairs
+    }
+
+    /// Every `space_flag("KEY")` the gateway reads (config.rs). Only these read an unset value from
+    /// APP_ENV, so only these can be dev-default-on.
+    fn space_flag_keys() -> std::collections::BTreeSet<&'static str> {
+        let keys: std::collections::BTreeSet<&str> = include_str!("config.rs")
+            .split("space_flag(\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert!(
+            keys.len() >= 40,
+            "config.rs reads {} space_flag switches: the scan is broken",
+            keys.len()
+        );
+        keys
+    }
+
+    /// V3-bff-4-rel1, in the spirit of V3-bff-4: every switch the gateway reads through
+    /// `space_flag` is declared in the base compose's gateway block, so an operator can set it.
+    #[test]
+    fn every_space_flag_switch_is_declared_in_the_gateway_compose_block() {
+        let base = include_str!("../../../docker-compose.yml").replace("\r\n", "\n");
+        let declared: std::collections::BTreeSet<&str> = compose_gateway_env(&base)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        let undeclared: Vec<&str> = space_flag_keys()
+            .into_iter()
+            .filter(|key| !declared.contains(key))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "space_flag switches the base gateway block does not declare: {undeclared:?}"
+        );
+    }
+
+    /// V3-bff-4-rel1: a dev-default-on Space switch is declared `${KEY:-true}` in the base compose,
+    /// so only the production overlay can turn it off. Every such switch the gateway reads through
+    /// `space_flag` must be pinned to `"false"` in the overlay's gateway block, or that route turns
+    /// on in production with no test failing. These are rollout controls, never authorization
+    /// inputs.
+    #[test]
+    fn production_overlay_pins_every_dev_default_on_space_flag_off() {
+        // The default `D` of a `KEY: ${KEY:-D}` declaration.
+        fn compose_default<'a>(key: &str, value: &'a str) -> Option<&'a str> {
+            value
+                .strip_prefix("${")?
+                .strip_prefix(key)?
+                .strip_prefix(":-")?
+                .strip_suffix('}')
+        }
+        // The values `env_bool` reads as on.
+        fn reads_on(raw: &str) -> bool {
+            matches!(
+                raw.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        }
+
+        let space_keys = space_flag_keys();
+        let base = include_str!("../../../docker-compose.yml").replace("\r\n", "\n");
+        let production =
+            include_str!("../../../docker-compose.production.yml").replace("\r\n", "\n");
+
+        let dev_default_on: Vec<&str> = compose_gateway_env(&base)
+            .into_iter()
+            .filter(|&(key, value)| {
+                space_keys.contains(key) && compose_default(key, value).is_some_and(reads_on)
+            })
+            .map(|(key, _)| key)
+            .collect();
+        assert!(
+            dev_default_on.len() >= 40,
+            "only {} dev-default-on space_flag switches in the base gateway block: \
+             the scan is broken",
+            dev_default_on.len()
+        );
+
+        let forced_off: std::collections::BTreeSet<&str> = compose_gateway_env(&production)
+            .into_iter()
+            .filter(|&(_, value)| value == "false")
+            .map(|(key, _)| key)
+            .collect();
+        let unpinned: Vec<&str> = dev_default_on
+            .iter()
+            .copied()
+            .filter(|key| !forced_off.contains(key))
+            .collect();
+        assert!(
+            unpinned.is_empty(),
+            "docker-compose.production.yml does not force these dev-default-on space_flag \
+             switches to \"false\" in the gateway block: {unpinned:?}"
+        );
+    }
+
+    /// V3-bff-4-rel2: the base compose passes `GATEWAY_ZDR_LOG_FILTER` and `GATEWAY_RATE_CLASSES`
+    /// through from the host env, so a host value of `off` would reach the production gateway. The
+    /// gateway reads only `off`, `0` or `false` (and `no` for the rate classes) as a disable, so the
+    /// production overlay pins both to `"on"` in its gateway block, as `CONTROL_PLANE_ENFORCEMENT`
+    /// is pinned to `strict`. Before V3-bff-4 the container never received either variable, so both
+    /// were always on in production. Dev keeps the base pass-through, so `off` still works there.
+    #[test]
+    fn compose_pins_the_zdr_log_filter_and_rate_classes_on_in_production() {
+        let base = include_str!("../../../docker-compose.yml").replace("\r\n", "\n");
+        let production =
+            include_str!("../../../docker-compose.production.yml").replace("\r\n", "\n");
+
+        assert!(base.contains("GATEWAY_ZDR_LOG_FILTER: ${GATEWAY_ZDR_LOG_FILTER:-on}"));
+        assert!(base.contains("GATEWAY_RATE_CLASSES: ${GATEWAY_RATE_CLASSES:-on}"));
+
+        let production_gateway = compose_gateway_env(&production);
+        for key in ["GATEWAY_ZDR_LOG_FILTER", "GATEWAY_RATE_CLASSES"] {
+            let values: Vec<&str> = production_gateway
+                .iter()
+                .filter(|(name, _)| *name == key)
+                .map(|(_, value)| *value)
+                .collect();
+            assert_eq!(
+                values,
+                vec!["on"],
+                "docker-compose.production.yml must declare {key} exactly once, as \"on\""
+            );
+        }
+    }
+
     pub(crate) fn test_state(allow_dev_actor_headers: bool) -> AppState {
         AppState {
             client: reqwest::Client::new(),

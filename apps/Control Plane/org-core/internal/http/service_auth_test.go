@@ -259,6 +259,12 @@ func TestOrgServiceScopeForRequest(t *testing.T) {
 		{method: http.MethodGet, path: "/orgs/org-1/roles", want: []string{"org:read:self", "org:read:any"}},
 		{method: http.MethodGet, path: "/orgs/org-1/members/search", want: []string{"org:read:self", "org:read:any"}},
 		{method: http.MethodGet, path: "/orgs/org-1/roles/catalog", want: []string{"org:read:self", "org:read:any"}},
+		// The caller's own role's capabilities (ORG_ROLE_CAPABILITIES_ENABLED): one signed-user
+		// read, never org:read:any. The internal read of the same answer stays machine-only.
+		{method: http.MethodGet, path: "/orgs/org-1/roles/member/capabilities", want: []string{"org:read:self"}},
+		{method: http.MethodPost, path: "/orgs/org-1/roles/member/capabilities", want: nil},
+		{method: http.MethodGet, path: "/orgs/org-1/roles/member/capabilities/extra", want: nil},
+		{method: http.MethodGet, path: "/internal/orgs/org-1/roles/member/capabilities", want: []string{"org:read:any"}},
 		{method: http.MethodPost, path: "/orgs/org-1/plan", want: []string{"org:settings:write:self"}},
 		{method: http.MethodPatch, path: "/orgs/org-1/capabilities", want: []string{"org:settings:write:self"}},
 		{method: http.MethodPatch, path: "/orgs/org-1/settings", want: []string{"org:settings:write:self"}},

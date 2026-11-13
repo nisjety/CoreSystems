@@ -85,6 +85,8 @@ services:
       # (policy token, scope retention:zdr-decide). Empty = every decision refuses with
       # zdr_decision_unavailable. Never a browser value.
       GATEWAY_RETENTION_DECISION_SERVICE_API_KEY: ${GATEWAY_RETENTION_DECISION_SERVICE_API_KEY:-}
+      # The sensitive-field filter of the gateway JSON log. Only off, 0 or false disables it; the compose default keeps it on.
+      GATEWAY_ZDR_LOG_FILTER: ${GATEWAY_ZDR_LOG_FILTER:-on}
       AUTH_CORE_URL: ${AUTH_CORE_URL:-http://auth-core:3011}
       USER_CORE_URL: ${USER_CORE_URL:-http://user-core:3012}
       ORG_CORE_URL: ${ORG_CORE_URL:-http://org-core:8080}
@@ -157,7 +159,17 @@ services:
       # a value in this base file would be inherited by the production overlay.
       BROWSER_GRANT_ENFORCEMENT: ${BROWSER_GRANT_ENFORCEMENT:-}
       BROWSER_HUMAN_BROWSE: ${BROWSER_HUMAN_BROWSE:-false}
+      # W3-E3.4-5: the owner's view-only live route for a browser session. Off answers 404. Only 1, true, yes or on turns it on.
+      BROWSER_LIVE_VIEW_ONLY: ${BROWSER_LIVE_VIEW_ONLY:-false}
+      # WS7.H: the organisation browser policy admin routes. Off, or unset, answers 404 browser_policy_admin_disabled.
+      BROWSER_POLICY_ADMIN_API: ${BROWSER_POLICY_ADMIN_API:-false}
+      # E3.3-d: the browser region attach route. Off, the route is not mounted.
+      BROWSER_REGION_ATTACH: ${BROWSER_REGION_ATTACH:-false}
+      # E3.3-c: @tab mentions in a chat turn are resolved against the live tab list. Off, the route is not mounted.
+      BROWSER_TAB_MENTIONS: ${BROWSER_TAB_MENTIONS:-false}
       QUARRY_CONTROL_URL: ${QUARRY_CONTROL_URL:-http://quarry-control:8081}
+      # The knowledge crawl approval gate: off, observe or enforce. Unset or unrecognised means observe.
+      CRAWL_APPROVAL_MODE: ${CRAWL_APPROVAL_MODE:-observe}
       # Result caching/rate limiting degrades safely to in-process storage when
       # no frontend-owned cache contract is configured.
       # imports service is reachable as "imports-api" on inter-plane-bus (the
@@ -180,6 +192,8 @@ services:
       BROWSER_ASSISTANT_TASK_GRANTS: ${BROWSER_ASSISTANT_TASK_GRANTS:-false}
       # Kill switch for the assistant navigation model call. Off by default; only the literal true.
       ASSISTANT_NAVIGATION_ENABLED: ${ASSISTANT_NAVIGATION_ENABLED:-false}
+      # E3.7.10: the gateway arms of the Model-facing agent web toolset. Only the literal true turns it on.
+      VEREVON_GATEWAY_AGENT_WEB_TOOLSET: ${VEREVON_GATEWAY_AGENT_WEB_TOOLSET:-false}
       MODEL_PLANE_RECOMMEND_URL: ${MODEL_PLANE_RECOMMEND_URL:-http://model-gateway:8080/v1/recommend/plan}
       # Search verticals: SearXNG (videos) + autocomplete-core (typeahead). Web/images/answer
       # ride QUARRY_EDGE_URL above. Suggestions stay empty until AUTOCOMPLETE_INTERNAL_TOKEN is set.
@@ -225,6 +239,12 @@ services:
       # EP-12 S8: public Agent API ingress (/api/agent/v1/*); exchanges x-api-key at auth-core with the verevon-gateway principal above.
       GATEWAY_AGENT_API_ENABLED: ${GATEWAY_AGENT_API_ENABLED:-false}
       GATEWAY_AGENT_API_RPM_PER_KEY: ${GATEWAY_AGENT_API_RPM_PER_KEY:-60}
+      # API-key agent runs (INNH-10 GW-1): the x-api-key ingress for browser agent runs. Only 1 or the literal true.
+      API_KEY_AGENT_RUNS: ${API_KEY_AGENT_RUNS:-false}
+      # The per-class rate limit layers. off, 0, false or no removes them.
+      GATEWAY_RATE_CLASSES: ${GATEWAY_RATE_CLASSES:-on}
+      # The two content caches (search results, scrape previews) in the result cache. off, 0 or false disables them.
+      GATEWAY_RESULT_CACHE_CONTENT: ${GATEWAY_RESULT_CACHE_CONTENT:-on}
       # NOTE: there is deliberately no SCRAPE_ENHANCED_* stealth-proxy tier here.
       # The BFF used to fetch bot-walled sites itself through Scrapfly / Bright
       # Data, which sent the org's target URL and the page's full content to a
@@ -233,6 +253,12 @@ services:
       # had refused. Web fetch belongs to the Ingestion Plane; a stealth tier, if
       # needed, goes behind quarry-edge as another DriverKind in its waterfall.
       ALLOW_DEV_AUTH_BYPASS: ${ALLOW_DEV_AUTH_BYPASS:-0}
+      # Dev only: logs the blocked origin of each CSP report. Forced off when APP_ENV is production.
+      CSP_REPORT_LOG_HOSTS: ${CSP_REPORT_LOG_HOSTS:-false}
+      # Dev only: accepts dev actor headers. Refused, with a log line, when APP_ENV is production.
+      ALLOW_DEV_ACTOR_HEADERS: ${ALLOW_DEV_ACTOR_HEADERS:-false}
+      # Dev only: lets a release build boot with placeholder dev keys. The production overlay forces it to 0.
+      ALLOW_INSECURE_DEV_DEFAULTS: ${ALLOW_INSECURE_DEV_DEFAULTS:-false}
       RUST_LOG: ${RUST_LOG:-info}
       VEREVON_ALLOWED_ORIGINS: ${VEREVON_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,http://localhost:5199,http://127.0.0.1:5199,http://localhost:3186,http://127.0.0.1:3186,http://localhost:3187,http://127.0.0.1:3187}
       VEREVON_PUBLIC_ORIGIN: ${VEREVON_PUBLIC_ORIGIN:-http://localhost:5173}
@@ -264,14 +290,24 @@ services:
       # chat_snapshots_disabled. Pairs with MODEL_GATEWAY_THREAD_SHARES and SESSION_SNAPSHOT_GRANTS_ENABLED on the
       # Model Plane and VITE_CHAT_SNAPSHOTS on the frontend service. All default off.
       CHAT_SNAPSHOTS_ENABLED: ${CHAT_SNAPSHOTS_ENABLED:-false}
+      # WS16-S6: stamps the viewer interface language on the model-bound body as the locale field. Off removes the field.
+      CHAT_LOCALE_HINT: ${CHAT_LOCALE_HINT:-true}
       # W4-CC-8 (F-t3-057): the organisation's credential bindings (/api/v1/credential-bindings) and the custom REST
       # connector (/api/v1/connectors/custom-rest). Only the literal `true` enables them; off, they answer 404
       # credential_bindings_disabled. Pairs with the Ingestion Plane's CREDENTIAL_BINDINGS_ENABLED. Owners and admins only.
       CREDENTIAL_BINDINGS_UI_ENABLED: ${CREDENTIAL_BINDINGS_UI_ENABLED:-false}
       # W4-T7: the event trigger routes (/api/v1/event-triggers and its dry run). Only the literal true enables it; off, the routes are not mounted.
       EVENT_TRIGGERS_UI_ENABLED: ${EVENT_TRIGGERS_UI_ENABLED:-false}
+      # Schedule contracts (DEC-16): only the literal true lets a create carry a stored-consent contract to Control.
+      SCHEDULE_CONTRACT_ENABLED: ${SCHEDULE_CONTRACT_ENABLED:-false}
+      # WS15.S0: the schedule capabilities this installation can honour, as a JSON object. Unset means all off.
+      QUARRY_SCHEDULE_CAPABILITIES: ${QUARRY_SCHEDULE_CAPABILITIES:-}
       # F-t3-098: client-config reports the closed environment label. Only the literal true enables it; off, no environment identity is reported.
       CLIENT_ENV_IDENTITY: ${CLIENT_ENV_IDENTITY:-false}
+      # WS07-S3: what a stale client does. off, banner or enforce. Unknown values are banner.
+      CLIENT_VERSION_POLICY: ${CLIENT_VERSION_POLICY:-banner}
+      # WS07-S3: the oldest client contract the gateway still serves. Never below the compiled-in floor of 1.
+      CLIENT_MIN_CONTRACT: ${CLIENT_MIN_CONTRACT:-1}
       # EP-6 S7/S8: the agent builder routes (draft, publish, versions) and the draft preview of a chat turn.
       # Only the literal `true` enables them; off, the builder routes answer 404. Pairs with VITE_AGENT_BUILDER
       # on the frontend service, which mounts the page. Both default off.
@@ -282,6 +318,8 @@ services:
       # WS03-S4: the three org-admin Space policy routes (404 when off). A rollout control only;
       # Control's role check and its SPACE_POLICY_ADMIN_WRITES switch decide who may change what.
       SPACE_POLICY_ADMIN_API: ${SPACE_POLICY_ADMIN_API:-true}
+      # The effective policy view (GET /api/v1/policy/effective). Off, the route is not mounted.
+      POLICY_EFFECTIVE_VIEW_ENABLED: ${POLICY_EFFECTIVE_VIEW_ENABLED:-false}
       # WS04-S6: room member add, role change and leave on Control's writer (then the audience
       # reconcile). Off resumes the legacy Convex path (emergency stop only). Control also needs the
       # spaces:membership:act scope on this gateway's credential; without it every call is 403.
@@ -313,6 +351,10 @@ services:
       # WS13-S8: room pins (Convex-backed, editor or above). Rollout control only; Control's live role
       # decides who may pin and the thread must be readable by the pinner.
       SPACE_ROOM_PINS_API: ${SPACE_ROOM_PINS_API:-true}
+      # Room archive (Space). Off answers 404 feature_disabled. A rollout control, never an authorization input.
+      SPACE_ROOM_ARCHIVE_API: ${SPACE_ROOM_ARCHIVE_API:-true}
+      # The approval-grants and approval-policy routes. Off answers 404 feature_disabled; a once decision still works.
+      SPACE_APPROVAL_SCOPES_ENABLED: ${SPACE_APPROVAL_SCOPES_ENABLED:-true}
       # WS14-S7: room files routes and the per-turn attachment / Files tab reports. Rollout controls only;
       # Control's decisions, Ingestion and Data decide. Off until the upstream WS14 flags are on.
       # WS15-S7: the windowed room timeline (GET .../timeline, tail window on the transcript route; 404
@@ -342,6 +384,12 @@ services:
       # D2-461: a follow-up turn on an existing thread resolves its Space server-side, or is refused typed.
       # It also gates the ZDR retention thread-Space lookup (ZDR-Z-19a). Only the literal true enables it; off, unchanged.
       SPACE_THREAD_SCOPE_RESOLVE: ${SPACE_THREAD_SCOPE_RESOLVE:-false}
+      # WS18-S2: a follow-up turn of a scoped thread fetches its own retrieval decision. Only the literal true turns it on.
+      GATEWAY_SPACE_APPEND_RETRIEVAL: ${GATEWAY_SPACE_APPEND_RETRIEVAL:-false}
+      # EP-8 S7: the Space memory routes. Only the literal true turns them on; never on by default, even in development.
+      GATEWAY_SPACE_MEMORY_UI: ${GATEWAY_SPACE_MEMORY_UI:-false}
+      # The Space tool policy routes and the Agent tab editor. Off answers 404 feature_disabled. Dev default on.
+      SPACE_TOOL_POLICY_EDITOR_ENABLED: ${SPACE_TOOL_POLICY_EDITOR_ENABLED:-true}
       # EP-11 S1: members may author private skills (BFF). Only the literal true enables it; off, the admin-only answer stands.
       SKILL_MEMBER_AUTHORING: ${SKILL_MEMBER_AUTHORING:-false}
       # WS11-S7: the attention inbox (/attention) and the thread follow control. Rollout controls only; the
@@ -359,6 +407,8 @@ services:
       # model-gateway SPACE_WAKE_API and session-core SPACE_MENTION_RECORDS_CORE / SPACE_WAKE_CORE.
       SPACE_MENTION_RECORDS_API: ${SPACE_MENTION_RECORDS_API:-true}
       SPACE_ADDRESSED_WAKE_API: ${SPACE_ADDRESSED_WAKE_API:-true}
+      # WS08-S5: the owner or manager writer of an agent respond_to policy. Off answers 404 feature_disabled.
+      SPACE_AGENT_WAKE_POLICY_API: ${SPACE_AGENT_WAKE_POLICY_API:-true}
       # WS05-S6: owner/admin domain verification routes (proxied to org-core, which has its own
       # ORG_DOMAIN_VERIFICATION_ENABLED). Rollout control only; the live owner/admin role decides access.
       ORG_IDENTITY_ADMIN_API: ${ORG_IDENTITY_ADMIN_API:-true}
@@ -524,6 +574,8 @@ services:
       # EP-6 S8: mounts the agent builder page at /agents/:agentId/edit. Only the literal `true`; pairs with
       # AGENT_DEFINITION_VERSIONS on the gateway, without which the page cannot load a draft.
       VITE_AGENT_BUILDER: ${VITE_AGENT_BUILDER:-false}
+      # W4-T8: the event triggers section under Automations. Only the literal true mounts it; the gateway's EVENT_TRIGGERS_UI_ENABLED serves the routes.
+      VITE_EVENT_TRIGGERS: ${VITE_EVENT_TRIGGERS:-false}
       # W4-SH-6: the share dialog for conversation snapshots and the /chat/shared/:snapshotId viewer page. Only the
       # literal `true`; pairs with the gateway's CHAT_SNAPSHOTS_ENABLED, without which every snapshot call answers 404.
       VITE_CHAT_SNAPSHOTS: ${VITE_CHAT_SNAPSHOTS:-false}

@@ -67,6 +67,11 @@ The tests read `apps/Model Plane/deploy/docker-compose.yml` and
   `unregistered`.
 - Every name in `unregistered` is still set in compose.
 - Every `codePath` still mentions its variable.
+- Every switch the Control Plane compose sets is registered or listed in
+  `controlSwitchUnregistered` with a reason. A switch is an interpolated name that follows
+  the convention, or a value, interpolated or literal, that `ParseSwitch` reads. A numeric
+  value that is not a switch is listed in `controlNotSwitches` with a reason.
+  `control_compose_switch_test.go` holds both lists and pins the scan.
 
 The scanner reads a service at the indent of the first service under `services:`,
 so the two-space Model Plane layout and the four-space Control Plane layout both
@@ -80,19 +85,24 @@ adding its entry and removing it from the list.
 1. Add the entry in name order, or remove the name from `unregistered` first.
 2. For compose flags, copy each `${HOST:-default}` line into `declarations`, with the
    service it sits in.
-3. Run the tests. The ratchet fails until the entry matches compose.
+3. Run the tests. The ratchet fails until the entry matches compose. A new Control Plane
+   switch needs an entry, or a reason in `controlSwitchUnregistered`, whether the compose
+   writes it out or interpolates it.
 
 Changing a compose default is a deployment change and goes through the owner and the
 release process. The registry records the change; it does not make it.
 
 ## Not covered yet
 
-- Compose variables outside the convention (for example `DEEP_RESEARCH_PLAN_TURN`,
-  `SPACE_WAKE_API`), which are often switch-shaped. They are not ratcheted.
+- Model Plane compose variables outside the convention (for example
+  `DEEP_RESEARCH_PLAN_TURN` and `SPACE_WAKE_API`), which are often switch-shaped. They
+  are not ratcheted. Control Plane names are covered by the switch ratchet above.
 - Literal compose values such as `MP_COMPAT_MODE: v1_only` in the Model Plane compose,
-  and `PPROF_ENABLED`, `DRAGONFLY_ENABLED`, `GIN_MODE`, `GF_USERS_ALLOW_SIGN_UP` and
-  `NATS_SHARED_ALLOW_TOKEN_FALLBACK` in the Control Plane compose, which are not
-  interpolated.
+  which are not interpolated and are not ratcheted. In the Control Plane compose the
+  literal switches are checked, and four stay out of the registry with a reason in
+  `controlSwitchUnregistered`: `PPROF_ENABLED`, `DRAGONFLY_ENABLED`,
+  `NATS_SHARED_ALLOW_TOKEN_FALLBACK` and `GF_USERS_ALLOW_SIGN_UP`. `GIN_MODE` is a
+  framework value, not a switch.
 - Compose files other than the two above: the Control Plane's
   `docker-compose.production.yml`, `docker-compose.legacy-bridge.yml`,
   `docker-compose.recovery.override.yml` and `docker-compose.shared-nats.yml`, and

@@ -502,6 +502,13 @@ services:
             SPACE_DM_REGISTRATION: ${SPACE_DM_REGISTRATION:-false}
             SPACE_AUDIT_DECISION_EVENTS: ${SPACE_AUDIT_DECISION_EVENTS:-false}
             SPACE_AUDIT_DECISION_KINDS: ${SPACE_AUDIT_DECISION_KINDS:-denied}
+            # EP-9 E2: per-tier sandbox egress on the Space capability decision. Strict literal
+            # true; off by default. Off keeps the v1 decision and leaves the egress columns alone.
+            SPACE_SANDBOX_EGRESS_TIERS: ${SPACE_SANDBOX_EGRESS_TIERS:-false}
+            # WS20-S4: stored-consent schedule contracts. Strict literal true; off by default.
+            # Blocked by depth-register D0-010 (step-time re-verification of the contract is not
+            # built): keep it off until that lands.
+            SCHEDULE_CONTRACT_ENABLED: ${SCHEDULE_CONTRACT_ENABLED:-false}
             # WS14-S2: owner-asserted grant writes (only the registered owner service of a
             # resource type, for a verified user) and Space-subject grants (file-grant,
             # space-visible). Strict literal true; off by default and in production until
@@ -637,6 +644,10 @@ services:
             ORG_FLAGS_ENABLED: ${ORG_FLAGS_ENABLED:-false}
             # EP-9 C1: retention policy and legal-hold routes. Off (404) unless the literal true.
             ORG_RETENTION_POLICY_ENABLED: ${ORG_RETENTION_POLICY_ENABLED:-false}
+            # Member capability route (GET /orgs/:id/roles/:roleName/capabilities): the gateway's
+            # similarity-candidate check reads the viewer's own role here. Off (404) unless the literal
+            # true; with it off the gateway keeps answering support_recurrence_policy_unavailable.
+            ORG_ROLE_CAPABILITIES_ENABLED: ${ORG_ROLE_CAPABILITIES_ENABLED:-false}
             # WS05-S7: SSO provider administration and enforcement go through auth-core.
             AUTH_CORE_URL: http://auth-core:3011
             ORG_CORE_IDENTITY_SERVICE_TOKEN: ${ORG_CORE_IDENTITY_SERVICE_TOKEN:-}

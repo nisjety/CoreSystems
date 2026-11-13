@@ -539,11 +539,15 @@ func main() {
 }
 
 func sessionRunActionAuthorityTransportFromEnvironment() (clients.SessionRunActionAuthorityTransport, error) {
+	// Strict literal: only "true" turns the plaintext loopback opt-in on. ParseBool still reads
+	// the off spellings (unset, false, 0, f, FALSE), so a switch that is off stays off without an
+	// error. Other spellings of true (1, t, TRUE, True) are refused rather than read as on, and so
+	// is a value ParseBool cannot read.
 	allowInsecureLoopback := false
 	if raw := strings.TrimSpace(os.Getenv("CONTROL_ALLOW_INSECURE_SESSION_RUN_AUTHORITY_LOOPBACK")); raw != "" {
 		parsed, err := strconv.ParseBool(raw)
-		if err != nil {
-			return clients.SessionRunActionAuthorityTransport{}, fmt.Errorf("CONTROL_ALLOW_INSECURE_SESSION_RUN_AUTHORITY_LOOPBACK must be true or false")
+		if err != nil || (parsed && raw != "true") {
+			return clients.SessionRunActionAuthorityTransport{}, fmt.Errorf("CONTROL_ALLOW_INSECURE_SESSION_RUN_AUTHORITY_LOOPBACK must be the literal true or false")
 		}
 		allowInsecureLoopback = parsed
 	}

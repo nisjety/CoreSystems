@@ -263,11 +263,16 @@ async fn require_support_recurrence_access(
             .into_response());
     }
 
+    // The member route, on the viewer's delegation (org:read:self): org-core answers the
+    // capabilities of the role this viewer holds and refuses any other role. The internal route
+    // needs org:read:any, which verevon-gateway can never hold, so it refused every call and this
+    // check always answered 503. While ORG_ROLE_CAPABILITIES_ENABLED is off, org-core answers 404
+    // here and the check stays 503, as before.
     let (status, Json(capabilities_response)) = proxy_json(
         state,
         Method::GET,
         &format!(
-            "{}/internal/orgs/{}/roles/{}/capabilities",
+            "{}/orgs/{}/roles/{}/capabilities",
             state.org_core_url,
             urlencoding::encode(org_id),
             urlencoding::encode(role)
@@ -727,7 +732,10 @@ mod support_recurrence_access_tests {
     use super::*;
     use http_body_util::BodyExt;
     use wiremock::{
-        matchers::{method as wm_method, path as wm_path},
+        matchers::{
+            header as wm_header, header_exists as wm_header_exists, method as wm_method,
+            path as wm_path,
+        },
         Mock, MockServer, ResponseTemplate,
     };
 
@@ -777,7 +785,7 @@ mod support_recurrence_access_tests {
             .mount(&org_core)
             .await;
         Mock::given(wm_method("GET"))
-            .and(wm_path("/internal/orgs/org-1/roles/member/capabilities"))
+            .and(wm_path("/orgs/org-1/roles/member/capabilities"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "capabilities": capabilities
             })))
@@ -845,6 +853,101 @@ mod support_recurrence_access_tests {
         require_support_recurrence_access(&state, &member_user("member"))
             .await
             .expect("expected access to be granted");
+    }
+
+    /// ZDR off for org-1, so the capability check is the one that decides.
+    async fn mount_zdr_off(org_core: &MockServer) {
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/api/v1/organizations/org-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "org-1",
+                "metadata": { "interactiveRetention": { "zdr": false } }
+            })))
+            .mount(org_core)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn the_capability_read_is_the_member_route_on_the_viewers_delegation() {
+        let org_core = MockServer::start().await;
+        let state = state_for(&org_core).await;
+        mount_zdr_off(&org_core).await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/orgs/org-1/roles/member/capabilities"))
+            .and(wm_header("x-service-id", "verevon-gateway"))
+            .and(wm_header(
+                "x-service-token",
+                state.org_core_service_token.as_str(),
+            ))
+            .and(wm_header("x-user-id", "user-1"))
+            .and(wm_header("x-org-id", "org-1"))
+            .and(wm_header("x-user-role", "member"))
+            .and(wm_header("x-delegation-version", "v3"))
+            .and(wm_header_exists("x-delegation-timestamp"))
+            .and(wm_header_exists("x-delegation-nonce"))
+            .and(wm_header_exists("x-delegation-body-sha256"))
+            .and(wm_header_exists("x-delegation-signature"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "capabilities": ["support:recurrence:read"]
+            })))
+            .expect(1)
+            .mount(&org_core)
+            .await;
+
+        require_support_recurrence_access(&state, &member_user("member"))
+            .await
+            .expect("expected access to be granted");
+
+        let requests = org_core.received_requests().await.unwrap_or_default();
+        assert!(requests
+            .iter()
+            .all(|request| request.url.path() != "/internal/orgs/org-1/roles/member/capabilities"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_capability_read_keeps_the_answer_policy_unavailable() {
+        // With ORG_ROLE_CAPABILITIES_ENABLED off, org-core answers 404 on the member route; a
+        // refusal answers 403. Both reach the same 503 the check has always answered, with the
+        // same code and message.
+        for status in [403_u16, 404] {
+            let org_core = MockServer::start().await;
+            let state = state_for(&org_core).await;
+            mount_zdr_off(&org_core).await;
+            Mock::given(wm_method("GET"))
+                .and(wm_path("/orgs/org-1/roles/member/capabilities"))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(serde_json::json!({
+                        "error": { "code": "not_found", "message": "not found" }
+                    })),
+                )
+                .mount(&org_core)
+                .await;
+
+            let err = require_support_recurrence_access(&state, &member_user("member"))
+                .await
+                .expect_err("expected rejection");
+            assert_eq!(
+                err.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "org-core answered {status}"
+            );
+            let body: Value = serde_json::from_slice(
+                &err.into_body()
+                    .collect()
+                    .await
+                    .expect("response body")
+                    .to_bytes(),
+            )
+            .expect("JSON response");
+            assert_eq!(
+                body["error"]["code"],
+                "support_recurrence_policy_unavailable"
+            );
+            assert_eq!(
+                body["error"]["message"],
+                "Similarity candidates are unavailable until permissions can be verified."
+            );
+        }
     }
 
     #[tokio::test]
