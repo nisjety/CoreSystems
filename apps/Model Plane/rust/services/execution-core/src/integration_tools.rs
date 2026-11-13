@@ -1618,6 +1618,7 @@ fn catalog_for(provider_key: &str) -> Option<Vec<RenderOp>> {
         let mut rows: Vec<RenderOp> = static_ops
             .unwrap_or_default()
             .iter()
+            .filter(|op| row_offered(provider_key, op.operation))
             .map(RenderOp::from)
             .collect();
         if let Some(catalog) = served {
@@ -1627,6 +1628,9 @@ fn catalog_for(provider_key: &str) -> Option<Vec<RenderOp>> {
                 .filter(|provider| provider.provider == provider_key)
             {
                 for row in &provider.operations {
+                    if !row_offered(provider_key, &row.operation) {
+                        continue;
+                    }
                     known = true;
                     let is_write = row.kind.is_write();
                     let position = rows
@@ -1671,7 +1675,7 @@ pub fn operation_is_write(operation: &str) -> Option<bool> {
         let mut verdict: Option<bool> = None;
         for (provider, ops) in CATALOG {
             for c in *ops {
-                if names_operation(op, provider, c.operation) {
+                if names_operation(op, provider, c.operation) && row_offered(provider, c.operation) {
                     verdict = Some(verdict.unwrap_or(false) || c.is_write);
                 }
             }
@@ -1679,7 +1683,9 @@ pub fn operation_is_write(operation: &str) -> Option<bool> {
         if let Some(catalog) = served {
             for provider in &catalog.providers {
                 for row in &provider.operations {
-                    if names_operation(op, &provider.provider, &row.operation) {
+                    if names_operation(op, &provider.provider, &row.operation)
+                        && row_offered(&provider.provider, &row.operation)
+                    {
                         verdict = Some(verdict.unwrap_or(false) || row.kind.is_write());
                     }
                 }
@@ -1747,6 +1753,71 @@ provider yet)"
     s
 }
 
+/// The environment switch for the provider content reads: the GitHub file and README rows, the
+/// Notion page-content row, and the larger cap a content read keeps, with the decode of its base64
+/// body. Only the literal `true` turns it on, and it is read on every offer and every call, so a
+/// restart is not needed to turn it off.
+const PROVIDER_CONTENT_READS_ENV: &str = "EXECUTION_CORE_PROVIDER_CONTENT_READS";
+
+/// Whether the deployment has switched the provider content reads on.
+pub(crate) fn provider_content_reads_enabled() -> bool {
+    parse_provider_content_reads_enabled(std::env::var(PROVIDER_CONTENT_READS_ENV).ok().as_deref())
+}
+
+fn parse_provider_content_reads_enabled(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// The catalogued rows the content-read switch governs, as (provider, operation): a GitHub file, a
+/// GitHub README and a Notion page's blocks. The curated table and a served catalog both carry them.
+/// Off, neither offers one or classes it as a read, so it is unknown and gated, as an operation the
+/// catalogue does not name always is.
+const CONTENT_READ_ROWS: &[(&str, &str)] = &[
+    ("github", "contents.get"),
+    ("github", "readme.get"),
+    ("notion", "page.content"),
+];
+
+/// Whether `operation` under `provider` is offered and classed from a catalog. Every row is, except
+/// the content-read rows while the switch is off.
+fn row_offered(provider: &str, operation: &str) -> bool {
+    let content_row = CONTENT_READ_ROWS
+        .iter()
+        .any(|(p, o)| p.eq_ignore_ascii_case(provider) && o.eq_ignore_ascii_case(operation));
+    !content_row || provider_content_reads_enabled()
+}
+
+/// Serialises the tests that set [`PROVIDER_CONTENT_READS_ENV`], which is process-wide.
+#[cfg(test)]
+static CONTENT_READS_SWITCH_LOCK: Mutex<()> = Mutex::new(());
+
+/// Clears [`PROVIDER_CONTENT_READS_ENV`] when it drops, so a panicking test leaves the switch off.
+#[cfg(test)]
+struct ClearContentReadsSwitch;
+
+#[cfg(test)]
+impl Drop for ClearContentReadsSwitch {
+    fn drop(&mut self) {
+        std::env::remove_var(PROVIDER_CONTENT_READS_ENV);
+    }
+}
+
+/// Runs `run` with the provider content-read switch on or off. The switch lock is held throughout,
+/// so no other test sees the switch change while `run` reads it.
+#[cfg(test)]
+pub(crate) fn with_provider_content_reads<T>(on: bool, run: impl FnOnce() -> T) -> T {
+    let _lock = CONTENT_READS_SWITCH_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _clear = ClearContentReadsSwitch;
+    if on {
+        std::env::set_var(PROVIDER_CONTENT_READS_ENV, "true");
+    } else {
+        std::env::remove_var(PROVIDER_CONTENT_READS_ENV);
+    }
+    run()
+}
+
 /// The read operations whose result is a content body, by bare name. Each is capped at
 /// [`READ_CONTENT_RESULT_CHARS`] instead of [`MAX_RESULT_CHARS`]. The field is where a base64 body
 /// sits, when one does: Drive sends a file as `content_base64`, and GitHub sends a file's `content`
@@ -1763,9 +1834,11 @@ const CONTENT_READS: &[(&str, Option<&str>)] = &[
 
 /// The content read `operation` names, bare or behind a catalogued provider prefix
 /// (`google.drive.file.content`), when the catalogue classes it as a read. An unknown operation is
-/// not a read here, so it never gets the larger cap, and a write never does either.
+/// not a read here, so it never gets the larger cap, and a write never does either. With the
+/// provider content-read switch off no operation is a content read, so every read keeps the
+/// ordinary cap and no body is decoded.
 fn content_read(operation: &str) -> Option<(&'static str, Option<&'static str>)> {
-    if operation_is_write(operation) != Some(false) {
+    if !provider_content_reads_enabled() || operation_is_write(operation) != Some(false) {
         return None;
     }
     CONTENT_READS.iter().copied().find(|(name, _)| {
@@ -2270,18 +2343,120 @@ mod tests {
 
     #[test]
     fn a_gmail_message_body_is_a_content_read_with_the_content_cap() {
-        assert!(is_content_read("gmail.messages.get"));
-        assert!(is_content_read("google.gmail.messages.get"));
-        assert!(
-            !is_content_read("gmail.messages"),
-            "a list read keeps the ordinary cap"
-        );
-        assert!(
-            !is_content_read("gmail.send"),
-            "a write is never a content read"
-        );
-        assert_eq!(result_cap("gmail.messages.get"), READ_CONTENT_RESULT_CHARS);
-        assert_eq!(result_cap("gmail.messages"), MAX_RESULT_CHARS);
+        with_provider_content_reads(true, || {
+            assert!(is_content_read("gmail.messages.get"));
+            assert!(is_content_read("google.gmail.messages.get"));
+            assert!(
+                !is_content_read("gmail.messages"),
+                "a list read keeps the ordinary cap"
+            );
+            assert!(
+                !is_content_read("gmail.send"),
+                "a write is never a content read"
+            );
+            assert_eq!(result_cap("gmail.messages.get"), READ_CONTENT_RESULT_CHARS);
+            assert_eq!(result_cap("gmail.messages"), MAX_RESULT_CHARS);
+            let long = serde_json::json!({ "bodyText": "b".repeat(3_000) });
+            assert!(!render_action_result("gmail.messages.get", &long).contains("[truncated"));
+            let file =
+                serde_json::json!({ "mimeType": "text/plain", "content_base64": "aGVsbG8=" });
+            let rendered = render_action_result("drive.file.content", &file);
+            assert!(rendered.contains("hello") && !rendered.contains("content_base64"));
+        });
+    }
+
+    #[test]
+    fn with_the_switch_off_no_read_keeps_the_content_cap_or_decodes_a_body() {
+        with_provider_content_reads(false, || {
+            for operation in [
+                "gmail.messages.get",
+                "mail.messages.get",
+                "drive.file.content",
+            ] {
+                assert!(
+                    !is_content_read(operation),
+                    "{operation} keeps the ordinary context cap"
+                );
+                assert_eq!(
+                    result_cap(operation),
+                    MAX_RESULT_CHARS,
+                    "{operation} keeps the ordinary cap"
+                );
+            }
+            let long = serde_json::json!({ "bodyText": "b".repeat(3_000) });
+            assert!(render_action_result("gmail.messages.get", &long).contains("[truncated"));
+            let file =
+                serde_json::json!({ "mimeType": "text/plain", "content_base64": "aGVsbG8=" });
+            assert!(render_action_result("drive.file.content", &file).contains("content_base64"));
+        });
+    }
+
+    #[test]
+    fn the_content_read_rows_are_offered_and_classed_only_behind_the_switch() {
+        use crate::permission::is_risky_call;
+        let input = |operation: &str| serde_json::json!({ "operation": operation }).to_string();
+        let connection = |provider: &str| ConnectionSummary {
+            id: format!("conn_{provider}"),
+            provider_key: provider.to_owned(),
+            display_name: String::new(),
+            status: "active".to_owned(),
+        };
+        let connections = [connection("github"), connection("notion")];
+        let names = [
+            "contents.get",
+            "github.readme.get",
+            "page.content",
+            "notion.page.content",
+        ];
+        with_provider_content_reads(false, || {
+            for operation in names {
+                assert_eq!(
+                    operation_is_write(operation),
+                    None,
+                    "{operation} is unknown while off"
+                );
+                assert!(
+                    is_risky_call("execute_provider_action", &input(operation)),
+                    "{operation} is gated while off"
+                );
+            }
+            let offered = render_provider_actions(&connections);
+            assert!(!offered.contains("- contents.get:"));
+            assert!(!offered.contains("- readme.get:"));
+            assert!(!offered.contains("- page.content:"));
+            assert!(offered.contains("- issues.list:") && offered.contains("- databases:"));
+        });
+        with_provider_content_reads(true, || {
+            for operation in names {
+                assert_eq!(
+                    operation_is_write(operation),
+                    Some(false),
+                    "{operation} is a read"
+                );
+                assert!(
+                    !is_risky_call("execute_provider_action", &input(operation)),
+                    "{operation} ungated"
+                );
+            }
+            let offered = render_provider_actions(&connections);
+            assert!(offered.contains("- contents.get:") && offered.contains("- readme.get:"));
+            assert!(offered.contains("- page.content:"));
+        });
+    }
+
+    #[test]
+    fn the_content_reads_switch_is_on_only_for_the_literal_true() {
+        for raw in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some("yes"),
+            Some("false"),
+        ] {
+            assert!(!parse_provider_content_reads_enabled(raw), "{raw:?}");
+        }
+        assert!(parse_provider_content_reads_enabled(Some("true")));
     }
 
     #[test]

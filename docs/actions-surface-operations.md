@@ -208,6 +208,8 @@ of these land, the operation is inert.
 
 `page.content` is read-only and not approval-gated. It returns one page of the page's block children as the provider sends it (`results` plus `next_cursor`). The response is workspace content: callers should not cache it. This service stores none of it: a read writes no action receipt, and its audit metadata carries only the operation name.
 
+**Ships dark**: flag `INTEGRATION_NOTION_PAGE_CONTENT_READ`, default off (only an explicit true value turns it on). While it is off the call answers 400 `operation_not_supported` before the provider token is acquired, and the catalog in §8 leaves the row out.
+
 ### shopify (3 ops) — `https://{shop}/admin/api/2026-01` (shop from connection `providerContext`), auth via `X-Shopify-Access-Token` header
 
 | Operation (aliases) | Method + Endpoint | Required params | Body semantics | Capability | Sensitive | Approval | service.go |
@@ -399,6 +401,7 @@ The catalog lists a curated subset of the provider operations the executor serve
   - `capability` and `sensitive` are the values `requiredCapabilityForOperation` returns.
   - `params` lists the `params.*` names the operation reads. Body fields are described in `summary`.
 - **Derived, never hand-edited.** Rows come from `catalogRows` in `internal/api/actions_catalog.go`. Kind, capability and sensitivity are computed per request from `actionRequiresApproval` and `requiredCapabilityForOperation`. A row whose operation has no capability entry is dropped (fail closed, see §3). Changing an approval entry or a capability mapping changes the served catalog. Do not copy or edit the catalog by hand.
+- **Dark row.** The `notion` `page.content` row is served only while `INTEGRATION_NOTION_PAGE_CONTENT_READ` is on. With the flag off the document omits it.
 - **ETag.** `etag` is the SHA-256 hex digest of the document with `etag` omitted. The same value is sent as the quoted `ETag` header. A request whose `If-None-Match` names the current etag gets `304 Not Modified` with no body.
 - **Versioning.** `version` is `1`. New rows, operations and fields are additive and keep version 1. A breaking change to the shape bumps it.
 - **Consumer rule.** execution-core, the Model Plane consumer, treats the catalog as an addition-only hint. It may add operations its static table lacks. It never removes or relaxes an operation. For an operation in both sources, `is_write` is the OR of the two, so a served read cannot downgrade a static write. An operation the catalog does not list is still treated as a write.

@@ -1482,15 +1482,15 @@ async fn execute_step_inner(
         .await
     } else if matches!(tool_name, WEB_SEARCH_TOOL | QUARRY_MCP_WEB_SEARCH_TOOL) {
         let attribution =
-            crate::web_tools::Attribution::for_step(run_id, step_id, zdr || waived);
+            crate::web_tools::Attribution::for_step_if_enabled(run_id, step_id, zdr || waived);
         execute_web_search(tool_input, org_id, zdr, attribution).await
     } else if matches!(tool_name, WEB_FETCH_TOOL | QUARRY_MCP_WEB_READ_TOOL) {
         let attribution =
-            crate::web_tools::Attribution::for_step(run_id, step_id, zdr || waived);
+            crate::web_tools::Attribution::for_step_if_enabled(run_id, step_id, zdr || waived);
         execute_web_fetch(tool_input, org_id, zdr, attribution).await
     } else if crate::web_tools::is_crawl_tool(tool_name) {
         let attribution =
-            crate::web_tools::Attribution::for_step(run_id, step_id, zdr || waived);
+            crate::web_tools::Attribution::for_step_if_enabled(run_id, step_id, zdr || waived);
         execute_web_crawl_tool(tool_name, tool_input, org_id, attribution).await
     } else if tool_name == crate::runtime_loop::owner_reads::TOOL_NAME {
         crate::runtime_loop::owner_reads::execute(
@@ -3234,6 +3234,13 @@ async fn execute_read_provider_action(
         input.document_url.as_deref(),
     ) {
         Ok(resolved) => resolved,
+        // A link refused here names a GitHub or Notion content read. execute_provider_action lists that read only
+        // while the provider content reads are on, so with them off the refusal names no call this loop offers.
+        Err(mp_contracts::provider_reads::DocumentUrlError::Refused(_))
+            if !crate::integration_tools::provider_content_reads_enabled() =>
+        {
+            return tool_error(mp_contracts::provider_reads::DOCUMENT_URL_NOT_OFFERED.to_owned());
+        }
         Err(error) => return tool_error(error.message().to_owned()),
     };
     let Some(client) = crate::integration_tools::IntegrationActionsClient::from_env() else {
@@ -3638,6 +3645,56 @@ mod connector_tool_tests {
                 .error
                 .expect("a read of a connection the run did not select is refused");
             assert!(error.contains("connection_not_in_scope"), "{scope:?}: {error}");
+        }
+    }
+
+    /// Sets the document-link switch for one test, and clears it when the test ends, even on a panic.
+    struct DocumentUrlSwitchOn;
+
+    impl DocumentUrlSwitchOn {
+        fn set() -> Self {
+            std::env::set_var(mp_contracts::provider_reads::DOCUMENT_URL_ENV, "true");
+            Self
+        }
+    }
+
+    impl Drop for DocumentUrlSwitchOn {
+        fn drop(&mut self) {
+            std::env::remove_var(mp_contracts::provider_reads::DOCUMENT_URL_ENV);
+        }
+    }
+
+    /// A GitHub or Notion link is refused toward execute_provider_action only while the provider content reads are
+    /// on, where that call serves the read. Off, the refusal names no call, because that call is not offered then.
+    #[test]
+    fn a_content_link_names_no_call_while_the_content_reads_are_off() {
+        let scope = vec!["conn-a".to_owned()];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime to drive the read");
+        let _switch = DocumentUrlSwitchOn::set();
+        let github = r#"{"connection_id":"conn-a","document_url":"https://github.com/acme/widgets/blob/main/README.md"}"#;
+        let notion = r#"{"connection_id":"conn-a","document_url":"https://www.notion.so/Plan-0123456789abcdef0123456789abcdef"}"#;
+        for (input, operation) in [(github, "contents.get"), (notion, "page.content")] {
+            crate::integration_tools::with_provider_content_reads(false, || {
+                let out =
+                    runtime.block_on(execute_read_provider_action(input, "org-1", None, &scope));
+                assert_eq!(
+                    out.error.as_deref(),
+                    Some(mp_contracts::provider_reads::DOCUMENT_URL_NOT_OFFERED),
+                    "{input}"
+                );
+            });
+            crate::integration_tools::with_provider_content_reads(true, || {
+                let out =
+                    runtime.block_on(execute_read_provider_action(input, "org-1", None, &scope));
+                let error = out
+                    .error
+                    .expect("a link to a content read is refused toward the call that serves it");
+                let named = format!("use execute_provider_action with operation \"{operation}\"");
+                assert!(error.contains(&named), "{input}: {error}");
+            });
         }
     }
 

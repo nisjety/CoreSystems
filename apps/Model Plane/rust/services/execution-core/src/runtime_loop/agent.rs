@@ -25337,25 +25337,31 @@ mod tests {
     /// of ordinary text keep the ordinary one.
     #[test]
     fn a_provider_content_read_keeps_its_whole_text_and_nothing_else_gets_that_cap() {
-        use crate::integration_tools::READ_RESULT_CHAR_CAP;
+        use crate::integration_tools::{with_provider_content_reads, READ_RESULT_CHAR_CAP};
         let call = |tool: &str, operation: &str| {
             let input = format!(r#"{{"connection_id":"conn_1","operation":"{operation}"}}"#);
             provider_call_is_content_read(tool, &input)
         };
-        assert!(call("execute_provider_action", "gmail.messages.get"));
-        assert!(call("execute_provider_action", "google.gmail.messages.get"));
-        assert!(call("read_provider_action", "mail.messages.get"));
+        with_provider_content_reads(true, || {
+            assert!(call("execute_provider_action", "gmail.messages.get"));
+            assert!(call("execute_provider_action", "google.gmail.messages.get"));
+            assert!(call("read_provider_action", "mail.messages.get"));
+            assert!(
+                !call("execute_provider_action", "gmail.messages"),
+                "a list read keeps the ordinary cap"
+            );
+            assert!(
+                !call("execute_provider_action", "gmail.send"),
+                "a write is never a content read"
+            );
+            assert!(
+                !call("web_search", "gmail.messages.get"),
+                "only the provider tools carry a content read"
+            );
+        });
         assert!(
-            !call("execute_provider_action", "gmail.messages"),
-            "a list read keeps the ordinary cap"
-        );
-        assert!(
-            !call("execute_provider_action", "gmail.send"),
-            "a write is never a content read"
-        );
-        assert!(
-            !call("web_search", "gmail.messages.get"),
-            "only the provider tools carry a content read"
+            !with_provider_content_reads(false, || call("execute_provider_action", "gmail.messages.get")),
+            "with the provider content-read switch off a read keeps the ordinary cap"
         );
 
         let read = ToolStepResult {

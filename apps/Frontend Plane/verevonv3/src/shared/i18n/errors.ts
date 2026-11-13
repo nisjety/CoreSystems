@@ -318,6 +318,11 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'En agent kan ikke kobles til en nettleserøkt med Zero Data Retention. Ta over nettleseren selv i stedet.',
     en: 'An agent cannot be attached to a browser session with Zero Data Retention. Take over the browser yourself instead.',
   },
+  // Q2-WS8.I: Stop agent could not end the attached agent (browser.rs `stop_attach`): its grant revoke and the Quarry abort both failed.
+  browser_attach_stop_failed: {
+    no: 'Agenten kunne ikke stoppes og kan fortsatt handle. Prøv igjen.',
+    en: 'The agent could not be stopped and may still act. Try again.',
+  },
   browser_tab_control_forbidden: {
     no: 'Bare personen som eier denne nettleserøkten kan endre hvem som holder en fane.',
     en: 'Only the person who owns this browser session can change who holds a tab.',

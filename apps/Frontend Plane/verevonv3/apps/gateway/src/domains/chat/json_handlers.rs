@@ -136,6 +136,19 @@ async fn invoke_chat_json(
     let mut outbound_body =
         shared::with_viewer_locale(outbound_body, state.space_features.chat_locale_hint);
     shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;
+    // QF-8: the same browser context gate as the chat stream, after the ZDR posture is settled.
+    // It strips any client copy of the browser fields, so only what the gateway verified reaches
+    // Model Gateway from this route.
+    if let Err((status, body)) = crate::domains::browser_context::inject_turn_browser_context(
+        &state,
+        &user,
+        &headers,
+        &mut outbound_body,
+    )
+    .await
+    {
+        return (status, body);
+    }
     let request_timeout = chat_invoke_timeout(&outbound_body);
     // After `inject_personal_thread_context`, not with the other bearers above:
     // it is only minted once Control has actually scoped this turn to a Space.

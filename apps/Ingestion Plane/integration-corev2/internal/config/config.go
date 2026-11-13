@@ -103,6 +103,7 @@ type Config struct {
 	// and refreshed in place by the broker), never in the integration
 	// database.
 	ZDRAcknowledgementEnabled          bool
+	NotionPageContentReadEnabled       bool
 	CodexSubscriptionEnabled           bool
 	CodexAppServerCommand              string
 	CodexSubscriptionHome              string
@@ -407,6 +408,7 @@ func Load() (Config, error) {
 		TokenLeaseConsumers: envCSV("INTEGRATION_TOKEN_LEASE_CONSUMERS", "finspo-core,conversation-core,data-plane-v2,model-plane,application-plane,verevon-v2-bff,verevon-v3-gateway,social-publisher,email-worker"),
 
 		ZDRAcknowledgementEnabled:          envBool("ZDR_ACKNOWLEDGEMENT_ENABLED", false),
+		NotionPageContentReadEnabled:       envBool("INTEGRATION_NOTION_PAGE_CONTENT_READ", false),
 		CodexSubscriptionEnabled:           envBool("CODEX_SUBSCRIPTION_ENABLED", false),
 		CodexAppServerCommand:              strings.TrimSpace(envOr("CODEX_APP_SERVER_COMMAND", "codex")),
 		CodexSubscriptionHome:              strings.TrimSpace(os.Getenv("CODEX_SUBSCRIPTION_HOME")),

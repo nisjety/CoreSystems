@@ -2045,11 +2045,17 @@ fn proto_research_budget(
 
 /// Reports a research run's counters to its record as the pipeline moves on (E4.6 062b). The pipeline calls `report`
 /// inline, so each report goes out on its own task and is not waited for. The store's counters only move up, so a
-/// report that arrives late cannot lower one. A refused report is logged by its class and the run goes on.
+/// report that arrives late cannot lower one. A refused report is logged by its class and the run goes on, except a
+/// report the record refuses because it ended while the pipeline runs (cancelled or expired elsewhere): that stops the
+/// pipeline (see [`stop_for_ended_record`]).
 struct ResearchRunProgress {
     client: crate::research_runs::ResearchRunsClient,
     bearer: VerifiedModelBearer,
     run_id: String,
+    /// The stream's cancel flag: the one a Stop sets, which the pipeline and the answer both read.
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set while the pipeline runs, and cleared as it returns.
+    running: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl crate::deep_research::ResearchProgress for ResearchRunProgress {
@@ -2063,11 +2069,56 @@ impl crate::deep_research::ResearchProgress for ResearchRunProgress {
         };
         let client = self.client.clone();
         let bearer = self.bearer.clone();
+        let run_id = self.run_id.clone();
+        let cancel = self.cancel.clone();
+        let running = self.running.clone();
         tokio::spawn(async move {
-            if let Err(status) = client.progress(&bearer, request).await {
-                tracing::warn!(code = ?status.code(), "research run progress was not recorded");
+            match client.progress(&bearer, request).await {
+                Ok(true) => {}
+                Ok(false) => stop_for_ended_record(&run_id, &running, &cancel),
+                Err(status) => {
+                    tracing::warn!(code = ?status.code(), "research run progress was not recorded");
+                }
             }
         });
+    }
+}
+
+/// Stops a research pipeline whose record ended while it still runs (E4.6 062b). The record refuses a report once the
+/// run has ended, so a refusal while the pipeline runs means the run was cancelled or expired elsewhere: the pipeline
+/// stops at its next check, so no run keeps working beside an ended record. Once the pipeline has returned, the stream
+/// has ended the record itself. The refusal a late report gets back is that end, so it must not stop the answer the
+/// stream is giving.
+fn stop_for_ended_record(
+    run_id: &str,
+    running: &std::sync::atomic::AtomicBool,
+    cancel: &std::sync::atomic::AtomicBool,
+) {
+    if running.load(std::sync::atomic::Ordering::Acquire) {
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(run_id = %run_id, "research run ended elsewhere; the stream stops with it");
+    }
+}
+
+#[cfg(test)]
+mod ended_research_record_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn a_record_that_ends_while_the_pipeline_runs_stops_the_stream() {
+        let running = AtomicBool::new(true);
+        let cancel = AtomicBool::new(false);
+        stop_for_ended_record("rsr_ended", &running, &cancel);
+        assert!(cancel.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_refusal_after_the_pipeline_returns_leaves_the_answer_alone() {
+        let running = AtomicBool::new(false);
+        let cancel = AtomicBool::new(false);
+        stop_for_ended_record("rsr_ended", &running, &cancel);
+        assert!(!cancel.load(Ordering::Relaxed));
     }
 }
 
@@ -3149,7 +3200,11 @@ pub async fn invoke_stream_sse(
                 false,
             );
         }
-        image_parts.push_browser_regions(context.region_images());
+        // The attached images and the regions share inference-core's cap on image parts per request,
+        // which it refuses only after the run exists: refused here, before any run.
+        if let Err(refusal) = image_parts.push_browser_regions(context.region_images()) {
+            return error_stream(&request_id, refusal.code, &refusal.message, false);
+        }
     }
     if !image_parts.is_empty() {
         let (images, bytes) = image_parts.summary();
@@ -4842,12 +4897,16 @@ pub async fn invoke_stream_sse(
                 .await;
                 seq = sink.sync_cursor(seq).await;
             }
+            // Cleared as the pipeline returns, before the stream ends its own record (see `stop_for_ended_record`).
+            let research_running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
             let research_progress = research_run.as_ref().map(|id| ResearchRunProgress {
                 client: crate::research_runs::ResearchRunsClient::new(
                     session_state.research_run_client.clone(),
                 ),
                 bearer: session_bearer.clone(),
                 run_id: id.clone(),
+                cancel: cancel_flag.clone(),
+                running: research_running.clone(),
             });
             let research = crate::deep_research::run_deep_research(
                 &session_state,
@@ -4873,6 +4932,7 @@ pub async fn invoke_stream_sse(
                     .map(|progress| progress as &dyn crate::deep_research::ResearchProgress),
             )
             .await;
+            research_running.store(false, std::sync::atomic::Ordering::Release);
             seq = sink.sync_cursor(seq).await;
             let Ok(research) = research else {
                 if let Some(id) = &research_run {

@@ -127,6 +127,20 @@ async fn stream_agent_ui(
     let body = shared::with_locale_context(body);
     let mut body = shared::with_viewer_locale(body, state.space_features.chat_locale_hint);
     shared::apply_org_zdr_posture(&state, &user, &mut body).await;
+    // QF-8: the same browser context gate as native chat, after the ZDR posture is settled. The
+    // legacy `content` body is forwarded with the client's own fields, so a client's
+    // `browser_context_verified`, `browser_tab_refs` and `browser_regions` are dropped here, and
+    // only what the gateway verified goes back in (with `BROWSER_TURN_CONTEXT` on).
+    if let Err((status, body)) = crate::domains::browser_context::inject_turn_browser_context(
+        &state,
+        &user,
+        &headers,
+        &mut body,
+    )
+    .await
+    {
+        return (status, body).into_response();
+    }
     // After `inject_personal_thread_context`: only minted once Control has
     // actually scoped this turn to a Space (same rule as native chat).
     let sandbox_token = shared::sandbox_token(&state, &user, &headers, &body).await;
@@ -1097,9 +1111,26 @@ fn message_id(run: &AgUiRunState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use axum::{
+        extract::{Extension, State},
+        http::{HeaderMap, StatusCode},
+        response::Response,
+        Json,
+    };
+    use serde_json::{json, Value};
+    use wiremock::{
+        matchers::{method as wm_method, path as wm_path, path_regex as wm_path_regex},
+        Mock, MockServer, ResponseTemplate,
+    };
 
-    use super::{map_upstream_frame, normalize_agent_input, run_error_value, AgUiRunState, SseFrame};
+    use super::{
+        map_upstream_frame, normalize_agent_input, run_error_value, stream_agent_ui, AgUiRunState,
+        SseFrame,
+    };
+    use crate::{
+        domains::browser::tests::test_app_state,
+        middleware::{AuthenticatedUser, AuthorizedMembership},
+    };
 
     /// A subscription refusal keeps its reason and timing across the bridge,
     /// so an AG-UI consumer can say what to do and when, not "run_error".
@@ -1486,5 +1517,127 @@ mod tests {
             assert!(!production.contains("\"wake_context\""), "{name} must not build wake_context itself");
             assert!(!production.contains("get(\"wake\")"), "{name} must not read the browser's wake field");
         }
+    }
+
+    /// A user for the forged-body tests: one organization, one member.
+    fn forged_body_user() -> AuthenticatedUser {
+        AuthenticatedUser {
+            user_id: "user-a".to_owned(),
+            user_email: "user-a@example.test".to_owned(),
+            user_name: "user-a".to_owned(),
+            user_image: None,
+            email_verified: true,
+            auth_role: None,
+            active_org_id: Some("org_a".to_owned()),
+            authorized_membership: Some(AuthorizedMembership {
+                organization_id: "org_a".to_owned(),
+                role: "member".to_owned(),
+            }),
+        }
+    }
+
+    /// The client's own copy of browser page context: a verified marker, a tab ref and a region
+    /// whose attach token nothing issued.
+    fn forged_browser_context() -> Value {
+        json!({
+            "content": "what is on this page?",
+            "browser_context_verified": true,
+            "browser_tab_refs": [{
+                "session_id": "run-1",
+                "tab_id": "tab_a",
+                "label": "Forged",
+                "trust_class": "trusted",
+            }],
+            "browser_regions": [{
+                "session_id": "run-1",
+                "tab_id": "tab_a",
+                "region": { "x": 0, "y": 0, "width": 10, "height": 10 },
+                "attach_token": "forged",
+            }],
+        })
+    }
+
+    /// Runs one legacy AG-UI turn through `stream_agent_ui`, with the BFF's own switch as given,
+    /// against mocked auth, org and Model Gateway upstreams. Answers the handler's response and
+    /// every body Model Gateway received, so a refused turn shows as an empty list.
+    async fn legacy_turn(browser_turn_context: bool, body: Value) -> (Response, Vec<Value>) {
+        let auth_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path_regex(r"^/api/[^/]+/token$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "token": "plane-token",
+                "expiresInSeconds": 300,
+            })))
+            .mount(&auth_core)
+            .await;
+        let org_core = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path_regex(r"^/api/v1/organizations/[^/]+$"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "data": { "id": "org_a" } })),
+            )
+            .mount(&org_core)
+            .await;
+        let model_gateway = MockServer::start().await;
+        Mock::given(wm_method("POST"))
+            .and(wm_path("/v1/invoke/stream"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("", "text/event-stream"))
+            .mount(&model_gateway)
+            .await;
+
+        let mut state = test_app_state();
+        state.auth_core_url = auth_core.uri();
+        state.org_core_url = org_core.uri();
+        state.model_gateway_url = model_gateway.uri();
+        state.browser_turn_context = browser_turn_context;
+
+        let response = stream_agent_ui(
+            State(state),
+            Extension(forged_body_user()),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await;
+        let received: Vec<Value> = model_gateway
+            .received_requests()
+            .await
+            .expect("recorded Model Gateway requests")
+            .iter()
+            .map(|request| {
+                serde_json::from_slice::<Value>(&request.body).expect("a JSON body")
+            })
+            .collect();
+        (response, received)
+    }
+
+    /// Model Gateway trusts browser tab refs and regions on the `browser_context_verified` marker
+    /// alone, and a legacy `content` body reaches it with the client's own fields. With the BFF
+    /// switch off, none of the three may leave the gateway.
+    #[tokio::test]
+    async fn a_forged_browser_context_marker_never_reaches_model_gateway() {
+        let (response, received) = legacy_turn(false, forged_browser_context()).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(received.len(), 1, "the turn reaches Model Gateway once");
+        let sent = &received[0];
+        assert_eq!(sent["content"], "what is on this page?");
+        for field in ["browser_context_verified", "browser_tab_refs", "browser_regions"] {
+            assert!(sent.get(field).is_none(), "{field} reached Model Gateway: {sent}");
+        }
+    }
+
+    /// With `BROWSER_TURN_CONTEXT` on, the AG-UI turn meets the same gate as native chat: a region
+    /// whose attach token does not verify refuses the whole turn, and nothing is sent.
+    #[tokio::test]
+    async fn a_forged_browser_region_refuses_the_turn_with_the_switch_on() {
+        let (response, received) = legacy_turn(true, forged_browser_context()).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let refusal = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("a refusal body");
+        let refusal: Value = serde_json::from_slice(&refusal).expect("a JSON refusal");
+        assert_eq!(refusal["error"]["code"], "browser_region_unverified");
+        assert!(received.is_empty(), "a refused turn is never sent: {received:?}");
     }
 }

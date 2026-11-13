@@ -703,14 +703,6 @@ pub async fn purge_organization_data(
         .await?
         .rows_affected();
 
-    // Research run records (Q4 E4.6, 062b): the org's rows, deleted before runs and threads. A non-ZDR run's partial
-    // results are content, so the purge removes them with the organisation. Nothing else in the purge reads them.
-    summary.research_runs = sqlx::query("DELETE FROM research_runs WHERE org_id = $1")
-        .bind(org_id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-
     // Append-only event log: scoped by its own `org_id` column, plus (for
     // any pre-2 row where that column is still the empty-string default) by
     // the `run_id` of a run this org owns. Must run before `runs` below —
@@ -767,6 +759,16 @@ pub async fn purge_organization_data(
         .rows_affected();
 
     summary.threads = sqlx::query("DELETE FROM threads WHERE org_id = $1")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    // Research run records (Q4 E4.6, 062b): the org's rows. They have no foreign key, but they must go after the
+    // threads: a begin locks its thread's row (FOR KEY SHARE) before it inserts a run, and the thread delete above
+    // waits for that lock, so a run committed for a thread this purge deletes is already in place here. A non-ZDR
+    // run's partial results are content, so the purge removes them with the organisation.
+    summary.research_runs = sqlx::query("DELETE FROM research_runs WHERE org_id = $1")
         .bind(org_id)
         .execute(&mut *tx)
         .await?
@@ -1479,8 +1481,8 @@ mod tests {
             "event trigger records (W4-F T1) must be purged before runs and threads"
         );
         assert!(
-            research_runs < runs && research_runs < threads,
-            "research run records (Q4 E4.6, 062b) must be purged before runs and threads"
+            threads < research_runs,
+            "research run records (Q4 E4.6, 062b) must be purged after threads, so a run committed for a deleted thread is removed too"
         );
         assert!(
             pos("DELETE FROM agent_skills WHERE org_id = $1")

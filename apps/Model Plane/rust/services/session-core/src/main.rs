@@ -288,6 +288,19 @@ async fn main() -> Result<()> {
         })
         .await
     });
+    // Research run expiry: a run whose finish was lost reads as running until this sweep ends it past its deadline.
+    // Off by default: the task parks and makes no database write, as the attention sweep does.
+    let research_expiry_pool = pool.clone();
+    let research_expiry_handle = tokio::spawn(async move {
+        if !research_runs::research_runs_enabled() {
+            std::future::pending::<()>().await;
+        }
+        supervise_background("session-core research run expiry sweep", move || {
+            let pool = research_expiry_pool.clone();
+            async move { research_runs::run_expiry_sweep(pool).await }
+        })
+        .await
+    });
     // Space event log: the NOTIFY listener only runs while emitting is on (it holds one pool
     // connection); the retention sweeper always runs, because retention is owed for rows
     // already written.
@@ -384,6 +397,7 @@ async fn main() -> Result<()> {
         result = terminalization_handle => result??,
         result = tool_ledger_handle => result??,
         result = attention_events_handle => result??,
+        result = research_expiry_handle => result??,
         result = space_listener_handle => result??,
         result = space_sweeper_handle => result??,
         result = trace_handle => result??,

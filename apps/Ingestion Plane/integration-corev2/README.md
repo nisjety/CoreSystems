@@ -423,7 +423,7 @@ Supported operation families:
   `gsc.search_analytics.query`, `ga4.account_summaries.list`,
   `ga4.data_streams.list`, `ga4.report.run`, `ga4.reporting_host.resolve`
 - GitHub: `user`, `orgs`, `teams`, `repos`, `repo`
-- Notion: `user`, `databases`, `pages`, `page.content`
+- Notion: `user`, `databases`, `pages`, `page.content` (dark: needs `INTEGRATION_NOTION_PAGE_CONTENT_READ=true`)
 - Shopify: `shop`, `products`, `orders`
 - Stripe: `account`, `customers`, `subscriptions`, `invoices`
 - Okta: `org`, `users`, `groups`, `user.suspend`, `user.activate`

@@ -825,7 +825,7 @@ async fn assistant_browser_capabilities(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
 ) -> Json<Value> {
-    assistant_browser_capabilities_with_switch(&state, &user, &headers, browser_ai_run_attach_enabled()).await
+    assistant_browser_capabilities_with_switch(&state, &user, &headers, state.space_features.browser_ai_run_attach_session).await
 }
 
 fn assistant_capability_body(available: bool, reason: Option<&str>) -> Value {
@@ -1717,7 +1717,8 @@ fn tab_control_quarry_body(holder: TabHolder, expected_epoch: Option<u64>) -> Va
     body
 }
 
-/// The refusal both attach routes give while BROWSER_AI_RUN_ATTACH_SESSION is off.
+/// The refusal both attach routes give while BROWSER_AI_RUN_ATTACH_SESSION is off, and Stop
+/// agent gives when no agent is attached (Quarry's `no_attached_agent`).
 fn attach_unavailable_refusal() -> Response {
     (
         StatusCode::CONFLICT,
@@ -1757,7 +1758,8 @@ pub(crate) async fn control_tab(
     Path((session_id, tab_id)): Path<(String, String)>,
     Json(body): Json<TabControlBody>,
 ) -> Response {
-    control_tab_with_switch(state, user, headers, session_id, tab_id, body, browser_ai_run_attach_enabled()).await
+    let attach_switch = state.space_features.browser_ai_run_attach_session;
+    control_tab_with_switch(state, user, headers, session_id, tab_id, body, attach_switch).await
 }
 
 // reason: route glue, every argument is a distinct request-scoped concern plus the switch.
@@ -1869,14 +1871,17 @@ fn projection_attach_ids(projection: &Value) -> (Option<String>, Option<String>)
 
 /// `POST /api/v1/browser/sessions/{session_id}/attach/stop` (Q2-WS8.I): the owner's Stop agent.
 /// Revokes the attach grant through model-gateway, then ends the attachment in Quarry with
-/// `disposition=abort`, each best effort. Answers `{ stopped: true }`; never the grant id.
+/// `disposition=abort`, each best effort. Answers `{ stopped: true }` when either step went
+/// through, 409 `browser_attach_unavailable` when no agent is attached, and 502
+/// `browser_attach_stop_failed` when neither did (the agent may still act). Never the grant id.
 pub(crate) async fn stop_attach(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Response {
-    stop_attach_with_switch(state, user, headers, session_id, browser_ai_run_attach_enabled()).await
+    let attach_switch = state.space_features.browser_ai_run_attach_session;
+    stop_attach_with_switch(state, user, headers, session_id, attach_switch).await
 }
 
 async fn stop_attach_with_switch(
@@ -1915,34 +1920,57 @@ async fn stop_attach_with_switch(
     if projection_not_zdr_off(&projection) {
         return attach_zdr_refusal();
     }
+    // Quarry projects the `attach` object only while an attachment is live, so without one there
+    // is no agent to stop.
+    if !projection.get("attach").is_some_and(Value::is_object) {
+        return attach_unavailable_refusal();
+    }
     let (attach_id, grant_id) = projection_attach_ids(&projection);
     // The grant first: once it is revoked the agent's next step is refused even if the
-    // Quarry call below fails. `revoke_session_grant` is best effort and logs only a status.
-    if let Some(grant_id) = grant_id.as_deref() {
-        revoke_session_grant(&state, &user, &headers, grant_id).await;
-    }
-    if let Some(attach_id) = attach_id.as_deref() {
-        let (status, _) = quarry_call(
-            &state,
-            Method::DELETE,
-            &format!(
-                "/v1/agent/runs/{}/attach/{}?disposition=abort",
-                urlencoding::encode(&session_id),
-                urlencoding::encode(attach_id),
-            ),
-            None,
-            token.as_deref(),
-            &user.user_id,
-        )
-        .await;
-        if !status.is_success() {
-            tracing::warn!(
-                status = status.as_u16(),
-                "browser attach stop: Quarry did not end the attachment; the revoked grant stops it"
-            );
+    // Quarry call below fails. `revoke_session_grant` is best effort and reports whether it
+    // went through.
+    let revoked = match grant_id.as_deref() {
+        Some(grant_id) => revoke_session_grant(&state, &user, &headers, grant_id).await,
+        None => false,
+    };
+    let ended = match attach_id.as_deref() {
+        Some(attach_id) => {
+            let (status, _) = quarry_call(
+                &state,
+                Method::DELETE,
+                &format!(
+                    "/v1/agent/runs/{}/attach/{}?disposition=abort",
+                    urlencoding::encode(&session_id),
+                    urlencoding::encode(attach_id),
+                ),
+                None,
+                token.as_deref(),
+                &user.user_id,
+            )
+            .await;
+            if !status.is_success() {
+                tracing::warn!(
+                    status = status.as_u16(),
+                    "browser attach stop: Quarry did not end the attachment"
+                );
+            }
+            status.is_success()
         }
+        None => false,
+    };
+    // Stopped only when one of the two went through. When neither did, the agent may still act,
+    // so the person is told the stop failed and can try again.
+    if revoked || ended {
+        return (StatusCode::OK, Json(ok(json!({ "stopped": true })))).into_response();
     }
-    (StatusCode::OK, Json(ok(json!({ "stopped": true })))).into_response()
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(error(
+            "browser_attach_stop_failed",
+            "The agent could not be stopped and may still act. Try again.",
+        )),
+    )
+        .into_response()
 }
 
 /// The body of a tab-open call. An open the model proposed carries
@@ -2544,7 +2572,8 @@ async fn start_ai_run_with_switch(
     body: StartAiRunBody,
     real_grant_switch: bool,
 ) -> Response {
-    start_ai_run_with_switches(state, user, headers, session_id, body, real_grant_switch, browser_ai_run_attach_enabled()).await
+    let attach_switch = state.space_features.browser_ai_run_attach_session;
+    start_ai_run_with_switches(state, user, headers, session_id, body, real_grant_switch, attach_switch).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -2954,11 +2983,6 @@ fn browser_ai_run_real_grant_enabled() -> bool {
 
 fn browser_ai_run_real_grant_from(value: Option<&str>) -> bool {
     value == Some("true")
-}
-
-/// Disabled by default: only an explicit server setting enables owner attachment.
-fn browser_ai_run_attach_enabled() -> bool {
-    std::env::var("BROWSER_AI_RUN_ATTACH_SESSION").ok().as_deref() == Some("true")
 }
 
 fn assistant_task_grants_enabled() -> bool {
@@ -5721,6 +5745,7 @@ fn screenshot_artifact_id(observation: &Value) -> Option<String> {
 
 /// E5.1: the artifact id of a `pdf` action's capture, with the same strict
 /// artifact-id filter as `screenshot_artifact_id`.
+#[cfg(test)]
 fn pdf_artifact_id(observation: &Value) -> Option<String> {
     observation
         .get("pdf_artifact_id")
@@ -6371,22 +6396,24 @@ async fn issue_session_grant(
 }
 
 /// Revokes a session grant, best effort: a failure leaves the grant to expire
-/// on its own TTL, and revoking an already-gone grant is a 200 upstream.
+/// on its own TTL, and revoking an already-gone grant is a 200 upstream. Answers whether the
+/// revoke went through (a 2xx), so a caller can tell a stop that happened from one that did not.
 async fn revoke_session_grant(
     state: &AppState,
     user: &AuthenticatedUser,
     headers: &HeaderMap,
     grant_id: &str,
-) {
+) -> bool {
     if !is_valid_path_segment(grant_id) {
-        return;
+        return false;
     }
     let (model, browser) = tokio::join!(
         model_token(state, user, headers),
         browser_broker_token(state, user, headers),
     );
     let Ok(browser) = browser else {
-        return;
+        tracing::warn!("browser session grant revoke skipped: no browser-broker token");
+        return false;
     };
     let url = format!(
         "{}/v1/browser/grants/{}",
@@ -6409,6 +6436,7 @@ async fn revoke_session_grant(
             "browser session grant revoke failed; it expires on its TTL"
         );
     }
+    status.is_success()
 }
 
 /// Quarry's owner projection as the SPA may see it: unchanged except that the
@@ -9809,6 +9837,133 @@ pub(crate) mod tests {
                 assert!(requests_to(&up.model, "POST", "/v1/browser/grants").await.is_empty());
                 assert!(requests_to(&up.model, "POST", "/v1/browser/runs").await.is_empty());
             }
+        }
+
+        #[tokio::test]
+        async fn stop_agent_says_stopped_only_when_a_stop_went_through() {
+            // (grant revoke status, Quarry abort status, expected status). Both steps are tried
+            // whatever the other answers; the stop is reported only when one of them went through.
+            let cases = [
+                (StatusCode::OK, StatusCode::INTERNAL_SERVER_ERROR, StatusCode::OK),
+                (StatusCode::INTERNAL_SERVER_ERROR, StatusCode::OK, StatusCode::OK),
+                (StatusCode::OK, StatusCode::OK, StatusCode::OK),
+                (StatusCode::INTERNAL_SERVER_ERROR, StatusCode::CONFLICT, StatusCode::BAD_GATEWAY),
+            ];
+            let revoke_path = format!("/v1/browser/grants/{GRANT}");
+            for (revoke, abort, expected) in cases {
+                let up = upstreams().await;
+                let mut projection = owner_projection(Some(GRANT));
+                projection["attach"] = json!({
+                    "state": "attached",
+                    "attachId": "attach-1",
+                    "tabId": "tab-1",
+                    "tabEpoch": 0,
+                    "grantId": GRANT,
+                });
+                mount_quarry_session(&up.quarry, projection).await;
+                Mock::given(wm_method("DELETE"))
+                    .and(wm_path(revoke_path.as_str()))
+                    .respond_with(ResponseTemplate::new(revoke.as_u16()))
+                    .mount(&up.model)
+                    .await;
+                Mock::given(wm_method("DELETE"))
+                    .and(wm_path("/v1/agent/runs/run-1/attach/attach-1"))
+                    .respond_with(ResponseTemplate::new(abort.as_u16()))
+                    .mount(&up.quarry)
+                    .await;
+                let response = stop_attach_with_switch(
+                    state(&up, BrowserGrantMode::Strict),
+                    test_user("user-a", "org-a"),
+                    HeaderMap::new(),
+                    "run-1".to_owned(),
+                    true,
+                )
+                .await;
+                let status = response.status();
+                let bytes = to_bytes(response.into_body(), 256 * 1024).await.expect("body");
+                let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                assert_eq!(status, expected, "revoke {revoke}, abort {abort}: {body}");
+                if expected == StatusCode::OK {
+                    assert_eq!(body["data"]["stopped"], json!(true), "{body}");
+                } else {
+                    assert_eq!(body["error"]["code"], json!("browser_attach_stop_failed"), "{body}");
+                }
+                assert_eq!(requests_to(&up.model, "DELETE", &revoke_path).await.len(), 1);
+                assert_eq!(
+                    requests_to(&up.quarry, "DELETE", "/v1/agent/runs/run-1/attach/attach-1")
+                        .await
+                        .len(),
+                    1
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn stop_agent_without_an_attached_agent_is_a_typed_refusal() {
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            let response = stop_attach_with_switch(
+                state(&up, BrowserGrantMode::Strict),
+                test_user("user-a", "org-a"),
+                HeaderMap::new(),
+                "run-1".to_owned(),
+                true,
+            )
+            .await;
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 256 * 1024).await.expect("body");
+            let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(body["error"]["code"], json!("browser_attach_unavailable"), "{body}");
+            assert!(requests_to(&up.model, "DELETE", &format!("/v1/browser/grants/{GRANT}"))
+                .await
+                .is_empty());
+            assert!(requests_to(&up.quarry, "DELETE", "/v1/agent/runs/run-1/attach/attach-1")
+                .await
+                .is_empty());
+        }
+
+        /// The attach switch is read once into AppState (`SpaceFeatureFlags::browser_ai_run_attach_session`),
+        /// never from the process environment in a handler. With the state switch off, tab control and
+        /// Stop agent refuse with `browser_attach_unavailable` even when the environment says `true`, and
+        /// neither route makes an upstream call.
+        #[tokio::test]
+        async fn attach_routes_read_the_switch_from_app_state_not_the_environment() {
+            let up = upstreams().await;
+            mount_quarry_session(&up.quarry, owner_projection(Some(GRANT))).await;
+            let (stop, tab) = {
+                let _env = crate::config::TEST_ENV_LOCK.lock().await;
+                std::env::set_var("BROWSER_AI_RUN_ATTACH_SESSION", "true");
+                let stop = stop_attach(
+                    State(state(&up, BrowserGrantMode::Strict)),
+                    Extension(test_user("user-a", "org-a")),
+                    HeaderMap::new(),
+                    Path("run-1".to_owned()),
+                )
+                .await;
+                let tab = control_tab(
+                    State(state(&up, BrowserGrantMode::Strict)),
+                    Extension(test_user("user-a", "org-a")),
+                    HeaderMap::new(),
+                    Path(("run-1".to_owned(), "tab-1".to_owned())),
+                    Json(TabControlBody {
+                        holder: TabHolder::Agent,
+                        expected_epoch: None,
+                    }),
+                )
+                .await;
+                std::env::remove_var("BROWSER_AI_RUN_ATTACH_SESSION");
+                (stop, tab)
+            };
+            for response in [stop, tab] {
+                let status = response.status();
+                let bytes = to_bytes(response.into_body(), 256 * 1024).await.expect("body");
+                let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                assert_eq!(status, StatusCode::CONFLICT, "{body}");
+                assert_eq!(body["error"]["code"], json!("browser_attach_unavailable"), "{body}");
+            }
+            assert!(up.quarry.received_requests().await.unwrap_or_default().is_empty());
+            assert!(up.model.received_requests().await.unwrap_or_default().is_empty());
         }
 
         #[tokio::test]

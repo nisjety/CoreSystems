@@ -6058,7 +6058,7 @@ fn browser_steer_answer(status: StatusCode, payload: &Value) -> BrowserSteerAnsw
         .iter()
         .find(|(known, _)| Some(*known) == upstream_code)
     {
-        return BrowserSteerAnswer::Refused(status, error(*code, *message));
+        return BrowserSteerAnswer::Refused(status, error(code, *message));
     }
     BrowserSteerAnswer::Refused(status, payload.clone())
 }
@@ -6612,7 +6612,9 @@ pub(super) async fn dispatch_browser_control_tab(
 /// `browser_attach.stop` with `{ sessionId }` (Q2-WS8.I-b, QF-28): the owner's Stop agent. Calls
 /// the same `stop_attach` handler the REST route mounts, so the BROWSER_AI_RUN_ATTACH_SESSION
 /// switch, the owner-projection gate, the ZDR refusal, the grant revoke and the Quarry abort are
-/// identical. The result is `{ stopped: true }`; the grant id never reaches the caller.
+/// identical. The result is `{ stopped: true }` only when a stop went through; any other answer
+/// (no attached agent, or a failed stop) keeps the handler's status and error. The grant id never
+/// reaches the caller.
 pub(super) async fn dispatch_browser_stop_attach(
     state: &AppState,
     user: &AuthenticatedUser,

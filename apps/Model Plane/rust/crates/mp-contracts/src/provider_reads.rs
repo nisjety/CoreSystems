@@ -217,6 +217,12 @@ pub fn parse_document_url_enabled(raw: Option<&str>) -> bool {
 pub const DOCUMENT_URL_NOT_SWITCHED_ON: &str =
     "read_provider_action takes no document_url here: this deployment has not switched it on";
 
+/// The refusal for a link to a GitHub or Notion document while the provider content reads are off. The refusal
+/// [`resolve_read_request`] gives names `execute_provider_action` for that read, and that call does not list it while
+/// the reads are off, so the Do loop answers with this one instead.
+pub const DOCUMENT_URL_NOT_OFFERED: &str =
+    "read_provider_action does not read this document, and this deployment offers no read of GitHub or Notion content";
+
 /// Why a read request does not resolve to a read the tool serves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DocumentUrlError {

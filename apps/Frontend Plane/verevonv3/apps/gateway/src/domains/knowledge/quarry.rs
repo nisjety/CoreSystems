@@ -688,7 +688,9 @@ pub(super) async fn start_crawl(
             Err(message) => return invalid_crawl(message),
         }
     } else {
-        match normalize_crawl_body(&body) {
+        // WS14.S7: the robots override is the AppState switch, read once in `build_state`.
+        let robots_override = state.space_features.crawl_robots_override;
+        match normalize_crawl_body_with(&body, Surface::Ui, robots_override) {
             Ok(crawl) => ("/v1/crawl", crawl, "crawl"),
             Err(message) => return invalid_crawl(message),
         }
@@ -791,24 +793,22 @@ pub(crate) fn normalize_crawl_body(input: &Value) -> Result<Value, String> {
 }
 
 /// `VEREVON_GATEWAY_CRAWL_ROBOTS_OVERRIDE` (WS14.S7): lets the UI crawl surface forward
-/// `ignore_robots_txt: true` to the edge. Off unless it is exactly `true`. Read per request,
-/// and only for a UI crawl, like `VEREVON_GATEWAY_AGENT_WEB_TOOLSET`.
+/// `ignore_robots_txt: true` to the edge. Off unless it is exactly `true`. Read once into
+/// `AppState` (`SpaceFeatureFlags::crawl_robots_override`) in `build_state`, and handed to the
+/// UI crawl handler, which passes it to `normalize_crawl_body_with`; never read per request.
 pub(crate) const CRAWL_ROBOTS_OVERRIDE_FLAG: &str = "VEREVON_GATEWAY_CRAWL_ROBOTS_OVERRIDE";
-
-fn crawl_robots_override_enabled() -> bool {
-    crawl_robots_override_from(std::env::var(CRAWL_ROBOTS_OVERRIDE_FLAG).ok().as_deref())
-}
 
 /// Exactly the word `true`, like the other gateway feature switches; anything else,
 /// including an unset variable, is off.
-fn crawl_robots_override_from(value: Option<&str>) -> bool {
+pub(crate) fn crawl_robots_override_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
 pub(crate) fn normalize_crawl_body_for(input: &Value, surface: Surface) -> Result<Value, String> {
-    // The switch is only read for a UI crawl: the Model surface never forwards a robots key.
-    let robots_override = surface == Surface::Ui && crawl_robots_override_enabled();
-    normalize_crawl_body_with(input, surface, robots_override)
+    // The robots override is not read here: the UI crawl handler (`start_crawl`) passes the
+    // AppState switch in through `normalize_crawl_body_with`, so this entry point never forwards
+    // a robots key.
+    normalize_crawl_body_with(input, surface, false)
 }
 
 /// The normaliser with the robots-override switch passed in, so tests never touch the
@@ -1809,6 +1809,44 @@ mod tests {
         assert_eq!(forwarded["max_age"], json!(120_000));
         assert_eq!(forwarded["cache"]["max_age_s"], json!(60));
         assert!(forwarded["cache"].get("mode").is_none());
+    }
+
+    /// WS14.S7: the UI crawl forwards `ignore_robots_txt` only while the AppState switch is on,
+    /// and the handler takes the switch from `state`, not from the environment.
+    #[tokio::test]
+    async fn start_crawl_forwards_robots_override_only_behind_the_app_state_switch() {
+        use wiremock::matchers::{method as wm_method, path as wm_path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for on in [true, false] {
+            let quarry = MockServer::start().await;
+            Mock::given(wm_method("POST"))
+                .and(wm_path("/v1/crawl"))
+                .respond_with(
+                    ResponseTemplate::new(202).set_body_json(json!({ "data": { "job_id": "job-1" } })),
+                )
+                .mount(&quarry)
+                .await;
+            let mut state = crate::tests::test_state(false);
+            state.quarry_edge_url = quarry.uri();
+            state.space_features.crawl_robots_override = on;
+            let response = start_crawl(
+                State(state),
+                Extension(preview_user()),
+                HeaderMap::new(),
+                Json(json!({ "url": "https://example.com/", "ignoreRobotsTxt": true })),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "switch on: {on}");
+
+            let received = quarry.received_requests().await.unwrap();
+            let forwarded: Value = serde_json::from_slice(&received[0].body).unwrap();
+            if on {
+                assert_eq!(forwarded["ignore_robots_txt"], json!(true));
+            } else {
+                assert!(forwarded.get("ignore_robots_txt").is_none(), "switch off");
+            }
+        }
     }
 
     #[test]

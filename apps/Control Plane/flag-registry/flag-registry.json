@@ -182,6 +182,28 @@
       ]
     },
     {
+      "name": "EXECUTION_CORE_PROVIDER_CONTENT_READS",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Q4-E4.3 (056a/c): the agent's provider content reads (github contents.get, readme.get, notion page.content), their decode and larger caps. Off: not offered, gated as unknown, 2000/8000 caps. Only the literal true.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_CORE_PROVIDER_CONTENT_READS", "default": "false" }
+      ]
+    },
+    {
+      "name": "EXECUTION_CORE_QUARRY_ATTRIBUTION",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Q4 E4.6 (062a): execution-core's web search, fetch and crawl tools send x-request-id and x-verevon-parent-run to Quarry so its traces join the run. Neither is sent for a ZDR or waived step. Only the literal true.",
+      "declarations": [
+        { "service": "execution-core", "env": "EXECUTION_CORE_QUARRY_ATTRIBUTION", "default": "false" }
+      ]
+    },
+    {
       "name": "EXECUTION_CORE_RECIPE_RUNNER",
       "kind": "switch",
       "owner": "model-plane",

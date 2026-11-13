@@ -1980,6 +1980,13 @@ services:
       # issues a single-use fill_otp child grant (needs BROWSER_BROKER_FILL_OTP_ENABLED and Quarry's
       # QUARRY_EDGE__FILL_OTP). Only the literal true turns it on.
       EXECUTION_CORE_BROWSER_FILL_OTP: ${EXECUTION_CORE_BROWSER_FILL_OTP:-false}
+      # Q4 E4.6 (062a), OFF by default: the web search, fetch and crawl tools send x-request-id and
+      # x-verevon-parent-run to Quarry (never for a ZDR or waived step). Only the literal true turns it on.
+      EXECUTION_CORE_QUARRY_ATTRIBUTION: ${EXECUTION_CORE_QUARRY_ATTRIBUTION:-false}
+      # Q4-E4.3, OFF by default: the provider content reads (github contents.get/readme.get, notion
+      # page.content) and their larger caps. notion page.content also needs integration-corev2's
+      # INTEGRATION_NOTION_PAGE_CONTENT_READ. Only the literal true turns it on.
+      EXECUTION_CORE_PROVIDER_CONTENT_READS: ${EXECUTION_CORE_PROVIDER_CONTENT_READS:-false}
       # Data Plane v2 retrieval — backs the real knowledge_search agentic tool
       # (RAG over the org's ingested docs). DATAPLANE_INTERNAL_KEY is sent as
       # the x-api-key credential.

@@ -624,6 +624,33 @@ export function streamFailurePresentation(
         unavailable: false,
         action: 'none',
       }
+    case 'browser_page_context_unsupported':
+      // QF-10: a browser tab or area cannot ride this turn (a Do, deep-research or image-generation turn,
+      // or an area on a model that reads no images). Refused before any run or model. The composer has
+      // already let go of the areas (it clears them once the send is handed over), so the words say to
+      // attach them again. The server's text is English operator wording and is never shown.
+      return {
+        message: tr(
+          'Området eller fanen fra nettleseren kan ikke brukes med denne modusen, dette verktøyet eller denne modellen. Endre modus, verktøy eller modell, legg dem ved på nytt og send igjen. Meldingen ble ikke sendt. Utkastet er beholdt.',
+          'The area or tab from the browser cannot be used with this mode, tool or model. Change the mode, tool or model, attach them again and send again. The message was not sent. Your draft is kept.',
+        ),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
+    case 'browser_page_context_invalid':
+      // QF-10: the browser tabs or areas the turn carried could not be read (a list or an image broke a
+      // bound or failed its check). Refused before any run or model, so they must be attached again. The
+      // server's text is English operator wording and is never shown.
+      return {
+        message: tr(
+          'Områdene eller fanene fra nettleseren kunne ikke leses. Meldingen ble ikke sendt. Legg dem ved på nytt og send igjen. Utkastet er beholdt.',
+          'The areas or tabs from the browser could not be read. The message was not sent. Attach them again and send again. Your draft is kept.',
+        ),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
     case 'agentic_subscription_disabled':
       // The server refused Do on the ChatGPT subscription because its switch is
       // off, before any model ran. Sending the same turn again would be refused

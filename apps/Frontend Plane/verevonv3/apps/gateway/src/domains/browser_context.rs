@@ -390,6 +390,10 @@ const TURN_TAB_REFS_FIELD: &str = "browser_tab_refs";
 const TURN_REGIONS_FIELD: &str = "browser_regions";
 /// Chat body field that says the gateway vouched for the browser context it carries.
 const TURN_VERIFIED_FIELD: &str = "browser_context_verified";
+/// The camelCase aliases Model Gateway's `InvokeRequest` also reads for the three fields above.
+/// A client's copy under any of them is removed too, or a forged marker would reach Model Gateway.
+const TURN_CAMEL_ALIASES: [&str; 3] =
+    ["browserTabRefs", "browserRegions", "browserContextVerified"];
 /// Regions one turn may carry.
 const TURN_REGIONS_MAX: usize = 4;
 /// Largest error body read back from a refusal built by the shared resolver.
@@ -486,8 +490,8 @@ fn take_turn_list(
 
 /// QF-8: the chat send path's browser context gate. The gateway is the only place a browser
 /// tab ref or region is vouched for, so whatever the client put in `browser_tab_refs` and
-/// `browser_regions` is always removed first (as is any client `browser_context_verified`).
-/// With `BROWSER_TURN_CONTEXT` off that is all. On:
+/// `browser_regions` is always removed first, under its camelCase alias too (as is any client
+/// `browser_context_verified`). With `BROWSER_TURN_CONTEXT` off that is all. On:
 ///
 /// - a zero-data-retention turn that carried either field is refused (400
 ///   `browser_context_refused_zdr`) before anything reaches Quarry or a model;
@@ -511,6 +515,9 @@ pub(crate) async fn inject_turn_browser_context(
         return Ok(());
     };
     object.remove(TURN_VERIFIED_FIELD);
+    for alias in TURN_CAMEL_ALIASES {
+        object.remove(alias);
+    }
     let tab_refs = take_turn_list(object, TURN_TAB_REFS_FIELD);
     let regions = take_turn_list(object, TURN_REGIONS_FIELD);
     if !state.browser_turn_context {
@@ -1065,5 +1072,39 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    }
+
+    /// The camelCase spellings of the chat body's browser context are the client's too. Model
+    /// Gateway's `InvokeRequest` reads them as serde aliases, so a forged marker or list must leave
+    /// the gate under those names as well, with `BROWSER_TURN_CONTEXT` off or on.
+    #[tokio::test]
+    async fn a_camel_case_forged_browser_context_never_reaches_model_gateway() {
+        for switch in [false, true] {
+            let mut state = test_app_state();
+            state.browser_turn_context = switch;
+            let mut body = json!({
+                "content": "what is on this page?",
+                "browserContextVerified": true,
+                "browserTabRefs": [{ "sessionId": "run-1", "tabId": "tab_a" }],
+                "browserRegions": [{ "sessionId": "run-1", "tabId": "tab_a", "image": {} }],
+            });
+            inject_turn_browser_context(&state, &test_user(), &HeaderMap::new(), &mut body)
+                .await
+                .expect("a camelCase copy is the client's and is stripped, not refused");
+            assert_eq!(body["content"], "what is on this page?");
+            for field in [
+                "browser_context_verified",
+                "browser_tab_refs",
+                "browser_regions",
+                "browserContextVerified",
+                "browserTabRefs",
+                "browserRegions",
+            ] {
+                assert!(
+                    body.get(field).is_none(),
+                    "{field} reached Model Gateway with the switch {switch}: {body}"
+                );
+            }
+        }
     }
 }

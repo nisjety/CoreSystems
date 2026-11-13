@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use std::{future::Future, pin::Pin};
 
 use crate::{config::AppState, envelope::error, middleware::AuthenticatedUser};
 
@@ -210,6 +211,20 @@ fn resolve_action_id(action_id: &str, toolset_enabled: bool) -> &str {
     }
 }
 
+/// Boxes one dispatcher's future for `execute_action`. The dispatcher is called inside this
+/// helper, so the future is built in this helper's frame and then moved to the heap. Awaited
+/// directly, each arm's future lived in `execute_action`'s own frame; in a debug build that
+/// frame was about 2 MiB, which with the callers' frames overflowed the 2 MiB default thread
+/// stack. The boxed future is polled exactly as the plain one was.
+fn boxed_dispatch<'a, F>(
+    make: impl FnOnce() -> F,
+) -> Pin<Box<dyn Future<Output = Response> + Send + 'a>>
+where
+    F: Future<Output = Response> + Send + 'a,
+{
+    Box::pin(make())
+}
+
 pub(super) async fn execute_action(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
@@ -234,627 +249,1052 @@ pub(super) async fn execute_action(
             .into_response();
     }
     match resolve_action_id(&body.action_id, toolset_enabled) {
-        "knowledge.recrawl_source" => dispatch_recrawl(&state, &user, &headers, &body.input).await,
-        "knowledge.scrape_url" => dispatch_scrape_url(&state, &user, &headers, &body.input).await,
-        "knowledge.crawl_site" => dispatch_crawl_site(&state, &user, &headers, &body.input).await,
+        "knowledge.recrawl_source" => {
+            boxed_dispatch(|| dispatch_recrawl(&state, &user, &headers, &body.input)).await
+        }
+        "knowledge.scrape_url" => {
+            boxed_dispatch(|| dispatch_scrape_url(&state, &user, &headers, &body.input)).await
+        }
+        "knowledge.crawl_site" => {
+            boxed_dispatch(|| dispatch_crawl_site(&state, &user, &headers, &body.input)).await
+        }
         "knowledge.import_source" => {
-            dispatch_import_source(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_import_source(&state, &user, &headers, &body.input)).await
         }
         "knowledge.connect_source" => {
-            dispatch_connect_source(&state, &user, &headers, &body.input, &body.idempotency_key)
-                .await
+            boxed_dispatch(|| {
+                dispatch_connect_source(&state, &user, &headers, &body.input, &body.idempotency_key)
+            })
+            .await
         }
-        "knowledge.upload_files" => dispatch_upload_files().await,
+        "knowledge.upload_files" => boxed_dispatch(dispatch_upload_files).await,
         "knowledge.create_document" => {
-            dispatch_knowledge_create_document(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| {
+                dispatch_knowledge_create_document(&state, &user, &headers, &body.input)
+            })
+            .await
         }
         "knowledge.extract_products" => {
-            dispatch_knowledge_extract_products(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| {
+                dispatch_knowledge_extract_products(&state, &user, &headers, &body.input)
+            })
+            .await
         }
         "knowledge.summarize_products" => {
-            dispatch_knowledge_summarize_products(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| {
+                dispatch_knowledge_summarize_products(&state, &user, &headers, &body.input)
+            })
+            .await
         }
         "knowledge.register_sharepoint_source" => {
-            dispatch_knowledge_register_sharepoint_source(&state, &user, &body.input).await
+            boxed_dispatch(|| {
+                dispatch_knowledge_register_sharepoint_source(&state, &user, &body.input)
+            })
+            .await
         }
         "brreg_lookup_organization" | "brreg.lookup_organization" => {
-            dispatch_brreg_lookup(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_brreg_lookup(&state, &user, &body.input)).await
         }
         "shipping.get_quotes" => {
-            dispatch_shipping_quotes(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_shipping_quotes(&state, &user, &headers, &body.input)).await
         }
         "operating_map.generate" | "operating_map.refresh" => {
-            dispatch_operating_map_generate(&state, &user, &headers, &body.input, &body.action_id)
-                .await
+            boxed_dispatch(|| {
+                dispatch_operating_map_generate(
+                    &state,
+                    &user,
+                    &headers,
+                    &body.input,
+                    &body.action_id,
+                )
+            })
+            .await
         }
         "operating_map.review_proposal" => {
-            dispatch_operating_map_review(&state, &user, &headers, &body.input).await
-        }
-        "operating_map.create_agent_blueprint" => {
-            dispatch_operating_map_blueprint(&state, &user, &headers, &body.input).await
-        }
-        "workflows.toggle_policy" => dispatch_toggle_policy(&state, &user, &body.input).await,
-        "inbox.follow_conversation" => {
-            dispatch_conversation_follow(&state, &user, &body.input).await
-        }
-        "inbox.set_csat_preference" => {
-            dispatch_conversation_csat_preference(&state, &user, &body.input).await
-        }
-        "inbox.add_tag" => dispatch_inbox_add_tag(&state, &user, &body.input).await,
-        "inbox.remove_tag" => dispatch_inbox_remove_tag(&state, &user, &body.input).await,
-        "inbox.claim_draft_lease" => {
-            dispatch_inbox_claim_draft_lease(&state, &user, &body.input).await
-        }
-        "inbox.release_draft_lease" => {
-            dispatch_inbox_release_draft_lease(&state, &user, &body.input).await
-        }
-        "inbox.save_draft" => dispatch_inbox_save_draft(&state, &user, &body.input).await,
-        "inbox.delete_draft" => dispatch_inbox_delete_draft(&state, &user, &body.input).await,
-        "inbox.set_status" => dispatch_inbox_set_status(&state, &user, &body.input).await,
-        "inbox.set_assignment" => dispatch_inbox_set_assignment(&state, &user, &body.input).await,
-        "inbox.send_reply" => dispatch_inbox_send_reply(&state, &user, &body.input).await,
-        "inbox.submit_feedback" => dispatch_inbox_submit_feedback(&state, &user, &body.input).await,
-        "inbox.review_ai_action" => {
-            dispatch_inbox_review_ai_action(&state, &user, &body.input).await
-        }
-        "inbox.create_draft_reply_proposal" => {
-            dispatch_inbox_create_draft_reply_proposal(&state, &user, &body.input).await
-        }
-        "inbox.create_internal_note_proposal" => {
-            dispatch_inbox_create_internal_note_proposal(&state, &user, &body.input).await
-        }
-        "inbox.create_ticket_update_proposal" => {
-            dispatch_inbox_create_ticket_update_proposal(&state, &user, &body.input).await
-        }
-        "inbox.create_incident_proposal" => {
-            dispatch_inbox_create_incident_proposal(&state, &user, &body.input).await
-        }
-        "inbox.create_problem_proposal" => {
-            dispatch_inbox_create_problem_proposal(&state, &user, &body.input).await
-        }
-        "inbox.set_conversation_pinned" => {
-            dispatch_inbox_workspace_set_pinned(&state, &user, &body.input).await
-        }
-        "inbox.set_conversation_read" => {
-            dispatch_inbox_workspace_set_read(&state, &user, &body.input).await
-        }
-        "notifications.mark_read" => {
-            dispatch_notification_mark_read(&state, &user, &body.input).await
-        }
-        "notifications.mark_all_read" => {
-            dispatch_notification_mark_all_read(&state, &user, &body.input).await
-        }
-        "notifications.delete" => dispatch_notification_delete(&state, &user, &body.input).await,
-        "notifications.update_preference" => {
-            dispatch_notification_update_preference(&state, &user, &body.input).await
-        }
-        "navbar.save_theme" => dispatch_navbar_save_theme(&state, &user, &body.input).await,
-        "navbar.mark_notification_read" => {
-            dispatch_navbar_mark_notification_read(&state, &user, &body.input).await
-        }
-        "navbar.create_calendar_event" => {
-            dispatch_navbar_create_calendar_event(&state, &user, &body.input).await
-        }
-        "navbar.create_calendar_note" => {
-            dispatch_navbar_create_calendar_note(&state, &user, &body.input).await
-        }
-        "navbar.submit_support_request" => {
-            dispatch_navbar_submit_support_request(&state, &user, &body.input).await
-        }
-        "ownership.share_document" => {
-            dispatch_ownership_share_document(&state, &user, &headers, &body.input).await
-        }
-        "ownership.revoke_document_share" => {
-            dispatch_ownership_revoke_document_share(&state, &user, &headers, &body.input).await
-        }
-        "memory.delete" => dispatch_memory_delete(&state, &user, &headers, &body.input).await,
-        "memory.set_state" => {
-            dispatch_memory_set_state(&state, &user, &headers, &body.input).await
-        }
-        "memory.reset" => dispatch_memory_reset(&state, &user, &headers, &body.input).await,
-        "memory.remember" => dispatch_memory_remember(&state, &user, &headers, &body.input).await,
-        "learning.accept_skill" => {
-            dispatch_learning_accept_skill(&state, &user, &headers, &body.input).await
-        }
-        "learning.reject_skill" => {
-            dispatch_learning_reject_skill(&state, &user, &headers, &body.input).await
-        }
-        "learning.undo" => dispatch_learning_undo(&state, &user, &headers, &body.input).await,
-        "learning.learn_from_thread" => {
-            dispatch_learning_learn_from_thread(&state, &user, &headers, &body.input).await
-        }
-        "settings.update_me" => dispatch_settings_update_me(&state, &user, &body.input).await,
-        "settings.update_preferences" => {
-            dispatch_settings_update_preferences(&state, &user, &body.input).await
-        }
-        "settings.update_setting" => {
-            dispatch_settings_update_setting(&state, &user, &body.input).await
-        }
-        "settings.set_tone_preset" => {
-            dispatch_settings_set_tone_preset(&state, &user, &body.input).await
-        }
-        "settings.complete_personal_setup" => {
-            dispatch_settings_complete_personal_setup(&state, &user, &body.input).await
-        }
-        "settings.skip_personal_setup" => dispatch_settings_skip_personal_setup(&state, &user).await,
-        "settings.create_api_key" => {
-            dispatch_settings_create_api_key(&state, &user, &headers, &body.input).await
-        }
-        "settings.delete_api_key" => {
-            dispatch_settings_delete_api_key(&state, &user, &headers, &body.input).await
-        }
-        "mcp.delete_server" => {
-            dispatch_mcp_delete_server(&state, &user, &headers, &body.input).await
-        }
-        "mcp.share_server" => dispatch_mcp_share_server(&state, &user, &headers, &body.input).await,
-        "ingestions.job_control" => {
-            dispatch_ingestions_job_control(&state, &user, &headers, &body.input).await
-        }
-        "ingestions.start_agent_run" => {
-            dispatch_ingestions_start_agent_run(&state, &user, &headers, &body.input).await
-        }
-        "monitoring.check_now" => {
-            dispatch_monitoring_check_now(&state, &user, &headers, &body.input).await
-        }
-        "monitoring.create_monitor" => {
-            dispatch_monitoring_create_monitor(&state, &user, &headers, &body.input).await
-        }
-        "monitoring.delete_monitor" => {
-            dispatch_monitoring_delete_monitor(&state, &user, &headers, &body.input).await
-        }
-        "privacy.erase_my_account" => {
-            dispatch_privacy_erase_my_account(&state, &user, &body.input).await
-        }
-        "leads.create_list" => dispatch_leads_create_list(&state, &user, &body.input).await,
-        "leads.delete_list" => dispatch_leads_delete_list(&state, &user, &body.input).await,
-        "finetune.create_job" => dispatch_finetune_create_job(&state, &user, &body.input).await,
-        "finetune.cancel_job" => dispatch_finetune_cancel_job(&state, &user, &body.input).await,
-        "finetune.deploy_job" => dispatch_finetune_deploy_job(&state, &user, &body.input).await,
-        "studio.create_project" => dispatch_studio_create_project(&state, &user, &body.input).await,
-        "studio.save_project" => dispatch_studio_save_project(&state, &user, &body.input).await,
-        "studio.export_social_draft" => {
-            dispatch_studio_export_social_draft(&state, &user, &body.input).await
-        }
-        "ingestions.create_run" => {
-            dispatch_ingestions_create_run(&state, &user, &headers, &body.input).await
-        }
-        "ingestions.create_schedule" => {
-            dispatch_ingestions_create_schedule(&state, &user, &headers, &body.input).await
-        }
-        "ingestions.pause_schedule" => {
-            dispatch_ingestions_pause_schedule(&state, &user, &headers, &body.input).await
-        }
-        "ingestions.change_schedule_state" => {
-            dispatch_ingestions_change_schedule_state(&state, &user, &headers, &body.input).await
-        }
-        "ingestions.get_run_status" => {
-            dispatch_ingestions_get_run_status(&state, &user, &headers, &body.input).await
-        }
-        "ingestions.pause_run" => {
-            dispatch_ingestions_pause_run(&state, &user, &headers, &body.input).await
-        }
-        "ingestions.resume_run" => {
-            dispatch_ingestions_resume_run(&state, &user, &headers, &body.input).await
-        }
-        "ingestions.cancel_run" => {
-            dispatch_ingestions_cancel_run(&state, &user, &headers, &body.input).await
-        }
-        "ingestions.create_source" => {
-            dispatch_ingestions_create_source(&state, &user, &headers, &body.input).await
-        }
-        "ingestions.delete_source" => {
-            dispatch_ingestions_delete_source(&state, &user, &headers, &body.input).await
-        }
-        "integrations.start_connect_session" => {
-            dispatch_integrations_start_connect_session(&state, &user, &headers, &body.input).await
-        }
-        "integrations.disconnect" => {
-            dispatch_integrations_disconnect(&state, &user, &headers, &body.input).await
-        }
-        "integrations.start_chatgpt_subscription" => {
-            dispatch_integrations_start_chatgpt_subscription(&state, &user, &headers, &body.input)
+            boxed_dispatch(|| dispatch_operating_map_review(&state, &user, &headers, &body.input))
                 .await
         }
+        "operating_map.create_agent_blueprint" => {
+            boxed_dispatch(|| {
+                dispatch_operating_map_blueprint(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "workflows.toggle_policy" => {
+            boxed_dispatch(|| dispatch_toggle_policy(&state, &user, &body.input)).await
+        }
+        "inbox.follow_conversation" => {
+            boxed_dispatch(|| dispatch_conversation_follow(&state, &user, &body.input)).await
+        }
+        "inbox.set_csat_preference" => {
+            boxed_dispatch(|| dispatch_conversation_csat_preference(&state, &user, &body.input))
+                .await
+        }
+        "inbox.add_tag" => {
+            boxed_dispatch(|| dispatch_inbox_add_tag(&state, &user, &body.input)).await
+        }
+        "inbox.remove_tag" => {
+            boxed_dispatch(|| dispatch_inbox_remove_tag(&state, &user, &body.input)).await
+        }
+        "inbox.claim_draft_lease" => {
+            boxed_dispatch(|| dispatch_inbox_claim_draft_lease(&state, &user, &body.input)).await
+        }
+        "inbox.release_draft_lease" => {
+            boxed_dispatch(|| dispatch_inbox_release_draft_lease(&state, &user, &body.input)).await
+        }
+        "inbox.save_draft" => {
+            boxed_dispatch(|| dispatch_inbox_save_draft(&state, &user, &body.input)).await
+        }
+        "inbox.delete_draft" => {
+            boxed_dispatch(|| dispatch_inbox_delete_draft(&state, &user, &body.input)).await
+        }
+        "inbox.set_status" => {
+            boxed_dispatch(|| dispatch_inbox_set_status(&state, &user, &body.input)).await
+        }
+        "inbox.set_assignment" => {
+            boxed_dispatch(|| dispatch_inbox_set_assignment(&state, &user, &body.input)).await
+        }
+        "inbox.send_reply" => {
+            boxed_dispatch(|| dispatch_inbox_send_reply(&state, &user, &body.input)).await
+        }
+        "inbox.submit_feedback" => {
+            boxed_dispatch(|| dispatch_inbox_submit_feedback(&state, &user, &body.input)).await
+        }
+        "inbox.review_ai_action" => {
+            boxed_dispatch(|| dispatch_inbox_review_ai_action(&state, &user, &body.input)).await
+        }
+        "inbox.create_draft_reply_proposal" => {
+            boxed_dispatch(|| {
+                dispatch_inbox_create_draft_reply_proposal(&state, &user, &body.input)
+            })
+            .await
+        }
+        "inbox.create_internal_note_proposal" => {
+            boxed_dispatch(|| {
+                dispatch_inbox_create_internal_note_proposal(&state, &user, &body.input)
+            })
+            .await
+        }
+        "inbox.create_ticket_update_proposal" => {
+            boxed_dispatch(|| {
+                dispatch_inbox_create_ticket_update_proposal(&state, &user, &body.input)
+            })
+            .await
+        }
+        "inbox.create_incident_proposal" => {
+            boxed_dispatch(|| dispatch_inbox_create_incident_proposal(&state, &user, &body.input))
+                .await
+        }
+        "inbox.create_problem_proposal" => {
+            boxed_dispatch(|| dispatch_inbox_create_problem_proposal(&state, &user, &body.input))
+                .await
+        }
+        "inbox.set_conversation_pinned" => {
+            boxed_dispatch(|| dispatch_inbox_workspace_set_pinned(&state, &user, &body.input)).await
+        }
+        "inbox.set_conversation_read" => {
+            boxed_dispatch(|| dispatch_inbox_workspace_set_read(&state, &user, &body.input)).await
+        }
+        "notifications.mark_read" => {
+            boxed_dispatch(|| dispatch_notification_mark_read(&state, &user, &body.input)).await
+        }
+        "notifications.mark_all_read" => {
+            boxed_dispatch(|| dispatch_notification_mark_all_read(&state, &user, &body.input)).await
+        }
+        "notifications.delete" => {
+            boxed_dispatch(|| dispatch_notification_delete(&state, &user, &body.input)).await
+        }
+        "notifications.update_preference" => {
+            boxed_dispatch(|| dispatch_notification_update_preference(&state, &user, &body.input))
+                .await
+        }
+        "navbar.save_theme" => {
+            boxed_dispatch(|| dispatch_navbar_save_theme(&state, &user, &body.input)).await
+        }
+        "navbar.mark_notification_read" => {
+            boxed_dispatch(|| dispatch_navbar_mark_notification_read(&state, &user, &body.input))
+                .await
+        }
+        "navbar.create_calendar_event" => {
+            boxed_dispatch(|| dispatch_navbar_create_calendar_event(&state, &user, &body.input))
+                .await
+        }
+        "navbar.create_calendar_note" => {
+            boxed_dispatch(|| dispatch_navbar_create_calendar_note(&state, &user, &body.input))
+                .await
+        }
+        "navbar.submit_support_request" => {
+            boxed_dispatch(|| dispatch_navbar_submit_support_request(&state, &user, &body.input))
+                .await
+        }
+        "ownership.share_document" => {
+            boxed_dispatch(|| {
+                dispatch_ownership_share_document(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "ownership.revoke_document_share" => {
+            boxed_dispatch(|| {
+                dispatch_ownership_revoke_document_share(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "memory.delete" => {
+            boxed_dispatch(|| dispatch_memory_delete(&state, &user, &headers, &body.input)).await
+        }
+        "memory.set_state" => {
+            boxed_dispatch(|| dispatch_memory_set_state(&state, &user, &headers, &body.input)).await
+        }
+        "memory.reset" => {
+            boxed_dispatch(|| dispatch_memory_reset(&state, &user, &headers, &body.input)).await
+        }
+        "memory.remember" => {
+            boxed_dispatch(|| dispatch_memory_remember(&state, &user, &headers, &body.input)).await
+        }
+        "learning.accept_skill" => {
+            boxed_dispatch(|| dispatch_learning_accept_skill(&state, &user, &headers, &body.input))
+                .await
+        }
+        "learning.reject_skill" => {
+            boxed_dispatch(|| dispatch_learning_reject_skill(&state, &user, &headers, &body.input))
+                .await
+        }
+        "learning.undo" => {
+            boxed_dispatch(|| dispatch_learning_undo(&state, &user, &headers, &body.input)).await
+        }
+        "learning.learn_from_thread" => {
+            boxed_dispatch(|| {
+                dispatch_learning_learn_from_thread(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "settings.update_me" => {
+            boxed_dispatch(|| dispatch_settings_update_me(&state, &user, &body.input)).await
+        }
+        "settings.update_preferences" => {
+            boxed_dispatch(|| dispatch_settings_update_preferences(&state, &user, &body.input))
+                .await
+        }
+        "settings.update_setting" => {
+            boxed_dispatch(|| dispatch_settings_update_setting(&state, &user, &body.input)).await
+        }
+        "settings.set_tone_preset" => {
+            boxed_dispatch(|| dispatch_settings_set_tone_preset(&state, &user, &body.input)).await
+        }
+        "settings.complete_personal_setup" => {
+            boxed_dispatch(|| dispatch_settings_complete_personal_setup(&state, &user, &body.input))
+                .await
+        }
+        "settings.skip_personal_setup" => {
+            boxed_dispatch(|| dispatch_settings_skip_personal_setup(&state, &user)).await
+        }
+        "settings.create_api_key" => {
+            boxed_dispatch(|| {
+                dispatch_settings_create_api_key(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "settings.delete_api_key" => {
+            boxed_dispatch(|| {
+                dispatch_settings_delete_api_key(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "mcp.delete_server" => {
+            boxed_dispatch(|| dispatch_mcp_delete_server(&state, &user, &headers, &body.input))
+                .await
+        }
+        "mcp.share_server" => {
+            boxed_dispatch(|| dispatch_mcp_share_server(&state, &user, &headers, &body.input)).await
+        }
+        "ingestions.job_control" => {
+            boxed_dispatch(|| dispatch_ingestions_job_control(&state, &user, &headers, &body.input))
+                .await
+        }
+        "ingestions.start_agent_run" => {
+            boxed_dispatch(|| {
+                dispatch_ingestions_start_agent_run(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "monitoring.check_now" => {
+            boxed_dispatch(|| dispatch_monitoring_check_now(&state, &user, &headers, &body.input))
+                .await
+        }
+        "monitoring.create_monitor" => {
+            boxed_dispatch(|| {
+                dispatch_monitoring_create_monitor(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "monitoring.delete_monitor" => {
+            boxed_dispatch(|| {
+                dispatch_monitoring_delete_monitor(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "privacy.erase_my_account" => {
+            boxed_dispatch(|| dispatch_privacy_erase_my_account(&state, &user, &body.input)).await
+        }
+        "leads.create_list" => {
+            boxed_dispatch(|| dispatch_leads_create_list(&state, &user, &body.input)).await
+        }
+        "leads.delete_list" => {
+            boxed_dispatch(|| dispatch_leads_delete_list(&state, &user, &body.input)).await
+        }
+        "finetune.create_job" => {
+            boxed_dispatch(|| dispatch_finetune_create_job(&state, &user, &body.input)).await
+        }
+        "finetune.cancel_job" => {
+            boxed_dispatch(|| dispatch_finetune_cancel_job(&state, &user, &body.input)).await
+        }
+        "finetune.deploy_job" => {
+            boxed_dispatch(|| dispatch_finetune_deploy_job(&state, &user, &body.input)).await
+        }
+        "studio.create_project" => {
+            boxed_dispatch(|| dispatch_studio_create_project(&state, &user, &body.input)).await
+        }
+        "studio.save_project" => {
+            boxed_dispatch(|| dispatch_studio_save_project(&state, &user, &body.input)).await
+        }
+        "studio.export_social_draft" => {
+            boxed_dispatch(|| dispatch_studio_export_social_draft(&state, &user, &body.input)).await
+        }
+        "ingestions.create_run" => {
+            boxed_dispatch(|| dispatch_ingestions_create_run(&state, &user, &headers, &body.input))
+                .await
+        }
+        "ingestions.create_schedule" => {
+            boxed_dispatch(|| {
+                dispatch_ingestions_create_schedule(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "ingestions.pause_schedule" => {
+            boxed_dispatch(|| {
+                dispatch_ingestions_pause_schedule(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "ingestions.change_schedule_state" => {
+            boxed_dispatch(|| {
+                dispatch_ingestions_change_schedule_state(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "ingestions.get_run_status" => {
+            boxed_dispatch(|| {
+                dispatch_ingestions_get_run_status(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "ingestions.pause_run" => {
+            boxed_dispatch(|| dispatch_ingestions_pause_run(&state, &user, &headers, &body.input))
+                .await
+        }
+        "ingestions.resume_run" => {
+            boxed_dispatch(|| dispatch_ingestions_resume_run(&state, &user, &headers, &body.input))
+                .await
+        }
+        "ingestions.cancel_run" => {
+            boxed_dispatch(|| dispatch_ingestions_cancel_run(&state, &user, &headers, &body.input))
+                .await
+        }
+        "ingestions.create_source" => {
+            boxed_dispatch(|| {
+                dispatch_ingestions_create_source(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "ingestions.delete_source" => {
+            boxed_dispatch(|| {
+                dispatch_ingestions_delete_source(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "integrations.start_connect_session" => {
+            boxed_dispatch(|| {
+                dispatch_integrations_start_connect_session(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "integrations.disconnect" => {
+            boxed_dispatch(|| {
+                dispatch_integrations_disconnect(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "integrations.start_chatgpt_subscription" => {
+            boxed_dispatch(|| {
+                dispatch_integrations_start_chatgpt_subscription(
+                    &state,
+                    &user,
+                    &headers,
+                    &body.input,
+                )
+            })
+            .await
+        }
         "integrations.disconnect_chatgpt_subscription" => {
-            dispatch_integrations_disconnect_chatgpt_subscription(
-                &state,
-                &user,
-                &headers,
-                &body.input,
-            )
+            boxed_dispatch(|| {
+                dispatch_integrations_disconnect_chatgpt_subscription(
+                    &state,
+                    &user,
+                    &headers,
+                    &body.input,
+                )
+            })
             .await
         }
         "integrations.trigger_sync" => {
-            dispatch_integrations_trigger_sync(&state, &user, &headers, &body.input).await
-        }
-        "integrations.trigger_inbox_sync" => {
-            dispatch_integrations_trigger_inbox_sync(&state, &user, &headers, &body.input).await
-        }
-        "integrations.extend_inbox_history" => {
-            dispatch_integrations_extend_inbox_history(&state, &user, &headers, &body.input).await
-        }
-        "org.soft_delete" => dispatch_org_soft_delete(&state, &user, &body.input).await,
-        "org.restore" => dispatch_org_restore(&state, &user, &body.input).await,
-        "org.mark_exported" => dispatch_org_mark_exported(&state, &user, &body.input).await,
-        "org.acknowledge_deletion" => {
-            dispatch_org_acknowledge_deletion(&state, &user, &body.input).await
-        }
-        "org.set_quota" => dispatch_org_set_quota(&state, &user, &body.input).await,
-        "org.set_model_entitlement" => {
-            dispatch_org_set_model_entitlement(&state, &user, &headers, &body.input).await
-        }
-        "org.update_instructions" => {
-            dispatch_org_update_instructions(&state, &user, &body.input).await
-        }
-        "org.update_zdr" => dispatch_org_update_zdr(&state, &user, &headers, &body.input).await,
-        "org.update_support_ai_mode" => {
-            dispatch_org_update_support_ai_mode(&state, &user, &headers, &body.input).await
-        }
-        "org.update_agent_learning_policy" => {
-            dispatch_org_update_agent_learning_policy(&state, &user, &headers, &body.input).await
-        }
-        "membership.invite_member" => {
-            dispatch_membership_invite_member(&state, &user, &headers, &body.input).await
-        }
-        "membership.remove_member" => {
-            dispatch_membership_remove_member(&state, &user, &headers, &body.input).await
-        }
-        "membership.update_member_role" => {
-            dispatch_membership_update_member_role(&state, &user, &headers, &body.input).await
-        }
-        "organization.switch_active" => {
-            dispatch_organization_switch_active(&state, &user, &headers, &body.input).await
-        }
-        "chat.approve_plan" => {
-            dispatch_chat_approve_plan(&state, &user, &headers, &body.input).await
-        }
-        "chat.cancel_invocation" => {
-            dispatch_chat_cancel_invocation(&state, &user, &headers, &body.input).await
-        }
-        "chat.research_run.cancel" => {
-            dispatch_chat_cancel_research_run(&state, &user, &headers, &body.input).await
-        }
-        "chat.queue_invocation_input" => {
-            dispatch_chat_queue_invocation_input(&state, &user, &headers, &body.input).await
-        }
-        "chat.clear_threads" => {
-            dispatch_chat_clear_threads(&state, &user, &headers, &body.input).await
-        }
-        "chat.delete_thread" => {
-            dispatch_chat_delete_thread(&state, &user, &headers, &body.input).await
-        }
-        "chat.save_thread_snapshot" => {
-            dispatch_chat_save_thread_snapshot(&state, &user, &headers, &body.input).await
-        }
-        "chat.submit_feedback" => {
-            dispatch_chat_submit_feedback(&state, &user, &headers, &body.input).await
-        }
-        "chat.upload_document" => {
-            dispatch_chat_upload_document(&state, &user, &headers, &body.input).await
-        }
-        "chat.extract_document" => {
-            dispatch_chat_extract_document(&state, &user, &headers, &body.input).await
-        }
-        "audio.transcribe" => dispatch_audio_transcribe(&state, &user, &headers, &body.input).await,
-        "audio.dictate" => dispatch_audio_dictate(&state, &user, &headers, &body.input).await,
-        "orchestration.decide_approval" => {
-            dispatch_orchestration_decide_approval(&state, &user, &headers, &body.input).await
-        }
-        "orchestration.resume_run" => {
-            dispatch_orchestration_resume_run(&state, &user, &headers, &body.input).await
-        }
-        "orchestration.cancel_run" => {
-            dispatch_orchestration_cancel_run(&state, &user, &headers, &body.input).await
-        }
-        "browser_run.start" => {
-            dispatch_browser_run_start(&state, &user, &headers, &body.input, &body.idempotency_key)
-                .await
-        }
-        "browser_run.control" => {
-            dispatch_browser_run_control(&state, &user, &headers, &body.input).await
-        }
-        "browser_run.steer" => {
-            dispatch_browser_run_steer(&state, &user, &headers, &body.input).await
-        }
-        "browser.blocked.try_other_source" => {
-            dispatch_browser_blocked_try_other_source(&state, &user, &headers, &body.input).await
-        }
-        "browser_download.send_to_knowledge" => {
-            dispatch_browser_download_send_to_knowledge(
-                &state,
-                &user,
-                &headers,
-                &body.input,
-                &body.idempotency_key,
-            )
+            boxed_dispatch(|| {
+                dispatch_integrations_trigger_sync(&state, &user, &headers, &body.input)
+            })
             .await
         }
-        "router_policy.update" => dispatch_router_policy_update(&state, &user, &body.input).await,
+        "integrations.trigger_inbox_sync" => {
+            boxed_dispatch(|| {
+                dispatch_integrations_trigger_inbox_sync(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "integrations.extend_inbox_history" => {
+            boxed_dispatch(|| {
+                dispatch_integrations_extend_inbox_history(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "org.soft_delete" => {
+            boxed_dispatch(|| dispatch_org_soft_delete(&state, &user, &body.input)).await
+        }
+        "org.restore" => boxed_dispatch(|| dispatch_org_restore(&state, &user, &body.input)).await,
+        "org.mark_exported" => {
+            boxed_dispatch(|| dispatch_org_mark_exported(&state, &user, &body.input)).await
+        }
+        "org.acknowledge_deletion" => {
+            boxed_dispatch(|| dispatch_org_acknowledge_deletion(&state, &user, &body.input)).await
+        }
+        "org.set_quota" => {
+            boxed_dispatch(|| dispatch_org_set_quota(&state, &user, &body.input)).await
+        }
+        "org.set_model_entitlement" => {
+            boxed_dispatch(|| {
+                dispatch_org_set_model_entitlement(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "org.update_instructions" => {
+            boxed_dispatch(|| dispatch_org_update_instructions(&state, &user, &body.input)).await
+        }
+        "org.update_zdr" => {
+            boxed_dispatch(|| dispatch_org_update_zdr(&state, &user, &headers, &body.input)).await
+        }
+        "org.update_support_ai_mode" => {
+            boxed_dispatch(|| {
+                dispatch_org_update_support_ai_mode(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "org.update_agent_learning_policy" => {
+            boxed_dispatch(|| {
+                dispatch_org_update_agent_learning_policy(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "membership.invite_member" => {
+            boxed_dispatch(|| {
+                dispatch_membership_invite_member(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "membership.remove_member" => {
+            boxed_dispatch(|| {
+                dispatch_membership_remove_member(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "membership.update_member_role" => {
+            boxed_dispatch(|| {
+                dispatch_membership_update_member_role(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "organization.switch_active" => {
+            boxed_dispatch(|| {
+                dispatch_organization_switch_active(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "chat.approve_plan" => {
+            boxed_dispatch(|| dispatch_chat_approve_plan(&state, &user, &headers, &body.input))
+                .await
+        }
+        "chat.cancel_invocation" => {
+            boxed_dispatch(|| dispatch_chat_cancel_invocation(&state, &user, &headers, &body.input))
+                .await
+        }
+        "chat.research_run.cancel" => {
+            boxed_dispatch(|| {
+                dispatch_chat_cancel_research_run(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "chat.queue_invocation_input" => {
+            boxed_dispatch(|| {
+                dispatch_chat_queue_invocation_input(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "chat.clear_threads" => {
+            boxed_dispatch(|| dispatch_chat_clear_threads(&state, &user, &headers, &body.input))
+                .await
+        }
+        "chat.delete_thread" => {
+            boxed_dispatch(|| dispatch_chat_delete_thread(&state, &user, &headers, &body.input))
+                .await
+        }
+        "chat.save_thread_snapshot" => {
+            boxed_dispatch(|| {
+                dispatch_chat_save_thread_snapshot(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "chat.submit_feedback" => {
+            boxed_dispatch(|| dispatch_chat_submit_feedback(&state, &user, &headers, &body.input))
+                .await
+        }
+        "chat.upload_document" => {
+            boxed_dispatch(|| dispatch_chat_upload_document(&state, &user, &headers, &body.input))
+                .await
+        }
+        "chat.extract_document" => {
+            boxed_dispatch(|| dispatch_chat_extract_document(&state, &user, &headers, &body.input))
+                .await
+        }
+        "audio.transcribe" => {
+            boxed_dispatch(|| dispatch_audio_transcribe(&state, &user, &headers, &body.input)).await
+        }
+        "audio.dictate" => {
+            boxed_dispatch(|| dispatch_audio_dictate(&state, &user, &headers, &body.input)).await
+        }
+        "orchestration.decide_approval" => {
+            boxed_dispatch(|| {
+                dispatch_orchestration_decide_approval(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "orchestration.resume_run" => {
+            boxed_dispatch(|| {
+                dispatch_orchestration_resume_run(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "orchestration.cancel_run" => {
+            boxed_dispatch(|| {
+                dispatch_orchestration_cancel_run(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "browser_run.start" => {
+            boxed_dispatch(|| {
+                dispatch_browser_run_start(
+                    &state,
+                    &user,
+                    &headers,
+                    &body.input,
+                    &body.idempotency_key,
+                )
+            })
+            .await
+        }
+        "browser_run.control" => {
+            boxed_dispatch(|| dispatch_browser_run_control(&state, &user, &headers, &body.input))
+                .await
+        }
+        "browser_run.steer" => {
+            boxed_dispatch(|| dispatch_browser_run_steer(&state, &user, &headers, &body.input))
+                .await
+        }
+        "browser.blocked.try_other_source" => {
+            boxed_dispatch(|| {
+                dispatch_browser_blocked_try_other_source(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "browser_download.send_to_knowledge" => {
+            boxed_dispatch(|| {
+                dispatch_browser_download_send_to_knowledge(
+                    &state,
+                    &user,
+                    &headers,
+                    &body.input,
+                    &body.idempotency_key,
+                )
+            })
+            .await
+        }
+        "router_policy.update" => {
+            boxed_dispatch(|| dispatch_router_policy_update(&state, &user, &body.input)).await
+        }
         "browser_session.create" => {
-            dispatch_browser_create_session(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_browser_create_session(&state, &user, &headers, &body.input))
+                .await
         }
         "browser_session.close" => {
-            dispatch_browser_close_session(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_browser_close_session(&state, &user, &headers, &body.input))
+                .await
         }
         "browser_session.keepalive" => {
-            dispatch_browser_keepalive_session(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| {
+                dispatch_browser_keepalive_session(&state, &user, &headers, &body.input)
+            })
+            .await
         }
         "browser_tab.create" => {
-            dispatch_browser_create_tab(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_browser_create_tab(&state, &user, &headers, &body.input))
+                .await
         }
         "browser_tab.select" => {
-            dispatch_browser_select_tab(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_browser_select_tab(&state, &user, &headers, &body.input))
+                .await
         }
         "browser_tab.close" => {
-            dispatch_browser_close_tab(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_browser_close_tab(&state, &user, &headers, &body.input))
+                .await
         }
         "browser_tab.control" => {
-            dispatch_browser_control_tab(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_browser_control_tab(&state, &user, &headers, &body.input))
+                .await
         }
         "browser_attach.stop" => {
-            dispatch_browser_stop_attach(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_browser_stop_attach(&state, &user, &headers, &body.input))
+                .await
         }
         "browser_action.run" => {
-            dispatch_browser_run_action(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_browser_run_action(&state, &user, &headers, &body.input))
+                .await
         }
         "browser_action.set_control_mode" => {
-            dispatch_browser_set_control_mode(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| {
+                dispatch_browser_set_control_mode(&state, &user, &headers, &body.input)
+            })
+            .await
         }
         "browser_action.suggest" => {
-            dispatch_browser_suggest_action(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_browser_suggest_action(&state, &user, &headers, &body.input))
+                .await
         }
         "browser_omnibox.search" => {
-            dispatch_browser_omnibox_search(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_browser_omnibox_search(&state, &user, &headers, &body.input))
+                .await
         }
         "browser_omnibox.suggest" => {
-            dispatch_browser_omnibox_suggest(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| {
+                dispatch_browser_omnibox_suggest(&state, &user, &headers, &body.input)
+            })
+            .await
         }
         "browser_evidence.compile_procedure" => {
-            crate::domains::browser_evidence::dispatch_compile_procedure(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| {
+                crate::domains::browser_evidence::dispatch_compile_procedure(
+                    &state,
+                    &user,
+                    &headers,
+                    &body.input,
+                )
+            })
+            .await
         }
         "browser_evidence.save_recipe" => {
-            crate::domains::browser_evidence::dispatch_save_recipe(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| {
+                crate::domains::browser_evidence::dispatch_save_recipe(
+                    &state,
+                    &user,
+                    &headers,
+                    &body.input,
+                )
+            })
+            .await
         }
         "browser_region.attach" => {
-            crate::domains::browser_evidence::dispatch_region_attach(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| {
+                crate::domains::browser_evidence::dispatch_region_attach(
+                    &state,
+                    &user,
+                    &headers,
+                    &body.input,
+                )
+            })
+            .await
         }
         "browser_context.resolve_tab_mentions" => {
-            crate::domains::browser_context::dispatch_resolve_tab_mentions(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| {
+                crate::domains::browser_context::dispatch_resolve_tab_mentions(
+                    &state,
+                    &user,
+                    &headers,
+                    &body.input,
+                )
+            })
+            .await
         }
         "browser_profile.create" => {
-            dispatch_browser_create_profile(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_browser_create_profile(&state, &user, &headers, &body.input))
+                .await
         }
         "browser_profile.rename" => {
-            dispatch_browser_rename_profile(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_browser_rename_profile(&state, &user, &headers, &body.input))
+                .await
         }
         "browser_profile.delete" => {
-            dispatch_browser_delete_profile(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_browser_delete_profile(&state, &user, &headers, &body.input))
+                .await
         }
         "browser_profile.probe_restore" => {
-            dispatch_browser_probe_profile_restore(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| {
+                dispatch_browser_probe_profile_restore(&state, &user, &headers, &body.input)
+            })
+            .await
         }
         "tickets.record_csat_outcome" => {
-            dispatch_ticket_record_csat_outcome(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_record_csat_outcome(&state, &user, &body.input)).await
         }
         "tickets.record_chat_handoff" => {
-            dispatch_ticket_record_chat_handoff(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_record_chat_handoff(&state, &user, &body.input)).await
         }
         // Ticketing actions -> conversation-core-go (the same backend the dedicated
         // /api/v1/tickets/* routes proxy to), scoped to the caller's org.
         "tickets.create" => {
-            dispatch_ticket_create(&state, &user, &body.input, &body.idempotency_key).await
+            boxed_dispatch(|| {
+                dispatch_ticket_create(&state, &user, &body.input, &body.idempotency_key)
+            })
+            .await
         }
         "tickets.classify_conversation" => {
-            dispatch_ticket_classify(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_classify(&state, &user, &body.input)).await
         }
-        "tickets.update" => dispatch_ticket_update(&state, &user, &body.input).await,
-        "tickets.assign" => dispatch_ticket_assign(&state, &user, &body.input).await,
-        "tickets.link_resource" => dispatch_ticket_link_resource(&state, &user, &body.input).await,
-        "tickets.resolve" => dispatch_ticket_resolve(&state, &user, &body.input).await,
-        "tickets.run_macro" => dispatch_ticket_run_macro(&state, &user, &body.input).await,
-        "tickets.create_macro" => dispatch_ticket_create_macro(&state, &user, &body.input).await,
+        "tickets.update" => {
+            boxed_dispatch(|| dispatch_ticket_update(&state, &user, &body.input)).await
+        }
+        "tickets.assign" => {
+            boxed_dispatch(|| dispatch_ticket_assign(&state, &user, &body.input)).await
+        }
+        "tickets.link_resource" => {
+            boxed_dispatch(|| dispatch_ticket_link_resource(&state, &user, &body.input)).await
+        }
+        "tickets.resolve" => {
+            boxed_dispatch(|| dispatch_ticket_resolve(&state, &user, &body.input)).await
+        }
+        "tickets.run_macro" => {
+            boxed_dispatch(|| dispatch_ticket_run_macro(&state, &user, &body.input)).await
+        }
+        "tickets.create_macro" => {
+            boxed_dispatch(|| dispatch_ticket_create_macro(&state, &user, &body.input)).await
+        }
         "tickets.create_checklist" => {
-            dispatch_ticket_create_checklist(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_create_checklist(&state, &user, &body.input)).await
         }
         "tickets.update_checklist_item" => {
-            dispatch_ticket_update_checklist_item(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_update_checklist_item(&state, &user, &body.input))
+                .await
         }
         "tickets.create_side_conversation" => {
-            dispatch_ticket_create_side_conversation(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_create_side_conversation(&state, &user, &body.input))
+                .await
         }
         "tickets.add_side_conversation_message" => {
-            dispatch_ticket_add_side_conversation_message(&state, &user, &body.input).await
+            boxed_dispatch(|| {
+                dispatch_ticket_add_side_conversation_message(&state, &user, &body.input)
+            })
+            .await
         }
         "tickets.update_side_conversation" => {
-            dispatch_ticket_update_side_conversation(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_update_side_conversation(&state, &user, &body.input))
+                .await
         }
         "tickets.create_incident" => {
-            dispatch_ticket_create_incident(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_create_incident(&state, &user, &body.input)).await
         }
         "tickets.update_incident" => {
-            dispatch_ticket_update_incident(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_update_incident(&state, &user, &body.input)).await
         }
         "tickets.link_incident_ticket" => {
-            dispatch_ticket_link_incident_ticket(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_link_incident_ticket(&state, &user, &body.input))
+                .await
         }
         "tickets.create_problem" => {
-            dispatch_ticket_create_problem(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_create_problem(&state, &user, &body.input)).await
         }
         "tickets.update_problem" => {
-            dispatch_ticket_update_problem(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_update_problem(&state, &user, &body.input)).await
         }
         "tickets.create_sla_policy" => {
-            dispatch_ticket_create_sla_policy(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_create_sla_policy(&state, &user, &body.input)).await
         }
         "tickets.update_sla_policy" => {
-            dispatch_ticket_update_sla_policy(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_update_sla_policy(&state, &user, &body.input)).await
         }
         "tickets.create_automation_rule" => {
-            dispatch_ticket_create_automation_rule(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_create_automation_rule(&state, &user, &body.input))
+                .await
         }
         "tickets.update_automation_rule" => {
-            dispatch_ticket_update_automation_rule(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_ticket_update_automation_rule(&state, &user, &body.input))
+                .await
         }
-        "tickets.create_team" => dispatch_ticket_create_team(&state, &user, &body.input).await,
-        "tickets.update_team" => dispatch_ticket_update_team(&state, &user, &body.input).await,
-        "tickets.create_view" => dispatch_ticket_create_view(&state, &user, &body.input).await,
-        "tickets.update_view" => dispatch_ticket_update_view(&state, &user, &body.input).await,
-        "tickets.update_macro" => dispatch_ticket_update_macro(&state, &user, &body.input).await,
+        "tickets.create_team" => {
+            boxed_dispatch(|| dispatch_ticket_create_team(&state, &user, &body.input)).await
+        }
+        "tickets.update_team" => {
+            boxed_dispatch(|| dispatch_ticket_update_team(&state, &user, &body.input)).await
+        }
+        "tickets.create_view" => {
+            boxed_dispatch(|| dispatch_ticket_create_view(&state, &user, &body.input)).await
+        }
+        "tickets.update_view" => {
+            boxed_dispatch(|| dispatch_ticket_update_view(&state, &user, &body.input)).await
+        }
+        "tickets.update_macro" => {
+            boxed_dispatch(|| dispatch_ticket_update_macro(&state, &user, &body.input)).await
+        }
         // Space actions call the same route handlers domains::spaces mounts for
         // its direct REST routes (not a parallel proxy), so a per-room grant
         // check or the create/bind-then-confirm-membership sequence can never
         // drift between the two callers.
         "spaces.create_personal_space" => {
-            dispatch_space_create_personal(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_space_create_personal(&state, &user, &body.input)).await
         }
         "spaces.ensure_organization_room" => {
-            dispatch_space_ensure_organization_room(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_space_ensure_organization_room(&state, &user, &body.input))
+                .await
         }
         "spaces.update_space_instructions" => {
-            dispatch_space_update_instructions(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_space_update_instructions(&state, &user, &body.input)).await
         }
         "spaces.create_space_agent" => {
-            dispatch_space_create_agent(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_space_create_agent(&state, &user, &body.input)).await
         }
-        "spaces.bind_space_agent" => dispatch_space_bind_agent(&state, &user, &body.input).await,
+        "spaces.bind_space_agent" => {
+            boxed_dispatch(|| dispatch_space_bind_agent(&state, &user, &body.input)).await
+        }
         "spaces.request_personal_space_deletion" => {
-            dispatch_space_request_personal_deletion(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_space_request_personal_deletion(&state, &user, &body.input))
+                .await
         }
         "spaces.update_thread_presentation" => {
-            dispatch_space_update_thread_presentation(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| {
+                dispatch_space_update_thread_presentation(&state, &user, &headers, &body.input)
+            })
+            .await
         }
-        "spaces.mark_read" => dispatch_space_mark_read(&state, &user, &body.input).await,
+        "spaces.mark_read" => {
+            boxed_dispatch(|| dispatch_space_mark_read(&state, &user, &body.input)).await
+        }
         "spaces.record_presence" => {
-            dispatch_space_record_presence(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_space_record_presence(&state, &user, &body.input)).await
         }
         "spaces.set_agent_state" => {
-            dispatch_space_set_agent_state(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_space_set_agent_state(&state, &user, &body.input)).await
         }
-        "spaces.revoke_agent" => dispatch_space_revoke_agent(&state, &user, &body.input).await,
-        "spaces.create_room" => dispatch_space_create_room(&state, &user, &body.input).await,
-        "spaces.add_member" => dispatch_space_add_member(&state, &user, &body.input).await,
-        "spaces.remove_member" => dispatch_space_remove_member(&state, &user, &body.input).await,
+        "spaces.revoke_agent" => {
+            boxed_dispatch(|| dispatch_space_revoke_agent(&state, &user, &body.input)).await
+        }
+        "spaces.create_room" => {
+            boxed_dispatch(|| dispatch_space_create_room(&state, &user, &body.input)).await
+        }
+        "spaces.add_member" => {
+            boxed_dispatch(|| dispatch_space_add_member(&state, &user, &body.input)).await
+        }
+        "spaces.remove_member" => {
+            boxed_dispatch(|| dispatch_space_remove_member(&state, &user, &body.input)).await
+        }
         "spaces.create_post" => {
-            dispatch_spaces_create_post(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_spaces_create_post(&state, &user, &headers, &body.input))
+                .await
         }
         "spaces.reply_in_thread" => {
-            dispatch_spaces_reply_in_thread(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_spaces_reply_in_thread(&state, &user, &headers, &body.input))
+                .await
         }
         "spaces.change_member_role" => {
-            dispatch_spaces_change_member_role(&state, &user, &body.input, &body.idempotency_key)
-                .await
+            boxed_dispatch(|| {
+                dispatch_spaces_change_member_role(
+                    &state,
+                    &user,
+                    &body.input,
+                    &body.idempotency_key,
+                )
+            })
+            .await
         }
-        "spaces.leave_room" => dispatch_spaces_leave_room(&state, &user, &body.input).await,
+        "spaces.leave_room" => {
+            boxed_dispatch(|| dispatch_spaces_leave_room(&state, &user, &body.input)).await
+        }
         "spaces.open_dm" => {
-            dispatch_spaces_open_dm(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_spaces_open_dm(&state, &user, &headers, &body.input)).await
         }
-        "spaces.hide_space" => dispatch_spaces_hide_space(&state, &user, &body.input).await,
+        "spaces.hide_space" => {
+            boxed_dispatch(|| dispatch_spaces_hide_space(&state, &user, &body.input)).await
+        }
         "spaces.edit_message" => {
-            dispatch_spaces_edit_message(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_spaces_edit_message(&state, &user, &headers, &body.input))
+                .await
         }
         "spaces.delete_message" => {
-            dispatch_spaces_delete_message(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_spaces_delete_message(&state, &user, &headers, &body.input))
+                .await
         }
         "spaces.toggle_reaction" => {
-            dispatch_spaces_toggle_reaction(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_spaces_toggle_reaction(&state, &user, &headers, &body.input))
+                .await
         }
         "spaces.update_sidebar" => {
-            dispatch_spaces_update_sidebar(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_spaces_update_sidebar(&state, &user, &headers, &body.input))
+                .await
         }
         "spaces.set_agent_wake_policy" => {
-            dispatch_spaces_set_agent_wake_policy(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_spaces_set_agent_wake_policy(&state, &user, &body.input))
+                .await
         }
         "spaces.decide_approval" => {
-            dispatch_spaces_decide_approval(&state, &user, &headers, &body.input, &body.idempotency_key)
-                .await
+            boxed_dispatch(|| {
+                dispatch_spaces_decide_approval(
+                    &state,
+                    &user,
+                    &headers,
+                    &body.input,
+                    &body.idempotency_key,
+                )
+            })
+            .await
         }
         "spaces.revoke_approval_grant" => {
-            dispatch_spaces_revoke_approval_grant(&state, &user, &body.input).await
-        }
-        "spaces.set_tool_policy" => {
-            dispatch_spaces_set_tool_policy(&state, &user, &body.input).await
-        }
-        "spaces.set_attention_item_state" => {
-            dispatch_spaces_set_attention_item_state(&state, &user, &body.input).await
-        }
-        "spaces.stop_run" => {
-            dispatch_spaces_stop_run(&state, &user, &headers, &body.input).await
-        }
-        "spaces.set_thread_follow" => {
-            dispatch_spaces_set_thread_follow(&state, &user, &headers, &body.input).await
-        }
-        "spaces.mark_all_read" => dispatch_spaces_mark_all_read(&state, &user, &body.input).await,
-        "spaces.mark_unread" => dispatch_spaces_mark_unread(&state, &user, &body.input).await,
-        "spaces.set_notify_level" => {
-            dispatch_spaces_set_notify_level(&state, &user, &body.input).await
-        }
-        "spaces.set_status" => {
-            dispatch_spaces_set_status(&state, &user, &headers, &body.input).await
-        }
-        "spaces.create_reminder" => {
-            dispatch_spaces_create_reminder(&state, &user, &headers, &body.input).await
-        }
-        "spaces.cancel_reminder" => {
-            dispatch_spaces_cancel_reminder(&state, &user, &body.input).await
-        }
-        "spaces.update_room_details" => {
-            dispatch_spaces_update_room_details(&state, &user, &body.input).await
-        }
-        "spaces.join_room" => {
-            dispatch_spaces_join_room(&state, &user, &body.input, &body.idempotency_key).await
-        }
-        "spaces.update_room_settings" => {
-            dispatch_spaces_update_room_settings(&state, &user, &body.input, &body.idempotency_key)
+            boxed_dispatch(|| dispatch_spaces_revoke_approval_grant(&state, &user, &body.input))
                 .await
         }
+        "spaces.set_tool_policy" => {
+            boxed_dispatch(|| dispatch_spaces_set_tool_policy(&state, &user, &body.input)).await
+        }
+        "spaces.set_attention_item_state" => {
+            boxed_dispatch(|| dispatch_spaces_set_attention_item_state(&state, &user, &body.input))
+                .await
+        }
+        "spaces.stop_run" => {
+            boxed_dispatch(|| dispatch_spaces_stop_run(&state, &user, &headers, &body.input)).await
+        }
+        "spaces.set_thread_follow" => {
+            boxed_dispatch(|| {
+                dispatch_spaces_set_thread_follow(&state, &user, &headers, &body.input)
+            })
+            .await
+        }
+        "spaces.mark_all_read" => {
+            boxed_dispatch(|| dispatch_spaces_mark_all_read(&state, &user, &body.input)).await
+        }
+        "spaces.mark_unread" => {
+            boxed_dispatch(|| dispatch_spaces_mark_unread(&state, &user, &body.input)).await
+        }
+        "spaces.set_notify_level" => {
+            boxed_dispatch(|| dispatch_spaces_set_notify_level(&state, &user, &body.input)).await
+        }
+        "spaces.set_status" => {
+            boxed_dispatch(|| dispatch_spaces_set_status(&state, &user, &headers, &body.input))
+                .await
+        }
+        "spaces.create_reminder" => {
+            boxed_dispatch(|| dispatch_spaces_create_reminder(&state, &user, &headers, &body.input))
+                .await
+        }
+        "spaces.cancel_reminder" => {
+            boxed_dispatch(|| dispatch_spaces_cancel_reminder(&state, &user, &body.input)).await
+        }
+        "spaces.update_room_details" => {
+            boxed_dispatch(|| dispatch_spaces_update_room_details(&state, &user, &body.input)).await
+        }
+        "spaces.join_room" => {
+            boxed_dispatch(|| {
+                dispatch_spaces_join_room(&state, &user, &body.input, &body.idempotency_key)
+            })
+            .await
+        }
+        "spaces.update_room_settings" => {
+            boxed_dispatch(|| {
+                dispatch_spaces_update_room_settings(
+                    &state,
+                    &user,
+                    &body.input,
+                    &body.idempotency_key,
+                )
+            })
+            .await
+        }
         "spaces.set_effect_entitlements" => {
-            dispatch_spaces_set_effect_entitlements(
-                &state,
-                &user,
-                &body.input,
-                &body.idempotency_key,
-            )
+            boxed_dispatch(|| {
+                dispatch_spaces_set_effect_entitlements(
+                    &state,
+                    &user,
+                    &body.input,
+                    &body.idempotency_key,
+                )
+            })
             .await
         }
         "spaces.apply_effect_preset" => {
-            dispatch_spaces_apply_effect_preset(&state, &user, &body.input, &body.idempotency_key)
-                .await
+            boxed_dispatch(|| {
+                dispatch_spaces_apply_effect_preset(
+                    &state,
+                    &user,
+                    &body.input,
+                    &body.idempotency_key,
+                )
+            })
+            .await
         }
         "browser.get_org_policy" => {
-            dispatch_browser_get_org_policy(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_browser_get_org_policy(&state, &user, &body.input)).await
         }
         "browser.set_org_policy" => {
-            dispatch_browser_set_org_policy(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_browser_set_org_policy(&state, &user, &body.input)).await
         }
         "browser.list_origin_consents" => {
-            dispatch_browser_list_origin_consents(&state, &user).await
+            boxed_dispatch(|| dispatch_browser_list_origin_consents(&state, &user)).await
         }
         "browser.revoke_origin_consent" => {
-            dispatch_browser_revoke_origin_consent(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_browser_revoke_origin_consent(&state, &user, &body.input))
+                .await
         }
-        "space.files.attach" => dispatch_space_files_attach().await,
+        "space.files.attach" => boxed_dispatch(dispatch_space_files_attach).await,
         "space.files.list" => {
-            dispatch_space_files_list(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_space_files_list(&state, &user, &headers, &body.input)).await
         }
         "space.files.read_text" => {
-            dispatch_space_files_read_text(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_space_files_read_text(&state, &user, &headers, &body.input))
+                .await
         }
         "space.files.delete" => {
-            dispatch_space_files_delete(&state, &user, &headers, &body.input).await
+            boxed_dispatch(|| dispatch_space_files_delete(&state, &user, &headers, &body.input))
+                .await
         }
         // Social actions -> social-core via the dedicated dispatchers (real
         // ApprovalState is enforced by social-core before publish/schedule).
-        "social.create_draft" => dispatch_social_create_draft(&state, &user, &body.input).await,
-        "social.schedule_post" => dispatch_social_schedule_post(&state, &user, &body.input).await,
-        "social.publish_post" => dispatch_social_publish_post(&state, &user, &body.input).await,
+        "social.create_draft" => {
+            boxed_dispatch(|| dispatch_social_create_draft(&state, &user, &body.input)).await
+        }
+        "social.schedule_post" => {
+            boxed_dispatch(|| dispatch_social_schedule_post(&state, &user, &body.input)).await
+        }
+        "social.publish_post" => {
+            boxed_dispatch(|| dispatch_social_publish_post(&state, &user, &body.input)).await
+        }
         "social.create_campaign" => {
-            dispatch_social_create_campaign(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_social_create_campaign(&state, &user, &body.input)).await
         }
         "social.create_draft_from_inbox" => {
-            dispatch_social_create_draft_from_inbox(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_social_create_draft_from_inbox(&state, &user, &body.input))
+                .await
         }
         "social.decide_approval" => {
-            dispatch_social_decide_approval(&state, &user, &body.input).await
+            boxed_dispatch(|| dispatch_social_decide_approval(&state, &user, &body.input)).await
         }
         other => (
             StatusCode::NOT_IMPLEMENTED,

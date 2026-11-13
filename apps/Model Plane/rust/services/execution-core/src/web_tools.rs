@@ -77,6 +77,9 @@ pub const REQUEST_ID_HEADER: &str = "x-request-id";
 pub const PARENT_RUN_HEADER: &str = "x-verevon-parent-run";
 /// Longest attribution value sent, in bytes.
 const MAX_ATTRIBUTION_BYTES: usize = 128;
+/// The deployment switch for the advisory attribution headers the web tools send. Default OFF: only the
+/// literal `true` enables it. Off, a web call goes out exactly as it was built, with neither header.
+pub const ATTRIBUTION_ENV: &str = "EXECUTION_CORE_QUARRY_ATTRIBUTION";
 
 /// Advisory attribution for the Quarry calls of one run step: a request id and the parent run.
 /// Each value is kept only when non-empty, at most 128 bytes and every byte is in
@@ -113,6 +116,35 @@ impl Attribution {
             },
         }
     }
+
+    /// [`Attribution::for_step`] while the attribution switch is on, and none while it is off, so with the
+    /// switch off every Quarry call the step makes goes out as it was built.
+    #[must_use]
+    pub fn for_step_if_enabled(run_id: &str, step_id: &str, zdr: bool) -> Self {
+        Self::for_step_when(attribution_enabled(), run_id, step_id, zdr)
+    }
+
+    /// [`Attribution::for_step_if_enabled`] with the switch given, so both settings are testable without
+    /// touching the process environment.
+    fn for_step_when(on: bool, run_id: &str, step_id: &str, zdr: bool) -> Self {
+        if on {
+            Self::for_step(run_id, step_id, zdr)
+        } else {
+            Self::default()
+        }
+    }
+}
+
+/// Whether the attribution switch is on in this process. Read per call, so a flip needs no restart.
+#[must_use]
+pub fn attribution_enabled() -> bool {
+    attribution_enabled_from(std::env::var(ATTRIBUTION_ENV).ok().as_deref())
+}
+
+/// Only the literal `true` enables; `1`, `on` and anything else stay off.
+#[must_use]
+pub fn attribution_enabled_from(value: Option<&str>) -> bool {
+    value.map(str::trim) == Some("true")
 }
 
 impl WebToolsClient {
@@ -1109,6 +1141,36 @@ pub(crate) mod tests {
             Some("run_abc123.run_abc123:step:0")
         );
         assert_eq!(plain.parent_run.as_deref(), Some("run_abc123"));
+    }
+
+    #[test]
+    fn the_attribution_switch_is_off_unless_the_literal_true_is_set() {
+        assert_eq!(ATTRIBUTION_ENV, "EXECUTION_CORE_QUARRY_ATTRIBUTION");
+        assert!(attribution_enabled_from(Some("true")));
+        assert!(attribution_enabled_from(Some(" true ")));
+        for raw in [
+            None,
+            Some(""),
+            Some("TRUE"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+        ] {
+            assert!(!attribution_enabled_from(raw), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn with_the_switch_off_a_step_sends_no_attribution() {
+        // Off, a step's Quarry calls carry neither header, under ZDR or not, so they go out as built.
+        for zdr in [false, true] {
+            let off = Attribution::for_step_when(false, "run_abc123", "run_abc123:step:0", zdr);
+            assert!(off.request_id.is_none());
+            assert!(off.parent_run.is_none());
+        }
+        // On, the same step carries the attribution it carried before the switch gated it.
+        let on = Attribution::for_step_when(true, "run_abc123", "run_abc123:step:0", false);
+        assert_eq!(on.parent_run.as_deref(), Some("run_abc123"));
     }
 
     #[tokio::test]

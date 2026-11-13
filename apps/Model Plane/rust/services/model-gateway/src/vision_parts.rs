@@ -34,6 +34,11 @@ pub const DO_UNSUPPORTED_CODE: &str = "attachment_do_unsupported";
 /// The feature flag inference-core lists on a model that reads images.
 const VISION_FEATURE: &str = "vision";
 
+/// Image parts one request may carry. inference-core refuses a request with more (its
+/// `MAX_IMAGE_PARTS`), as `invalid_argument` and only after the run exists, so the gateway keeps
+/// the same count and refuses the turn before any run.
+const MAX_IMAGE_PARTS: usize = 4;
+
 #[must_use]
 pub fn enabled() -> bool {
     enabled_with(&|key| std::env::var(key).ok())
@@ -166,13 +171,31 @@ impl ImageParts {
     /// `browser_page_context`) after any attached images, in region order. They are
     /// request-scope memory like every other part: never stored, logged or serialized.
     /// Must run before [`ImageParts::bind`].
-    pub fn push_browser_regions<'a>(&mut self, images: impl IntoIterator<Item = (&'a [u8], &'a str)>) {
-        for (data, mime_type) in images {
+    ///
+    /// # Errors
+    /// `attachment_count_exceeded` when the attached images and the regions together
+    /// exceed [`MAX_IMAGE_PARTS`]. Nothing is added then, so the caller refuses the turn.
+    pub fn push_browser_regions<'a>(
+        &mut self,
+        images: impl IntoIterator<Item = (&'a [u8], &'a str)>,
+    ) -> Result<(), PartsRefusal> {
+        let regions: Vec<(&[u8], &str)> = images.into_iter().collect();
+        let total = self.images.len() + regions.len();
+        if total > MAX_IMAGE_PARTS {
+            return Err(PartsRefusal {
+                code: AttachmentCode::CountExceeded.as_str(),
+                message: format!(
+                    "At most {MAX_IMAGE_PARTS} images can be attached to one message, browser regions included ({total} were sent)."
+                ),
+            });
+        }
+        for (data, mime_type) in regions {
             self.images.push(Image {
                 data: data.to_vec(),
                 mime_type: mime_type.to_owned(),
             });
         }
+        Ok(())
     }
 
     /// Binds the images to the current turn's user message in the rendered prompt:
@@ -498,5 +521,34 @@ mod tests {
         let shown = format!("{parts:?}");
         assert!(shown.contains("images: 1"), "{shown}");
         assert!(!shown.contains("104"), "{shown}");
+    }
+
+    #[test]
+    fn browser_regions_share_the_image_part_cap_with_the_attached_images() {
+        let shot: (&[u8], &str) = (b"hi", "image/png");
+        let two_images = [image(HI, "image/png"), image(HO, "image/png")];
+        // Two attached images and two regions make four, the most inference-core takes.
+        let mut fits = ImageParts::from_validated(&two_images).expect("both images decode");
+        fits.push_browser_regions([shot, shot])
+            .expect("four image parts fit");
+        assert_eq!(fits.summary().0, 4);
+        // Two attached images and three regions make five: refused typed, and nothing is added.
+        let mut over = ImageParts::from_validated(&two_images).expect("both images decode");
+        let refusal = over
+            .push_browser_regions([shot, shot, shot])
+            .expect_err("five image parts are refused");
+        assert_eq!(refusal.code, "attachment_count_exceeded");
+        assert!(
+            refusal.message.contains("(5 were sent)"),
+            "{}",
+            refusal.message
+        );
+        assert_eq!(over.summary().0, 2);
+        // Regions alone may fill the cap: the browser allows at most four of them.
+        let mut alone = ImageParts::none();
+        alone
+            .push_browser_regions([shot, shot, shot, shot])
+            .expect("four regions fit");
+        assert_eq!(alone.summary().0, 4);
     }
 }

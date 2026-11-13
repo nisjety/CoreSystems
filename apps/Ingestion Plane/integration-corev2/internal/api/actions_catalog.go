@@ -29,7 +29,8 @@ type catalogRow struct {
 // CATALOG (apps/Model Plane/rust/services/execution-core/src/integration_tools.rs), plus the
 // github read rows the executor serves and the notion page.content read. A row is served only
 // when requiredCapabilityForOperation maps its operation, so no row can advertise an ungated
-// operation.
+// operation. The notion page.content row is served only while INTEGRATION_NOTION_PAGE_CONTENT_READ
+// is on (see buildActionsCatalog).
 var catalogRows = []catalogRow{
 	// meta: Facebook Pages, Instagram, WhatsApp, Messenger, Meta ads and Threads.
 	{"meta", "pages.list", "List the connected Facebook Pages (+ linked Instagram accounts).", []string{"limit"}},
@@ -115,15 +116,29 @@ type actionsCatalogDocument struct {
 	Providers []actionsCatalogProvider `json:"providers"`
 }
 
+// isNotionPageContentOperation names the Notion page.content read, bare or with the notion.
+// prefix, under the same normalisation requiredCapabilityForOperation applies.
+func isNotionPageContentOperation(operation string) bool {
+	switch strings.TrimSpace(strings.ToLower(operation)) {
+	case "page.content", "notion.page.content":
+		return true
+	}
+	return false
+}
+
 // buildActionsCatalog derives the served document from catalogRows on every call. Kind is
 // "write" exactly when actionRequiresApproval admits the operation and "read" otherwise;
 // capability and sensitivity come from requiredCapabilityForOperation. A row whose operation
 // has no capability entry is dropped: the executor leaves an unmapped operation ungated, so it
-// is never advertised.
-func buildActionsCatalog() actionsCatalogDocument {
+// is never advertised. While notionPageContentRead (INTEGRATION_NOTION_PAGE_CONTENT_READ) is off,
+// the notion page.content row is dropped too, because the executor refuses that operation.
+func buildActionsCatalog(notionPageContentRead bool) actionsCatalogDocument {
 	doc := actionsCatalogDocument{Version: actionsCatalogVersion, Providers: []actionsCatalogProvider{}}
 	position := map[string]int{}
 	for _, row := range catalogRows {
+		if row.Provider == "notion" && isNotionPageContentOperation(row.Operation) && !notionPageContentRead {
+			continue
+		}
 		capability, sensitive := requiredCapabilityForOperation(row.Provider, row.Operation)
 		if capability == "" {
 			continue
@@ -182,18 +197,21 @@ func actionsCatalogReadScope(c *fiber.Ctx) error {
 
 // actionsCatalogHandler serves GET /api/v1/actions/catalog. The body is the catalog document
 // itself, so execution-core can parse {version, etag, providers} directly. When If-None-Match
-// names the current etag the answer is 304 with no body.
-func actionsCatalogHandler(c *fiber.Ctx) error {
-	doc, err := withActionsCatalogETag(buildActionsCatalog())
-	if err != nil {
-		return apiError(c, fiber.StatusServiceUnavailable, "actions_catalog_unavailable", "The provider operation catalog is unavailable.")
+// names the current etag the answer is 304 with no body. notionPageContentRead is the
+// INTEGRATION_NOTION_PAGE_CONTENT_READ switch the document is built with.
+func actionsCatalogHandler(notionPageContentRead bool) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		doc, err := withActionsCatalogETag(buildActionsCatalog(notionPageContentRead))
+		if err != nil {
+			return apiError(c, fiber.StatusServiceUnavailable, "actions_catalog_unavailable", "The provider operation catalog is unavailable.")
+		}
+		c.Set("ETag", `"`+doc.ETag+`"`)
+		c.Set("Cache-Control", "private, no-cache")
+		if actionsCatalogNoneMatch(c.Get("If-None-Match"), doc.ETag) {
+			return c.SendStatus(fiber.StatusNotModified)
+		}
+		return c.JSON(doc)
 	}
-	c.Set("ETag", `"`+doc.ETag+`"`)
-	c.Set("Cache-Control", "private, no-cache")
-	if actionsCatalogNoneMatch(c.Get("If-None-Match"), doc.ETag) {
-		return c.SendStatus(fiber.StatusNotModified)
-	}
-	return c.JSON(doc)
 }
 
 // actionsCatalogNoneMatch reports whether an If-None-Match header names the current etag.

@@ -256,6 +256,14 @@ pub(crate) struct SpaceFeatureFlags {
     /// never by default in development. Off keeps the legacy persona injection. A rollout control, never an
     /// authorization input: the allowlist and cap only narrow.
     pub(crate) agent_version_pinning: bool,
+    /// `BROWSER_AI_RUN_ATTACH_SESSION`: whether the owner may attach an AI run to a browser session
+    /// (the attach capability, the tab control and Stop agent routes, and an attached AI run start).
+    /// Read once here, never in a handler. Exactly `true` enables it; any other value, and an unset
+    /// variable, is off in every environment. While off the attach routes answer 409
+    /// `browser_attach_unavailable` and the capabilities report it unavailable. A rollout control,
+    /// never an authorization input: Quarry and model-gateway still decide each attach, and a Zero
+    /// Data Retention run takes no attachment.
+    pub(crate) browser_ai_run_attach_session: bool,
     /// `CHAT_LOCALE_HINT` (WS16-S6): stamp the viewer's interface language (`nb-NO` or `en-US`) on
     /// the model-bound body as the request-scoped `locale` field. Off removes the field, whatever
     /// the browser sent. A rollout control, never an authorization input: the field is a framing
@@ -275,6 +283,12 @@ pub(crate) struct SpaceFeatureFlags {
     /// Model Gateway and Session Core decide that the run is the caller's own, and a zero-retention
     /// run comes back with ids, status and counters only.
     pub(crate) chat_research_runs: bool,
+    /// `VEREVON_GATEWAY_CRAWL_ROBOTS_OVERRIDE` (WS14.S7): whether the UI crawl submit forwards
+    /// `ignore_robots_txt: true` to the edge. Read once here, never in a handler. Exactly `true`
+    /// enables it; any other value, and an unset variable, is off in every environment. A rollout
+    /// control, never an authorization input: the edge refuses the override without the org
+    /// entitlement and for service principals, and quarry-control audits it before the ack.
+    pub(crate) crawl_robots_override: bool,
     /// `SPACE_DENIALS_TYPED` (WS03-S5): map Control's typed Space denials to the browser envelope.
     /// Off restores pass-through. A rollout control, never an authorization input.
     pub(crate) denials_typed: bool,
@@ -547,11 +561,18 @@ impl SpaceFeatureFlags {
             append_retrieval: env::var("GATEWAY_SPACE_APPEND_RETRIEVAL").is_ok_and(|value| value == "true"),
             memory_ui: env::var("GATEWAY_SPACE_MEMORY_UI").is_ok_and(|value| value == "true"),
             agent_version_pinning: env::var("AGENT_VERSION_PINNING").is_ok_and(|value| value == "true"),
+            browser_ai_run_attach_session: env::var("BROWSER_AI_RUN_ATTACH_SESSION")
+                .is_ok_and(|value| value == "true"),
             chat_locale_hint: space_flag("CHAT_LOCALE_HINT"),
             chat_artifact_promote: chat_artifact_promote_from(
                 env::var("CHAT_ARTIFACT_PROMOTE_ENABLED").ok().as_deref(),
             ),
             chat_research_runs: env_bool("CHAT_RESEARCH_RUNS", false),
+            crawl_robots_override: crate::domains::knowledge::quarry::crawl_robots_override_from(
+                env::var(crate::domains::knowledge::quarry::CRAWL_ROBOTS_OVERRIDE_FLAG)
+                    .ok()
+                    .as_deref(),
+            ),
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             dm_api: space_flag("SPACE_DM_API"),
             message_revise_api: space_flag("SPACE_MESSAGE_REVISE_API"),
@@ -1514,6 +1535,64 @@ mod tests {
         with_env(&[("APP_ENV", Some("development")), (key, Some("off"))], || {
             assert!(!super::space_flag(key));
         });
+    }
+
+    /// WS14.S7: `VEREVON_GATEWAY_CRAWL_ROBOTS_OVERRIDE` is off unless it is exactly `true`, in every
+    /// environment, development included, and is read into `SpaceFeatureFlags` rather than per request.
+    #[test]
+    fn crawl_robots_override_flag_is_default_off_in_every_environment() {
+        assert!(!super::SpaceFeatureFlags::default().crawl_robots_override);
+        let read = || super::SpaceFeatureFlags::from_env().crawl_robots_override;
+        for app_env in [None, Some("production"), Some("development")] {
+            with_env(
+                &[
+                    ("APP_ENV", app_env),
+                    ("VEREVON_GATEWAY_CRAWL_ROBOTS_OVERRIDE", None),
+                ],
+                || assert!(!read(), "APP_ENV={app_env:?}"),
+            );
+        }
+        for value in ["", "1", "TRUE", "false", "on"] {
+            let vars = [
+                ("APP_ENV", Some("development")),
+                ("VEREVON_GATEWAY_CRAWL_ROBOTS_OVERRIDE", Some(value)),
+            ];
+            with_env(&vars, || assert!(!read(), "{value:?}"));
+        }
+        let vars = [
+            ("APP_ENV", Some("production")),
+            ("VEREVON_GATEWAY_CRAWL_ROBOTS_OVERRIDE", Some("true")),
+        ];
+        with_env(&vars, || assert!(read()));
+    }
+
+    /// `BROWSER_AI_RUN_ATTACH_SESSION` is off unless it is exactly `true`, in every environment, and is
+    /// read into `SpaceFeatureFlags` once rather than per request.
+    #[test]
+    fn browser_ai_run_attach_session_flag_is_off_unless_exactly_true() {
+        assert!(!super::SpaceFeatureFlags::default().browser_ai_run_attach_session);
+        let read = || super::SpaceFeatureFlags::from_env().browser_ai_run_attach_session;
+        for app_env in [None, Some("production"), Some("development")] {
+            with_env(
+                &[
+                    ("APP_ENV", app_env),
+                    ("BROWSER_AI_RUN_ATTACH_SESSION", None),
+                ],
+                || assert!(!read(), "APP_ENV={app_env:?}"),
+            );
+        }
+        for value in ["", "1", "TRUE", "false", "on", "yes"] {
+            let vars = [
+                ("APP_ENV", Some("development")),
+                ("BROWSER_AI_RUN_ATTACH_SESSION", Some(value)),
+            ];
+            with_env(&vars, || assert!(!read(), "{value:?}"));
+        }
+        let vars = [
+            ("APP_ENV", Some("production")),
+            ("BROWSER_AI_RUN_ATTACH_SESSION", Some("true")),
+        ];
+        with_env(&vars, || assert!(read()));
     }
 
     /// WS04-S9 / WS16-S6 / WS16-S8 / WS12-S3: the resolver, the locale hint, the sidebar and the DM

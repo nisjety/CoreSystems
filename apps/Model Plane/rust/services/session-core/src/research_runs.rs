@@ -23,9 +23,6 @@
 //! rows, and the org purge (`gdpr::purge_organization_data`) deletes an organisation's rows. The held-scope list names
 //! the table, so a legal hold that blocks a thread erase keeps it.
 
-// `expire_stale` has no caller until the expiry sweep is wired; the other store functions are called by the gRPC service.
-#![allow(dead_code)]
-
 use chrono::{DateTime, TimeDelta, Utc};
 use mp_contracts::model_plane::v1::{self as pb, research_run_service_server::ResearchRunService};
 use mp_contracts::zdr_refusal::Refusal;
@@ -210,6 +207,10 @@ pub(crate) enum BeginError {
     /// `user_id` its owner. The gRPC service names the run to its owner only (see [`begin_status`]).
     #[error("a research run is already running on this thread: {run_id}")]
     Active { run_id: String, user_id: String },
+    /// The thread is not in the caller's organisation, does not belong to the run's owner, or is gone. The gRPC service
+    /// answers it as not found (see [`OWNED_THREAD`]).
+    #[error("the research run's thread is not found")]
+    ThreadNotFound,
     #[error(transparent)]
     Store(#[from] sqlx::Error),
 }
@@ -275,12 +276,22 @@ const EXPIRE_STALE: &str = "UPDATE research_runs
 
 /// Starts a research run on a thread, or refuses with the id of the run already running there.
 ///
-/// One transaction. A per-thread advisory lock makes concurrent begins for the thread take turns; the thread's running
-/// runs past their deadline are expired; and if a running run remains, the new one is refused. The partial unique index
-/// is the backstop, so a begin that somehow raced past the lock fails on the insert rather than leaving two running
-/// runs.
+/// One transaction. Its first statement is the thread's owner check, which locks the thread's row (see
+/// [`OWNED_THREAD`]), so the check and the insert are atomic with respect to a thread erase. A per-thread advisory lock
+/// makes concurrent begins for the thread take turns; the thread's running runs past their deadline are expired; and if
+/// a running run remains, the new one is refused. The partial unique index is the backstop, so a begin that somehow
+/// raced past the lock fails on the insert rather than leaving two running runs.
 pub(crate) async fn begin(pool: &PgPool, new: NewRun<'_>) -> Result<ResearchRun, BeginError> {
     let mut tx = pool.begin().await?;
+    let owned: Option<(String,)> = sqlx::query_as(OWNED_THREAD)
+        .bind(new.thread_id)
+        .bind(new.org_id)
+        .bind(new.user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    if owned.is_none() {
+        return Err(BeginError::ThreadNotFound);
+    }
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('research-run-slot' || chr(31) || $1::text, 0))")
         .bind(new.thread_id)
         .execute(&mut *tx)
@@ -436,6 +447,25 @@ pub(crate) async fn expire_stale(pool: &PgPool) -> Result<u64, sqlx::Error> {
         .await?
         .rows_affected();
     Ok(rows)
+}
+
+/// How often the expiry sweep ends the runs past their deadline. A run whose finish was lost reads as running for at
+/// most this long after its deadline.
+const EXPIRY_SWEEP_SECONDS: u64 = 5;
+
+/// The expiry sweep loop: once per cadence it ends every running run past its deadline, in every organisation, and logs
+/// how many it ended. `main` starts it only while the switch is on, under `supervise_background`, and a failed pass is
+/// logged before the next one.
+pub(crate) async fn run_expiry_sweep(pool: PgPool) -> anyhow::Result<()> {
+    let interval = std::time::Duration::from_secs(EXPIRY_SWEEP_SECONDS);
+    loop {
+        tokio::time::sleep(interval).await;
+        match expire_stale(&pool).await {
+            Ok(0) => {}
+            Ok(ended) => tracing::info!(ended, "research runs past their deadline were expired"),
+            Err(error) => tracing::warn!(%error, "research run expiry sweep failed"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -723,6 +753,7 @@ fn begin_status(error: BeginError, owner: &str) -> RpcStatus {
             research_run_active_status(Some(run_id.as_str()))
         }
         BeginError::Active { .. } => research_run_active_status(None),
+        BeginError::ThreadNotFound => RpcStatus::not_found("thread not found"),
         BeginError::Store(error) => internal(error),
     }
 }
@@ -776,7 +807,22 @@ async fn owned_run(
     }
 }
 
-/// Begins a research run for the caller on a thread, or refuses with the id of the run already running there.
+/// The thread lookup of a begin. It runs first, inside the begin's transaction: the thread must be in the caller's
+/// org and belong to the run's owner, or it reads as not found. `FOR KEY SHARE` holds the thread's row until the
+/// transaction ends. The thread erase takes `FOR UPDATE` on the same row before it deletes the thread's research
+/// runs, so the two take turns. A begin that locks the row first commits its run before the erase deletes runs,
+/// and the erase deletes it with the rest. An erase that locked the row first has committed by the time the lookup
+/// runs, and the thread reads as absent. A message append takes this same lock through its foreign key, so a begin
+/// does not wait on an append.
+///
+/// A run takes its thread's one running slot, and only its owner can see or end the run. A begin on another owner's
+/// thread would hold that slot where the thread's owner cannot reach it. So another owner's thread reads as not found,
+/// as another owner's run does (see [`owned_run`]). A ZDR turn's thread is a metadata-only row of its owner too, so the
+/// same rule holds for it.
+const OWNED_THREAD: &str = "SELECT id FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3 FOR KEY SHARE";
+
+/// Begins a research run for the caller on a thread the caller owns, or refuses with the id of the run already running
+/// there.
 async fn begin_run(
     pool: &PgPool,
     caller: &VerifiedIdentity,
@@ -966,5 +1012,25 @@ mod tests {
         assert_eq!(status.code(), tonic::Code::Aborted);
         assert_eq!(trailer(&status, ERROR_CODE_TRAILER), Some(ACTIVE_CODE));
         assert_eq!(trailer(&status, ACTIVE_RUN_TRAILER), None);
+    }
+
+    #[test]
+    fn a_begin_names_only_a_thread_of_its_owner_in_its_org() {
+        // The org and the owner are both in the lookup, so another owner's or another org's thread reads as absent.
+        assert!(OWNED_THREAD.contains("org_id = $2"));
+        assert!(OWNED_THREAD.contains("user_id = $3"));
+    }
+
+    #[test]
+    fn a_begin_locks_its_thread_row_against_the_erase() {
+        // FOR KEY SHARE conflicts with the thread erase's FOR UPDATE on the same row, which is what orders them.
+        assert!(OWNED_THREAD.ends_with("FOR KEY SHARE"));
+    }
+
+    #[test]
+    fn the_expiry_sweep_ends_only_a_running_run_past_its_deadline() {
+        // A live run inside its deadline and an ended run are both left alone.
+        assert!(EXPIRE_STALE.contains("status = 'running' AND deadline_at < now()"));
+        assert!(EXPIRE_STALE.contains("SET status = 'expired'"));
     }
 }

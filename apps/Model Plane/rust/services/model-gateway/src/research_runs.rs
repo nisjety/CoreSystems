@@ -7,7 +7,8 @@
 //! - `GET /v1/research/runs/:run_id`: one research run the caller owns, as `{data: {...}}`.
 //! - `GET /v1/threads/:thread_id/research-run`: the running research run of a thread the caller owns, or 404.
 //! - `POST /v1/research/runs/:run_id/cancel`: asks the live chat stream of the run to stop (here, or on the replica
-//!   that holds it when the run-control bus is on), and answers 202. That stream ends the run as cancelled.
+//!   that holds it when the run-control bus is on), and answers 202. That stream ends the run as cancelled. A running
+//!   run that no stream answers for is ended as cancelled here, so its thread slot frees before the deadline.
 //!
 //! Every call carries the caller's own session bearer, and the org comes from the verified claims. The owner is
 //! the verified caller, never a request field, so a run of another owner reads as not found. A zero-retention or
@@ -389,12 +390,27 @@ async fn get_thread_research_run(
     Ok(Json(body))
 }
 
+/// The end a cancel gives a running research run that no live stream answers for: `cancelled`, the status and stop
+/// reason a stream's own client stop records. It sends no partial result, report or counter, so the stored ones stay
+/// as they are: Session Core moves counters only up, and keeps the stored partial and report when none is sent.
+fn orphaned_end(run: &ResearchRun) -> FinishRequest {
+    FinishRequest {
+        id: run.id.clone(),
+        status: "cancelled".to_owned(),
+        stop_reason: crate::deep_research::ResearchStop::Cancelled.as_str().to_owned(),
+        ..Default::default()
+    }
+}
+
 /// `POST /v1/research/runs/:run_id/cancel`: asks the live chat stream of a research run the caller owns to stop. The
 /// stream registers under the chat session run that the research run belongs to, so the stop is keyed by that run's
 /// id. The run-control route resolves it: here through `cancel_run_for`, or on the replica that holds the stream when
 /// the run-control bus is on. `stopRequested` is true when a live stream was asked; that stream then ends the run as
 /// cancelled. A run that has already ended asks no stream: it is answered 202 with `stopRequested` false, and its
-/// chat run is left alone. Answered 202 once the caller is known to own the run, and 503 when the bus could not tell.
+/// chat run is left alone. A running run that no stream answers for would otherwise stay running until its deadline,
+/// so this route ends it as cancelled; `stopRequested` stays false, as no stream was asked. Answered 202 once the
+/// caller is known to own the run, and 503 when the bus could not tell. A failed end is answered with its upstream
+/// error, so the caller may try again.
 async fn cancel_research_run(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -419,7 +435,17 @@ async fn cancel_research_run(
     };
     let stop_requested = match route {
         CancelRoute::Local | CancelRoute::Peer => true,
-        CancelRoute::NoOwner => false,
+        CancelRoute::NoOwner => {
+            // A running run that no stream answers for holds its thread's one running slot until its deadline, and
+            // nothing else ends it. Session Core applies this end only while the run is still running.
+            if run.status == "running" {
+                runs_client(&state)
+                    .finish(&bearer, orphaned_end(&run))
+                    .await
+                    .map_err(|status| upstream_error(&status))?;
+            }
+            false
+        }
         CancelRoute::Unavailable => {
             return Err(envelope(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -434,4 +460,26 @@ async fn cancel_research_run(
         Json(json!({ "data": { "id": run.id, "stopRequested": stop_requested } })),
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_orphaned_run_ends_as_cancelled_and_sends_no_content() {
+        let run = ResearchRun {
+            id: "rr_orphan".to_owned(),
+            status: "running".to_owned(),
+            ..Default::default()
+        };
+        let end = orphaned_end(&run);
+        assert_eq!(end.id, "rr_orphan");
+        assert_eq!(end.status, "cancelled");
+        assert_eq!(end.stop_reason, "cancelled");
+        assert!(end.halt_code.is_empty());
+        assert!(end.partial.is_none());
+        assert!(end.report_artifact_id.is_empty());
+        assert_eq!((end.pages_read, end.sources_found, end.spent_usd_micro), (0, 0, 0));
+    }
 }

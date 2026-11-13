@@ -425,7 +425,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 		})
 	})
 
-	app.Get("/api/v1/actions/catalog", chainHandlers(rateLimited, internalOrBearerAuth, actionsCatalogReadScope, actionsCatalogHandler)...)
+	app.Get("/api/v1/actions/catalog", chainHandlers(rateLimited, internalOrBearerAuth, actionsCatalogReadScope, actionsCatalogHandler(cfg.Config.NotionPageContentReadEnabled))...)
 
 	app.Patch("/api/v1/connections/:id/capabilities", internalOrBearerAuth, requireServiceIntegrationWrite, func(c *fiber.Ctx) error {
 		connection, err := scopedConnection(c, cfg, c.Params("id"))
@@ -3056,6 +3056,12 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 	// actions.Service keeps the same check as its own gate.
 	if err := actions.RefuseOTPOnlyCaller(actionCallerIdentity(c), body.Operation); err != nil {
 		return actions.ExecuteResult{}, err
+	}
+	// The Notion page.content read is dark while INTEGRATION_NOTION_PAGE_CONTENT_READ is off. A
+	// dark call gets the unsupported-operation answer before the capability rule and the provider
+	// token, so no Notion page body is read or served (the catalog leaves its row out too).
+	if !cfg.Config.NotionPageContentReadEnabled && isNotionPageContentOperation(body.Operation) {
+		return actions.ExecuteResult{}, errActionOperationUnsupported
 	}
 	if err := requireActionCapability(c, connection, body); err != nil {
 		return actions.ExecuteResult{}, err

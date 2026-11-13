@@ -1,2 +1,9 @@
 [registries.crates-io]
 protocol = "sparse"
+
+# Test threads default to a 2 MiB stack, and a debug build's run-loop futures need more than that
+# once a run delegates: a delegated child nests a second loop and its tool dispatch. The
+# delegated-child and wide-research tests overflowed it on Windows. This sizes the test threads
+# cargo starts; an explicitly set RUST_MIN_STACK in the environment still wins.
+[env]
+RUST_MIN_STACK = "8388608"
