@@ -63,10 +63,11 @@ pub fn admission_table() -> bool {
 
 /// Whether this deployment refuses the listing on a Space-scoped run (`OWNER_LIST_SPACE_REFUSE`).
 /// Strict: only the literal `true` switches it on, so the listing keeps its organisation-wide
-/// reach everywhere else. Dark by default (D2-769).
+/// reach everywhere else. Dark by default (D2-769). The value is read raw, not through the
+/// trimming `env_value`, so a padded value such as ` true` stays off, as in model-gateway.
 #[must_use]
 pub fn space_refuse_enabled() -> bool {
-    crate::control_http_client::env_value("OWNER_LIST_SPACE_REFUSE").as_deref() == Some("true")
+    std::env::var("OWNER_LIST_SPACE_REFUSE").ok().as_deref() == Some("true")
 }
 
 /// Whether a call on a run in `space_id` is refused because the run is Space-scoped. The Data Plane
@@ -667,5 +668,32 @@ mod tests {
 
             handle.abort();
         }
+    }
+}
+
+/// Section 3.4: `OWNER_LIST_SPACE_REFUSE` is documented strict: only the literal `true` switches it on.
+#[cfg(test)]
+mod space_switch_parse {
+    use super::space_refuse_enabled;
+    use super::test_switches::Switches;
+
+    #[tokio::test]
+    async fn only_the_literal_true_switches_the_space_refusal_on() {
+        let mut wrong = Vec::new();
+        for (raw, on) in [
+            (Some("true"), true),
+            (Some(" true"), false),
+            (Some("true\n"), false),
+            (Some("TRUE"), false),
+            (Some("1"), false),
+            (Some(""), false),
+            (None, false),
+        ] {
+            let _switches = Switches::set(raw, None).await;
+            if space_refuse_enabled() != on {
+                wrong.push(raw);
+            }
+        }
+        assert!(wrong.is_empty(), "values read wrongly: {wrong:?}");
     }
 }
