@@ -29,6 +29,7 @@ use axum::{
     routing::post,
     Extension, Json, Router,
 };
+use chrono::{DateTime, Utc};
 use mp_contracts::agentic_subscription::PROVIDER_ID;
 use mp_contracts::model_plane::v1::{
     ArchiveFilter, ChatMessage, InferPurpose, InferRequest, ListConversationRequest,
@@ -47,6 +48,7 @@ use crate::http_routes::{
 };
 use crate::pricing::CostBasis;
 use crate::state::AppState;
+use crate::subscription_failure::{FailureContext, SubscriptionFailure};
 
 /// The opt-in switch. Only the literal `true` (case-insensitive) turns it on.
 pub const ENABLED_ENV: &str = "MODEL_GATEWAY_SIDE_CHAT_ENABLED";
@@ -550,6 +552,50 @@ async fn read_active_path(
     Ok((response.messages, response.has_more))
 }
 
+/// The answer to a failed `infer` (V2-mg-1). A call on the thread's subscription connection ends on the subscription
+/// catalogue, as every other subscription call does (`/v1/invoke`, the direct inference run): its typed code, or the
+/// generic route failure, with the catalogue's words, `retryable`, its content-free timing and its status. The upstream
+/// message is never shown on that route. A typed zero-retention or model-entitlement refusal keeps its own body, and a
+/// platform or customer-gateway call keeps `grpc_status_to_http`.
+pub(crate) fn side_chat_inference_error(
+    error: &tonic::Status,
+    subscription_route: bool,
+) -> HttpJsonError {
+    let typed_refusal = mp_contracts::zdr_refusal::Refusal::from_status(error).is_some()
+        || mp_contracts::model_entitlement::Refusal::from_status(error).is_some();
+    if !subscription_route || typed_refusal {
+        return grpc_status_to_http(error);
+    }
+    match crate::subscription_failure::on_route_or_generic(error, true) {
+        Some(failure) => subscription_failure_answer(&failure, Utc::now()),
+        None => grpc_status_to_http(error),
+    }
+}
+
+/// A subscription failure as the unary routes answer it: the catalogue's words, the code, `retryable`, and the timing
+/// the failure carries, at the catalogue's HTTP status. A side chat is one call with no history to compact or leave
+/// behind, so an overlong prompt is worded as the request, as `/v1/invoke` words one.
+fn subscription_failure_answer(failure: &SubscriptionFailure, now: DateTime<Utc>) -> HttpJsonError {
+    let mut body = json!({
+        "error": crate::subscription_failure::message_at(failure, FailureContext::Request, now),
+        "code": failure.code,
+        "retryable": crate::subscription_failure::retryable(failure.code),
+    });
+    if let Some(resets_at) = failure.resets_at_label() {
+        body["resets_at"] = json!(resets_at);
+    }
+    if let Some(retry_after_ms) = failure.retry_after_ms {
+        body["retry_after_ms"] = json!(retry_after_ms);
+    }
+    if let Some(retry_at) = failure.retry_at_label(now) {
+        body["retry_at"] = json!(retry_at);
+    }
+    (
+        crate::subscription_failure::http_status(failure.code),
+        Json(body),
+    )
+}
+
 /// The side chat once the switch is on: check the question, decide the posture, read the newest
 /// turns of the thread, and make the one read-only call.
 pub(crate) async fn side_chat_with(
@@ -590,12 +636,20 @@ pub(crate) async fn side_chat_with(
     )?;
     let nonce = new_ulid();
     let request = side_chat_request(&question, &transcript, &nonce, &claims.org_id, zdr, &route);
+    // A subscription call ends a failure on the subscription catalogue (V2-mg-1); the other routes keep their mapping.
+    let subscription_route = match &route {
+        SideRoute::Connection {
+            connection: ThreadConnection::Subscription(_),
+            ..
+        } => true,
+        SideRoute::Platform | SideRoute::Connection { .. } => false,
+    };
     let resp = state
         .inference_client
         .clone()
         .infer(authenticated_inference_request(request, &inference_bearer))
         .await
-        .map_err(|e| grpc_status_to_http(&e))?
+        .map_err(|e| side_chat_inference_error(&e, subscription_route))?
         .into_inner();
     let answer = resp.content.trim().to_owned();
     if answer.is_empty() {

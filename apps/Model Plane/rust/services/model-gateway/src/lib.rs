@@ -160,3 +160,5 @@ pub mod web_extraction;
 pub mod zdr_features;
 pub mod zdr_posture;
 pub mod zdr_precheck;
+#[cfg(test)]
+mod side_chat_failure_tests;

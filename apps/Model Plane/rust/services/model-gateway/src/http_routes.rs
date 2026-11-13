@@ -1586,6 +1586,147 @@ fn invoke_inference_error(
     }
 }
 
+/// What a failed direct inference call ends its run with, and the answer its caller gets (V2-mg-1-rel1).
+///
+/// On the subscription route a typed zero-retention or model-entitlement refusal from inference-core keeps its own
+/// catalogue code and body, as the side chat's answer does. It is not the route's generic failure, so the run ends
+/// under the refusal's code, and the caller is not told to retry a refusal that cannot succeed. Every other failure
+/// keeps the route's typed reason or generic failure, and off the route nothing changes.
+fn direct_run_inference_failure(
+    error: &tonic::Status,
+    subscription_route: bool,
+) -> (&'static str, InvokeError) {
+    let refusal = if subscription_route {
+        mp_contracts::zdr_refusal::Refusal::from_status(error)
+            .map(|refusal| refusal.code())
+            .or_else(|| {
+                mp_contracts::model_entitlement::Refusal::from_status(error)
+                    .map(|refusal| refusal.code())
+            })
+    } else {
+        None
+    };
+    if let Some(code) = refusal {
+        return (code, grpc_status_to_http(error).into());
+    }
+    let subscription_failure =
+        crate::subscription_failure::on_route_or_generic(error, subscription_route);
+    let terminal_code = subscription_failure
+        .as_ref()
+        .map_or("inference_unavailable", |failure| failure.code);
+    (
+        terminal_code,
+        invoke_inference_error(error, subscription_failure.as_ref()),
+    )
+}
+
+#[cfg(test)]
+mod direct_run_failure_tests {
+    //! V2-mg-1-rel1. On the subscription route a failed direct inference run ends under a typed zero-retention or
+    //! model-entitlement refusal's own code and answers its body, not under the generic `subscription_route_unavailable`,
+    //! which would call the refusal retryable. Off the route, and for every other failure, the answer is unchanged.
+    use super::*;
+    use mp_contracts::model_entitlement::{Reason, Refusal as EntitlementRefusal};
+    use mp_contracts::zdr_refusal::{code as zdr_code, Refusal as ZdrRefusal};
+
+    fn zdr_status() -> tonic::Status {
+        ZdrRefusal::CONNECTION_NOT_ACKNOWLEDGED.grpc_status(tonic::Code::FailedPrecondition)
+    }
+
+    fn entitlement_status() -> tonic::Status {
+        EntitlementRefusal::not_entitled("gpt-x", Reason::NotInAllowList).grpc_status()
+    }
+
+    #[test]
+    fn a_typed_zdr_refusal_on_the_subscription_route_keeps_its_own_code_and_body() {
+        let status = zdr_status();
+        let (terminal, answer) = direct_run_inference_failure(&status, true);
+        let (flat_status, Json(flat)) = grpc_status_to_http(&status);
+        assert_eq!(terminal, zdr_code::CONNECTION_NOT_ACKNOWLEDGED);
+        assert_eq!((answer.status, &answer.body.0), (flat_status, &flat));
+        assert_eq!(
+            answer.body.0["error"]["code"].as_str(),
+            Some(zdr_code::CONNECTION_NOT_ACKNOWLEDGED)
+        );
+        assert_eq!(answer.body.0["error"]["retryable"].as_bool(), Some(false));
+        assert!(answer.body.0["code"].is_null(), "{}", answer.body.0);
+        assert_eq!(answer.retry_after_secs, None);
+    }
+
+    #[test]
+    fn a_typed_model_refusal_on_the_subscription_route_keeps_its_own_code_and_body() {
+        let status = entitlement_status();
+        let (terminal, answer) = direct_run_inference_failure(&status, true);
+        let (flat_status, Json(flat)) = grpc_status_to_http(&status);
+        assert_eq!(
+            terminal,
+            mp_contracts::model_entitlement::code::MODEL_NOT_ENTITLED
+        );
+        assert_eq!((answer.status, &answer.body.0), (flat_status, &flat));
+        assert_eq!(
+            answer.body.0["error"]["code"].as_str(),
+            Some(mp_contracts::model_entitlement::code::MODEL_NOT_ENTITLED)
+        );
+        assert_eq!(answer.body.0["error"]["retryable"].as_bool(), Some(false));
+        assert!(answer.body.0["code"].is_null(), "{}", answer.body.0);
+    }
+
+    #[test]
+    fn off_the_subscription_route_a_refusal_is_answered_as_before() {
+        for status in [zdr_status(), entitlement_status()] {
+            let (terminal, answer) = direct_run_inference_failure(&status, false);
+            let before = invoke_inference_error(&status, None);
+            assert_eq!(terminal, "inference_unavailable");
+            assert_eq!(
+                (answer.status, &answer.body.0),
+                (before.status, &before.body.0)
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_with_no_typed_reason_on_the_subscription_route_is_the_generic_failure() {
+        let status = tonic::Status::unavailable("upstream said: token expired for acct 42");
+        let (terminal, answer) = direct_run_inference_failure(&status, true);
+        assert_eq!(
+            terminal,
+            crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE
+        );
+        assert_eq!(answer.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            answer.body.0["code"].as_str(),
+            Some(crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE)
+        );
+        assert_eq!(answer.body.0["retryable"].as_bool(), Some(true));
+        assert!(
+            !answer.body.0.to_string().contains("acct 42"),
+            "{}",
+            answer.body.0
+        );
+    }
+
+    #[test]
+    fn a_typed_subscription_failure_on_the_subscription_route_keeps_its_reason() {
+        let mut status = tonic::Status::resource_exhausted("upstream said: quota for acct 42");
+        status.metadata_mut().insert(
+            crate::compaction::PROVIDER_ERROR_KIND_TRAILER,
+            crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT
+                .parse()
+                .expect("ascii"),
+        );
+        let (terminal, answer) = direct_run_inference_failure(&status, true);
+        assert_eq!(
+            terminal,
+            crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT
+        );
+        assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            answer.body.0["code"].as_str(),
+            Some(crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT)
+        );
+    }
+}
+
 /// Attach the separately verified `aud=inference-core` credential to one
 /// downstream RPC. A verified compact JWT uses only metadata-safe characters;
 /// validation happens in the auth middleware before this type can exist.
@@ -18290,13 +18431,11 @@ async fn invoke(
                 // On the subscription route the reason is typed, an overflow
                 // is `prompt_too_long` (not retried, closed as the request's
                 // own failure), and anything else is the generic route
-                // failure; the run records its code.
+                // failure; a typed refusal keeps its own code and body there
+                // (see `direct_run_inference_failure`). The run records its code.
                 let subscription_route = !normalized.subscription_connection_id.trim().is_empty();
-                let subscription_failure =
-                    crate::subscription_failure::on_route_or_generic(&error, subscription_route);
-                let terminal_code = subscription_failure
-                    .as_ref()
-                    .map_or("inference_unavailable", |failure| failure.code);
+                let (terminal_code, answer) =
+                    direct_run_inference_failure(&error, subscription_route);
                 if let Err(terminal_error) =
                     session_flow::terminalize_direct_inference_run_authenticated(
                         &state,
@@ -18312,7 +18451,7 @@ async fn invoke(
                         Json(serde_json::json!({"error": "session-core terminalization failed"})),
                     ).into());
                 }
-                return Err(invoke_inference_error(&error, subscription_failure.as_ref()));
+                return Err(answer);
             }
         }
     };
