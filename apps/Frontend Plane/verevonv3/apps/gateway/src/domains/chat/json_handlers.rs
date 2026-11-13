@@ -486,16 +486,22 @@ fn branch_move_body(body: &BranchThreadBody, mode: BranchMove) -> Result<Value, 
     Ok(payload)
 }
 
-/// The body of a side question: one question and nothing else, so a client cannot choose a model, a posture or
-/// another thread.
+/// The body of a side question: one question and, for a thread whose turns were written under a connection (W4-BYO,
+/// DEC-V-R8), the model that connection serves. It cannot choose a posture or another thread: Model Gateway reads the
+/// connection from the stored thread.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SideChatBody {
     question: String,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// The most characters one side question may carry. Model Gateway refuses a longer one the same way.
 const SIDE_CHAT_QUESTION_MAX_CHARS: usize = 2_000;
+
+/// The longest model id a side question may name. Model Gateway checks the id against the deployment allowlist.
+const SIDE_CHAT_MODEL_MAX_CHARS: usize = 200;
 
 /// A side question about one conversation (F-t3-069): one read-only answer from Model Gateway, which reads the
 /// thread's active path and stores nothing. The answer goes back to the caller alone.
@@ -510,7 +516,7 @@ pub(super) async fn ask_side_chat(
     Path(thread_id): Path<String>,
     Json(body): Json<SideChatBody>,
 ) -> Response {
-    no_store(side_chat_reply(&state, &user, &headers, &thread_id, &body.question).await)
+    no_store(side_chat_reply(&state, &user, &headers, &thread_id, &body).await)
 }
 
 async fn side_chat_reply(
@@ -518,13 +524,13 @@ async fn side_chat_reply(
     user: &AuthenticatedUser,
     headers: &HeaderMap,
     thread_id: &str,
-    question: &str,
+    body: &SideChatBody,
 ) -> Response {
     let thread_id = thread_id.trim();
     if thread_id.is_empty() {
         return bad_request("thread_id is required.");
     }
-    let question = question.trim();
+    let question = body.question.trim();
     if question.is_empty() || question.chars().count() > SIDE_CHAT_QUESTION_MAX_CHARS {
         return bad_request("The side chat question must be 1 to 2000 characters.");
     }
@@ -532,6 +538,20 @@ async fn side_chat_reply(
         "question": question,
         "zdr": shared::zdr_flag(headers),
     });
+    // The model a connection thread is served with (W4-BYO, DEC-V-R8). Model Gateway refuses a connection-thread
+    // side chat that names none and uses the field on no other thread, so a blank one is left out, as if unsent. A
+    // named model is one model id: no whitespace or control character, and at most SIDE_CHAT_MODEL_MAX_CHARS.
+    let model = body.model.as_deref().unwrap_or_default().trim();
+    if model.chars().count() > SIDE_CHAT_MODEL_MAX_CHARS
+        || model.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return bad_request(
+            "The side chat model must be one model id of at most 200 characters, with no spaces or control characters.",
+        );
+    }
+    if !model.is_empty() {
+        outbound_body["model"] = json!(model);
+    }
     shared::apply_org_zdr_posture(state, user, &mut outbound_body).await;
     let token = shared::model_token(state, user, headers).await;
     let session_token = match shared::required_session_token(state, user, headers).await {
@@ -566,8 +586,15 @@ async fn side_chat_reply(
     )
     .await;
     // A refused delegated credential is not the browser's session, so it is answered as unavailable, not as a 401
-    // that would sign the person out. `assistant_navigation` follows the same rule.
-    let (status, payload) = if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+    // that would sign the person out. `assistant_navigation` follows the same rule. The one 403 that is relayed is
+    // model-gateway's typed refusal of this side chat (see `is_typed_side_chat_refusal`): a retry would not change
+    // it, and the person should be told why the side chat cannot run.
+    let credential_refused = match status {
+        StatusCode::UNAUTHORIZED => true,
+        StatusCode::FORBIDDEN => !is_typed_side_chat_refusal(&payload),
+        _ => false,
+    };
+    let (status, payload) = if credential_refused {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             error(
@@ -579,6 +606,17 @@ async fn side_chat_reply(
         (status, payload)
     };
     (status, Json(payload)).into_response()
+}
+
+/// Whether a 403 body is model-gateway's typed refusal of a side chat: the model-entitlement refusal
+/// (`model_not_entitled`), or a zero-retention one (`zdr_*`, the credential refusals of a connection route included).
+/// Model Gateway's generic `forbidden` (a Session Core permission refusal: a thread the caller does not own, or a
+/// delegated scope it lacks) is not one, so it keeps the unavailable answer.
+fn is_typed_side_chat_refusal(payload: &Value) -> bool {
+    payload
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .is_some_and(|code| code == "model_not_entitled" || code.starts_with("zdr_"))
 }
 
 /// Marks an answer that must not be kept: the question and the answer are the person's own conversation text.
