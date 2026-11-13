@@ -888,25 +888,107 @@ pub(crate) async fn recall_agent_memory(
 /// binding's notes already (EP-8 S7, by the `<space_id>:` prefix). Agent rows have no Letta copy,
 /// so the durable delete is the whole erasure. Returns how many rows went.
 /// Reached through `MemoryService.EraseAgentMemory` (EP-6 P3), under a Control Space memory decision.
+///
+/// The legal-hold gate is asked before any note is deleted (EP-9 C4, V3-sc-1): a held organization refuses
+/// the whole revocation, and with the hold switch on so does a held thread that one of the binding's notes
+/// cites. A refusal deletes nothing and keeps its typed code. With the switch off nothing is asked and the
+/// delete is the one statement it always was.
+///
+/// # Errors
+///
+/// Returns [`crate::gdpr::ErasureHoldError`] (inside the `anyhow::Error`) when a hold covers the organization
+/// or one of the cited threads, or cannot be ruled out. Returns an error if a statement or the commit fails;
+/// nothing is deleted then.
 pub(crate) async fn erase_agent_memory(
     pool: &PgPool,
     org_id: &str,
     space_id: &str,
     agent_subject_id: &str,
-) -> Result<u64, sqlx::Error> {
+) -> anyhow::Result<u64> {
+    erase_agent_memory_gated(
+        pool,
+        org_id,
+        space_id,
+        agent_subject_id,
+        crate::gdpr::erasure_hold_gate(),
+    )
+    .await
+}
+
+/// [`erase_agent_memory`] with the hold gate named by the caller, so a test can answer with its own org-core.
+/// Production always passes the process gate.
+async fn erase_agent_memory_gated(
+    pool: &PgPool,
+    org_id: &str,
+    space_id: &str,
+    agent_subject_id: &str,
+    gate: &crate::gdpr::ErasureHoldGate,
+) -> anyhow::Result<u64> {
     let Some(scope_id) = agent_scope_id(space_id, agent_subject_id) else {
         return Ok(0);
     };
-    let erased = sqlx::query("DELETE FROM agent_memory WHERE org_id = $1 AND scope = 'agent' AND scope_id = $2")
+    // EP-9 C4: the organization's hold is asked before the transaction opens and before any note is locked or
+    // deleted, so a held organization is refused with nothing touched. Switched off, nothing is asked.
+    gate.ensure_not_held(org_id, &[]).await?;
+    let erased = if matches!(gate, crate::gdpr::ErasureHoldGate::Off) {
+        sqlx::query(
+            "DELETE FROM agent_memory WHERE org_id = $1 AND scope = 'agent' AND scope_id = $2",
+        )
         .bind(org_id)
         .bind(&scope_id)
         .execute(pool)
         .await?
-        .rows_affected();
+        .rows_affected()
+    } else {
+        erase_binding_rows_checked(pool, gate, org_id, &scope_id).await?
+    };
     if erased > 0 {
         metrics::counter!("mp_session_space_memory_erased_total", "op" => "binding_revocation")
             .increment(erased);
     }
+    Ok(erased)
+}
+
+/// The revocation with the hold switch on (V3-sc-1). The binding's notes are locked in one transaction, the
+/// threads they cite are read from those locked rows and asked (the GDPR-order-rel2 rule), and only then are the
+/// locked notes deleted, so the rows checked are the rows removed. A refusal or a failed statement drops the
+/// transaction and nothing is deleted. A note written after the lock is not part of this revocation, so a held
+/// thread's content is never deleted unchecked.
+async fn erase_binding_rows_checked(
+    pool: &PgPool,
+    gate: &crate::gdpr::ErasureHoldGate,
+    org_id: &str,
+    scope_id: &str,
+) -> anyhow::Result<u64> {
+    let mut tx = pool.begin().await?;
+    let rows: Vec<(String, Vec<String>)> = sqlx::query_as(
+        "SELECT id, source_links FROM agent_memory \
+         WHERE org_id = $1 AND scope = 'agent' AND scope_id = $2 \
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(org_id)
+    .bind(scope_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let links: Vec<String> = rows
+        .iter()
+        .flat_map(|(_, row_links)| row_links.iter().cloned())
+        .collect();
+    let cited = crate::gdpr::cited_thread_ids_in_tx(&mut tx, org_id, &links).await?;
+    if !cited.is_empty() {
+        gate.ensure_not_held(org_id, &cited).await?;
+    }
+    let ids: Vec<String> = rows.into_iter().map(|(id, _)| id).collect();
+    let erased = sqlx::query(
+        "DELETE FROM agent_memory WHERE org_id = $1 AND scope = 'agent' AND scope_id = $2 AND id = ANY($3)",
+    )
+    .bind(org_id)
+    .bind(scope_id)
+    .bind(&ids)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
     Ok(erased)
 }
 
@@ -1284,6 +1366,174 @@ mod tests {
         assert!(!dreaming.contains("OR (session_id IS NULL AND scope <> 'user' AND NOT $8)"));
     }
 
+    // ---- V3-sc-1: a revocation asks the legal-hold gate before any delete --------------------------
+
+    /// The text of one production function: from its signature to its closing brace in column 0.
+    fn production_fn<'a>(text: &'a str, signature: &str) -> &'a str {
+        let start = text.find(signature).unwrap_or_else(|| panic!("expected {signature:?}"));
+        let rest = &text[start..];
+        let end = rest.find("\n}\n").expect("the function's closing brace");
+        &rest[..end + 2]
+    }
+
+    /// The hold gate with the switch on, org-core answering from `url`, and session-core's credentials.
+    fn hold_gate(url: &str) -> crate::gdpr::ErasureHoldGate {
+        crate::gdpr::ErasureHoldGate::from_lookup(|name| match name {
+            crate::gdpr::ERASURE_HOLD_CHECK_ENV => Some("true".to_owned()),
+            crate::org_policy::ORG_CORE_URL_ENV => Some(url.to_owned()),
+            crate::org_policy::SERVICE_TOKEN_ENV => Some("session-token".to_owned()),
+            _ => None,
+        })
+    }
+
+    /// Answers org-core's check the way the route does: `org_held` as given, and of the threads asked about,
+    /// only the held ones come back.
+    struct HoldAnswer {
+        org_held: bool,
+        held: Vec<String>,
+    }
+
+    impl wiremock::Respond for HoldAnswer {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let asked: Vec<String> = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .ok()
+                .and_then(|body| body["thread_ids"].as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|id| id.as_str().map(str::to_owned))
+                .collect();
+            let held_asked: Vec<String> = asked
+                .into_iter()
+                .filter(|id| self.held.contains(id))
+                .collect();
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "organization_id": "org",
+                "window_days": null,
+                "revision": 0,
+                "org_held": self.org_held,
+                "held_thread_ids": held_asked,
+            }))
+        }
+    }
+
+    /// Mounts [`HoldAnswer`] on the check route of `org`, with session-core's credentials required.
+    async fn mount_hold_answer(
+        server: &wiremock::MockServer,
+        org: &str,
+        org_held: bool,
+        held: Vec<String>,
+    ) {
+        use wiremock::matchers::{header, method, path};
+        server.reset().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path(format!("/internal/orgs/{org}/retention/check")))
+            .and(header("x-service-id", "session-core"))
+            .and(header("x-service-token", "session-token"))
+            .respond_with(HoldAnswer { org_held, held })
+            .mount(server)
+            .await;
+    }
+
+    /// A pool that is never connected: a refusal must come before the first statement, so none is run.
+    fn unconnected_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(200))
+            .connect_lazy("postgres://unused@127.0.0.1:1/unused")
+            .expect("a lazy pool parses its url")
+    }
+
+    /// V3-sc-1: a revocation erasure asks the hold gate before any note is locked or deleted. The organization is
+    /// asked before the transaction opens; the binding's notes are locked; the threads they cite are read after the
+    /// lock, behind the switch, and asked before the delete, which removes only the locked notes. With the switch
+    /// off, the one statement it always was runs and nothing is asked.
+    #[test]
+    fn revocation_erasure_asks_holds_before_any_delete() {
+        let source = production_source(include_str!("space_memory.rs"));
+        let gated = production_fn(source, "async fn erase_agent_memory_gated(");
+        let checked = production_fn(source, "async fn erase_binding_rows_checked(");
+        let wrapper = production_fn(source, "pub(crate) async fn erase_agent_memory(");
+        assert!(
+            wrapper.contains("crate::gdpr::erasure_hold_gate()"),
+            "the revocation asks the process hold gate, not a gate of its own"
+        );
+        let pos = |text: &str, needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("expected {needle:?} in the revocation erasure"))
+        };
+        let organization = pos(gated, "gate.ensure_not_held(org_id, &[]).await?;");
+        let switch = pos(
+            gated,
+            "if matches!(gate, crate::gdpr::ErasureHoldGate::Off)",
+        );
+        let off_delete = pos(
+            gated,
+            "\"DELETE FROM agent_memory WHERE org_id = $1 AND scope = 'agent' AND scope_id = $2\"",
+        );
+        let checked_path = pos(
+            gated,
+            "erase_binding_rows_checked(pool, gate, org_id, &scope_id)",
+        );
+        assert!(
+            organization < switch && switch < off_delete && switch < checked_path,
+            "the organization is asked before the switch picks the delete path"
+        );
+
+        let begin = pos(checked, "pool.begin()");
+        let locked = pos(checked, "FOR UPDATE");
+        let read = pos(
+            checked,
+            "crate::gdpr::cited_thread_ids_in_tx(&mut tx, org_id, &links)",
+        );
+        let asked = pos(checked, "gate.ensure_not_held(org_id, &cited).await?;");
+        let delete = pos(checked, "AND id = ANY($3)");
+        assert!(
+            begin < locked && locked < read && read < asked && asked < delete,
+            "the cited threads are read after the lock and asked before the delete"
+        );
+        assert!(
+            !checked.contains("ensure_not_held(org_id, &[])"),
+            "the organization is asked once, before the transaction opens"
+        );
+    }
+
+    /// A held organization refuses the revocation before any statement: the pool is never connected.
+    #[tokio::test]
+    async fn a_held_organization_refuses_the_revocation_before_any_statement() {
+        let server = wiremock::MockServer::start().await;
+        mount_hold_answer(&server, "org-1", true, Vec::new()).await;
+        let refusal = erase_agent_memory_gated(
+            &unconnected_pool(),
+            "org-1",
+            "space-1",
+            "agent-1",
+            &hold_gate(&server.uri()),
+        )
+        .await
+        .expect_err("a held organization refuses the revocation");
+        assert_eq!(
+            refusal.downcast_ref::<crate::gdpr::ErasureHoldError>(),
+            Some(&crate::gdpr::ErasureHoldError::OrgHeld)
+        );
+    }
+
+    /// A switch on without org-core cannot rule a hold out, so the revocation is refused as retryable, before
+    /// any statement.
+    #[tokio::test]
+    async fn an_unanswerable_hold_check_refuses_the_revocation_before_any_statement() {
+        let gate = crate::gdpr::ErasureHoldGate::from_lookup(|name| match name {
+            crate::gdpr::ERASURE_HOLD_CHECK_ENV => Some("true".to_owned()),
+            _ => None,
+        });
+        let refusal =
+            erase_agent_memory_gated(&unconnected_pool(), "org-1", "space-1", "agent-1", &gate)
+                .await
+                .expect_err("an unanswerable check refuses the revocation");
+        assert!(matches!(
+            refusal.downcast_ref::<crate::gdpr::ErasureHoldError>(),
+            Some(crate::gdpr::ErasureHoldError::Unavailable(_))
+        ));
+    }
+
     // ---- DB tier: `#[ignore]`d, needs DATABASE_URL to a disposable `*test*` Postgres ----------
 
     use crate::space::test_support;
@@ -1629,6 +1879,73 @@ mod tests {
             erase_agent_memory(&seeded.pool, &seeded.org, &seeded.space, "agent-1").await.unwrap(),
             0,
             "a redelivered revocation is a no-op"
+        );
+        cleanup(&seeded).await;
+    }
+
+    /// V3-sc-1: a revocation asks the hold gate before any note is deleted. A held organization refuses it; with the
+    /// hold switch on, a held thread that one of the binding's notes cites refuses it too, and the note stays. Once
+    /// the holds are released, the same revocation erases the note, and a redelivery finds nothing left.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres whose name contains \"test\""]
+    async fn revocation_refused_by_a_hold_keeps_the_binding_notes() {
+        let Some(seeded) = seed(REMEMBER).await else {
+            return;
+        };
+        let server = wiremock::MockServer::start().await;
+        let gate = hold_gate(&server.uri());
+        const BINDING_NOTES: &str =
+            "SELECT COUNT(*) FROM agent_memory WHERE org_id = $1 AND scope = 'agent'";
+        let run = seed_wake_run(&seeded, &seeded.space, &seeded.thread, "agent-1").await;
+        save(&seeded, &seeded.thread, NOTE)
+            .await
+            .expect("agent-1 note");
+        finish_run(&seeded, &run).await;
+
+        mount_hold_answer(&server, &seeded.org, true, Vec::new()).await;
+        let refusal =
+            erase_agent_memory_gated(&seeded.pool, &seeded.org, &seeded.space, "agent-1", &gate)
+                .await
+                .expect_err("a held organization refuses the revocation");
+        assert_eq!(
+            refusal.downcast_ref::<crate::gdpr::ErasureHoldError>(),
+            Some(&crate::gdpr::ErasureHoldError::OrgHeld)
+        );
+        assert_eq!(
+            count(&seeded, BINDING_NOTES).await,
+            1,
+            "a refused revocation deletes nothing"
+        );
+
+        mount_hold_answer(&server, &seeded.org, false, vec![seeded.thread.clone()]).await;
+        let refusal =
+            erase_agent_memory_gated(&seeded.pool, &seeded.org, &seeded.space, "agent-1", &gate)
+                .await
+                .expect_err("a held thread that the note cites refuses the revocation");
+        assert_eq!(
+            refusal.downcast_ref::<crate::gdpr::ErasureHoldError>(),
+            Some(&crate::gdpr::ErasureHoldError::ThreadsHeld(1))
+        );
+        assert_eq!(
+            count(&seeded, BINDING_NOTES).await,
+            1,
+            "a refused revocation deletes nothing"
+        );
+
+        mount_hold_answer(&server, &seeded.org, false, Vec::new()).await;
+        assert_eq!(
+            erase_agent_memory_gated(&seeded.pool, &seeded.org, &seeded.space, "agent-1", &gate)
+                .await
+                .expect("released: the revocation completes"),
+            1
+        );
+        assert_eq!(count(&seeded, BINDING_NOTES).await, 0);
+        assert_eq!(
+            erase_agent_memory_gated(&seeded.pool, &seeded.org, &seeded.space, "agent-1", &gate)
+                .await
+                .expect("a redelivered revocation"),
+            0,
+            "a redelivered revocation finds nothing left"
         );
         cleanup(&seeded).await;
     }

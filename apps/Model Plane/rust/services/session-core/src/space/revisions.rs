@@ -21,7 +21,7 @@ use mp_contracts::message_revision as rev;
 use mp_contracts::model_plane::v1 as pb;
 use mp_contracts::model_plane::v1::message_revision_service_server::MessageRevisionService;
 use sha2::{Digest as _, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use tonic::metadata::MetadataValue;
 use tonic::{Request, Response, Status};
 use tracing::warn;
@@ -196,7 +196,8 @@ impl MessageRevisionService for MessageRevisionGrpc {
                 .to_owned();
             caller.authorize_org(&req.org_id)?;
             validate_request(&req)?;
-            let (response, erased) = revise_message(&self.pool, &req, &user_id).await?;
+            let (response, erased) =
+                revise_message(&self.pool, &req, &user_id, crate::gdpr::erasure_hold_gate()).await?;
             if !erased.is_empty() {
                 let outcome =
                     crate::memory_erasure::erase_semantic_copies(self.letta.as_ref(), &req.org_id, &erased)
@@ -307,13 +308,70 @@ fn validate_request(req: &pb::ReviseMessageRequest) -> Result<(), Status> {
     Ok(())
 }
 
+/// The threads the hold gate is asked about for a destructive revision: the message's own thread, always, and every
+/// thread the memory rows it retires cite. Sorted, each named once.
+fn revision_hold_threads(thread_id: &str, cited: Vec<String>) -> Vec<String> {
+    let mut threads = cited;
+    threads.push(thread_id.to_owned());
+    threads.sort();
+    threads.dedup();
+    threads
+}
+
+/// The memory rows a destructive revision retires (step 10), checked against the legal-hold gate (EP-9 C4, V3-sc-1).
+/// A delete, and an edit under purge, delete the thread's memory rows that cite the message, and a purge blanks its
+/// text; a hold keeps both. So the rows are locked here, the threads they cite are read after the lock, and the gate
+/// is asked about the message's thread and those threads before any write of the revision. A refusal drops the
+/// transaction with nothing changed. Switched off, nothing is read or asked, and `None` sends step 10 down the one
+/// statement it always was.
+///
+/// # Errors
+///
+/// The typed hold refusal when a hold covers the organization or one of the threads, or cannot be ruled out;
+/// `internal` for a failed statement. The caller's transaction is then dropped.
+#[allow(clippy::result_large_err)]
+async fn check_retiring_memory_against_holds(
+    tx: &mut Transaction<'_, Postgres>,
+    hold_gate: &crate::gdpr::ErasureHoldGate,
+    org_id: &str,
+    req: &pb::ReviseMessageRequest,
+) -> Result<Option<Vec<String>>, Status> {
+    if matches!(hold_gate, crate::gdpr::ErasureHoldGate::Off) {
+        return Ok(None);
+    }
+    let rows: Vec<(String, Vec<String>)> = sqlx::query_as(
+        "SELECT id, source_links FROM agent_memory
+         WHERE session_id = $1 AND ('message:' || $2) = ANY(source_links)
+         ORDER BY id FOR UPDATE",
+    )
+    .bind(&req.thread_id)
+    .bind(&req.message_id)
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| Status::internal(e.to_string()))?;
+    let links: Vec<String> = rows
+        .iter()
+        .flat_map(|(_, row_links)| row_links.iter().cloned())
+        .collect();
+    let cited = crate::gdpr::cited_thread_ids_in_tx(tx, org_id, &links)
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+    hold_gate
+        .ensure_not_held(org_id, &revision_hold_threads(&req.thread_id, cited))
+        .await
+        .map_err(crate::gdpr::ErasureHoldError::into_status)?;
+    Ok(Some(rows.into_iter().map(|(id, _)| id).collect()))
+}
+
 /// Records one revision in a single transaction under the thread's row lock and returns the
-/// response plus the memory rows it retired (their semantic twins are erased after commit).
+/// response plus the memory rows it retired (their semantic twins are erased after commit). A
+/// destructive revision is checked against the legal-hold gate before its first write (step 7b).
 #[allow(clippy::too_many_lines)]
 async fn revise_message(
     pool: &PgPool,
     req: &pb::ReviseMessageRequest,
     caller_id: &str,
+    hold_gate: &crate::gdpr::ErasureHoldGate,
 ) -> Result<(pb::ReviseMessageResponse, Vec<crate::memory_erasure::ErasedMemory>), Status> {
     let internal = |e: sqlx::Error| Status::internal(e.to_string());
     let is_delete = req.action == rev::ACTION_DELETE;
@@ -475,6 +533,15 @@ async fn revise_message(
         }
     }
 
+    // 7b. Held content (EP-9 C4, V3-sc-1). A delete, and an edit under purge, blank or delete what a legal hold keeps:
+    //     the message's text and the memory rows that cite it. The hold is asked here, before the first write below, so
+    //     a refusal changes nothing. A retained edit removes nothing and asks nothing.
+    let retiring = if is_delete || verified.purge_original {
+        check_retiring_memory_against_holds(&mut tx, hold_gate, &org_id, req).await?
+    } else {
+        None
+    };
+
     // 8. The revision row. `content` is the new text of an edit (a ZDR credential never gets
     //    here); a delete stores none.
     let revision_no = last_no + 1;
@@ -531,20 +598,32 @@ async fn revise_message(
     }
 
     // 10. Derived data: memory extracted from the old text. A delete (either mode) and an edit
-    //     under purge retire the rows linked to this message.
+    //     under purge retire the rows linked to this message. Behind the hold switch those are
+    //     exactly the rows the hold check locked (7b).
     let erased: Vec<crate::memory_erasure::ErasedMemory> = if is_delete || verified.purge_original {
-        sqlx::query_as::<_, (String, String)>(
-            "DELETE FROM agent_memory WHERE session_id = $1 AND ('message:' || $2) = ANY(source_links)
+        let removed: Vec<(String, String)> = match &retiring {
+            Some(ids) => sqlx::query_as::<_, (String, String)>(
+                "DELETE FROM agent_memory WHERE session_id = $1 AND id = ANY($2) RETURNING id, owner",
+            )
+            .bind(&req.thread_id)
+            .bind(ids)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(internal)?,
+            None => sqlx::query_as::<_, (String, String)>(
+                "DELETE FROM agent_memory WHERE session_id = $1 AND ('message:' || $2) = ANY(source_links)
              RETURNING id, owner",
-        )
-        .bind(&req.thread_id)
-        .bind(&req.message_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(internal)?
-        .into_iter()
-        .map(|(memory_id, owner)| crate::memory_erasure::ErasedMemory { memory_id, owner })
-        .collect()
+            )
+            .bind(&req.thread_id)
+            .bind(&req.message_id)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(internal)?,
+        };
+        removed
+            .into_iter()
+            .map(|(memory_id, owner)| crate::memory_erasure::ErasedMemory { memory_id, owner })
+            .collect()
     } else {
         Vec::new()
     };
@@ -642,4 +721,379 @@ async fn revise_message(
         },
         erased,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grpc::thread_revise_payload_digest;
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use ed25519_dalek::{Signer as _, SigningKey};
+
+    /// The file before its test module: the production code the source-order pins read.
+    fn production_source(source: &str) -> &str {
+        source.split("#[cfg(test)]").next().unwrap_or(source)
+    }
+
+    /// The text of one production function: from its signature to its closing brace in column 0.
+    fn production_fn<'a>(text: &'a str, signature: &str) -> &'a str {
+        let start = text
+            .find(signature)
+            .unwrap_or_else(|| panic!("expected {signature:?}"));
+        let rest = &text[start..];
+        let end = rest.find("\n}\n").expect("the function's closing brace");
+        &rest[..end + 2]
+    }
+
+    /// The position of `needle` in `text`, which must hold it.
+    fn at(text: &str, needle: &str) -> usize {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("expected {needle:?} in the revision path"))
+    }
+
+    /// V3-sc-1 (rel1): a delete, and an edit under purge, asks the legal-hold gate before its first write, about the
+    /// message's own thread and the threads its memory rows cite. The RPC passes in the process gate. Switched off,
+    /// the one statement that removes the memory rows is the one it always was.
+    #[test]
+    fn a_destructive_revision_asks_the_hold_gate_before_any_write() {
+        let source = production_source(include_str!("revisions.rs"));
+        assert!(
+            source.contains(
+                "revise_message(&self.pool, &req, &user_id, crate::gdpr::erasure_hold_gate())"
+            ),
+            "the RPC passes the process hold gate"
+        );
+        let revise = production_fn(source, "\nasync fn revise_message(");
+        let check = production_fn(source, "\nasync fn check_retiring_memory_against_holds(");
+
+        let condition = at(
+            revise,
+            "let retiring = if is_delete || verified.purge_original {",
+        );
+        let asked = at(revise, "check_retiring_memory_against_holds(&mut tx");
+        let first_write = at(revise, "INSERT INTO message_revisions");
+        let purge = at(revise, "let purge = if is_delete");
+        let removed = at(
+            revise,
+            "DELETE FROM agent_memory WHERE session_id = $1 AND id = ANY($2)",
+        );
+        assert!(
+            condition < asked && asked < first_write && first_write < purge && purge < removed,
+            "the hold is asked before the revision row, the purge and the memory delete"
+        );
+        assert!(
+            revise.contains("\"DELETE FROM agent_memory WHERE session_id = $1 AND ('message:' || $2) = ANY(source_links)"),
+            "switched off, the one statement that removes the memory rows is unchanged"
+        );
+
+        let switch = at(
+            check,
+            "matches!(hold_gate, crate::gdpr::ErasureHoldGate::Off)",
+        );
+        let lock = at(check, "FOR UPDATE");
+        let read = at(
+            check,
+            "crate::gdpr::cited_thread_ids_in_tx(tx, org_id, &links)",
+        );
+        let ask = at(
+            check,
+            ".ensure_not_held(org_id, &revision_hold_threads(&req.thread_id, cited))",
+        );
+        assert!(
+            switch < lock && lock < read && read < ask,
+            "switched off returns first; otherwise the rows are locked, the cited threads read, then the gate is asked"
+        );
+    }
+
+    /// The hold check names the message's thread, and each thread its memory rows cite, once, in order.
+    #[test]
+    fn the_hold_check_names_the_thread_and_each_cited_thread_once() {
+        assert_eq!(
+            revision_hold_threads("thread-b", Vec::new()),
+            vec!["thread-b".to_owned()]
+        );
+        assert_eq!(
+            revision_hold_threads(
+                "thread-b",
+                vec!["thread-a".to_owned(), "thread-b".to_owned()]
+            ),
+            vec!["thread-a".to_owned(), "thread-b".to_owned()],
+        );
+    }
+
+    // ---- DB tier: `#[ignore]`d, needs DATABASE_URL to a disposable `*test*` Postgres ----------
+
+    /// The org, the Space, and the one person who owns the threads and wrote the message.
+    const ORG: &str = "org-1";
+    const SPACE: &str = "space-1";
+    const PERSON: &str = "user-1";
+    /// The text `seed_space_message` gives the message.
+    const SEEDED_TEXT: &str = "canary body";
+
+    /// Fills in the signed Control `model.thread.revise` decision of `req` the way Control mints one: every field the
+    /// decision binds first, then the payload digest over them, then the envelope signed under `key_id`.
+    fn sign_revise(
+        req: &mut pb::ReviseMessageRequest,
+        signing_key: &SigningKey,
+        key_id: &str,
+        purge: bool,
+    ) {
+        req.space_id = SPACE.to_owned();
+        req.space_decision_ref = "revise-decision-1".to_owned();
+        req.recipient_audience_ref = "audience:space-1:4".to_owned();
+        req.recipient_audience_hash = "sha256:revise-audience".to_owned();
+        req.privacy_policy_ref = "privacy:org-1:5".to_owned();
+        req.resource_authorization_ref = "control:space-1:thread-revise:7".to_owned();
+        req.action_schema_hash = rev::DECISION_SCHEMA.to_owned();
+        req.idempotency_key = "revise-1".to_owned();
+        req.authority_revision = 7;
+        req.recipient_audience_revision = 4;
+        let digest = thread_revise_payload_digest(req, ORG, PERSON);
+        req.payload_digest = digest;
+        let retention = if purge {
+            rev::PERMISSION_PURGE_ORIGINAL
+        } else {
+            rev::PERMISSION_RETAIN_ORIGINAL
+        };
+        let now = Utc::now();
+        let claims = serde_json::json!({
+            "decision_ref": req.space_decision_ref,
+            "org_id": ORG,
+            "space_ref": SPACE,
+            "subject_id": PERSON,
+            "service_audience": "model-plane",
+            "action_id": rev::DECISION_ACTION_ID,
+            "action_schema_hash": rev::DECISION_SCHEMA,
+            "payload_digest": req.payload_digest,
+            "idempotency_key": req.idempotency_key,
+            "recipient_audience_ref": req.recipient_audience_ref,
+            "recipient_audience_revision": req.recipient_audience_revision,
+            "recipient_audience_hash": req.recipient_audience_hash,
+            "privacy_policy_ref": req.privacy_policy_ref,
+            "resource_authorization_ref": req.resource_authorization_ref,
+            "purpose": "assistant_collaboration",
+            "lawful_basis": "contract",
+            "privacy_class": "internal",
+            "third_party_processing_allowed": false,
+            "retention_class": "standard",
+            "residency": "swedencentral",
+            "deletion_scope": "space",
+            "zero_data_retention": false,
+            "nonce": "nonce-1",
+            "authority_revision": req.authority_revision,
+            "membership_revision": 4,
+            "privacy_revision": 5,
+            "entitlement_revision": 3,
+            "permissions": [rev::PERMISSION_REVISE, retention],
+            "issued_at": now.to_rfc3339(),
+            "expires_at": (now + chrono::Duration::minutes(1)).to_rfc3339(),
+        });
+        let signed = format!(
+            "v2.{}.{}",
+            URL_SAFE_NO_PAD.encode(key_id.as_bytes()),
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims")),
+        );
+        let signature = signing_key.sign(signed.as_bytes());
+        req.space_decision_token =
+            format!("{signed}.{}", URL_SAFE_NO_PAD.encode(signature.to_bytes()));
+    }
+
+    /// The hold gate with the switch on, org-core answering from `url`, and session-core's credentials.
+    fn hold_gate(url: &str) -> crate::gdpr::ErasureHoldGate {
+        crate::gdpr::ErasureHoldGate::from_lookup(|name| match name {
+            crate::gdpr::ERASURE_HOLD_CHECK_ENV => Some("true".to_owned()),
+            crate::org_policy::ORG_CORE_URL_ENV => Some(url.to_owned()),
+            crate::org_policy::SERVICE_TOKEN_ENV => Some("session-token".to_owned()),
+            _ => None,
+        })
+    }
+
+    /// Answers org-core's check the way the route does: of the threads asked about, only the held ones come back.
+    struct HoldAnswer {
+        held: Vec<String>,
+    }
+
+    impl wiremock::Respond for HoldAnswer {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let asked: Vec<String> = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .ok()
+                .and_then(|body| body["thread_ids"].as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|id| id.as_str().map(str::to_owned))
+                .collect();
+            let held_asked: Vec<String> = asked
+                .into_iter()
+                .filter(|id| self.held.contains(id))
+                .collect();
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "organization_id": ORG,
+                "window_days": null,
+                "revision": 0,
+                "org_held": false,
+                "held_thread_ids": held_asked,
+            }))
+        }
+    }
+
+    /// Mounts [`HoldAnswer`] on the check route of [`ORG`], with session-core's credentials required.
+    async fn mount_hold_answer(server: &wiremock::MockServer, held: Vec<String>) {
+        use wiremock::matchers::{header, method, path};
+        server.reset().await;
+        wiremock::Mock::given(method("POST"))
+            .and(path(format!("/internal/orgs/{ORG}/retention/check")))
+            .and(header("x-service-id", "session-core"))
+            .and(header("x-service-token", "session-token"))
+            .respond_with(HoldAnswer { held })
+            .mount(server)
+            .await;
+    }
+
+    /// The refusal is the typed hold refusal: a failed precondition carrying `erasure_blocked_legal_hold`.
+    fn assert_refused_by_hold(refusal: &Status) {
+        assert_eq!(refusal.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            refusal
+                .metadata()
+                .get(ERROR_CODE_TRAILER)
+                .and_then(|code| code.to_str().ok()),
+            Some("erasure_blocked_legal_hold"),
+        );
+    }
+
+    /// Nothing was retired: the message still reads as seeded, its memory row is there, and no revision was recorded.
+    async fn assert_nothing_retired(pool: &PgPool, message: &str, memory: &str) {
+        let text: String = sqlx::query_scalar("SELECT content FROM messages WHERE id = $1")
+            .bind(message)
+            .fetch_one(pool)
+            .await
+            .expect("read the message");
+        assert_eq!(text, SEEDED_TEXT);
+        let memories: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_memory WHERE id = $1")
+            .bind(memory)
+            .fetch_one(pool)
+            .await
+            .expect("count the memory row");
+        assert_eq!(memories, 1, "the memory row survives the refusal");
+        let revisions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM message_revisions WHERE message_id = $1")
+                .bind(message)
+                .fetch_one(pool)
+                .await
+                .expect("count the revisions");
+        assert_eq!(revisions, 0, "a refused revision records nothing");
+    }
+
+    /// A held thread refuses the revisions that would retire its content: a purge-mode edit of its message, and a
+    /// delete whose memory row cites a held thread. Switched off, the same delete runs as it always did.
+    /// Run with `DATABASE_URL` set to a disposable `*test*` database and `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn a_held_thread_refuses_the_revisions_that_would_retire_its_content() {
+        let Some(pool) = crate::space::test_support::connect().await else {
+            return;
+        };
+        let nonce = mp_ids::new_ulid();
+        let thread = format!("revise-thread-{nonce}");
+        let cited = format!("revise-cited-{nonce}");
+        let message = format!("revise-message-{nonce}");
+        let memory = format!("revise-memory-{nonce}");
+        crate::space::test_support::seed_space_thread(&pool, ORG, SPACE, &thread, PERSON).await;
+        crate::space::test_support::seed_space_thread(&pool, ORG, SPACE, &cited, PERSON).await;
+        crate::space::test_support::seed_space_message(
+            &pool,
+            SPACE,
+            &thread,
+            &message,
+            "user",
+            Some(PERSON),
+        )
+        .await;
+        // A memory row of the thread that cites the message, and a message of the other thread.
+        sqlx::query(
+            "INSERT INTO agent_memory (id, org_id, session_id, scope, key, content, owner, source_links) \
+             VALUES ($1, $2, $3, 'thread', $4, 'remembered', $5, $6)",
+        )
+        .bind(&memory)
+        .bind(ORG)
+        .bind(&thread)
+        .bind(format!("revise-key-{nonce}"))
+        .bind(PERSON)
+        .bind(vec![format!("message:{message}"), format!("thread:{cited}")])
+        .execute(&pool)
+        .await
+        .expect("seed the thread memory");
+
+        let signing_key = SigningKey::from_bytes(&[61_u8; 32]);
+        let key_id = "control-revise-test-key";
+        std::env::remove_var("CONTROL_SPACE_DECISION_PUBLIC_KEYS_JSON");
+        std::env::set_var("CONTROL_SPACE_DECISION_KEY_ID", key_id);
+        std::env::set_var(
+            "CONTROL_SPACE_DECISION_PUBLIC_KEY_BASE64",
+            URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes()),
+        );
+        let server = wiremock::MockServer::start().await;
+
+        let mut purge_edit = pb::ReviseMessageRequest {
+            org_id: ORG.to_owned(),
+            thread_id: thread.clone(),
+            message_id: message.clone(),
+            action: rev::ACTION_EDIT.to_owned(),
+            content: "Edited under purge".to_owned(),
+            ..Default::default()
+        };
+        sign_revise(&mut purge_edit, &signing_key, key_id, true);
+        let mut delete = purge_edit.clone();
+        delete.action = rev::ACTION_DELETE.to_owned();
+        delete.content = String::new();
+        sign_revise(&mut delete, &signing_key, key_id, false);
+
+        // A purge-mode edit of a held thread: refused before the text is blanked or the memory row removed.
+        mount_hold_answer(&server, vec![thread.clone()]).await;
+        let Err(refusal) =
+            revise_message(&pool, &purge_edit, PERSON, &hold_gate(&server.uri())).await
+        else {
+            panic!("a held thread refuses a purge-mode edit");
+        };
+        assert_refused_by_hold(&refusal);
+        assert_nothing_retired(&pool, &message, &memory).await;
+
+        // A delete in a thread that is not held, whose memory row cites a message of a held thread: refused too.
+        mount_hold_answer(&server, vec![cited.clone()]).await;
+        let Err(refusal) = revise_message(&pool, &delete, PERSON, &hold_gate(&server.uri())).await
+        else {
+            panic!("a memory row that cites a held thread keeps its delete refused");
+        };
+        assert_refused_by_hold(&refusal);
+        assert_nothing_retired(&pool, &message, &memory).await;
+
+        // Switched off, the same delete runs as it always did: the memory row goes, the text stays.
+        let (response, erased) =
+            revise_message(&pool, &delete, PERSON, &crate::gdpr::ErasureHoldGate::Off)
+                .await
+                .expect("switched off, the delete runs");
+        assert_eq!(response.revision_state, "deleted");
+        assert_eq!(
+            erased,
+            vec![crate::memory_erasure::ErasedMemory {
+                memory_id: memory.clone(),
+                owner: PERSON.to_owned()
+            }],
+        );
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_memory WHERE id = $1")
+            .bind(&memory)
+            .fetch_one(&pool)
+            .await
+            .expect("count the memory row");
+        assert_eq!(remaining, 0);
+        let text: String = sqlx::query_scalar("SELECT content FROM messages WHERE id = $1")
+            .bind(&message)
+            .fetch_one(&pool)
+            .await
+            .expect("read the message");
+        assert_eq!(
+            text, SEEDED_TEXT,
+            "a retained delete keeps the original text"
+        );
+    }
 }
