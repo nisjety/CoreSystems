@@ -320,7 +320,10 @@ pub struct McpHttpSession {
     endpoint: reqwest::Url,
     /// Bearer credential, or empty for an unauthenticated server. For
     /// OAuth-connected servers this is a live access token resolved from
-    /// capability-core, never the (always-empty) cached `McpServer::token`.
+    /// capability-core, never the (always-empty) cached `McpServer::token`. For a
+    /// static-bearer server (W4-CC-5) it is the one token its integration-corev2
+    /// binding redeemed for this call ([`crate::mcp_credential_ref`]). The session
+    /// lives for that call only, and the token is never logged.
     token: String,
     session_id: Option<String>,
     /// The revision sent in the protocol header: [`MCP_PROTOCOL_VERSION`]

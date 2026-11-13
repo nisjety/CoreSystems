@@ -350,6 +350,58 @@ async fn thread_position_locked(
     Ok(row.map(|(position,)| position))
 }
 
+/// Whether a save is an input pause: a `pause` fold under the reference of a question or an
+/// elicitation the run waits on, not an approval's `{run}:{step}` reference.
+fn is_input_pause_save(kind: &str, pause_ref: &str) -> bool {
+    kind == "pause" && mp_contracts::user_question::is_input_pause_ref(pause_ref)
+}
+
+/// Where a thread stands against the position a fold was stamped at.
+#[derive(Debug, PartialEq, Eq)]
+enum ThreadSince {
+    /// Nothing was appended above the stamp.
+    Unmoved,
+    /// A message sits above the stamp, or the stamp is not an integer (fail closed).
+    Moved,
+    /// An append holds the thread; the caller rolls back and the fold stays as it was.
+    Busy,
+}
+
+/// Compare the stamp in a fold's extensions with the thread as it stands, under the thread's lock
+/// (see [`thread_position_locked`]). A stamp that is not an integer counts as moved.
+async fn thread_since(
+    tx: &mut Transaction<'_, Postgres>,
+    run_id: &str,
+    stamp: &serde_json::Value,
+) -> Result<ThreadSince, Status> {
+    let Some(position) = thread_position_locked(tx, run_id).await? else {
+        return Ok(ThreadSince::Busy);
+    };
+    Ok(
+        if stamp.as_i64().is_none_or(|watermark| position > watermark) {
+            ThreadSince::Moved
+        } else {
+            ThreadSince::Unmoved
+        },
+    )
+}
+
+/// Close a claimed fold whose thread moved: the content is dropped and the row can no longer be
+/// claimed. The caller commits.
+async fn close_moved_fold(tx: &mut Transaction<'_, Postgres>, run_id: &str) -> Result<(), Status> {
+    sqlx::query(
+        "UPDATE run_loop_checkpoints
+            SET state = 'closed', ciphertext = '', claim_token_hash = NULL,
+                claim_expires_at = NULL, park_until = NULL, updated_at = now()
+          WHERE run_id = $1",
+    )
+    .bind(run_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(internal)?;
+    Ok(())
+}
+
 /// Store a run's fold, latest wins. Returns the seq the fold was stored under and whether it was
 /// accepted as a park.
 pub(crate) async fn save(
@@ -444,7 +496,11 @@ pub(crate) async fn save(
 
     // While crash parking is on, a round fold also records how far its thread had got. An unlocked
     // read is enough: a message that lands after it only makes the later comparison refuse.
-    let stamped = if input.kind == "round" && crate::terminalization::crash_park_active() {
+    // An input-pause fold (a question or elicitation the run waits on) is stamped the same way
+    // whatever the crash-park switch says: its claim refuses the answer once the thread moved.
+    let stamped = if (input.kind == "round" && crate::terminalization::crash_park_active())
+        || is_input_pause_save(input.kind, input.pause_ref)
+    {
         let position: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(m.sequence), 0)::bigint FROM messages AS m
               WHERE m.thread_id = (SELECT thread_id FROM runs WHERE id = $1)",
@@ -594,6 +650,9 @@ pub(crate) async fn claim(
     // parked fold (build plan WS03 S8-4). With them off it is the committed statement below,
     // which an empty reference matches no row of.
     let park_claim = pause_ref.is_empty() && crate::terminalization::park_recovery_active();
+    // A named reference that is a question's or elicitation's: it gets the thread checks below.
+    let input_pause_claim =
+        !park_claim && mp_contracts::user_question::is_input_pause_ref(pause_ref);
 
     // Under the park rules a park is claimed by the empty reference and by nothing else. Its own
     // reference (`park:{run_id}:{n}`) is computable by anyone from the run id, and the committed
@@ -652,6 +711,25 @@ pub(crate) async fn claim(
         if park_claim {
             return Err(park_claim_refusal(&mut tx, run_id).await?);
         }
+        // A different continuation holding a live lease on this same input pause: the caller
+        // learns another continuation is applying the answer, which is not a gone pause.
+        if input_pause_claim {
+            let elsewhere: Option<(bool,)> = sqlx::query_as(
+                "SELECT COALESCE(state = 'resuming' AND claim_expires_at > now()
+                                 AND pause_ref = $3 AND claim_token_hash IS DISTINCT FROM $2,
+                                 false)
+                   FROM run_loop_checkpoints WHERE run_id = $1",
+            )
+            .bind(run_id)
+            .bind(&token_hash)
+            .bind(pause_ref)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(internal)?;
+            if elsewhere.is_some_and(|(elsewhere,)| elsewhere) {
+                return Err(Status::aborted("loop_checkpoint_claimed_elsewhere"));
+            }
+        }
         // The same continuation asking again, for the same pause, while its own lease
         // is live is told so, which is not the same as losing the pause to someone
         // else. The pause reference is part of the question: a holder of the token who
@@ -690,23 +768,36 @@ pub(crate) async fn claim(
     // back, and the park stays as it was.
     if park_claim {
         if let Some(stamp) = claimed_fold.extensions.get(THREAD_WATERMARK_KEY) {
-            let Some(position) = thread_position_locked(&mut tx, run_id).await? else {
-                return Err(Status::aborted("loop_checkpoint_claim_held"));
-            };
-            if stamp.as_i64().is_none_or(|watermark| position > watermark) {
-                sqlx::query(
-                    "UPDATE run_loop_checkpoints
-                        SET state = 'closed', ciphertext = '', claim_token_hash = NULL,
-                            claim_expires_at = NULL, park_until = NULL, updated_at = now()
-                      WHERE run_id = $1",
-                )
-                .bind(run_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(internal)?;
-                tx.commit().await.map_err(internal)?;
-                return Err(Status::failed_precondition("loop_checkpoint_not_claimable"));
+            match thread_since(&mut tx, run_id, stamp).await? {
+                ThreadSince::Busy => return Err(Status::aborted("loop_checkpoint_claim_held")),
+                ThreadSince::Moved => {
+                    close_moved_fold(&mut tx, run_id).await?;
+                    tx.commit().await.map_err(internal)?;
+                    return Err(Status::failed_precondition("loop_checkpoint_not_claimable"));
+                }
+                ThreadSince::Unmoved => {}
             }
+        }
+    }
+
+    // An input pause (a question the run waits on) is answered only while its thread has not
+    // moved: a newer turn leaves the old run's context stale. The stamp is written by `save`; a
+    // fold without one, or with one that is not an integer, counts as moved. A thread held by an
+    // append is not waited for: the claim rolls back and the fold stays paused. Approval and park
+    // claims never reach this branch.
+    if input_pause_claim {
+        let moved = match claimed_fold.extensions.get(THREAD_WATERMARK_KEY) {
+            None => true,
+            Some(stamp) => match thread_since(&mut tx, run_id, stamp).await? {
+                ThreadSince::Busy => return Err(Status::aborted("loop_checkpoint_thread_busy")),
+                ThreadSince::Moved => true,
+                ThreadSince::Unmoved => false,
+            },
+        };
+        if moved {
+            close_moved_fold(&mut tx, run_id).await?;
+            tx.commit().await.map_err(internal)?;
+            return Err(Status::failed_precondition("loop_checkpoint_thread_moved"));
         }
     }
 
@@ -4019,3 +4110,8 @@ mod revocation_tests {
         close_rpc(&pool, &owner, &run_id, 1).await.expect("unscoped close");
     }
 }
+
+/// Input-pause fold tests (build plan WS14 S5 b3).
+#[cfg(test)]
+#[path = "loop_checkpoint_input_pause_tests.rs"]
+mod input_pause_tests;

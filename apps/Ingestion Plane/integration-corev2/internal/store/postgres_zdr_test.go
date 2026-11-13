@@ -440,6 +440,101 @@ func TestPostgresListAndRevokeAcknowledgements(t *testing.T) {
 	}
 }
 
+// Revoking one acknowledgement by id takes the record's lock first, as the revoke-all does, and names both
+// the acknowledgement and its connection, so no other connection's row can be revoked through it.
+func TestPostgresRevokeOneAcknowledgementLocksTheRecordAndNamesTheConnection(t *testing.T) {
+	mock, repo := newZDRMock(t)
+	now := time.Now().UTC()
+	revoked := now
+	mock.MatchExpectationsInOrder(true)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT connection_id FROM integration_connection_zdr WHERE connection_id = \$1 FOR UPDATE`).
+		WithArgs("conn-1").WillReturnRows(pgxmock.NewRows([]string{"connection_id"}).AddRow("conn-1"))
+	mock.ExpectQuery(`UPDATE integration_connection_zdr_acknowledgements SET revoked_at = \$3, revoke_reason = \$4 WHERE id = \$1 AND connection_id = \$2 AND revoked_at IS NULL RETURNING`).
+		WithArgs("ack-old", "conn-1", pgxmock.AnyArg(), ZDRRevokeTextVersionOutdated).
+		WillReturnRows(pgxmock.NewRows(zdrAckColumns).AddRow(ackRow("ack-old", strings.Repeat("a", 64), &revoked, ZDRRevokeTextVersionOutdated, now.Add(-time.Hour))...))
+	mock.ExpectCommit()
+	got, err := repo.RevokeConnectionZDRAcknowledgement(t.Context(), "conn-1", "ack-old", ZDRRevokeTextVersionOutdated, time.Time{})
+	if err != nil || got.ID != "ack-old" || got.RevokedAt == nil || got.RevokeReason != ZDRRevokeTextVersionOutdated {
+		t.Fatalf("revoke = (%+v, %v), want the row revoked as text_version_superseded", got, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// A row that is not active for this connection (another connection's, or already revoked) is ErrNotFound and
+// nothing is revoked; an invented reason is refused before any statement.
+func TestPostgresRevokeOneAcknowledgementReportsAMissingOrRevokedRowAsNotFound(t *testing.T) {
+	mock, repo := newZDRMock(t)
+	mock.MatchExpectationsInOrder(true)
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT connection_id FROM integration_connection_zdr WHERE connection_id = \$1 FOR UPDATE`).
+		WithArgs("conn-1").WillReturnRows(pgxmock.NewRows([]string{"connection_id"}).AddRow("conn-1"))
+	mock.ExpectQuery(`UPDATE integration_connection_zdr_acknowledgements SET revoked_at = \$3, revoke_reason = \$4 WHERE id = \$1 AND connection_id = \$2 AND revoked_at IS NULL RETURNING`).
+		WithArgs("ack-old", "conn-1", pgxmock.AnyArg(), ZDRRevokeTextVersionOutdated).WillReturnRows(pgxmock.NewRows(zdrAckColumns))
+	mock.ExpectRollback()
+	if _, err := repo.RevokeConnectionZDRAcknowledgement(t.Context(), "conn-1", "ack-old", ZDRRevokeTextVersionOutdated, time.Time{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+	if _, err := repo.RevokeConnectionZDRAcknowledgement(t.Context(), "conn-1", "ack-old", "because", time.Time{}); !errors.Is(err, ErrInvalidZDR) {
+		t.Fatalf("invented reason = %v, want ErrInvalidZDR before any statement", err)
+	}
+}
+
+// Superseding an acknowledgement and acknowledging the current text are one audit transaction: the active rows
+// are listed, the one below the minimum is revoked by id, and the new acknowledgement is then created (not
+// answered as a replay of the revoked row). One Begin and one Commit cover all of it.
+func TestPostgresSupersedingAnAcknowledgementInsideOneAuditTransactionCreatesTheNewOne(t *testing.T) {
+	mock, repo := newZDRMock(t)
+	a := testAssessment(t, 1)
+	in := rehash(t, testAck(t, a.Digest))
+	at := time.Now().UTC()
+	old := at.Add(-time.Hour)
+	mock.MatchExpectationsInOrder(true)
+	mock.ExpectBegin() // the audit transaction: the ONLY Begin
+	mock.ExpectQuery(`FROM integration_connection_zdr_acknowledgements WHERE connection_id = \$1 AND \(\$2::boolean = FALSE OR revoked_at IS NULL\) ORDER BY acknowledged_at DESC, id ASC`).
+		WithArgs("conn-1", true).WillReturnRows(pgxmock.NewRows(zdrAckColumns).AddRow(ackRow("ack-old", a.Digest, nil, "", old)...))
+	mock.ExpectQuery(`SELECT connection_id FROM integration_connection_zdr WHERE connection_id = \$1 FOR UPDATE`).
+		WithArgs("conn-1").WillReturnRows(pgxmock.NewRows([]string{"connection_id"}).AddRow("conn-1"))
+	mock.ExpectQuery(`UPDATE integration_connection_zdr_acknowledgements SET revoked_at = \$3, revoke_reason = \$4 WHERE id = \$1 AND connection_id = \$2 AND revoked_at IS NULL RETURNING`).
+		WithArgs("ack-old", "conn-1", pgxmock.AnyArg(), ZDRRevokeTextVersionOutdated).
+		WillReturnRows(pgxmock.NewRows(zdrAckColumns).AddRow(ackRow("ack-old", a.Digest, &at, ZDRRevokeTextVersionOutdated, old)...))
+	mock.ExpectQuery(sqlLockForAck).WithArgs("conn-1").WillReturnRows(pgxmock.NewRows(zdrLockColumns).AddRow(lockRow(a, "org-1", "user-1", nil)...))
+	mock.ExpectQuery(sqlReadConnectionDeletedAt).WithArgs("conn-1").WillReturnRows(pgxmock.NewRows([]string{"deleted_at"}).AddRow((*time.Time)(nil)))
+	mock.ExpectQuery(sqlInsertAck).WithArgs("ack-1", "org-1", "conn-1", "user-1", a.ProviderKey, "not_supported", "provider_terms_known", 1, a.Digest,
+		"2026-10-a", "no", in.TextSHA256, "text", true, "connect", "req-1", pgxmock.AnyArg()).
+		WillReturnRows(pgxmock.NewRows(zdrAckColumns).AddRow(ackRow("ack-1", a.Digest, nil, "", at)...))
+	mock.ExpectCommit()
+
+	var created bool
+	var saved ConnectionZDRAcknowledgement
+	err := repo.WithAuditTransaction(t.Context(), func(tx AuditTransaction) error {
+		active, listErr := tx.ListConnectionZDRAcknowledgements(t.Context(), "conn-1", true)
+		if listErr != nil {
+			return listErr
+		}
+		if len(active) != 1 {
+			return errors.New("the listed active rows are not the one below the minimum")
+		}
+		if _, revokeErr := tx.RevokeConnectionZDRAcknowledgement(t.Context(), "conn-1", active[0].ID, ZDRRevokeTextVersionOutdated, at); revokeErr != nil {
+			return revokeErr
+		}
+		var insertErr error
+		saved, created, insertErr = tx.InsertConnectionZDRAcknowledgement(t.Context(), in)
+		return insertErr
+	})
+	if err != nil || !created || saved.ID != "ack-1" {
+		t.Fatalf("supersede and insert = (%+v, created=%v, %v), want a new row created after the revocation", saved, created, err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations (a second Begin, or a missing statement): %v", err)
+	}
+}
+
 // The generic connection write paths are the very read-modify-write the side table exists to
 // keep clear of. A source scan keeps it that way: nobody can add a ZDR column to them, or to
 // connectionColumns, without this failing and asking why.

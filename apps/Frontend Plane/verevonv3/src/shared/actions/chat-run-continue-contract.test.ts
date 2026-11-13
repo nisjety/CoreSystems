@@ -20,6 +20,7 @@ import {
   chatRunContinueParkDispatchUnavailableOf,
   chatRunContinueParkFailureOf,
   chatRunContinueParkRefusalOf,
+  chatRunContinueQuestionRefusalOf,
   chatRunContinueSpentConnected,
   chatRunContinueSpentRunEndOf,
   chatRunContinueSpentSubscriptionFailureOf,
@@ -33,8 +34,8 @@ import contractSource from './chat-run-continue-contract.ts?raw'
 // (apps/gateway CONTINUE_RELAYED_ERRORS); the stream half is relayed byte for
 // byte. The HTTP list is pinned to the BFF's list on the Rust side
 // (apps/gateway/tests/continue_error_vocabulary.rs), which also pins the HTTP list
-// and the 25 stream tokens to model-gateway's own constants
-// (CONTINUE_HTTP_REFUSALS, CONTINUE_FRAME_REFUSALS), the three run-end frames
+// and the 26 base stream tokens (plus the question form's six, WS14 S5) to model-gateway's own constants
+// (CONTINUE_HTTP_REFUSALS, CONTINUE_FRAME_REFUSALS, CONTINUE_QUESTION_FRAME_REFUSALS), the three run-end frames
 // to CONTINUE_SPENT_RUN_END_FRAMES and the seven typed subscription failures to
 // CONTINUE_SPENT_SUBSCRIPTION_FRAMES.
 
@@ -47,6 +48,31 @@ const HTTP_PAIRS = [
   ['approval_not_resumable', 409],
   ['continuation_already_consumed', 409],
   ['continue_unavailable', 503],
+  ['org_agents_paused', 403],
+  ['org_policy_unavailable', 503],
+  ['question_not_found', 404],
+  ['question_expired', 410],
+  ['question_already_answered', 409],
+  ['invalid_answer', 422],
+  ['question_not_resumable', 409],
+] as const
+
+// The five codes only the question form (WS14 S5) produces.
+const QUESTION_HTTP_CODES = [
+  'question_not_found',
+  'question_expired',
+  'question_already_answered',
+  'invalid_answer',
+  'question_not_resumable',
+] as const
+
+const QUESTION_FRAME_TOKENS = [
+  'question_answer_released',
+  'question_resume_unavailable',
+  'question_not_answered',
+  'question_expired',
+  'question_not_found',
+  'question_not_resumable',
 ] as const
 
 const EXECUTOR_TOKENS = [
@@ -67,6 +93,7 @@ const EXECUTOR_TOKENS = [
   'resume_checkpoint_unavailable',
   'not_resumable',
   'resume_forbidden',
+  'skip_authority_unavailable',
   'park_not_restorable',
   'park_route_unavailable',
   'park_not_due',
@@ -75,20 +102,44 @@ const EXECUTOR_TOKENS = [
 const CODE_DERIVED = ['approval_not_found', 'durable_mutation_forbidden'] as const
 const GATEWAY_MADE = ['continue_refused', 'continue_unreachable', 'continue_outcome_unknown'] as const
 
+// The HTTP codes the question form (WS14 S5) sends: the five only it produces, the two it shares with the approval
+// and park forms, and the two org-policy refusals every form sends (model-gateway's CONTINUE_QUESTION_HTTP_REFUSALS
+// names all of them; C-14-mg-rel1).
+const QUESTION_FORM_HTTP_CODES = [
+  ...QUESTION_HTTP_CODES,
+  'continue_disabled',
+  'not_resumable',
+  'org_agents_paused',
+  'org_policy_unavailable',
+] as const
+
+// The six codes the approval and park forms add beyond the question form's. The BFF test names the same six
+// (apps/gateway/tests/continue_error_vocabulary.rs), so a new pinned code is named on both sides or sent by both.
+const APPROVAL_AND_PARK_ONLY_HTTP_CODES = [
+  'approval_not_found',
+  'approval_not_granted',
+  'approval_expired',
+  'approval_not_resumable',
+  'continuation_already_consumed',
+  'continue_unavailable',
+] as const
+
 describe('the closed vocabularies', () => {
-  it('lists exactly the 8 relayed HTTP refusals with their statuses', () => {
+  it('lists exactly the 15 relayed HTTP refusals with their statuses', () => {
     expect(CHAT_RUN_CONTINUE_HTTP_REFUSALS.map((entry) => [entry.code, entry.status])).toEqual(
       HTTP_PAIRS.map((pair) => [...pair]),
     )
-    expect(CHAT_RUN_CONTINUE_HTTP_REFUSALS).toHaveLength(8)
+    expect(CHAT_RUN_CONTINUE_HTTP_REFUSALS).toHaveLength(15)
   })
 
-  it('lists exactly the 25 stream refusals: 20 executor tokens, 2 code-derived, 3 gateway-made', () => {
+  it('lists exactly the 32 stream refusals: 21 executor tokens, 2 code-derived, 3 gateway-made, 6 of the question form', () => {
     expect([...CHAT_RUN_CONTINUE_FRAME_REFUSALS].sort()).toEqual(
-      [...EXECUTOR_TOKENS, ...CODE_DERIVED, ...GATEWAY_MADE].sort(),
+      [...EXECUTOR_TOKENS, ...CODE_DERIVED, ...GATEWAY_MADE, ...QUESTION_FRAME_TOKENS].sort(),
     )
-    expect(CHAT_RUN_CONTINUE_FRAME_REFUSALS).toHaveLength(25)
-    expect(EXECUTOR_TOKENS).toHaveLength(20)
+    expect(CHAT_RUN_CONTINUE_FRAME_REFUSALS).toHaveLength(32)
+    expect(EXECUTOR_TOKENS).toHaveLength(21)
+    // The question tokens come after the base ones, in the gateway's order.
+    expect(CHAT_RUN_CONTINUE_FRAME_REFUSALS.slice(26)).toEqual([...QUESTION_FRAME_TOKENS])
   })
 
   it('lists the three park refusals, the executor refusals of the resume of a parked run', () => {
@@ -108,13 +159,33 @@ describe('the closed vocabularies', () => {
     expect(rows).toEqual(CHAT_RUN_CONTINUE_HTTP_REFUSALS.map((entry) => entry.code).sort())
   })
 
+  it('covers the question form HTTP codes with the pinned list under the same statuses, and names each code the pinned list adds', () => {
+    const questionCodes = QUESTION_FORM_HTTP_CODES as readonly string[]
+    const pinned = new Map<string, number>(
+      CHAT_RUN_CONTINUE_HTTP_REFUSALS.map((entry): [string, number] => [entry.code, entry.status]),
+    )
+    const questionForm = HTTP_PAIRS.filter(([code]) => questionCodes.includes(code))
+    expect(questionForm.map(([code]) => code).sort()).toEqual([...QUESTION_FORM_HTTP_CODES].sort())
+    for (const [code, status] of questionForm) {
+      expect(pinned.get(code), `the question form sends ${code} with ${status}`).toBe(status)
+    }
+    const added = [...pinned.keys()].filter((code) => !questionCodes.includes(code))
+    expect(added.sort()).toEqual([...APPROVAL_AND_PARK_ONLY_HTTP_CODES].sort())
+  })
+
   it('keeps the HTTP codes that the stream can also carry inside the stream list', () => {
     // The gateway's HTTP codes and its stream tokens overlap on the refusal
     // class. The HTTP-only ones (a refusal before any stream exists) are the
     // two the stream has no frame for.
     const frame = new Set<string>(CHAT_RUN_CONTINUE_FRAME_REFUSALS)
     const httpOnly = CHAT_RUN_CONTINUE_HTTP_REFUSALS.map((entry) => entry.code).filter((code) => !frame.has(code))
-    expect(httpOnly).toEqual(['continue_unavailable'])
+    expect(httpOnly).toEqual([
+      'continue_unavailable',
+      'org_agents_paused',
+      'org_policy_unavailable',
+      'question_already_answered',
+      'invalid_answer',
+    ])
   })
 
   it('marks only the two gateway-made frame codes that need a spent consume as spent-only', () => {
@@ -147,6 +218,14 @@ const HTTP_EFFECT_TABLE = {
   approval_not_resumable: ['no', false, false],
   continuation_already_consumed: ['yes', false, true],
   continue_unavailable: ['unknown', true, true],
+  org_agents_paused: ['unknown', false, true],
+  org_policy_unavailable: ['unknown', false, true],
+  // The question form reads no approval: nothing was spent.
+  question_not_found: ['no', false, false],
+  question_expired: ['no', false, false],
+  question_already_answered: ['no', false, false],
+  invalid_answer: ['no', false, false],
+  question_not_resumable: ['no', false, true],
 } as const
 
 describe('chatRunContinueHttpRefusalOf', () => {
@@ -167,6 +246,8 @@ describe('chatRunContinueHttpRefusalOf', () => {
       'approval_not_resumable',
     ])
     for (const [code, status] of HTTP_PAIRS) {
+      // The question form's codes name no approval at all (nothing to spend): they are not part of this claim.
+      if ((QUESTION_HTTP_CODES as readonly string[]).includes(code)) continue
       const pre = (CHAT_RUN_CONTINUE_PRE_CONSUME_ONLY_HTTP_REFUSALS as readonly string[]).includes(code)
       expect(chatRunContinueHttpRefusalOf({ code, status })?.approvalSpent === 'no').toBe(pre)
     }
@@ -212,7 +293,7 @@ describe('chatRunContinueHttpRefusalOf', () => {
     expect(chatRunContinueHttpRefusalOf({ code: 'continuation_already_consumed', status: 200 })).toBeNull()
   })
 
-  it('is null for any failure that is not one of the eight, which the transport guard then reads as unknown', () => {
+  it('is null for any failure that is not one of the listed refusals, which the transport guard then reads as unknown', () => {
     // A request the BFF could not complete after delivering it upstream (a send
     // failure, a dropped connection) reaches the client as 502 upstream_unavailable
     // although the gateway may already have consumed the approval. A 401, a
@@ -250,7 +331,7 @@ describe('chatRunContinueHttpRefusalOf', () => {
 })
 
 describe('chatRunContinueFrameRefusalOf (regime 1: the gateway spent the approval)', () => {
-  it('reads every one of the 25 codes as spent, final, and to be followed when approval_spent is true', () => {
+  it('reads every one of the 32 codes as spent, final, and to be followed when approval_spent is true', () => {
     for (const code of CHAT_RUN_CONTINUE_FRAME_REFUSALS) {
       expect(
         chatRunContinueFrameRefusalOf({ code, message: code.replaceAll('_', ' '), retryable: false, request_id: 'r', run_id: 'run_1', approval_spent: true }),
@@ -578,7 +659,7 @@ describe('the park effect (regime P: the resume of a parked run)', () => {
 })
 
 describe('chatRunContinueParkRefusalOf (the frames of a park continue)', () => {
-  it('reads every one of the 25 codes with the marker: nothing spent, follow the run, and whether the park stays', () => {
+  it('reads every one of the 32 codes with the marker: nothing spent, follow the run, and whether the park stays', () => {
     for (const code of CHAT_RUN_CONTINUE_FRAME_REFUSALS) {
       const read = chatRunContinueParkRefusalOf(parkFrame(code))
       expect(read).toEqual({
@@ -910,7 +991,7 @@ describe('chatRunContinueTransportFailureOf (a failure that says nothing about t
     }
   })
 
-  it('is null for the eight listed refusals: the HTTP guard reads those, and never both', () => {
+  it('is null for the fifteen listed refusals: the HTTP guard reads those, and never both', () => {
     for (const [code, status] of HTTP_PAIRS) {
       expect(chatRunContinueTransportFailureOf({ code, status })).toBeNull()
       expect(chatRunContinueHttpRefusalOf({ code, status })).not.toBeNull()
@@ -997,5 +1078,137 @@ describe('the wording of the contract', () => {
     const field = contractSource.match(/\/\*\*(?:[^*]|\*(?!\/))*\*\/\s*readonly followRun: boolean/)?.[0] ?? ''
     expect(field).toContain('read the run by its id')
     expect(field).toContain('not that a run is live')
+  })
+})
+
+// The QUESTION regime (WS14 S5): the continuation of a run paused for its owner's answer. A frame
+// marked `question_continue: true` is read by chatRunContinueQuestionRefusalOf alone.
+describe('the question regime (chatRunContinueQuestionRefusalOf)', () => {
+  const questionFrame = (code: string, extra: Record<string, unknown> = {}) => ({
+    code,
+    message: code.replaceAll('_', ' '),
+    retryable: false,
+    request_id: 'r',
+    run_id: 'run_1',
+    question_continue: true,
+    ...extra,
+  })
+
+  it('says resend ONLY for question_answer_released', () => {
+    expect(chatRunContinueQuestionRefusalOf(questionFrame('question_answer_released'))).toEqual({
+      code: 'question_answer_released',
+      sendAsMessage: true,
+      kind: 'released',
+    })
+    for (const code of [
+      ...CHAT_RUN_CONTINUE_FRAME_REFUSALS,
+      ...CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES,
+      'run_ended',
+      'agent_dispatch_unavailable',
+      'nope',
+      '',
+    ]) {
+      if (code === 'question_answer_released') continue
+      expect(chatRunContinueQuestionRefusalOf(questionFrame(code))?.sendAsMessage).toBe(false)
+    }
+  })
+
+  it('pins the gone, retry and unknown tables', () => {
+    for (const code of [
+      'continuation_already_consumed',
+      'question_expired',
+      'question_not_found',
+      'question_not_resumable',
+      'not_resumable',
+      'durable_mutation_forbidden',
+      'resume_forbidden',
+    ]) {
+      expect(chatRunContinueQuestionRefusalOf(questionFrame(code))).toEqual({ code, sendAsMessage: false, kind: 'gone' })
+    }
+    expect(chatRunContinueQuestionRefusalOf(questionFrame('continue_in_progress'))).toEqual({
+      code: 'continue_in_progress',
+      sendAsMessage: false,
+      kind: 'retry',
+    })
+    // The authority refusals are not in the table: they read unknown (the run is followed, nothing is
+    // resent), as does `run_ended`, which no path sends any more.
+    for (const code of [
+      'question_resume_unavailable',
+      'question_not_answered',
+      'continue_disabled',
+      'continue_refused',
+      'continue_unreachable',
+      'continue_outcome_unknown',
+      'authority_widened',
+      'authority_space_mismatch',
+      'authority_route_mismatch',
+      'continue_space_scope_unsupported',
+      'run_ended',
+      'something_new',
+    ]) {
+      expect(chatRunContinueQuestionRefusalOf(questionFrame(code))).toEqual({ code, sendAsMessage: false, kind: 'unknown' })
+    }
+  })
+
+  it('reads only a frame marked exactly question_continue: true, with a string code', () => {
+    for (const marker of [undefined, false, 'true', 1, null]) {
+      const frame: Record<string, unknown> = { code: 'question_answer_released' }
+      if (marker !== undefined) frame.question_continue = marker
+      expect(chatRunContinueQuestionRefusalOf(frame)).toBeNull()
+    }
+    expect(chatRunContinueQuestionRefusalOf({ question_continue: true })).toBeNull()
+    expect(chatRunContinueQuestionRefusalOf({ question_continue: true, code: 7 })).toBeNull()
+    for (const input of [null, undefined, 'question_answer_released', 7, []]) {
+      expect(chatRunContinueQuestionRefusalOf(input)).toBeNull()
+    }
+  })
+
+  it('is read by no other frame reader: every reader is null for a question-marked frame', () => {
+    const codes = [
+      ...CHAT_RUN_CONTINUE_FRAME_REFUSALS,
+      ...CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES,
+      ...CHAT_RUN_CONTINUE_SPENT_SUBSCRIPTION_FRAMES,
+      'agent_dispatch_unavailable',
+    ]
+    for (const code of codes) {
+      for (const extra of [{}, { approval_spent: true }, { approval_spent: false }, { park_continue: true }]) {
+        const frame = questionFrame(code, extra)
+        expect(chatRunContinueFrameRefusalOf(frame)).toBeNull()
+        expect(chatRunContinueUnflaggedRefusalOf(frame)).toBeNull()
+        expect(chatRunContinueSpentRunEndOf(frame)).toBeNull()
+        expect(chatRunContinueSpentSubscriptionFailureOf(frame)).toBeNull()
+        expect(chatRunContinueParkRefusalOf(frame)).toBeNull()
+        expect(chatRunContinueParkFailureOf(frame, { parkStream: true })).toBeNull()
+      }
+    }
+  })
+
+  it('has a null reader pinned one by one', () => {
+    const frame = questionFrame('not_resumable')
+    expect(chatRunContinueFrameRefusalOf({ ...frame, approval_spent: true })).toBeNull()
+    expect(chatRunContinueUnflaggedRefusalOf(frame)).toBeNull()
+    expect(chatRunContinueParkRefusalOf(frame)).toBeNull()
+    expect(chatRunContinueParkDispatchUnavailableOf(questionFrame('agent_dispatch_unavailable'), true)).toBeNull()
+    expect(chatRunContinueParkFailureOf(frame)).toBeNull()
+    expect(chatRunContinueSpentRunEndOf(questionFrame('agent_run_failed', { approval_spent: true }))).toBeNull()
+    expect(chatRunContinueSpentSubscriptionFailureOf(questionFrame('rate_limited', { approval_spent: true }))).toBeNull()
+    expect(chatRunContinueSpentConnected({ ok: true, approval_spent: true, question_continue: true })).toBeNull()
+  })
+
+  it('leaves the unmarked readings as they were', () => {
+    expect(chatRunContinueUnflaggedRefusalOf({ code: 'not_resumable' })).toMatchObject({ regime: 2 })
+    expect(chatRunContinueFrameRefusalOf({ code: 'not_resumable', approval_spent: true })).toMatchObject({ regime: 1 })
+    // Only an exact true is the marker.
+    for (const marker of [false, 'true', 1, null]) {
+      expect(chatRunContinueUnflaggedRefusalOf({ code: 'not_resumable', question_continue: marker })).toMatchObject({ regime: 2 })
+    }
+  })
+
+  it('relays the question HTTP codes under their own statuses and no others', () => {
+    for (const code of QUESTION_HTTP_CODES) {
+      const status = HTTP_PAIRS.find(([known]) => known === code)?.[1] ?? 0
+      expect(chatRunContinueHttpRefusalOf({ code, status })).toMatchObject({ code, status, approvalSpent: 'no', retryable: false })
+      expect(chatRunContinueHttpRefusalOf({ code, status: status === 409 ? 404 : 409 })).toBeNull()
+    }
   })
 })

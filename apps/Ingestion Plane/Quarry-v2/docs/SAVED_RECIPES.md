@@ -10,7 +10,7 @@ Plan: `docs/plans/quarry-browser-build-plan-2026-10-14.md`, section 3.4, E4.2.
 
 ### 1.1 B2(b): capability-core owns the store
 
-The saved-recipe store belongs to capability-core, with its own migration: `apps/Model Plane/go/services/capability-core/migrations/0039_procedures.up.sql`, with a down file beside it. The store is `internal/procedures`. The HTTP surface is `internal/api/procedures.go`. execution-core reads the store over gRPC.
+The saved-recipe store belongs to capability-core, with its own migration: `apps/Model Plane/go/services/capability-core/migrations/0043_procedures.up.sql`, with a down file beside it. The store is `internal/procedures`. The HTTP surface is `internal/api/procedures.go`. execution-core reads the store over gRPC.
 
 This was taken at the plan's recommendation (item B2(b) of the W4 blocker list). This section is the ledger text for B2(b). The owner's ratification is recorded in the ledger, not here.
 
@@ -104,7 +104,7 @@ The runner always checks in prefix mode, before it dispatches each step.
 
 ### 2.4 The store (capability-core)
 
-Three tables, created by migration 0039:
+Three tables, created by migration 0043:
 - `procedures`: one row per recipe, with the owner, the organization, the scope (`user`), the name (1 to 120 characters), the description (at most 500), the source run id (at most 128 bytes) and the latest version.
 - `procedure_versions`: one immutable row per version, with the canonical body (JSONB), a digest (lowercase sha256 hex over the body re-marshalled with sorted keys), the step count and the slot names.
 - `procedure_tags`: a mutable pointer from a tag (`^[a-z0-9._-]{1,32}$`) to a version of the same recipe.
@@ -188,7 +188,7 @@ ZDR runs write no receipts, and a ZDR session cannot be saved.
 
 What the store holds: the stored actions (their types, the URL of a `navigate`, keys, and scroll and wait values), semantic locators (role and name, label, text, placeholder and test id), slot names and kinds, and outcome labels. It holds no typed value, no approval id and no redaction marker. The store is content-bearing, because locators and URLs can carry page text. capability-core describes the body as org configuration rather than conversation content, and the code puts the ZDR refusal at the gateway.
 
-Erasure. Organization erasure in session-core (`apps/Model Plane/rust/services/session-core/src/gdpr.rs`, Q4-E4.2-3j) deletes the organization's `procedure_tags`, `procedure_versions` and `procedures`, in that order, inside the organization-erasure transaction, on the shared database, when migration 0039 is present. A per-person erasure does not remove that person's recipes. The per-owner path is not built, as for skills.
+Erasure. Organization erasure in session-core (`apps/Model Plane/rust/services/session-core/src/gdpr.rs`, Q4-E4.2-3j) deletes the organization's `procedure_tags`, `procedure_versions` and `procedures`, in that order, inside the organization-erasure transaction, on the shared database, when migration 0043 is present. A per-person erasure does not remove that person's recipes. The per-owner path is not built, as for skills.
 
 ## 6. Out of scope
 
@@ -221,7 +221,7 @@ Erasure. Organization erasure in session-core (`apps/Model Plane/rust/services/s
 | Step admission (`expect`) | `apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/step.rs` |
 | Canonical compile, the version 2 vocabulary and the replay | `apps/Ingestion Plane/Quarry-v2/crates/quarry-runtime/src/browser_procedure.rs` |
 | Procedure routes | `apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/agent_routes/receipts.rs`, `types.rs`, `router.rs` |
-| Store migration and package | `apps/Model Plane/go/services/capability-core/migrations/0039_procedures.up.sql`, `0039_procedures.down.sql`, `internal/procedures/` |
+| Store migration and package | `apps/Model Plane/go/services/capability-core/migrations/0043_procedures.up.sql`, `0043_procedures.down.sql`, `internal/procedures/` |
 | Store HTTP and gRPC | `apps/Model Plane/go/services/capability-core/internal/api/procedures.go`, `internal/server/server.go`, `cmd/main.go` |
 | model-gateway proxies and run start | `apps/Model Plane/rust/services/model-gateway/src/http_routes.rs`, `browser_run.rs` |
 | Runner reader, the recipe planner and the tool bridge | `apps/Model Plane/rust/services/execution-core/src/recipe_store.rs`, `browser_agent/recipe.rs`, `browser_agent/recipe_planner.rs`, `tool_bridge/mod.rs` |

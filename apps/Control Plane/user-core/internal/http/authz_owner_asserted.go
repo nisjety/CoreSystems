@@ -49,6 +49,11 @@ const (
 
 	grantMaxBodyBytes = 1 << 20
 	fileGrantMaxIDLen = 200
+
+	// conversationSnapshotType is the share snapshot resource type (ADR
+	// conversation-share-model). session-core is its one owner service, it is never
+	// Space-grantable, and its grants are view only.
+	conversationSnapshotType = "conversation_snapshot"
 )
 
 // SetOwnerAssertedGrants wires CONTROL_OWNER_ASSERTED_GRANTS (strict literal true).
@@ -156,6 +161,14 @@ func (s *Server) applyOwnerAssertedGrantRules(c *gin.Context, resourceType, subj
 		writeGrantRefusal(c, http.StatusBadRequest, "role_not_supported", "role is not supported for this resource type")
 		return "", "", true
 	}
+	if resourceType == conversationSnapshotType && normalized != "view" {
+		// A snapshot is an immutable, read-only copy: view is its only role, whether
+		// or not an owner ever enforces edit for it.
+		writeGrantRefusal(c, http.StatusBadRequest, "role_not_supported", "role is not supported for this resource type")
+		return "", "", true
+	}
+	// Org-only for every owner-asserted type, conversation_snapshot included (ADR
+	// decision 2): the grantee must be an active member of the granter's org.
 	member, err := s.aclRepo.IsActiveOrgMember(c.Request.Context(), c.GetString("org_id"), strings.TrimSpace(subjectID))
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "grant subject could not be verified"})

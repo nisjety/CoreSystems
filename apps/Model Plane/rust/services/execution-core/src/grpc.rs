@@ -539,20 +539,12 @@ impl ExecutionService {
         inference_bearer: &str,
         receipt_id: &str,
     ) -> Result<Response<pb::ExecuteScheduledStepResponse>, Status> {
-        // Zero retention and waivers are refused before any work: the lane keeps no durable
-        // state for an unattended run (WS20 S6, ZDR clause). The caller is the lane's own
-        // identity, which carries no retention until the step context does.
-        let caller = AuthenticatedUser {
-            org_id: req.org_id.clone(),
-            user_id: req.subject_id.clone(),
-            zdr: false,
-            org_zdr: None,
-            zdr_waiver: None,
-        };
-        if let Some(code) = runtime_loop::scheduled_agent::refuses_retention(
-            caller.zdr,
-            caller.zdr_waiver.is_some(),
-        ) {
+        // Zero retention and waivers are refused before any work, ahead of the contract check: the
+        // lane keeps no durable state for an unattended run (WS20 S6, ZDR clause). The run's
+        // retention is what Session Core states on the step context, never a constant and never
+        // read from the orchestrator. A waived run is refused here, so the caller below carries
+        // no waiver: `ZdrWaiver` is never built for the lane.
+        if let Some(code) = runtime_loop::scheduled_agent::refuses_step_retention(run) {
             return self
                 .finish_scheduled_agent_step(
                     req,
@@ -562,6 +554,14 @@ impl ExecutionService {
                 )
                 .await;
         }
+        // The lane's own identity, carrying the run's real retention.
+        let caller = AuthenticatedUser {
+            org_id: req.org_id.clone(),
+            user_id: req.subject_id.clone(),
+            zdr: run.zdr,
+            org_zdr: None,
+            zdr_waiver: None,
+        };
         let now = chrono::Utc::now();
         let contract = match runtime_loop::scheduled_agent::admit(
             &run.contract_json,
@@ -587,8 +587,11 @@ impl ExecutionService {
                 runtime_loop::agent::base_tool_defs(!req.space_id.is_empty()),
             ),
             derivable: false,
+            // A scheduled run is offered its contract's tools and nothing else, so it is not indexed.
+            deferred: runtime_loop::tool_index::DeferredIndex::default(),
         };
-        let run_req = runtime_loop::scheduled_agent::run_request(req, &run.goal, &contract);
+        let run_req =
+            runtime_loop::scheduled_agent::run_request(req, &run.goal, &contract, run.zdr);
         self.state.begin_unattended(&req.run_id);
         let driven = tokio::time::timeout(
             runtime_loop::scheduled_agent::wall_clock(&contract, now),
@@ -619,6 +622,7 @@ impl ExecutionService {
                 crate::knowledge_tools::SpaceRetrieval::Withheld,
                 None,
                 Some(runtime_loop::scheduled_agent::loop_scope(&contract)),
+                None,
             ),
         )
         .await;
@@ -1041,12 +1045,17 @@ fn enforce_resume(req: &pb::RunAgentRequest, enabled: bool) -> Result<(), Status
 /// Whether a continuation names a run question rather than an approval (build plan WS14 S5). Such a
 /// continuation carries a question id or an answer, and nothing an approval stage reads.
 fn resume_names_question(resume: &pb::AgentResume) -> bool {
-    !resume.question_id.is_empty() || !resume.answer_json.is_empty()
+    runtime_loop::resume::names_question(resume)
 }
 
 /// A question continuation (build plan WS14 S5), judged after the continue switch: refused while
 /// `AGENT_ASK_USER_RESUME_ENABLED` and its prerequisites are not all on, and refused unless it names
 /// one question with its answer and a claim. It never names an approval, a step, a tool or a brief.
+///
+/// Only mode `loop` is accepted: a question has no stage 1 (a fresh segment seeded by an approved
+/// call), so `segment` is refused `question_resume_unavailable`. The answer is checked for shape
+/// only (`parse_resume_answer`); the answer applied on resume is session-core's consumed row, never
+/// this echo.
 fn enforce_question_resume(resume: &pb::AgentResume, question_resume_on: bool) -> Result<(), Status> {
     if !question_resume_on {
         return Err(Status::failed_precondition("continue_disabled"));
@@ -1064,6 +1073,11 @@ fn enforce_question_resume(resume: &pb::AgentResume, question_resume_on: bool) -
     {
         return Err(Status::invalid_argument("resume_incomplete"));
     }
+    if resume.mode != "loop" {
+        return Err(Status::failed_precondition("question_resume_unavailable"));
+    }
+    mp_contracts::user_question::parse_resume_answer(&resume.answer_json)
+        .map_err(|_problem| Status::invalid_argument("resume_incomplete"))?;
     Ok(())
 }
 
@@ -1345,18 +1359,30 @@ fn enforce_agent_route(
     })
 }
 
+/// The public identifier shape: 1 to 256 bytes of ASCII alphanumerics or
+/// `-`, `_`, `:` or `.`. The scheduled-step bindings and the Space id check at
+/// the RunAgent and ExecuteStep entries both use this one function.
+fn identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
+        })
+}
+
+/// A Space id is either absent (the run has no Space) or exactly the identifier
+/// shape. It is never trimmed or rewritten, because it is a signed id: a
+/// whitespace-only or malformed value is refused at handler entry, so no later
+/// site can read it as "no Space" while another reads it as a Space.
+fn space_id_shape_ok(space_id: &str) -> bool {
+    space_id.is_empty() || identifier(space_id)
+}
+
 /// Validate the public shape of the scheduled-step lane before it is wired to
 /// any authority or execution adapter. This keeps malformed Temporal activity
 /// input from becoming an implicit wildcard when the lane is enabled later.
 #[allow(clippy::result_large_err)]
 fn validate_scheduled_step_bindings(req: &pb::ExecuteScheduledStepRequest) -> Result<(), Status> {
-    fn identifier(value: &str) -> bool {
-        !value.is_empty()
-            && value.len() <= 256
-            && value.bytes().all(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
-            })
-    }
     fn digest(value: &str) -> bool {
         value.len() == 71
             && value.starts_with("sha256:")
@@ -1477,6 +1503,10 @@ impl ExecutionCore for ExecutionService {
         &self,
         request: Request<pb::ExecuteStepRequest>,
     ) -> Result<Response<pb::ExecuteStepResponse>, Status> {
+        // A malformed Space id is refused before any other work (see `space_id_shape_ok`).
+        if !space_id_shape_ok(&request.get_ref().space_id) {
+            return Err(Status::invalid_argument("space_id_invalid"));
+        }
         let session_bearer = delegated_session_bearer(&request)?;
         let caller = self.auth.authenticate(&request).await?;
         let data_plane_bearer = self
@@ -1534,6 +1564,13 @@ impl ExecutionCore for ExecutionService {
         } else {
             None
         };
+        // The Space retrieval the gateway authorised for this step's knowledge search, read before
+        // the request is consumed exactly as `run_agent` reads it. A header that is not valid text
+        // is present-but-empty, so a Space step withholds rather than searching the organisation.
+        let space_retrieval_header = request
+            .metadata()
+            .get(crate::knowledge_tools::SPACE_RETRIEVAL_HEADER)
+            .map(|value| value.to_str().unwrap_or_default().to_owned());
         let req = request.into_inner();
         caller.authorize(&req.org_id, Some(&req.user_id))?;
         self.authorize_run(&caller, &req.run_id, &session_bearer)
@@ -1649,6 +1686,13 @@ impl ExecutionCore for ExecutionService {
             }
             _ => None,
         };
+        // A Space-scoped step with no decision is withheld, never searched organisation-wide
+        // (D2-771, `EXECUTE_STEP_SPACE_SEARCH_WITHHOLD`). Data Plane verifies the decision itself.
+        let space_retrieval = crate::knowledge_tools::step_space_retrieval(
+            crate::knowledge_tools::execute_step_space_search_withhold_enabled(),
+            &req.space_id,
+            space_retrieval_header.as_deref(),
+        );
         let outcome = runtime_loop::execute_step_with_browser_grant(
             &req.tool_name,
             &req.tool_input,
@@ -1683,6 +1727,10 @@ impl ExecutionCore for ExecutionService {
             browser_grant.as_ref(),
             sandbox.as_ref(),
             thread.as_ref(),
+            space_retrieval,
+            // The step's own Space, so the owner document listing refuses a Space-scoped step even
+            // when no sandbox context is built for it (D2-769, `OWNER_LIST_SPACE_REFUSE`).
+            &req.space_id,
         )
         .await;
 
@@ -1719,11 +1767,12 @@ impl ExecutionCore for ExecutionService {
                         &req.tool_input,
                         crate::space_gate::RESUME_NONE,
                     ),
-                    cause: Some(approval_cause::for_call(
+                    cause: Some(approval_cause::for_call_with_facts(
                         outcome.cause.unwrap_or(CauseCode::UnclassifiedGate),
                         &run_id,
                         &req.tool_name,
                         &req.tool_input,
+                        &outcome.pause_facts,
                     )),
                     ..Default::default()
                 },
@@ -1909,6 +1958,7 @@ impl ExecutionCore for ExecutionService {
             self.process_host.as_deref(),
             &req.run_id,
             &caller.org_id,
+            caller.zdr_waiver.is_some(),
         )
         .await;
 
@@ -1960,6 +2010,10 @@ impl ExecutionCore for ExecutionService {
         &self,
         request: Request<pb::RunAgentRequest>,
     ) -> Result<Response<pb::RunAgentResponse>, Status> {
+        // A malformed Space id is refused before any other work (see `space_id_shape_ok`).
+        if !space_id_shape_ok(&request.get_ref().space_id) {
+            return Err(Status::invalid_argument("space_id_invalid"));
+        }
         let session_bearer = delegated_session_bearer(&request)?;
         let caller = self.auth.authenticate(&request).await?;
         let data_plane_bearer = self
@@ -2024,13 +2078,11 @@ impl ExecutionCore for ExecutionService {
         // context that breaks its bounds, or that carries conversation content
         // on a zero-retention run, is refused with the closed token only.
         enforce_run_context(&req)?;
+        // A question continuation (build plan WS14 S5) is judged here for its shape and its switch
+        // (`continue_disabled` while `AGENT_ASK_USER_RESUME_ENABLED` and its prerequisites are not
+        // all on, before anything is read). `run_agent` then decides it first, beside the park
+        // resume, and claims the fold and spends the answer once (`resume_questioned_run`).
         enforce_resume(&req, mp_contracts::loop_fold::continue_after_approval_enabled())?;
-        // A question continuation is judged above, but its apply on resume is not built yet (the
-        // executor's input pause and its answer step). It is refused here, before anything is
-        // consumed, rather than read as an approval.
-        if req.resume.as_ref().is_some_and(resume_names_question) {
-            return Err(Status::failed_precondition("question_resume_unavailable"));
-        }
         // The inference route the request names (`provider_hint` and
         // `subscription_connection_id`) is judged here, at the boundary and
         // before any of the run's work: a route this process may not honour is
@@ -2683,6 +2735,27 @@ mod auth_tests {
     }
 
     #[test]
+    fn space_id_shape_is_absent_or_an_untrimmed_identifier() {
+        // Absent: an organisation-level run with no Space stays allowed.
+        assert!(space_id_shape_ok(""));
+        assert!(space_id_shape_ok("space_01"));
+        assert!(space_id_shape_ok("spc_01"));
+        assert!(space_id_shape_ok("space-1.a:b"));
+        assert!(space_id_shape_ok(&"a".repeat(256)));
+        // Blank and padded ids are refused; the id is never trimmed into a valid one.
+        assert!(!space_id_shape_ok("  "));
+        assert!(!space_id_shape_ok(" space_01"));
+        assert!(!space_id_shape_ok("space_01\n"));
+        // Malformed ids: separators, query-like characters, non-ASCII, and over-long values.
+        assert!(!space_id_shape_ok("space/01"));
+        assert!(!space_id_shape_ok("space 01"));
+        assert!(!space_id_shape_ok("space_01?x=1"));
+        assert!(!space_id_shape_ok("sp\u{e9}ce"));
+        assert!(!space_id_shape_ok("*"));
+        assert!(!space_id_shape_ok(&"a".repeat(257)));
+    }
+
+    #[test]
     fn scheduled_step_service_gate_is_exact_and_non_zdr() {
         let valid = AuthenticatedService::for_test(
             "org_01",
@@ -3115,35 +3188,52 @@ mod run_context_boundary_tests {
         pb::AgentResume {
             mode: mode.to_owned(),
             question_id: "q_1".to_owned(),
-            answer_json: "{}".to_owned(),
+            answer_json: r#"{"answers":[{"item_id":"i1","option_ids":["a"],"text":""}]}"#.to_owned(),
             claim_token: "claim".to_owned(),
             ..Default::default()
         }
     }
 
-    /// A question continuation is refused while its switch is off, and it names exactly one question,
-    /// its answer and its claim. It never names an approval, a step, a tool or a brief.
+    /// A question continuation is refused while its switch is off (for both modes, before anything
+    /// else), accepts only mode `loop` (a question has no stage 1), and names exactly one question,
+    /// a well-shaped answer and its claim. It never names an approval, a step, a tool or a brief.
     #[test]
     fn enforce_question_resume_needs_the_switch_and_exactly_the_question_shape() {
         for mode in ["segment", "loop"] {
-            assert!(enforce_question_resume(&question_resume(mode), true).is_ok(), "{mode}");
             let off = enforce_question_resume(&question_resume(mode), false).expect_err("switch off");
-            assert_eq!(off.message(), "continue_disabled");
+            assert_eq!(off.code(), tonic::Code::FailedPrecondition, "{mode}");
+            assert_eq!(off.message(), "continue_disabled", "{mode}");
         }
+        assert!(enforce_question_resume(&question_resume("loop"), true).is_ok());
+        let segment = enforce_question_resume(&question_resume("segment"), true).expect_err("no stage 1");
+        assert_eq!(segment.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(segment.message(), "question_resume_unavailable");
         let incomplete = [
-            pb::AgentResume { mode: "park".to_owned(), ..question_resume("segment") },
-            pb::AgentResume { approval_id: "appr_1".to_owned(), ..question_resume("segment") },
-            pb::AgentResume { tool_name: "delete_records".to_owned(), ..question_resume("segment") },
-            pb::AgentResume { brief: "recorded results".to_owned(), ..question_resume("segment") },
-            pb::AgentResume { question_id: String::new(), ..question_resume("segment") },
-            pb::AgentResume { answer_json: String::new(), ..question_resume("segment") },
-            pb::AgentResume { claim_token: String::new(), ..question_resume("segment") },
-            pb::AgentResume { mode: "PARK".to_owned(), ..question_resume("segment") },
+            pb::AgentResume { mode: "park".to_owned(), ..question_resume("loop") },
+            pb::AgentResume { approval_id: "appr_1".to_owned(), ..question_resume("loop") },
+            pb::AgentResume { tool_name: "delete_records".to_owned(), ..question_resume("loop") },
+            pb::AgentResume { brief: "recorded results".to_owned(), ..question_resume("loop") },
+            pb::AgentResume { question_id: String::new(), ..question_resume("loop") },
+            pb::AgentResume { answer_json: String::new(), ..question_resume("loop") },
+            pb::AgentResume { claim_token: String::new(), ..question_resume("loop") },
+            pb::AgentResume { mode: "PARK".to_owned(), ..question_resume("loop") },
+            // An answer that is not the resume answer's shape: unreadable, empty, or a skip that
+            // also carries answers.
+            pb::AgentResume { answer_json: "not json".to_owned(), ..question_resume("loop") },
+            pb::AgentResume { answer_json: r#"{"answers":[]}"#.to_owned(), ..question_resume("loop") },
+            pb::AgentResume {
+                answer_json: r#"{"answers":[{"item_id":"i1","option_ids":["a"],"text":""}],"skip":true}"#
+                    .to_owned(),
+                ..question_resume("loop")
+            },
         ];
         for shape in incomplete {
             let e = enforce_question_resume(&shape, true).expect_err("an incomplete question shape");
+            assert_eq!(e.code(), tonic::Code::InvalidArgument);
             assert_eq!(e.message(), "resume_incomplete");
         }
+        let skip = pb::AgentResume { answer_json: r#"{"answers":[],"skip":true}"#.to_owned(), ..question_resume("loop") };
+        assert!(enforce_question_resume(&skip, true).is_ok(), "a skip is a well-shaped answer");
     }
 
     /// Only a continuation that carries a question or an answer takes the question check, so an
@@ -3495,5 +3585,483 @@ mod run_attachment_tests {
             mp_contracts::zdr_refusal::code::FEATURE_NOT_SUPPORTED
         );
         assert_eq!(refusal.feature(), Some("sandbox_workspace"));
+    }
+}
+
+/// F-f10-29 lane level: a scheduled agent step whose run Session Core states as zero-retention
+/// or waived ends `failed` with `scheduled_zdr_refused` through the real
+/// `execute_scheduled_step_runtime`, with no inference call, no tool call and no capability
+/// decision. Session Core, inference and Auth Core are in-process fakes that record every call.
+#[cfg(test)]
+mod scheduled_agent_lane_tests {
+    use super::*;
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use tonic::codegen::{empty_body, http, Body, BoxFuture, Context, Poll, Service, StdError};
+    use tonic::transport::{Endpoint, Server};
+
+    #[derive(Default)]
+    struct Seen {
+        session_paths: Vec<String>,
+        inference_calls: usize,
+        results: Vec<pb::RecordScheduledRunResultRequest>,
+        receipts: Vec<pb::RecordScheduledStepReceiptRequest>,
+    }
+
+    type Shared = Arc<Mutex<Seen>>;
+
+    struct Handler<F>(Arc<F>);
+
+    impl<Req, Resp, F> tonic::server::UnaryService<Req> for Handler<F>
+    where
+        Req: Send + 'static,
+        Resp: Send + 'static,
+        F: Fn(Req) -> Result<Resp, Status> + Send + Sync + 'static,
+    {
+        type Response = Resp;
+        type Future = BoxFuture<tonic::Response<Resp>, Status>;
+
+        fn call(&mut self, request: tonic::Request<Req>) -> Self::Future {
+            let handler = Arc::clone(&self.0);
+            Box::pin(async move { handler(request.into_inner()).map(tonic::Response::new) })
+        }
+    }
+
+    fn unary<B, Req, Resp, F>(
+        request: http::Request<B>,
+        handler: F,
+    ) -> BoxFuture<http::Response<tonic::body::BoxBody>, Infallible>
+    where
+        B: Body + Send + 'static,
+        B::Error: Into<StdError> + Send + 'static,
+        Req: prost::Message + Default + Send + 'static,
+        Resp: prost::Message + Send + 'static,
+        F: Fn(Req) -> Result<Resp, Status> + Send + Sync + 'static,
+    {
+        Box::pin(async move {
+            let mut grpc =
+                tonic::server::Grpc::new(tonic::codec::ProstCodec::<Resp, Req>::default());
+            Ok(grpc.unary(Handler(Arc::new(handler)), request).await)
+        })
+    }
+
+    fn unimplemented_response() -> BoxFuture<http::Response<tonic::body::BoxBody>, Infallible> {
+        Box::pin(async {
+            let mut response = http::Response::new(empty_body());
+            response.headers_mut().insert(
+                Status::GRPC_STATUS,
+                (tonic::Code::Unimplemented as i32).into(),
+            );
+            response.headers_mut().insert(
+                http::header::CONTENT_TYPE,
+                tonic::metadata::GRPC_CONTENT_TYPE,
+            );
+            Ok(response)
+        })
+    }
+
+    #[derive(Clone)]
+    struct Lane {
+        seen: Shared,
+        context: pb::ScheduledStepContext,
+    }
+
+    impl Lane {
+        fn route<B>(
+            &self,
+            request: http::Request<B>,
+        ) -> BoxFuture<http::Response<tonic::body::BoxBody>, Infallible>
+        where
+            B: Body + Send + 'static,
+            B::Error: Into<StdError> + Send + 'static,
+        {
+            let path = request.uri().path().to_owned();
+            if path.starts_with("/model_plane.v1.InferenceCore/") {
+                self.seen.lock().unwrap().inference_calls += 1;
+                return unimplemented_response();
+            }
+            self.seen.lock().unwrap().session_paths.push(path.clone());
+            match path.as_str() {
+                "/model_plane.v1.SessionCore/ClaimScheduledStep" => {
+                    unary(request, |_: pb::ClaimScheduledStepRequest| {
+                        Ok(pb::ClaimScheduledStepResponse {
+                            claimed: true,
+                            receipt_id: "receipt-1".to_owned(),
+                            status: "claimed".to_owned(),
+                        })
+                    })
+                }
+                "/model_plane.v1.RunService/GetScheduledStepContext" => {
+                    let context = self.context.clone();
+                    unary(request, move |_: pb::GetScheduledStepContextRequest| {
+                        Ok(context.clone())
+                    })
+                }
+                "/model_plane.v1.SessionCore/RecordScheduledRunResult" => {
+                    let seen = Arc::clone(&self.seen);
+                    unary(
+                        request,
+                        move |result: pb::RecordScheduledRunResultRequest| {
+                            let status = result.status.clone();
+                            seen.lock().unwrap().results.push(result);
+                            Ok(pb::RecordScheduledRunResultResponse {
+                                receipt_id: "receipt-1".to_owned(),
+                                status,
+                                ..Default::default()
+                            })
+                        },
+                    )
+                }
+                "/model_plane.v1.SessionCore/RecordScheduledStepReceipt" => {
+                    let seen = Arc::clone(&self.seen);
+                    unary(
+                        request,
+                        move |receipt: pb::RecordScheduledStepReceiptRequest| {
+                            let status = receipt.status.clone();
+                            seen.lock().unwrap().receipts.push(receipt);
+                            Ok(pb::RecordScheduledStepReceiptResponse {
+                                receipt_id: "receipt-1".to_owned(),
+                                status,
+                                recorded: true,
+                            })
+                        },
+                    )
+                }
+                _ => unimplemented_response(),
+            }
+        }
+    }
+
+    macro_rules! named_fake {
+        ($name:ident, $service:literal) => {
+            #[derive(Clone)]
+            struct $name(Lane);
+
+            impl tonic::server::NamedService for $name {
+                const NAME: &'static str = $service;
+            }
+
+            impl<B> Service<http::Request<B>> for $name
+            where
+                B: Body + Send + 'static,
+                B::Error: Into<StdError> + Send + 'static,
+            {
+                type Response = http::Response<tonic::body::BoxBody>;
+                type Error = Infallible;
+                type Future = BoxFuture<Self::Response, Self::Error>;
+
+                fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+                    Poll::Ready(Ok(()))
+                }
+
+                fn call(&mut self, request: http::Request<B>) -> Self::Future {
+                    self.0.route(request)
+                }
+            }
+        };
+    }
+
+    named_fake!(FakeSessionCore, "model_plane.v1.SessionCore");
+    named_fake!(FakeRunService, "model_plane.v1.RunService");
+    named_fake!(FakeInferenceCore, "model_plane.v1.InferenceCore");
+
+    struct CountingPolicy(Arc<AtomicUsize>);
+
+    #[tonic::async_trait]
+    impl crate::capability_policy::CapabilityPolicy for CountingPolicy {
+        async fn evaluate(
+            &self,
+            _tool_name: &str,
+            _run_id: &str,
+            _org_id: &str,
+        ) -> Result<crate::capability_policy::CapabilityDecision, Status> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::capability_policy::CapabilityDecision::Allow)
+        }
+    }
+
+    struct StaticTokens;
+
+    #[tonic::async_trait]
+    impl ManagedRunTokenProvider for StaticTokens {
+        async fn terminalize_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, crate::session_terminal_auth::SessionTerminalTokenError> {
+            Ok("test-terminalize-token".to_owned())
+        }
+
+        async fn heartbeat_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, crate::session_terminal_auth::SessionTerminalTokenError> {
+            Ok("test-heartbeat-token".to_owned())
+        }
+
+        async fn scheduled_step_token(
+            &self,
+            _org_id: &str,
+        ) -> Result<String, crate::session_terminal_auth::SessionTerminalTokenError> {
+            Ok("test-scheduled-step-token".to_owned())
+        }
+    }
+
+    async fn verifier(server: &wiremock::MockServer) -> JwtVerifier {
+        use base64::Engine;
+        use rsa::traits::PublicKeyParts;
+        use wiremock::{
+            matchers::{method, path},
+            Mock, ResponseTemplate,
+        };
+        let private = rsa::RsaPrivateKey::new(&mut rand::thread_rng(), 2048).expect("RSA key");
+        let public = rsa::RsaPublicKey::from(&private);
+        let n = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.n().to_bytes_be());
+        let e = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public.e().to_bytes_be());
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [{ "kty": "RSA", "use": "sig", "alg": "RS256", "kid": "lane", "n": n, "e": e }]
+            })))
+            .mount(server)
+            .await;
+        JwtVerifier::from_config(crate::auth::AuthConfig {
+            jwks_url: format!("{}/jwks", server.uri()),
+            issuer: "auth-core".to_owned(),
+            audience: "data-plane".to_owned(),
+            jwks_ttl: Duration::from_secs(300),
+            leeway_secs: 0,
+        })
+        .await
+        .expect("test verifier")
+    }
+
+    struct Harness {
+        service: ExecutionService,
+        seen: Shared,
+        evaluations: Arc<AtomicUsize>,
+        _auth: wiremock::MockServer,
+    }
+
+    async fn harness(zdr: bool, zdr_waived: bool) -> Harness {
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let seen: Shared = Arc::default();
+        let lane = Lane {
+            seen: Arc::clone(&seen),
+            context: pb::ScheduledStepContext {
+                run_id: "run-1".to_owned(),
+                thread_id: "thread-1".to_owned(),
+                org_id: "org-1".to_owned(),
+                goal: "summarise the week".to_owned(),
+                status: "running".to_owned(),
+                // Any stored contract routes the step to the agent lane; the retention check comes
+                // before the contract is read, so it need not verify.
+                contract_json: "{}".to_owned(),
+                contract_digest: "sha256:none".to_owned(),
+                contract_expires_at: "2099-01-01T00:00:00Z".to_owned(),
+                zdr,
+                zdr_waived,
+                ..Default::default()
+            },
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fakes");
+        let address = listener.local_addr().expect("fake address");
+        tokio::spawn(
+            Server::builder()
+                .add_service(FakeSessionCore(lane.clone()))
+                .add_service(FakeRunService(lane.clone()))
+                .add_service(FakeInferenceCore(lane))
+                .serve_with_incoming(TcpListenerStream::new(listener)),
+        );
+        let channel = Endpoint::from_shared(format!("http://{address}"))
+            .expect("endpoint")
+            .connect()
+            .await
+            .expect("connect fakes");
+
+        let auth = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/inference-core/internal-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "token": "inference-token",
+                "expiresInSeconds": 300,
+                "audience": "inference-core",
+            })))
+            .mount(&auth)
+            .await;
+        let evaluations = Arc::new(AtomicUsize::new(0));
+        let service = ExecutionService::new_with_scheduled_step_runtime(
+            StateStore::new(),
+            verifier(&auth).await,
+            channel.clone(),
+            channel,
+            Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            Arc::new(CountingPolicy(Arc::clone(&evaluations))),
+            Arc::new(StaticTokens),
+            None,
+            Some(Arc::new(ScheduledInferenceTokenProvider::new_for_test(
+                &auth.uri(),
+            ))),
+            None,
+            SandboxManagerClient::from_env().expect("default sandbox-manager endpoint"),
+            None,
+            "test-backend".to_owned(),
+            Arc::new(
+                crate::sandbox_lease::SandboxManagerTokenProvider::new_for_test(
+                    "http://127.0.0.1:1",
+                    "execution-core",
+                    "test-service-secret-at-least-32-bytes",
+                ),
+            ),
+            None,
+        );
+        Harness {
+            service,
+            seen,
+            evaluations,
+            _auth: auth,
+        }
+    }
+
+    fn step() -> pb::ExecuteScheduledStepRequest {
+        pb::ExecuteScheduledStepRequest {
+            run_id: "run-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            org_id: "org-1".to_owned(),
+            subject_id: "user-1".to_owned(),
+            space_id: "space-1".to_owned(),
+            step_id: "step-1".to_owned(),
+            idempotency_key: "idem-1".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// The agent lane is reached only with its switch on; it is read on every step.
+    fn switch_on() {
+        std::env::set_var(runtime_loop::scheduled_agent::SWITCH_ENV, "true");
+    }
+
+    async fn drive(zdr: bool, zdr_waived: bool) -> (pb::ExecuteScheduledStepResponse, Harness) {
+        switch_on();
+        let harness = harness(zdr, zdr_waived).await;
+        let response = harness
+            .service
+            .execute_scheduled_step_runtime(step())
+            .await
+            .expect("the lane answers with a recorded outcome")
+            .into_inner();
+        (response, harness)
+    }
+
+    fn assert_refused_before_any_work(
+        response: &pb::ExecuteScheduledStepResponse,
+        harness: &Harness,
+        code: &str,
+    ) {
+        assert_eq!(response.error, code);
+        assert_eq!(response.status, "failed");
+        assert!(!response.unknown_outcome);
+        assert_eq!(
+            (
+                response.rounds_executed,
+                response.tool_calls,
+                response.withheld_effects
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!((response.input_tokens, response.output_tokens), (0, 0));
+        assert!(response.output.is_empty());
+        let seen = harness.seen.lock().unwrap();
+        assert_eq!(seen.inference_calls, 0, "no inference for a refused run");
+        assert_eq!(
+            harness.evaluations.load(Ordering::SeqCst),
+            0,
+            "no tool reached a capability decision"
+        );
+        assert_eq!(
+            seen.session_paths,
+            [
+                "/model_plane.v1.SessionCore/ClaimScheduledStep",
+                "/model_plane.v1.RunService/GetScheduledStepContext",
+                "/model_plane.v1.SessionCore/RecordScheduledRunResult",
+            ],
+            "claim, context, one result row and nothing else"
+        );
+        assert!(seen.receipts.is_empty());
+        let [result] = seen.results.as_slice() else {
+            panic!("exactly one result row, got {}", seen.results.len());
+        };
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.error_code, code);
+        assert!(
+            result.output.is_empty(),
+            "the refused result carries no content"
+        );
+        assert_eq!(
+            (
+                result.rounds_executed,
+                result.tool_calls,
+                result.input_tokens,
+                result.output_tokens
+            ),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(result.receipt_id, "receipt-1");
+    }
+
+    #[tokio::test]
+    async fn a_zdr_scheduled_agent_step_fails_closed_with_no_inference_and_no_tools() {
+        let (response, harness) = drive(true, false).await;
+        assert_refused_before_any_work(
+            &response,
+            &harness,
+            runtime_loop::scheduled_agent::REFUSAL_RETENTION,
+        );
+    }
+
+    #[tokio::test]
+    async fn a_waived_scheduled_agent_step_fails_closed_with_no_inference_and_no_tools() {
+        let (response, harness) = drive(false, true).await;
+        assert_refused_before_any_work(
+            &response,
+            &harness,
+            runtime_loop::scheduled_agent::REFUSAL_RETENTION,
+        );
+    }
+
+    #[tokio::test]
+    async fn both_retention_flags_fail_closed_as_unknown_retention() {
+        let (response, harness) = drive(true, true).await;
+        assert_refused_before_any_work(
+            &response,
+            &harness,
+            runtime_loop::scheduled_agent::REFUSAL_RETENTION_UNKNOWN,
+        );
+    }
+
+    /// The control: a persistent run reaches the lane's next check (the stored contract, which
+    /// this fake does not sign) rather than the retention refusal, so the three refusals above
+    /// are the retention check and not a lane that refuses everything.
+    #[tokio::test]
+    async fn a_persistent_step_passes_the_retention_check_to_the_contract_check() {
+        let (response, harness) = drive(false, false).await;
+        assert_ne!(
+            response.error,
+            runtime_loop::scheduled_agent::REFUSAL_RETENTION
+        );
+        assert_ne!(
+            response.error,
+            runtime_loop::scheduled_agent::REFUSAL_RETENTION_UNKNOWN
+        );
+        assert_eq!(
+            response.error,
+            runtime_loop::scheduled_agent::REFUSAL_INVALID
+        );
+        assert_eq!(harness.seen.lock().unwrap().inference_calls, 0);
     }
 }

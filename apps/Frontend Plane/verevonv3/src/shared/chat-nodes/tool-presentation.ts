@@ -37,9 +37,11 @@ import { looksLikeUnifiedDiff, parseUnifiedDiff } from './diff'
 
 /**
  * How a tool call is drawn. `terminal` is a one-shot command. `browser`, `process` and `file` are the computer
- * panel's kinds (P1): a browser step, a process the agent started, and a workspace file.
+ * panel's kinds (P1): a browser step, a process the agent started, and a workspace file. `image` is a picture the
+ * image tool made, drawn with the model and provider that made it (W4-IMG-4); it is only ever the intent while
+ * `VITE_CHAT_IMAGE_TOOL` is on.
  */
-export type ToolIntent = 'terminal' | 'search' | 'read' | 'diff' | 'generic' | 'browser' | 'process' | 'file'
+export type ToolIntent = 'terminal' | 'search' | 'read' | 'diff' | 'generic' | 'browser' | 'process' | 'file' | 'image'
 
 /**
  * How a `code_interpreter` run was confined, from its enforcement report (EP-9
@@ -49,6 +51,12 @@ export type ToolIntent = 'terminal' | 'search' | 'read' | 'diff' | 'generic' | '
  * `unknown` and is never shown as isolated.
  */
 export type SandboxBadge = 'isolated_no_network' | 'unknown'
+
+/**
+ * The typed refusals the image tool returns instead of a picture (W4-IMG-3). `feature_not_supported` is the
+ * zero-retention refusal (the catalogue's wire code is `zdr_feature_not_supported`, read as the same one).
+ */
+export type ImageRefusalCode = 'feature_not_supported' | 'image_tool_limit_reached' | 'image_model_unavailable'
 
 export type ToolPresentation = {
   intent: ToolIntent
@@ -72,6 +80,14 @@ export type ToolPresentation = {
    * every result while the report switch is off.
    */
   sandbox?: SandboxBadge
+  /** The model that made a generated image, from the image tool's result. `image` intent only. */
+  imageModel?: string
+  /** The provider that served the image, as the registry names it. `image` intent only. */
+  imageProvider?: string
+  /** The image's size, as the tool reports it (`1024x1536`). `image` intent only. */
+  imageSize?: string
+  /** The typed refusal the image call came back with, when it names one. `image` intent only. */
+  imageRefusal?: ImageRefusalCode
 }
 
 /**
@@ -142,12 +158,23 @@ const FILE_TOOLS = new Set([
   'workspace_put',
 ])
 
+/** The image tool (W4-IMG-3): a picture it made, or the typed refusal it came back with. */
+const IMAGE_TOOLS = new Set(['generate_image'])
+
+/**
+ * `VITE_CHAT_IMAGE_TOOL=true` draws the image tool's call as an image card: the model and provider that made the
+ * picture, and any typed refusal in words. Off, the call renders as the generic card it always was. Exact string, as
+ * for the other chat switches.
+ */
+export const chatImageToolEnabled = () => import.meta.env.VITE_CHAT_IMAGE_TOOL === 'true'
+
 function intentFor(name: string): ToolIntent {
   const normalized = name.trim().toLowerCase()
   if (TERMINAL_TOOLS.has(normalized)) return 'terminal'
   if (PROCESS_TOOLS.has(normalized)) return 'process'
   if (BROWSER_TOOLS.has(normalized)) return 'browser'
   if (FILE_TOOLS.has(normalized)) return 'file'
+  if (IMAGE_TOOLS.has(normalized) && chatImageToolEnabled()) return 'image'
   if (SEARCH_TOOLS.has(normalized)) return 'search'
   if (READ_TOOLS.has(normalized)) return 'read'
   // Anything else — action tools, MCP tools, subagents — renders generically.
@@ -196,6 +223,70 @@ function sandboxBadge(name: string, body: Record<string, unknown>): SandboxBadge
   return 'unknown'
 }
 
+/** The image tool's refusal codes, by the names they go by. A code this client does not list is not a refusal it shows. */
+const IMAGE_REFUSAL_CODES: Record<string, ImageRefusalCode> = {
+  feature_not_supported: 'feature_not_supported',
+  zdr_feature_not_supported: 'feature_not_supported',
+  image_tool_limit_reached: 'image_tool_limit_reached',
+  image_model_unavailable: 'image_model_unavailable',
+}
+
+/**
+ * The refusal a text carries: the code alone, a text that opens with the code (`code: detail`), or the code of a JSON
+ * error (`{"error": {"code": …}}`, a flat `{"error": "…"}`, or `{"code": …}`). Anything else is not a refusal.
+ */
+function refusalCodeIn(text: string | undefined): ImageRefusalCode | undefined {
+  if (!text) return undefined
+  const trimmed = text.trim()
+  const leading = trimmed.split(/[\s:]/, 1)[0] ?? ''
+  if (Object.hasOwn(IMAGE_REFUSAL_CODES, leading)) return IMAGE_REFUSAL_CODES[leading]
+  const body = envelope(trimmed)
+  if (!body) return undefined
+  const error = body.error
+  const named: unknown =
+    typeof error === 'string' ? error : error && typeof error === 'object' ? (error as Record<string, unknown>).code : body.code
+  return typeof named === 'string' && Object.hasOwn(IMAGE_REFUSAL_CODES, named) ? IMAGE_REFUSAL_CODES[named] : undefined
+}
+
+/**
+ * The typed refusal an image call came back with, read from its error and then from its result. Only a call the
+ * image intent covers can be refused this way, so every other tool answers `undefined`.
+ */
+export function imageRefusalOf(call: ChatToolCall): ImageRefusalCode | undefined {
+  if (intentFor(call.name) !== 'image') return undefined
+  return refusalCodeIn(call.error) ?? refusalCodeIn(call.output)
+}
+
+/** A model name as the card shows it: whitespace folded, trimmed, and kept short enough for one line. */
+function shownModel(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const flat = value.replace(/\s+/g, ' ').trim()
+  return flat ? Array.from(flat).slice(0, 80).join('') : undefined
+}
+
+/** A provider id, kept only in the registry-id shape the served-by line already requires (privacy-tier.ts). */
+function providerOf(value: unknown): string | undefined {
+  const id = typeof value === 'string' ? value.trim() : ''
+  return /^[a-z0-9][a-z0-9._-]{0,63}$/i.test(id) ? id : undefined
+}
+
+/** An image size the tool reports, as `WIDTHxHEIGHT`. */
+function sizeOf(value: unknown): string | undefined {
+  const size = typeof value === 'string' ? value.trim() : ''
+  return /^\d{3,5}x\d{3,5}$/.test(size) ? size : undefined
+}
+
+/** The image card's facts: who made the picture and at what size, or the refusal it came back with. */
+function imagePresentation(body: Record<string, unknown> | null, refusal: ImageRefusalCode | undefined): ToolPresentation {
+  return {
+    intent: 'image',
+    imageModel: shownModel(body?.model_used),
+    imageProvider: providerOf(body?.provider_used),
+    imageSize: sizeOf(body?.size),
+    imageRefusal: refusal,
+  }
+}
+
 export function toolPresentation(call: ChatToolCall): ToolPresentation {
   // Content wins over name: a tool that returned a patch gets the diff card
   // whatever it is called, including tools registered by an MCP server this
@@ -206,6 +297,8 @@ export function toolPresentation(call: ChatToolCall): ToolPresentation {
   }
   const intent = intentFor(call.name)
   const body = envelope(call.output)
+  // A refused image has no picture to count, so its card is read from the refusal and the picture's facts alone.
+  if (intent === 'image') return imagePresentation(body, imageRefusalOf(call))
   if (!body) return { intent }
 
   const outcome = typeof body.status === 'string' ? body.status : undefined

@@ -23,10 +23,15 @@ use reqwest::Method;
 use serde::Deserialize;
 
 use crate::{
+    audience_tokens::ModelServiceAudience,
     config::AppState,
-    domains::chat::shared::{model_token, proxy_model_json_with_session, session_token},
+    domains::chat::shared::{
+        model_token, proxy_model_json_with_session, retention_refusal_response, session_token,
+        waived_decision, waived_service_token,
+    },
     middleware::{require_session, AuthenticatedUser},
     rate_limit::rate_limit_middleware,
+    retention_decision::{continuation_retention, take_continuation_connection, ContinuationConnection},
     upstream::authorized_org_id,
 };
 
@@ -297,10 +302,55 @@ pub(crate) async fn approve_plan(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(run_id): Path<String>,
-    Json(body): Json<serde_json::Value>,
+    Json(mut body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let token = model_token(&state, &user, &headers).await;
-    let session_token = session_token(&state, &user, &headers).await;
+    // ZDR-Z-19e (D-ZDR-15): a plan approval never inherits a waiver. The SPA may name the connection
+    // of a waived run in the body (`subscription_connection_id`, `provider`); the two keys are
+    // removed, never forwarded, and only a fresh decision from Auth Core for that connection waives
+    // the bearers below. With the switch off or no connection named this is today's path.
+    let connection = take_continuation_connection(&state, &mut body);
+    let retention = match continuation_retention(
+        &state,
+        &user,
+        &headers,
+        connection.as_ref().map(ContinuationConnection::as_pair),
+    )
+    .await
+    {
+        Ok(retention) => retention,
+        Err(refusal) => return retention_refusal_response(refusal).into_response(),
+    };
+    let (token, session_token) = if let Some(decision) = waived_decision(&retention) {
+        let model = match waived_service_token(
+            &state,
+            &user,
+            &headers,
+            decision,
+            ModelServiceAudience::ModelGateway,
+        )
+        .await
+        {
+            Ok(token) => token,
+            Err(refusal) => return refusal.into_response(),
+        };
+        let session = match waived_service_token(
+            &state,
+            &user,
+            &headers,
+            decision,
+            ModelServiceAudience::SessionCore,
+        )
+        .await
+        {
+            Ok(token) => token,
+            Err(refusal) => return refusal.into_response(),
+        };
+        (Some(model), Some(session))
+    } else {
+        let token = model_token(&state, &user, &headers).await;
+        let session_token = session_token(&state, &user, &headers).await;
+        (token, session_token)
+    };
     let url = format!(
         "{}/v1/runs/{}/plan-approval",
         state.model_gateway_url,

@@ -1,7 +1,7 @@
 //! Research runs: the durable, addressable research phase of a chat turn (Quarry v2 E4.6, slice Q4-062b;
 //! plan 3.4 E4.6 scope (b)).
 //!
-//! A research run is one row in `research_runs` (migration 0115). A client addresses it by id to read its status,
+//! A research run is one row in `research_runs` (migration 0129). A client addresses it by id to read its status,
 //! partial results and stop reason, and a second research run on the same thread is refused (`BeginError::Active`,
 //! which the gRPC service answers as aborted `research_run_active`, naming the run only to its owner). The store
 //! functions come first; the gRPC service [`ResearchRunGrpc`] (`ResearchRunService`, at the end of this file) is their

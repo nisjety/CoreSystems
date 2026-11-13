@@ -58,7 +58,7 @@ describe('ChatPage browser dock mounts', () => {
 
   it('keeps the wide-research cards mounted in the rail', async () => {
     const page = await read(PAGE)
-    expect(page).toContain('const liveRailWideResearch = createMemo(() => <ChatWideResearchPanel runId={liveRunId()} threadId={state.threadId ?? null} />)')
+    expect(page).toContain('const liveRailWideResearch = createMemo(() => <ChatWideResearchPanel runId={liveRunId()} threadId={state.threadId ?? null} onRetryItem={wideResearchOffered() ? retryWideResearchItem : undefined} />)')
     expect(page).toContain('wideResearch={liveRailWideResearch()}')
   })
 

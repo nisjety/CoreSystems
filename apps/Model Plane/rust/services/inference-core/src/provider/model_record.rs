@@ -1,10 +1,16 @@
 //! The record a provider advertises for each model on `/v1/models`: its context
-//! window, its synchronous output ceiling and its vendor lifecycle stage.
+//! window, its synchronous output ceiling, its vendor lifecycle stage and, for a
+//! deprecated model whose vendor names one, the model that replaces it.
 //!
 //! One static table, keyed by provider family and model id the way
 //! [`super::effort::declared_support`] is keyed. A model with no row is advertised
 //! with no limits: a provider's own ceiling bounds everything that provider serves,
 //! but it is no fact about any one model, so it never fills a gap.
+//!
+//! The retired ids a request is rewritten from live in this module too, in the
+//! `RETIRED` table, so one source answers what replaces a model. They are kept apart
+//! from the `ROWS` table: a retired id is never advertised, and a deprecated model
+//! still answers as pinned, so it must never be rewritten.
 
 use super::effort::{Family, ModelAliases};
 
@@ -32,13 +38,20 @@ impl Lifecycle {
     }
 }
 
-/// The limits and lifecycle one model is advertised with. The default is the
-/// unknown record: zero tokens and no lifecycle.
+/// The limits, lifecycle and replacement one model is advertised with. The default is the
+/// unknown record: zero tokens, no lifecycle and no successor.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RecordLimits {
     pub context_window_tokens: u32,
     pub max_output_tokens: u32,
     pub lifecycle: Option<Lifecycle>,
+    /// The model the vendor names as this model's replacement. Set only on a deprecated
+    /// row whose cited vendor page names one. Nothing switches to it.
+    pub successor: Option<&'static str>,
+    /// Whether the model is served on the subscription broker's priority service tier when a
+    /// call asks for it. Set only for a model that `PRIORITY_TIER` lists. Every other model,
+    /// and a model with no row, is false.
+    pub priority_tier: bool,
 }
 
 struct Row {
@@ -61,6 +74,30 @@ const fn row(
             context_window_tokens,
             max_output_tokens,
             lifecycle: Some(lifecycle),
+            successor: None,
+            priority_tier: false,
+        },
+    }
+}
+
+/// A deprecated row that names the model the vendor recommends in its place. Only a row
+/// whose cited vendor page names `successor` as the replacement may use this.
+const fn deprecated_row(
+    family: Family,
+    model: &'static str,
+    context_window_tokens: u32,
+    max_output_tokens: u32,
+    successor: &'static str,
+) -> Row {
+    Row {
+        family,
+        model,
+        limits: RecordLimits {
+            context_window_tokens,
+            max_output_tokens,
+            lifecycle: Some(Lifecycle::Deprecated),
+            successor: Some(successor),
+            priority_tier: false,
         },
     }
 }
@@ -107,19 +144,20 @@ const ROWS: &[Row] = &[
         Lifecycle::Ga,
     ),
     // Claude Sonnet 4.5: 200K context and 64K output. Deprecated on 2026-09-30, retiring
-    // on 2026-11-30.
+    // on 2026-11-30. The deprecation history names claude-sonnet-5-5 as the recommended
+    // replacement (read 2026-11-10).
     // https://platform.claude.com/docs/en/models/sonnet-4-5/overview
     // https://platform.claude.com/docs/en/about-claude/model-deprecations
-    row(
+    deprecated_row(
         Family::Anthropic,
         "claude-sonnet-4-5",
         200_000,
         64_000,
-        Lifecycle::Deprecated,
+        "claude-sonnet-5-5",
     ),
     // Gemini 2.5 Pro on Vertex: 1,048,576 input and 65,536 output tokens. The page
     // announces its retirement on 2026-10-20 and says the model may still answer on the
-    // Gemini API afterwards.
+    // Gemini API afterwards. It names no replacement, so the row carries none.
     // https://docs.cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/2-5-pro
     row(
         Family::Gemini,
@@ -128,7 +166,8 @@ const ROWS: &[Row] = &[
         65_536,
         Lifecycle::Deprecated,
     ),
-    // Gemini 2.5 Flash: the same numbers and the same announced retirement.
+    // Gemini 2.5 Flash: the same numbers, the same announced retirement and no named
+    // replacement.
     // https://docs.cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/2-5-flash
     row(
         Family::Gemini,
@@ -149,10 +188,81 @@ pub fn declared_record(family: Family, model: &str) -> Option<RecordLimits> {
         .map(|entry| entry.limits)
 }
 
+/// The models the Codex adapter serves on its priority service tier, as its own list has always
+/// stated them. It is not a vendor limit: no vendor page is cited for it, so a listed model
+/// carries no token numbers and no lifecycle, and only the tier is declared.
+const PRIORITY_TIER: &[(Family, &str)] = &[
+    (Family::Codex, "gpt-6-astra"),
+    (Family::Codex, "gpt-5.6-sol"),
+    (Family::Codex, "gpt-5.6-terra"),
+    (Family::Codex, "gpt-5.6-luna"),
+    (Family::Codex, "gpt-5.5"),
+];
+
+/// Whether `PRIORITY_TIER` lists `model` under `family`. The match is exact, as the adapter's
+/// own list was, so a model is promoted only when its id is spelled as the list spells it.
+#[must_use]
+pub fn priority_tier_listed(family: Family, model: &str) -> bool {
+    PRIORITY_TIER
+        .iter()
+        .any(|(listed, id)| *listed == family && *id == model)
+}
+
+/// A retired model id and the model the request rewrite answers it with.
+struct Retired {
+    family: Family,
+    model: &'static str,
+    successor: &'static str,
+}
+
+/// The retired ids the request rewrite answers, and the model each one is answered by.
+/// Read only by [`retired_successor`]. A deprecated model still answers as pinned, so it is
+/// never listed here, and a retired id is never advertised, so it carries no row in `ROWS`.
+const RETIRED: &[Retired] = &[
+    // claude-opus-4-20250514, retired 2026-06-15. The vendor page names claude-opus-4-8 as its
+    // replacement. The rewrite keeps claude-opus-5-5 as shipped, an open owner decision.
+    // https://platform.claude.com/docs/en/about-claude/model-deprecations
+    Retired {
+        family: Family::Anthropic,
+        model: "claude-opus-4-20250514",
+        successor: "claude-opus-5-5",
+    },
+    // claude-sonnet-4-20250514, retired 2026-06-15. The vendor page names claude-sonnet-5-5.
+    // https://platform.claude.com/docs/en/about-claude/model-deprecations
+    Retired {
+        family: Family::Anthropic,
+        model: "claude-sonnet-4-20250514",
+        successor: "claude-sonnet-5-5",
+    },
+    // claude-3-5-haiku-20241022, retired 2026-02-19. The vendor page names
+    // claude-haiku-4-5-20251001 as its replacement. The rewrite keeps claude-haiku-5-5 as
+    // shipped, an open owner decision.
+    // https://platform.claude.com/docs/en/about-claude/model-deprecations
+    Retired {
+        family: Family::Anthropic,
+        model: "claude-3-5-haiku-20241022",
+        successor: "claude-haiku-5-5",
+    },
+];
+
+/// The model a retired id is answered by, read the way [`declared_record`] reads its id:
+/// matched exactly, ignoring case and surrounding whitespace, so a date-stamped or unknown
+/// id is not guessed at. A guess would send a thread to a model its owner did not pick.
+/// `None` for every id that is not retired.
+#[must_use]
+pub fn retired_successor(family: Family, model: &str) -> Option<&'static str> {
+    let model = model.trim().to_ascii_lowercase();
+    RETIRED
+        .iter()
+        .find(|entry| entry.family == family && entry.model == model)
+        .map(|entry| entry.successor)
+}
+
 /// What a provider advertises for `model`: the declared record, with each token limit
 /// lowered to the provider's own ceiling when that ceiling is lower. A zero ceiling
 /// declares none. A deployment name resolves to its base model through `aliases`
-/// first, as it does for the effort table.
+/// first, as it does for the effort table. A model that `PRIORITY_TIER` lists keeps
+/// its `priority_tier` even with no row; its limits stay unknown.
 #[must_use]
 pub fn advertised(
     family: Family,
@@ -161,13 +271,20 @@ pub fn advertised(
     ceiling_context_tokens: u32,
     ceiling_output_tokens: u32,
 ) -> RecordLimits {
-    let Some(declared) = declared_record(family, &aliases.base_model(model)) else {
-        return RecordLimits::default();
+    let base = aliases.base_model(model);
+    let priority_tier = priority_tier_listed(family, &base);
+    let Some(declared) = declared_record(family, &base) else {
+        return RecordLimits {
+            priority_tier,
+            ..RecordLimits::default()
+        };
     };
     RecordLimits {
         context_window_tokens: bounded(declared.context_window_tokens, ceiling_context_tokens),
         max_output_tokens: bounded(declared.max_output_tokens, ceiling_output_tokens),
         lifecycle: declared.lifecycle,
+        successor: declared.successor,
+        priority_tier,
     }
 }
 
@@ -259,7 +376,8 @@ mod tests {
         let lines: Vec<&str> = source.lines().collect();
         let mut rows = 0;
         for (index, line) in lines.iter().enumerate() {
-            if !line.trim_start().starts_with("row(") {
+            let call = line.trim_start();
+            if !(call.starts_with("row(") || call.starts_with("deprecated_row(")) {
                 continue;
             }
             rows += 1;
@@ -270,6 +388,10 @@ mod tests {
                 .any(|above| above.contains("https://"));
             assert!(cited, "a row without a vendor citation above it: {line}");
         }
-        assert_eq!(rows, ROWS.len(), "every row is written as a `row(` call");
+        assert_eq!(
+            rows,
+            ROWS.len(),
+            "every row is written as a `row(` or `deprecated_row(` call"
+        );
     }
 }

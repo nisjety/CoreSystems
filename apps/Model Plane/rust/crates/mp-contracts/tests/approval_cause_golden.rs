@@ -79,7 +79,7 @@ fn approval_cause_round_trips_and_unknown_codes_degrade() {
 
     // A creator newer than this reader degrades, and cannot widen the scopes it offers.
     let (degraded, known) = normalized(ApprovalCause {
-        code: "tainted_egress".to_owned(),
+        code: "tainted_egress_retired".to_owned(),
         scope_options: vec!["thread".to_owned(), "run".to_owned()],
         ..ApprovalCause::default()
     });

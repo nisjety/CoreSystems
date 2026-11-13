@@ -10,6 +10,7 @@ import { HttpException, Logger } from '@nestjs/common';
 // the NATS audit publisher are doubles.
 const mockVerifyApiKey = jest.fn();
 const mockResolveCanonicalTokenContext = jest.fn();
+const mockIsUserBanned = jest.fn();
 const mockResolveInteractiveRetentionPosture = jest.fn();
 jest.mock('./auth', () => ({
   auth: {
@@ -21,6 +22,7 @@ jest.mock('./auth', () => ({
 }));
 jest.mock('./plane-token-membership', () => ({
   resolveCanonicalTokenContext: mockResolveCanonicalTokenContext,
+  isUserBanned: mockIsUserBanned,
 }));
 // Only the org posture lookup is replaced; the 503 error class stays real so
 // the controller's `instanceof` check is exercised.
@@ -479,6 +481,54 @@ describe('POST /api/:audience/api-key-exchange (INNH-10 CP-1)', () => {
     const error = await rejection(exchange());
     expect(error.getStatus()).toBe(503);
     expect(auditEvents()).toEqual([]);
+  });
+
+  describe('banned owner (F-f08-12)', () => {
+    it('a banned owner who is still a member is refused 403 with a content-free audit', async () => {
+      mockIsUserBanned.mockReset().mockResolvedValue(true);
+      const error = await rejection(exchange());
+      expect(error.getStatus()).toBe(403);
+      expect(codeOf(error)).toBe('api_key_owner_banned');
+      expect(JSON.stringify(error.getResponse())).not.toContain('eyJ');
+      expect(mockIsUserBanned).toHaveBeenCalledWith(OWNER);
+      expect(mockResolveInteractiveRetentionPosture).not.toHaveBeenCalled();
+      expect(auditEvents()).toEqual([API_KEY_TOKEN_DENIED_EVENT]);
+      const [, payload] = audit.publishAuditDurable.mock.calls[0] as [
+        string,
+        { details: Record<string, unknown> },
+      ];
+      expect(payload.details).toEqual(
+        expect.objectContaining({
+          key_id: KEY_ID,
+          reason: 'api_key_owner_banned',
+        }),
+      );
+      expect(JSON.stringify(payload)).not.toContain(API_KEY);
+      mockIsUserBanned.mockReset().mockResolvedValue(false);
+    });
+
+    it('not a member wins over banned: the existing denial order is unchanged', async () => {
+      mockIsUserBanned.mockReset().mockResolvedValue(true);
+      mockResolveCanonicalTokenContext.mockResolvedValue(null);
+      expect(codeOf(await rejection(exchange()))).toBe('api_key_owner_not_member');
+      mockVerifyApiKey.mockResolvedValue(verifiedKey({ enabled: false }));
+      expect(codeOf(await rejection(exchange()))).toBe('api_key_disabled');
+      mockIsUserBanned.mockReset().mockResolvedValue(false);
+    });
+
+    it('an owner who is not banned still gets a token', async () => {
+      mockIsUserBanned.mockReset().mockResolvedValue(false);
+      const bundle = await exchange();
+      expect(payloadOf(bundle.token).acting_user_id).toBe(OWNER);
+    });
+
+    it('the ban lookup failing is a 503 and no token, never a pass', async () => {
+      mockIsUserBanned.mockReset().mockRejectedValue(new Error('db down'));
+      const error = await rejection(exchange());
+      expect(error.getStatus()).toBe(503);
+      expect(auditEvents()).toEqual([]);
+      mockIsUserBanned.mockReset().mockResolvedValue(false);
+    });
   });
 
   it('retention posture unavailable: 503 and no token', async () => {
@@ -1059,6 +1109,42 @@ describe('POST /api/:audience/api-key-exchange (EP-12 S2, Agent API audiences)',
       const refused = await refusalOf(exchange());
       expect(refused.status).toBe(403);
       expect(refused.body.error.details).toEqual({ reason });
+    });
+
+    describe('banned owner (F-f08-12)', () => {
+      afterEach(() => {
+        mockIsUserBanned.mockReset().mockResolvedValue(false);
+      });
+
+      it('a banned owner who is still a member is refused 403 owner_banned, no token', async () => {
+        mockIsUserBanned.mockReset().mockResolvedValue(true);
+        const refused = await refusalOf(exchange());
+        expect(refused.status).toBe(403);
+        expect(refused.body.error.details).toEqual({ reason: 'owner_banned' });
+        expect(JSON.stringify(refused)).not.toContain('eyJ');
+        expect(mockIsUserBanned).toHaveBeenCalledWith('user-a');
+        expect(mockResolveInteractiveRetentionPosture).not.toHaveBeenCalled();
+      });
+
+      it('not a member still wins over banned (order unchanged)', async () => {
+        mockIsUserBanned.mockReset().mockResolvedValue(true);
+        mockResolveCanonicalTokenContext.mockResolvedValue(null);
+        const refused = await refusalOf(exchange());
+        expect(refused.body.error.details).toEqual({ reason: 'owner_not_member' });
+      });
+
+      it('the ban lookup failing is 503 membership_unavailable', async () => {
+        mockIsUserBanned.mockReset().mockRejectedValue(new Error('db down'));
+        const refused = await refusalOf(exchange());
+        expect(refused.status).toBe(503);
+        expect(JSON.stringify(refused.body)).toContain('membership_unavailable');
+      });
+
+      it('an owner who is not banned still gets a token', async () => {
+        mockIsUserBanned.mockReset().mockResolvedValue(false);
+        const minted = await exchange();
+        expect(typeof minted.data.token).toBe('string');
+      });
     });
 
     it('still refuses when the refusal cannot be audited', async () => {

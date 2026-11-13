@@ -56,6 +56,17 @@ services:
       EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:?EXECUTION_CORE_AUTH_AUDIENCE is required}
       MODEL_GATEWAY_SERVICE_API_KEY: ${MODEL_GATEWAY_SERVICE_API_KEY:?MODEL_GATEWAY_SERVICE_API_KEY is required}
       MODEL_GATEWAY_MANAGED_START_KEY_SECRET: ${MODEL_GATEWAY_MANAGED_START_KEY_SECRET:?MODEL_GATEWAY_MANAGED_START_KEY_SECRET is required}
+      # EP-7 goal judge (OD-58, R2-OD-58-a/c): explicit empty values until the
+      # goal-judge principal is minted and session-core accepts it (an empty ID
+      # falls back to model-gateway-goal-judge). Until then, with
+      # MODEL_GATEWAY_GOAL_JUDGE_ENABLED on, the judge-turn route answers 503
+      # goal_judge_unavailable. That switch is not turned on in production yet.
+      MODEL_GATEWAY_GOAL_JUDGE_SERVICE_ID: ""
+      MODEL_GATEWAY_GOAL_JUDGE_SERVICE_API_KEY: ""
+      # C-05 (D2-769, D2-774): the one switch for the Space listing refusal, the same name execution-core reads.
+      # Interpolated, not pinned, so a deployment turns it on in its runtime environment; it must be on before
+      # MODEL_ACTION_ADMISSION=table with Spaces. Unset is off; only the literal "true" enables it.
+      OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-false}
   session-core:
     <<: *hardened-service
     ports: !reset []
@@ -102,6 +113,9 @@ services:
       EXECUTION_CORE_SPACE_APPROVAL_GATE: "off"
       # Quarantine-and-release of flagged tool output (WS10-S8): off in production.
       EXECUTION_CORE_QUARANTINE_MODE: "off"
+      # C-05 (D2-769): the Space listing refusal for a Do run, the same switch model-gateway reads. Interpolated, not
+      # pinned, so a deployment turns it on in its runtime environment. Unset is off; only the literal "true" enables it.
+      OWNER_LIST_SPACE_REFUSE: ${OWNER_LIST_SPACE_REFUSE:-false}
       AUTH_CORE_JWKS_URL: ${AUTH_CORE_JWKS_URL:?AUTH_CORE_JWKS_URL is required}
       AUTH_CORE_ISSUER: ${AUTH_CORE_ISSUER:?AUTH_CORE_ISSUER is required}
       EXECUTION_CORE_AUTH_AUDIENCE: ${EXECUTION_CORE_AUTH_AUDIENCE:?EXECUTION_CORE_AUTH_AUDIENCE is required}

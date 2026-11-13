@@ -24,7 +24,8 @@ import (
 
 // Origin records how a skill came to exist. It is load-bearing: the
 // auto-curator must never prune or overwrite human-authored skills with
-// machine-generated ones.
+// machine-generated ones. The values mirror the origin CHECK on session-core's
+// agent_skills (migrations 0006 and 0116).
 type Origin string
 
 const (
@@ -32,6 +33,10 @@ const (
 	OriginUser Origin = "user"
 	// OriginBackgroundReview marks a skill proposed by the post-session loop.
 	OriginBackgroundReview Origin = "background_review"
+	// OriginTeach marks a skill a person taught the agent (Teach mode,
+	// F-t3-081). Like a background-review skill it is an owner-held proposal:
+	// disabled until the owner accepts it in the learning inbox.
+	OriginTeach Origin = "teach"
 )
 
 // MinConfidence is the floor below which review candidates are discarded. The

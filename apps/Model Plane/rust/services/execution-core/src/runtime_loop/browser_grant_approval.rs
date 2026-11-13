@@ -131,6 +131,7 @@ mod tests {
             side_effect_class: String::new(),
             approval_floor: String::new(),
             capability_id: "cap.browser.open".to_owned(),
+            tool_digest: String::new(),
             reason: "high risk".to_owned(),
             ask_evidence_verified: true,
         }

@@ -34,14 +34,15 @@ export function documentWarningMessage(warning: { code: string; message: string 
 export function documentErrorMessage(error: unknown, tr: Tr, fallback: { no: string; en: string }): string {
   if (!(error instanceof ApiError)) return translateApiError(error, tr, fallback)
   const code = error.code?.toLowerCase() ?? ''
+  const details = Array.isArray(error.details) ? null : error.details
   if (error.status === 501) {
-    if (code === 'isolation_required' || error.details?.reason === 'isolation_required') {
+    if (code === 'isolation_required' || details?.reason === 'isolation_required') {
       return tr(
         'Quarry leser ikke dokumenter på denne installasjonen ennå, fordi lesingen ikke er isolert.',
         'Quarry does not read documents on this installation yet, because reading is not isolated.',
       )
     }
-    if (error.details?.reason === 'parse_route_disabled') {
+    if (details?.reason === 'parse_route_disabled') {
       return tr(
         'Dokumentlesing er ikke slått på på Quarry. Slå på QUARRY_EDGE__PARSE_ROUTE der, og prøv igjen.',
         'Document reading is not switched on in Quarry. Turn on QUARRY_EDGE__PARSE_ROUTE there, and try again.',

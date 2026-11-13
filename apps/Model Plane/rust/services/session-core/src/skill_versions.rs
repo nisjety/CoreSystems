@@ -7,7 +7,8 @@
 //! the Skills page's history from the same table over HTTP.
 //!
 //! Visibility is `list_agent_skills`'s rule: org skills, the reader's own, and accepted skills
-//! shared with the reader. A service caller reads as the user it names in `for_user_id`, and as no
+//! shared with the reader; a Space skill's history is not readable here at all (see
+//! [`VISIBLE_SKILL_SQL`]). A service caller reads as the user it names in `for_user_id`, and as no
 //! user otherwise; a user caller always reads as itself. Skill text is org configuration, not
 //! conversation content, so a zero-retention credential may read it as it may list skills. The
 //! switch is [`ENABLED_ENV`], default off; while it is off every RPC answers `unavailable`
@@ -39,11 +40,21 @@ const MAX_SKILL_ID_CHARS: usize = 128;
 
 /// The visibility predicate of `list_agent_skills`, over `agent_skills` with `$1` the org, `$2` the
 /// skill and `$3` the reader. A proposal stays private to its owner even if a share was written on it.
+///
+/// A Space skill (scope `space`, migration 0111) has an empty owner and is held by its Space, so it
+/// is never matched through the owner or share branches, and an empty reader (a service caller that
+/// names no `for_user_id`) never matches an owner: `owner_user_id = ''` would otherwise match every
+/// Space row. An empty reader still sees org skills through the first branch and nothing else.
+/// A person's read of their own Space's skill history is not offered here: it stays refused (the
+/// RPCs answer the typed not-found) until a Space-membership rule exists, and that rule belongs to
+/// the Space owner, not to this query.
 const VISIBLE_SKILL_SQL: &str = "SELECT EXISTS (
         SELECT 1 FROM agent_skills
         WHERE id = $2 AND org_id = $1
-          AND (scope = 'org' OR owner_user_id = $3
-               OR (shared_with ? $3 AND review_state = 'accepted')))";
+          AND (scope = 'org'
+               OR (scope <> 'space' AND $3 <> '' AND owner_user_id = $3)
+               OR ($3 <> '' AND scope <> 'space' AND shared_with ? $3
+                   AND review_state = 'accepted')))";
 
 /// Read where it is used: the RPCs hold no switch of their own.
 pub(crate) fn skill_versions_enabled() -> bool {
@@ -150,7 +161,7 @@ struct VersionBody {
     trigger_keywords: Vec<String>,
     trigger_file_patterns: Vec<String>,
     tool_restrictions: Vec<String>,
-    /// Migration 0116's conditional key: present only in the body of a version cut while the skill
+    /// Migration 0130's conditional key: present only in the body of a version cut while the skill
     /// had URL patterns, so every older body (and every version of a skill without patterns)
     /// reads as an empty list.
     url_patterns: Vec<String>,
@@ -1006,3 +1017,8 @@ mod tests {
         assert_eq!(refused.message(), DISABLED);
     }
 }
+
+/// F-f10-16: a Space skill's history is never read through an owner match.
+#[cfg(test)]
+#[path = "skill_versions_space_tests.rs"]
+mod space_tests;

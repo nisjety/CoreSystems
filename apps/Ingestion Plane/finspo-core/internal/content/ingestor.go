@@ -33,12 +33,20 @@ type DocumentSink interface {
 	CreateDocument(ctx context.Context, orgID string, input dataplane.CreateDocumentInput) error
 }
 
+// SensitivityLabelReader reads the Microsoft Purview sensitivity label ids applied
+// to a DriveItem. Implemented by *sharepoint.ContentClient.
+type SensitivityLabelReader interface {
+	ExtractSensitivityLabels(ctx context.Context, organizationID, driveID, itemID string) ([]string, error)
+}
+
 // Ingestor turns one synced file item into a Data Plane document.
 type Ingestor struct {
 	fetcher        ContentFetcher
 	docs           DocumentSink
 	logger         zerolog.Logger
 	classification string
+	labels         SensitivityLabelReader
+	restricted     map[string]bool
 }
 
 type Config struct {
@@ -50,6 +58,12 @@ type Config struct {
 	// "internal" is Data Plane v2's customer-private tier. Set "restricted" for
 	// libraries that must be excluded from reject-mode retrieval.
 	ZDRClassification string
+	// SensitivityLabels, when non-nil, turns on the Purview label check: a file
+	// carrying one of RestrictedLabelIDs is forwarded private (NarrowForLabels).
+	// Nil leaves visibility as ClassifyVisibility set it.
+	SensitivityLabels SensitivityLabelReader
+	// RestrictedLabelIDs are Purview sensitivity label GUIDs. Matching ignores case.
+	RestrictedLabelIDs []string
 }
 
 func NewIngestor(cfg Config) *Ingestor {
@@ -62,7 +76,21 @@ func NewIngestor(cfg Config) *Ingestor {
 		docs:           cfg.Docs,
 		logger:         cfg.Logger,
 		classification: classification,
+		labels:         cfg.SensitivityLabels,
+		restricted:     restrictedLabelSet(cfg.RestrictedLabelIDs),
 	}
+}
+
+// restrictedLabelSet indexes the configured restricted label ids by their
+// lower-case form, which is how NarrowForLabels looks them up.
+func restrictedLabelSet(ids []string) map[string]bool {
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id = strings.ToLower(strings.TrimSpace(id)); id != "" {
+			set[id] = true
+		}
+	}
+	return set
 }
 
 // IngestItemContent downloads, extracts, and forwards one item's content.
@@ -71,6 +99,10 @@ func NewIngestor(cfg Config) *Ingestor {
 // engine; it decides the forwarded document's Data Plane visibility (see
 // ClassifyVisibility). It is passed in rather than re-fetched so this costs no
 // extra Graph call, and an empty slice fails closed to `private`.
+//
+// When sensitivity-label narrowing is on, an org-visible item whose labels include
+// a restricted one, or whose labels cannot be read, is forwarded `private` as well
+// (see NarrowForLabels).
 //
 // It is best-effort at the call site: the returned error is logged by the sync
 // engine but never aborts the page, so one unreadable file cannot stall a whole
@@ -118,6 +150,11 @@ func (i *Ingestor) IngestItemContent(
 	}
 
 	visibility := ClassifyVisibility(permissions)
+	// A label can only narrow an org-visible item, so a private one skips the
+	// Graph label call.
+	if i.labels != nil && visibility == VisibilityOrg {
+		visibility = i.narrowByLabels(ctx, source, item, visibility)
+	}
 	input := dataplane.CreateDocumentInput{
 		Source:            "sharepoint",
 		Type:              "sharepoint_file",
@@ -152,6 +189,32 @@ func (i *Ingestor) IngestItemContent(
 		ModifiedAt: item.ModifiedAt,
 	}
 	return i.docs.CreateDocument(ctx, source.OrganizationID, input)
+}
+
+// narrowByLabels reads the item's sensitivity labels and returns visibility
+// narrowed by them; a failed read yields private. Only the label count and the
+// outcome are logged, never label names, label ids or content.
+func (i *Ingestor) narrowByLabels(ctx context.Context, source store.Source, item store.Item, visibility string) string {
+	labelIDs, err := i.labels.ExtractSensitivityLabels(ctx, source.OrganizationID, source.DriveID, item.ItemID)
+	narrowed := NarrowForLabels(visibility, labelIDs, i.restricted, err)
+
+	outcome := "unchanged"
+	switch {
+	case err != nil:
+		outcome = "read_failed"
+	case narrowed != visibility:
+		outcome = "narrowed"
+	}
+	event := i.logger.Debug()
+	if outcome != "unchanged" {
+		event = i.logger.Info()
+	}
+	event.Str("item_id", item.ItemID).
+		Int("label_count", len(labelIDs)).
+		Str("label_outcome", outcome).
+		Str("visibility", narrowed).
+		Msg("sensitivity label visibility check")
+	return narrowed
 }
 
 func documentTitle(item store.Item) string {

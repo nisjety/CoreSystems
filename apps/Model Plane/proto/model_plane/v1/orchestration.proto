@@ -76,6 +76,14 @@ service OrchestrationCoreService {
   // delivery worker. Caller-scoped (user bearer), not service-only.
   rpc ConsumeApproval(ConsumeApprovalRequest) returns (ConsumeApprovalResponse);
 
+  // Read, without consuming, the tools and authority a DENIED browser_human_assist pause
+  // retained, so a skipped site's continuation runs under the pause's authority and never
+  // under the /continue placeholders. Read-only: it claims, spends and stores nothing, and
+  // the denied approval stays as it is. Same caller scope, run, org and owner checks as
+  // ConsumeApproval. Refused typed for a zero-retention or waived run; any state other than
+  // a denied, unconsumed browser_human_assist approval is FAILED_PRECONDITION.
+  rpc GetSkippedAssistAuthority(GetSkippedAssistAuthorityRequest) returns (GetSkippedAssistAuthorityResponse);
+
   // Claim the granted once-approval for one exact action, so the agent's retry of a
   // non-resumable call passes the Space gate exactly once (build plan WS10 S3). The
   // caller is the run owner's session; the claim is one atomic update, so two
@@ -636,6 +644,12 @@ message ApprovalCause {
   // EP-1 design reserved: `host_class` took 11 in the mp-w2w3 merge. WS21-S6's
   // site-consent cause reuses this field.
   string host = 15;
+
+  // The registry capability the paused MCP tool is bound to, as execution-core resolved it from
+  // its verified registry binding, never from model text. Set only for a pinned MCP tool whose
+  // pause is the high-risk capability check alone, the one pause a confirmed Always rule (a
+  // capability-core user-scope allow) lifts (WS13 S7, D-WS13-8). Empty otherwise.
+  string capability_id = 16;
 }
 
 // A durable todo record.
@@ -1205,6 +1219,19 @@ message ApprovedAuthority {
   // A digest of the authority fields (mp_contracts::loop_fold::Authority::digest).
   // A continuation recomputes it and refuses a snapshot that does not match.
   string digest = 10;
+  // A coordinator run's complete offer (RunAgentRequest.coordinator), the tools it was offered
+  // before coordinator mode narrowed `tools`. Empty for every other run and for a pause whose
+  // snapshot would not fit with it. A continuation recomputes the coordinator's narrowing from
+  // it; it never widens `tools`, and it is not covered by `digest`.
+  repeated ApprovedTool coordinator_tools = 11;
+  // The connection ids the paused turn selected (RunAgentRequest.connector_scope). Empty when the
+  // turn selected none, or when the descriptor predates the field. A stage-1 continuation runs under
+  // this selection or a narrower one; it is not covered by `digest`.
+  repeated string connector_scope = 12;
+  // Whether the paused turn's screening taint was marked (a connected-app read came back flagged).
+  // Absent when the descriptor predates the field; a continuation then holds the taint as marked.
+  // Not covered by `digest`.
+  optional bool connector_taint = 13;
 }
 
 // One offered tool, with the definition the model was given.
@@ -1215,6 +1242,30 @@ message ApprovedTool {
   string description = 2;
   // The JSON Schema of the tool's arguments.
   string parameters_json = 3;
+}
+
+// GetSkippedAssistAuthority reads the authority a denied browser_human_assist pause retained.
+// Scope comes from the verified caller; the ids only select.
+message GetSkippedAssistAuthorityRequest {
+  // The denied approval whose retained authority is read.
+  string approval_id = 1;
+  // Server-authoritative org scope.
+  string org_id = 2;
+  // The run the approval gates; must match the approval.
+  string run_id = 3;
+  // The step the approval gated; must match the retained descriptor when set.
+  string step_id = 4;
+  // An opaque token of the continuing segment. Required, as for ConsumeApproval; a read
+  // stores nothing, so it is not kept.
+  string claim_token = 5;
+}
+
+// The authority a denied browser_human_assist pause retained.
+message GetSkippedAssistAuthorityResponse {
+  // The tools and authority the pause was raised under, exactly as ConsumeApproval returns
+  // them for a granted approval. Always set: a denied approval that retained no snapshot is
+  // refused as FAILED_PRECONDITION approval_not_resumable instead.
+  ApprovedAuthority authority = 1;
 }
 
 message CreateApprovalResponse {
@@ -2390,6 +2441,11 @@ message UseApprovalScopeGrantRequest {
 
   // The call's declared effect class under the run, from the signed capability decision.
   string effect_class = 7;
+
+  // sha256 of the pinned MCP definition the call is bound to, from the verified capability
+  // decision and registry binding; empty for a built-in tool. A grant matches only the digest it
+  // was created with (D2-1123).
+  string tool_digest = 8;
 }
 
 // Result of UseApprovalScopeGrantRequest: the grant that released the call, if any.
@@ -2426,4 +2482,123 @@ message RevokeApprovalScopeGrantRequest {
 message RevokeApprovalScopeGrantResponse {
   // The grant as it stands after the revocation.
   ApprovalScopeGrant grant = 1;
+}
+
+// --- Approval "Always" rule proposals (build plan WS13 S7) ---
+
+// Where an "Always" rule proposal stands.
+enum ApprovalRuleProposalState {
+  // Not set. Never stored.
+  APPROVAL_RULE_PROPOSAL_STATE_UNSPECIFIED = 0;
+  // Offered to the owner and not yet acted on.
+  APPROVAL_RULE_PROPOSAL_STATE_PROPOSED = 1;
+  // Claimed by a confirm in flight: the rule is being written in capability-core.
+  APPROVAL_RULE_PROPOSAL_STATE_CONFIRMING = 2;
+  // The owner confirmed it and the rule was written; the proposal records the policy id.
+  APPROVAL_RULE_PROPOSAL_STATE_CONFIRMED = 3;
+  // The owner dismissed it.
+  APPROVAL_RULE_PROPOSAL_STATE_DISMISSED = 4;
+}
+
+// The owner's "Always allow this tool" proposals. Served by session-core, which owns the
+// proposals. It is its own service rather than a method of OrchestrationCoreService, as
+// ApprovalScopeGrantService is, so the implementations of that service, and their test doubles,
+// need no change. The RPCs act for the verified owner only and are not model-executable. A confirm
+// is orchestrated by model-gateway, which writes the rule in capability-core and hands back the
+// policy id.
+service ApprovalRuleProposalService {
+  // The verified caller's own open proposals (proposed, or held by a confirm), oldest first.
+  rpc ListApprovalRuleProposals(ListApprovalRuleProposalsRequest)
+      returns (ListApprovalRuleProposalsResponse);
+
+  // One of the verified caller's own proposals, in any state.
+  rpc GetApprovalRuleProposal(GetApprovalRuleProposalRequest)
+      returns (GetApprovalRuleProposalResponse);
+
+  // Moves one of the verified caller's proposals to CONFIRMING, CONFIRMED or DISMISSED. CONFIRMING
+  // and CONFIRMED need APPROVAL_RULE_PROPOSALS_ENABLED; DISMISSED always works, so a person can
+  // still remove a proposal made while the switch was on. A ZDR or waived caller is refused.
+  rpc ResolveApprovalRuleProposal(ResolveApprovalRuleProposalRequest)
+      returns (ResolveApprovalRuleProposalResponse);
+}
+
+// An "Always" rule proposal as its owner sees it. It carries ids, a digest and closed words,
+// never an argument value.
+message ApprovalRuleProposal {
+  // Proposal identifier.
+  string id = 1;
+
+  // The tool the proposed rule would allow.
+  string tool_name = 2;
+
+  // The pinned definition digest of an MCP tool, or empty for a built-in tool.
+  string tool_digest = 3;
+
+  // The capability-core id a confirm writes the rule under. Empty for a proposal that predates
+  // the capability field; it cannot be confirmed.
+  string capability_id = 4;
+
+  // Where the proposal stands.
+  ApprovalRuleProposalState state = 5;
+
+  // The approval whose decision raised the proposal.
+  string created_from_approval_id = 6;
+
+  // When the proposal was made.
+  google.protobuf.Timestamp created_at = 7;
+
+  // When it was confirmed or dismissed. Unset while it is open.
+  google.protobuf.Timestamp resolved_at = 8;
+
+  // The capability-core policy a confirm wrote. Empty until the proposal is confirmed.
+  string policy_id = 9;
+}
+
+// Request to list the caller's open rule proposals.
+message ListApprovalRuleProposalsRequest {
+  // Must equal the caller's verified org.
+  string org_id = 1;
+}
+
+// Result of ListApprovalRuleProposalsRequest.
+message ListApprovalRuleProposalsResponse {
+  // The caller's open proposals, oldest first.
+  repeated ApprovalRuleProposal proposals = 1;
+}
+
+// Request to read one rule proposal.
+message GetApprovalRuleProposalRequest {
+  // Must equal the caller's verified org.
+  string org_id = 1;
+
+  // The proposal to read.
+  string proposal_id = 2;
+}
+
+// Result of GetApprovalRuleProposalRequest.
+message GetApprovalRuleProposalResponse {
+  // The proposal.
+  ApprovalRuleProposal proposal = 1;
+}
+
+// Request to resolve one rule proposal.
+message ResolveApprovalRuleProposalRequest {
+  // Must equal the caller's verified org.
+  string org_id = 1;
+
+  // The proposal to resolve.
+  string proposal_id = 2;
+
+  // CONFIRMING (a confirm claims the proposal), CONFIRMED (the rule was written) or DISMISSED.
+  ApprovalRuleProposalState resolution = 3;
+
+  // The capability-core policy the confirm wrote. Required with CONFIRMED and empty otherwise.
+  string policy_id = 4;
+}
+
+// Result of ResolveApprovalRuleProposalRequest.
+message ResolveApprovalRuleProposalResponse {
+  // The proposal as it stands after the resolution. A replay of a resolution that already
+  // happened returns it unchanged.
+  ApprovalRuleProposal proposal = 1;
 }

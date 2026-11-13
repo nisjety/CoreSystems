@@ -65,6 +65,18 @@ fn expected() -> Vec<(&'static str, Failure)> {
             Failure::ResidencyUnavailable,
         ),
         ("provider_tier_unavailable", Failure::TierUnavailable),
+        // A model the platform catalogue hides, and an image call no configured provider serves,
+        // are NOT_FOUND: terminal, and no kind the client names, so they are read by code.
+        ("provider_model_hidden", Failure::Other),
+        ("provider_image_model_unavailable", Failure::Other),
+        // Every eligible provider is benched: UNAVAILABLE with the soonest end of a bench as the
+        // retry-after trailer, so a wait of exactly that time, by code.
+        (
+            "provider_providers_benched",
+            Failure::Transient {
+                retry_after: ms(30_000),
+            },
+        ),
         (
             "subscription_usage_limit_with_timing",
             Failure::RateLimited {
@@ -279,13 +291,17 @@ fn every_kind_the_golden_lists_is_one_the_client_has_met() {
     .map(str::to_owned)
     .collect();
     // The kinds the client does not name are decoded by their code, on purpose:
-    // the three subscription refusals other than the usage limit and the two model entitlement kinds.
+    // the three subscription refusals other than the usage limit, the two model entitlement kinds,
+    // the hidden model, the unserved image model and the benched providers.
     let by_code_only: BTreeSet<String> = listed.difference(&named_by_the_client).cloned().collect();
     assert_eq!(
         by_code_only,
         [
+            "image_model_unavailable",
             "model_entitlement_unavailable",
+            "model_hidden",
             "model_not_entitled",
+            "providers_benched",
             "subscription_bad_request",
             "subscription_reauth_required",
             "subscription_upstream_unavailable"

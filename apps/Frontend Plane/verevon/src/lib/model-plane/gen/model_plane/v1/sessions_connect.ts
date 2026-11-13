@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, BindGrantToRunRequest, BindGrantToRunResponse, ClaimLoopCheckpointRequest, ClaimLoopCheckpointResponse, ClaimScheduledStepRequest, ClaimScheduledStepResponse, CloseLoopCheckpointRequest, CloseLoopCheckpointResponse, CompactNowRequest, CompactNowResponse, CompleteDirectRunWithMessageRequest, CompleteDirectRunWithMessageResponse, CompleteStepRequest, CompleteStepResponse, CountWaivedRunsRequest, CountWaivedRunsResponse, CreateThreadRequest, CreateThreadResponse, DecideSkillProposalRequest, DecideSkillProposalResponse, DeleteSpaceThreadsRequest, DeleteSpaceThreadsResponse, DeleteThreadRequest, DeleteThreadResponse, DeleteThreadsRequest, DeleteThreadsResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, ForkThreadRequest, ForkThreadResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, GetThreadGrantRequest, GetThreadGrantResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListLearningLedgerRequest, ListLearningLedgerResponse, ListThreadsRequest, ListThreadsResponse, ListToolActionsRequest, ListToolActionsResponse, PrepareScheduledRunThreadRequest, PrepareScheduledRunThreadResponse, PrepareUserOwnedThreadRequest, PrepareUserOwnedThreadResponse, ReadThreadForReferenceRequest, ReadThreadForReferenceResponse, RecordRunContextRequest, RecordRunContextResponse, RecordRunOutputRequest, RecordRunOutputResponse, RecordScheduledRunResultRequest, RecordScheduledRunResultResponse, RecordScheduledStepReceiptRequest, RecordScheduledStepReceiptResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, ResolveMessageTargetRequest, ResolveMessageTargetResponse, ReviseMessageRequest, ReviseMessageResponse, SaveCheckpointRequest, SaveCheckpointResponse, SaveLoopCheckpointRequest, SaveLoopCheckpointResponse, SearchMessagesRequest, SearchMessagesResponse, SetActiveLeafRequest, SetActiveLeafResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, StartScheduledRunRequest, UndoLearningEntryRequest, UndoLearningEntryResponse, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
+import { AppendMessageRequest, AppendMessageResponse, ArchiveThreadRequest, ArchiveThreadResponse, ArchiveThreadsRequest, ArchiveThreadsResponse, BindGrantToRunRequest, BindGrantToRunResponse, ClaimLoopCheckpointRequest, ClaimLoopCheckpointResponse, ClaimScheduledStepRequest, ClaimScheduledStepResponse, CloseLoopCheckpointRequest, CloseLoopCheckpointResponse, CompactNowRequest, CompactNowResponse, CompleteDirectRunWithMessageRequest, CompleteDirectRunWithMessageResponse, CompleteStepRequest, CompleteStepResponse, CountWaivedRunsRequest, CountWaivedRunsResponse, CreateThreadRequest, CreateThreadResponse, DecideSkillProposalRequest, DecideSkillProposalResponse, DeleteSpaceThreadsRequest, DeleteSpaceThreadsResponse, DeleteThreadRequest, DeleteThreadResponse, DeleteThreadsRequest, DeleteThreadsResponse, FinalizeToolActionRequest, FinalizeToolActionResponse, ForkThreadRequest, ForkThreadResponse, GetContextAssemblyRequest, GetContextAssemblyResponse, GetThreadGrantRequest, GetThreadGrantResponse, HeartbeatManagedRunRequest, HeartbeatManagedRunResponse, IncrementPromoteUseRequest, IncrementPromoteUseResponse, ListAgentSkillsRequest, ListAgentSkillsResponse, ListConversationRequest, ListConversationResponse, ListLearningLedgerRequest, ListLearningLedgerResponse, ListThreadsRequest, ListThreadsResponse, ListToolActionsRequest, ListToolActionsResponse, PrepareScheduledRunThreadRequest, PrepareScheduledRunThreadResponse, PrepareUserOwnedThreadRequest, PrepareUserOwnedThreadResponse, ReadThreadForReferenceRequest, ReadThreadForReferenceResponse, RecordRunContextRequest, RecordRunContextResponse, RecordRunOutputRequest, RecordRunOutputResponse, RecordScheduledRunResultRequest, RecordScheduledRunResultResponse, RecordScheduledStepReceiptRequest, RecordScheduledStepReceiptResponse, RecordTerminalOutcomeRequest, RecordTerminalOutcomeResponse, ReplayThreadRequest, ReserveToolActionRequest, ReserveToolActionResponse, ResolveMessageTargetRequest, ResolveMessageTargetResponse, ReviseMessageRequest, ReviseMessageResponse, SaveCheckpointRequest, SaveCheckpointResponse, SaveLoopCheckpointRequest, SaveLoopCheckpointResponse, SearchMessagesRequest, SearchMessagesResponse, SetActiveLeafRequest, SetActiveLeafResponse, SetAgentSkillEnabledRequest, SetAgentSkillEnabledResponse, SetRunModeRequest, SetRunModeResponse, StartManagedRunRequest, StartManagedRunResponse, StartRunRequest, StartRunResponse, StartScheduledRunRequest, UndoLearningEntryRequest, UndoLearningEntryResponse, UpdateThreadPresentationRequest, UpdateThreadPresentationResponse, UpsertAgentSkillRequest, UpsertAgentSkillResponse } from "./sessions_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { Event } from "./events_pbjs";
 
@@ -672,9 +672,11 @@ export const MessageTreeService = {
      * rewind: the leaf becomes the target and nothing is deleted. Any other target is
      * a version switch: the leaf becomes the newest turn beneath it, so the chosen
      * branch shows its own continuation. With `exact` set, the leaf is the target
-     * itself (an undo of a rewind). Owner only, with `session:write`. Refused
-     * for a Space thread, a thread that holds a waived run and a thread with a queued
-     * or running run. Refused with unavailable `message_versions_disabled` while
+     * itself (an undo of a rewind). Owner only, with `session:write`. Refused with
+     * zdr_durable_mutation_forbidden for a zero-retention caller, and with
+     * zdr_feature_not_supported (feature message_versions) for a waived caller or a
+     * thread that holds a waived run. Refused for a Space thread and a thread with a
+     * queued or running run. Refused with unavailable `message_versions_disabled` while
      * SESSION_CORE_MESSAGE_VERSIONS_ENABLED is not `true`.
      *
      * @generated from rpc model_plane.v1.MessageTreeService.SetActiveLeaf
@@ -836,6 +838,35 @@ export const ThreadReferenceService = {
       name: "ReadThreadForReference",
       I: ReadThreadForReferenceRequest,
       O: ReadThreadForReferenceResponse,
+      kind: MethodKind.Unary,
+    },
+  }
+} as const;
+
+/**
+ * PromoteOnUseService: the durable per-org counter behind execution-core's promote-on-use trigger. A
+ * separate service, as ThreadReferenceService is, so that SessionCore and every mock of it stay
+ * source-compatible. The counter stores a hash of the normalised URL, never the URL, and execution-core
+ * calls it only when PROMOTE_ON_USE_DURABLE is on.
+ *
+ * @generated from service model_plane.v1.PromoteOnUseService
+ */
+export const PromoteOnUseService = {
+  typeName: "model_plane.v1.PromoteOnUseService",
+  methods: {
+    /**
+     * Count one grounded use of a page by (org, user, url hash) and say whether this use is the one that
+     * reaches the threshold. `fire` is true exactly once per key: the use that takes the count to the
+     * threshold while the key has no promotion recorded; the promotion is recorded in the same statement.
+     * Refused to a zero-retention or waived credential (failed_precondition), to a service credential
+     * without `session:promote:write`, and for another org or, for a user credential, another user.
+     *
+     * @generated from rpc model_plane.v1.PromoteOnUseService.IncrementPromoteUse
+     */
+    incrementPromoteUse: {
+      name: "IncrementPromoteUse",
+      I: IncrementPromoteUseRequest,
+      O: IncrementPromoteUseResponse,
       kind: MethodKind.Unary,
     },
   }

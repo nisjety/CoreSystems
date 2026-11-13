@@ -86,6 +86,7 @@
   },
   "prompt_digest": "41df4662e3c928927466e1ce1283d50c9c2736a894a0dda86742a061a5976f46",
   "extensions": {
+    "connector_taint": false,
     "effect_ledger": true
   }
 }

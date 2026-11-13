@@ -13,6 +13,7 @@ import {
   type ChatUsageProgressEvent,
   type ChatVerificationEvent,
   type CitationLocator,
+  type ChatRoutingDecision,
   type EffortLevel,
   type EffortProfile,
   type RecalledMemory,
@@ -413,6 +414,8 @@ export type ChatTurn = {
   provider?: string
   /** Opaque Integration Core connection id paired with a subscription route. */
   subscriptionConnectionId?: string
+  /** Opaque Integration Core id of the customer gateway this turn is served on (W4-BYO-6). Kept so a retry stays on it. */
+  modelConnectionId?: string
   requestId?: string
   /**
    * Highest SSE frame `id:` seen for this turn, sent as `Last-Event-ID` on
@@ -444,6 +447,12 @@ export type ChatTurn = {
    * a stale or reconstructed one.
    */
   servedBy?: AnswerServedBy
+  /**
+   * Why the gateway routed the answer to its model (W5-073-b): the Verevon mode, complexity and reason, as closed
+   * tokens. Read from the usage frame while the turn streams and from the stored answer's metadata on a reload; absent
+   * when the gateway stated none, and then the Details popover shows no Routed line.
+   */
+  routingDecision?: ChatRoutingDecision
   /**
    * Where the turn's server time went (`turn_timing`). Absent when the gateway
    * did not report it; the metrics rows that read it are then not shown at all.
@@ -617,6 +626,12 @@ export type ChatTurn = {
   /** The context chips this turn was sent with (EP-3 S5): kind, id and label only. */
   contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
   /**
+   * The deep-research plan this assistant turn ended with (EP-2 S5), read back from the persisted
+   * `research_plan` on a reload. Shown as a read-only card once a later turn exists; never set while
+   * the live plan card is still open.
+   */
+  researchPlan?: import('@/shared/api/chat-client').ChatResearchPlanEvent
+  /**
    * The server's own confirmation of `retrievalScope` (`source_scope_applied`
    * SSE event) — the concrete "shown in the receipt" surface. Absent until
    * the event arrives. A turn whose scope was `auto`/omitted gets one only
@@ -768,6 +783,16 @@ export type SendOptions = {
   browserTabRefs?: import('@/shared/api/browser-client').BrowserTabContextRef[]
   /** See `ChatInvokeRequest.browserRegions` (QF-9). Per-turn, like `browserTabRefs`. */
   browserRegions?: import('@/features/browser/page-context/region-attach').BrowserRegionTurnInput[]
+  /**
+   * The brand deck template this turn applies (EP-5 S7): a skill id from `listDeckTemplates`. See
+   * `ChatInvokeRequest.deckTemplate`; per-turn, like `contextRefs`, and never sent on a zero-retention turn.
+   */
+  deckTemplate?: string
+  /**
+   * This send is not the composer's text (a deck template pick from the deck view, EP-5 S7), so the composer keeps its
+   * draft. Like the approved-plan turn and a wide-research retry, which are never typed in the composer either.
+   */
+  keepDraft?: boolean
   /** See `ChatInvokeRequest.agentMode`. Per-turn, like `connectorScope`. */
   agentMode?: AgentModeId
   actions?: ChatAction[]
@@ -775,8 +800,15 @@ export type SendOptions = {
   provider?: string
   /** Opaque Integration Core connection id; never a ChatGPT token. */
   subscriptionConnectionId?: string
+  /** Opaque Integration Core id of a customer gateway (W4-BYO-6). Text-only, never zero retention. */
+  modelConnectionId?: string
   /** Reasoning effort from the composer's response-mode selector. */
   effort?: EffortProfile | EffortLevel
+  /**
+   * The Fast chip's speed choice (W5-095-b): `priority` asks the gateway for the priority service tier on this
+   * turn, which it honours only on a model that declares the tier. `standard` (the default) is no choice.
+   */
+  speed?: 'standard' | 'priority'
   /**
    * Response-style dial from composer settings — how much prose the answer
    * spends, independent of `effort`'s thinking budget.
@@ -795,6 +827,12 @@ export type SendOptions = {
   modelContent?: string
   browseWeb?: boolean
   deepResearch?: boolean
+  /**
+   * Wide research from the composer's "Bred forskning" entry (EP-2 S8/S9): the choice a start sends, or a one-item
+   * retry. Set only by `startWideResearch` and `retryWideResearchItem` on an agentic Do turn; see
+   * `ChatInvokeRequest.wideResearch` for what the wire carries.
+   */
+  wideResearch?: import('@/shared/api/chat-client').WideResearchStart
   createdAt?: string
   displayAttachments?: ChatTurnAttachment[]
   generateImage?: boolean

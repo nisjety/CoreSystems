@@ -29,6 +29,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/codexsubscription"
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/controlplane"
+	"github.com/triodelab/integration-corev2/internal/customergateway"
 	"github.com/triodelab/integration-corev2/internal/discovery"
 	"github.com/triodelab/integration-corev2/internal/events"
 	"github.com/triodelab/integration-corev2/internal/handoff"
@@ -40,6 +41,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/readiness"
 	"github.com/triodelab/integration-corev2/internal/store"
 	"github.com/triodelab/integration-corev2/internal/webhookorg"
+	"github.com/triodelab/integration-corev2/internal/zdr"
 )
 
 type ServerConfig struct {
@@ -66,9 +68,22 @@ type ServerConfig struct {
 	// CodexSubscriptions owns ChatGPT subscription device-code flows and
 	// execution. It is nil unless explicitly enabled in deployment config.
 	CodexSubscriptions *codexsubscription.Manager
+	// CustomerGateway registers a customer's OpenAI-compatible gateway (key sealed in this service)
+	// and brokers inference to it for Model Plane. It is nil, and its routes absent, unless
+	// CUSTOMER_GATEWAY_CONNECTIONS_ENABLED is exactly "true".
+	CustomerGateway *customergateway.Broker
 	// OrgZDR reads the organisation's ZDR posture from org-core for the acknowledgement API. Nil
 	// refuses every acknowledgement (fail closed), and the routes exist only with the switch on.
 	OrgZDR ZDROrgPosture
+	// ZDRWording is the acknowledgement wording the ZDR routes use. Nil means the embedded wording
+	// (zdr.DefaultWording); a test supplies its own to reach a text version below the minimum.
+	ZDRWording *zdr.Wording
+	// CredentialSealer seals a credential binding's secret (the credential vault). Nil, and the
+	// credential-binding routes absent (404), unless CREDENTIAL_BINDINGS_ENABLED is exactly "true".
+	CredentialSealer CredentialSealer
+	// CredentialHostVetter vets a binding's host against private, loopback and metadata addresses.
+	// Nil means the process-wide egress guard; tests substitute a stub resolver.
+	CredentialHostVetter CredentialHostVetter
 	// WebhookOrg resolves the owning tenant for account-wide provider
 	// webhooks (Meta/Slack callbacks carry no Verevon org id). Nil-safe.
 	WebhookOrg *webhookorg.Resolver
@@ -194,6 +209,10 @@ func NewServer(cfg ServerConfig) *fiber.App {
 	})
 	codexSubscriptionModelPlaneAuth := auth.InternalOnly(auth.Config{
 		APIKey:       cfg.Config.CodexSubscriptionModelPlaneAPIKey,
+		APIKeyHeader: cfg.Config.InternalAPIKeyHeader,
+	})
+	customerGatewayModelPlaneAuth := auth.InternalOnly(auth.Config{
+		APIKey:       cfg.Config.CustomerGatewayModelPlaneAPIKey,
 		APIKeyHeader: cfg.Config.InternalAPIKeyHeader,
 	})
 	app.Get("/metrics", internalAuth, func(c *fiber.Ctx) error {
@@ -1136,6 +1155,7 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			event := store.WebhookEvent{
 				ID:             item.eventID,
 				OrganizationID: item.organizationID,
+				ConnectionID:   item.connectionID,
 				ProviderKey:    normalized.ProviderKey,
 				EventType:      normalized.EventType,
 				SignatureHash:  normalized.SignatureHash,
@@ -1340,6 +1360,9 @@ func NewServer(cfg ServerConfig) *fiber.App {
 			if errors.Is(err, oauth.ErrResourceBoundToken) {
 				return apiError(c, fiber.StatusForbidden, "resource_bound_token", "Algolia authority is restricted to Integration Core's read-only MCP adapter.")
 			}
+			if errors.Is(err, oauth.ErrBrokerOnlyCredential) {
+				return apiError(c, fiber.StatusForbidden, "broker_only_credential", "This connection's credential is used only by Integration Core's broker and cannot be leased.")
+			}
 			if errors.Is(err, store.ErrNotFound) {
 				return apiError(c, fiber.StatusNotFound, "connection_not_found", "No active connection exists for this organization and connector.")
 			}
@@ -1352,7 +1375,11 @@ func NewServer(cfg ServerConfig) *fiber.App {
 	})...)
 
 	registerCodexSubscriptionRoutes(app, cfg, codexSubscriptionModelPlaneAuth, internalOrBearerAuth, rateLimited)
+	registerCustomerGatewayRoutes(app, cfg, customerGatewayModelPlaneAuth, bearerOnlyAuth, rateLimited)
 	registerZDRAcknowledgementRoutes(app, cfg, bearerOnlyAuth, rateLimited)
+	registerCredentialBindingRoutes(app, cfg, bearerOnlyAuth, rateLimited)
+	registerCustomRESTConnectorRoutes(app, cfg, bearerOnlyAuth, rateLimited)
+	registerCredentialRefRoutes(app, cfg, rateLimited)
 
 	app.Get("/internal/gdpr/export", internalAuth, func(c *fiber.Ctx) error {
 		organizationID := strings.TrimSpace(c.Query("organizationId"))
@@ -2931,7 +2958,10 @@ func runGDPRDelete(ctx context.Context, cfg ServerConfig, body gdprRequestBody) 
 		}
 		if userID == "" {
 			// An organisation-wide delete is the organisation purge: its ZDR records and acknowledgements
-			// are erased. A user-level delete keeps the revoked rows for the audit window instead.
+			// are erased. A user-level delete keeps the revoked rows instead. The daily sweep removes them
+			// once they are older than ZDR_ACK_RETENTION_DAYS, but only while ZDR_ACKNOWLEDGEMENT_ENABLED is on;
+			// with the switch off they are kept, with no time limit, until it is on again (D-ZDR-16, owner to
+			// confirm under OD-LEGAL).
 			purged, purgeErr := tx.PurgeOrganizationConnectionZDR(ctx, organizationID)
 			if purgeErr != nil {
 				return purgeErr
@@ -2947,6 +2977,23 @@ func runGDPRDelete(ctx context.Context, cfg ServerConfig, body gdprRequestBody) 
 				CreatedAt: now,
 			}); err != nil {
 				return err
+			}
+			// The organisation's sealed credential bindings go with it: a deleted organisation
+			// keeps no standing secret. Nothing is written when it had none.
+			bindingsPurged, bindingsErr := tx.PurgeOrganizationCredentialBindings(ctx, organizationID)
+			if bindingsErr != nil {
+				return bindingsErr
+			}
+			if bindingsPurged > 0 {
+				if err := persist(store.AuditEvent{
+					ID:             auditMutationID(ctx, "gdpr-credential-bindings-purged", organizationID),
+					OrganizationID: organizationID,
+					EventType:      "gdpr.integration.credential_bindings_purged",
+					Metadata:       map[string]any{"bindings": bindingsPurged},
+					CreatedAt:      now,
+				}); err != nil {
+					return err
+				}
 			}
 		}
 		return persist(store.AuditEvent{
@@ -3014,8 +3061,12 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 	if err := auth.AssertOrgAccess(c, connection.OrganizationID); err != nil {
 		return actions.ExecuteResult{}, err
 	}
+	// custom_rest.call is dark (W4-CC-6): with the switch off the provider is unknown, as before.
+	if connection.ProviderKey == actions.CustomRESTProviderKey && !cfg.Config.CustomRESTConnectorsEnabled {
+		return actions.ExecuteResult{}, errActionOperationUnsupported
+	}
 	idempotencyKey := strings.TrimSpace(body.IdempotencyKey)
-	writeAction := actionRequiresApproval(connection.ProviderKey, body.Operation)
+	writeAction := actionRequiresApproval(connection.ProviderKey, body.Operation) || customRESTCallIsWrite(connection.ProviderKey, body)
 	if !writeAction {
 		// A read has no write attestation to carry a cryptographically
 		// verified acting user, so owner ruling (5) is enforced from the
@@ -3153,12 +3204,23 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 			}
 		}
 	}
-	token, err := cfg.OAuth.AccessTokenForConnection(ctx, connection.ID)
-	if err != nil {
-		if writeAction {
-			return actions.ExecuteResult{}, errActionPreProviderRetryable
+	var token oauth.AccessTokenResult
+	var restBinding *actions.CustomRESTBinding
+	if connection.ProviderKey == actions.CustomRESTProviderKey {
+		// A custom_rest connection has no OAuth token: its credential is the one binding the
+		// connection names, opened for this call only (custom_rest.go).
+		restBinding, err = openCustomRESTBinding(ctx, cfg, connection, idempotencyKey)
+		if err != nil {
+			return actions.ExecuteResult{}, err
 		}
-		return actions.ExecuteResult{}, err
+	} else {
+		token, err = cfg.OAuth.AccessTokenForConnection(ctx, connection.ID)
+		if err != nil {
+			if writeAction {
+				return actions.ExecuteResult{}, errActionPreProviderRetryable
+			}
+			return actions.ExecuteResult{}, err
+		}
 	}
 	if writeAction {
 		if err := withAuditTransaction(ctx, cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
@@ -3189,6 +3251,7 @@ func executeConnectionAction(c *fiber.Ctx, cfg ServerConfig, connectionID string
 		Params:      body.Params,
 		Body:        body.Body,
 		Caller:      actionCallerIdentity(c),
+		RESTBinding: restBinding,
 	})
 	if err != nil {
 		if writeAction {
@@ -3322,6 +3385,10 @@ func actionReceiptMatchesAuthorization(receipt store.ActionReceipt, connection s
 
 func requireActionCapability(c *fiber.Ctx, connection store.Connection, body actionBody) error {
 	required, sensitive := requiredCapabilityForOperation(connection.ProviderKey, body.Operation)
+	if connection.ProviderKey == actions.CustomRESTProviderKey {
+		// custom_rest.call is one operation whose capability depends on the method (custom_rest.go).
+		required, sensitive = customRESTCapability(body)
+	}
 	if required == "" {
 		return errActionOperationUnsupported
 	}
@@ -3766,6 +3833,10 @@ func actionError(c *fiber.Ctx, err error) error {
 		return apiError(c, fiber.StatusForbidden, "otp_caller_not_allowed", "This operation is limited to the executor's scoped service token.")
 	case errors.Is(err, actions.ErrOTPAuditUnavailable), errors.Is(err, actions.ErrOTPAuditFailed):
 		return apiError(c, fiber.StatusServiceUnavailable, "otp_audit_unavailable", "The read could not be audited, so no code is returned.")
+	case errors.Is(err, errCustomRESTBindingUnavailable):
+		return apiError(c, fiber.StatusConflict, "credential_binding_unavailable", "The connection's credential binding is not available.")
+	case errors.Is(err, errCustomRESTAuditFailed):
+		return apiError(c, fiber.StatusServiceUnavailable, "credential_audit_failed", "The credential could not be released safely.")
 	case isProviderAuthRejection(err):
 		return reconnectRequiredError(c, err)
 	default:

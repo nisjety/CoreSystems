@@ -19,10 +19,14 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ThreadShareService_CreateSnapshot_FullMethodName = "/model_plane.v1.ThreadShareService/CreateSnapshot"
-	ThreadShareService_ListSnapshots_FullMethodName  = "/model_plane.v1.ThreadShareService/ListSnapshots"
-	ThreadShareService_GetSnapshot_FullMethodName    = "/model_plane.v1.ThreadShareService/GetSnapshot"
-	ThreadShareService_RevokeSnapshot_FullMethodName = "/model_plane.v1.ThreadShareService/RevokeSnapshot"
+	ThreadShareService_CreateSnapshot_FullMethodName     = "/model_plane.v1.ThreadShareService/CreateSnapshot"
+	ThreadShareService_ListSnapshots_FullMethodName      = "/model_plane.v1.ThreadShareService/ListSnapshots"
+	ThreadShareService_GetSnapshot_FullMethodName        = "/model_plane.v1.ThreadShareService/GetSnapshot"
+	ThreadShareService_RevokeSnapshot_FullMethodName     = "/model_plane.v1.ThreadShareService/RevokeSnapshot"
+	ThreadShareService_ShareSnapshot_FullMethodName      = "/model_plane.v1.ThreadShareService/ShareSnapshot"
+	ThreadShareService_UnshareSnapshot_FullMethodName    = "/model_plane.v1.ThreadShareService/UnshareSnapshot"
+	ThreadShareService_ListSnapshotGrants_FullMethodName = "/model_plane.v1.ThreadShareService/ListSnapshotGrants"
+	ThreadShareService_GetSharedSnapshot_FullMethodName  = "/model_plane.v1.ThreadShareService/GetSharedSnapshot"
 )
 
 // ThreadShareServiceClient is the client API for ThreadShareService service.
@@ -35,10 +39,19 @@ type ThreadShareServiceClient interface {
 	CreateSnapshot(ctx context.Context, in *CreateSnapshotRequest, opts ...grpc.CallOption) (*CreateSnapshotResponse, error)
 	// List the caller's live snapshots of one thread.
 	ListSnapshots(ctx context.Context, in *ListSnapshotsRequest, opts ...grpc.CallOption) (*ListSnapshotsResponse, error)
-	// Read one live snapshot with its body; owner-only in this version.
+	// Read one live snapshot with its body, as its owner; a granted member uses GetSharedSnapshot.
 	GetSnapshot(ctx context.Context, in *GetSnapshotRequest, opts ...grpc.CallOption) (*GetSnapshotResponse, error)
 	// Revoke a snapshot: its body and digest are deleted in the same statement.
+	// With `SESSION_SNAPSHOT_GRANTS_ENABLED` on it also removes the snapshot's Control grants.
 	RevokeSnapshot(ctx context.Context, in *RevokeSnapshotRequest, opts ...grpc.CallOption) (*RevokeSnapshotResponse, error)
+	// W4-SH-4. Share a live snapshot with an organisation member through a Control `view` grant.
+	ShareSnapshot(ctx context.Context, in *ShareSnapshotRequest, opts ...grpc.CallOption) (*ShareSnapshotResponse, error)
+	// W4-SH-4. Remove one member's Control grant on a live snapshot.
+	UnshareSnapshot(ctx context.Context, in *UnshareSnapshotRequest, opts ...grpc.CallOption) (*UnshareSnapshotResponse, error)
+	// W4-SH-4. List the members a live snapshot is shared with.
+	ListSnapshotGrants(ctx context.Context, in *ListSnapshotGrantsRequest, opts ...grpc.CallOption) (*ListSnapshotGrantsResponse, error)
+	// W4-SH-5. Read a live snapshot as its owner, or as a member with a Control `view` grant on it.
+	GetSharedSnapshot(ctx context.Context, in *GetSharedSnapshotRequest, opts ...grpc.CallOption) (*GetSharedSnapshotResponse, error)
 }
 
 type threadShareServiceClient struct {
@@ -89,6 +102,46 @@ func (c *threadShareServiceClient) RevokeSnapshot(ctx context.Context, in *Revok
 	return out, nil
 }
 
+func (c *threadShareServiceClient) ShareSnapshot(ctx context.Context, in *ShareSnapshotRequest, opts ...grpc.CallOption) (*ShareSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ShareSnapshotResponse)
+	err := c.cc.Invoke(ctx, ThreadShareService_ShareSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *threadShareServiceClient) UnshareSnapshot(ctx context.Context, in *UnshareSnapshotRequest, opts ...grpc.CallOption) (*UnshareSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UnshareSnapshotResponse)
+	err := c.cc.Invoke(ctx, ThreadShareService_UnshareSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *threadShareServiceClient) ListSnapshotGrants(ctx context.Context, in *ListSnapshotGrantsRequest, opts ...grpc.CallOption) (*ListSnapshotGrantsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListSnapshotGrantsResponse)
+	err := c.cc.Invoke(ctx, ThreadShareService_ListSnapshotGrants_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *threadShareServiceClient) GetSharedSnapshot(ctx context.Context, in *GetSharedSnapshotRequest, opts ...grpc.CallOption) (*GetSharedSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSharedSnapshotResponse)
+	err := c.cc.Invoke(ctx, ThreadShareService_GetSharedSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ThreadShareServiceServer is the server API for ThreadShareService service.
 // All implementations must embed UnimplementedThreadShareServiceServer
 // for forward compatibility.
@@ -99,10 +152,19 @@ type ThreadShareServiceServer interface {
 	CreateSnapshot(context.Context, *CreateSnapshotRequest) (*CreateSnapshotResponse, error)
 	// List the caller's live snapshots of one thread.
 	ListSnapshots(context.Context, *ListSnapshotsRequest) (*ListSnapshotsResponse, error)
-	// Read one live snapshot with its body; owner-only in this version.
+	// Read one live snapshot with its body, as its owner; a granted member uses GetSharedSnapshot.
 	GetSnapshot(context.Context, *GetSnapshotRequest) (*GetSnapshotResponse, error)
 	// Revoke a snapshot: its body and digest are deleted in the same statement.
+	// With `SESSION_SNAPSHOT_GRANTS_ENABLED` on it also removes the snapshot's Control grants.
 	RevokeSnapshot(context.Context, *RevokeSnapshotRequest) (*RevokeSnapshotResponse, error)
+	// W4-SH-4. Share a live snapshot with an organisation member through a Control `view` grant.
+	ShareSnapshot(context.Context, *ShareSnapshotRequest) (*ShareSnapshotResponse, error)
+	// W4-SH-4. Remove one member's Control grant on a live snapshot.
+	UnshareSnapshot(context.Context, *UnshareSnapshotRequest) (*UnshareSnapshotResponse, error)
+	// W4-SH-4. List the members a live snapshot is shared with.
+	ListSnapshotGrants(context.Context, *ListSnapshotGrantsRequest) (*ListSnapshotGrantsResponse, error)
+	// W4-SH-5. Read a live snapshot as its owner, or as a member with a Control `view` grant on it.
+	GetSharedSnapshot(context.Context, *GetSharedSnapshotRequest) (*GetSharedSnapshotResponse, error)
 	mustEmbedUnimplementedThreadShareServiceServer()
 }
 
@@ -124,6 +186,18 @@ func (UnimplementedThreadShareServiceServer) GetSnapshot(context.Context, *GetSn
 }
 func (UnimplementedThreadShareServiceServer) RevokeSnapshot(context.Context, *RevokeSnapshotRequest) (*RevokeSnapshotResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RevokeSnapshot not implemented")
+}
+func (UnimplementedThreadShareServiceServer) ShareSnapshot(context.Context, *ShareSnapshotRequest) (*ShareSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ShareSnapshot not implemented")
+}
+func (UnimplementedThreadShareServiceServer) UnshareSnapshot(context.Context, *UnshareSnapshotRequest) (*UnshareSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UnshareSnapshot not implemented")
+}
+func (UnimplementedThreadShareServiceServer) ListSnapshotGrants(context.Context, *ListSnapshotGrantsRequest) (*ListSnapshotGrantsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListSnapshotGrants not implemented")
+}
+func (UnimplementedThreadShareServiceServer) GetSharedSnapshot(context.Context, *GetSharedSnapshotRequest) (*GetSharedSnapshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSharedSnapshot not implemented")
 }
 func (UnimplementedThreadShareServiceServer) mustEmbedUnimplementedThreadShareServiceServer() {}
 func (UnimplementedThreadShareServiceServer) testEmbeddedByValue()                            {}
@@ -218,6 +292,78 @@ func _ThreadShareService_RevokeSnapshot_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ThreadShareService_ShareSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ShareSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadShareServiceServer).ShareSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadShareService_ShareSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadShareServiceServer).ShareSnapshot(ctx, req.(*ShareSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ThreadShareService_UnshareSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnshareSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadShareServiceServer).UnshareSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadShareService_UnshareSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadShareServiceServer).UnshareSnapshot(ctx, req.(*UnshareSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ThreadShareService_ListSnapshotGrants_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListSnapshotGrantsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadShareServiceServer).ListSnapshotGrants(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadShareService_ListSnapshotGrants_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadShareServiceServer).ListSnapshotGrants(ctx, req.(*ListSnapshotGrantsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ThreadShareService_GetSharedSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSharedSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadShareServiceServer).GetSharedSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadShareService_GetSharedSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadShareServiceServer).GetSharedSnapshot(ctx, req.(*GetSharedSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ThreadShareService_ServiceDesc is the grpc.ServiceDesc for ThreadShareService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -240,6 +386,22 @@ var ThreadShareService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RevokeSnapshot",
 			Handler:    _ThreadShareService_RevokeSnapshot_Handler,
+		},
+		{
+			MethodName: "ShareSnapshot",
+			Handler:    _ThreadShareService_ShareSnapshot_Handler,
+		},
+		{
+			MethodName: "UnshareSnapshot",
+			Handler:    _ThreadShareService_UnshareSnapshot_Handler,
+		},
+		{
+			MethodName: "ListSnapshotGrants",
+			Handler:    _ThreadShareService_ListSnapshotGrants_Handler,
+		},
+		{
+			MethodName: "GetSharedSnapshot",
+			Handler:    _ThreadShareService_GetSharedSnapshot_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

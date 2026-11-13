@@ -25,6 +25,9 @@ pub struct GenerateImageRequest {
     pub size: String,
     pub quality: String,
     pub n: u32,
+    /// Serve from the one provider that the hint and the model name, with no chain walk (see
+    /// [`VisionChain::generate_image`]). `false` walks the chain as it always has.
+    pub strict_provider: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,14 +138,35 @@ impl VisionChain {
 
     /// Generate an image using the first matching provider in the chain.
     ///
+    /// Without `strict_provider` the chain is walked in order: a provider that fails is passed over for
+    /// the next, and the call fails only when every matching provider has failed. With it, the first
+    /// provider that matches the hint and the model is the only one tried, and its error comes back as
+    /// it is. No other provider answers in its place. Either way the response names the provider and the
+    /// model that served it.
+    ///
     /// # Errors
     ///
     /// Returns [`ProviderError::RateLimited`] if a provider is rate limited, or
-    /// [`ProviderError::AllExhausted`] if every matching provider fails.
+    /// [`ProviderError::AllExhausted`] if every matching provider fails. A strict call returns the named
+    /// provider's own error instead, or [`ProviderError::ImageModelUnavailable`] when no provider matches,
+    /// which is decided before any provider is called.
     pub async fn generate_image(
         &self,
         req: &GenerateImageRequest,
     ) -> Result<GenerateImageResponse, ProviderError> {
+        if req.strict_provider {
+            let Some((name, provider)) = self
+                .providers
+                .iter()
+                .find(|(name, provider)| image_provider_serves(name, &**provider, req))
+            else {
+                return Err(ProviderError::ImageModelUnavailable {
+                    model: req.model.trim().to_owned(),
+                });
+            };
+            let response = provider.generate_image(req).await?;
+            return Ok(with_served_by(response, name, &**provider, &req.model));
+        }
         let mut attempts = 0;
         for (name, provider) in &self.providers {
             if !provider_matches(name, &req.provider_hint) {
@@ -150,7 +174,9 @@ impl VisionChain {
             }
             attempts += 1;
             match provider.generate_image(req).await {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    return Ok(with_served_by(response, name, &**provider, &req.model));
+                }
                 Err(ProviderError::RateLimited { retry_after_ms }) => {
                     return Err(ProviderError::RateLimited { retry_after_ms });
                 }
@@ -587,6 +613,52 @@ fn provider_matches(name: &str, hint: &str) -> bool {
         || hint == name
         || (hint == "openai" && name == "azure-openai")
         || (hint == "azure" && name == "azure-openai")
+}
+
+/// Whether a strict image call names this provider: its chain entry matches the hint, and, when the request
+/// names a model, the provider lists that model as an image model.
+fn image_provider_serves(
+    name: &str,
+    provider: &dyn VisionProvider,
+    req: &GenerateImageRequest,
+) -> bool {
+    if !provider_matches(name, &req.provider_hint) {
+        return false;
+    }
+    // Compared as sent: the provider uses the model string verbatim, so a listed id must match it exactly.
+    req.model.trim().is_empty()
+        || provider
+            .list_models()
+            .iter()
+            .any(|info| info.modality == "image" && info.id == req.model)
+}
+
+/// The response with its served-by fields filled where the provider left them empty. The chain entry's name
+/// stands in for the provider. The model is the one the request named, or else the first image model the
+/// provider lists, which is the model an automatic request resolves to.
+fn with_served_by(
+    mut response: GenerateImageResponse,
+    chain_name: &str,
+    provider: &dyn VisionProvider,
+    requested_model: &str,
+) -> GenerateImageResponse {
+    if response.provider_used.trim().is_empty() {
+        chain_name.clone_into(&mut response.provider_used);
+    }
+    if response.model_used.trim().is_empty() {
+        let requested = requested_model.trim();
+        response.model_used = if requested.is_empty() {
+            provider
+                .list_models()
+                .into_iter()
+                .find(|info| info.modality == "image")
+                .map(|info| info.id)
+                .unwrap_or_default()
+        } else {
+            requested.to_owned()
+        };
+    }
+    response
 }
 
 fn to_i32_or_max(value: i64) -> i32 {

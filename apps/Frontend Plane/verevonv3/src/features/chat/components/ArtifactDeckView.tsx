@@ -9,7 +9,7 @@
  */
 import type { JSX } from '@solidjs/web'
 import { Dynamic } from '@solidjs/web'
-import { For, Show, createMemo, createSignal, createUniqueId } from 'solid-js'
+import { For, Show, createEffect, createMemo, createSignal, createUniqueId, useContext } from 'solid-js'
 import {
   AlertTriangle,
   ChevronDown,
@@ -22,12 +22,14 @@ import {
   LayoutTemplate,
   List,
   Maximize2,
+  Palette,
   Presentation,
   Type,
 } from '@/shared/icons'
 import { useI18n } from '@/shared/i18n'
+import type { DeckTemplate } from '@/shared/api/chat-client'
 import { ArtifactOfficePreview } from './ArtifactOfficePreview'
-import type { ArtifactRenderer, ArtifactRendererProps } from './artifact-renderers'
+import { DeckTemplateContext, type ArtifactRenderer, type ArtifactRendererProps } from './artifact-renderers'
 import type { IconComponent } from './chat-types'
 import {
   DECK_ARTIFACT_KIND,
@@ -37,6 +39,7 @@ import {
   slideLines,
 } from './deck-manifest'
 import { DeckPresentMode, presentGate } from './DeckPresentMode'
+import { DeckTemplatePicker } from './DeckTemplatePicker'
 
 type Translate = (noText: string, enText: string) => string
 
@@ -78,6 +81,33 @@ export function ArtifactDeckView(props: ArtifactRendererProps): JSX.Element {
   const [presenting, setPresenting] = createSignal(false)
   let presenterRef: HTMLButtonElement | undefined
   const reasonId = `verevon-deck-present-reason-${createUniqueId()}`
+  // "Bytt mal" (EP-5 S7): offered only when the chat page provides the templates and the gateway lists at least one.
+  // With no provider (`null`, e.g. the space artifact sheet) the control stays hidden.
+  // The deck's own template is not in its manifest, so nothing is shown as current until this view makes a pick ('').
+  const templates = useContext(DeckTemplateContext)
+  const [templatesOffered, setTemplatesOffered] = createSignal(false)
+  const [templatePickerOpen, setTemplatePickerOpen] = createSignal(false)
+  const [templatePick, setTemplatePick] = createSignal<string | null>('')
+  const templatesBusy = () => templates?.busy() === true
+  // Solid v2 has no onMount: a two-phase effect with a constant compute runs once after mount.
+  createEffect(() => undefined, () => {
+    let live = true
+    templates?.list()
+      .then((listed) => {
+        if (live) setTemplatesOffered((listed?.length ?? 0) > 0)
+      })
+      .catch(() => {
+        if (live) setTemplatesOffered(false)
+      })
+    return () => {
+      live = false
+    }
+  })
+  const pickTemplate = (template: DeckTemplate | null) => {
+    setTemplatePick(template?.skillId ?? null)
+    setTemplatePickerOpen(false)
+    templates?.apply(template)
+  }
   // A newer revision can have fewer slides than the pick, so the pick stays on a slide that exists.
   const current = createMemo(() => Math.min(pickedIndex(), Math.max(0, (manifest()?.slides.length ?? 0) - 1)))
   const selected = createMemo(() => manifest()?.slides[current()])
@@ -200,6 +230,23 @@ export function ArtifactDeckView(props: ArtifactRendererProps): JSX.Element {
               <p id={reasonId} class="verevon-deck__reason">{blockReason()}</p>
             </Show>
           </div>
+          <Show when={templates && templatesOffered()}>
+            <div class="verevon-deck__template">
+              <button
+                type="button"
+                class="verevon-deck__toggle"
+                aria-expanded={templatePickerOpen() ? 'true' : 'false'}
+                disabled={templatesBusy()}
+                onClick={() => setTemplatePickerOpen(!templatePickerOpen())}
+              >
+                <Palette size={14} />
+                {i18n.tr('Bytt mal', 'Change template')}
+              </button>
+              <Show when={templatePickerOpen()}>
+                <DeckTemplatePicker selected={templatePick()} disabled={templatesBusy()} onSelect={pickTemplate} />
+              </Show>
+            </div>
+          </Show>
           <Show when={selected()}>
             {(slide) => (
               <div class="verevon-deck__detail">

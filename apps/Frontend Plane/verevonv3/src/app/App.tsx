@@ -1,10 +1,11 @@
 import { Show, createEffect, lazy } from 'solid-js'
-import { createRouter, useNavigate } from '@solidjs/router'
+import { createRouter, useNavigate, useParams } from '@solidjs/router'
 import type { JSX } from '@solidjs/web'
 import { AppShell } from '@/app/shell/AppShell'
 import { hasWorkspaceAdminAccess } from '@/shared/session/access'
 import { getSession } from '@/shared/session/session-store'
 import { shouldEnableSceneMode } from '@/demo/scene-mode'
+import { startLongTaskBeacon } from '@/shared/build/long-task-beacon'
 
 const DashboardPage = lazy(() => import('@/features/dashboard/components/DashboardPage'))
 const ChatPage = lazy(() => import('@/features/chat/components/ChatPage'))
@@ -29,6 +30,13 @@ const AgentInstallationsPage = lazy(() => import('@/features/agents/components/A
 const AGENT_BUILDER_ENABLED = import.meta.env.VITE_AGENT_BUILDER === 'true'
 const AgentBuilderPage = AGENT_BUILDER_ENABLED
   ? lazy(() => import('@/features/agents/components/AgentBuilderPage'))
+  : undefined
+// The page a member opens from a shared conversation snapshot (W4-SH-6) talks to BFF routes that exist only with
+// CHAT_SNAPSHOTS_ENABLED on, so its route is off unless VITE_CHAT_SNAPSHOTS=true. With the flag unset the build
+// emits no chunk.
+const CHAT_SNAPSHOTS_ENABLED = import.meta.env.VITE_CHAT_SNAPSHOTS === 'true'
+const SharedSnapshotPage = CHAT_SNAPSHOTS_ENABLED
+  ? lazy(() => import('@/features/chat/replay/SharedSnapshotPage'))
   : undefined
 const AutomationsHubPage = lazy(() => import('@/features/automations/components/AutomationsHubPage'))
 const ChiefCoreRoutingPage = lazy(() => import('@/features/agents/components/ChiefCoreRoutingPage'))
@@ -208,6 +216,7 @@ export const Router = createRouter({
         { path: '/', component: DashboardPage },
         { path: '/dashboard', component: DashboardPage },
         { path: '/chat', component: ChatPage },
+        ...(SharedSnapshotPage ? [{ path: '/chat/shared/:snapshotId', component: SharedSnapshotPage }] : []),
         { path: '/chat/findings', component: () => <ChatUtilityPage section="findings" /> },
         { path: '/chat/reports', component: () => <ChatUtilityPage section="reports" /> },
         { path: '/chat/routines', component: () => <ChatUtilityPage section="routines" /> },
@@ -260,7 +269,13 @@ export const Router = createRouter({
         { path: '/agents/chief-core', component: ChiefCoreRoutingPage },
         { path: '/agents/runs', component: AgentRunConsole },
         ...(FleetRunConsole
-          ? [{ path: '/agents/fleets/:fleetId', component: () => <FleetRunConsole fleetId={window.location.pathname.split('/').pop()!} /> }]
+          ? [{
+              path: '/agents/fleet/:threadId/:runId',
+              component: () => {
+                const params = useParams<{ threadId: string; runId: string }>()
+                return <FleetRunConsole threadId={params.threadId} runId={params.runId} />
+              },
+            }]
           : []),
         ...(AgentBuilderPage
           ? [{ path: '/agents/:agentId/edit', component: AgentBuilderPage }]
@@ -298,5 +313,7 @@ export const Router = createRouter({
 })
 
 export default function App() {
+  // Content-free long-task beacon (F-t3-096). Starts once, and only when VITE_LONG_TASK_BEACON is the literal true.
+  startLongTaskBeacon()
   return <Router>{(props) => <AppShell {...props} />}</Router>
 }

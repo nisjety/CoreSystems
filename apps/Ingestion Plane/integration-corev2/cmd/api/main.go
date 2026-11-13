@@ -22,6 +22,7 @@ import (
 	"github.com/triodelab/integration-corev2/internal/config"
 	"github.com/triodelab/integration-corev2/internal/controlplane"
 	secretcrypto "github.com/triodelab/integration-corev2/internal/crypto"
+	"github.com/triodelab/integration-corev2/internal/customergateway"
 	"github.com/triodelab/integration-corev2/internal/db"
 	"github.com/triodelab/integration-corev2/internal/discovery"
 	"github.com/triodelab/integration-corev2/internal/egress"
@@ -138,6 +139,24 @@ func main() {
 		logger.Fatal().Err(err).Msg("initialize token vault")
 	}
 
+	// Customer-gateway model connections (dark): the broker seals a gateway key with this vault and
+	// calls the gateway through the egress guard. Without the switch it is not built and its routes
+	// are absent.
+	var customerGateway *customergateway.Broker
+	if cfg.CustomerGatewayConnectionsEnabled {
+		customerGateway, err = customergateway.New(customergateway.Config{Vault: vault})
+		if err != nil {
+			logger.Fatal().Err(err).Msg("initialize customer gateway broker")
+		}
+	}
+
+	// Credential bindings (dark): the admin routes seal a bound secret with this vault. Without the
+	// switch no sealer is passed and the routes are absent (404).
+	var credentialSealer api.CredentialSealer
+	if cfg.CredentialBindingsEnabled {
+		credentialSealer = vault
+	}
+
 	// Microsoft's token/profile endpoints are fixed deployment config
 	// (cfg.MicrosoftTokenURL, cfg.MicrosoftGraphBaseURL), but are guarded here
 	// purely for consistency with every other provider client
@@ -215,6 +234,14 @@ func main() {
 		Int("examined", zdrResult.Examined).Int("created", zdrResult.Created).Int("changed", zdrResult.Changed).
 		Int("unchanged", zdrResult.Unchanged).Int("revoked", zdrResult.Revoked).Int("failed", zdrResult.Failed).
 		Msg("connection ZDR assessment reconcile")
+	// Retention sweep of the acknowledgement ledger: revoked rows are deleted once they are older than
+	// ZDR_ACK_RETENTION_DAYS, once at start and then every 24 hours. Active rows are never touched, and
+	// with nothing revoked it deletes nothing. Logs carry counts only. It runs only while the
+	// acknowledgement routes are on (ZDR_ACKNOWLEDGEMENT_ENABLED): with the switch off the sweep does not
+	// start, so revoked rows are kept until it is on again, whatever their age.
+	sweepCtx, cancelSweep := context.WithCancel(context.Background())
+	defer cancelSweep()
+	startZDRAcknowledgementSweep(sweepCtx, cfg, repo, &logger)
 	// Inbound "forward an email to create a task" pipeline (chat-wave2
 	// mail-task spec, owner ruling 2026-09-28: Postmark inbound, self-forward
 	// only). Always constructed -- Handler itself stays off by default until
@@ -325,6 +352,8 @@ func main() {
 		WriteAttestations:  writeAttestations,
 		HotPath:            hotpath.NewHTTPWebhookNormalizer(cfg.WebhookHotPathURL, hotPathClient),
 		CodexSubscriptions: codexSubscriptions,
+		CustomerGateway:    customerGateway,
+		CredentialSealer:   credentialSealer,
 		// Same finspo-core client the finspo worker uses; lets the generic
 		// sync route answer 409 no_sources_registered instead of queuing a
 		// Microsoft job that has no library to sync. ErrNotConfigured (no
@@ -389,4 +418,46 @@ func buildRepository(ctx context.Context, cfg config.Config) (store.Repository, 
 	}
 	repo := store.NewPostgresRepository(pool)
 	return repo, repo.Close, nil
+}
+
+// zdrAcknowledgementSweepInterval is how often the retention sweep of the acknowledgement ledger runs.
+const zdrAcknowledgementSweepInterval = 24 * time.Hour
+
+// zdrAcknowledgementSweepBatch is how many revoked rows one delete statement removes.
+const zdrAcknowledgementSweepBatch = 500
+
+// startZDRAcknowledgementSweep starts the acknowledgement retention sweep only while the acknowledgement
+// routes are switched on (ZDR_ACKNOWLEDGEMENT_ENABLED, strict "true": the same value the routes read).
+// With the switch off nothing is started and no row is deleted.
+func startZDRAcknowledgementSweep(ctx context.Context, cfg config.Config, repo store.ConnectionZDRStore, logger *zerolog.Logger) {
+	if !cfg.ZDRAcknowledgementEnabled {
+		return
+	}
+	go runZDRAcknowledgementSweep(ctx, repo, cfg.ZDRAcknowledgementRetentionDays, logger)
+}
+
+// runZDRAcknowledgementSweep deletes revoked acknowledgements older than the retention window, once on
+// entry and then every 24 hours until ctx ends. A failure is logged and retried on the next tick; the
+// log carries counts and the window only, never a row.
+func runZDRAcknowledgementSweep(ctx context.Context, repo store.ConnectionZDRStore, retentionDays int, logger *zerolog.Logger) {
+	sweep := func() {
+		revokedBefore := time.Now().UTC().Add(-time.Duration(retentionDays) * 24 * time.Hour)
+		deleted, err := repo.PurgeRevokedConnectionZDRAcknowledgements(ctx, revokedBefore, zdrAcknowledgementSweepBatch)
+		if err != nil {
+			logger.Error().Err(err).Int("deleted", deleted).Int("retention_days", retentionDays).Msg("connection ZDR acknowledgement retention sweep")
+			return
+		}
+		logger.Info().Int("deleted", deleted).Int("retention_days", retentionDays).Msg("connection ZDR acknowledgement retention sweep")
+	}
+	sweep()
+	ticker := time.NewTicker(zdrAcknowledgementSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
 }

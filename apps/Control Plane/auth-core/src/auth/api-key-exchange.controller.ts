@@ -117,6 +117,7 @@ import {
   type AuthorizedPlaneServiceApiKeyExchange,
 } from './plane-service-principal';
 import {
+  isUserBanned,
   resolveCanonicalTokenContext,
   type CanonicalTokenContext,
 } from './plane-token-membership';
@@ -149,7 +150,8 @@ export type ApiKeyExchangeDenyReason =
   | 'api_key_metadata_invalid'
   | 'api_key_org_mismatch'
   | 'api_key_scope_missing'
-  | 'api_key_owner_not_member';
+  | 'api_key_owner_not_member'
+  | 'api_key_owner_banned';
 
 type ExchangeTokenBundle = ReturnType<
   ConvexTokenService['issueApiKeyAgentToken']
@@ -427,8 +429,10 @@ export class ApiKeyExchangeHandler {
     }
 
     let membership: Awaited<ReturnType<typeof resolveCanonicalTokenContext>>;
+    let ownerBanned: boolean;
     try {
       membership = await resolveCanonicalTokenContext(ownerId, request.orgId);
+      ownerBanned = await isUserBanned(ownerId);
     } catch {
       throw new ServiceUnavailableException(
         'Canonical membership authority unavailable',
@@ -436,6 +440,9 @@ export class ApiKeyExchangeHandler {
     }
     if (!membership || membership.orgId !== request.orgId) {
       deny('api_key_owner_not_member', HttpStatus.FORBIDDEN, keyId, ownerId);
+    }
+    if (ownerBanned) {
+      deny('api_key_owner_banned', HttpStatus.FORBIDDEN, keyId, ownerId);
     }
 
     // 503 (retention_posture_unavailable / web_policy_unavailable) and NO
@@ -750,8 +757,10 @@ export class ApiKeyExchangeController {
     const key = verified.key;
 
     let membership: CanonicalTokenContext | null;
+    let ownerBanned: boolean;
     try {
       membership = await resolveCanonicalTokenContext(key.referenceId, orgId);
+      ownerBanned = await isUserBanned(key.referenceId);
     } catch {
       throw refusal(
         HttpStatus.SERVICE_UNAVAILABLE,
@@ -761,11 +770,17 @@ export class ApiKeyExchangeController {
       );
     }
 
-    const decision = decideApiKeyExchange(key, membership, {
-      audience,
-      orgId,
-      scopes: requestedScopes,
-    });
+    const decision = decideApiKeyExchange(
+      key,
+      membership,
+      {
+        audience,
+        orgId,
+        scopes: requestedScopes,
+      },
+      Date.now(),
+      ownerBanned,
+    );
     if (!decision.allowed) {
       throw await this.deny(
         caller,

@@ -14,7 +14,8 @@
 //!   can never reach a model as the model's own earlier output, and an "ignore previous
 //!   instructions" line arrives as a quoted line of data;
 //! * each stored message carries `metadata.imported{digest, exported_at, source_org_match,
-//!   original_role}`, so a reader can tell an imported turn from a typed one;
+//!   original_role}` (and `source` for a foreign export), so a reader can tell an imported turn
+//!   from a typed one;
 //! * the new thread's memory is off and no `MESSAGE_APPENDED` is written, so Dreaming never
 //!   extracts a memory from imported text; the owner may turn memory on afterwards.
 //!
@@ -22,6 +23,11 @@
 //! (`conversation_import`): an import writes new durable conversation rows. A service principal is
 //! refused because an import is the owner's own act. The switch is [`ENABLED_ENV`], default off;
 //! while it is off the RPC answers `unavailable`.
+//!
+//! A ChatGPT or Claude export is read as well while [`FOREIGN_ENABLED_ENV`] is `true` and the file
+//! has no `format` key. [`thread_import_foreign`] turns its active conversation into the same
+//! [`ImportShape`] the strict parse builds, and every rule above applies to it. Any other `format`
+//! is still refused as an unknown format.
 
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1 as pb;
@@ -41,6 +47,7 @@ use crate::auth::{authorize_operation, identity, VerifiedIdentity};
 use crate::grpc::{record_metrics, THREAD_TITLE_MAX_CHARS};
 use crate::run_phase::ERROR_CODE_TRAILER;
 use crate::thread_export::ERROR_REASON_TRAILER;
+use crate::thread_import_foreign::{self, ForeignSource};
 
 /// The environment switch for the import. Default off, read by the strict parser the other
 /// switches share, so only `true`, in any case, turns it on.
@@ -74,6 +81,15 @@ const THREAD_IMPORTED_TYPE_URL: &str = "type.googleapis.com/model_plane.v1.Threa
 /// Read where it is used, as the export's switch is: the RPC holds no switch of its own.
 pub(crate) fn thread_import_enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(ENABLED_ENV).ok().as_deref())
+}
+
+/// The environment switch for the ChatGPT and Claude readers. Default off, read by the same strict
+/// parser as [`ENABLED_ENV`]. It has an effect only while the import itself is on.
+pub(crate) const FOREIGN_ENABLED_ENV: &str = "SESSION_THREAD_IMPORT_FOREIGN_ENABLED";
+
+/// Read where it is used, as [`thread_import_enabled`] is.
+pub(crate) fn foreign_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(FOREIGN_ENABLED_ENV).ok().as_deref())
 }
 
 /// The `ImportThread` RPC of `ThreadExportService`, which the export's service delegates to.
@@ -239,6 +255,35 @@ struct ImportedTurn {
     original_role: OriginalRole,
 }
 
+/// What a file holds once it is read, before any turn is dropped or quoted. The strict parse of a
+/// verevon export and each foreign converter build one. [`plan_import`] applies every rule after
+/// it, so the caps (D11), the role downgrade, the quoting and the title are shared by all formats.
+pub(crate) struct ImportShape {
+    /// The source thread's title, or empty when the file names none.
+    pub(crate) title: String,
+    /// The export time as RFC 3339, or the last update time of a foreign conversation. `None` when
+    /// the file names none.
+    pub(crate) exported_at: Option<String>,
+    /// The source thread's id, trimmed. A foreign file names no thread of this platform, so it is
+    /// empty.
+    pub(crate) source_thread_id: String,
+    /// The foreign format the file was read as, or `None` for a verevon export.
+    pub(crate) source: Option<ForeignSource>,
+    /// Every message of the file, in file order, before any is dropped.
+    pub(crate) messages: Vec<ImportMessage>,
+}
+
+/// One message of a file, before any rule has dropped it.
+pub(crate) struct ImportMessage {
+    /// The role the file gives the message. Only `user` and `assistant` are kept.
+    pub(crate) role: String,
+    /// The text the file gives the message, before cleaning.
+    pub(crate) content: String,
+    /// How many of the message's items are not stored, such as artifacts, citations, metadata or
+    /// non-text parts. They count in `dropped` when the message is kept.
+    pub(crate) dropped_extras: usize,
+}
+
 /// What a file becomes before anything is written: decided without the database, so every rule
 /// about the file is testable on its own.
 struct ImportPlan {
@@ -246,8 +291,11 @@ struct ImportPlan {
     turns: Vec<ImportedTurn>,
     dropped: usize,
     digest: String,
-    exported_at: String,
+    /// The export time, when the file names one.
+    exported_at: Option<String>,
     source_thread_id: String,
+    /// The foreign format the file was read as, or `None` for a verevon export.
+    source: Option<ForeignSource>,
 }
 
 /// Import one file for the caller. The switch and the write gate are the RPC's to check, so the
@@ -302,13 +350,82 @@ fn refuse_retention_exempt(caller: &VerifiedIdentity) -> Result<(), Status> {
     Ok(())
 }
 
-/// Read, check and shape a file. The format and version are checked on the raw value first, so a
-/// different document is named as such rather than as a shape error.
+/// Read, check and shape a file. The shape comes from [`read_shape`]. Every rule after it is the
+/// same for every format: a foreign turn is capped, marked and quoted as a verevon turn is.
 fn plan_import(export_json: &str, requested_title: &str) -> Result<ImportPlan, Invalid> {
     if export_json.len() > MAX_IMPORT_FILE_BYTES {
         return Err(Invalid::TooLarge);
     }
     let raw: Value = serde_json::from_str(export_json).map_err(|_| Invalid::NotJson)?;
+    let ImportShape {
+        title,
+        exported_at,
+        source_thread_id,
+        source,
+        messages,
+    } = read_shape(raw)?;
+    if messages.len() > MAX_IMPORT_MESSAGES {
+        return Err(Invalid::TooManyMessages);
+    }
+    if messages
+        .iter()
+        .any(|message| message.content.len() > MAX_IMPORT_MESSAGE_BYTES)
+    {
+        return Err(Invalid::MessageTooLarge);
+    }
+
+    let mut dropped = 0_usize;
+    let mut kept: Vec<(OriginalRole, String)> = Vec::new();
+    for message in messages {
+        let Some(role) = OriginalRole::parse(&message.role) else {
+            dropped += 1;
+            continue;
+        };
+        let text = clean_text(&message.content);
+        if text.trim().is_empty() {
+            dropped += 1;
+            continue;
+        }
+        dropped += message.dropped_extras;
+        kept.push((role, text));
+    }
+    if kept.is_empty() {
+        return Err(Invalid::Empty);
+    }
+    let total = kept.len();
+    let turns = kept
+        .into_iter()
+        .enumerate()
+        .map(|(index, (role, text))| ImportedTurn {
+            content: quoted_turn(role, index + 1, total, &text),
+            original_role: role,
+        })
+        .collect();
+    Ok(ImportPlan {
+        title: import_title(requested_title, &title),
+        turns,
+        dropped,
+        digest: format!("sha256:{:x}", Sha256::digest(export_json.as_bytes())),
+        exported_at,
+        source,
+        source_thread_id,
+    })
+}
+
+/// Read the raw value as a verevon export. While [`FOREIGN_ENABLED_ENV`] is on and the file has no
+/// `format` key, a ChatGPT or Claude export that [`thread_import_foreign`] recognises is read
+/// instead. Anything else is refused as it always was: a value that is not a JSON object is
+/// `not_json`, a `format` other than [`FORMAT_ID`] is `format`, and the version and the shape are
+/// checked in turn.
+fn read_shape(raw: Value) -> Result<ImportShape, Invalid> {
+    if raw.get("format").is_none() && foreign_enabled() {
+        if let Some(source) = thread_import_foreign::detect(&raw) {
+            return match source {
+                ForeignSource::ChatGpt => thread_import_foreign::from_chatgpt(&raw, 0),
+                ForeignSource::Claude => thread_import_foreign::from_claude(&raw, 0),
+            };
+        }
+    }
     if !raw.is_object() {
         return Err(Invalid::NotJson);
     }
@@ -326,53 +443,22 @@ fn plan_import(export_json: &str, requested_title: &str) -> Result<ImportPlan, I
         .map_err(|_| Invalid::Shape)?
         .with_timezone(&Utc)
         .to_rfc3339();
-    if file.messages.len() > MAX_IMPORT_MESSAGES {
-        return Err(Invalid::TooManyMessages);
-    }
-    if file
-        .messages
-        .iter()
-        .any(|message| message.content.len() > MAX_IMPORT_MESSAGE_BYTES)
-    {
-        return Err(Invalid::MessageTooLarge);
-    }
-
-    let mut dropped = 0_usize;
-    let mut kept: Vec<(OriginalRole, String)> = Vec::new();
-    for message in file.messages {
-        let Some(role) = OriginalRole::parse(&message.role) else {
-            dropped += 1;
-            continue;
-        };
-        let text = clean_text(&message.content);
-        if text.trim().is_empty() {
-            dropped += 1;
-            continue;
-        }
-        dropped += usize::from(!message.artifacts.is_empty())
-            + usize::from(!message.citations.is_empty())
-            + usize::from(!message.metadata.is_empty());
-        kept.push((role, text));
-    }
-    if kept.is_empty() {
-        return Err(Invalid::Empty);
-    }
-    let total = kept.len();
-    let turns = kept
-        .into_iter()
-        .enumerate()
-        .map(|(index, (role, text))| ImportedTurn {
-            content: quoted_turn(role, index + 1, total, &text),
-            original_role: role,
-        })
-        .collect();
-    Ok(ImportPlan {
-        title: import_title(requested_title, &file.thread.title),
-        turns,
-        dropped,
-        digest: format!("sha256:{:x}", Sha256::digest(export_json.as_bytes())),
-        exported_at,
+    Ok(ImportShape {
+        title: file.thread.title,
+        exported_at: Some(exported_at),
         source_thread_id: file.thread.id.trim().to_owned(),
+        source: None,
+        messages: file
+            .messages
+            .into_iter()
+            .map(|message| ImportMessage {
+                dropped_extras: usize::from(!message.artifacts.is_empty())
+                    + usize::from(!message.citations.is_empty())
+                    + usize::from(!message.metadata.is_empty()),
+                role: message.role,
+                content: message.content,
+            })
+            .collect(),
     })
 }
 
@@ -434,16 +520,19 @@ fn import_title(requested: &str, from_file: &str) -> String {
 
 /// The marker each stored turn carries. `digest` names the whole file, so every turn of one import
 /// points at the same source; `source_org_match` says whether the file names a thread of the
-/// caller's own org.
+/// caller's own org. `source` names the foreign format of a ChatGPT or Claude export and is absent
+/// for a verevon export.
 fn imported_metadata(plan: &ImportPlan, turn: &ImportedTurn, source_org_match: bool) -> Value {
-    json!({
-        "imported": {
-            "digest": plan.digest,
-            "exported_at": plan.exported_at,
-            "source_org_match": source_org_match,
-            "original_role": turn.original_role.as_str(),
-        }
-    })
+    let mut imported = json!({
+        "digest": plan.digest,
+        "exported_at": plan.exported_at,
+        "source_org_match": source_org_match,
+        "original_role": turn.original_role.as_str(),
+    });
+    if let Some(source) = plan.source {
+        imported["source"] = json!(source.as_str());
+    }
+    json!({ "imported": imported })
 }
 
 /// Whether the file names a thread of the caller's own org. A thread of another org reads the same

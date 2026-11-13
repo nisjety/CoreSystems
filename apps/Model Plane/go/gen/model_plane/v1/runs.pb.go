@@ -632,8 +632,12 @@ type ScheduledStepContext struct {
 	ContractDigest string `protobuf:"bytes,7,opt,name=contract_digest,json=contractDigest,proto3" json:"contract_digest,omitempty"`
 	// Expiry of the stored-consent contract, re-verified per step.
 	ContractExpiresAt string `protobuf:"bytes,8,opt,name=contract_expires_at,json=contractExpiresAt,proto3" json:"contract_expires_at,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// The run's retention, stated as two flags (F-f10-26). `zdr` is a zero-retention run;
+	// `zdr_waived` is a run whose zero-retention was waived. Both false is a persistent run.
+	Zdr           bool `protobuf:"varint,9,opt,name=zdr,proto3" json:"zdr,omitempty"`
+	ZdrWaived     bool `protobuf:"varint,10,opt,name=zdr_waived,json=zdrWaived,proto3" json:"zdr_waived,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ScheduledStepContext) Reset() {
@@ -720,6 +724,20 @@ func (x *ScheduledStepContext) GetContractExpiresAt() string {
 		return x.ContractExpiresAt
 	}
 	return ""
+}
+
+func (x *ScheduledStepContext) GetZdr() bool {
+	if x != nil {
+		return x.Zdr
+	}
+	return false
+}
+
+func (x *ScheduledStepContext) GetZdrWaived() bool {
+	if x != nil {
+		return x.ZdrWaived
+	}
+	return false
 }
 
 type ListRunsRequest struct {
@@ -2313,7 +2331,11 @@ type RunContextStatus struct {
 	Memory *RunContextPart `protobuf:"bytes,3,opt,name=memory,proto3" json:"memory,omitempty"`
 	// EP-11 S3: the skill versions the run injected, one pin per skill. Ids,
 	// numbers and hashes only, so the pin is allowed wherever the run record is.
-	Skills        []*SkillPin `protobuf:"bytes,4,rep,name=skills,proto3" json:"skills,omitempty"`
+	Skills []*SkillPin `protobuf:"bytes,4,rep,name=skills,proto3" json:"skills,omitempty"`
+	// WS23-S4: the ids of the connected accounts the person selected for this
+	// turn. Ids only, no tokens, names or content, so the list is allowed
+	// wherever the run record is; never recorded for a zero-retention or waived run.
+	ConnectorIds  []string `protobuf:"bytes,5,rep,name=connector_ids,json=connectorIds,proto3" json:"connector_ids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2372,6 +2394,13 @@ func (x *RunContextStatus) GetMemory() *RunContextPart {
 func (x *RunContextStatus) GetSkills() []*SkillPin {
 	if x != nil {
 		return x.Skills
+	}
+	return nil
+}
+
+func (x *RunContextStatus) GetConnectorIds() []string {
+	if x != nil {
+		return x.ConnectorIds
 	}
 	return nil
 }
@@ -2491,7 +2520,7 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\x1eGetScheduledStepContextRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +
-	"\x06org_id\x18\x03 \x01(\tR\x05orgId\"\x8b\x02\n" +
+	"\x06org_id\x18\x03 \x01(\tR\x05orgId\"\xbc\x02\n" +
 	"\x14ScheduledStepContext\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tthread_id\x18\x02 \x01(\tR\bthreadId\x12\x15\n" +
@@ -2500,7 +2529,11 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\x06status\x18\x05 \x01(\tR\x06status\x12#\n" +
 	"\rcontract_json\x18\x06 \x01(\tR\fcontractJson\x12'\n" +
 	"\x0fcontract_digest\x18\a \x01(\tR\x0econtractDigest\x12.\n" +
-	"\x13contract_expires_at\x18\b \x01(\tR\x11contractExpiresAt\"\x98\x02\n" +
+	"\x13contract_expires_at\x18\b \x01(\tR\x11contractExpiresAt\x12\x10\n" +
+	"\x03zdr\x18\t \x01(\bR\x03zdr\x12\x1d\n" +
+	"\n" +
+	"zdr_waived\x18\n" +
+	" \x01(\bR\tzdrWaived\"\x98\x02\n" +
 	"\x0fListRunsRequest\x12\x1b\n" +
 	"\tthread_id\x18\x01 \x01(\tR\bthreadId\x12#\n" +
 	"\rstatus_filter\x18\x02 \x01(\tR\fstatusFilter\x12 \n" +
@@ -2654,12 +2687,13 @@ const file_model_plane_v1_runs_proto_rawDesc = "" +
 	"\x05state\x18\x01 \x01(\x0e2\x1f.model_plane.v1.RunContextStateR\x05state\x12\x1a\n" +
 	"\bincluded\x18\x02 \x01(\rR\bincluded\x12\x18\n" +
 	"\aomitted\x18\x03 \x01(\rR\aomitted\x12\x16\n" +
-	"\x06reason\x18\x04 \x01(\tR\x06reason\"\xfa\x01\n" +
+	"\x06reason\x18\x04 \x01(\tR\x06reason\"\x9f\x02\n" +
 	"\x10RunContextStatus\x12B\n" +
 	"\finstructions\x18\x01 \x01(\v2\x1e.model_plane.v1.RunContextPartR\finstructions\x128\n" +
 	"\ahistory\x18\x02 \x01(\v2\x1e.model_plane.v1.RunContextPartR\ahistory\x126\n" +
 	"\x06memory\x18\x03 \x01(\v2\x1e.model_plane.v1.RunContextPartR\x06memory\x120\n" +
-	"\x06skills\x18\x04 \x03(\v2\x18.model_plane.v1.SkillPinR\x06skills\"o\n" +
+	"\x06skills\x18\x04 \x03(\v2\x18.model_plane.v1.SkillPinR\x06skills\x12#\n" +
+	"\rconnector_ids\x18\x05 \x03(\tR\fconnectorIds\"o\n" +
 	"\bSkillPin\x12\x19\n" +
 	"\bskill_id\x18\x01 \x01(\tR\askillId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\x05R\aversion\x12\x16\n" +

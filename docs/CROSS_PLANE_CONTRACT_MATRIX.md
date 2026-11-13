@@ -23,7 +23,7 @@
 
 | Aspect | Detail |
 |--------|--------|
-| **Allowed Dependencies** | _None_ — L1 is the apex; does not call any other plane. **Two recorded exceptions**, both to integration-corev2, are listed under "Recorded Exceptions" below (E1 is in code, E2 is designed and not built) |
+| **Allowed Dependencies** | _None_ — L1 is the apex; does not call any other plane. **Two recorded exceptions**, both to integration-corev2, are listed under "Recorded Exceptions" below (E1 is in code, E2 is in code, dark) |
 | **Published Events** | `user.created`, `user.updated`, `organization.created`, `organization.member.added`, `organization.member.removed` |
 | **Auth Mechanism** | JWT issuance, session-token issuance (HTTP-only cookies) |
 | **Forbidden Patterns** | 🚫 No other plane writes to auth-core's database; 🚫 No other plane redefines identity/session ownership |
@@ -326,14 +326,14 @@ The 🚫 in the L1 Control → L3 Ingestion cell holds except for the two edges 
 
 ## Recorded Exceptions
 
-The summary above says an L1 service calls no other plane. Two edges from auth-core to integration-corev2 (L3) do not fit that row. They are recorded here so that a pull request that touches either one is checked against this entry and not against the row alone. Listing an edge here records that it exists. It is not an approval: E1 was found in the code on 2026-10-06, and E2 is the design's edge and is not built.
+The summary above says an L1 service calls no other plane. Two edges from auth-core to integration-corev2 (L3) do not fit that row. They are recorded here so that a pull request that touches either one is checked against this entry and not against the row alone. Listing an edge here records that it exists. It is not an approval: E1 was found in the code on 2026-10-06, and E2 is in code, dark.
 
 | # | Edge | Direction | Mechanism | Purpose | State |
 |---|------|-----------|-----------|---------|-------|
 | E1 | auth-core → integration-corev2 | L1 → L3, write | `POST /internal/providers/microsoft/sign-in-handoff` with the internal API key; best effort, 5 s timeout, never blocks sign-in (`apps/Control Plane/auth-core/src/auth/microsoft-signin-handoff.ts`) | Hands the signed-in user's Microsoft token to the organisation's Microsoft connection, so the connection refreshes at login | In code. Not recorded in this matrix before 2026-10-06 |
-| E2 | auth-core → integration-corev2 | L1 → L3, read | A user-bound `ingestion`-audience token minted from the session user; one read of one connection's zero-retention capability and acknowledgement status | Decides the per-run zero-retention waiver for a user's own connection (master ownership matrix, rule 17) | Designed, not built (ZDR task Z-14; decision ledger entry of 2026-10-03, own-connection ZDR) |
+| E2 | auth-core → integration-corev2 | L1 → L3, read | A user-bound `ingestion`-audience token minted from the session user; one read of one connection's zero-retention capability and acknowledgement status | Decides the per-run zero-retention waiver for a user's own connection (master ownership matrix, rule 17) | In code, dark (ZDR_WAIVER_ENABLED and integration-corev2 ZDR_ACKNOWLEDGEMENT_ENABLED off) |
 
-Constraints that E2 must keep when it is built:
+Constraints that E2 keeps:
 
 - **Read-only, one route.** It never writes to integration-corev2, and no other Control Plane service gains the edge.
 - **As the session user, in the session's organisation.** integration-corev2 checks owner and organisation on it. The route accepts a bearer only: no internal API key path, because the internal-key calls of that service skip the owner check for the ChatGPT-account connection.

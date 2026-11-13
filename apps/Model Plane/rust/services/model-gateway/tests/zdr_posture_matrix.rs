@@ -27,7 +27,7 @@ const MATRIX: &str = include_str!("fixtures/zdr-posture-matrix.json");
 
 /// The number of enforcement rows the canonical matrix carries when this test was written. A row
 /// added or removed without this test being updated is a change nobody reviewed here.
-const ENFORCEMENT_ROWS: usize = 34;
+const ENFORCEMENT_ROWS: usize = 37;
 
 fn matrix() -> Value {
     serde_json::from_str(MATRIX).expect("the vendored matrix is JSON")
@@ -454,6 +454,29 @@ fn the_cited_passage_goldens_are_rows_decided_as_named() {
     for (id, decision) in [
         ("e_zdr_turn_kb_citation_passage_streams_not_persisted", "zdr"),
         ("e_waived_research_metadata_not_persisted", "waived"),
+    ] {
+        let row = rows
+            .iter()
+            .find(|row| row["id"] == id)
+            .unwrap_or_else(|| panic!("the matrix has no row {id}"));
+        assert_eq!(row["expect"]["decision"], decision, "{id}");
+        assert_eq!(decided(row).0, decision, "{id}");
+    }
+}
+
+/// WS17 S8/S9: the message-version goldens name the turns whose regenerate, edit or branch move is
+/// refused before any row changes. Which code site refuses each is checked where it lives
+/// (`branch_thread`, `zdr_features`, session-core `SetActiveLeaf`); this pins that the rows decide as
+/// their names say.
+#[test]
+fn the_message_version_goldens_are_rows_decided_as_named() {
+    let matrix = matrix();
+    let rows = matrix["enforcement_rows"]
+        .as_array()
+        .expect("rows are an array");
+    for (id, decision) in [
+        ("e_zdr_token_message_versions_refused", "zdr"),
+        ("e_waived_message_versions_refused", "waived"),
     ] {
         let row = rows
             .iter()

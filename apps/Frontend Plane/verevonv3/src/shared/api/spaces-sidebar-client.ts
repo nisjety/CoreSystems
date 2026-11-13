@@ -55,7 +55,7 @@ export async function putSpaceSidebar(baseRevision: number, doc: SidebarDoc): Pr
 export function sidebarConflictFrom(error: unknown): SpaceSidebarConflict | null {
   if (!(error instanceof ApiError) || error.status !== 409 || error.code !== 'space_sidebar_conflict') return null
   const details = error.details
-  if (!details) return { revision: 0, doc: null }
+  if (!details || Array.isArray(details)) return { revision: 0, doc: null }
   return {
     revision: revisionOf(details.revision),
     doc: details.doc == null ? null : parseSidebarDoc(details.doc),

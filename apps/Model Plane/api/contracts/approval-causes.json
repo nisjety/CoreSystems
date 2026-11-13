@@ -54,6 +54,11 @@
       "scope_options": ["once"]
     },
     {
+      "code": "tainted_egress",
+      "raised_by": "execution-core agent loop: an egress call after a flagged connector read, held for a person",
+      "scope_options": ["once"]
+    },
+    {
       "code": "unclassified_gate",
       "raised_by": "ExecuteStep, pause_for_approval, and every code outside this list; a request that states no cause stores none",
       "scope_options": ["once"]

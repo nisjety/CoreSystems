@@ -8,11 +8,14 @@ import {
   BellRing,
   Bot,
   Brain,
+  Check,
   CheckCircle2,
   CheckSquare,
   CircleDot,
   Clock,
   Coins,
+  Copy,
+  Download,
   Gauge,
   Globe2,
   History,
@@ -37,8 +40,10 @@ import { isZdrCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
 import { agentBlueprints } from '@/features/agents/lib/verevon-agent-blueprints'
 import type { AgentBlueprint } from '@/features/agents/lib/verevon-agent-page-types'
 import { controlFocusClass } from '@/features/agents/lib/verevon-agent-page-styles'
+import { buildSupportBundle, supportBundleFileName } from '@/features/agents/lib/support-bundle'
 import {
   getPresetAgent,
+  presetAgentActionsEnabled,
   presetAgentChatActions,
   presetAgents,
   resolvePresetAgent,
@@ -46,6 +51,7 @@ import {
   type PresetAgentId,
   type ResolvedPresetAgent,
 } from '@/shared/actions/preset-agents'
+import { listAdmittedOwnerActions } from '@/shared/api/agent-actions-client'
 import { listAuthored, type AuthoredBehaviour } from '@/shared/api/authored-kinds-client'
 import {
   streamChat,
@@ -91,6 +97,8 @@ import {
 import type { RunMeter } from '@/features/chat/components/chat-types'
 import { RunCostMeter, applyUsageProgress, applyUsageTotal } from '@/features/chat/components/RunCostMeter'
 import { ResultFeedback } from '@/features/chat/components/ResultFeedback'
+import { downloadBytes } from '@/features/chat/lib/chat-export/download'
+import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
 import {
   browserActionBriefEnabled,
   browserActionLines,
@@ -104,6 +112,10 @@ import {
   withBrowserObserved,
   type BrowserActionFacts,
 } from '@/features/browser/replay/browser-action-brief'
+import {
+  BrowserWalkthroughStrip,
+  runProofWalkthroughEnabled,
+} from '@/features/browser/replay/BrowserWalkthroughStrip'
 import type { PrivacyTier } from '@/shared/api/privacy-tier'
 import { useI18n } from '@/shared/i18n'
 import {
@@ -283,6 +295,18 @@ export default function AgentRunConsole() {
     authoredPresets.error != null ? [] : authoredPresets() ?? [],
   )
 
+  // The owner actions this org admits for presets (EP-6 S11). Read once, and only while the preset
+  // switch is on. Until it has answered, and on any failure, the set stays empty: a preset that needs
+  // an owner action then reads "Not available in this org" and sends nothing.
+  const [admittedActions] = createResource(async () => {
+    if (!presetAgentActionsEnabled()) return null
+    return listAdmittedOwnerActions()
+  })
+  const admittedActionIds = createMemo<ReadonlySet<string>>(() => {
+    const admitted = admittedActions.error != null ? null : admittedActions() ?? null
+    return new Set(admitted?.actionIds ?? [])
+  })
+
   const [runs] = createResource(
     () => {
       const source = historySource()
@@ -334,6 +358,11 @@ export default function AgentRunConsole() {
     if (proofBundle.error != null) return { bundle: null, failed: true, loading: false }
     return { bundle: proofBundle() ?? null, failed: false, loading: proofBundle.loading }
   })
+
+  // The run's privacy tier, read for the support bundle's zero-retention decision. An errored detail is not read,
+  // for the same reason as `proofView`: the decision then rests on the org's posture alone.
+  const runPrivacyTier = (): PrivacyTier | undefined =>
+    runDetail.error != null ? undefined : runDetail()?.privacyTier
 
   // Telemetry merges the durable RunDetail (steps, tokens, status) with the
   // live usage event the chat stream emits (cost, latency, confidence) — the
@@ -731,10 +760,11 @@ export default function AgentRunConsole() {
   const runTask = () => {
     const content = goal().trim()
     if (!content || isActive()) return
-    // An unavailable preset sends nothing, so the check runs before the run state is reset. The
-    // empty Set stands in until an admitted-set client exists; with the switch off this is a no-op.
+    // An unavailable preset sends nothing, so the check runs before the run state is reset. The admitted
+    // set is empty until it has loaded and on any failure, so no owner action is sent unless the org
+    // admits it; with the switch off this is a no-op.
     const preset = presetId() ? getPresetAgent(presetId()!) : undefined
-    const resolved: ResolvedPresetAgent | undefined = preset ? resolvePresetAgent(preset, new Set<string>()) : undefined
+    const resolved: ResolvedPresetAgent | undefined = preset ? resolvePresetAgent(preset, admittedActionIds()) : undefined
     if (resolved && !resolved.available) return
 
     // A new run aborts the previous controller first — no leaked streams. Any
@@ -1006,6 +1036,7 @@ export default function AgentRunConsole() {
               isActive={isActive()}
               modeId={modeId()}
               presetId={presetId()}
+              admittedActionIds={admittedActionIds()}
               authoredPresets={authoredPresetList()}
               onAuthoredPreset={applyAuthoredPreset}
               onBlueprint={setBlueprintId}
@@ -1082,6 +1113,8 @@ export default function AgentRunConsole() {
                 bundle={proofView().bundle}
                 failed={proofView().failed}
                 loading={proofView().loading}
+                runId={activeRunId() ?? ''}
+                privacyTier={runPrivacyTier()}
               />
             </Show>
 
@@ -1197,6 +1230,7 @@ function Launcher(props: {
   isActive: boolean
   modeId: string
   presetId: PresetAgentId | null
+  admittedActionIds: ReadonlySet<string>
   authoredPresets: AuthoredBehaviour[]
   onAuthoredPreset: (preset: AuthoredBehaviour) => void
   onBlueprint: (id: AgentBlueprint['id']) => void
@@ -1217,6 +1251,7 @@ function Launcher(props: {
     <div class="verevon-run-launcher">
       <PresetPicker
         activeId={props.presetId}
+        admitted={props.admittedActionIds}
         disabled={props.isActive}
         onSelect={props.onPreset}
       />
@@ -1390,6 +1425,8 @@ function Launcher(props: {
 
 function PresetPicker(props: {
   activeId: PresetAgentId | null
+  /** The owner actions this org admits (EP-6 S11); empty until they have loaded. */
+  admitted: ReadonlySet<string>
   disabled: boolean
   onSelect: (preset: PresetAgent) => void
 }) {
@@ -1401,7 +1438,7 @@ function PresetPicker(props: {
         <For each={presetAgents}>
           {(preset) => {
             const active = () => props.activeId === preset.id
-            const available = () => resolvePresetAgent(preset, new Set<string>()).available
+            const available = () => resolvePresetAgent(preset, props.admitted).available
             return (
               <button
                 type="button"
@@ -1844,6 +1881,7 @@ function unavailableSectionLabel(i18n: ReturnType<typeof useI18n>, section?: str
     case 'known': return i18n.tr('Hva kjøringen visste', 'What the run knew')
     case 'charged': return i18n.tr('Hva det kostet', 'What it cost')
     case 'retained': return i18n.tr('Hvilken lagring som gjaldt', 'What retention applied')
+    case 'walkthrough': return i18n.tr('Nettleserforløpet', 'The browser walkthrough')
     default: return section ?? i18n.tr('Udokumentert dimensjon', 'Undocumented dimension')
   }
 }
@@ -1853,7 +1891,15 @@ function shortFingerprint(value: string): string {
   return value.length > 16 ? `${value.slice(0, 16)}…` : value
 }
 
-function ProofBundlePanel(props: { bundle: ProofBundle | null; failed: boolean; loading: boolean }) {
+function ProofBundlePanel(props: {
+  bundle: ProofBundle | null
+  failed: boolean
+  loading: boolean
+  /** The run whose bundle this is; its walkthrough screenshots are read under this id. */
+  runId: string
+  /** The run's privacy tier, for the support bundle's zero-retention decision. */
+  privacyTier?: PrivacyTier
+}) {
   const i18n = useI18n()
   return (
     <div class="verevon-run-panel verevon-run-proof">
@@ -1921,6 +1967,17 @@ function ProofBundlePanel(props: { bundle: ProofBundle | null; failed: boolean; 
               </div>
             </Show>
 
+            {/* The browser walkthrough (F-t3-050, W4-R3-b): mounted only behind its switch and only when the bundle
+                carries the section. When it is omitted, the "walkthrough" entry in the list below says why. */}
+            <Show when={runProofWalkthroughEnabled() ? bundle().browserWalkthrough : undefined}>
+              {(walkthrough) => (
+                <>
+                  <p class="verevon-run-trust__subhead">{i18n.tr('Nettleserforløp', 'Browser walkthrough')}</p>
+                  <BrowserWalkthroughStrip runId={props.runId} walkthrough={walkthrough()} />
+                </>
+              )}
+            </Show>
+
             {/* Always rendered, never collapsed: the dimensions this bundle
                 deliberately does not claim are part of the evidence, and a
                 reader must be able to tell them from "nothing happened". */}
@@ -1961,6 +2018,104 @@ function ProofBundlePanel(props: { bundle: ProofBundle | null; failed: boolean; 
             </Show>
           </>
         )}
+      </Show>
+
+      <Show when={runSupportBundleEnabled()}>
+        <SupportReference runId={props.runId} bundle={props.bundle} privacyTier={props.privacyTier} />
+      </Show>
+    </div>
+  )
+}
+
+/** Whether this build shows the support reference and support bundle (`VITE_RUN_SUPPORT_BUNDLE`, the strict literal `true`). */
+function runSupportBundleEnabled(): boolean {
+  return import.meta.env.VITE_RUN_SUPPORT_BUNDLE === 'true'
+}
+
+/**
+ * Whether the run keeps no content, as far as the console can tell: its privacy tier is a zero-retention contract, or
+ * this caller is under the org's zero-retention posture now (the posture `ExportConversationAction` reads). Such a
+ * run's support bundle carries ids, statuses and timestamps only.
+ */
+function supportBundleZeroRetention(privacyTier: PrivacyTier | undefined): boolean {
+  return privacyTier === 'zdr_contractual' || !isLocalRetentionAllowed()
+}
+
+/**
+ * The run's support reference (W5-096-b): the run id and the request id of the proof read, on one copyable line for a
+ * support ticket, and the run's support bundle as a file. The reference shows even when the proof bundle did not load,
+ * since the run id is always known; the download needs the bundle it is built from.
+ */
+function SupportReference(props: { runId: string; bundle: ProofBundle | null; privacyTier?: PrivacyTier }) {
+  const i18n = useI18n()
+  const [copied, setCopied] = createSignal(false)
+  const zeroRetention = () => supportBundleZeroRetention(props.privacyTier)
+
+  async function copyReference() {
+    const request = props.bundle?.requestId
+    const text = `Support reference: run ${props.runId}${request ? ` · request ${request}` : ''}`
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  function downloadBundle() {
+    const bundle = props.bundle
+    if (!bundle) return
+    const payload = buildSupportBundle(bundle, {
+      runId: props.runId,
+      now: new Date().toISOString(),
+      zeroRetention: zeroRetention(),
+    })
+    downloadBytes(
+      new TextEncoder().encode(`${JSON.stringify(payload, null, 2)}\n`),
+      supportBundleFileName(props.runId),
+      'application/json',
+    )
+  }
+
+  return (
+    <div class="mt-2">
+      <p class="verevon-run-trust__subhead">{i18n.tr('Støttereferanse', 'Support reference')}</p>
+      <dl class="verevon-run-proof__receipt">
+        <div class="verevon-run-proof__receipt-row">
+          <dt>{i18n.tr('Kjøring', 'Run')}</dt>
+          <dd><code>{props.runId}</code></dd>
+        </div>
+        <div class="verevon-run-proof__receipt-row">
+          <dt>{i18n.tr('Forespørsel', 'Request')}</dt>
+          <dd>
+            <Show when={props.bundle?.requestId} fallback={i18n.tr('Ikke registrert', 'Not recorded')}>
+              {(request) => <code>{request()}</code>}
+            </Show>
+          </dd>
+        </div>
+      </dl>
+      <div class="flex flex-wrap items-center gap-2 mt-2">
+        <Button variant="ghost" size="sm" shape="pill" onClick={() => void copyReference()}>
+          <Show when={copied()} fallback={<Copy class="size-3.5" strokeWidth={1.9} />}>
+            <Check class="size-3.5" strokeWidth={2.2} />
+          </Show>
+          {copied() ? i18n.tr('Kopiert', 'Copied') : i18n.tr('Kopier referanse', 'Copy reference')}
+        </Button>
+        <Show when={props.bundle}>
+          <Button variant="secondary" size="sm" shape="pill" onClick={downloadBundle}>
+            <Download class="size-3.5" strokeWidth={1.9} />
+            {i18n.tr('Last ned støttepakke', 'Download support bundle')}
+          </Button>
+        </Show>
+      </div>
+      <Show when={props.bundle && zeroRetention()}>
+        <p class="verevon-run-proof__stamp">
+          {i18n.tr(
+            'Denne kjøringen lagrer ikke innhold, så støttepakken inneholder bare id-er, statuser og tidspunkter.',
+            'This run keeps no content, so the support bundle holds ids, statuses and timestamps only.',
+          )}
+        </p>
       </Show>
     </div>
   )

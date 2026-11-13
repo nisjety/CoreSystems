@@ -3,8 +3,10 @@
  * to the host, and the limits the host holds it to.
  *
  * A widget may size itself, propose a follow-up the person may send, and ask to
- * open a safe link. Nothing else crosses the frame: the host sends nothing back,
- * the widget gets no storage, no network and no host data. A follow-up is staged
+ * open a safe link. With `VITE_WIDGET_SELECTION` on (EP-4 W4-IO-2) it may also
+ * quote a passage of its own text, staged the way a follow-up is. Nothing else
+ * crosses the frame: the host sends nothing back, the widget gets no storage, no
+ * network and no host data. A follow-up is staged
  * as a chip the person clicks (D3), never sent by the widget, so a widget can
  * never drive the model on its own; a link opens only from the person's click on
  * the host's own confirmation.
@@ -28,6 +30,9 @@ export const MAX_WIDGET_HEIGHT = 1200
 /** A follow-up is a question, not a document. Longer ones are dropped, not cut, so the chip never misquotes. */
 export const MAX_FOLLOWUP_CHARS = 500
 
+/** A selection is a passage the person may quote, not a document: longer ones are dropped, not cut. */
+export const MAX_SELECTION_CHARS = 2000
+
 /** Follow-ups one answer's widgets may stage per minute, together. */
 export const FOLLOWUPS_PER_ANSWER_PER_MINUTE = 5
 
@@ -48,6 +53,7 @@ export const BRIDGE_SHIM =
   'window.verevon=Object.freeze({' +
   'resize:function(h){post("size",{height:Number(h)})},' +
   'suggest:function(t){post("followup",{text:String(t)})},' +
+  'select:function(t){post("selection",{text:String(t)})},' +
   'openLink:function(u){post("open_link",{url:String(u)})}' +
   '});' +
   'post("ready",{})' +
@@ -57,6 +63,7 @@ export type WidgetBridgeMessage =
   | { type: 'ready'; id?: string }
   | { type: 'size'; id?: string; height: number }
   | { type: 'followup'; id?: string; text: string }
+  | { type: 'selection'; id?: string; text: string }
   | { type: 'open_link'; id?: string; url: string }
 
 /** Why a message was dropped. Kept as a count per reason, never shown to the widget. */
@@ -90,6 +97,14 @@ function serializedBytes(data: unknown): number | null {
   } catch {
     return null
   }
+}
+
+/**
+ * A selection as the host may quote it: line and tab breaks become one space, so two lines never run together;
+ * every other control character is removed; the ends are trimmed. Empty when nothing is left.
+ */
+export function cleanSelectionText(raw: string): string {
+  return raw.replace(/[\t\n\r]+/g, ' ').replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim()
 }
 
 /** A height in px, clamped; null when it is not a finite number. */
@@ -133,6 +148,11 @@ export function parseWidgetBridgeEvent(event: WidgetBridgeEvent, frameWindow: un
       if (!text || text.length > MAX_FOLLOWUP_CHARS) return { ok: false, reason: 'invalid_payload' }
       return { ok: true, message: { type: 'followup', id, text } }
     }
+    case 'selection': {
+      const text = typeof payload.text === 'string' ? cleanSelectionText(payload.text) : ''
+      if (!text || text.length > MAX_SELECTION_CHARS) return { ok: false, reason: 'invalid_payload' }
+      return { ok: true, message: { type: 'selection', id, text } }
+    }
     case 'open_link': {
       if (typeof payload.url !== 'string') return { ok: false, reason: 'invalid_payload' }
       const url = payload.url.trim()
@@ -171,6 +191,7 @@ export function createAnswerFollowupBudget(now: () => number = Date.now): TokenB
 export type WidgetBridgeAction =
   | { kind: 'resize'; height: number }
   | { kind: 'stage_followup'; text: string }
+  | { kind: 'stage_selection'; text: string }
   | { kind: 'confirm_link'; url: string }
 
 export type WidgetBridgeOutcome = { ok: true; action: WidgetBridgeAction | null } | { ok: false; reason: WidgetBridgeDrop }
@@ -190,6 +211,8 @@ export type WidgetBridgeHost = {
 export function createWidgetBridgeHost(options: {
   frameWindow: () => unknown
   followupBudget: TokenBucket
+  /** Whether the host offers a quoted selection (`VITE_WIDGET_SELECTION`). Off, a selection is accepted and ignored. */
+  selection?: boolean
   now?: () => number
 }): WidgetBridgeHost {
   const sizeBudget = createTokenBucket(SIZE_MESSAGES_PER_SECOND, 1000, options.now)
@@ -218,6 +241,13 @@ export function createWidgetBridgeHost(options: {
           if (!options.followupBudget.take()) return drop('rate_limited')
           followupStaged = true
           return { ok: true, action: { kind: 'stage_followup', text: message.text } }
+        case 'selection':
+          // Off, the message is accepted and does nothing, and it spends no budget.
+          if (!options.selection) return { ok: true, action: null }
+          // A quote shares the answer's follow-up budget, so a widget quotes no more often than it may suggest.
+          return options.followupBudget.take()
+            ? { ok: true, action: { kind: 'stage_selection', text: message.text } }
+            : drop('rate_limited')
         case 'open_link':
           return { ok: true, action: { kind: 'confirm_link', url: message.url } }
       }

@@ -8,7 +8,7 @@
 
 use std::sync::OnceLock;
 
-use crate::normalize::{fold, fold_confusables, is_bidi_override, is_invisible, is_tag};
+use crate::normalize::{fold, fold_confusables, is_bidi_override, is_invisible, is_tag, subdivision_sequence_len};
 use crate::rules::{self, Marker, MARKERS};
 
 /// Environment switch for the normalised scan. Read once per process.
@@ -145,16 +145,26 @@ fn normalized_scan(text: &str) -> ScanReport {
 }
 
 /// Flags that depend on the raw characters, before any folding removes them.
+/// The tag characters of an emoji subdivision flag are its own syntax, so they
+/// are not flagged; every other tag character is.
 fn flag_raw_characters(text: &str, report: &mut ScanReport) {
     let mut previous_visible: Option<char> = None;
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
+    // Where the last subdivision flag ends. Tag characters before this offset are
+    // part of that flag.
+    let mut sequence_end = 0;
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
         // No flagged character is ASCII, so the common case skips the checks.
         if c.is_ascii() {
             previous_visible = Some(c);
             continue;
         }
-        if is_tag(c) {
+        // A subdivision flag starts at its base. Any other character fails the first
+        // comparison inside the check.
+        if let Some(len) = subdivision_sequence_len(&text[at..]) {
+            sequence_end = at + len;
+        }
+        if is_tag(c) && at >= sequence_end {
             report.flag(FlagKind::TagBlock, rules::TAG_BLOCK);
         }
         if is_bidi_override(c) {
@@ -162,7 +172,7 @@ fn flag_raw_characters(text: &str, report: &mut ScanReport) {
         }
         if is_invisible(c) {
             let inside_word = previous_visible.is_some_and(|p| p.is_ascii_alphabetic())
-                && chars.peek().is_some_and(|next| next.is_ascii_alphabetic());
+                && chars.peek().is_some_and(|(_, next)| next.is_ascii_alphabetic());
             if inside_word {
                 report.flag(FlagKind::InvisibleInWord, rules::INVISIBLE_IN_WORD);
             }
@@ -400,3 +410,8 @@ mod tests {
         assert!(report.is_hit());
     }
 }
+
+/// Subdivision flags in the raw-character pass (W2-WS26-S2-b step 4).
+#[cfg(test)]
+#[path = "scan_subdivision_tests.rs"]
+mod subdivision_tests;

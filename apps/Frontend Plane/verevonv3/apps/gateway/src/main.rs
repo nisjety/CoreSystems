@@ -37,6 +37,7 @@ mod onboarding;
 mod public_url;
 mod rate_limit;
 mod request_id;
+mod retention_decision;
 mod upstream;
 mod utils;
 mod zdr;
@@ -104,6 +105,7 @@ fn build_router(state: config::AppState) -> Router {
         .merge(domains::audit::router(state.clone()))
         .merge(domains::audit_compliance::router(state.clone()))
         .merge(domains::org_identity::router(state.clone()))
+        .merge(domains::org_flags::router(state.clone()))
         .merge(domains::auth::router(state.clone()))
         .merge(domains::browser::router(state.clone()))
         .merge(domains::browser_evidence::router(state.clone()))
@@ -208,6 +210,12 @@ fn request_target_for_log(uri: &axum::http::Uri) -> String {
 
     if uri.path().starts_with("/api/v1/orgs/invitations/") {
         return "/api/v1/orgs/invitations/{invitationId}/accept".to_owned();
+    }
+
+    // W4-CC-8: the credential-binding routes never log a body (the stored secret is posted once and forwarded, see
+    // domains/integrations/credential_bindings.rs). The binding id in the path is templated out of the log as well.
+    if uri.path().starts_with("/api/v1/credential-bindings/") {
+        return "/api/v1/credential-bindings/{bindingId}".to_owned();
     }
 
     uri.path().to_owned()
@@ -439,7 +447,16 @@ mod tests {
             mail_task_nats_user: String::new(),
             mail_task_nats_password: String::new(),
             continue_park_form: false,
+            continue_question_form: false,
             model_entitlement_admin_enabled: false,
+            zdr_effective_posture_read: false,
+            zdr_waiver_ui_enabled: false,
+            retention_decision_service_api_key: None,
+            agent_definition_versions: false,
+            chat_process_output_enabled: false,
+            chat_snapshots_enabled: false,
+            event_triggers_enabled: false,
+            credential_bindings_enabled: false,
             mail_task_pipeline: None,
             space_features: Default::default(),
         }

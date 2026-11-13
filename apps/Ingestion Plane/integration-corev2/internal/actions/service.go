@@ -125,6 +125,10 @@ type ExecuteInput struct {
 	// layer. Pre-existing operations ignore it; mail.otp.read requires a
 	// service principal with integration:otp:read (mail_otp.go).
 	Caller CallerIdentity
+	// RESTBinding is the opened credential binding of a custom_rest connection,
+	// filled by the HTTP layer for custom_rest.call only (custom_rest.go).
+	// Every other provider ignores it.
+	RESTBinding *CustomRESTBinding
 }
 
 type ExecuteResult struct {
@@ -221,6 +225,13 @@ func (s *Service) Execute(ctx context.Context, input ExecuteInput) (ExecuteResul
 		result, err = s.executeSnapchat(ctx, input.AccessToken, operation, input.Params, input.Body)
 	case "okta":
 		result, err = s.executeOkta(ctx, input.AccessToken, operation, input.Params)
+	case CustomRESTProviderKey:
+		// Dark: with CUSTOM_REST_CONNECTORS_ENABLED off the provider is as unknown as ever.
+		if !s.cfg.CustomRESTConnectorsEnabled {
+			err = fmt.Errorf("actions are not implemented for provider %s", input.Connection.ProviderKey)
+		} else {
+			result, err = s.executeCustomREST(ctx, input.RESTBinding, operation, input.Params, input.Body)
+		}
 	default:
 		err = fmt.Errorf("actions are not implemented for provider %s", input.Connection.ProviderKey)
 	}

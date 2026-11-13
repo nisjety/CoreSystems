@@ -19,6 +19,7 @@ vi.mock('@/shared/session/session-store', () => ({
 vi.mock('@/features/chat/lib/prepare-chat-attachments', () => ({
   prepareChatAttachments: async (attachments: unknown[]) => attachments,
 }))
+import { LocalizedError } from '@/shared/i18n/errors'
 import { DashboardComposer } from './DashboardComposer'
 
 const intercept = vi.fn<(text: string) => boolean>()
@@ -78,7 +79,7 @@ describe('local pre-submit handling', () => {
   })
   it('keeps an unavailable assistant task as a draft and shows the error', async () => {
     intercept.mockReturnValue(false)
-    submit.mockRejectedValue(new Error('Agentoppgaver er ikke tilgjengelige ennå. Utkastet er beholdt.'))
+    submit.mockRejectedValue(new LocalizedError({ no: 'Agentoppgaver er ikke tilgjengelige ennå. Utkastet er beholdt.', en: 'Agent tasks are not available yet. Your draft has been kept.' }))
     setup()
     send('Lag en rapport')
     await screen.findByText('Agentoppgaver er ikke tilgjengelige ennå. Utkastet er beholdt.')

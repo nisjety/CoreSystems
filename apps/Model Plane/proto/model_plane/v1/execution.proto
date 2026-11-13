@@ -303,6 +303,23 @@ message RunAgentRequest {
   // `item_cap` and seeds the run's goal with the items. Field 25 is reserved for this message by the
   // Wave 3 integration round A.
   WideResearchRequest wide_research = 25;
+
+  // The tool allowlist of the agent version this Do run is pinned to (Wave 3 EP-6 S9; additive). Absent =
+  // no narrowing, exactly as before the field existed. The gateway sets it only for a Do or execute turn whose
+  // mentioned agent version states an allowlist, while MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST is on; a
+  // zero-retention turn never starts a Do run, so it never carries one. execution-core then offers and admits
+  // only the tools whose governed capability is listed, and never adds a tool. A continuation carries none: its
+  // tools are the snapshot its pause retained, which was already narrowed. Field 26 is reserved for this message
+  // by the Wave 3 integration round A.
+  AgentToolAllowlist agent_tool_allowlist = 26;
+
+  // Coordinator mode: this Do run is a non-editing orchestrator. Execution-core offers it only the read tools and the
+  // subagent delegation tools, and refuses any other call, so its effects are delegated to subagents, which keep their
+  // normal catalogue under their normal gates. Absent or false = an ordinary run, exactly as before the field existed.
+  // The gateway sets it only while EXECUTION_COORDINATOR_MODE_ENABLED is the literal `true`, and never on a
+  // zero-retention or waived turn or a continuation. Execution-core applies it only while the same switch is on.
+  // Field 27 is the next free number on this message.
+  bool coordinator = 27;
 }
 
 // WideResearchRequest is what a person asked a wide-research run to cover (Wave 3 EP-2 S8/S9). It only
@@ -455,12 +472,28 @@ message AgentRoleSpec {
   string autonomy_cap = 7;
 }
 
+// AgentToolAllowlist is the tool allowlist of the agent version a Do run is pinned to (Wave 3 EP-6 S9). It
+// holds capability ids and the version they were read from, never the agent's instructions. It only narrows:
+// execution-core offers and admits a tool only when that tool's governed capability is listed here, and a tool
+// with no governed capability (every MCP tool, for one) is never admitted.
+message AgentToolAllowlist {
+  // The agent definition's stable id, the `agent_ref` the invoke pin named.
+  string agent_ref = 1;
+  // The published version the allowlist was read from (immutable, from 1).
+  uint32 version = 2;
+  // Capability ids (WS05 registry) the run may use. A tool is offered only when its capability is listed.
+  repeated string capability_ids = 3;
+}
+
 // RunAgentResponse — terminal outcome of a driven agent run.
 message RunAgentResponse {
-  // Outcome status: "completed" or "failed" (terminal), "awaiting_approval" or
-  // "parked" (the run stays open). "parked" means the loop saved a durable park
-  // fold at a round boundary and returned without finalizing: no assistant
-  // message was appended, no receipt written; `park_reason` says why.
+  // Outcome status: "completed" or "failed" (terminal), "awaiting_approval",
+  // "awaiting_input" or "parked" (the run stays open). "parked" means the loop
+  // saved a durable park fold at a round boundary and returned without
+  // finalizing: no assistant message was appended, no receipt written;
+  // `park_reason` says why. "awaiting_input" means the run waits for its
+  // owner's answer to a resume question: non-terminal, nothing appended, no
+  // receipt.
   string status = 1;
 
   // The persisted assistant answer (or graceful error sentence on failure).

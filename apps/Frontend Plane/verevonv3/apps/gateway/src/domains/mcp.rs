@@ -15,6 +15,10 @@
 //! principal. The only gate here is defense in depth: an org-scope policy write
 //! by a non-admin is refused before it is proxied, as an org-wide server is.
 //!
+//! `POST /api/v1/mcp/servers/probe` is the probe that runs before a server is saved: the
+//! caller's `url` is forwarded alone, and model-gateway answers the server's auth requirement
+//! and tools without saving anything.
+//!
 //! Ownership/sharing: servers are private (`scope == "user"`) by default;
 //! org-wide servers (`scope == "org"`) require an org admin — gated here before
 //! proxying — and model-gateway re-derives admin/owner authoritatively from the
@@ -63,6 +67,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route("/api/v1/mcp/servers/oauth/start", post(oauth_start))
         .route("/api/v1/mcp/servers/oauth/callback", get(oauth_callback))
         .route("/api/v1/mcp/servers/connect", post(connect_server))
+        .route("/api/v1/mcp/servers/probe", post(probe_server))
         .route("/api/v1/mcp/servers/{server_id}/tools", get(list_server_tools))
         .route(
             "/api/v1/mcp/servers/{server_id}/tools/{tool}/approve",
@@ -333,6 +338,40 @@ async fn connect_server(
     (status, body).into_response()
 }
 
+/// Probe an MCP server before anyone saves it: the body is forwarded as its `url`
+/// alone, and model-gateway answers the server's auth requirement and tools without
+/// registering anything. The switch, the SSRF guard and the per-user limit live in
+/// model-gateway, so this layer adds no gate of its own.
+async fn probe_server(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Response {
+    let url = format!("{}/v1/mcp/servers/probe", state.model_gateway_url);
+    proxy_tool_surface(
+        &state,
+        &user,
+        &headers,
+        Method::POST,
+        &url,
+        Some(mcp_probe_body(&body)),
+    )
+    .await
+}
+
+/// The body forwarded for a probe: the `url` alone, as sent. Anything else the browser
+/// adds, a credential among it, is dropped here, and model-gateway refuses a body with
+/// any other key.
+fn mcp_probe_body(body: &Value) -> Value {
+    let mut forwarded = serde_json::Map::new();
+    forwarded.insert(
+        "url".to_owned(),
+        body.get("url").cloned().unwrap_or(Value::Null),
+    );
+    Value::Object(forwarded)
+}
+
 /// The registry rows of one server's tools: class, approval floor, review state
 /// and digests, never a description or a schema.
 async fn list_server_tools(
@@ -554,6 +593,7 @@ async fn post_mcp_app_tool_call(
         Some(execution.as_str()),
         None,
         Some(session.as_str()),
+        None,
         None,
         None,
         &user,

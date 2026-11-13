@@ -9,6 +9,7 @@
 //! the caller only.
 
 use axum::{extract::State, http::StatusCode, routing::post, Extension, Json, Router};
+use mp_contracts::user_content::UserContent;
 use mp_ids::new_ulid;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -31,8 +32,8 @@ pub(crate) fn router() -> Router<AppState> {
 pub(crate) struct ReviewRunRequest {
     target: String,
     label: String,
-    material: String,
-    brief: String,
+    material: UserContent,
+    brief: UserContent,
     locale: String,
     zdr: bool,
 }
@@ -104,7 +105,7 @@ pub(crate) async fn review_run_with(
         .map_err(|e| grpc_status_to_http(&e))?
         .into_inner();
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let lines: Vec<&str> = input.material.lines().collect();
+    let lines: Vec<&str> = input.material.expose_for_model().lines().collect();
     let parse = parse_review_reply(&resp.content, &lines);
     let cost_basis = CostBasis::of_route("", "").served_by(&resp.provider_used);
     let cost_usd = if zdr {

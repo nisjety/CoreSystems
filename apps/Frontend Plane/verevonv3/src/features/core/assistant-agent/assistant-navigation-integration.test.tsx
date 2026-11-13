@@ -31,7 +31,7 @@ function mount(infer: (prompt: string, signal: AbortSignal) => Promise<{ content
     const [state, setState] = createSignal<AssistantNavigationAgentState>({ status: 'idle', error: null })
     guide = createAssistantNavigationGuide({ navigate, onComplete: completed, onOpenChat: vi.fn() })
     const agent = createAssistantNavigationAgent({ scope: () => 'user-a:org-a', onChange: setState,
-      onAction: action => guide.startAction(action), dependencies: { infer } })
+      onAction: action => guide.startAction(action), tr: (_no: string, en: string) => en, dependencies: { infer } })
     onCleanup(() => { agent.dispose(); guide.dispose() })
     return <><AssistantNavigationCursor guide={guide} /><GlobalAssistant forceReveal message={message()} onMessageChange={setMessage}
       onBeforeSubmit={() => false} canHandleBeforeSubmit={() => false} onSubmit={agent.send} navigationAgent={state()}
@@ -57,13 +57,26 @@ describe('assistant task input and model navigation', () => {
     else expect(navigate).not.toHaveBeenCalled()
   })
 
-  it('keeps the draft and does not start a guide when the model fails', async () => {
+  it('keeps the draft and does not start a guide when the model gives no usable proposal', async () => {
+    const infer = vi.fn(async () => ({ content: 'not a proposal' }))
+    const { guide } = mount(infer)
+    const input = screen.getByRole('textbox', { name: 'Task for Verevon' }) as HTMLTextAreaElement
+    fireEvent.input(input, { target: { value: 'Find the knowledge page' } }); flush()
+    fireEvent.click(screen.getByRole('button', { name: 'Start task' })); flush()
+    // The app's own sentence for an answer it cannot use, in the active locale (English here).
+    await waitFor(() => expect(screen.getByText('Which app page or website should I work with?')).toBeTruthy())
+    expect(input.value).toBe('Find the knowledge page')
+    expect(guide().destination()).toBeNull()
+  })
+
+  it('does not show the raw text of a failed model request', async () => {
     const infer = vi.fn(async () => { throw new Error('Model unavailable') })
     const { guide } = mount(infer)
     const input = screen.getByRole('textbox', { name: 'Task for Verevon' }) as HTMLTextAreaElement
     fireEvent.input(input, { target: { value: 'Find the knowledge page' } }); flush()
     fireEvent.click(screen.getByRole('button', { name: 'Start task' })); flush()
-    await waitFor(() => expect(screen.getByText('Model unavailable')).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
+    expect(screen.queryByText('Model unavailable')).toBeNull()
     expect(input.value).toBe('Find the knowledge page')
     expect(guide().destination()).toBeNull()
   })

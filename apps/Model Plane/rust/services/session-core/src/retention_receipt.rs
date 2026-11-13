@@ -245,6 +245,95 @@ pub(crate) fn refuse_zdr_continuation(caller: &VerifiedIdentity) -> Result<(), S
     Ok(())
 }
 
+/// `SESSION_THREAD_RECEIPT_ENFORCE`: stamp a retention receipt on a thread at `CreateThread` and check an
+/// `AppendMessage` caller's posture against it (Z-17, thread half; D-ZDR-04). Default off; off, no
+/// receipt is written, none is read, and an append behaves exactly as before. Only the literal `true`
+/// turns it on.
+pub(crate) const THREAD_RECEIPT_ENFORCE_ENV: &str = "SESSION_THREAD_RECEIPT_ENFORCE";
+
+/// Whether `raw` of [`THREAD_RECEIPT_ENFORCE_ENV`] turns the switch on. The repo's strict parser reads it:
+/// only the literal `true`.
+#[must_use]
+pub(crate) fn thread_receipt_enforce_from(raw: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(raw)
+}
+
+/// Whether the thread receipt is stamped and enforced. Read where it is used, as the other session-core
+/// switches are, so a test that sets the variable sees it.
+#[must_use]
+pub(crate) fn thread_receipt_enforce_enabled() -> bool {
+    thread_receipt_enforce_from(std::env::var(THREAD_RECEIPT_ENFORCE_ENV).ok().as_deref())
+}
+
+/// Read a thread's stored receipt. A NULL class is a thread created before the receipt existed, or while
+/// the switch was off, and reads as persistent (D-ZDR-04; no backfill). A NULL class that names a waiver
+/// is not a receipt this code wrote.
+///
+/// # Errors
+///
+/// `internal` when the class is unknown or the waiver columns disagree with it.
+#[allow(clippy::result_large_err)]
+pub(crate) fn thread_retention_from_storage(
+    class: Option<&str>,
+    ack_id: Option<String>,
+    connection_id: Option<String>,
+) -> Result<RunRetention, Status> {
+    match class {
+        Some(class) => RunRetention::from_storage(class, ack_id, connection_id),
+        None if ack_id.is_none() && connection_id.is_none() => Ok(RunRetention::persistent()),
+        None => Err(Status::internal(
+            "thread retention waiver columns disagree with the class",
+        )),
+    }
+}
+
+/// The posture gate of an append into an existing thread (Z-17, thread half). With
+/// `SESSION_THREAD_RECEIPT_ENFORCE` on, a human caller appends only when its posture is the thread's
+/// receipt, exactly: a persistent caller into a persistent (or receipt-less) thread, and a waived caller
+/// only into a thread whose receipt names the same connection and the same acknowledgement. The
+/// comparison is [`require_stored_posture`], the one runs use.
+///
+/// * A thread that does not exist is not refused here: the append reports it as not found, as before.
+/// * A ZDR credential keeps its existing refusal (`authorize_operation` refuses it before this runs); this
+///   adds no path for it.
+/// * A service workload is not held to a user's posture, as [`require_stored_posture`] says.
+/// * With the switch off this returns at once and reads nothing.
+///
+/// The receipt is written once at `CreateThread` and never changes, so a lookup before the append's
+/// transaction is the receipt the append sees. Every refusal comes before any write. No content is read
+/// or logged: the lookup selects the class word and two ids.
+///
+/// # Errors
+///
+/// `permission_denied` with the posture-mismatch refusal when the postures differ; `failed_precondition`
+/// with the durable-mutation refusal for a ZDR credential; `internal` when the lookup fails or the stored
+/// receipt is malformed.
+#[allow(clippy::result_large_err)]
+pub(crate) async fn require_thread_posture(
+    pool: &PgPool,
+    caller: &VerifiedIdentity,
+    thread_id: &str,
+) -> Result<(), Status> {
+    if !thread_receipt_enforce_enabled() || caller.is_service() {
+        return Ok(());
+    }
+    let row: Option<(Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT retention_class, waiver_ack_id, waiver_connection_id FROM threads WHERE id = $1",
+    )
+    .bind(thread_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "thread retention lookup failed");
+        Status::internal("thread retention persistence failed")
+    })?;
+    let Some((class, ack_id, connection_id)) = row else {
+        return Ok(());
+    };
+    let stored = thread_retention_from_storage(class.as_deref(), ack_id, connection_id)?;
+    require_stored_posture(caller, &stored)
+}
+
 /// Whether `run_id` is `user_id`'s run in `org_id` and, for a human caller, whether the caller's posture
 /// is that run's receipt. A run that is not the caller's answers `false` and its receipt is never read,
 /// so the answer does not disclose another owner's run.
@@ -900,6 +989,7 @@ mod db_tests {
             user_id: seeded.user.clone(),
             start_key: start_key.to_owned(),
             terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+            agent_version_pin: None,
         }
     }
 

@@ -14,6 +14,7 @@ use mp_contracts::dataplane::retrieval_v2::{
 };
 use mp_contracts::model_plane::v1::{
     self as pb,
+    approval_rule_proposal_service_server::ApprovalRuleProposalServiceServer,
     approval_scope_grant_service_server::ApprovalScopeGrantServiceServer,
     artifact_revision_service_server::ArtifactRevisionServiceServer,
     attention_service_server::AttentionServiceServer,
@@ -27,6 +28,7 @@ use mp_contracts::model_plane::v1::{
     message_tree_service_server::MessageTreeServiceServer,
     orchestration_core_service_server::OrchestrationCoreServiceServer,
     research_run_service_server::ResearchRunServiceServer,
+    promote_on_use_service_server::{PromoteOnUseService, PromoteOnUseServiceServer},
     run_question_consume_service_server::RunQuestionConsumeServiceServer,
     routing_policy_server::RoutingPolicyServer,
     run_ledger_service_server::RunLedgerServiceServer,
@@ -232,6 +234,12 @@ struct ConversationRow {
     revised_by_subject_id: Option<String>,
     revision_no: i32,
     agent_followed_up: bool,
+    /// The customer-gateway connection the turn was written under (W4-BYO): an opaque id, NULL for
+    /// a platform turn and for rows written before the column existed.
+    model_connection_id: Option<String>,
+    /// The subscription connection the turn was written under (DEC-V-R8): an opaque id, NULL for every
+    /// other turn and for rows written before the column existed.
+    subscription_connection_id: Option<String>,
 }
 
 /// The sibling count of a turn, read where the tree is read: a thread that has never been
@@ -302,6 +310,10 @@ fn session_message_from_row(row: ConversationRow, include_inactive: bool) -> pb:
         // Filled for human posts by `finish_conversation_messages` (WS08-S2).
         mentions: Vec::new(),
         entry,
+        // The opaque connection id only, so a regenerate or an edit replays on the same connection.
+        model_connection_id: row.model_connection_id.unwrap_or_default(),
+        // The opaque subscription connection id only, so a side question is answered on the same subscription.
+        subscription_connection_id: row.subscription_connection_id.unwrap_or_default(),
     }
 }
 
@@ -405,7 +417,8 @@ async fn conversation_rows_ordered(
                 {fold_state} AS revision_state, rv.created_at AS revised_at,
                 rv.actor_subject_id AS revised_by_subject_id,
                 COALESCE(rv.revision_no, 0) AS revision_no,
-                {fold_followed_up} AS agent_followed_up
+                {fold_followed_up} AS agent_followed_up,
+                m.model_connection_id, m.subscription_connection_id
          FROM messages m
          JOIN threads t ON t.id = m.thread_id
          {fold_join}
@@ -883,6 +896,16 @@ async fn authorize_thread_deletion_owner(
     }
 }
 
+/// What [`delete_thread_rows`] removed that the caller acts on after its commit: the `agent_memory`
+/// rows whose semantic twins must follow, and the ids of the thread's share snapshots, whose Control
+/// grants are removed (or logged) once their rows are gone.
+pub(crate) struct ErasedThreadRows {
+    /// The erased `agent_memory` rows, for the semantic propagation after the commit.
+    pub(crate) memories: Vec<crate::memory_erasure::ErasedMemory>,
+    /// The thread's snapshot ids, read before their rows went. Empty while the grants switch is off.
+    pub(crate) snapshot_ids: Vec<String>,
+}
+
 /// Delete every durable row owned by one thread while `tx` holds the caller's
 /// transaction. The order is explicit because the original schema predates
 /// this operation and most foreign keys do not have `ON DELETE CASCADE`.
@@ -898,11 +921,12 @@ async fn authorize_thread_deletion_owner(
 /// semantic twin on letta-bridge keyed by the same id, and once the durable row
 /// is gone there is nothing left in Postgres to find that twin by. The caller
 /// propagates after commit — see [`crate::memory_erasure`] for why this is not
-/// done inside the transaction.
+/// done inside the transaction. The share snapshot ids come back the same way:
+/// their Control grants are removed after the commit, never inside it.
 pub(crate) async fn delete_thread_rows(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     thread_id: &str,
-) -> Result<Vec<crate::memory_erasure::ErasedMemory>, Status> {
+) -> Result<ErasedThreadRows, Status> {
     // Captured before the row is gone; `owner` is the user_id the semantic copy
     // was tagged with (memory_grpc::index_memory).
     let erased_memories: Vec<crate::memory_erasure::ErasedMemory> =
@@ -916,6 +940,18 @@ pub(crate) async fn delete_thread_rows(
         .into_iter()
         .map(|(memory_id, owner)| crate::memory_erasure::ErasedMemory { memory_id, owner })
         .collect();
+
+    // EP-12 S14 / W4-SH-4: a snapshot's Control view grants are removed by the caller after the commit,
+    // so the ids are read here, before their rows go. Read only while the grants switch is on.
+    let snapshot_ids: Vec<String> = if crate::thread_shares::snapshot_grants_enabled() {
+        sqlx::query_scalar("SELECT id FROM thread_share_snapshots WHERE thread_id = $1")
+            .bind(thread_id)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?
+    } else {
+        Vec::new()
+    };
 
     // Direct thread evidence and content-bearing side ledgers.
     for query in [
@@ -1047,7 +1083,10 @@ pub(crate) async fn delete_thread_rows(
             .map_err(|error| Status::internal(error.to_string()))?;
     }
 
-    Ok(erased_memories)
+    Ok(ErasedThreadRows {
+        memories: erased_memories,
+        snapshot_ids,
+    })
 }
 
 /// Require that `thread_id` is owned by EXACTLY `owner` in the caller's org.
@@ -2063,12 +2102,26 @@ async fn record_scheduled_step_receipt_inner(
 
 /// The fire status a terminal step outcome settles to. An unknown outcome is not
 /// a failure: the step may have run, so the fire says so, the same word the sweeper
-/// uses for fires it cannot match (build plan WS20 S8).
+/// uses for fires it cannot match (build plan WS20 S8). A `needs_review` run is a
+/// failed run (orchestrator-core records it RUN_FAILED), so its fire is `failed` too,
+/// and the fire's outcome names the review (DEC-V-R14).
 fn scheduled_fire_status(step_status: &str) -> &'static str {
     match step_status {
         "completed" => "completed",
         "unknown_outcome" => "unknown",
         _ => "failed",
+    }
+}
+
+/// The run outcome a scheduled result records (DEC-V-R14). A completed step that withheld
+/// effects for the owner ends `needs_review`, never `completed`: the orchestrator fails such a
+/// run (`scheduled_agent_needs_review`), so its fire and its goal turn must not read completed.
+/// Every other status is its own outcome. The receipt and the RPC response keep the step status.
+fn scheduled_result_outcome(step_status: &str, withheld_effects: i32) -> &str {
+    if step_status == "completed" && withheld_effects > 0 {
+        "needs_review"
+    } else {
+        step_status
     }
 }
 
@@ -2261,6 +2314,9 @@ async fn record_scheduled_run_result_with(
     .execute(&mut *tx)
     .await
     .map_err(|error| Status::internal(error.to_string()))?;
+    // The run's own outcome: a needs_review run is recorded failed, with the review as its outcome
+    // (DEC-V-R14). The receipt above and the response below keep the step's own status.
+    let run_outcome = scheduled_result_outcome(&req.status, withheld_effects);
     sqlx::query(
         "UPDATE cron_fires
          SET status = $3, completed_at = now(), run_id = $4, thread_id = $5,
@@ -2269,10 +2325,10 @@ async fn record_scheduled_run_result_with(
     )
     .bind(&schedule_id)
     .bind(&fire_key)
-    .bind(scheduled_fire_status(&req.status))
+    .bind(scheduled_fire_status(run_outcome))
     .bind(&req.run_id)
     .bind(&thread_id)
-    .bind(&req.status)
+    .bind(run_outcome)
     .bind(withheld_effects)
     .execute(&mut *tx)
     .await
@@ -2285,7 +2341,7 @@ async fn record_scheduled_run_result_with(
                 org_id: &req.org_id,
                 run_id: &req.run_id,
                 scheduled_thread_id: &thread_id,
-                outcome: unattended_turn_outcome(&req.status),
+                outcome: unattended_turn_outcome(run_outcome),
                 input_tokens: i64::from(req.input_tokens),
                 output_tokens: i64::from(req.output_tokens),
             },
@@ -2319,11 +2375,12 @@ struct UnattendedFire<'a> {
     output_tokens: i64,
 }
 
-/// The goal-turn outcome of a scheduled step status (the `thread_goal_turns` CHECK).
-fn unattended_turn_outcome(step_status: &str) -> &'static str {
-    match step_status {
+/// The goal-turn outcome of a scheduled run outcome (the `thread_goal_turns` CHECK). A
+/// `needs_review` run is a failed run, so its turn is failed (DEC-V-R14).
+fn unattended_turn_outcome(run_outcome: &str) -> &'static str {
+    match run_outcome {
         "completed" => "completed",
-        "failed" => "failed",
+        "failed" | "needs_review" => "failed",
         _ => "unknown",
     }
 }
@@ -2489,8 +2546,9 @@ async fn record_unattended_goal_turn(
 #[cfg(test)]
 mod unattended_goal_tests {
     use super::{
-        claim_scheduled_step_inner, pb, record_scheduled_run_result_with, unattended_stop_state,
-        unattended_turn_outcome, UnattendedGoalCounters,
+        claim_scheduled_step_inner, pb, record_scheduled_run_result_with, scheduled_fire_status,
+        scheduled_result_outcome, unattended_stop_state, unattended_turn_outcome,
+        UnattendedGoalCounters,
     };
 
     fn counters(tokens: (Option<i64>, i64), turns: (i32, i32)) -> UnattendedGoalCounters {
@@ -2511,6 +2569,50 @@ mod unattended_goal_tests {
         assert_eq!(unattended_turn_outcome("failed"), "failed");
         assert_eq!(unattended_turn_outcome("unknown_outcome"), "unknown");
         assert_eq!(unattended_turn_outcome("anything else"), "unknown");
+    }
+
+    /// DEC-V-R14: the run outcome settles the fire and the goal turn. A completed step that
+    /// withheld effects is a `needs_review` run, which is failed; a run with nothing withheld
+    /// stays completed; every other status keeps its own outcome.
+    #[test]
+    fn scheduled_result_outcome_records_a_review_as_failed() {
+        assert_eq!(scheduled_result_outcome("completed", 0), "completed");
+        assert_eq!(scheduled_result_outcome("completed", 2), "needs_review");
+        assert_eq!(scheduled_result_outcome("failed", 2), "failed");
+        assert_eq!(
+            scheduled_result_outcome("unknown_outcome", 1),
+            "unknown_outcome"
+        );
+
+        assert_eq!(
+            scheduled_fire_status(scheduled_result_outcome("completed", 0)),
+            "completed"
+        );
+        assert_eq!(
+            scheduled_fire_status(scheduled_result_outcome("completed", 2)),
+            "failed"
+        );
+        assert_eq!(
+            scheduled_fire_status(scheduled_result_outcome("failed", 0)),
+            "failed"
+        );
+        assert_eq!(
+            scheduled_fire_status(scheduled_result_outcome("unknown_outcome", 0)),
+            "unknown"
+        );
+
+        assert_eq!(
+            unattended_turn_outcome(scheduled_result_outcome("completed", 0)),
+            "completed"
+        );
+        assert_eq!(
+            unattended_turn_outcome(scheduled_result_outcome("completed", 2)),
+            "failed"
+        );
+        assert_eq!(
+            unattended_turn_outcome(scheduled_result_outcome("unknown_outcome", 2)),
+            "unknown"
+        );
     }
 
     #[test]
@@ -2781,6 +2883,95 @@ mod unattended_goal_tests {
                 .expect("read counters");
         assert_eq!((tokens, turns), (1_500, 1), "a replay adds nothing");
         assert_eq!(schedule_state(&pool, &seeded.schedule_id).await, (true, None));
+    }
+
+    /// DEC-V-R14: a scheduled run that completed its step but withheld an effect ends
+    /// `needs_review`, so its fire records `failed` with the outcome `needs_review`, and its goal
+    /// turn is `failed`. The receipt and the response keep the step's `completed`, and the answer
+    /// is still appended. A run with nothing withheld still records `completed` on its fire and
+    /// its goal turn.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn scheduled_result_records_a_needs_review_run_as_failed() {
+        let Some(pool) = connect().await else {
+            return;
+        };
+        let seeded = seed_goal_schedule(&pool, &mp_ids::new_ulid().to_lowercase(), 5).await;
+
+        let clean_fire = mp_ids::new_ulid();
+        let clean = claimed_fire(&pool, &seeded, &clean_fire).await;
+        let clean_result = record_scheduled_run_result_with(&pool, clean.clone(), true)
+            .await
+            .expect("clean result")
+            .into_inner();
+        assert_eq!(clean_result.status, "completed");
+
+        let review_fire = mp_ids::new_ulid();
+        let review = claimed_fire(&pool, &seeded, &review_fire).await;
+        let review = pb::RecordScheduledRunResultRequest {
+            withheld_effects: 2,
+            ..review
+        };
+        let first = record_scheduled_run_result_with(&pool, review.clone(), true)
+            .await
+            .expect("review result")
+            .into_inner();
+        assert_eq!(first.status, "completed", "receipt keeps status");
+        assert!(!first.message_id.is_empty(), "the answer is still appended");
+        let replay = record_scheduled_run_result_with(&pool, review.clone(), true)
+            .await
+            .expect("replayed review result")
+            .into_inner();
+        assert_eq!(replay.message_id, first.message_id);
+
+        let clean_row = fire_row(&pool, &seeded.schedule_id, &format!("fire-{clean_fire}")).await;
+        assert_eq!(clean_row.status, "completed");
+        assert_eq!(clean_row.outcome, "completed");
+        assert_eq!(clean_row.withheld_effects, 0);
+        let review_row = fire_row(&pool, &seeded.schedule_id, &format!("fire-{review_fire}")).await;
+        assert_eq!(review_row.status, "failed");
+        assert_eq!(review_row.outcome, "needs_review");
+        assert_eq!(review_row.withheld_effects, 2);
+        assert_eq!(review_row.run_id, review.run_id, "the fire names its run");
+
+        let clean_turn = goal_turn_outcome(&pool, &seeded.goal_id, &clean.run_id).await;
+        assert_eq!(clean_turn, "completed");
+        let review_turn = goal_turn_outcome(&pool, &seeded.goal_id, &review.run_id).await;
+        assert_eq!(review_turn, "failed");
+    }
+
+    /// One fire row, read back for the assertions above.
+    #[derive(sqlx::FromRow)]
+    struct FireRow {
+        status: String,
+        outcome: String,
+        withheld_effects: i32,
+        run_id: String,
+    }
+
+    /// The fire row of one schedule's fire key.
+    async fn fire_row(pool: &sqlx::PgPool, schedule_id: &str, fire_key: &str) -> FireRow {
+        sqlx::query_as(
+            "SELECT status, outcome, withheld_effects, run_id FROM cron_fires
+             WHERE schedule_id = $1 AND fire_key = $2",
+        )
+        .bind(schedule_id)
+        .bind(fire_key)
+        .fetch_one(pool)
+        .await
+        .expect("read fire")
+    }
+
+    /// The settled outcome of the unattended goal turn one run wrote.
+    async fn goal_turn_outcome(pool: &sqlx::PgPool, goal_id: &str, run_id: &str) -> String {
+        sqlx::query_scalar(
+            "SELECT outcome FROM thread_goal_turns WHERE goal_id = $1 AND run_id = $2",
+        )
+        .bind(goal_id)
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .expect("read goal turn")
     }
 
     /// EP-7 S6: a goal that leaves `active` pauses its schedule in the same transaction, and the
@@ -3282,6 +3473,22 @@ async fn latest_skill_revision(
         .await
 }
 
+/// The fire key prefix capability-core's event-trigger starter gives a fire it starts through the
+/// scheduled-run path (`trigger:<trigger id>:<webhook event id>`). A cron fire's key is its RFC 3339 slot,
+/// which can never begin with it.
+const TRIGGER_FIRE_KEY_PREFIX: &str = "trigger:";
+
+/// The origin a scheduled run is stamped with. It is derived from the immutable fire key the run is bound
+/// to, never from a request field: a key that starts `trigger:` is a run an event trigger started, and
+/// every other key is a schedule's own slot.
+fn scheduled_run_origin(fire_key: &str) -> RunOrigin {
+    if fire_key.starts_with(TRIGGER_FIRE_KEY_PREFIX) {
+        RunOrigin::Trigger
+    } else {
+        RunOrigin::Schedule
+    }
+}
+
 /// Bind the non-secret schedule identity to the deterministic run row. This
 /// is separate from `StartRunRequest` so generic user runs cannot populate the
 /// schedule namespace. A retry may observe the exact same binding, but a
@@ -3295,8 +3502,8 @@ async fn persist_scheduled_run_bindings(
         .begin()
         .await
         .map_err(|error| Status::internal(error.to_string()))?;
-    let existing: Option<(String, String, serde_json::Value)> = sqlx::query_as(
-        "SELECT r.org_id, COALESCE(t.space_id, ''), r.metadata
+    let existing: Option<(String, String, serde_json::Value, String)> = sqlx::query_as(
+        "SELECT r.org_id, COALESCE(t.space_id, ''), r.metadata, r.retention_class
          FROM runs r JOIN threads t ON t.id = r.thread_id
          WHERE r.id = $1 AND r.thread_id = $2
            AND r.org_id = $3 AND r.user_id = $4
@@ -3309,11 +3516,23 @@ async fn persist_scheduled_run_bindings(
     .fetch_optional(&mut *tx)
     .await
     .map_err(|error| Status::internal(error.to_string()))?;
-    let Some((org_id, space_id, metadata)) = existing else {
+    let Some((org_id, space_id, metadata, retention_class)) = existing else {
         return Err(Status::permission_denied(
             "scheduled run owner binding is unavailable",
         ));
     };
+    // A scheduled run is always persistent (Control refuses a ZDR schedule and start_scheduled_run
+    // creates the run persistent). A zero-retention or waived run, or an unreadable class, is refused
+    // before any UPDATE; dropping the transaction rolls it back. Waived counts as ZDR (DEC-32).
+    if !matches!(
+        crate::retention_receipt::RetentionClass::from_storage(&retention_class),
+        Some(crate::retention_receipt::RetentionClass::Persistent)
+    ) {
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
+    }
     let mut expected = serde_json::json!({
         "source": "scheduled_run",
         "schedule_id": req.schedule_id,
@@ -3323,7 +3542,7 @@ async fn persist_scheduled_run_bindings(
         "template_digest": req.template_digest,
         "policy_digest": req.policy_digest,
         "idempotency_key": req.idempotency_key,
-        "origin": RunOrigin::Schedule.as_str(),
+        "origin": scheduled_run_origin(&req.fire_key).as_str(),
     });
     if !req.contract_digest.is_empty() {
         let body: serde_json::Value = serde_json::from_str(&req.contract_json)
@@ -3349,8 +3568,8 @@ async fn persist_scheduled_run_bindings(
     // A run bound before the origin stamp existed carries none. It may take the
     // stamp, but a run already stamped with any other origin is never rebound.
     let stamped = metadata.get(ORIGIN_METADATA_KEY).is_some();
-    let origin_bindable =
-        !stamped || RunOrigin::from_metadata(&metadata) == Some(RunOrigin::Schedule);
+    let origin_bindable = !stamped
+        || RunOrigin::from_metadata(&metadata) == Some(scheduled_run_origin(&req.fire_key));
     if !metadata.is_object() || metadata.as_object().is_none() || metadata == serde_json::json!({})
     {
         sqlx::query(
@@ -3372,7 +3591,7 @@ async fn persist_scheduled_run_bindings(
              WHERE id = $1 AND org_id = $3",
         )
         .bind(&req.run_id)
-        .bind(RunOrigin::Schedule.as_str())
+        .bind(scheduled_run_origin(&req.fire_key).as_str())
         .bind(&org_id)
         .bind(ORIGIN_METADATA_KEY)
         .execute(&mut *tx)
@@ -4349,9 +4568,12 @@ pub(crate) fn verify_run_control_space_decision(
 pub(crate) const CONTROL_SPACE_MEMORY_ACTION: &str = "model.space.memory.manage";
 pub(crate) const CONTROL_SPACE_MEMORY_SCHEMA: &str = "sha256:space-memory-manage-v1";
 pub(crate) const SPACE_MEMORY_PERMISSION: &str = "memory:manage";
-/// The two operations a Space memory decision binds.
+/// The operations a Space memory decision binds.
 pub(crate) const SPACE_MEMORY_OPERATION_LIST: &str = "list";
 pub(crate) const SPACE_MEMORY_OPERATION_DELETE: &str = "delete";
+/// Erase one named agent's memory in the Space (EP-6 P3). Its `memory_id` is the agent's subject id,
+/// so one token erases one agent's rows and no other agent's.
+pub(crate) const SPACE_MEMORY_OPERATION_ERASE_AGENT: &str = "erase_agent";
 
 /// What a verified Space memory decision tells the reader: the Space's audience as Control signed
 /// it now, so the owner's list can mark the rows a current member is not shown, and the
@@ -5188,25 +5410,38 @@ async fn create_thread_inner(
     pool: &PgPool,
     req: pb::CreateThreadRequest,
 ) -> Result<Response<pb::CreateThreadResponse>, Status> {
+    create_thread_inner_with_receipt(pool, req, None).await
+}
+
+/// [`create_thread_inner`] that also stamps the thread's retention receipt (Z-17, thread half). `receipt`
+/// is `Some` only from the `create_thread` handler while `SESSION_THREAD_RECEIPT_ENFORCE` is on; `None`
+/// leaves the receipt columns NULL, which reads as persistent.
+async fn create_thread_inner_with_receipt(
+    pool: &PgPool,
+    req: pb::CreateThreadRequest,
+    receipt: Option<&crate::retention_receipt::RunRetention>,
+) -> Result<Response<pb::CreateThreadResponse>, Status> {
     let signed_kind = verify_thread_space_decision(&req)?;
     let space_kind = crate::space::memory_scope::normalize_claim_space_kind(&signed_kind);
-    create_thread_inner_preverified_kind(pool, req, space_kind).await
+    create_thread_inner_preverified_kind(pool, req, space_kind, receipt).await
 }
 
 async fn create_thread_inner_preverified(
     pool: &PgPool,
     req: pb::CreateThreadRequest,
 ) -> Result<Response<pb::CreateThreadResponse>, Status> {
-    create_thread_inner_preverified_kind(pool, req, None).await
+    create_thread_inner_preverified_kind(pool, req, None, None).await
 }
 
 /// WS17-S1: `space_kind` is the Space kind from the verified Control decision, already
 /// normalised; `None` leaves the column NULL (contained). Only the verified create path
-/// passes one.
+/// passes one. `receipt` is the thread's retention receipt (Z-17): written in the insert, once, and
+/// never on a retried create that finds the thread already there.
 async fn create_thread_inner_preverified_kind(
     pool: &PgPool,
     req: pb::CreateThreadRequest,
     space_kind: Option<String>,
+    receipt: Option<&crate::retention_receipt::RunRetention>,
 ) -> Result<Response<pb::CreateThreadResponse>, Status> {
     let mut tx = pool
         .begin()
@@ -5282,8 +5517,8 @@ async fn create_thread_inner_preverified_kind(
     let origin = resolve_thread_origin(&req)?;
 
     sqlx::query(
-        "INSERT INTO threads (id, session_key, org_id, user_id, created_at, space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision, origin, space_kind)
-         VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, 0), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, 0), $14, $15)",
+        "INSERT INTO threads (id, session_key, org_id, user_id, created_at, space_id, space_decision_ref, recipient_audience_ref, recipient_audience_revision, recipient_audience_hash, privacy_policy_ref, resource_authorization_ref, authority_revision, origin, space_kind, retention_class, waiver_ack_id, waiver_connection_id)
+         VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, 0), NULLIF($10, ''), NULLIF($11, ''), NULLIF($12, ''), NULLIF($13, 0), $14, $15, $16, $17, $18)",
     )
     .bind(&thread_id)
     .bind(&req.session_key)
@@ -5304,6 +5539,9 @@ async fn create_thread_inner_preverified_kind(
     })?)
     .bind(origin)
     .bind(space_kind.as_deref())
+    .bind(receipt.map(|receipt| receipt.class.as_str()))
+    .bind(receipt.and_then(|receipt| receipt.ack_id()))
+    .bind(receipt.and_then(|receipt| receipt.connection_id()))
     .execute(&mut *tx)
     .await
     .map_err(|e| Status::internal(e.to_string()))?;
@@ -5508,6 +5746,17 @@ async fn append_message_inner_as(
     }))
 }
 
+/// A connection id (a customer-gateway `model_connection_id` or a `subscription_connection_id`) has the shape the
+/// `messages` columns allow (non-empty, at most 128 bytes of ASCII letters, digits, `-`, `_` and `.`), so a
+/// malformed one is refused as a bad argument here instead of surfacing as a database error from the CHECK.
+fn valid_connection_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
 /// A caller's `client_message_id` has the shape the `messages` CHECK allows, so a malformed one is
 /// refused as a bad argument here instead of surfacing as a database error from the CHECK.
 fn valid_client_message_id(id: &str) -> bool {
@@ -5579,6 +5828,22 @@ pub(crate) async fn append_message_in_tx_as(
     if !client_message_id.is_empty() && !valid_client_message_id(client_message_id) {
         return Err(Status::invalid_argument(
             "client_message_id must match [A-Za-z0-9][A-Za-z0-9_-]{0,127}",
+        ));
+    }
+    // The customer-gateway connection id a turn is written under (W4-BYO). Only the opaque id is
+    // stored, never a key; a malformed one is refused before anything is written.
+    let model_connection_id = req.model_connection_id.trim();
+    if !model_connection_id.is_empty() && !valid_connection_id(model_connection_id) {
+        return Err(Status::invalid_argument(
+            "model_connection_id must be at most 128 characters of letters, digits, '-', '_' and '.'",
+        ));
+    }
+    // The subscription connection id a turn is written under (DEC-V-R8). Only the opaque id is stored, never a
+    // key; the same shape rule as the customer-gateway id, and a malformed one is refused before anything is written.
+    let subscription_connection_id = req.subscription_connection_id.trim();
+    if !subscription_connection_id.is_empty() && !valid_connection_id(subscription_connection_id) {
+        return Err(Status::invalid_argument(
+            "subscription_connection_id must be at most 128 characters of letters, digits, '-', '_' and '.'",
         ));
     }
     // "" and "turn" are the conversation turn every caller has always written; "post" is a
@@ -5905,6 +6170,30 @@ pub(crate) async fn append_message_in_tx_as(
         sqlx::query("UPDATE messages SET client_message_id = $2 WHERE id = $1")
             .bind(&msg_id)
             .bind(client_message_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+    }
+
+    // The connection a conversation turn was written under (W4-BYO), so a regenerate, edit or retry
+    // reloaded from history replays on the same connection. A separate statement, and only when an
+    // id came with the send, so a send without one never touches the column. A human post is a room
+    // message and never routed to a model, so it keeps none.
+    if !model_connection_id.is_empty() && post_kind == "turn" && !member {
+        sqlx::query("UPDATE messages SET model_connection_id = $2 WHERE id = $1")
+            .bind(&msg_id)
+            .bind(model_connection_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+    }
+
+    // The same for a subscription turn (DEC-V-R8): a separate statement, and only when an id came with the send,
+    // so a send without one never touches the column. A human post keeps none.
+    if !subscription_connection_id.is_empty() && post_kind == "turn" && !member {
+        sqlx::query("UPDATE messages SET subscription_connection_id = $2 WHERE id = $1")
+            .bind(&msg_id)
+            .bind(subscription_connection_id)
             .execute(&mut **tx)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -8908,7 +9197,13 @@ impl SessionCore for SessionService {
                 None => authorize_system_run_owner(&caller)?,
             };
             req.user_id = user_id;
-            create_thread_inner(&self.pool, req).await
+            // Z-17 (thread half): stamp the creating caller's retention receipt, only while
+            // SESSION_THREAD_RECEIPT_ENFORCE is on. Off, the columns stay NULL and nothing reads them.
+            // A ZDR credential was refused by `authorize_operation` above, so the receipt is
+            // persistent or waived here.
+            let receipt = crate::retention_receipt::thread_receipt_enforce_enabled()
+                .then(|| crate::retention_receipt::RunRetention::from_caller(&caller));
+            create_thread_inner_with_receipt(&self.pool, req, receipt.as_ref()).await
         }
         .await;
         record_metrics("create_thread", started, result.is_ok());
@@ -8927,6 +9222,10 @@ impl SessionCore for SessionService {
             // The thread's owner keeps the owner path unchanged; another Space member may append
             // a human `post` only through the member gate (WS01-S3, flag `SPACE_HUMAN_POSTS_CORE`).
             let append_as = crate::space::authz::authorize_append(&self.pool, &caller, &req).await?;
+            // Z-17 (thread half): the appending caller's posture must be the thread's receipt, checked
+            // before any write. A ZDR credential never gets here (`authorize_operation` refused it).
+            crate::retention_receipt::require_thread_posture(&self.pool, &caller, &req.thread_id)
+                .await?;
             let author_subject_id = caller.user_id().unwrap_or_default().to_owned();
             append_message_inner_as(
                 &self.pool,
@@ -9491,10 +9790,12 @@ impl SessionCore for SessionService {
 
     // G7 closed learning loop: persist a skill body into agent_skills. The
     // capability-core learning loop calls this with origin="background_review";
-    // a human skill editor uses origin="user". Provenance is enforced in the
-    // DB: a background_review upsert never overwrites a user-authored skill
-    // (the `WHERE` guard on the conflict), surfaced as `skipped_protected`
-    // rather than an error so the loop yields gracefully to the human.
+    // a human skill editor uses origin="user"; a skill a person taught the agent
+    // (W5-081) is filed with origin="teach", a proposal like background_review.
+    // Provenance is enforced in the DB: a background_review upsert never
+    // overwrites a user-authored skill (the `WHERE` guard on the conflict),
+    // surfaced as `skipped_protected` rather than an error so the loop yields
+    // gracefully to the human.
     /// Flip one skill's injection switch without touching anything else.
     ///
     /// `upsert_agent_skill` is keyed by (org_id, name) and rewrites the whole
@@ -9615,23 +9916,33 @@ impl SessionCore for SessionService {
                 return Err(Status::invalid_argument("org_id and name are required"));
             }
             caller.authorize_org(&req.org_id)?;
+            // The values mirror `learning.Origin` in capability-core's internal/learning and the
+            // origin CHECK of migration 0116: a new origin is added to all three.
             let origin = match req.origin.as_str() {
                 "" | "background_review" => "background_review",
+                "teach" => "teach",
                 "user" => "user",
                 other => {
                     return Err(Status::invalid_argument(format!("invalid origin: {other}")));
                 }
             };
             validate_skill_url_patterns(&req.url_patterns)?;
-            // A learned skill is a disabled proposal owned by one user, whatever
-            // the caller asked for; a human write is accepted as it always was.
-            let (scope, owner, review_state, enabled) = if origin == "background_review" {
+            // A taught skill is durable skill text, so a zero-retention or waived credential never
+            // writes one: the refusal `record_run_context` gives, before anything is read or written.
+            if origin == "teach" && (caller.zdr() || caller.zdr_waiver().is_some()) {
+                return Err(Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::FailedPrecondition));
+            }
+            // A learned or taught skill is a disabled proposal owned by one user, whatever the
+            // caller asked for; a human write is accepted as it always was.
+            let learned = matches!(origin, "background_review" | "teach");
+            let (scope, owner, review_state, enabled) = if learned {
                 let owner = req.owner_user_id.trim();
                 if owner.is_empty() {
                     return Ok(Response::new(skill_write_skipped("owner_required")));
                 }
-                // A user credential may only write for itself; a service
-                // (the learning review) names the owner of the run it reviewed.
+                // A user credential may only write for itself; a service (the learning review,
+                // or the teach route) names the owner of the run the proposal came from.
                 if caller.user_id().is_some() {
                     caller.authorize_user(owner)?;
                 }
@@ -9644,7 +9955,30 @@ impl SessionCore for SessionService {
                     return Ok(Response::new(skill_write_skipped("origin_requires_person")));
                 };
                 match req.scope.as_str() {
-                    "" | "org" => ("org", String::new(), "accepted", req.enabled),
+                    "" | "org" => {
+                        // An org-wide skill is enabled for everyone in the org, so under
+                        // SKILL_ORG_ADMIN_CHECK only a person holding the org admin role in
+                        // the verified credential may write one, the rule capability-core's
+                        // registry_apis applies to a human org write. Session Core decides
+                        // it; the BFF does not. Only the typed reason is logged, no skill text.
+                        if crate::auth::skill_org_admin_check_enabled(
+                            std::env::var(crate::auth::SKILL_ORG_ADMIN_CHECK_ENV)
+                                .ok()
+                                .as_deref(),
+                        ) && !caller.is_org_admin()
+                        {
+                            info!(
+                                org_id = %req.org_id,
+                                actor = %caller.principal_id(),
+                                reason = "org_scope_requires_admin",
+                                "agent skill org write skipped"
+                            );
+                            return Ok(Response::new(skill_write_skipped(
+                                "org_scope_requires_admin",
+                            )));
+                        }
+                        ("org", String::new(), "accepted", req.enabled)
+                    }
                     "user" => {
                         if !req.owner_user_id.is_empty() {
                             caller.authorize_user(&req.owner_user_id)?;
@@ -9685,7 +10019,7 @@ impl SessionCore for SessionService {
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
-            if origin == "background_review" {
+            if learned {
                 // Under the owner's row lock, so a pause that commits first is
                 // seen here and one that waits lands after this write. The
                 // announcement of the run was gated too; this is the gate where
@@ -9701,7 +10035,7 @@ impl SessionCore for SessionService {
             // The content policy. A learned skill's text is refused under enforce and a
             // person's is only counted. A refusal writes nothing: no row is inserted and a
             // stored proposal keeps the text it had.
-            let policy_origin = if origin == "background_review" {
+            let policy_origin = if learned {
                 crate::write_policy::Origin::BackgroundReview
             } else {
                 crate::write_policy::Origin::User
@@ -9727,12 +10061,12 @@ impl SessionCore for SessionService {
             // The conflict key is (org, kind, scope, scope_id, owner, name), the
             // unique index of migration 0109; this RPC writes only kind 'skill' with
             // an empty scope_id (the column defaults), so a template or preset of the
-            // same name is never overwritten by a skill write. A learned skill
-            // refreshes only a proposal it wrote itself and never touches
+            // same name is never overwritten by a skill write. A learned or taught skill
+            // refreshes only a proposal of its own origin (the bound `$10`) and never touches
             // enabled, scope, owner or review_state; a human write keeps setting
             // `enabled` but cannot switch on a proposal nobody accepted.
             // None ⟺ the conflict guard rejected the write.
-            let row: Option<(String, bool)> = if origin == "background_review" {
+            let row: Option<(String, bool)> = if learned {
                 sqlx::query_as(
                     "INSERT INTO agent_skills
                         (id, org_id, name, description, content, trigger_keywords,
@@ -9751,7 +10085,7 @@ impl SessionCore for SessionService {
                          source_thread_id = EXCLUDED.source_thread_id,
                          proposal_reason = EXCLUDED.proposal_reason,
                          updated_at = now()
-                     WHERE agent_skills.origin = 'background_review'
+                     WHERE agent_skills.origin = $10
                        AND agent_skills.review_state = 'proposed'
                      RETURNING id, (xmax = 0) AS created",
                 )
@@ -10451,6 +10785,9 @@ impl SessionCore for SessionService {
                       AND (NULLIF($7, '') IS NULL OR t.id = $7)
                       AND ($11 = 'all' OR (($11 = 'archived') = (t.archived_at IS NOT NULL)))
                       AND (NOT $12::BOOLEAN OR t.starred_at IS NOT NULL)
+                      AND (NULLIF($14, '') IS NULL
+                           OR EXISTS (SELECT 1 FROM runs ar
+                                      WHERE ar.thread_id = t.id AND ar.agent_subject_id = $14))
                       AND ($8::BOOLEAN IS NULL
                            OR ((t.pinned_at IS NOT NULL), t.last_activity_at, t.id)
                               < ($8::BOOLEAN, $9::TIMESTAMPTZ, $10::TEXT))
@@ -10547,6 +10884,7 @@ impl SessionCore for SessionService {
             .bind(archive_state)
             .bind(req.starred_only)
             .bind(history_floor)
+            .bind(&req.agent_subject_id)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| {
@@ -10639,6 +10977,22 @@ impl SessionCore for SessionService {
                     },
                 )
                 .collect();
+            // The retention flag is read for a single-thread lookup only (thread_id filter), so a
+            // listing page costs no extra query per row. The predicate is the reference read's.
+            if !req.thread_id.trim().is_empty() {
+                for thread in &mut threads {
+                    thread.holds_retention_run =
+                        crate::thread_reference::holds_retention_run_for_thread(
+                            &self.pool,
+                            &thread.thread_id,
+                        )
+                        .await
+                        .map_err(|e| {
+                            warn!(error = %e, "list_threads retention read failed");
+                            Status::internal(e.to_string())
+                        })?;
+                }
+            }
             // The attention fields are a post-step on the rows already read: one batched read of
             // the pending rows, and nothing at all while the switch is off (WS16 S1).
             if attention::enabled() {
@@ -11009,6 +11363,11 @@ impl SessionCore for SessionService {
         let result = async {
             let caller = identity(&request)?;
             authorize_owner_housekeeping(&caller, "session:write")?;
+            // The owner's delegated credential is read before the request is consumed, because Control's
+            // grant cleanup needs it. Held as a result, so a missing one never stops the erase.
+            let grants = crate::thread_shares::snapshot_grants_enabled().then(|| {
+                crate::thread_shares::erase_grant_session(self.auth.as_ref(), &request, &caller)
+            });
             let req = request.into_inner();
             if req.org_id.trim().is_empty() || req.thread_id.trim().is_empty() {
                 return Err(Status::invalid_argument(
@@ -11047,7 +11406,10 @@ impl SessionCore for SessionService {
             if owner_org != req.org_id || owner_user != caller_owner {
                 return Err(Status::permission_denied("thread owner required"));
             }
-            let erased_memories = delete_thread_rows(&mut tx, &req.thread_id).await?;
+            let ErasedThreadRows {
+                memories: erased_memories,
+                snapshot_ids,
+            } = delete_thread_rows(&mut tx, &req.thread_id).await?;
             let deleted = sqlx::query("DELETE FROM threads WHERE id = $1 AND org_id = $2")
                 .bind(&req.thread_id)
                 .bind(&req.org_id)
@@ -11068,6 +11430,14 @@ impl SessionCore for SessionService {
             // Best-effort by necessity, but never silent.
             self.propagate_semantic_erasure("delete_thread", &req.org_id, &erased_memories)
                 .await;
+            // After the commit, and never failing the delete: see `revoke_erased_snapshot_grants`.
+            crate::thread_shares::revoke_erased_snapshot_grants(
+                grants,
+                &caller,
+                caller_owner,
+                &snapshot_ids,
+            )
+            .await;
 
             Ok(Response::new(pb::DeleteThreadResponse {
                 thread_id: req.thread_id,
@@ -11087,6 +11457,11 @@ impl SessionCore for SessionService {
         let result = async {
             let caller = identity(&request)?;
             authorize_owner_housekeeping(&caller, "session:write")?;
+            // The owner's delegated credential is read before the request is consumed, because Control's
+            // grant cleanup needs it. Held as a result, so a missing one never stops the erase.
+            let grants = crate::thread_shares::snapshot_grants_enabled().then(|| {
+                crate::thread_shares::erase_grant_session(self.auth.as_ref(), &request, &caller)
+            });
             let req = request.into_inner();
             if req.org_id.trim().is_empty() || req.user_id.trim().is_empty() {
                 return Err(Status::invalid_argument("org_id and user_id are required"));
@@ -11119,8 +11494,11 @@ impl SessionCore for SessionService {
                 .map_err(crate::gdpr::ErasureHoldError::into_status)?;
 
             let mut erased_memories: Vec<crate::memory_erasure::ErasedMemory> = Vec::new();
+            let mut snapshot_ids: Vec<String> = Vec::new();
             for (thread_id,) in &thread_ids {
-                erased_memories.extend(delete_thread_rows(&mut tx, thread_id).await?);
+                let erased = delete_thread_rows(&mut tx, thread_id).await?;
+                erased_memories.extend(erased.memories);
+                snapshot_ids.extend(erased.snapshot_ids);
                 sqlx::query("DELETE FROM threads WHERE id = $1 AND org_id = $2 AND user_id = $3")
                     .bind(thread_id)
                     .bind(&req.org_id)
@@ -11135,6 +11513,14 @@ impl SessionCore for SessionService {
 
             self.propagate_semantic_erasure("delete_threads", &req.org_id, &erased_memories)
                 .await;
+            // After the commit, and never failing the delete: see `revoke_erased_snapshot_grants`.
+            crate::thread_shares::revoke_erased_snapshot_grants(
+                grants,
+                &caller,
+                &req.user_id,
+                &snapshot_ids,
+            )
+            .await;
 
             Ok(Response::new(pb::DeleteThreadsResponse {
                 deleted_count: u32::try_from(thread_ids.len()).unwrap_or(u32::MAX),
@@ -11192,6 +11578,51 @@ impl SessionCore for SessionService {
             .fetch_all(&mut *tx)
             .await
             .map_err(|error| Status::internal(error.to_string()))?;
+
+            // EP-9 C4: a held organisation, or a held thread, is not erased. The candidates are the
+            // owner's locked Space threads and every thread the Space and agent memory rows this
+            // deletion removes cite (GDPR-order-rel1): a `message:` link resolves to its thread,
+            // and a `thread:` link names one, both within this organisation. A hold on any
+            // candidate refuses the whole deletion, as `ensure_user_thread_erasure_not_held` does
+            // for a user erasure (OD-59). The cited threads are read in this transaction, and only
+            // with the check on, so with the switch off the statements are exactly those before it.
+            // The gate is asked after the locks and that read, and before any receipt, memory or
+            // thread delete below. A refusal, or an org-core outage, drops the transaction; the
+            // event-log purge above rolls back with it, so nothing is erased.
+            let mut held_candidates: std::collections::BTreeSet<String> =
+                thread_ids.iter().map(|(id,)| id.clone()).collect();
+            if !matches!(crate::gdpr::erasure_hold_gate(), crate::gdpr::ErasureHoldGate::Off) {
+                let cited: Vec<(String,)> = sqlx::query_as(
+                    "WITH cited_rows AS (
+                       SELECT am.source_links FROM agent_memory am
+                       WHERE am.org_id = $1
+                         AND ((am.scope = 'space' AND am.scope_id = $2)
+                           OR (am.scope = 'agent'
+                               AND left(am.scope_id, length($2) + 1) = $2 || ':'))
+                     )
+                     SELECT t.id FROM cited_rows c
+                       CROSS JOIN LATERAL unnest(c.source_links) AS sl(link)
+                       JOIN messages m ON m.id = substr(sl.link, 9)
+                       JOIN threads t ON t.id = m.thread_id
+                      WHERE sl.link LIKE 'message:%' AND t.org_id = $1
+                     UNION
+                     SELECT t.id FROM cited_rows c
+                       CROSS JOIN LATERAL unnest(c.source_links) AS sl(link)
+                       JOIN threads t ON t.id = substr(sl.link, 8)
+                      WHERE sl.link LIKE 'thread:%' AND t.org_id = $1",
+                )
+                .bind(&req.org_id)
+                .bind(&req.space_id)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+                held_candidates.extend(cited.into_iter().map(|(id,)| id));
+            }
+            let held_candidates: Vec<String> = held_candidates.into_iter().collect();
+            crate::gdpr::erasure_hold_gate()
+                .ensure_not_held(&req.org_id, &held_candidates)
+                .await
+                .map_err(crate::gdpr::ErasureHoldError::into_status)?;
 
             // New background thread memories are mirrored into Letta with the
             // exact durable ID. Capture those IDs before the local deletion;
@@ -12482,6 +12913,9 @@ pub async fn serve(
     // gets its own instance.
     let approval_scope_grants =
         crate::orchestration_grpc::OrchestrationGrpc::new(pool.clone(), events_tx.clone());
+    // The owner's "Always" rule proposals (build plan WS13 S7) likewise share the store only.
+    let approval_rule_proposals =
+        crate::orchestration_grpc::OrchestrationGrpc::new(pool.clone(), events_tx.clone());
     // The resume-answer spend (build plan WS14 S5) likewise shares the store and not the replay.
     let run_question_consume =
         crate::orchestration_grpc::OrchestrationGrpc::new(pool.clone(), events_tx.clone());
@@ -12540,6 +12974,7 @@ pub async fn serve(
     let thread_goal_pool = pool.clone();
     let event_trigger_pool = pool.clone();
     let research_run_pool = pool.clone();
+    let promote_use_pool = pool.clone();
     let thread_share_pool = pool.clone();
     let skill_version_pool = pool.clone();
 
@@ -12597,6 +13032,10 @@ pub async fn serve(
             approval_scope_grants,
             auth.clone(),
         ))
+        .add_service(ApprovalRuleProposalServiceServer::with_interceptor(
+            approval_rule_proposals,
+            auth.clone(),
+        ))
         .add_service(FinetuneJobsServer::with_interceptor(finetune, auth.clone()))
         .add_service(MemoryServiceServer::with_interceptor(memory, auth.clone()))
         .add_service(RoutingPolicyServer::with_interceptor(routing, auth.clone()))
@@ -12628,7 +13067,12 @@ pub async fn serve(
         ))
         // EP-12 S14: the owner's share snapshots; answers `unavailable` until its switch is on.
         .add_service(ThreadShareServiceServer::with_interceptor(
-            crate::thread_shares::ThreadShareGrpc { pool: thread_share_pool },
+            crate::thread_shares::ThreadShareGrpc {
+                pool: thread_share_pool,
+                // W4-SH-4: sharing verifies the owner's delegated credential and calls Control.
+                auth: Some(auth.clone()),
+                control: crate::control_grants::ControlGrantsClient::from_env(),
+            },
             auth.clone(),
         ))
         // EP-3 S7: read-only thread reference reads; only the gateway's switched-off tools call it.
@@ -12654,6 +13098,11 @@ pub async fn serve(
         // Q4 E4.6 (062b): the durable research run store; answers `unavailable` until RESEARCH_RUNS_ENABLED is on.
         .add_service(ResearchRunServiceServer::with_interceptor(
             crate::research_runs::ResearchRunGrpc { pool: research_run_pool },
+            auth.clone(),
+        ))
+        // W5-093-b: the durable promote-on-use counter; execution-core calls it only when PROMOTE_ON_USE_DURABLE is on.
+        .add_service(PromoteOnUseServiceServer::with_interceptor(
+            PromoteOnUseGrpc { pool: promote_use_pool },
             auth.clone(),
         ))
         // EP-11 S2: reads of immutable skill versions; answers `unavailable` until its switch is on.
@@ -12747,6 +13196,86 @@ impl SessionRetentionService for SessionRetentionGrpc {
         }
         .await;
         record_metrics("count_waived_runs", started, result.is_ok());
+        result
+    }
+}
+
+/// The service scope a service principal needs to count a promote-on-use for a user. A run's own
+/// (user-bound) credential needs no scope: it may count only its own user's uses in its own org.
+pub const PROMOTE_USE_WRITE_SCOPE: &str = "session:promote:write";
+
+/// The longest threshold the counter accepts; a threshold above it is a caller error, not a count.
+const MAX_PROMOTE_THRESHOLD: u32 = 1_000_000;
+
+/// One grounded use, counted in a single statement. The first use inserts the row; later uses add one. `promoted_at`
+/// is stamped in the same statement that takes the count to the threshold, and only while it is still null, so
+/// the stamp happens at most once per key. `fire` is "this statement stamped it": `promoted_at` then equals
+/// `updated_at`, both being this transaction's `now()`, while an earlier stamp is an earlier time.
+const INCREMENT_PROMOTE_USE_SQL: &str =
+    "INSERT INTO promote_use_counts (org_id, user_id, url_hash, count, promoted_at, updated_at)
+     VALUES ($1, $2, $3, 1, CASE WHEN 1 >= $4 THEN now() END, now())
+     ON CONFLICT (org_id, user_id, url_hash) DO UPDATE SET
+         count = promote_use_counts.count + 1,
+         promoted_at = CASE
+             WHEN promote_use_counts.promoted_at IS NULL AND promote_use_counts.count + 1 >= $4
+                 THEN now()
+             ELSE promote_use_counts.promoted_at
+         END,
+         updated_at = now()
+     RETURNING count, (promoted_at IS NOT NULL AND promoted_at = updated_at)";
+
+/// `PromoteOnUseService`: the durable promote-on-use counter. It stays beside `SessionCore`, so that trait
+/// and its mocks are unchanged. It stores the hash of a URL, never the URL.
+pub struct PromoteOnUseGrpc {
+    pool: PgPool,
+}
+
+#[tonic::async_trait]
+impl PromoteOnUseService for PromoteOnUseGrpc {
+    async fn increment_promote_use(
+        &self,
+        request: Request<pb::IncrementPromoteUseRequest>,
+    ) -> Result<Response<pb::IncrementPromoteUseResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::IncrementPromoteUseResponse>, Status> = async {
+            let caller = identity(&request)?;
+            // A zero-retention credential is refused here (a write scope is not a `:read`), and a waived one
+            // below: neither may leave a row behind.
+            authorize_operation(&caller, PROMOTE_USE_WRITE_SCOPE)?;
+            if caller.zdr() || caller.zdr_waiver().is_some() {
+                return Err(Refusal::DURABLE_MUTATION_FORBIDDEN
+                    .grpc_status(tonic::Code::FailedPrecondition));
+            }
+            let req = request.into_inner();
+            caller.authorize_org(&req.org_id)?;
+            if req.user_id.trim().is_empty() || req.user_id.chars().count() > 256 {
+                return Err(Status::invalid_argument("user_id is required"));
+            }
+            // A user credential counts only its own uses; a service principal holding the scope names the user.
+            if !caller.is_service() {
+                caller.authorize_user(&req.user_id)?;
+            }
+            if req.url_hash.len() != 32 {
+                return Err(Status::invalid_argument("url_hash must be a 32-byte SHA-256"));
+            }
+            if req.threshold == 0 || req.threshold > MAX_PROMOTE_THRESHOLD {
+                return Err(Status::invalid_argument("threshold out of range"));
+            }
+            let (count, fire): (i32, bool) = sqlx::query_as(INCREMENT_PROMOTE_USE_SQL)
+                .bind(&req.org_id)
+                .bind(&req.user_id)
+                .bind(&req.url_hash)
+                .bind(i32::try_from(req.threshold).unwrap_or(i32::MAX))
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            Ok(Response::new(pb::IncrementPromoteUseResponse {
+                count: u32::try_from(count).unwrap_or(0),
+                fire,
+            }))
+        }
+        .await;
+        record_metrics("increment_promote_use", started, result.is_ok());
         result
     }
 }
@@ -13146,7 +13675,7 @@ const LEDGER_MAX_LIMIT: i64 = 200;
 /// other kinds and so is a skill. A row never changes kind, so the conflict arm
 /// leaves it alone; settings are restored like the text.
 ///
-/// QF-19: url_patterns (0116) are restored too. Snapshots carry them from 0117 on;
+/// QF-19: url_patterns (0130) are restored too. Snapshots carry them from 0131 on;
 /// an older snapshot has no `url_patterns` key, so the conflict arm keeps the row's
 /// current patterns for it instead of wiping them, and a deleted skill recreated
 /// from one comes back with '[]'. The patterns were validated when written, so a
@@ -16869,6 +17398,7 @@ mod tests {
             history: Some(pb::RunContextPart { state: pb::RunContextState::Truncated as i32, included: 24, omitted: 6, reason: "cap".into() }),
             memory: Some(pb::RunContextPart { state: pb::RunContextState::SkippedByPolicy as i32, included: 0, omitted: 0, reason: "memory_off".into() }),
             skills: Vec::new(),
+            connector_ids: Vec::new(),
         };
         let request = |org: &str| pb::RecordRunContextRequest { run_id: run_id.clone(), org_id: org.to_owned(), status: Some(status.clone()) };
 
@@ -18289,6 +18819,7 @@ mod tests {
                 user_id: user_id.clone(),
                 start_key: format!("managed-space-start-{suffix}"),
                 terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+                agent_version_pin: None,
             },
             false,
         )
@@ -18409,6 +18940,7 @@ mod tests {
             user_id: user_id.clone(),
             start_key: format!("managed-race-start-{suffix}"),
             terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+            agent_version_pin: None,
         };
         let first_pool = pool.clone();
         let second_pool = pool.clone();
@@ -18862,6 +19394,71 @@ mod tests {
                 .code(),
             tonic::Code::PermissionDenied
         );
+    }
+
+    /// EP-9 C4: a Space deletion asks the legal-hold gate before it erases any memory or
+    /// thread. The gate is asked after the owner's Space threads are locked, so it checks the
+    /// same set the loop erases (the order `delete_threads` uses), and before the first
+    /// receipt, memory delete or thread delete. The Space's event-log purge runs in the same
+    /// transaction and rolls back with a refusal. The threads the Space and agent memory rows cite
+    /// are asked with them (GDPR-order-rel1): read in the same transaction after the owner's lock,
+    /// behind the switch, and joined to the candidates the final ask checks.
+    #[test]
+    fn delete_space_threads_asks_holds_before_any_erasure() {
+        let source = include_str!("grpc.rs");
+        let production = &source[..source.find("\nmod tests {").expect("the test module")];
+        let from_handler = &production[production
+            .find("    async fn delete_space_threads(")
+            .expect("the Space deletion handler")..];
+        let body = &from_handler[..from_handler
+            .find("record_metrics(\"delete_space_threads\"")
+            .expect("the handler's end")];
+        let pos = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("expected {needle:?} in the Space deletion handler"))
+        };
+        assert!(
+            body.contains("thread_ids.iter().map(|(id,)| id.clone())")
+                && body.contains(".ensure_not_held(&req.org_id, &held_candidates)"),
+            "the gate must be asked with the owner's locked Space threads"
+        );
+        let locked = pos("ORDER BY id FOR UPDATE");
+        let asked = pos("crate::gdpr::erasure_hold_gate()");
+        assert!(
+            locked < asked,
+            "the gate is asked only after the Space threads are locked"
+        );
+        // GDPR-order-rel1: the cited-thread read sits behind the switch, after the owner's lock.
+        // Its result joins the candidates, and the final ask (the one that names them) comes after
+        // the join and before every erasure.
+        let switch = pos(
+            "if !matches!(crate::gdpr::erasure_hold_gate(), crate::gdpr::ErasureHoldGate::Off)",
+        );
+        let cited = pos("cited_rows AS (");
+        let joined = pos("held_candidates.extend(cited.into_iter().map(|(id,)| id))");
+        let built =
+            pos("let held_candidates: Vec<String> = held_candidates.into_iter().collect();");
+        let ask = pos(".ensure_not_held(&req.org_id, &held_candidates)");
+        assert!(
+            locked < switch && switch < cited && cited < joined && joined < built && built < ask,
+            "the cited Space threads must be read after the owner's lock, behind the switch, and \
+             join the candidates before the final ask"
+        );
+        for erasure in [
+            "INSERT INTO space_deletion_semantic_memory_receipts",
+            "delete_thread_rows(&mut tx, thread_id)",
+            "DELETE FROM threads WHERE id = $1",
+            "DELETE FROM agent_memory",
+        ] {
+            assert!(
+                asked < pos(erasure),
+                "{erasure} runs before the legal-hold gate is asked"
+            );
+            assert!(
+                ask < pos(erasure),
+                "{erasure} runs before the final legal-hold ask over the cited threads"
+            );
+        }
     }
 
     /// D12. A thread a trusted workload owns INSIDE a person's Space -- a
@@ -19883,6 +20480,7 @@ mod tests {
                 user_id: "user-1".to_owned(),
                 start_key: format!("managed-terminal-{suffix}"),
                 terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+                agent_version_pin: None,
             },
             false,
         )
@@ -20743,7 +21341,7 @@ mod tests {
     fn upsert_agent_skill_conflict_arm_never_touches_state_columns() {
         let source = include_str!("grpc.rs");
         let guard = source
-            .find("WHERE agent_skills.origin = 'background_review'")
+            .find("WHERE agent_skills.origin = $10")
             .expect("the learned conflict guard");
         let set = source[..guard]
             .rfind("DO UPDATE SET")
@@ -20898,9 +21496,9 @@ mod tests {
         assert!(snapshot.contains("'settings', s.settings"));
         assert!(super::RESTORE_SKILL_SQL.contains("COALESCE(r.kind, 'skill')"));
         assert!(super::RESTORE_SKILL_SQL.contains("kind text, settings jsonb, url_patterns jsonb)"));
-        // QF-19: an undo keeps the skill's url_patterns (0117 puts them in the snapshot).
+        // QF-19: an undo keeps the skill's url_patterns (0131 puts them in the snapshot).
         assert!(super::RESTORE_SKILL_SQL.contains("COALESCE(r.url_patterns, '[]'::jsonb)"));
-        let patterns = include_str!("../migrations/0117_skill_revision_url_patterns.sql");
+        let patterns = include_str!("../migrations/0131_skill_revision_url_patterns.sql");
         assert!(patterns.contains("'url_patterns', s.url_patterns"));
         let conflict = &super::RESTORE_SKILL_SQL[super::RESTORE_SKILL_SQL
             .find("ON CONFLICT (id) DO UPDATE SET")
@@ -20908,7 +21506,7 @@ mod tests {
         assert!(!conflict.contains("kind ="), "a row never changes kind");
         assert!(
             conflict.contains("url_patterns = CASE WHEN $1::jsonb ? 'url_patterns'"),
-            "a snapshot from before 0117 must not wipe the row's patterns"
+            "a snapshot from before 0131 must not wipe the row's patterns"
         );
     }
 
@@ -23767,6 +24365,7 @@ mod waived_run_count_db_tests {
                 user_id: user.to_owned(),
                 start_key: key.to_owned(),
                 terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+                agent_version_pin: None,
             },
             retention,
         )
@@ -25335,9 +25934,58 @@ mod thread_list_db_tests {
 mod conversation_page_tests {
     use super::{
         clamp_conversation_page_limit, conversation_tail_page, session_message_from_row,
-        ConversationRow,
+        valid_connection_id, ConversationRow,
     };
     use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn a_turn_carries_its_subscription_connection_id_and_no_other() {
+        let stored = Utc.with_ymd_and_hms(2026, 11, 12, 10, 0, 0).unwrap();
+        let turn = |model: Option<&str>, subscription: Option<&str>| ConversationRow {
+            id: "m-2".to_owned(),
+            role: "user".to_owned(),
+            content: "hei".to_owned(),
+            agent_name: None,
+            metadata: None,
+            author_subject_id: None,
+            post_kind: "turn".to_owned(),
+            created_at: stored,
+            parent_message_id: None,
+            sibling_ordinal: 0,
+            sibling_count: 0,
+            on_active_path: true,
+            versioned: false,
+            revision_state: String::new(),
+            revised_at: None,
+            revised_by_subject_id: None,
+            revision_no: 0,
+            agent_followed_up: false,
+            model_connection_id: model.map(str::to_owned),
+            subscription_connection_id: subscription.map(str::to_owned),
+        };
+        let on_subscription = session_message_from_row(turn(None, Some("conn_0f9c")), false);
+        assert_eq!(on_subscription.subscription_connection_id, "conn_0f9c");
+        assert!(on_subscription.model_connection_id.is_empty());
+        let on_gateway = session_message_from_row(turn(Some("conn_gw"), None), false);
+        assert_eq!(on_gateway.model_connection_id, "conn_gw");
+        assert!(on_gateway.subscription_connection_id.is_empty());
+        let platform = session_message_from_row(turn(None, None), false);
+        assert!(platform.subscription_connection_id.is_empty());
+        assert!(platform.model_connection_id.is_empty());
+    }
+
+    #[test]
+    fn a_connection_id_has_the_shape_the_column_allows() {
+        assert!(valid_connection_id(
+            "conn_0f9c3e2a-1b7d-4c55-9e0a-2f6b8d1c7a90"
+        ));
+        assert!(valid_connection_id("conn-1"));
+        assert!(valid_connection_id(&"c".repeat(128)));
+        assert!(!valid_connection_id(""));
+        assert!(!valid_connection_id("conn 1"));
+        assert!(!valid_connection_id("conn/1"));
+        assert!(!valid_connection_id(&"c".repeat(129)));
+    }
 
     #[test]
     fn a_stored_turn_carries_the_time_it_was_stored() {
@@ -25362,6 +26010,8 @@ mod conversation_page_tests {
             revised_by_subject_id: None,
             revision_no: 0,
             agent_followed_up: false,
+            model_connection_id: None,
+            subscription_connection_id: None,
         };
         let message = session_message_from_row(row, false);
         let created_at = message.created_at.expect("created_at is set on every row");
@@ -25775,3 +26425,7 @@ mod space_memory_tests;
 #[cfg(test)]
 #[path = "grpc_space_mentions_tests.rs"]
 mod space_mentions_tests;
+
+#[cfg(test)]
+#[path = "grpc_owed_tests.rs"]
+mod owed_tests;

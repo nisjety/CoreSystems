@@ -62,3 +62,26 @@ func ClassifyVisibility(permissions []store.Permission) string {
 	}
 	return VisibilityPrivate
 }
+
+// NarrowForLabels applies a file's Microsoft Purview sensitivity labels on top of
+// the ACL visibility from ClassifyVisibility. It can only narrow, never widen: it
+// returns `org` only when base is already `org`, the label read succeeded, and
+// none of the file's labels is in restricted. Every other case returns `private`:
+//
+//   - base is `private` (a label never widens a private item to org),
+//   - readErr != nil (the labels could not be read: fail closed),
+//   - any label on the file is in restricted.
+//
+// Only label ids reach this function, never label names. restricted is keyed by
+// lower-case label GUIDs, and ids on the file are compared case-insensitively.
+func NarrowForLabels(base string, labels []string, restricted map[string]bool, readErr error) string {
+	if base != VisibilityOrg || readErr != nil {
+		return VisibilityPrivate
+	}
+	for _, label := range labels {
+		if restricted[strings.ToLower(strings.TrimSpace(label))] {
+			return VisibilityPrivate
+		}
+	}
+	return VisibilityOrg
+}

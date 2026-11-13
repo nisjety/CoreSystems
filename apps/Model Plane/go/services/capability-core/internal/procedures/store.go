@@ -36,7 +36,7 @@ const (
 	MaxListLimit     = 100
 )
 
-// maxVersionNumber is the largest version number the INTEGER version columns hold (migration 0039). A version
+// maxVersionNumber is the largest version number the INTEGER version columns hold (migration 0043). A version
 // number reaches Postgres as an int4 parameter, and pgx refuses to encode a larger one, which the caller would
 // see as a store failure. No stored version has a larger number, so such a number is answered as not found.
 const maxVersionNumber = math.MaxInt32
@@ -124,7 +124,7 @@ type Page struct {
 }
 
 // Store is the durable procedure registry backed by procedures, procedure_versions and
-// procedure_tags (capability-core migration 0039).
+// procedure_tags (capability-core migration 0043).
 type Store struct {
 	pool  database
 	nowFn func() time.Time

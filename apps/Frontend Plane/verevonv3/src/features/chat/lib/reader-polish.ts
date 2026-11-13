@@ -3,14 +3,16 @@
  * the transcript. The page writes them as `data-reader-*` attributes on the chat workspace, and `chat-reader.css`
  * turns them into type and spacing.
  *
- * Behind `VITE_CHAT_READER_POLISH`, read through `readerPolishEnabled`. Off, no attribute is written, the settings are
- * not read, and the transcript renders as it did. The text size is the one the person stored in their appearance
+ * Behind `VITE_CHAT_READER_POLISH`, read through `readerPolishEnabled`, and narrowed by the organisation's own value
+ * (W5-079-c): `readerPolishOn()` is the two together. Off, no attribute is written, the settings are not read, and the
+ * transcript renders as it did. The text size is the one the person stored in their appearance
  * settings. The font choice is kept on this device, like the transcript level's cache: it is a reading aid, and the
  * server does not need it. Spacing follows the transcript level (EP-14 S2) when that switch is on, and otherwise the
  * stored compact flag, which `UserPreferencesProvider` already puts on the document.
  */
 
 import { createEffect, createSignal, type Accessor } from 'solid-js'
+import { orgFlag } from '@/shared/api/org-flags-client'
 import { getAppearanceSettings, type TranscriptDensity } from '@/shared/api/navbar-client'
 import { createResource } from '@/shared/lib/create-resource-compat'
 
@@ -19,8 +21,25 @@ export function isReaderPolishEnabled(raw: string | undefined): boolean {
   return raw === 'true'
 }
 
-/** Fixed per build, like every `VITE_` switch: read once, at load. */
+/**
+ * Fixed per build, like every `VITE_` switch: read once, at load. This is the build switch alone. It cannot wait for
+ * the organisation's value, which arrives after import, so the viewer's effective value is `readerPolishOn()`.
+ */
 export const readerPolishEnabled = isReaderPolishEnabled(import.meta.env.VITE_CHAT_READER_POLISH)
+
+/** The organisation's value for the polish. It is the registry name org-core stores the value under. */
+const READER_POLISH_ORG_FLAG = 'VITE_CHAT_READER_POLISH'
+
+/** The organisation's side of the polish: on, unless the organisation has set it to false (W5-079-c). */
+const orgAllowsReaderPolish = (): boolean => orgFlag(READER_POLISH_ORG_FLAG, true)
+
+/**
+ * The polish as this viewer sees it: the build switch AND the organisation's value. It is read at the call, so a value
+ * that lands after the first render applies wherever it is read inside a tracked scope.
+ */
+export function readerPolishOn(): boolean {
+  return readerPolishEnabled && orgAllowsReaderPolish()
+}
 
 /** The text sizes user-core stores, from `apps/Control Plane/user-core`. */
 export const READER_FONT_SIZES = ['small', 'medium', 'large'] as const
@@ -103,12 +122,17 @@ export type ReaderAppearanceDeps = {
   enabled: boolean
   /** The stored appearance. Only its text size is read here. */
   load: () => Promise<{ fontSize?: unknown }>
+  /**
+   * Whether the organisation has not turned the polish off. It is read where the attributes are read, so a value that
+   * lands later applies. Absent means there is no organisation layer, and the switch alone decides.
+   */
+  orgAllows?: () => boolean
 }
 
 export type ReaderAppearanceControl = {
-  /** The workspace attributes at this spacing. Empty with the switch off, so the markup is unchanged. */
+  /** The workspace attributes at this spacing. Empty when the switch or the organisation's value is off. */
   attributes: (spacing: ReaderSpacing | undefined) => ReaderAttributes
-  /** Whether the dyslexia-friendly font is on. Always off with the switch off. */
+  /** Whether the dyslexia-friendly font is on. Always off with the switch off or the organisation's value off. */
   dyslexiaFont: Accessor<boolean>
   setDyslexiaFont: (on: boolean) => void
 }
@@ -116,6 +140,7 @@ export type ReaderAppearanceControl = {
 const liveReaderDeps: ReaderAppearanceDeps = {
   enabled: readerPolishEnabled,
   load: () => getAppearanceSettings(),
+  orgAllows: orgAllowsReaderPolish,
 }
 
 /**
@@ -123,9 +148,9 @@ const liveReaderDeps: ReaderAppearanceDeps = {
  * read. A read that fails keeps the default, so the transcript still renders.
  */
 export function createReaderAppearance(deps: ReaderAppearanceDeps = liveReaderDeps): ReaderAppearanceControl {
-  const { enabled } = deps
+  const { enabled, orgAllows = () => true } = deps
   const [fontSize, setFontSize] = createSignal<ReaderFontSize>(READER_FONT_SIZE_DEFAULT)
-  const [dyslexiaFont, setDyslexiaFontSignal] = createSignal(enabled && readCachedDyslexiaFont())
+  const [dyslexiaChosen, setDyslexiaChosen] = createSignal(enabled && readCachedDyslexiaFont())
 
   // With the switch off the source is false, so the settings are never fetched.
   const [settings] = createResource(
@@ -139,12 +164,15 @@ export function createReaderAppearance(deps: ReaderAppearanceDeps = liveReaderDe
     },
   )
 
+  // The build switch comes first, so with it off the organisation's value is never read.
+  const shown = (): boolean => enabled && orgAllows()
+  const dyslexiaFont = (): boolean => shown() && dyslexiaChosen()
   const setDyslexiaFont = (on: boolean) => {
-    setDyslexiaFontSignal(on)
+    setDyslexiaChosen(on)
     writeCachedDyslexiaFont(on)
   }
   const attributes = (spacing: ReaderSpacing | undefined): ReaderAttributes =>
-    enabled ? readerAttributes({ fontSize: fontSize(), dyslexiaFont: dyslexiaFont(), spacing }) : {}
+    shown() ? readerAttributes({ fontSize: fontSize(), dyslexiaFont: dyslexiaFont(), spacing }) : {}
 
   return { attributes, dyslexiaFont, setDyslexiaFont }
 }

@@ -119,6 +119,18 @@ func (sp *SharedPublisher) Publish(ctx context.Context, subject string, payload 
 	log.Printf("📡 SharedNATS → %s", subject)
 }
 
+// LegacyJetStream returns a classic JetStream context over the same shared
+// connection (and so the same scoped credentials). The org-erasure consumer
+// uses it for nats.Bind + QueueSubscribe, which the newer jetstream package
+// does not offer for push consumers. It returns an error when the publisher is
+// nil or has no connection.
+func (sp *SharedPublisher) LegacyJetStream() (nats.JetStreamContext, error) {
+	if sp == nil || sp.conn == nil {
+		return nil, fmt.Errorf("shared NATS connection is not available")
+	}
+	return sp.conn.JetStream()
+}
+
 // Close drains and closes the shared NATS connection.
 func (sp *SharedPublisher) Close() {
 	if sp != nil && sp.conn != nil {

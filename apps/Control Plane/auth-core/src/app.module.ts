@@ -27,6 +27,13 @@ import { NatsModule } from './nats/nats.module';
 import { OrphanOrganizationCleanupService } from './services/orphan-organization-cleanup.service';
 import { InvitationAcceptanceController } from './auth/invitation-acceptance.controller';
 import { InvitationAcceptanceRepairService } from './services/invitation-acceptance-repair.service';
+import { RetentionDecisionController } from './auth/retention-decision.controller';
+import {
+  RetentionDecisionService,
+  zdrWaiverEnabledProvider,
+} from './auth/retention-decision.service';
+import { retentionDecisionSignerProvider } from './auth/retention-decision.signer';
+import { IntegrationConnectionPostureClient } from './auth/integration-connection-posture.client';
 
 @Module({
   imports: [
@@ -56,6 +63,7 @@ import { InvitationAcceptanceRepairService } from './services/invitation-accepta
     SsoProviderAdminController,
     ScimProvisioningController,
     InvitationAcceptanceController,
+    RetentionDecisionController,
     AuthGrpcController,
   ],
   providers: [
@@ -64,6 +72,11 @@ import { InvitationAcceptanceRepairService } from './services/invitation-accepta
     ConvexTokenService,
     OrphanOrganizationCleanupService,
     InvitationAcceptanceRepairService,
+    // ZDR-Z-14: the dark per-connection waiver decision (ZDR_WAIVER_ENABLED).
+    RetentionDecisionService,
+    retentionDecisionSignerProvider,
+    IntegrationConnectionPostureClient,
+    zdrWaiverEnabledProvider,
   ],
 })
 export class AppModule {}

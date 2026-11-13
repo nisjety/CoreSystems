@@ -1,15 +1,20 @@
-import { Loader2, Plug, Plus, ShieldCheck, Trash2, Users, X } from '@/shared/icons'
+import { Loader2, Plug, Plus, RefreshCw, Search, ShieldCheck, Trash2, Users, X } from '@/shared/icons'
 import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   connectMcpServer,
   deleteMcpServer,
   listMcpServers,
+  probeMcpServer,
   shareMcpServer,
+  type McpProbeAuth,
+  type McpProbedTool,
   type McpServer,
 } from '@/shared/api/mcp-client'
+import { ApiError } from '@/shared/api/http'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { SectionHeader, SettingsButton } from '@/features/settings/components/settings-ui'
+import { setPendingStoredTokenUrl } from '@/features/settings/components/CustomConnectorSection'
 import { VerevonInput } from '@/shared/ui/verevon/VerevonInput'
 import { getSession } from '@/shared/session/session-store'
 import { hasWorkspaceAdminAccess } from '@/shared/session/access'
@@ -45,6 +50,77 @@ function scopeLabel(server: McpServer): ServerScope {
   return server.shared_with.length > 0 ? 'Delt' : 'Privat'
 }
 
+/** The most tools the picker shows. The probe reports no more than this. */
+const MCP_PROBE_TOOL_LIMIT = 64
+
+/** The tool names `tool_allowlist` accepts: letters, digits, `_`, `.`, `:` or `-`, at most 128 bytes. */
+const REGISTRABLE_TOOL_NAME = /^[A-Za-z0-9_.:-]{1,128}$/
+
+/** `VITE_MCP_PROBE === 'true'`: the add flow probes a server and offers a tool picker. Off, the form is unchanged. */
+function mcpProbeEnabled(): boolean {
+  return import.meta.env.VITE_MCP_PROBE === 'true'
+}
+
+/** `VITE_CUSTOM_CONNECTORS === 'true'`: a server that needs a static token is routed to the stored-token flow. */
+function customConnectorsEnabled(): boolean {
+  return import.meta.env.VITE_CUSTOM_CONNECTORS === 'true'
+}
+
+/**
+ * Whether a probed tool must stay unticked until a person picks it. Under the MCP defaults a tool is destructive
+ * unless it says otherwise: a read-only hint settles it, and a destructive hint of `false` is the only other way
+ * to be safe. A tool the server gave no hint for therefore starts unticked.
+ */
+function isDestructiveTool(tool: McpProbedTool): boolean {
+  if (tool.read_only_hint === true) return false
+  return tool.destructive_hint !== false
+}
+
+/** A probed tool that may be ticked up front: it is not destructive, and the registry accepts its name. */
+function preselectable(tool: McpProbedTool): boolean {
+  return !isDestructiveTool(tool) && REGISTRABLE_TOOL_NAME.test(tool.name)
+}
+
+/** The hint the server stated for a tool, in words a person can judge by. */
+function toolHintLabel(tool: McpProbedTool): string {
+  if (tool.read_only_hint === true) return 'Bare lesing'
+  if (tool.destructive_hint === true) return 'Destruktiv'
+  if (tool.destructive_hint === false) return 'Ikke destruktiv'
+  return 'Ingen merknad'
+}
+
+/** Each tool name once, in the server's order, and no more than the picker shows. */
+function distinctTools(tools: McpProbedTool[]): McpProbedTool[] {
+  const seen = new Set<string>()
+  const unique: McpProbedTool[] = []
+  for (const tool of tools) {
+    if (seen.has(tool.name)) continue
+    seen.add(tool.name)
+    unique.push(tool)
+  }
+  return unique.slice(0, MCP_PROBE_TOOL_LIMIT)
+}
+
+/**
+ * The message for a failed probe. A missing route means the probe is off in this environment; a 400 means the
+ * address is not one the registry accepts. Anything else is the typed copy for the code the gateway sent.
+ */
+function probeFailureMessage(err: unknown, tr: (noText: string, enText: string) => string): string {
+  if (err instanceof ApiError && err.status === 404) {
+    return tr(
+      'Sjekken av MCP-tjenere er ikke slått på i dette miljøet.',
+      'Checking MCP servers is not turned on in this environment.',
+    )
+  }
+  if (err instanceof ApiError && err.status === 400) {
+    return tr(
+      'Adressen må være en offentlig HTTPS-adresse uten påloggingsdata, søkeparametere eller fragment.',
+      'The address must be a public HTTPS address with no login details, query or fragment.',
+    )
+  }
+  return translateApiError(err, tr, { no: 'Kunne ikke sjekke tjeneren.', en: 'Could not check the server.' })
+}
+
 export function McpServersSection() {
   const i18n = useI18n()
   const session = getSession()
@@ -66,6 +142,20 @@ export function McpServersSection() {
   const [token, setToken] = createSignal('')
   const [allowlist, setAllowlist] = createSignal('')
   const [scope, setScope] = createSignal<'user' | 'org'>('user')
+
+  // The probe-first add flow (VITE_MCP_PROBE). `probed` is the last answer, kept with the address it was
+  // for, so an address that has since changed is never judged by another server's answer. `picks` holds the
+  // tools ticked for a server that needs no credential.
+  const probeEnabled = mcpProbeEnabled()
+  const [probed, setProbed] = createSignal<{ url: string; auth: McpProbeAuth; tools: McpProbedTool[] } | null>(null)
+  const [probing, setProbing] = createSignal(false)
+  const [picks, setPicks] = createSignal<string[]>([])
+  const probeCurrent = createMemo(() => {
+    const result = probed()
+    return result && result.url === url().trim() ? result : null
+  })
+  const probeAuth = createMemo<McpProbeAuth | null>(() => probeCurrent()?.auth ?? null)
+  const probeTools = createMemo(() => probeCurrent()?.tools ?? [])
 
   const [submitting, setSubmitting] = createSignal(false)
   const [busyServerId, setBusyServerId] = createSignal<string | null>(null)
@@ -117,6 +207,8 @@ export function McpServersSection() {
     setAllowlist('')
     setScope('user')
     setFormError(null)
+    setProbed(null)
+    setPicks([])
   }
 
   const openAddForm = () => {
@@ -208,6 +300,83 @@ export function McpServersSection() {
     }
   }
 
+  // Step one of the probe-first flow: ask what the address needs. Nothing is saved by a probe.
+  const handleProbe = async () => {
+    if (probing() || submitting()) return
+    const trimmedName = name().trim()
+    const trimmedUrl = url().trim()
+    if (!trimmedName || !trimmedUrl) {
+      setFormError('Navn og URL er påkrevd.')
+      return
+    }
+    if (!/^https:\/\//i.test(trimmedUrl)) {
+      setFormError('URL må starte med https:// — en offentlig tjener Verevon kan oppdage og koble til.')
+      return
+    }
+
+    setProbing(true)
+    setFormError(null)
+    try {
+      const result = await probeMcpServer(trimmedUrl)
+      const tools = distinctTools(result.tools)
+      setProbed({ url: trimmedUrl, auth: result.auth, tools })
+      // Nothing is ticked for a server that needs a credential: its tools are only known after sign-in.
+      setPicks(result.auth === 'none' ? tools.filter(preselectable).map((tool) => tool.name) : [])
+    } catch (err) {
+      setProbed(null)
+      setFormError(probeFailureMessage(err, i18n.tr))
+    } finally {
+      setProbing(false)
+    }
+  }
+
+  const togglePick = (toolName: string, on: boolean) =>
+    setPicks((current) => (on ? [...new Set([...current, toolName])] : current.filter((tool) => tool !== toolName)))
+
+  // Registers the probed server through the existing connect call. `toolNames` is the picked set for a server
+  // that needs no credential, or undefined for an OAuth server, which then takes the typed allowlist or every
+  // tool its sign-in exposes. The connect call still sends a server that turns out to need OAuth to its
+  // consent screen.
+  const connectProbed = async (toolNames: string[] | undefined) => {
+    const id = orgId()
+    const current = probeCurrent()
+    if (!id || submitting() || !current) return
+    // A static-token server is never registered from here, and a server that needs no credential needs a pick.
+    if (current.auth === 'bearer_required') return
+    if (current.auth === 'none' && (!toolNames || toolNames.length === 0)) return
+
+    const trimmedName = name().trim()
+    if (!trimmedName) {
+      setFormError('Navn og URL er påkrevd.')
+      return
+    }
+
+    setSubmitting(true)
+    setFormError(null)
+    try {
+      // Non-admins can never request org scope; the gateway also enforces this.
+      const effectiveScope = scope() === 'org' && isAdmin() ? 'org' : 'user'
+      const result = await connectMcpServer(id, {
+        name: trimmedName,
+        url: current.url,
+        tool_allowlist: toolNames,
+        scope: effectiveScope,
+      })
+      if (result.needs_oauth) {
+        window.location.href = result.authorization_url
+        return
+      }
+      setSubmitting(false)
+      closeAddForm()
+      await refetch()
+    } catch (err) {
+      setFormError(
+        translateApiError(err, i18n.tr, { no: 'Kunne ikke koble til MCP-tjeneren.', en: 'Could not connect the MCP server.' }),
+      )
+      setSubmitting(false)
+    }
+  }
+
   const handleDelete = async (server: McpServer) => {
     const id = orgId()
     if (!id || busyServerId()) return
@@ -271,7 +440,19 @@ export function McpServersSection() {
       </Show>
 
       <Show when={showAddForm()}>
-        <form class="verevon-settings-field-grid verevon-settings-field-grid--spaced" onSubmit={(event) => void handleConnect(event)}>
+        <form
+          class="verevon-settings-field-grid verevon-settings-field-grid--spaced"
+          onSubmit={(event) => {
+            if (!probeEnabled) {
+              void handleConnect(event)
+              return
+            }
+            // With the probe on, Enter only runs the probe. Registering is always a button press, so a key press
+            // can never save a server with the tools ticked by default.
+            event.preventDefault()
+            if (probeAuth() === null) void handleProbe()
+          }}
+        >
           <label for="mcp-name" class="verevon-settings-field">
             <span class="verevon-settings-label">Navn</span>
             <span class="verevon-settings-input-wrap">
@@ -326,40 +507,127 @@ export function McpServersSection() {
             </span>
           </label>
 
-          <label for="mcp-token" class="verevon-settings-field">
-            <span class="verevon-settings-label">Delt hemmelighet (valgfritt)</span>
-            <span class="verevon-settings-input-wrap">
-              <VerevonInput
-                id="mcp-token"
-                type="password"
-                value={token()}
-                autocomplete="off"
-                placeholder="Kun hvis tjeneren ber om én, og ikke støtter innlogging"
-                onInput={(event) => setToken(event.currentTarget.value)}
-                class="verevon-settings-input"
-              />
-            </span>
-            <span class="verevon-settings-help">
-              La stå tom med mindre tjeneren krever en delt token og ikke støtter ekte
-              OAuth-innlogging. Lagres hos model-gateway og vises aldri igjen.
-            </span>
-          </label>
+          {/* With the probe on, the shared secret is not asked for: a server that needs one is routed elsewhere. */}
+          <Show when={!probeEnabled}>
+            <label for="mcp-token" class="verevon-settings-field">
+              <span class="verevon-settings-label">Delt hemmelighet (valgfritt)</span>
+              <span class="verevon-settings-input-wrap">
+                <VerevonInput
+                  id="mcp-token"
+                  type="password"
+                  value={token()}
+                  autocomplete="off"
+                  placeholder="Kun hvis tjeneren ber om én, og ikke støtter innlogging"
+                  onInput={(event) => setToken(event.currentTarget.value)}
+                  class="verevon-settings-input"
+                />
+              </span>
+              <span class="verevon-settings-help">
+                La stå tom med mindre tjeneren krever en delt token og ikke støtter ekte
+                OAuth-innlogging. Lagres hos model-gateway og vises aldri igjen.
+              </span>
+            </label>
+          </Show>
 
-          <label for="mcp-allowlist" class="verevon-settings-field">
-            <span class="verevon-settings-label">Tillatte verktøy (valgfritt)</span>
-            <span class="verevon-settings-input-wrap">
-              <VerevonInput
-                id="mcp-allowlist"
-                value={allowlist()}
-                placeholder="kommaseparert, f.eks. get_skill, execute_query"
-                onInput={(event) => setAllowlist(event.currentTarget.value)}
-                class="verevon-settings-input"
-              />
-            </span>
-            <span class="verevon-settings-help">
-              La stå tom for å tillate alle oppdagede verktøy.
-            </span>
-          </label>
+          {/* The probe's answer (VITE_MCP_PROBE): the auth requirement, then the tool picker for a server that needs no credential. */}
+          <Show when={probeEnabled && probeAuth() === 'oauth'}>
+            <p class="verevon-settings-panel-note" role="status">
+              Tjeneren krever OAuth-innlogging. Verevon sender deg til innloggingssiden, og verktøyene vises først
+              etter innloggingen. Skriv inn navnene under for å begrense dem.
+            </p>
+          </Show>
+          <Show when={probeEnabled && probeAuth() === 'bearer_required'}>
+            <p class="verevon-settings-panel-note" role="status">
+              Tjeneren krever en statisk token.{' '}
+              <Show
+                when={customConnectorsEnabled()}
+                fallback={<>Verevon kan ikke koble til slike tjenere herfra ennå.</>}
+              >
+                Legg den til under{' '}
+                <Show when={isAdmin()} fallback={<>egendefinerte koblinger</>}>
+                  <a
+                    href="/settings/integrations"
+                    link
+                    onClick={() => {
+                      const current = probeCurrent()
+                      if (current) setPendingStoredTokenUrl(current.url)
+                    }}
+                  >
+                    egendefinerte koblinger
+                  </a>
+                </Show>
+                , der tokenet lagres i stedet for i dette skjemaet.
+              </Show>
+            </p>
+          </Show>
+          <Show when={probeEnabled && probeAuth() === 'none'}>
+            <div
+              class="verevon-settings-field-grid verevon-settings-field-grid--spaced"
+              role="group"
+              aria-labelledby="mcp-tools-title"
+            >
+              <div class="verevon-settings-field-span">
+                <p id="mcp-tools-title" class="verevon-settings-label">
+                  Verktøy tjeneren tilbyr ({probeTools().length})
+                </p>
+                <Show
+                  when={probeTools().length > 0}
+                  fallback={
+                    <p class="verevon-settings-help">
+                      Tjeneren tilbyr ingen verktøy, så den kan ikke kobles til ennå.
+                    </p>
+                  }
+                >
+                  <p class="verevon-settings-help">
+                    Verktøy som kan endre data, og verktøy tjeneren ikke har merket, er ikke valgt på forhånd.
+                  </p>
+                </Show>
+              </div>
+              <For each={probeTools()}>
+                {(tool) => (
+                  <label class="verevon-settings-field">
+                    <span class="verevon-settings-label">
+                      <input
+                        type="checkbox"
+                        checked={picks().includes(tool.name)}
+                        disabled={!REGISTRABLE_TOOL_NAME.test(tool.name)}
+                        onChange={(event) => togglePick(tool.name, event.currentTarget.checked)}
+                      />{' '}
+                      {tool.name}{' '}
+                      <span class="verevon-trust-chip">{toolHintLabel(tool)}</span>
+                    </span>
+                    <span class="verevon-settings-help">
+                      {tool.description || 'Ingen beskrivelse.'}
+                      <Show when={!REGISTRABLE_TOOL_NAME.test(tool.name)}>
+                        {' '}Navnet kan ikke brukes i en tillatelsesliste.
+                      </Show>
+                    </span>
+                  </label>
+                )}
+              </For>
+            </div>
+          </Show>
+
+          {/* Off: the typed allowlist, as before. With the probe on: only for an OAuth server, which has no tool list yet. */}
+          <Show when={!probeEnabled || probeAuth() === 'oauth'}>
+            <label for="mcp-allowlist" class="verevon-settings-field">
+              <span class="verevon-settings-label">Tillatte verktøy (valgfritt)</span>
+              <span class="verevon-settings-input-wrap">
+                <VerevonInput
+                  id="mcp-allowlist"
+                  value={allowlist()}
+                  placeholder="kommaseparert, f.eks. get_skill, execute_query"
+                  onInput={(event) => setAllowlist(event.currentTarget.value)}
+                  class="verevon-settings-input"
+                />
+              </span>
+              <span class="verevon-settings-help">
+                {probeEnabled
+                  ? 'La stå tom for å tillate alle verktøyene tjeneren tilbyr etter innlogging.'
+                  : 'La stå tom for å tillate alle oppdagede verktøy.'}
+              </span>
+            </label>
+          </Show>
 
           <Show when={formError()}>
             {(message) => (
@@ -370,14 +638,76 @@ export function McpServersSection() {
           </Show>
 
           <div>
-            <SettingsButton type="submit" variant="primary" settingsSize="sm" disabled={submitting()}>
-              <Show
-                when={submitting()}
-                fallback={<><Plug size={14} aria-hidden="true" /> Koble til</>}
+            <Show when={!probeEnabled}>
+              <SettingsButton type="submit" variant="primary" settingsSize="sm" disabled={submitting()}>
+                <Show
+                  when={submitting()}
+                  fallback={<><Plug size={14} aria-hidden="true" /> Koble til</>}
+                >
+                  <Loader2 size={14} aria-hidden="true" /> Kobler til…
+                </Show>
+              </SettingsButton>{' '}
+            </Show>
+            <Show when={probeEnabled && probeAuth() === null}>
+              <SettingsButton type="submit" variant="primary" settingsSize="sm" disabled={probing()}>
+                <Show
+                  when={probing()}
+                  fallback={<><Search size={14} aria-hidden="true" /> Sjekk tjener</>}
+                >
+                  <Loader2 size={14} aria-hidden="true" /> Sjekker…
+                </Show>
+              </SettingsButton>{' '}
+            </Show>
+            <Show when={probeEnabled && probeAuth() === 'oauth'}>
+              <SettingsButton
+                type="button"
+                variant="primary"
+                settingsSize="sm"
+                disabled={submitting()}
+                onClick={() => {
+                  const typed = parseAllowlist(allowlist())
+                  void connectProbed(typed.length > 0 ? typed : undefined)
+                }}
               >
-                <Loader2 size={14} aria-hidden="true" /> Kobler til…
-              </Show>
-            </SettingsButton>{' '}
+                <Show
+                  when={submitting()}
+                  fallback={<><Plug size={14} aria-hidden="true" /> Koble til</>}
+                >
+                  <Loader2 size={14} aria-hidden="true" /> Kobler til…
+                </Show>
+              </SettingsButton>{' '}
+            </Show>
+            <Show when={probeEnabled && probeAuth() === 'none'}>
+              <SettingsButton
+                type="button"
+                variant="primary"
+                settingsSize="sm"
+                disabled={submitting() || picks().length === 0}
+                onClick={() => void connectProbed(picks())}
+              >
+                <Show
+                  when={submitting()}
+                  fallback={
+                    <>
+                      <Plug size={14} aria-hidden="true" />{' '}
+                      {picks().length > 0 ? `Koble til med ${picks().length} verktøy` : 'Velg minst ett verktøy'}
+                    </>
+                  }
+                >
+                  <Loader2 size={14} aria-hidden="true" /> Kobler til…
+                </Show>
+              </SettingsButton>{' '}
+            </Show>
+            <Show when={probeEnabled && probeAuth() !== null}>
+              <SettingsButton
+                type="button"
+                settingsSize="sm"
+                disabled={probing() || submitting()}
+                onClick={() => void handleProbe()}
+              >
+                <RefreshCw size={14} aria-hidden="true" /> Sjekk på nytt
+              </SettingsButton>{' '}
+            </Show>
             <SettingsButton settingsSize="sm" disabled={submitting()} onClick={closeAddForm}>
               Avbryt
             </SettingsButton>

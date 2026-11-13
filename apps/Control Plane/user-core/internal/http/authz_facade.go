@@ -143,6 +143,24 @@ func (s *Server) authzCheck(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check grant"})
 		return
 	}
+	// A shared conversation snapshot is readable only by a CURRENT active member
+	// of the org (conversation-share-model: membership is checked at read time),
+	// so a grant row outliving a removed member grants nothing. Only this
+	// resource type is affected; every other type answers from the grant alone.
+	// Fails closed: a membership read error never allows.
+	if allowed && resourceType == conversationSnapshotType {
+		member := false
+		if subjectType == "user" {
+			member, err = s.aclRepo.IsActiveOrgMember(c.Request.Context(), orgID, subjectID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check org membership"})
+				return
+			}
+		}
+		if !member {
+			allowed, role = false, ""
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"allowed": allowed, "role": role})
 }
 

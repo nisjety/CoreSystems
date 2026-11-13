@@ -346,6 +346,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             provider_timing: None,
+            service_tier_used: String::new(),
         };
 
         tokio::time::advance(Duration::from_millis(6)).await;
@@ -429,6 +430,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             provider_timing: Some(reported(true)),
+            service_tier_used: String::new(),
         };
         stream.observe(&mut done);
         let streamed = done

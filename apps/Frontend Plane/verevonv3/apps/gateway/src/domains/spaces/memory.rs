@@ -2,13 +2,15 @@
 //!
 //! `GET /api/v1/spaces/{space_ref}/memory` lists what a shared room has learned (its `space` scope
 //! rows), each marked when the room's current audience does not recall it, and `DELETE
-//! /api/v1/spaces/{space_ref}/memory/{memory_id}` removes one row. This hop decides nothing about
-//! who may do either. In order (each step is a refusal before the next one runs):
+//! /api/v1/spaces/{space_ref}/memory/{memory_id}` removes one row. With the optional query
+//! `?agent_subject_id=` the list returns one named agent's notes in that Space instead (EP-6 P3).
+//! This hop decides nothing about who may do either. In order (each step is a refusal before the next
+//! one runs):
 //!
 //! 1. the rollout flag `GATEWAY_SPACE_MEMORY_UI` (404 `feature_unavailable` when off; never an
 //!    authorization input),
 //! 2. live organization membership (403 `active_membership_required`) and the request shape (400
-//!    `invalid_space` / `invalid_memory`),
+//!    `invalid_space` / `invalid_memory` / `invalid_agent`),
 //! 3. the Space lifecycle (404 `space_not_found`, 503 `space_lifecycle_unavailable`),
 //! 4. a fresh Control `model.space.memory.manage` decision for THIS list or THIS row, which Control
 //!    issues to the Space's owner or admin only (403 `space_memory_not_authorized`). The decision
@@ -18,17 +20,20 @@
 //!
 //! The Space is the path's `space_ref`, resolved here and bound into the Control decision; no client
 //! `space_id` is read from a query or a body. Zero Data Retention needs no pre-check: neither route
-//! stores content, a zero-retention list is answered empty by Session Core, and a delete is allowed
-//! under every posture. Errors are `{error:{code,message,details}}` with `details` an object.
+//! stores content, a zero-retention Space list is answered empty by Session Core, and a delete is
+//! allowed under every posture. A zero-retention caller's agent list is refused `named_agent` (the
+//! catalogue refusal, shaped as `zdr-refusals.json` writes it). Errors are
+//! `{error:{code,message,details}}` with `details` an object, except that catalogue refusal.
 
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get},
     Json, Router,
 };
 use reqwest::Method;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{denial, space_lifecycle_by_ref};
@@ -46,10 +51,25 @@ const MAX_MEMORY_ID_LEN: usize = 64;
 /// The two operations a Control Space memory decision binds; Session Core's names.
 const OPERATION_LIST: &str = "list";
 const OPERATION_DELETE: &str = "delete";
+/// The decision operation that erases one named agent's memory in the Space (EP-6 P3). Its
+/// `memory_id` is the agent's subject id, so one decision erases one agent's rows only.
+const OPERATION_ERASE_AGENT: &str = "erase_agent";
 
 const DENIED: &str = "Managing this Space's memory is not authorized.";
 
+/// The catalogue code and feature key of the zero-retention refusal of one named agent's notes
+/// (EP-6 P3, EP-6 §5). The SPA renders the words from its own copy of the catalogue.
+const ZDR_FEATURE_NOT_SUPPORTED: &str = "zdr_feature_not_supported";
+const NAMED_AGENT_FEATURE: &str = "named_agent";
+
 type Reply = (StatusCode, Json<Value>);
+
+/// The optional query of the Space memory list. `agent_subject_id` names one bound agent whose notes
+/// the list returns (EP-6 P3); absent or blank, the list is the Space's own rows.
+#[derive(Deserialize)]
+struct SpaceMemoryListQuery {
+    agent_subject_id: Option<String>,
+}
 
 /// Registered through `module_routes()` behind `require_session`.
 pub(super) fn routes() -> Router<AppState> {
@@ -110,9 +130,19 @@ async fn list_space_memory(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(space_ref): Path<String>,
+    Query(query): Query<SpaceMemoryListQuery>,
 ) -> Response {
-    let (status, Json(body)) =
-        space_memory_core(&state, &user, &headers, &space_ref, OPERATION_LIST, "").await;
+    let agent_subject_id = query.agent_subject_id.unwrap_or_default();
+    let (status, Json(body)) = space_memory_core(
+        &state,
+        &user,
+        &headers,
+        &space_ref,
+        OPERATION_LIST,
+        "",
+        agent_subject_id.trim(),
+    )
+    .await;
     (status, Json(body)).into_response()
 }
 
@@ -129,12 +159,14 @@ async fn delete_space_memory(
         &space_ref,
         OPERATION_DELETE,
         &memory_id,
+        "",
     )
     .await;
     (status, Json(body)).into_response()
 }
 
-/// Both routes' work, so the flag, the Control decision and the typed errors exist once.
+/// Both routes' work, so the flag, the Control decision and the typed errors exist once. The agent id
+/// is read only by the list (`agent_subject_id`, EP-6 P3); the delete passes none.
 async fn space_memory_core(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -142,6 +174,7 @@ async fn space_memory_core(
     space_ref: &str,
     operation: &'static str,
     memory_id: &str,
+    agent_subject_id: &str,
 ) -> Reply {
     // 1. Rollout flag. A rollout control, never an authorization input.
     if !state.space_features.memory_ui {
@@ -174,6 +207,14 @@ async fn space_memory_core(
             StatusCode::BAD_REQUEST,
             "invalid_memory",
             "A valid memory id is required.",
+        );
+    }
+    let agent_subject_id = agent_subject_id.trim();
+    if !agent_subject_id.is_empty() && !valid_memory_id(agent_subject_id) {
+        return reply(
+            StatusCode::BAD_REQUEST,
+            "invalid_agent",
+            "A valid agent id is required.",
         );
     }
 
@@ -220,7 +261,7 @@ async fn space_memory_core(
             }
         };
     let model_token = crate::domains::chat::shared::model_token(state, user, headers).await;
-    let (url, body) = model_request(
+    let (url, mut body) = model_request(
         &state.model_gateway_url,
         space_ref,
         operation,
@@ -228,6 +269,9 @@ async fn space_memory_core(
         &decision_ref,
         &token,
     );
+    if !agent_subject_id.is_empty() {
+        body["agent_subject_id"] = json!(agent_subject_id);
+    }
     let (status, Json(response)) = crate::domains::chat::shared::proxy_model_json_with_session(
         state,
         Method::POST,
@@ -239,6 +283,124 @@ async fn space_memory_core(
     )
     .await;
     relay_answer(status, &response, operation, memory_id)
+}
+
+/// `spaces.memory.list` (EP-8 S7-b): the work of `GET /api/v1/spaces/{space_ref}/memory`, behind the same
+/// switch, membership, lifecycle and Control decision. The action names no agent, so it lists the Space's
+/// own rows.
+pub(in crate::domains) async fn list_core(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    space_ref: &str,
+) -> Reply {
+    space_memory_core(state, user, headers, space_ref, OPERATION_LIST, "", "").await
+}
+
+/// `spaces.memory.delete` (EP-8 S7-b): the work of `DELETE /api/v1/spaces/{space_ref}/memory/{memory_id}`,
+/// behind the same switch, membership, lifecycle and Control decision.
+pub(in crate::domains) async fn delete_core(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    space_ref: &str,
+    memory_id: &str,
+) -> Reply {
+    space_memory_core(
+        state,
+        user,
+        headers,
+        space_ref,
+        OPERATION_DELETE,
+        memory_id,
+        "",
+    )
+    .await
+}
+
+/// Counts one failed revocation erase under its closed reason. Never an id, a count or content.
+fn record_erase_failure(reason: &'static str) {
+    metrics::counter!("verevon_space_agent_erase_failures_total", "reason" => reason).increment(1);
+}
+
+/// Best-effort erase of one named agent's memory once its binding is revoked (EP-6 P3, EP-8 S10).
+///
+/// The caller runs this only when `GATEWAY_SPACE_MEMORY_UI` is on (`SpaceFeatureFlags::memory_ui`,
+/// dark by default). It runs after the revocation has landed and never changes the revoke's answer:
+/// any failure here is logged by status only, counted under a closed reason, and the revoke still
+/// succeeds. Session Core is the authority: it verifies the fresh Control decision issued for THIS
+/// agent and erases that agent's rows in this Space, whatever its own agent switch says. Allowed
+/// under every retention posture: the call removes rows and carries ids, never content, and only a
+/// row count is logged.
+pub(super) async fn erase_agent_memory_after_revocation(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    org_id: &str,
+    space_ref: &str,
+    agent_subject_id: &str,
+) {
+    let space_ref = space_ref.trim();
+    let agent_subject_id = agent_subject_id.trim();
+    if org_id.trim().is_empty() || !valid_space_ref(space_ref) || !valid_memory_id(agent_subject_id) {
+        tracing::warn!("revoked agent memory erase skipped: no valid Space or agent subject");
+        record_erase_failure("invalid_input");
+        return;
+    }
+    let (decision_ref, token) = match space_memory_decision(
+        state,
+        user,
+        org_id,
+        space_ref,
+        OPERATION_ERASE_AGENT,
+        agent_subject_id,
+    )
+    .await
+    {
+        Ok(decision) => decision,
+        Err((status, _)) => {
+            tracing::warn!(%status, "revoked agent memory erase skipped: Control gave no decision");
+            record_erase_failure("control_decision");
+            return;
+        }
+    };
+    let session_token =
+        match crate::domains::chat::shared::required_session_token(state, user, headers).await {
+            Ok(token) => token,
+            Err(_) => {
+                tracing::warn!("revoked agent memory erase skipped: delegated credentials unavailable");
+                record_erase_failure("credentials");
+                return;
+            }
+        };
+    let model_token = crate::domains::chat::shared::model_token(state, user, headers).await;
+    let url = format!(
+        "{}/v1/spaces/{}/agents/{}/memory/erase",
+        state.model_gateway_url,
+        urlencoding::encode(space_ref),
+        urlencoding::encode(agent_subject_id),
+    );
+    let (status, Json(response)) = crate::domains::chat::shared::proxy_model_json_with_session(
+        state,
+        Method::POST,
+        &url,
+        Some(json!({
+            "space_control_decision_ref": decision_ref,
+            "space_control_decision_token": token,
+        })),
+        model_token.as_deref(),
+        Some(&session_token),
+        user,
+    )
+    .await;
+    if status.is_success() {
+        // A count only, never content.
+        let erased = response.get("erased").and_then(Value::as_u64).unwrap_or(0);
+        tracing::info!(erased, "revoked agent memory erased");
+    } else {
+        record_erase_failure("upstream");
+        tracing::warn!(%status, "revoked agent memory erase failed");
+    }
 }
 
 /// Asks Control for the `model.space.memory.manage` decision of this call. A refusal (a member
@@ -371,11 +533,20 @@ fn relay_answer(status: StatusCode, response: &Value, operation: &str, memory_id
             Json(json!({"data": {"memories": memories, "withheld": withheld}})),
         );
     }
-    let code = response
-        .get("error")
-        .and_then(|error| error.get("code"))
+    let typed = response.get("error");
+    let code = typed
+        .and_then(|detail| detail.get("code"))
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let feature = typed
+        .and_then(|detail| detail.get("feature"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // A zero-retention refusal of one named agent's notes keeps the catalogue code and feature, so the
+    // browser shows the zdr-refusals copy for it (EP-6 P3). Model-gateway's status is 412 for it.
+    if code == ZDR_FEATURE_NOT_SUPPORTED && feature == NAMED_AGENT_FEATURE {
+        return (StatusCode::PRECONDITION_FAILED, Json(named_agent_refusal()));
+    }
     match code {
         "space_memory_not_authorized" => reply(StatusCode::FORBIDDEN, "space_memory_not_authorized", DENIED),
         "memory_not_found" => reply(
@@ -389,6 +560,19 @@ fn relay_answer(status: StatusCode, response: &Value, operation: &str, memory_id
             "Space memory is temporarily unavailable.",
         ),
     }
+}
+
+/// The catalogue refusal for one named agent's notes under Zero Data Retention (EP-6 P3): the Model
+/// Plane's `{error:{code,message,retryable,action,feature}}` shape with its fixed English words. The
+/// browser renders its own Norwegian or English copy of the same code and feature.
+fn named_agent_refusal() -> Value {
+    json!({"error": {
+        "code": ZDR_FEATURE_NOT_SUPPORTED,
+        "message": "This is not supported with zero data retention yet: named agent memory. The request was refused before any model call.",
+        "retryable": false,
+        "action": "turn_off_feature",
+        "feature": NAMED_AGENT_FEATURE,
+    }})
 }
 
 #[cfg(test)]

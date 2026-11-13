@@ -87,19 +87,26 @@ export function getRouterPolicy(orgId: string, signal?: AbortSignal): Promise<Ro
 /**
  * Persist a router policy. The full document is sent; `version`/`updated_*` are
  * authored server-side, so we strip them from the body (immutably — the caller's
- * object is never mutated). The server returns the stored policy with fresh
- * version + audit metadata.
+ * object is never mutated). The version the caller read goes out as
+ * `expected_version`, so a write over a newer version is refused (409) rather
+ * than overwriting it; a document without a version sends no expectation. The
+ * server returns the stored policy with fresh version + audit metadata.
  */
 export function updateRouterPolicy(
   orgId: string,
   policy: RoutingPolicy,
   signal?: AbortSignal,
 ): Promise<RoutingPolicy> {
-  const { version: _version, updated_by: _updatedBy, updated_at: _updatedAt, ...rest } = policy
-  void _version
+  const { version: expectedVersion, updated_by: _updatedBy, updated_at: _updatedAt, ...rest } = policy
   void _updatedBy
   void _updatedAt
-  const body: RoutingPolicy = { ...rest, version: 0, updated_by: '', updated_at: '' }
+  const body: RoutingPolicy & { expected_version?: number } = {
+    ...rest,
+    version: 0,
+    updated_by: '',
+    updated_at: '',
+    ...(typeof expectedVersion === 'number' ? { expected_version: expectedVersion } : {}),
+  }
   return requestJson<RoutingPolicy>('/api/v1/router-policy', {
     method: 'PUT',
     body: JSON.stringify(body),

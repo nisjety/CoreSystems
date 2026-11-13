@@ -8,12 +8,14 @@ use std::time::Duration;
 
 use crate::{
     audience_tokens::{
-        get_audience_token, get_model_service_token, require_model_service_token,
-        ModelServiceAudience, RequiredAudienceTokenError,
+        get_audience_token, get_audience_token_with_decision, get_model_service_token,
+        get_model_service_token_with_decision, require_model_service_token, ModelServiceAudience,
+        RequiredAudienceTokenError, TokenRefusal,
     },
     config::AppState,
     envelope::error,
     middleware::AuthenticatedUser,
+    retention_decision::{Refusal, TurnRetention},
 };
 
 pub(super) fn cookie_header(headers: &HeaderMap) -> String {
@@ -420,6 +422,30 @@ pub(crate) async fn browser_token(
     .await
 }
 
+/// The interactive `aud=browser-broker` token for the continuation of a skipped site (EP-1 S2, D3-647).
+/// Model Plane forwards it to execution-core, which uses it only to release the page the run held for
+/// the person. It is minted under the same conditions the turn that opened the page was: the agent
+/// browser's Do switch is on and the turn keeps content (not ZDR). Best-effort like `browser_token`: a
+/// missing credential leaves the continuation without it, and model-gateway refuses that continuation
+/// (the SPA then falls back to the plain resume).
+pub(crate) async fn skipped_site_browser_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    zdr: bool,
+) -> Option<String> {
+    if zdr || !browser_do_enabled() {
+        return None;
+    }
+    get_model_service_token(
+        state,
+        &user.user_id,
+        &cookie_header(headers),
+        ModelServiceAudience::BrowserBroker,
+    )
+    .await
+}
+
 async fn required_token(
     state: &AppState,
     user: &AuthenticatedUser,
@@ -528,6 +554,268 @@ pub(crate) fn delegated_auth_unavailable(
     )
 }
 
+/// Which chat handler is minting the bearers of a turn. The two send different delegated headers
+/// upstream, so a mint is made only for a header the handler actually sends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TurnSurface {
+    /// `stream_chat` (`POST /api/v1/chat/stream`): sends the capability and ingestion bearers too.
+    Stream,
+    /// `invoke_chat_json` (`POST /api/v1/chat/invoke`): sends neither capability nor ingestion.
+    Json,
+}
+
+/// Every delegated bearer a chat turn mints before it goes to model-gateway, minted from ONE
+/// retention answer (ZDR-Z-19b). Holds credentials, so it deliberately has no `Debug`.
+pub(crate) struct TurnBearers {
+    /// The `aud=model-gateway` ingress token (`None` only when none could be had and no dev bearer
+    /// applies; never `None` on a waived turn).
+    pub(crate) model: Option<String>,
+    /// The `aud=data-plane` bearer.
+    pub(crate) data_plane: Option<String>,
+    /// The `aud=ingestion` bearer (stream surface only).
+    pub(crate) ingestion: Option<String>,
+    /// The `aud=capability-core` bearer (stream surface only).
+    pub(crate) capability: Option<String>,
+    /// The `aud=inference-core` bearer.
+    pub(crate) inference: String,
+    /// The `aud=execution-core` bearer.
+    pub(crate) execution: String,
+    /// The `aud=cost-core` bearer.
+    pub(crate) cost: String,
+    /// The `aud=session-core` bearer.
+    pub(crate) session: String,
+}
+
+/// True when Auth Core signed a per-connection waiver for this turn.
+pub(crate) fn is_waived(retention: &TurnRetention) -> bool {
+    matches!(retention, TurnRetention::Waived { .. })
+}
+
+/// Answer an Auth Core refusal of a decision-carrying mint as it came: its status and its typed
+/// ZDR catalogue body.
+fn token_refusal_response(refusal: TokenRefusal) -> (StatusCode, Json<Value>) {
+    (refusal.status, Json(refusal.body))
+}
+
+/// Answer a retention-decision refusal (`retention_decision::turn_retention`) as it came. Nothing
+/// has been sent upstream when a handler answers this.
+pub(crate) fn retention_refusal_response(refusal: Refusal) -> (StatusCode, Json<Value>) {
+    (refusal.status, Json(refusal.body))
+}
+
+/// The invariant check of a waived turn: it must not name a Space. `turn_retention` already
+/// resolved the thread's Space before any mint, so this should never fire; it refuses 412
+/// `zdr_waiver_route_mismatch` before anything goes upstream if a Space reference (the browser's
+/// selection, or Control-injected authority) is on the outbound body of a waived turn. `None` for
+/// every other retention.
+pub(crate) fn waived_space_refusal(
+    retention: &TurnRetention,
+    outbound_body: &Value,
+) -> Option<(StatusCode, Json<Value>)> {
+    if !is_waived(retention) {
+        return None;
+    }
+    let names_space = ["space_ref", "spaceRef"].iter().any(|key| {
+        outbound_body
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    }) || is_space_scoped_turn(outbound_body);
+    if !names_space {
+        return None;
+    }
+    tracing::warn!("waived turn names a space; refused before any upstream call");
+    Some((
+        StatusCode::PRECONDITION_FAILED,
+        Json(crate::zdr::zdr_refusal_body(
+            crate::zdr::ZDR_WAIVER_ROUTE_MISMATCH,
+        )),
+    ))
+}
+
+// Every bearer mint of the two chat-turn handlers (`stream_chat` in streams.rs and
+// `invoke_chat_json` in json_handlers.rs), found by grepping each for `_token(`. A new mint added to
+// either handler must choose its waiver behaviour here before it ships:
+//
+//   mint (helper)                       handler(s)    Unchanged/Zdr/Persistent       Waived
+//   model_token                         both          best effort (dev bearer ok)    required, with decision
+//   data_plane_token                    both          best effort                    required, with decision
+//   ingestion_token                     stream        best effort                    required, with decision
+//   best_effort_capability_token        stream        best effort                    required, with decision
+//   required_inference_token            both          required                       required, with decision
+//   required_execution_token            both          required                       required, with decision
+//   required_cost_token                 both          required                       required, with decision
+//   required_session_token              both          required                       required, with decision
+//   sandbox_token                       both          after Space injection          NEVER (rule 5)
+//   browser_token                       stream        offered when !effective_zdr    NEVER (rule 5)
+//
+// The first eight are made by `mint_turn_bearers` below, all from one retention answer. The last two
+// stay in the handlers (they need the Space-injected body) behind an explicit waived check.
+// `skipped_site_browser_token` and the other handlers' mints are not part of a chat turn's send.
+
+/// Mint every bearer of one chat turn from the retention answer `turn_retention` gave.
+///
+/// `Unchanged`, `Zdr` and `Persistent` call today's helpers exactly, in today's order, with today's
+/// best-effort and required semantics. `Waived` mints each of model, data-plane, ingestion,
+/// capability, inference, execution, cost and session (only those the `surface` sends) with the
+/// signed decision on `x-retention-decision`, and every one is required: model-gateway refuses a
+/// request whose delegated bearers differ in `zdr_waiver` from the ingress token, so a bearer minted
+/// without the waiver (or a dev-bearer fallback) would fail the whole turn. Any refusal is answered
+/// as Auth Core sent it and nothing goes upstream.
+pub(crate) async fn mint_turn_bearers(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    retention: &TurnRetention,
+    surface: TurnSurface,
+) -> Result<TurnBearers, (StatusCode, Json<Value>)> {
+    if let TurnRetention::Waived { decision_token } = retention {
+        return mint_waived_bearers(state, user, headers, decision_token, surface).await;
+    }
+    let model = model_token(state, user, headers).await;
+    let data_plane = data_plane_token(state, user, headers).await;
+    let (ingestion, capability) = match surface {
+        TurnSurface::Stream => (
+            ingestion_token(state, user, headers).await,
+            // F-14 (apps/verevon-web/plans/system-audits/CHAT_PARITY_AUDIT_2026-09-15.md §3.9):
+            // best-effort, not `required_*` — a mint failure must degrade the PII/injection-defense
+            // policy lookup (model-gateway fails closed and redacts), not the turn.
+            best_effort_capability_token(state, user, headers).await,
+        ),
+        TurnSurface::Json => (None, None),
+    };
+    let inference = required_inference_token(state, user, headers)
+        .await
+        .map_err(delegated_auth_unavailable)?;
+    let execution = required_execution_token(state, user, headers)
+        .await
+        .map_err(delegated_auth_unavailable)?;
+    let cost = required_cost_token(state, user, headers)
+        .await
+        .map_err(delegated_auth_unavailable)?;
+    let session = required_session_token(state, user, headers)
+        .await
+        .map_err(delegated_auth_unavailable)?;
+    Ok(TurnBearers {
+        model,
+        data_plane,
+        ingestion,
+        capability,
+        inference,
+        execution,
+        cost,
+        session,
+    })
+}
+
+/// The waived half of [`mint_turn_bearers`]: every bearer minted with the decision, none optional.
+async fn mint_waived_bearers(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    decision: &str,
+    surface: TurnSurface,
+) -> Result<TurnBearers, (StatusCode, Json<Value>)> {
+    let cookie = cookie_header(headers);
+    let user_id = user.user_id.as_str();
+    let service = |audience: ModelServiceAudience| {
+        get_model_service_token_with_decision(state, user_id, &cookie, audience, decision)
+    };
+    let model = service(ModelServiceAudience::ModelGateway)
+        .await
+        .map_err(token_refusal_response)?;
+    let data_plane =
+        get_audience_token_with_decision(state, user_id, &cookie, "data-plane", decision)
+            .await
+            .map_err(token_refusal_response)?;
+    let (ingestion, capability) = match surface {
+        TurnSurface::Stream => {
+            let ingestion =
+                get_audience_token_with_decision(state, user_id, &cookie, "ingestion", decision)
+                    .await
+                    .map_err(token_refusal_response)?;
+            let capability = service(ModelServiceAudience::CapabilityCore)
+                .await
+                .map_err(token_refusal_response)?;
+            (Some(ingestion), Some(capability))
+        }
+        TurnSurface::Json => (None, None),
+    };
+    let inference = service(ModelServiceAudience::InferenceCore)
+        .await
+        .map_err(token_refusal_response)?;
+    let execution = service(ModelServiceAudience::ExecutionCore)
+        .await
+        .map_err(token_refusal_response)?;
+    let cost = service(ModelServiceAudience::CostCore)
+        .await
+        .map_err(token_refusal_response)?;
+    let session = service(ModelServiceAudience::SessionCore)
+        .await
+        .map_err(token_refusal_response)?;
+    Ok(TurnBearers {
+        model: Some(model),
+        data_plane: Some(data_plane),
+        ingestion,
+        capability,
+        inference,
+        execution,
+        cost,
+        session,
+    })
+}
+
+/// The signed decision a continuation's bearers must carry: `Some` only for a [`TurnRetention::Waived`]
+/// answer of `retention_decision::continuation_retention`, `None` for every other retention (which
+/// keeps today's helpers and today's org-posture bearers).
+pub(crate) fn waived_decision(retention: &TurnRetention) -> Option<&str> {
+    match retention {
+        TurnRetention::Waived { decision_token } => Some(decision_token.as_str()),
+        _ => None,
+    }
+}
+
+/// Mint one Model Plane service bearer of a waived continuation with the fresh decision on
+/// `x-retention-decision` (D-ZDR-15). Required, never best effort and never a dev-bearer fallback:
+/// model-gateway refuses delegated bearers that differ in `zdr_waiver` from the ingress token. An
+/// Auth Core refusal is answered as it came.
+pub(crate) async fn waived_service_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    decision: &str,
+    audience: ModelServiceAudience,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    get_model_service_token_with_decision(
+        state,
+        &user.user_id,
+        &cookie_header(headers),
+        audience,
+        decision,
+    )
+    .await
+    .map_err(token_refusal_response)
+}
+
+/// Mint the `aud=data-plane` bearer of a waived continuation with the fresh decision; see
+/// [`waived_service_token`].
+pub(crate) async fn waived_data_plane_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    decision: &str,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    get_audience_token_with_decision(
+        state,
+        &user.user_id,
+        &cookie_header(headers),
+        "data-plane",
+        decision,
+    )
+    .await
+    .map_err(token_refusal_response)
+}
+
 pub(crate) fn invalid_chat_request(message: &'static str) -> (StatusCode, Json<Value>) {
     (
         StatusCode::BAD_REQUEST,
@@ -561,6 +849,7 @@ pub(crate) async fn proxy_model_json(
         url,
         body,
         bearer_token,
+        None,
         None,
         None,
         None,
@@ -604,6 +893,7 @@ pub(crate) async fn proxy_model_json_with_data_plane(
         session_bearer,
         None,
         None,
+        None,
         user,
     )
     .await
@@ -642,6 +932,7 @@ pub(crate) async fn proxy_model_json_with_data_plane_request_timeout(
         session_bearer,
         sandbox_bearer,
         request_timeout,
+        None,
         user,
     )
     .await
@@ -664,6 +955,7 @@ pub(crate) async fn proxy_model_json_with_capability(
         bearer_token,
         None,
         capability_bearer,
+        None,
         None,
         None,
         None,
@@ -701,6 +993,7 @@ pub(crate) async fn proxy_model_json_with_sandbox(
         None,
         sandbox_bearer,
         None,
+        None,
         user,
     )
     .await
@@ -727,6 +1020,7 @@ pub(crate) async fn proxy_model_json_with_session(
         None,
         None,
         session_bearer,
+        None,
         None,
         None,
         user,
@@ -767,6 +1061,7 @@ pub(crate) async fn proxy_model_json_with_session_and_capability(
         session_bearer,
         None,
         None,
+        None,
         user,
     )
     .await
@@ -795,6 +1090,7 @@ pub(crate) async fn proxy_model_json_with_inference(
         None,
         None,
         None,
+        None,
         user,
     )
     .await
@@ -817,6 +1113,9 @@ pub(crate) async fn proxy_model_json_with_delegations(
     // switched on (see `sandbox_token`).
     sandbox_bearer: Option<&str>,
     request_timeout: Option<Duration>,
+    // Teach mode's `aud=quarry` bearer (F-t3-081), forwarded as `x-quarry-authorization`. Only the
+    // teach draft presents it.
+    quarry_bearer: Option<&str>,
     user: &AuthenticatedUser,
 ) -> (StatusCode, Json<Value>) {
     let org_id = crate::upstream::authorized_org_id(state, user).await;
@@ -866,6 +1165,9 @@ pub(crate) async fn proxy_model_json_with_delegations(
     }
     if let Some(value) = sandbox_bearer.and_then(data_plane_authorization_value) {
         req = req.header("x-sandbox-authorization", value);
+    }
+    if let Some(value) = quarry_bearer.and_then(data_plane_authorization_value) {
+        req = req.header("x-quarry-authorization", value);
     }
 
     if let Some(b) = body {
@@ -1004,7 +1306,16 @@ mod tests {
             mail_task_nats_user: String::new(),
             mail_task_nats_password: String::new(),
             continue_park_form: false,
+            continue_question_form: false,
             model_entitlement_admin_enabled: false,
+            zdr_effective_posture_read: false,
+            zdr_waiver_ui_enabled: false,
+            retention_decision_service_api_key: None,
+            agent_definition_versions: false,
+            chat_process_output_enabled: false,
+            chat_snapshots_enabled: false,
+            event_triggers_enabled: false,
+            credential_bindings_enabled: false,
             mail_task_pipeline: None,
             space_features: Default::default(),
         }

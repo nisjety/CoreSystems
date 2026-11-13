@@ -19,12 +19,15 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ThreadGoalService_SetThreadGoal_FullMethodName    = "/model_plane.v1.ThreadGoalService/SetThreadGoal"
-	ThreadGoalService_GetThreadGoal_FullMethodName    = "/model_plane.v1.ThreadGoalService/GetThreadGoal"
-	ThreadGoalService_UpdateThreadGoal_FullMethodName = "/model_plane.v1.ThreadGoalService/UpdateThreadGoal"
-	ThreadGoalService_ClaimGoalTurn_FullMethodName    = "/model_plane.v1.ThreadGoalService/ClaimGoalTurn"
-	ThreadGoalService_BindGoalTurnRun_FullMethodName  = "/model_plane.v1.ThreadGoalService/BindGoalTurnRun"
-	ThreadGoalService_SettleGoalTurn_FullMethodName   = "/model_plane.v1.ThreadGoalService/SettleGoalTurn"
+	ThreadGoalService_SetThreadGoal_FullMethodName            = "/model_plane.v1.ThreadGoalService/SetThreadGoal"
+	ThreadGoalService_GetThreadGoal_FullMethodName            = "/model_plane.v1.ThreadGoalService/GetThreadGoal"
+	ThreadGoalService_UpdateThreadGoal_FullMethodName         = "/model_plane.v1.ThreadGoalService/UpdateThreadGoal"
+	ThreadGoalService_ClaimGoalTurn_FullMethodName            = "/model_plane.v1.ThreadGoalService/ClaimGoalTurn"
+	ThreadGoalService_BindGoalTurnRun_FullMethodName          = "/model_plane.v1.ThreadGoalService/BindGoalTurnRun"
+	ThreadGoalService_SettleGoalTurn_FullMethodName           = "/model_plane.v1.ThreadGoalService/SettleGoalTurn"
+	ThreadGoalService_RecordGoalVerdict_FullMethodName        = "/model_plane.v1.ThreadGoalService/RecordGoalVerdict"
+	ThreadGoalService_GetGoalTurnForJudge_FullMethodName      = "/model_plane.v1.ThreadGoalService/GetGoalTurnForJudge"
+	ThreadGoalService_ListRunToolCallsForJudge_FullMethodName = "/model_plane.v1.ThreadGoalService/ListRunToolCallsForJudge"
 )
 
 // ThreadGoalServiceClient is the client API for ThreadGoalService service.
@@ -37,6 +40,9 @@ const (
 // zero-retention or waived credential and another person's thread; a write
 // also refuses a Space thread (`failed_precondition`
 // `thread_goal_space_unsupported`) and a thread holding a waived run.
+// `RecordGoalVerdict` is the one write a service makes: it answers only the goal-judge principal
+// (service:model-gateway-goal-judge, scope session:goal-verdict:write) and checks the org, not an
+// owner.
 type ThreadGoalServiceClient interface {
 	// Set a goal on a thread (one open goal per thread).
 	// Response type is shared by several goal RPCs; renaming it would break generated code.
@@ -62,6 +68,20 @@ type ThreadGoalServiceClient interface {
 	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	SettleGoalTurn(ctx context.Context, in *SettleGoalTurnRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error)
+	// EP-7 S3. Record the completion judge's verdict on a settled turn (goal-judge principal only,
+	// session:goal-verdict:write; refuses a thread holding a zero-retention or waived run).
+	// Response type is shared by several goal RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+	RecordGoalVerdict(ctx context.Context, in *RecordGoalVerdictRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error)
+	// EP-7 S6. Read the unattended turn of one scheduled fire for the completion judge (goal-judge
+	// principal only, session:goal-judge:read; refuses a thread holding a zero-retention or waived
+	// run). Like RecordGoalVerdict it checks the org, not an owner.
+	GetGoalTurnForJudge(ctx context.Context, in *GetGoalTurnForJudgeRequest, opts ...grpc.CallOption) (*GetGoalTurnForJudgeResponse, error)
+	// Read the names and statuses of the tool calls one run reserved, for the completion judge's
+	// evidence (goal-judge principal only, session:goal-judge:read). Checks the org, not an owner;
+	// refuses a run that is not persistent and a run on a thread holding a zero-retention or waived run.
+	ListRunToolCallsForJudge(ctx context.Context, in *ListRunToolCallsForJudgeRequest, opts ...grpc.CallOption) (*ListRunToolCallsForJudgeResponse, error)
 }
 
 type threadGoalServiceClient struct {
@@ -132,6 +152,36 @@ func (c *threadGoalServiceClient) SettleGoalTurn(ctx context.Context, in *Settle
 	return out, nil
 }
 
+func (c *threadGoalServiceClient) RecordGoalVerdict(ctx context.Context, in *RecordGoalVerdictRequest, opts ...grpc.CallOption) (*ThreadGoalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ThreadGoalResponse)
+	err := c.cc.Invoke(ctx, ThreadGoalService_RecordGoalVerdict_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *threadGoalServiceClient) GetGoalTurnForJudge(ctx context.Context, in *GetGoalTurnForJudgeRequest, opts ...grpc.CallOption) (*GetGoalTurnForJudgeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetGoalTurnForJudgeResponse)
+	err := c.cc.Invoke(ctx, ThreadGoalService_GetGoalTurnForJudge_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *threadGoalServiceClient) ListRunToolCallsForJudge(ctx context.Context, in *ListRunToolCallsForJudgeRequest, opts ...grpc.CallOption) (*ListRunToolCallsForJudgeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListRunToolCallsForJudgeResponse)
+	err := c.cc.Invoke(ctx, ThreadGoalService_ListRunToolCallsForJudge_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ThreadGoalServiceServer is the server API for ThreadGoalService service.
 // All implementations must embed UnimplementedThreadGoalServiceServer
 // for forward compatibility.
@@ -142,6 +192,9 @@ func (c *threadGoalServiceClient) SettleGoalTurn(ctx context.Context, in *Settle
 // zero-retention or waived credential and another person's thread; a write
 // also refuses a Space thread (`failed_precondition`
 // `thread_goal_space_unsupported`) and a thread holding a waived run.
+// `RecordGoalVerdict` is the one write a service makes: it answers only the goal-judge principal
+// (service:model-gateway-goal-judge, scope session:goal-verdict:write) and checks the org, not an
+// owner.
 type ThreadGoalServiceServer interface {
 	// Set a goal on a thread (one open goal per thread).
 	// Response type is shared by several goal RPCs; renaming it would break generated code.
@@ -167,6 +220,20 @@ type ThreadGoalServiceServer interface {
 	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
 	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
 	SettleGoalTurn(context.Context, *SettleGoalTurnRequest) (*ThreadGoalResponse, error)
+	// EP-7 S3. Record the completion judge's verdict on a settled turn (goal-judge principal only,
+	// session:goal-verdict:write; refuses a thread holding a zero-retention or waived run).
+	// Response type is shared by several goal RPCs; renaming it would break generated code.
+	// buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+	// buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+	RecordGoalVerdict(context.Context, *RecordGoalVerdictRequest) (*ThreadGoalResponse, error)
+	// EP-7 S6. Read the unattended turn of one scheduled fire for the completion judge (goal-judge
+	// principal only, session:goal-judge:read; refuses a thread holding a zero-retention or waived
+	// run). Like RecordGoalVerdict it checks the org, not an owner.
+	GetGoalTurnForJudge(context.Context, *GetGoalTurnForJudgeRequest) (*GetGoalTurnForJudgeResponse, error)
+	// Read the names and statuses of the tool calls one run reserved, for the completion judge's
+	// evidence (goal-judge principal only, session:goal-judge:read). Checks the org, not an owner;
+	// refuses a run that is not persistent and a run on a thread holding a zero-retention or waived run.
+	ListRunToolCallsForJudge(context.Context, *ListRunToolCallsForJudgeRequest) (*ListRunToolCallsForJudgeResponse, error)
 	mustEmbedUnimplementedThreadGoalServiceServer()
 }
 
@@ -194,6 +261,15 @@ func (UnimplementedThreadGoalServiceServer) BindGoalTurnRun(context.Context, *Bi
 }
 func (UnimplementedThreadGoalServiceServer) SettleGoalTurn(context.Context, *SettleGoalTurnRequest) (*ThreadGoalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SettleGoalTurn not implemented")
+}
+func (UnimplementedThreadGoalServiceServer) RecordGoalVerdict(context.Context, *RecordGoalVerdictRequest) (*ThreadGoalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RecordGoalVerdict not implemented")
+}
+func (UnimplementedThreadGoalServiceServer) GetGoalTurnForJudge(context.Context, *GetGoalTurnForJudgeRequest) (*GetGoalTurnForJudgeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetGoalTurnForJudge not implemented")
+}
+func (UnimplementedThreadGoalServiceServer) ListRunToolCallsForJudge(context.Context, *ListRunToolCallsForJudgeRequest) (*ListRunToolCallsForJudgeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListRunToolCallsForJudge not implemented")
 }
 func (UnimplementedThreadGoalServiceServer) mustEmbedUnimplementedThreadGoalServiceServer() {}
 func (UnimplementedThreadGoalServiceServer) testEmbeddedByValue()                           {}
@@ -324,6 +400,60 @@ func _ThreadGoalService_SettleGoalTurn_Handler(srv interface{}, ctx context.Cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ThreadGoalService_RecordGoalVerdict_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RecordGoalVerdictRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadGoalServiceServer).RecordGoalVerdict(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadGoalService_RecordGoalVerdict_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadGoalServiceServer).RecordGoalVerdict(ctx, req.(*RecordGoalVerdictRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ThreadGoalService_GetGoalTurnForJudge_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetGoalTurnForJudgeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadGoalServiceServer).GetGoalTurnForJudge(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadGoalService_GetGoalTurnForJudge_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadGoalServiceServer).GetGoalTurnForJudge(ctx, req.(*GetGoalTurnForJudgeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ThreadGoalService_ListRunToolCallsForJudge_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListRunToolCallsForJudgeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ThreadGoalServiceServer).ListRunToolCallsForJudge(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ThreadGoalService_ListRunToolCallsForJudge_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ThreadGoalServiceServer).ListRunToolCallsForJudge(ctx, req.(*ListRunToolCallsForJudgeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ThreadGoalService_ServiceDesc is the grpc.ServiceDesc for ThreadGoalService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -354,6 +484,18 @@ var ThreadGoalService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SettleGoalTurn",
 			Handler:    _ThreadGoalService_SettleGoalTurn_Handler,
+		},
+		{
+			MethodName: "RecordGoalVerdict",
+			Handler:    _ThreadGoalService_RecordGoalVerdict_Handler,
+		},
+		{
+			MethodName: "GetGoalTurnForJudge",
+			Handler:    _ThreadGoalService_GetGoalTurnForJudge_Handler,
+		},
+		{
+			MethodName: "ListRunToolCallsForJudge",
+			Handler:    _ThreadGoalService_ListRunToolCallsForJudge_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

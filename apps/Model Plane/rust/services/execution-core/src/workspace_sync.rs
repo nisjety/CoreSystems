@@ -490,6 +490,59 @@ pub fn write_through_applies(switched_on: bool, persistence_free: bool) -> bool 
     switched_on && !persistence_free
 }
 
+/// Whether the lease release keeps the same file filter as the per-step write-through, and never
+/// uploads for a run that keeps no content. Read once per process. Only the literal `true` turns it
+/// on, so an unset, empty or misspelled value leaves the release exactly as it was.
+#[must_use]
+pub fn lease_release_filter_switched_on() -> bool {
+    static SWITCH: OnceLock<bool> = OnceLock::new();
+    *SWITCH.get_or_init(|| {
+        lease_release_filter_from(
+            std::env::var("EXECUTION_CORE_LEASE_RELEASE_FILTER")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+/// The pure half of [`lease_release_filter_switched_on`], so the parsing is tested without the
+/// environment.
+fn lease_release_filter_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// What the lease release does with the hydrated workspace of a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseUpload {
+    /// The release as it was before the filter existed: it uploads, filtered only when the
+    /// per-step write-through is switched on.
+    AsBefore,
+    /// Upload only the files the per-step write-through would accept.
+    SyncableOnly,
+    /// The run keeps no content (zero retention or a waiver): discard the workspace, upload
+    /// nothing.
+    Discard,
+}
+
+/// Chooses what the lease release does with the workspace. With the filter off, or when the
+/// per-step write-through applies and so already filtered the run, the release is unchanged. With
+/// the filter on and no write-through, a persistence-free run is discarded before any upload and any
+/// other run uploads only what the write-through would have recorded.
+#[must_use]
+pub fn release_upload(
+    filter_on: bool,
+    write_through_switched_on: bool,
+    persistence_free: bool,
+) -> ReleaseUpload {
+    if !filter_on || write_through_applies(write_through_switched_on, persistence_free) {
+        ReleaseUpload::AsBefore
+    } else if persistence_free {
+        ReleaseUpload::Discard
+    } else {
+        ReleaseUpload::SyncableOnly
+    }
+}
+
 /// Records what one inline Space step changed as the run's overlay, before the step's result
 /// returns (WS22-S4). Every file the run has changed goes out with the base hash the run hydrated,
 /// so each record repeats the whole overlay and the rows converge on the run's last content.
@@ -1306,5 +1359,31 @@ mod tests {
         assert!(write_through_applies(true, false));
         assert!(!write_through_applies(true, true), "zero retention and waivers keep no content");
         assert!(!write_through_applies(false, false), "the default leaves the Space path as it was");
+    }
+}
+
+/// Section 3.4: the switch is documented as "only the literal true". A padded, differently cased or
+/// truthy-word value must leave it off, so a mis-set deployment keeps today's behaviour.
+#[cfg(test)]
+mod switch_literal_parse {
+    #[test]
+    fn only_the_literal_true_switches_it_on() {
+        assert!(super::lease_release_filter_from(Some("true")));
+        for raw in [
+            None,
+            Some(""),
+            Some(" true"),
+            Some("true\n"),
+            Some("TRUE"),
+            Some("True"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+        ] {
+            assert!(
+                !super::lease_release_filter_from(raw),
+                "{raw:?} must leave the switch off"
+            );
+        }
     }
 }

@@ -63,5 +63,5 @@ func (s *Server) getRetentionPostureInternal(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read retention posture"})
 		return
 	}
-	c.JSON(http.StatusOK, posture)
+	c.JSON(http.StatusOK, posture.Resolved())
 }

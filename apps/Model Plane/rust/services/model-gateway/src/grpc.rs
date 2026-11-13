@@ -275,7 +275,73 @@ fn plugin_from_catalog(row: &serde_json::Value) -> Plugin {
             .get("installed_at_unix")
             .and_then(serde_json::Value::as_i64)
             .unwrap_or_default(),
+        // The list leaves the supply-chain source empty (W4-PL-1); only the register response reports it.
+        ..Default::default()
     }
+}
+
+/// `PLUGIN_LOADER_ENABLED`, read with the strict reader capability-core uses: only the literal `true`
+/// turns the supply-chain pins on.
+fn plugin_loader_enabled_from_env_value(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// The process's `PLUGIN_LOADER_ENABLED`, read once so it cannot change under a request.
+fn plugin_loader_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let raw = std::env::var("PLUGIN_LOADER_ENABLED").ok();
+        plugin_loader_enabled_from_env_value(raw.as_deref())
+    })
+}
+
+/// A plugin's supply-chain source in capability-core's canonical form: the kind, the URL and the pin, each
+/// trimmed, with the pin lowercased. The gateway checks and forwards this form, so it matches what
+/// capability-core validates.
+#[derive(Debug, Default)]
+struct PluginSource {
+    kind: String,
+    reference: String,
+    pin: String,
+}
+
+impl PluginSource {
+    /// The source a registration request carries, in canonical form.
+    fn from_request(plugin: &Plugin) -> Self {
+        Self {
+            kind: plugin.source_kind.trim().to_owned(),
+            reference: plugin.source_ref.trim().to_owned(),
+            pin: plugin.source_pin.trim().to_ascii_lowercase(),
+        }
+    }
+
+    /// Why this source is not pinned, or `None` when it is. Only a full commit SHA pins a `git_commit`
+    /// source, and only `sha256:` with 64 hex digits pins an `archive`; a branch, a tag or a bare digest
+    /// never does. The reason is for the log only, so the caller never sees a value it sent.
+    fn pin_refusal(&self) -> Option<&'static str> {
+        match self.kind.as_str() {
+            "git_commit" if is_lower_hex(&self.pin, 40) => None,
+            "git_commit" => Some("git_commit pin is not a full 40-hex commit SHA"),
+            "archive" if is_archive_digest(&self.pin) => None,
+            "archive" => Some("archive pin is not sha256 followed by 64 hex digits"),
+            _ => Some("source_kind is not git_commit or archive"),
+        }
+    }
+}
+
+/// Exactly `len` lowercase hex digits.
+fn is_lower_hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// `sha256:` and then 64 lowercase hex digits, the form an archive pin takes.
+fn is_archive_digest(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| is_lower_hex(hex, 64))
 }
 
 /// The caller's own `authorization` header, for forwarding to a plane the
@@ -1524,9 +1590,23 @@ impl ModelGateway for GatewayService {
         let identity = authorize_rpc(&request, RpcAccess::Tool)?;
         let mut req = request.into_inner();
         req.zdr = identity.zdr_for(&crate::zdr_posture::Route::plain(req.zdr))?;
-        tools::handle_web_search(&self.state, req)
-            .await
-            .map(Response::new)
+        // Z-05a: a ZDR search is a typed refusal before the Quarry call, once ZDR_TYPED_REFUSALS_ENABLED is on.
+        if let Some(refusal) = crate::zdr_posture::refuse_zdr_feature_for("web_search", req.zdr) {
+            return Err(refusal.grpc_status(crate::zdr_posture::grpc_code(&refusal)));
+        }
+        let mut response = tools::handle_web_search(&self.state, req).await?;
+        // The org's domain rules drop a hit on a host the org does not allow, as the chat tool loop does (EP-9 W3).
+        // The org is the verified identity's, never a request field. Under `off` nothing is read and nothing is dropped.
+        crate::site_policy_client::drop_denied_results_in(
+            crate::site_policy_client::policy_mode(),
+            crate::site_policy_client::shared_checker(),
+            &crate::site_policy_client::SiteOwner::of(&self.state),
+            identity.org_id(),
+            &mut response.results,
+        )
+        .await;
+        response.total = i32::try_from(response.results.len()).unwrap_or(i32::MAX);
+        Ok(Response::new(response))
     }
 
     async fn sleep(
@@ -2132,34 +2212,102 @@ impl ModelGateway for GatewayService {
         request: Request<ProxyMcpToolRequest>,
     ) -> Result<Response<ProxyMcpToolResponse>, Status> {
         let identity = authorize_rpc(&request, RpcAccess::Tool)?;
+        // W4-CC-5: a static-bearer server is refused on a ZDR or waived turn with its own feature, so the check runs
+        // before the MCP-wide gate below, which would name `mcp_execution` instead.
+        let names_stored_binding = self
+            .state
+            .mcp
+            .credential_binding(&request.get_ref().org_id, &request.get_ref().server_id)
+            .is_some();
+        if names_stored_binding {
+            let posture = identity
+                .posture(&crate::zdr_posture::Route::plain(false))
+                .map_err(|refusal| refusal.grpc_status(tonic::Code::FailedPrecondition))?;
+            if let Some(refusal) = crate::mcp_credential_ref::turn_refusal(&posture) {
+                return Err(refusal.grpc_status(tonic::Code::FailedPrecondition));
+            }
+        }
         require_explicit_zdr_contract(&identity, "mcp_execution")?;
         if !identity.is_service() {
             return Err(Status::permission_denied(
                 "MCP execution is restricted to the governed execution service",
             ));
         }
-        let req = request.into_inner();
+        let mut req = request.into_inner();
+        // W4-CC-5: a static-bearer server runs with the credential its integration-corev2 binding redeems for this
+        // call. A waived turn is refused for such a server before any call. Every other server keeps the OAuth path.
+        let static_bearer = match (
+            self.state
+                .mcp
+                .credential_binding(&req.org_id, &req.server_id),
+            self.state.mcp.get_server(&req.org_id, &req.server_id),
+        ) {
+            (Some(binding_id), Some(server)) => {
+                let posture = identity
+                    .posture(&crate::zdr_posture::Route::plain(false))
+                    .map_err(|refusal| refusal.grpc_status(tonic::Code::FailedPrecondition))?;
+                if let Some(refusal) = crate::mcp_credential_ref::turn_refusal(&posture) {
+                    return Err(refusal.grpc_status(tonic::Code::FailedPrecondition));
+                }
+                match crate::mcp_credential_ref::bearer_for(
+                    &server.url,
+                    &binding_id,
+                    &req.org_id,
+                    &crate::mcp_credential_ref::call_id_for(&req.request_id),
+                    false,
+                )
+                .await
+                {
+                    Ok(bearer) => Some(bearer),
+                    Err(error) => {
+                        return Ok(Response::new(ProxyMcpToolResponse {
+                            request_id: req.request_id,
+                            output_json: String::new(),
+                            error_message: error.message(),
+                            elicitation: None,
+                        }));
+                    }
+                }
+            }
+            _ => None,
+        };
         // No live per-user bearer exists on this service-to-service path, so
         // an OAuth-connected server's token can't be forwarded the way every
         // other gateway->capability-core call does it — resolve one via the
         // Model-Plane-local service secret instead. Soft-fails to None (never
         // an error) so servers with no stored OAuth tokens are unaffected.
-        let oauth_token = crate::mcp_oauth::resolve_stored_oauth_token(
-            &self.state.http_client,
-            &self.state.capability_core_base_url,
-            &self.state.mcp_oauth_service_token,
-            &req.org_id,
-            &req.server_id,
-        )
-        .await;
-        runtime_registries::handle_proxy_mcp_tool(
+        let oauth_token = if static_bearer.is_some() {
+            // A held elicitation keeps its session, and with it the token, until the user answers. A call on a
+            // stored credential is never held, so the token lives for that call alone.
+            req.allow_elicitation = false;
+            None
+        } else {
+            crate::mcp_oauth::resolve_stored_oauth_token(
+                &self.state.http_client,
+                &self.state.capability_core_base_url,
+                &self.state.mcp_oauth_service_token,
+                &req.org_id,
+                &req.server_id,
+            )
+            .await
+        };
+        let token = static_bearer
+            .as_ref()
+            .map(crate::mcp_credential_ref::SecretBearer::expose)
+            .or(oauth_token.as_deref());
+        let mut response = runtime_registries::handle_proxy_mcp_tool(
             &self.state.mcp,
             &self.state.ownership,
             req,
-            oauth_token.as_deref(),
+            token,
         )
-        .await
-        .map(Response::new)
+        .await?;
+        if let Some(bearer) = static_bearer.as_ref() {
+            // A server that echoes its own credential must not hand it to the model.
+            crate::mcp_credential_ref::redact(&mut response.output_json, bearer.expose());
+            crate::mcp_credential_ref::redact(&mut response.error_message, bearer.expose());
+        }
+        Ok(Response::new(response))
     }
 
     /// Agent-facing tool defs for the org's enabled MCP servers, namespaced
@@ -2183,6 +2331,11 @@ impl ModelGateway for GatewayService {
                 .zdr_for(&crate::zdr_posture::Route::plain(false))
                 .ok(),
         );
+        // W4-CC-5: a static-bearer server is listed only on a turn that may redeem its binding. A ZDR or waived turn
+        // lists none, and so does an identity whose posture cannot be read.
+        let redeem_static_bearers = identity
+            .posture(&crate::zdr_posture::Route::plain(false))
+            .is_ok_and(|posture| crate::mcp_credential_ref::turn_refusal(&posture).is_none());
         let capability_bearer = forwarded_capability_bearer(&identity, &request);
         let req = request.into_inner();
         let (tools, meta) = runtime_registries::mcp_tool_listing(
@@ -2197,6 +2350,7 @@ impl ModelGateway for GatewayService {
             runtime_registries::McpListingOptions {
                 unstaged: req.unstaged,
                 observe,
+                redeem_static_bearers,
             },
         )
         .await;
@@ -2230,6 +2384,24 @@ impl ModelGateway for GatewayService {
                 "plugin name and version are required",
             ));
         }
+        // W4-PL-1: with PLUGIN_LOADER_ENABLED on, a plugin needs a supply-chain pin before it reaches
+        // capability-core. The gateway applies capability-core's rule and refuses here; capability-core still
+        // checks the pin and the URL itself. Off, the source is forwarded and capability-core ignores it.
+        let source = PluginSource::from_request(&plugin);
+        let loader_on = plugin_loader_enabled();
+        let refusal = if loader_on {
+            source.pin_refusal()
+        } else {
+            None
+        };
+        if let Some(reason) = refusal {
+            // Only the reason is logged: never the pin, and never the manifest URL.
+            warn!(
+                reason = reason,
+                "plugin registration refused: no supply-chain pin"
+            );
+            return Err(Status::invalid_argument("plugin source pin is required"));
+        }
         let created: serde_json::Value = self
             .capability_json(
                 reqwest::Method::POST,
@@ -2239,6 +2411,11 @@ impl ModelGateway for GatewayService {
                     "name": plugin.name,
                     "version": plugin.version,
                     "description": plugin.kind,
+                    // The supply-chain source (W4-PL-1), in canonical form. capability-core stores it only while
+                    // its own switch is on, so with the switch off it is ignored.
+                    "source_kind": source.kind,
+                    "source_ref": source.reference,
+                    "source_pin": source.pin,
                     // capability-core stores a manifest DOCUMENT; the gateway
                     // contract carries a manifest URL. Keep the URL rather than
                     // fetch-and-inline it here — fetching a caller-supplied URL
@@ -2250,7 +2427,14 @@ impl ModelGateway for GatewayService {
             .await?;
         // capability-core deliberately creates plugins DISABLED (safe rollout)
         // and assigns its own id, so report what it stored rather than echoing
-        // what the caller asked for.
+        // what the caller asked for. The source is reported only with the loader
+        // on: then capability-core validated and stored exactly this source, and
+        // with it off it stored none.
+        let stored = if loader_on {
+            source
+        } else {
+            PluginSource::default()
+        };
         Ok(Response::new(RegisterPluginResponse {
             request_id: req.request_id,
             plugin: Some(Plugin {
@@ -2268,6 +2452,9 @@ impl ModelGateway for GatewayService {
                     .get("installed_at_unix")
                     .and_then(serde_json::Value::as_i64)
                     .unwrap_or_else(|| Utc::now().timestamp()),
+                source_kind: stored.kind,
+                source_pin: stored.pin,
+                source_ref: stored.reference,
             }),
         }))
     }
@@ -2863,6 +3050,22 @@ impl ModelGateway for GatewayService {
         if req.url.trim().is_empty() {
             return Err(Status::invalid_argument("url is required"));
         }
+        // The org's domain rules, as the tool loop's `fetch_url` applies them (EP-9 W3, C-09). The org is the verified
+        // identity's: authorize_rpc matched the request's org to it and refused an empty one, so every call has an org
+        // and there is no org-less path to keep unchanged. The requested host is checked before any page is read, and
+        // the host the page ended on before its text is returned. Under `off` nothing is read and nothing changes.
+        if let Some(refusal) = crate::site_policy_client::fetch_refusal(
+            crate::site_policy_client::policy_mode(),
+            crate::site_policy_client::shared_checker(),
+            &crate::site_policy_client::SiteOwner::of(&self.state),
+            identity.org_id(),
+            &[req.url.as_str()],
+            "fetch",
+        )
+        .await
+        {
+            return Err(Status::permission_denied(refusal));
+        }
 
         let render = render_hints_from_proto(req.render.as_ref());
         let result = self
@@ -2877,6 +3080,19 @@ impl ModelGateway for GatewayService {
             )
             .await
             .map_err(quarry_err_to_status)?;
+        if let Some(refusal) = crate::site_policy_client::final_url_refusal(
+            crate::site_policy_client::policy_mode(),
+            crate::site_policy_client::shared_checker(),
+            &crate::site_policy_client::SiteOwner::of(&self.state),
+            identity.org_id(),
+            &req.url,
+            &result.final_url,
+            "fetch",
+        )
+        .await
+        {
+            return Err(Status::permission_denied(refusal));
+        }
 
         Ok(Response::new(FetchResponse {
             request_id: req.request_id,
@@ -2926,8 +3142,34 @@ impl ModelGateway for GatewayService {
             ));
         }
         spec.user_id = identity.user_id().unwrap_or_default().to_owned();
+        // The org's domain rules, as the tool loop's `extract_structured` applies them (EP-9 W3, C-09). Every URL the call
+        // names is checked before any page is read. Each page is checked again on the host it ended on, before its text
+        // reaches inference: web_extraction's final-URL check, which `from_request` switches on. The org is the verified
+        // identity's, as in `fetch`.
+        let urls: Vec<&str> = spec.urls.iter().map(String::as_str).collect();
+        if let Some(refusal) = crate::site_policy_client::fetch_refusal(
+            crate::site_policy_client::policy_mode(),
+            crate::site_policy_client::shared_checker(),
+            &crate::site_policy_client::SiteOwner::of(&self.state),
+            identity.org_id(),
+            &urls,
+            "extract_structured",
+        )
+        .await
+        {
+            return Err(Status::permission_denied(refusal));
+        }
 
         let mut outcomes = crate::web_extraction::extract(&self.state, &spec).await;
+        // A page the rules refuse was dropped before any inference call. As the tool loop does, the whole call is refused
+        // with the typed message, and no page's data is returned.
+        if let Some(refusal) = outcomes
+            .iter()
+            .map(|outcome| outcome.result.error_message.as_str())
+            .find(|message| message.starts_with(crate::site_policy_client::SITE_BLOCKED_CODE))
+        {
+            return Err(Status::permission_denied(refusal.to_owned()));
+        }
         if single {
             // One page, as before: a page the edge could not read is the edge's status.
             if let Some(error) = outcomes.first_mut().and_then(|o| o.fetch_error.take()) {
@@ -3365,6 +3607,7 @@ mod tests {
         TerminalOutcome, Trajectory, TranscribeSpeechRequest, TranscribeSpeechResponse,
         TranslateTextRequest, TranslateTextResponse, TranslationDetection, TranslationLanguageInfo,
     };
+    use mp_contracts::site_policy::WebDomainPolicyMode;
     use mp_events::publisher::InMemoryPublisher;
     use std::{
         pin::Pin,
@@ -3413,6 +3656,7 @@ mod tests {
                 cache_creation_input_tokens: 0,
                 provider_timing: None,
                 route_note: None,
+                service_tier_used: String::new(),
             }))
         }
 
@@ -3438,6 +3682,7 @@ mod tests {
                     cache_creation_input_tokens: 0,
                     provider_timing: None,
                     route_note: None,
+                    service_tier_used: String::new(),
                 }),
                 Ok(InferChunk {
                     compaction_summary: String::new(),
@@ -3456,6 +3701,7 @@ mod tests {
                     cache_creation_input_tokens: 0,
                     provider_timing: None,
                     route_note: None,
+                    service_tier_used: String::new(),
                 }),
             ]))))
         }
@@ -3975,6 +4221,14 @@ mod tests {
             ))
         }
 
+        async fn check_memory_write(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::CheckMemoryWriteRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::CheckMemoryWriteResponse>, Status>
+        {
+            Err(Status::unimplemented("check_memory_write not needed in test"))
+        }
+
         async fn get_memory_controls(
             &self,
             _: Request<mp_contracts::model_plane::v1::GetMemoryControlsRequest>,
@@ -3996,6 +4250,14 @@ mod tests {
             _: Request<mp_contracts::model_plane::v1::ResetMemoryRequest>,
         ) -> Result<Response<mp_contracts::model_plane::v1::ResetMemoryResponse>, Status> {
             Err(Status::unimplemented("reset_memory not needed in test"))
+        }
+
+        async fn erase_agent_memory(
+            &self,
+            _: Request<mp_contracts::model_plane::v1::EraseAgentMemoryRequest>,
+        ) -> Result<Response<mp_contracts::model_plane::v1::EraseAgentMemoryResponse>, Status>
+        {
+            Err(Status::unimplemented("erase_agent_memory not needed in test"))
         }
 
         async fn get_user_profile(
@@ -4922,6 +5184,254 @@ mod tests {
             assert_eq!(status.code(), tonic::Code::InvalidArgument, "{why}");
             assert!(status.message().contains(why), "{why}: {}", status.message());
         }
+    }
+
+    /// The org-core answer the domain-rule RPC tests use: `blocked.c09.example` is denied and `allowed.c09.example` is
+    /// read. `resolves` is how many resolve calls the test expects.
+    async fn org_rules(org_core: &MockServer, org_id: &str, resolves: u64) {
+        Mock::given(method("GET"))
+            .and(path(format!("/internal/orgs/{org_id}/browser-sites/resolve")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "organization_id": org_id,
+                "revision": 1,
+                "decisions": [
+                    {"host": "blocked.c09.example", "effective": "deny", "cap": "none", "source": "org_block"},
+                    {"host": "allowed.c09.example", "effective": "read", "cap": "read", "source": "default"}
+                ]
+            })))
+            .expect(resolves)
+            .mount(org_core)
+            .await;
+    }
+
+    /// A Quarry scrape whose page ended at `final_url`. `scrapes` is how many scrapes the test expects.
+    async fn scrape_page(quarry: &MockServer, final_url: &str, scrapes: u64) {
+        Mock::given(method("POST"))
+            .and(path("/v1/scrape"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {"status": 200, "url": {"final": final_url}, "formats": {"markdown": "Price 5"}}
+            })))
+            .expect(scrapes)
+            .mount(quarry)
+            .await;
+    }
+
+    /// The gateway with its org-core and Quarry edges on the mock servers. Each inference call publishes one usage
+    /// envelope, so [`published`] counts the inference calls an RPC made.
+    async fn site_policy_service(
+        org_core: &MockServer,
+        quarry: &MockServer,
+    ) -> (GatewayService, Arc<DynPublisher>) {
+        let (mut service, publisher, _) = test_service_with_lifecycle(MockInferenceOk).await;
+        service.state.quarry = crate::quarry::Client::new(crate::quarry::Config {
+            base_url: quarry.uri(),
+            token: "test-token".to_owned(),
+            timeout: std::time::Duration::from_secs(5),
+        });
+        service.state.org_core_base_url = org_core.uri();
+        service.state.org_core_service_token = "test-token".to_owned();
+        (service, publisher)
+    }
+
+    fn published(publisher: &DynPublisher) -> usize {
+        match publisher {
+            DynPublisher::InMemory(publisher) => publisher.drain().len(),
+            DynPublisher::Nats(_) => unreachable!("the test harness uses the in-memory publisher"),
+        }
+    }
+
+    fn fetch_of(org_id: &str, url: &str) -> FetchRequest {
+        FetchRequest {
+            org_id: org_id.to_owned(),
+            url: url.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn extract_of(org_id: &str, url: &str) -> ExtractStructuredRequest {
+        ExtractStructuredRequest {
+            request_id: "req-c09".to_owned(),
+            org_id: org_id.to_owned(),
+            url: url.to_owned(),
+            schema_json: r#"{"type":"object","required":["price"]}"#.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// C-09: the gRPC `fetch` applies the org's domain rules. A host the rules refuse is refused before any page is read.
+    #[tokio::test]
+    async fn fetch_refuses_a_requested_host_the_org_blocks_before_any_page_is_read() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Enforce);
+        let org_core = MockServer::start().await;
+        org_rules(&org_core, "org_c09_fetch_host", 1).await;
+        let quarry = MockServer::start().await;
+        scrape_page(&quarry, "https://blocked.c09.example/a", 0).await;
+        let (service, _) = site_policy_service(&org_core, &quarry).await;
+
+        let status = service
+            .fetch(authenticated_as(
+                fetch_of("org_c09_fetch_host", "https://blocked.c09.example/a"),
+                "org_c09_fetch_host",
+                "user_test",
+            ))
+            .await
+            .expect_err("a host the org blocks is refused");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        assert!(
+            status.message().starts_with("org_site_blocked: "),
+            "{}",
+            status.message()
+        );
+        assert!(
+            status.message().contains("blocked.c09.example"),
+            "{}",
+            status.message()
+        );
+    }
+
+    /// C-09: a page that ended on a host the org blocks is refused before its text is returned.
+    #[tokio::test]
+    async fn fetch_refuses_a_page_that_ended_on_a_host_the_org_blocks() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Enforce);
+        let org_core = MockServer::start().await;
+        // One answer for the requested host, which is allowed, and one for the host the page ended on, which is not.
+        org_rules(&org_core, "org_c09_fetch_final", 2).await;
+        let quarry = MockServer::start().await;
+        scrape_page(&quarry, "https://blocked.c09.example/landing", 1).await;
+        let (service, _) = site_policy_service(&org_core, &quarry).await;
+
+        let status = service
+            .fetch(authenticated_as(
+                fetch_of("org_c09_fetch_final", "https://allowed.c09.example/a"),
+                "org_c09_fetch_final",
+                "user_test",
+            ))
+            .await
+            .expect_err("a page that ended on a blocked host is refused");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        assert!(
+            status.message().starts_with("org_site_blocked: "),
+            "{}",
+            status.message()
+        );
+        assert!(
+            status.message().contains("blocked.c09.example"),
+            "{}",
+            status.message()
+        );
+    }
+
+    /// C-09: with the switch off the gRPC `fetch` reads a blocked host as it always did, and asks org-core nothing.
+    #[tokio::test]
+    async fn fetch_is_unchanged_with_the_domain_switch_off() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Off);
+        let org_core = MockServer::start().await;
+        org_rules(&org_core, "org_c09_fetch_off", 0).await;
+        let quarry = MockServer::start().await;
+        scrape_page(&quarry, "https://blocked.c09.example/a", 1).await;
+        let (service, _) = site_policy_service(&org_core, &quarry).await;
+
+        let reply = service
+            .fetch(authenticated_as(
+                fetch_of("org_c09_fetch_off", "https://blocked.c09.example/a"),
+                "org_c09_fetch_off",
+                "user_test",
+            ))
+            .await
+            .expect("off reads the page")
+            .into_inner();
+        assert_eq!(reply.final_url, "https://blocked.c09.example/a");
+        assert!(reply.markdown.contains("Price 5"), "{}", reply.markdown);
+    }
+
+    /// C-09: the gRPC `extract_structured` refuses a requested host the org blocks before any page is read, so no
+    /// inference call is made.
+    #[tokio::test]
+    async fn extract_structured_refuses_a_requested_host_the_org_blocks_before_inference() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Enforce);
+        let org_core = MockServer::start().await;
+        org_rules(&org_core, "org_c09_extract_host", 1).await;
+        let quarry = MockServer::start().await;
+        scrape_page(&quarry, "https://blocked.c09.example/a", 0).await;
+        let (service, publisher) = site_policy_service(&org_core, &quarry).await;
+
+        let status = service
+            .extract_structured(authenticated_as(
+                extract_of("org_c09_extract_host", "https://blocked.c09.example/a"),
+                "org_c09_extract_host",
+                "user_test",
+            ))
+            .await
+            .expect_err("a host the org blocks is refused");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        assert!(
+            status.message().starts_with("org_site_blocked: "),
+            "{}",
+            status.message()
+        );
+        assert_eq!(published(&publisher), 0, "no inference call was made");
+    }
+
+    /// C-09: a page that ended on a host the org blocks is refused before its text reaches inference, and the whole call
+    /// is refused, as the tool loop refuses it.
+    #[tokio::test]
+    async fn extract_structured_refuses_a_page_that_ended_on_a_blocked_host_before_inference() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Enforce);
+        let org_core = MockServer::start().await;
+        org_rules(&org_core, "org_c09_extract_final", 2).await;
+        let quarry = MockServer::start().await;
+        scrape_page(&quarry, "https://blocked.c09.example/landing", 1).await;
+        let (service, publisher) = site_policy_service(&org_core, &quarry).await;
+
+        let status = service
+            .extract_structured(authenticated_as(
+                extract_of("org_c09_extract_final", "https://allowed.c09.example/a"),
+                "org_c09_extract_final",
+                "user_test",
+            ))
+            .await
+            .expect_err("a page that ended on a blocked host is refused");
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        assert!(
+            status.message().starts_with("org_site_blocked: "),
+            "{}",
+            status.message()
+        );
+        assert!(
+            status.message().contains("blocked.c09.example"),
+            "{}",
+            status.message()
+        );
+        assert_eq!(published(&publisher), 0, "no inference call was made");
+    }
+
+    /// C-09: with the switch off the gRPC `extract_structured` reads and extracts a blocked host as it always did, and
+    /// asks org-core nothing.
+    #[tokio::test]
+    async fn extract_structured_is_unchanged_with_the_domain_switch_off() {
+        let _mode = crate::site_policy_client::test_seam::set(WebDomainPolicyMode::Off);
+        let org_core = MockServer::start().await;
+        org_rules(&org_core, "org_c09_extract_off", 0).await;
+        let quarry = MockServer::start().await;
+        scrape_page(&quarry, "https://blocked.c09.example/a", 1).await;
+        let (service, publisher) = site_policy_service(&org_core, &quarry).await;
+
+        let reply = service
+            .extract_structured(authenticated_as(
+                extract_of("org_c09_extract_off", "https://blocked.c09.example/a"),
+                "org_c09_extract_off",
+                "user_test",
+            ))
+            .await
+            .expect("off reads the page; a bad answer is a structured failure")
+            .into_inner();
+        assert_eq!(reply.results.len(), 1);
+        assert_eq!(reply.results[0].url, "https://blocked.c09.example/a");
+        assert_eq!(
+            reply.error_message,
+            "the model did not return a JSON object"
+        );
+        assert!(published(&publisher) > 0, "the inference call was made");
     }
 
     fn authenticated_as<T>(value: T, org_id: &str, user_id: &str) -> Request<T> {

@@ -53,6 +53,9 @@ pub fn bridge_to_grpc(
                 }),
                 // The note of the call rides the final chunk too, as its timing does.
                 route_note: if chunk.done { route_note.take() } else { None },
+                // The tier the provider served the stream on: set by an adapter that reports one, on
+                // its final chunk only (see `InferChunk.service_tier_used`), never inferred here.
+                service_tier_used: chunk.service_tier_used,
             };
             if tx.send(Ok(proto_chunk)).await.is_err() {
                 break;
@@ -91,6 +94,7 @@ mod tests {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             provider_timing,
+            service_tier_used: String::new(),
         }
     }
 
@@ -142,6 +146,9 @@ mod tests {
             cheap_fallback_forced: false,
             applied_effort: None,
             role: None,
+            mode: Some(crate::provider::intent::VerevonMode::Balance),
+            complexity: Some(crate::provider::intent::Complexity::Simple),
+            reason: "budget_tier_shift",
         };
         let mut wire = bridge_to_grpc(rx, HandlerClock::start(), Some(note));
 

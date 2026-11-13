@@ -2,7 +2,8 @@
 //!
 //! capability-core is the system of record for an org's agent policy (WS25-S7). This module reads
 //! the org's document through `GET /api/v1/org-agent-policy`, holds it briefly, and turns it into the
-//! caps the gateway enforces: the mode cap (with the lockdown bundle folded in) and the rung cap. The
+//! caps the gateway enforces: the mode cap (with the lockdown bundle folded in), the rung cap and the
+//! org's agent-run pause (`agents.paused`, F-t3-083), which refuses a Do run's start. The
 //! fetch follows the shape DEC-13 sets for every entitlement the gateway reads: a 30 s TTL, and when a
 //! refresh fails the last answer may still be served for 900 s if it was restrictive or 120 s if it
 //! was not. Past that bound the org's policy is unknown, and a Do run is refused with the typed code
@@ -18,10 +19,13 @@
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use axum::http::StatusCode;
 use dashmap::DashMap;
 use mp_contracts::agent_mode::{self, AgentMode, Resolved};
 use mp_contracts::autonomy;
-use mp_contracts::model_plane::v1::{AutonomyRung, OrgPolicyContext, WebPolicyContext};
+use mp_contracts::model_plane::v1::{
+    AutonomyRung, OrgPolicyContext, ToolDefinition, WebPolicyContext,
+};
 use mp_contracts::org_agent_policy::{
     is_https_origin, Kind, SettingDef, MCP_APPS_NETWORK_ORIGINS, SETTINGS,
 };
@@ -39,6 +43,18 @@ pub const POLICY_UNAVAILABLE_CODE: &str = "org_policy_unavailable";
 /// The words a person reads with [`POLICY_UNAVAILABLE_CODE`]. The code is the contract; the words are copy.
 pub const POLICY_UNAVAILABLE_MESSAGE: &str =
     "The organisation's agent policy cannot be read right now, so this agent run cannot start. Try again shortly.";
+
+/// The typed code of a Do run, resume or continuation refused because its org has paused agent runs (`agents.paused`,
+/// F-t3-083). A plain Ask turn is never refused with it.
+pub const AGENTS_PAUSED_CODE: &str = "org_agents_paused";
+
+/// The words a person reads with [`AGENTS_PAUSED_CODE`]. The code is the contract; the words are copy.
+pub const AGENTS_PAUSED_MESSAGE: &str = "Your organisation has paused agent runs.";
+
+/// The words a person reads with [`agent_mode::LOCKDOWN_CODE`] when the org's mode cap refuses a standalone run
+/// ([`admit_standalone_run`]). The code is the contract; the words are copy.
+pub const MODE_CAP_REFUSED_MESSAGE: &str =
+    "Your organisation's agent mode does not allow agent runs.";
 
 /// How long a read org policy is served without asking capability-core again (DEC-13, D8).
 pub const POLICY_TTL: Duration = Duration::from_secs(30);
@@ -129,6 +145,10 @@ pub struct OrgPolicy {
     /// The network origins the org's MCP apps may reach (`mcp_apps.network_origins`, Wave 4 W4-D M1a): the ids of an
     /// `approved_only` value, canonical https origins, sorted and unique. Empty for any other token.
     pub mcp_app_origins: Vec<String>,
+    /// Whether the org has paused agent runs (`agents.paused`, F-t3-083): a Do run it would start, resume or continue is
+    /// refused. A plain Ask turn is never paused. A value this build cannot read is paused, so a malformed value can only
+    /// narrow the org.
+    pub agents_paused: bool,
 }
 
 impl OrgPolicy {
@@ -165,6 +185,7 @@ impl OrgPolicy {
             },
             ext_skills: token("ext.skills"),
             mcp_app_origins: origins_of(settings, MCP_APPS_NETWORK_ORIGINS),
+            agents_paused: token("agents.paused") == "true",
         }
     }
 }
@@ -420,7 +441,8 @@ async fn ensure_at(
 /// # Errors
 ///
 /// [`POLICY_UNAVAILABLE_CODE`] when the policy is enforced, the turn is a Do run, and the policy cannot be read
-/// inside its bound. A plain turn is not refused: it keeps the floor it already had.
+/// inside its bound. [`AGENTS_PAUSED_CODE`] when the policy is enforced, the turn is a Do run, and the org has paused
+/// agent runs. A plain turn is not refused: it keeps the floor it already had.
 pub async fn admit_turn(
     mode: PolicyMode,
     cache: &OrgPolicyCache,
@@ -448,6 +470,12 @@ pub async fn admit_turn(
                             "org agent policy (shadow): web access would be withheld for this turn"
                         );
                     }
+                    if agentic && policy.agents_paused {
+                        tracing::info!(
+                            %org_id,
+                            "org agent policy (shadow): agent runs would be paused for this turn"
+                        );
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(%org_id, %error, "org agent policy (shadow) could not be read")
@@ -456,6 +484,8 @@ pub async fn admit_turn(
             Ok(None)
         }
         PolicyMode::Enforce => match ensure(cache, client, base_url, org_id, bearer).await {
+            // A paused org runs no Do turn. A plain Ask turn is never paused (F-t3-083).
+            Ok(policy) if agentic && policy.agents_paused => Err(AGENTS_PAUSED_CODE),
             Ok(policy) => Ok(Some(policy.mode_cap)),
             Err(error) => {
                 tracing::warn!(%org_id, %error, agentic, "org agent policy cannot be read");
@@ -466,6 +496,171 @@ pub async fn admit_turn(
                 }
             }
         },
+    }
+}
+
+/// Decides what the org policy does to a stored run's resume or continuation: the pause [`admit_continuation`] reads,
+/// and the org's mode cap, which a fresh Do turn already obeys at [`admit_turn`] (D2-1114, D2-1117, WS25-S9). Off reads
+/// nothing and returns `Ok(false)`. Shadow reads and logs what would be refused or narrowed, and returns `Ok(false)`.
+/// Enforce refuses a paused org, and an org whose mode cap is `lockdown` (no Do runs), with [`AGENTS_PAUSED_CODE`], and
+/// a policy that cannot be read inside its bound with [`POLICY_UNAVAILABLE_CODE`]. Otherwise it returns the cap's plan
+/// gate: `true` for a read-only cap, so the caller states `plan_mode` on the continuation it starts.
+///
+/// Lockdown reuses [`AGENTS_PAUSED_CODE`] on purpose: both mean the org does not let a Do run proceed, and the BFF relay
+/// list and the SPA list pinned to the continue refusals need no new code. The executor only ever narrows a paused
+/// authority, so stating a narrower plan flag never widens a resumed run.
+///
+/// # Errors
+///
+/// [`AGENTS_PAUSED_CODE`] when the org has paused agent runs or caps its mode at lockdown, or
+/// [`POLICY_UNAVAILABLE_CODE`] when the policy is enforced and cannot be read.
+pub async fn admit_continuation(
+    mode: PolicyMode,
+    cache: &OrgPolicyCache,
+    client: &reqwest::Client,
+    base_url: &str,
+    org_id: &str,
+    bearer: &str,
+) -> Result<bool, &'static str> {
+    match mode {
+        PolicyMode::Off => Ok(false),
+        PolicyMode::Shadow => {
+            match ensure(cache, client, base_url, org_id, bearer).await {
+                Ok(policy) => {
+                    if policy.agents_paused {
+                        tracing::info!(
+                            %org_id,
+                            "org agent policy (shadow): agent runs would be paused for this resume or continuation"
+                        );
+                    }
+                    let preset = policy.mode_cap.preset();
+                    if !preset.do_runs {
+                        tracing::info!(
+                            %org_id,
+                            "org agent policy (shadow): the lockdown cap would refuse this resume or continuation"
+                        );
+                    } else if preset.plan_gate {
+                        tracing::info!(
+                            %org_id,
+                            "org agent policy (shadow): the read-only cap would hold this continuation to plan mode"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%org_id, %error, "org agent policy (shadow) could not be read");
+                }
+            }
+            Ok(false)
+        }
+        PolicyMode::Enforce => match ensure(cache, client, base_url, org_id, bearer).await {
+            Ok(policy) if policy.agents_paused => Err(AGENTS_PAUSED_CODE),
+            Ok(policy) => {
+                let preset = policy.mode_cap.preset();
+                if preset.do_runs {
+                    Ok(preset.plan_gate)
+                } else {
+                    Err(AGENTS_PAUSED_CODE)
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%org_id, %error, "org agent policy cannot be read; the run is not resumed or continued");
+                Err(POLICY_UNAVAILABLE_CODE)
+            }
+        },
+    }
+}
+
+/// Decides whether the org policy admits a standalone run that acts on pages, such as a browser agent run started
+/// outside a chat turn (D2-1119, WS25-S9). Such a run is a Do run by any measure, yet it has no turn to resolve a mode
+/// for, so the org's pause and mode cap bind it here. Off reads nothing and admits. Shadow reads and logs what would be
+/// refused and admits. Enforce refuses a paused org with [`AGENTS_PAUSED_CODE`], a policy that cannot be read inside
+/// its bound with [`POLICY_UNAVAILABLE_CODE`], and an org whose mode cap is `lockdown` or `read_only` with
+/// [`agent_mode::LOCKDOWN_CODE`]: a browser run clicks and types and cannot be made read-only, so the strictest-wins
+/// cap forbids it.
+///
+/// # Errors
+///
+/// [`AGENTS_PAUSED_CODE`] when the org has paused agent runs, [`agent_mode::LOCKDOWN_CODE`] when the org caps its mode
+/// at lockdown or read-only, or [`POLICY_UNAVAILABLE_CODE`] when the policy is enforced and cannot be read.
+pub async fn admit_standalone_run(
+    mode: PolicyMode,
+    cache: &OrgPolicyCache,
+    client: &reqwest::Client,
+    base_url: &str,
+    org_id: &str,
+    bearer: &str,
+) -> Result<(), &'static str> {
+    match mode {
+        PolicyMode::Off => Ok(()),
+        PolicyMode::Shadow => {
+            match ensure(cache, client, base_url, org_id, bearer).await {
+                Ok(policy) => {
+                    if policy.agents_paused {
+                        tracing::info!(
+                            %org_id,
+                            "org agent policy (shadow): agent runs would be paused for this standalone run"
+                        );
+                    }
+                    if matches!(policy.mode_cap, AgentMode::Lockdown | AgentMode::ReadOnly) {
+                        tracing::info!(
+                            %org_id,
+                            would_mode_cap = policy.mode_cap.as_str(),
+                            "org agent policy (shadow): the mode cap would refuse this standalone run"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%org_id, %error, "org agent policy (shadow) could not be read");
+                }
+            }
+            Ok(())
+        }
+        PolicyMode::Enforce => match ensure(cache, client, base_url, org_id, bearer).await {
+            Ok(policy) if policy.agents_paused => Err(AGENTS_PAUSED_CODE),
+            Ok(policy) if matches!(policy.mode_cap, AgentMode::Lockdown | AgentMode::ReadOnly) => {
+                Err(agent_mode::LOCKDOWN_CODE)
+            }
+            Ok(_) => Ok(()),
+            Err(error) => {
+                tracing::warn!(%org_id, %error, "org agent policy cannot be read; the standalone run is not started");
+                Err(POLICY_UNAVAILABLE_CODE)
+            }
+        },
+    }
+}
+
+/// The inline code interpreter, which a lockdown cap withdraws from an Ask turn (D-f06-B, O-14).
+const CODE_INTERPRETER_TOOL: &str = "code_interpreter";
+
+/// Withdraws the inline code interpreter from an Ask turn whose org caps its mode at lockdown (D-f06-B, O-14).
+/// `org_cap` is the mode cap [`admit_turn`] read for the turn. Enforced with a `Lockdown` cap, the tool is
+/// withdrawn whatever the turn asked for, a client's declared copy included. A read-only cap keeps it, because
+/// a read-only run may still compute and write files, and so does every other cap. Off and shadow never
+/// withdraw it: they apply no cap to an Ask turn, so `org_cap` is `None` for them. A policy that cannot be
+/// read is `None` too, so the turn keeps the floor it had.
+#[must_use]
+pub fn ask_turn_tools_under_policy(
+    mode: PolicyMode,
+    mut tools: Vec<ToolDefinition>,
+    org_cap: Option<AgentMode>,
+) -> Vec<ToolDefinition> {
+    if mode == PolicyMode::Enforce && org_cap == Some(AgentMode::Lockdown) {
+        tools.retain(|tool| tool.name != CODE_INTERPRETER_TOOL);
+    }
+    tools
+}
+
+/// The HTTP status, and the words a person reads, of a refusal the org policy makes: a paused org or a mode cap that
+/// allows no agent run is `403`, and a policy that cannot be read is `503`, as a Do turn's refusal answers. The code is
+/// the contract; the words are copy.
+#[must_use]
+pub fn refusal_answer(code: &str) -> (StatusCode, &'static str) {
+    if code == AGENTS_PAUSED_CODE {
+        (StatusCode::FORBIDDEN, AGENTS_PAUSED_MESSAGE)
+    } else if code == agent_mode::LOCKDOWN_CODE {
+        (StatusCode::FORBIDDEN, MODE_CAP_REFUSED_MESSAGE)
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, POLICY_UNAVAILABLE_MESSAGE)
     }
 }
 
@@ -1303,5 +1498,323 @@ mod tests {
             cache.policy("org-d").is_none(),
             "nothing is held for a refused caller"
         );
+    }
+
+    /// Runs one enforced continuation admission against a registry that answers `body` for `org`, with nothing held.
+    async fn enforced_continuation(org: &str, body: Value) -> Result<bool, &'static str> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(document(org, 1, body)))
+            .mount(&server)
+            .await;
+        admit_continuation(
+            PolicyMode::Enforce,
+            &OrgPolicyCache::new(),
+            &reqwest::Client::new(),
+            &server.uri(),
+            org,
+            "token",
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_off_admits_a_continuation_unread_and_shadow_refuses_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(document(
+                "org-cont-off",
+                8,
+                json!({"agents.paused": true, "mode_cap": "lockdown"}),
+            )))
+            .mount(&server)
+            .await;
+        let cache = OrgPolicyCache::new();
+        let client = reqwest::Client::new();
+        assert_eq!(
+            admit_continuation(
+                PolicyMode::Off,
+                &cache,
+                &client,
+                &server.uri(),
+                "org-cont-off",
+                "token"
+            )
+            .await,
+            Ok(false)
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "off makes no call to the registry"
+        );
+        assert!(cache.policy("org-cont-off").is_none(), "off holds nothing");
+        assert_eq!(
+            admit_continuation(
+                PolicyMode::Shadow,
+                &cache,
+                &client,
+                &server.uri(),
+                "org-cont-off",
+                "token"
+            )
+            .await,
+            Ok(false),
+            "shadow would refuse this org and refuses nothing"
+        );
+        assert!(
+            cache.policy("org-cont-off").is_some(),
+            "shadow still reads the policy"
+        );
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_enforced_continuation_refuses_a_pause_or_a_lockdown_cap() {
+        // A paused org refuses its continuation whatever its cap says.
+        assert_eq!(
+            enforced_continuation("org-paused", json!({"agents.paused": true})).await,
+            Err(AGENTS_PAUSED_CODE)
+        );
+        // A pause this build cannot read pauses the org, so a malformed value can only narrow it.
+        assert_eq!(
+            enforced_continuation("org-paused-odd", json!({"agents.paused": "maybe"})).await,
+            Err(AGENTS_PAUSED_CODE)
+        );
+        // A lockdown cap refuses a continuation as a pause does: no Do run proceeds.
+        assert_eq!(
+            enforced_continuation("org-lockdown", json!({"mode_cap": "lockdown"})).await,
+            Err(AGENTS_PAUSED_CODE)
+        );
+        // The lockdown bundle locks the cap whatever its mode_cap says.
+        assert_eq!(
+            enforced_continuation("org-b", json!({"mode_cap": "auto", "lockdown": true})).await,
+            Err(AGENTS_PAUSED_CODE)
+        );
+        // A cap this build cannot read is the strictest one.
+        assert_eq!(
+            enforced_continuation("org-odd-cap", json!({"mode_cap": "full_access"})).await,
+            Err(AGENTS_PAUSED_CODE)
+        );
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_enforced_continuation_under_a_read_only_cap_is_held_to_plan_mode() {
+        assert_eq!(
+            enforced_continuation("org-read-only", json!({"mode_cap": "read_only"})).await,
+            Ok(true)
+        );
+        // The caps that allow Do runs without plan mode state no plan flag.
+        assert_eq!(
+            enforced_continuation("org-ask-first", json!({"mode_cap": "ask_first"})).await,
+            Ok(false)
+        );
+        assert_eq!(
+            enforced_continuation("org-default", json!({})).await,
+            Ok(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_enforced_continuation_fails_closed_when_unreadable() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        assert_eq!(
+            admit_continuation(
+                PolicyMode::Enforce,
+                &OrgPolicyCache::new(),
+                &client,
+                &server.uri(),
+                "org-unread",
+                "token"
+            )
+            .await,
+            Err(POLICY_UNAVAILABLE_CODE),
+            "a registry outage refuses the continuation"
+        );
+        assert_eq!(
+            admit_continuation(
+                PolicyMode::Enforce,
+                &OrgPolicyCache::new(),
+                &client,
+                &server.uri(),
+                "org-unread",
+                ""
+            )
+            .await,
+            Err(POLICY_UNAVAILABLE_CODE),
+            "a continuation with no bearer cannot read the policy either"
+        );
+    }
+
+    /// The builtin tools an Ask turn starts from, with a client's declared copy of the code interpreter added last.
+    fn ask_turn_tools_with_a_declared_copy() -> Vec<ToolDefinition> {
+        let mut tools = crate::tool_loop::builtin_tool_defs_with(false);
+        tools.push(ToolDefinition {
+            name: CODE_INTERPRETER_TOOL.to_owned(),
+            description: "a client's copy".to_owned(),
+            parameters_json: "{}".to_owned(),
+        });
+        tools
+    }
+
+    fn tool_names(tools: &[ToolDefinition]) -> Vec<String> {
+        tools.iter().map(|tool| tool.name.clone()).collect()
+    }
+
+    #[test]
+    fn org_agent_policy_lockdown_withdraws_the_ask_turns_code_interpreter_and_nothing_else() {
+        let offered = ask_turn_tools_with_a_declared_copy();
+        let before = tool_names(&offered);
+        assert_eq!(
+            before
+                .iter()
+                .filter(|name| *name == CODE_INTERPRETER_TOOL)
+                .count(),
+            2,
+            "the builtin list and a client copy both name it"
+        );
+        let withdrawn =
+            ask_turn_tools_under_policy(PolicyMode::Enforce, offered, Some(AgentMode::Lockdown));
+        let expected: Vec<String> = before
+            .into_iter()
+            .filter(|name| name != CODE_INTERPRETER_TOOL)
+            .collect();
+        assert_eq!(
+            tool_names(&withdrawn),
+            expected,
+            "a lockdown cap withdraws both copies and nothing else"
+        );
+    }
+
+    #[test]
+    fn org_agent_policy_read_only_and_normal_caps_keep_the_code_interpreter_on_an_ask_turn() {
+        let offered = ask_turn_tools_with_a_declared_copy();
+        for cap in [
+            Some(AgentMode::ReadOnly),
+            Some(AgentMode::AskFirst),
+            Some(AgentMode::Auto),
+            None,
+        ] {
+            assert_eq!(
+                tool_names(&ask_turn_tools_under_policy(
+                    PolicyMode::Enforce,
+                    offered.clone(),
+                    cap
+                )),
+                tool_names(&offered),
+                "{cap:?} keeps the Ask turn's list as it was"
+            );
+        }
+    }
+
+    #[test]
+    fn org_agent_policy_switch_off_or_shadow_never_withdraws_the_code_interpreter() {
+        let offered = ask_turn_tools_with_a_declared_copy();
+        for mode in [PolicyMode::Off, PolicyMode::Shadow] {
+            assert_eq!(
+                tool_names(&ask_turn_tools_under_policy(
+                    mode,
+                    offered.clone(),
+                    Some(AgentMode::Lockdown)
+                )),
+                tool_names(&offered),
+                "{mode:?} changes nothing, even against a lockdown cap"
+            );
+        }
+    }
+
+    /// Admits one Ask turn under `mode` against a registry that answers `body` for `org`, then applies the Ask turn's
+    /// rule to the builtin list. Returns the tool names offered and how many times the registry was asked.
+    async fn ask_turn_offer(mode: PolicyMode, org: &str, body: Value) -> (Vec<String>, usize) {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(ORG_AGENT_POLICY_PATH))
+            .respond_with(ResponseTemplate::new(200).set_body_json(document(org, 1, body)))
+            .mount(&server)
+            .await;
+        // A plain turn is never refused by the policy, so admission answers the cap it read, or nothing.
+        let cap = admit_turn(
+            mode,
+            &OrgPolicyCache::new(),
+            &reqwest::Client::new(),
+            &server.uri(),
+            org,
+            "token",
+            false,
+        )
+        .await
+        .expect("a plain turn is never refused by the policy");
+        let asked = server.received_requests().await.unwrap_or_default().len();
+        let offered =
+            ask_turn_tools_under_policy(mode, crate::tool_loop::builtin_tool_defs_with(false), cap);
+        (tool_names(&offered), asked)
+    }
+
+    #[tokio::test]
+    async fn org_agent_policy_a_lockdown_withdraws_the_ask_turn_code_interpreter() {
+        let (offered, asked) = ask_turn_offer(
+            PolicyMode::Enforce,
+            "org-ask-lock",
+            json!({"mode_cap": "lockdown"}),
+        )
+        .await;
+        assert!(
+            !offered.iter().any(|name| name == CODE_INTERPRETER_TOOL),
+            "an enforced lockdown withdraws it"
+        );
+        assert_eq!(asked, 1, "the turn reads the policy once");
+        let (offered, _) = ask_turn_offer(
+            PolicyMode::Enforce,
+            "org-ask-bundle",
+            json!({"lockdown": true}),
+        )
+        .await;
+        assert!(
+            !offered.iter().any(|name| name == CODE_INTERPRETER_TOOL),
+            "the lockdown bundle is the same cap"
+        );
+        for (org, body) in [
+            ("org-ask-ro", json!({"mode_cap": "read_only"})),
+            ("org-ask-ask", json!({"mode_cap": "ask_first"})),
+            ("org-ask-default", json!({})),
+        ] {
+            let (offered, _) = ask_turn_offer(PolicyMode::Enforce, org, body).await;
+            assert!(
+                offered.iter().any(|name| name == CODE_INTERPRETER_TOOL),
+                "{org} keeps the code interpreter"
+            );
+        }
+        let (offered, asked) = ask_turn_offer(
+            PolicyMode::Off,
+            "org-ask-off",
+            json!({"mode_cap": "lockdown"}),
+        )
+        .await;
+        assert!(
+            offered.iter().any(|name| name == CODE_INTERPRETER_TOOL),
+            "switch off keeps it"
+        );
+        assert_eq!(asked, 0, "switch off makes no call to the registry");
+        let (offered, asked) = ask_turn_offer(
+            PolicyMode::Shadow,
+            "org-ask-shadow",
+            json!({"mode_cap": "lockdown"}),
+        )
+        .await;
+        assert!(
+            offered.iter().any(|name| name == CODE_INTERPRETER_TOOL),
+            "shadow reads the lockdown and still keeps it"
+        );
+        assert_eq!(asked, 1, "shadow reads the policy");
     }
 }

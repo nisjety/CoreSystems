@@ -399,6 +399,7 @@ impl InferenceCore for MockOk {
             cache_creation_input_tokens: 0,
             provider_timing: None,
             route_note: None,
+            service_tier_used: String::new(),
         });
         // A private repair or source-review report must prove it bypassed
         // the response cache; a scripted planned round answering either
@@ -445,6 +446,7 @@ impl InferenceCore for MockOk {
                 cache_creation_input_tokens: 0,
                 provider_timing: None,
                 route_note: None,
+                service_tier_used: String::new(),
             }),
             Ok(InferChunk {
                 compaction_summary: String::new(),
@@ -463,6 +465,7 @@ impl InferenceCore for MockOk {
                 cache_creation_input_tokens: 0,
                 provider_timing: None,
                 route_note: None,
+                service_tier_used: String::new(),
             }),
         ];
         if self.stream_without_final {
@@ -977,6 +980,7 @@ impl InferenceCore for MockStreamDown {
             cache_creation_input_tokens: 0,
             provider_timing: None,
             route_note: None,
+            service_tier_used: String::new(),
         }))
     }
 
@@ -2422,6 +2426,13 @@ impl mpv1::orchestration_core_service_server::OrchestrationCoreService for Scrip
         _: tonic::Request<mp_contracts::model_plane::v1::GetApprovalPreviewRequest>,
     ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetApprovalPreviewResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented("get_approval_preview is not served by this double"))
+    }
+
+    async fn get_skipped_assist_authority(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetSkippedAssistAuthorityRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetSkippedAssistAuthorityResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("get_skipped_assist_authority is not served by this double"))
     }
 
     async fn list_plans(
@@ -12482,6 +12493,16 @@ impl mpv1::memory_service_server::MemoryService for MockMemory {
         Err(Status::unimplemented("health not needed in test"))
     }
 
+    async fn check_memory_write(
+        &self,
+        _: TReq<mpv1::CheckMemoryWriteRequest>,
+    ) -> Result<Response<mpv1::CheckMemoryWriteResponse>, Status> {
+        Ok(Response::new(mpv1::CheckMemoryWriteResponse {
+            allowed: true,
+            refusal_code: String::new(),
+        }))
+    }
+
     async fn get_memory_controls(
         &self,
         _: TReq<mpv1::GetMemoryControlsRequest>,
@@ -12508,6 +12529,13 @@ impl mpv1::memory_service_server::MemoryService for MockMemory {
         _: TReq<mpv1::ResetMemoryRequest>,
     ) -> Result<Response<mpv1::ResetMemoryResponse>, Status> {
         Err(Status::unimplemented("reset_memory not needed in test"))
+    }
+
+    async fn erase_agent_memory(
+        &self,
+        _: TReq<mpv1::EraseAgentMemoryRequest>,
+    ) -> Result<Response<mpv1::EraseAgentMemoryResponse>, Status> {
+        Err(Status::unimplemented("erase_agent_memory not needed in test"))
     }
 
     async fn get_user_profile(

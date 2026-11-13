@@ -2,11 +2,13 @@ import { createEffect, createMemo, createSignal, createUniqueId, For, Show, untr
 import { createResource } from '@/shared/lib/create-resource-compat'
 import {
   filterModels,
+  formatContextWindow,
   formatModelListPrice,
   getModelEntitlementMeta,
   groupChatModels,
   isExpensiveModel,
   listModels,
+  modelReplacement,
   selectionIsStale,
   verevonModeById,
   VEREVON_MODES,
@@ -54,9 +56,30 @@ function modelDataUseLine(
   return statements.length > 0 ? statements.join(' · ') : undefined
 }
 
+/**
+ * One customer-gateway connection the picker may offer under "Your gateway" (W4-BYO-6): its opaque
+ * Integration Core id, a display name, and the model ids it serves. Never carries a key. The parent reads
+ * the list through `listCustomerGateways` in `model-connections-client.ts`.
+ */
+export type AiModelPickerGateway = Readonly<{
+  id: string
+  name: string
+  modelIds: readonly string[]
+}>
+
 export function AiModelPicker(props: {
   orgId: string
   class?: string
+  /**
+   * Customer gateways to offer under "Your gateway". Absent or empty renders the picker as before. Shown only
+   * behind `VITE_BYO_GATEWAY` (the literal `'true'`), and never in a temporary chat or for a zero-retention
+   * organisation: a customer gateway is never zero data retention.
+   */
+  customerGateways?: readonly AiModelPickerGateway[]
+  /** Called with the connection id and the model id when a "Your gateway" model is chosen. */
+  onGatewayPick?: (connectionId: string, modelId: string) => void
+  /** The chat is temporary (stores nothing): the "Your gateway" group is not offered. */
+  temporaryChat?: boolean
   /** Support transcripts must honor the organization's no-retention posture. */
   respectOrgZdr?: boolean
   /**
@@ -87,8 +110,15 @@ export function AiModelPicker(props: {
       return []
     }
   })
+  // W4-BYO-6: the "Your gateway" group is behind VITE_BYO_GATEWAY (strict literal 'true'), needs gateways
+  // handed in, and is never offered in a temporary chat.
+  const customerGatewayEnabled = import.meta.env.VITE_BYO_GATEWAY === 'true'
+  const gatewayCandidates = createMemo(() => {
+    if (!customerGatewayEnabled || props.temporaryChat === true) return []
+    return (props.customerGateways ?? []).filter((connection) => connection.modelIds.length > 0)
+  })
   const [organizationSettings] = createResource(
-    () => props.respectOrgZdr ? orgId() : false,
+    () => (props.respectOrgZdr || gatewayCandidates().length > 0) ? orgId() : false,
     async (id) => {
       try {
         return await getOrganizationAISettings(id)
@@ -97,6 +127,13 @@ export function AiModelPicker(props: {
       }
     },
   )
+  // A customer gateway is never zero data retention, so the group waits for the organisation's settings and is
+  // hidden when they report zdr (or cannot be read).
+  const gatewayGroups = createMemo(() => {
+    const settings = organizationSettings()
+    if (!settings || settings.zdr === true) return []
+    return gatewayCandidates()
+  })
   const activeSubscription = createMemo(() =>
     (subscriptions() ?? []).find((connection) => connection.status.trim().toLocaleLowerCase() === 'active'),
   )
@@ -129,7 +166,9 @@ export function AiModelPicker(props: {
   // resolver/backend reports an unavailable subscription instead.
 
   const selectedCatalogModel = createMemo(() =>
-    flatModels().find((model) => model.id === selected().model && model.provider === selected().provider),
+    selected().modelConnectionId
+      ? undefined
+      : flatModels().find((model) => model.id === selected().model && model.provider === selected().provider),
   )
 
   // Keep the stored last-known tier current while the catalogue lists the
@@ -149,6 +188,7 @@ export function AiModelPicker(props: {
 
   const selectedLabel = createMemo(() => {
     const current = selected()
+    if (current.modelConnectionId) return current.label
     return verevonModeById(current.model)?.label
       ?? selectedCatalogModel()?.name
       ?? current.label
@@ -165,6 +205,8 @@ export function AiModelPicker(props: {
   createEffect(
     () => ({ catalogue: models() ?? [], meta: entitlementMeta(), current: selected() }),
     (state) => {
+      // A "Your gateway" model is not in the platform catalogue, so the catalogue cannot call it stale.
+      if (state.current.modelConnectionId) return
       if (!selectionIsStale(state.current, state.catalogue, state.meta)) return
       const label = selectedLabel()
       const preferred = state.meta?.defaultModel
@@ -184,6 +226,16 @@ export function AiModelPicker(props: {
     setSelected(next)
     rememberAiModelSelection(untrack(() => props.orgId), next)
     untrack(() => props.onChange)?.(next)
+    setOpen(false)
+  }
+
+  // A "Your gateway" model is served on the person's own connection, never on a platform provider. It is kept
+  // in this picker's state and handed up through `onGatewayPick`; it is not written to the remembered platform
+  // selection, so the other composers that read that selection keep sending a platform model.
+  function chooseGatewayModel(connection: AiModelPickerGateway, modelId: string): void {
+    setPolicyResetModel(null)
+    setSelected({ model: modelId, label: modelId, modelConnectionId: connection.id })
+    untrack(() => props.onGatewayPick)?.(connection.id, modelId)
     setOpen(false)
   }
 
@@ -233,21 +285,46 @@ export function AiModelPicker(props: {
                 <button
                   type="button"
                   onClick={() => choose({ model: mode.id, label: mode.label })}
-                  class={{ 'dashboard-composer-model-menu__item--active': !selected().provider && selected().model === mode.id }}
+                  class={{ 'dashboard-composer-model-menu__item--active': !selected().modelConnectionId && !selected().provider && selected().model === mode.id }}
                 >
                   <span><span><Zap class="size-3" /></span><span>{mode.label}</span></span>
                   <span class="dashboard-composer-model-menu__right">
                     <span class={cn('dashboard-composer-model-badge', mode.badge === 'premium' ? 'dashboard-composer-model-badge--premium' : 'dashboard-composer-model-badge--cheap')}>
                       {mode.badge === 'premium' ? '$$' : i18n.tr('Rimelig', 'Low cost')}
                     </span>
-                    <Show when={!selected().provider && selected().model === mode.id}><Check class="size-4" /></Show>
+                    <Show when={!selected().modelConnectionId && !selected().provider && selected().model === mode.id}><Check class="size-4" /></Show>
                   </span>
                 </button>
               )}</For>
             </div>
-            <For each={modelGroups()}>{(group) => (
+            <Show when={gatewayGroups().length > 0}>
               <div class="dashboard-composer-model-group">
-                <p class="dashboard-composer-model-group__label">{group.label}</p>
+                <p class="dashboard-composer-model-group__label">{i18n.tr('Din gateway', 'Your gateway')}</p>
+                <For each={gatewayGroups()}>{(connection) => (
+                  <For each={connection.modelIds}>{(modelId) => {
+                    const active = () => selected().modelConnectionId === connection.id && selected().model === modelId
+                    return (
+                      <button
+                        type="button"
+                        title={i18n.tr(`Bruk ${modelId} på din gateway`, `Use ${modelId} on your gateway`)}
+                        onClick={() => chooseGatewayModel(connection, modelId)}
+                        class={{ 'dashboard-composer-model-menu__item--active': active() }}
+                      >
+                        <span><span><Zap class="size-3" /></span><span>{modelId}</span></span>
+                        <span class="dashboard-composer-model-menu__right">
+                          <span class="dashboard-composer-model-badge dashboard-composer-model-badge--cheap">{i18n.tr('Egen gateway', 'Own gateway')}</span>
+                          <Show when={active()}><Check class="size-4" /></Show>
+                        </span>
+                      </button>
+                    )
+                  }}</For>
+                )}</For>
+              </div>
+            </Show>
+            <For each={modelGroups()}>{(group) => {
+              // A folded group opens by itself while the search is on (it lists only matching models) and when the selection is one of its models.
+              const opened = () => activeQuery() !== '' || group.models.some((model) => selected().model === model.id && selected().provider === model.provider)
+              const rows = () => (
                 <For each={group.models}>{(model) => {
                   const blocked = () => model.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && subscriptionBlocked()
                   return (
@@ -260,10 +337,13 @@ export function AiModelPicker(props: {
                       onClick={() => chooseCatalogModel(model)}
                       class={{ 'dashboard-composer-model-menu__item--active': selected().model === model.id && selected().provider === model.provider }}
                     >
-                      <span><span><Zap class="size-3" /></span><span>{model.name}<Show when={model.price}>{(price) => <span class="dashboard-composer-model-price">{formatModelListPrice(price(), i18n.locale())}</span>}</Show><Show when={modelDataUseLine(model.dataUse, i18n.tr)}>{(line) => <span class="dashboard-composer-model-data-use">{line()}</span>}</Show></span></span>
+                      <span><span><Zap class="size-3" /></span><span>{model.name}<Show when={modelReplacement(models() ?? [], model)}>{(replacement) => <span class="dashboard-composer-model-successor">{i18n.tr(`Erstattes av ${replacement().name}`, `Replaced by ${replacement().name}`)}</span>}</Show><Show when={formatContextWindow(model.contextWindowTokens)}>{(windowLabel) => <span class="dashboard-composer-model-context">{windowLabel()}</span>}</Show><Show when={model.price}>{(price) => <span class="dashboard-composer-model-price">{formatModelListPrice(price(), i18n.locale())}</span>}</Show><Show when={modelDataUseLine(model.dataUse, i18n.tr)}>{(line) => <span class="dashboard-composer-model-data-use">{line()}</span>}</Show></span></span>
                       <span class="dashboard-composer-model-menu__right">
                         <Show when={model.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER}>
                           <span class="dashboard-composer-model-badge dashboard-composer-model-badge--cheap">{i18n.tr('Tilkoblet', 'Connected')}</span>
+                        </Show>
+                        <Show when={model.lifecycle === 'preview'}>
+                          <span class="dashboard-composer-model-badge dashboard-composer-model-badge--preview">{i18n.tr('Forhåndsversjon', 'Preview')}</span>
                         </Show>
                         <Show when={model.provider !== OPENAI_CODEX_SUBSCRIPTION_PROVIDER && isExpensiveModel(model)}>
                           <span class="dashboard-composer-model-badge dashboard-composer-model-badge--premium">$$</span>
@@ -273,8 +353,19 @@ export function AiModelPicker(props: {
                     </button>
                   )
                 }}</For>
-              </div>
-            )}</For>
+              )
+              return group.folded ? (
+                <details class="dashboard-composer-model-group dashboard-composer-model-group--folded" open={opened()}>
+                  <summary class="dashboard-composer-model-group__label">{group.label}</summary>
+                  {rows()}
+                </details>
+              ) : (
+                <div class="dashboard-composer-model-group">
+                  <p class="dashboard-composer-model-group__label">{group.label}</p>
+                  {rows()}
+                </div>
+              )
+            }}</For>
             <Show when={activeQuery() !== '' && modelGroups().length === 0}>
               <p class="dashboard-composer-model-empty" role="status">{i18n.tr('Ingen modeller passer', 'No models match')}</p>
             </Show>

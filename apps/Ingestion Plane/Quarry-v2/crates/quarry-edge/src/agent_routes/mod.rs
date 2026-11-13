@@ -60,6 +60,8 @@ mod receipts;
 #[cfg(feature = "browser-agent")]
 mod downloads;
 #[cfg(feature = "browser-agent")]
+mod procedure_draft;
+#[cfg(feature = "browser-agent")]
 mod live;
 #[cfg(feature = "browser-agent")]
 mod hit_test;
@@ -108,6 +110,8 @@ pub use self::step::*;
 pub use self::receipts::*;
 #[cfg(feature = "browser-agent")]
 pub use self::downloads::*;
+#[cfg(feature = "browser-agent")]
+pub use self::procedure_draft::*;
 #[cfg(feature = "browser-agent")]
 pub use self::live::*;
 #[cfg(feature = "browser-agent")]

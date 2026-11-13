@@ -92,7 +92,16 @@ fn floor_from_seed(raw: &str) -> ApprovalFloor {
 const SEED_ROW_PATTERN: &str =
     r"\('global', '([^']+)', '([^']+)', '([a-z_]+)', '([a-z_]+)', (NULL|'[a-z_]+'), 'seed'\)";
 
+/// `read_page` and `find_in_page` bind to `cap.tool.http` only while `EXECUTION_WEB_READER` is `true`
+/// (`trusted_capability_id` reads the switch at each call). Migration 0036 seeds their rows for that
+/// state, so the parity checks run with the switch on, once, for this test binary.
+fn reader_switch_on() {
+    static ON: std::sync::Once = std::sync::Once::new();
+    ON.call_once(|| std::env::set_var(execution_core::web_tools::WEB_READER_ENV, "true"));
+}
+
 fn seeded_rows() -> Vec<Seeded> {
+    reader_switch_on();
     // 0016 seeds the classes; a later migration that registers a tool adds its own seed row.
     let mut sql = read_text(
         "../../../go/services/capability-core/migrations/0016_capability_tool_classes.up.sql",
@@ -107,8 +116,10 @@ fn seeded_rows() -> Vec<Seeded> {
         "0029_ask_user_tool_class.up.sql",
         "0031_web_crawl_tool_capabilities.up.sql",
         "0034_browser_console_tool.up.sql",
+        "0036_reader_tool_bindings.up.sql",
         "0038_computer_tool_capabilities.up.sql",
-        "0040_web_crawl_plan_tool.up.sql",
+        "0041_custom_rest_capabilities.up.sql",
+        "0044_web_crawl_plan_tool.up.sql",
     ] {
         sql.push_str(&read_text(&format!(
             "../../../go/services/capability-core/migrations/{later}"

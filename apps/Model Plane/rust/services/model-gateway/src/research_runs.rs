@@ -2,7 +2,7 @@
 //! research phase of a chat turn, as a client of Session Core and three routes that address one run.
 //!
 //! Session Core owns the run: its id, status, stop reason, halt code, budget, counters and partial result
-//! (`ResearchRunService`, migration 0115). This module is the gateway's client of that service, and it serves:
+//! (`ResearchRunService`, migration 0129). This module is the gateway's client of that service, and it serves:
 //!
 //! - `GET /v1/research/runs/:run_id`: one research run the caller owns, as `{data: {...}}`.
 //! - `GET /v1/threads/:thread_id/research-run`: the running research run of a thread the caller owns, or 404.

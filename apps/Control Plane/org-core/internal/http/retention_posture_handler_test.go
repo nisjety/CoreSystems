@@ -83,9 +83,9 @@ func TestRetentionPostureHandlerReturnsOnlyTheTwoBooleans(t *testing.T) {
 		posture orgcore.RetentionPosture
 		want    string
 	}{
-		{"zdr org", orgcore.RetentionPosture{ZDRIntent: true, Entitled: true}, `{"zdrIntent":true,"entitled":true}`},
-		{"plain org", orgcore.RetentionPosture{ZDRIntent: false, Entitled: true}, `{"zdrIntent":false,"entitled":true}`},
-		{"plan lapsed", orgcore.RetentionPosture{ZDRIntent: true, Entitled: false}, `{"zdrIntent":true,"entitled":false}`},
+		{"zdr org", orgcore.RetentionPosture{ZDRIntent: true, Entitled: true}, `{"zdrIntent":true,"entitled":true,"effectiveZdr":true,"lapsed":false,"planLapsePolicy":"intent_stays_zdr"}`},
+		{"plain org", orgcore.RetentionPosture{ZDRIntent: false, Entitled: true}, `{"zdrIntent":false,"entitled":true,"effectiveZdr":false,"lapsed":false,"planLapsePolicy":"intent_stays_zdr"}`},
+		{"plan lapsed", orgcore.RetentionPosture{ZDRIntent: true, Entitled: false}, `{"zdrIntent":true,"entitled":false,"effectiveZdr":true,"lapsed":true,"planLapsePolicy":"intent_stays_zdr"}`},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {

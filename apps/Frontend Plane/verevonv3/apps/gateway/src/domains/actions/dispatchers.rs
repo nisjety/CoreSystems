@@ -67,7 +67,8 @@ use crate::domains::knowledge::quarry::{
 use crate::domains::knowledge::products::{extract_products, summarize_products};
 use crate::domains::knowledge::sync::register_sharepoint;
 use crate::domains::learning::{
-    decide_proposal, learn_from_thread, undo_entry, LearnBody, LearningDecisionBody,
+    decide_proposal, learn_from_thread, teach_skill_from_run, undo_entry, LearnBody,
+    LearningDecisionBody, TeachBody,
 };
 use crate::domains::mcp::{delete_server as delete_mcp_server, share_server as share_mcp_server};
 use crate::domains::memory::{
@@ -2423,7 +2424,7 @@ pub(super) fn owner_json_response_to_envelope(
 // handler (see the comment on owner_json_response_to_envelope above) instead
 // of duplicating create_document's Data Plane call or extract_products' /
 // summarize_products' Model Plane prompt-and-parse logic.
-async fn response_to_status_and_json(response: Response) -> (StatusCode, Value) {
+pub(super) async fn response_to_status_and_json(response: Response) -> (StatusCode, Value) {
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -3764,6 +3765,42 @@ pub(super) async fn dispatch_learning_learn_from_thread(
     .into_response();
     let (status, payload) = response_to_status_and_json(response).await;
     owner_json_response_to_envelope("learning.learn_from_thread", user, status, payload)
+}
+
+/// Teach mode (F-t3-081): `teachSkillFromRun` through the action surface, the same call as the BFF route. The run, the
+/// name and the optional hint are all that cross; the owner is the verified session.
+pub(super) async fn dispatch_learning_teach_skill_from_run(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    input: &Value,
+) -> Response {
+    let run_id = ticket_string(input, "runId");
+    if run_id.is_empty() {
+        return ticket_bad_request("learning.teach_skill_from_run requires a non-empty 'runId'");
+    }
+    let name = ticket_string(input, "name");
+    if name.is_empty() {
+        return ticket_bad_request("learning.teach_skill_from_run requires a non-empty 'name'");
+    }
+    let goal_hint = input
+        .get("goalHint")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let response = teach_skill_from_run(
+        StateExtractor(state.clone()),
+        ExtensionExtractor(user.clone()),
+        headers.clone(),
+        Json(TeachBody {
+            run_id: run_id.to_owned(),
+            name: name.to_owned(),
+            goal_hint,
+        }),
+    )
+    .await
+    .into_response();
+    let (status, payload) = response_to_status_and_json(response).await;
+    owner_json_response_to_envelope("learning.teach_skill_from_run", user, status, payload)
 }
 
 pub(super) async fn dispatch_settings_update_me(
@@ -5446,6 +5483,8 @@ pub(super) async fn dispatch_chat_cancel_invocation(
         ExtensionExtractor(user.clone()),
         headers.clone(),
         PathExtractor(request_id.to_owned()),
+        // An agent action names no connection, so a continuation it makes is never waived (ZDR-Z-19e).
+        axum::body::Bytes::new(),
     )
     .await
     .into_response();
@@ -5816,6 +5855,8 @@ pub(super) async fn dispatch_orchestration_resume_run(
         ExtensionExtractor(user.clone()),
         headers.clone(),
         PathExtractor(run_id.to_owned()),
+        // An agent action names no connection, so a continuation it makes is never waived (ZDR-Z-19e).
+        axum::body::Bytes::new(),
     )
     .await
     .into_response();
@@ -5838,6 +5879,8 @@ pub(super) async fn dispatch_orchestration_cancel_run(
         ExtensionExtractor(user.clone()),
         headers.clone(),
         PathExtractor(run_id.to_owned()),
+        // An agent action names no connection, so a continuation it makes is never waived (ZDR-Z-19e).
+        axum::body::Bytes::new(),
     )
     .await
     .into_response();
@@ -7227,6 +7270,7 @@ pub(super) async fn dispatch_space_set_agent_state(
 pub(super) async fn dispatch_space_revoke_agent(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: &HeaderMap,
     input: &Value,
 ) -> Response {
     let space_ref = ticket_string(input, "spaceRef");
@@ -7239,6 +7283,7 @@ pub(super) async fn dispatch_space_revoke_agent(
     let (status, Json(payload)) = revoke_space_agent(
         StateExtractor(state.clone()),
         ExtensionExtractor(user.clone()),
+        headers.clone(),
         PathExtractor((space_ref.to_owned(), binding_ref.to_owned())),
     )
     .await;

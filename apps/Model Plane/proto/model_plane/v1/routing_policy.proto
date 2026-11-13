@@ -55,6 +55,20 @@ service RoutingPolicy {
 
   // List candidates, newest first.
   rpc ListCandidates(ListCandidatesRequest) returns (ListCandidatesResponse);
+
+  // Read one organisation's routing overlay (W4-BYO-3). A user reads its own
+  // organisation's; a service holding the `routing:read` scope reads any, which is
+  // how inference-core applies the overlay. Answers `{}` at version 0 for an
+  // organisation that never wrote one. Refused UNAVAILABLE while
+  // SESSION_ORG_ROUTING_OVERLAY is off.
+  rpc GetOrgRoutingOverlay(GetOrgRoutingOverlayRequest) returns (OrgRoutingOverlayMessage);
+
+  // Replace one organisation's routing overlay. The overlay only narrows the
+  // platform catalogue and role table: it holds `hidden`, `order` and `roles`, and
+  // nothing that adds a model. The caller must be an organisation admin of that
+  // organisation as the gateway has checked it, and a Zero Data Retention caller
+  // is refused. Refused UNAVAILABLE while SESSION_ORG_ROUTING_OVERLAY is off.
+  rpc SetOrgRoutingOverlay(SetOrgRoutingOverlayRequest) returns (OrgRoutingOverlayMessage);
 }
 
 message RoutingPolicyMessage {
@@ -170,4 +184,37 @@ message RecordCandidateEvaluationResponse {
 message PromoteCandidateResponse {
   // The live version the candidate became.
   RoutingPolicyMessage policy = 1;
+}
+
+// Read one organisation's routing overlay.
+message GetOrgRoutingOverlayRequest {
+  // The organisation whose overlay is read.
+  string org_id = 1;
+}
+
+// Replace one organisation's routing overlay.
+message SetOrgRoutingOverlayRequest {
+  // The organisation whose overlay is written. It must be the caller's own.
+  string org_id = 1;
+  // The overlay as a JSON string: `{"hidden": [], "order": [], "roles": {"<purpose>": ["<model id>"]}}`.
+  // Each role holds one to four candidate ids. A key outside those three is refused,
+  // so the overlay cannot carry an alias or add a model.
+  string config_json = 2;
+  // The version the caller read. 0 skips the check. Any other value must equal the
+  // stored version, or the write is ABORTED.
+  int64 expected_version = 3;
+}
+
+// One organisation's routing overlay, as stored. Configuration and identities only.
+message OrgRoutingOverlayMessage {
+  // The organisation the overlay belongs to.
+  string org_id = 1;
+  // The overlay as a JSON string. `{}` until the organisation writes one.
+  string config_json = 2;
+  // Monotonic version, incremented on every write. 0 for an organisation that never wrote one.
+  int64 version = 3;
+  // Identity (user or service id) that last wrote the overlay.
+  string updated_by = 4;
+  // Unix seconds of the last write. 0 for an organisation that never wrote one.
+  int64 updated_at = 5;
 }

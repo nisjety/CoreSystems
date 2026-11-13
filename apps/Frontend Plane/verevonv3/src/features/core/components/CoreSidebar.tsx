@@ -29,6 +29,7 @@ import {
   CHAT_THREAD_HISTORY_CHANGED_EVENT,
   CHAT_THREAD_HISTORY_KEY,
   CHAT_THREAD_TITLE_MAX_LENGTH,
+  chatThreadGoalStatus,
   clearActiveChatThreadId,
   clearChatThreadHistory,
   readActiveChatThreadId,
@@ -81,7 +82,8 @@ import {
   unarchiveChatThread,
   type ChatThreadSession,
 } from '@/shared/api/chat-client'
-import { ATTENTION_CHANGED_EVENT, getAttention, type AttentionSnapshot } from '@/shared/api/attention-client'
+import { ATTENTION_CHANGED_EVENT, getAttention, type AttentionReason, type AttentionSnapshot } from '@/shared/api/attention-client'
+import type { ThreadGoalStatus } from '@/shared/api/thread-goal-client'
 import { legacyStateFromRunStatus } from '@/shared/chat/thread-status'
 import { getModelEntitlement } from '@/shared/api/model-entitlement-client'
 import { useI18n, translateApiError } from '@/shared/i18n'
@@ -737,7 +739,7 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
     }
   }
 
-  const sessionRow = (item: ChatThreadHistoryItem, onMoveToProject?: () => void) => (
+  const sessionRow = (item: ChatThreadHistoryItem, onMoveToProject?: () => void, waitingReason?: AttentionReason) => (
     <div class="core-chat-session-row">
       <Show
         when={renamingThreadId() !== item.threadId}
@@ -821,6 +823,14 @@ export function ChatSidebarPanel(props: { onCollapse: () => void }) {
             <Show when={chatRunStatusChip(item.latestRunStatus, i18n)}>
               {(chip) => (
                 <small class="core-chat-session__status" data-tone={chip().tone} role="status">
+                  <i aria-hidden="true" />
+                  {chip().label}
+                </small>
+              )}
+            </Show>
+            <Show when={chatGoalChip(item.goalStatus, waitingReason, i18n)}>
+              {(chip) => (
+                <small class="core-chat-session__status core-chat-session__goal" data-tone={chip().tone}>
                   <i aria-hidden="true" />
                   {chip().label}
                 </small>
@@ -1101,6 +1111,34 @@ function ChatSessionMenu(props: {
 }
 
 type ChatRunStatusChip = { label: string; tone: 'active' | 'attention' }
+
+type ChatGoalChip = { label: string; tone?: 'attention' }
+
+/** The copy each closed goal status shows on a thread row (EP-7 S5). The words match the goal bar. */
+const CHAT_GOAL_STATUS_COPY: Record<ThreadGoalStatus, { no: string; en: string }> = {
+  active: { no: 'Aktivt', en: 'Active' },
+  paused: { no: 'Satt på pause', en: 'Paused' },
+  met: { no: 'Nådd', en: 'Met' },
+  budget_reached: { no: 'Budsjett brukt opp', en: 'Budget reached' },
+  turns_reached: { no: 'Ingen runder igjen', en: 'Out of turns' },
+  blocked: { no: 'Stoppet', en: 'Blocked' },
+}
+
+/** The goal chip on a thread row (EP-7 S5). A thread the rail placed in Waiting for a stopped goal
+ * reads "Goal stopped"; any other thread reads its closed status as "Goal · <state>", in the muted
+ * tone so the rail stays calm. Nothing shows while goals are off, because the server then sends no
+ * status. */
+function chatGoalChip(
+  status: string | undefined,
+  waitingReason: AttentionReason | undefined,
+  i18n: ReturnType<typeof useI18n>,
+): ChatGoalChip | undefined {
+  if (waitingReason === 'goal') return { label: i18n.tr('Mål stoppet', 'Goal stopped'), tone: 'attention' }
+  const closed = chatThreadGoalStatus(status)
+  if (!closed) return undefined
+  const copy = CHAT_GOAL_STATUS_COPY[closed]
+  return { label: `${i18n.tr('Mål', 'Goal')} · ${i18n.tr(copy.no, copy.en)}` }
+}
 
 /** Keep the personal thread rail calm: only active or attention states show a
  * hint. Completed/cancelled runs remain discoverable through the transcript

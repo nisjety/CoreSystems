@@ -870,6 +870,105 @@ export const setSpaceAgentWakePolicyForGateway = mutation({
 });
 
 /**
+ * EP-6 S9: pin one bound agent to a published version of its definition, or clear the pin.
+ *
+ * `pinnedVersion` absent clears the pin, so the binding follows the agent's published version
+ * again. A pin only selects a version that already exists for this agent: a version never
+ * published answers `agent_version_not_found`, and nothing here writes the definition. The gateway
+ * has already checked that the caller is the Space's owner or a manager (the pin route and
+ * `spaces.agent_binding.pin`); this re-checks that the binding belongs to that Space and
+ * organization and is still bound, then bumps `projectionVersion`. It leaves `updatedAt` alone, so
+ * a pin change never makes a second manager's wake-policy change look stale. Configuration only: no
+ * content is read or stored, so Zero Data Retention organizations behave the same.
+ *
+ * Errors are stable strings the gateway maps to typed envelopes: `invalid_policy`,
+ * `agent_binding_not_found`, `agent_version_not_found`.
+ */
+export const setSpaceAgentBindingPinForGateway = mutation({
+  args: {
+    serviceKey: v.string(),
+    externalAuthId: v.string(),
+    externalOrgId: v.string(),
+    spaceRef: v.string(),
+    bindingRef: v.string(),
+    pinnedVersion: v.optional(v.number()),
+  },
+  handler: async (
+    ctx,
+    args,
+  ): Promise<{
+    bindingRef: string;
+    subjectId: string;
+    pinnedVersion: number | null;
+    projectionVersion: number;
+    changed: boolean;
+  }> => {
+    assertServiceKey(args.serviceKey);
+    await requireGatewayMember(ctx, args.externalAuthId, args.externalOrgId);
+
+    const spaceRef = args.spaceRef.trim();
+    const bindingRef = args.bindingRef.trim();
+    if (!spaceRef || !bindingRef) throw new Error("invalid_policy");
+    const requested = args.pinnedVersion;
+    if (requested !== undefined && (!Number.isInteger(requested) || requested < 1)) {
+      throw new Error("invalid_policy");
+    }
+
+    const binding = await ctx.db
+      .query("spaceAgentBindings")
+      .withIndex("by_binding_ref", (q: any) => q.eq("bindingRef", bindingRef))
+      .unique();
+    // The binding must belong to the Space the gateway authorized for this organization, and be
+    // still bound: the same gate the wake policy and tool policy writers use.
+    if (
+      !binding ||
+      (binding as any).spaceRef !== spaceRef ||
+      (binding as any).externalOrgId !== args.externalOrgId ||
+      ((binding as any).status !== "active" && (binding as any).status !== "paused")
+    ) {
+      throw new Error("agent_binding_not_found");
+    }
+
+    const subjectId = (binding as any).subjectId as string;
+    const current = (binding as any).pinnedVersion as number | undefined;
+    const projectionVersion = (binding as any).projectionVersion as number;
+    if (current === requested) {
+      return {
+        bindingRef,
+        subjectId,
+        pinnedVersion: current ?? null,
+        projectionVersion,
+        changed: false,
+      };
+    }
+
+    if (requested !== undefined) {
+      const published = await ctx.db
+        .query("agentDefinitionVersions")
+        .withIndex("by_agent_version", (q: any) =>
+          q.eq("agentId", (binding as any).agentId).eq("version", requested),
+        )
+        .unique();
+      if (!published) throw new Error("agent_version_not_found");
+    }
+
+    const nextVersion = projectionVersion + 1;
+    // Absent `requested` removes the field, which is what clears the pin.
+    await ctx.db.patch(binding._id, {
+      pinnedVersion: requested,
+      projectionVersion: nextVersion,
+    });
+    return {
+      bindingRef,
+      subjectId,
+      pinnedVersion: requested ?? null,
+      projectionVersion: nextVersion,
+      changed: true,
+    };
+  },
+});
+
+/**
  * WS10-S5b: record the projection of Control's per-tool policy on one binding.
  *
  * Control (`space_tool_policies`) is the store and the only authority; the gateway has already

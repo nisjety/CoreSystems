@@ -47,22 +47,23 @@ func TestNewRetentionPostureMatrix(t *testing.T) {
 }
 
 // The wire shape is a contract with Auth Core
-// (internal/http/testdata/auth-core-org-core-retention-posture.contract.json): two
-// booleans, exact names, nothing else. Extra fields would hand a machine
+// (internal/http/testdata/auth-core-org-core-retention-posture.contract.json): the two
+// stored inputs (zdrIntent, entitled) and the three derived fields (effectiveZdr, lapsed,
+// planLapsePolicy), exact names, nothing else. Extra fields would hand a machine
 // principal org data it was not granted a scope for.
 func TestRetentionPostureWireShape(t *testing.T) {
 	encoded, err := json.Marshal(NewRetentionPosture("pro", true))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(encoded) != `{"zdrIntent":true,"entitled":true}` {
+	if string(encoded) != `{"zdrIntent":true,"entitled":true,"effectiveZdr":true,"lapsed":false,"planLapsePolicy":"intent_stays_zdr"}` {
 		t.Fatalf("wire shape=%s", encoded)
 	}
 	encoded, err = json.Marshal(NewRetentionPosture("free", false))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(encoded) != `{"zdrIntent":false,"entitled":false}` {
+	if string(encoded) != `{"zdrIntent":false,"entitled":false,"effectiveZdr":false,"lapsed":false,"planLapsePolicy":"intent_stays_zdr"}` {
 		t.Fatalf("wire shape=%s", encoded)
 	}
 }

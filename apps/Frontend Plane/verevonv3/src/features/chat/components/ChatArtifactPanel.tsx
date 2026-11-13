@@ -38,6 +38,7 @@ import {
   Pencil,
   Presentation,
   RotateCcw,
+  ScanSearch,
 } from '@/shared/icons'
 import { Dynamic } from '@solidjs/web'
 import {
@@ -67,6 +68,14 @@ import {
 import { extraArtifactRenderers } from './artifact-renderers'
 import { officePdfRenderer } from './ArtifactOfficePreview'
 import { ArtifactProvenance } from './ArtifactProvenance'
+import {
+  type ReviewLineRange,
+  type ReviewRunFailureKind,
+  ReviewRunCard,
+  ReviewRunFailure,
+  reviewRunEnabled,
+  reviewRunFailureKind,
+} from './ReviewRunCard'
 import {
   ChatMarkdown,
   DiffView,
@@ -110,8 +119,11 @@ import {
   type ArtifactRevision,
   getComposerCapabilities,
   listArtifactRevisions,
+  runReview,
+  type ReviewCard,
   uploadChatDocument,
 } from '@/shared/api/chat-client'
+import { REVIEW_LABEL_MAX_CHARS } from '@/shared/actions/chat-review'
 import { sandboxHtmlDocument } from '@/shared/lib/sandbox-html'
 import { useI18n } from '@/shared/i18n'
 import { type ViewerSurface, viewerActivationKey, viewerFor } from '@/shared/artifacts/viewer-registry'
@@ -170,6 +182,16 @@ type PendingSelection = ArtifactSelectionRange & { version: number }
 /** The selected text as the popover shows it: its first 80 characters, the rest cut. */
 function excerpt(text: string): string {
   return text.length > 80 ? `${text.slice(0, 80)}...` : text
+}
+
+/**
+ * The label a review card carries: the title, then the version it read. The gateway takes at most 120 characters, so the
+ * title is cut to leave room for the version, which always stays (F-t3-086).
+ */
+function reviewRunLabel(title: string, version: number): string {
+  const suffix = ` v${version}`
+  const room = REVIEW_LABEL_MAX_CHARS - Array.from(suffix).length
+  return `${Array.from(title.trim()).slice(0, room).join('')}${suffix}`
 }
 
 export function ArtifactsPanel(props: {
@@ -235,6 +257,9 @@ export function ArtifactsPanel(props: {
     return items.find((item) => item.artifact.id === requested) ?? items[items.length - 1]
   })
 
+  /** A chat thread that is not temporary may ask for a review. A room and a temporary thread never do (F-t3-086). */
+  const reviewable = () => (props.surface ?? 'chat') === 'chat' && props.history != null && !props.history.temporary
+
   return (
     <Show
       when={props.items.length > 0}
@@ -270,6 +295,7 @@ export function ArtifactsPanel(props: {
               onEditorOpenChange={setEditorOpen}
               selectionEdit={selectionEditOn()}
               onAskAboutSelection={props.onAskAboutSelection}
+              reviewable={reviewable()}
             />
           )}
         </Show>
@@ -332,6 +358,8 @@ export function ArtifactViewer(props: {
   /** The gateway's `selection_edit` capability, already narrowed to the surfaces that may ask (EP-3 S6). */
   selectionEdit?: boolean
   onAskAboutSelection?: (request: ArtifactSelectionRequest) => Promise<unknown> | void
+  /** Set only for a chat thread that is not temporary: the panel may offer Review on a text revision (F-t3-086). */
+  reviewable?: boolean
 }) {
   const i18n = useI18n()
   const surface = (): ViewerSurface => props.surface ?? 'chat'
@@ -367,6 +395,14 @@ export function ArtifactViewer(props: {
   const [promoting, setPromoting] = createSignal(false)
   /** The outcome of the last "save to knowledge" for this artifact; `documentId` links the copy. */
   const [promoteResult, setPromoteResult] = createSignal<{ ok: true; documentId: string } | { ok: false } | null>(null)
+  /** The review of the revision on screen, with the version it read (F-t3-086). Kept in memory only, never stored. */
+  const [reviewRun, setReviewRun] = createSignal<{ card: ReviewCard; version: number } | null>(null)
+  const [reviewing, setReviewing] = createSignal(false)
+  const [reviewFailure, setReviewFailure] = createSignal<ReviewRunFailureKind | null>(null)
+  /** The lines a finding points at, chosen in the review card; the code view shades and scrolls to them. */
+  const [focusLines, setFocusLines] = createSignal<ReviewLineRange | null>(null)
+  /** Bumped when the viewer moves to another artifact, so a review that returns late is dropped, not shown. */
+  let reviewGeneration = 0
 
   const artifact = createMemo(() => savedRevisions().reduce(
     (carried, saved) => mergeArtifactVersion(carried, {
@@ -455,6 +491,16 @@ export function ArtifactViewer(props: {
     && renderKind() === 'document'
     && !missing()
     && !editorOpen())
+  /** Review as a run (F-t3-086): the switch is on, and this is a chat that is not temporary. A room never offers it. */
+  const reviewOffered = createMemo(() => reviewRunEnabled() && props.reviewable === true && surface() === 'chat')
+  /** Review reads the text on screen: a document, code or HTML revision whose text arrived, never while the editor is open. */
+  const canReview = createMemo(() => reviewOffered()
+    && !editorOpen()
+    && !missing()
+    && (renderKind() === 'document' || renderKind() === 'code' || renderKind() === 'html'))
+  /** A finding's lines can be shown only in a code view, and only for the revision the review read. */
+  const reviewLocatable = createMemo(() => (renderKind() === 'code' || renderKind() === 'html')
+    && reviewRun()?.version === displayed().version)
 
   const openEditor = (open: boolean) => {
     setEditorOpen(open)
@@ -513,6 +559,54 @@ export function ArtifactViewer(props: {
     }
   }
 
+  /**
+   * Reviews the text on screen as a run (F-t3-086). The text is sent once and only the card comes back. A result that
+   * arrives after the person moved to another artifact is dropped, so a card never lands on the wrong text.
+   */
+  const runArtifactReview = async () => {
+    if (reviewing()) return
+    const shown = displayed()
+    const generation = reviewGeneration
+    setReviewing(true)
+    setReviewFailure(null)
+    try {
+      const card = await runReview({
+        target: 'artifact_revision',
+        label: reviewRunLabel(title(), shown.version),
+        material: shown.content,
+        brief: '',
+        locale: i18n.locale(),
+      })
+      if (generation !== reviewGeneration) return
+      setFocusLines(null)
+      if (card) {
+        setReviewRun({ card, version: shown.version })
+      } else {
+        setReviewRun(null)
+        setReviewFailure('off')
+      }
+    } catch (error) {
+      if (generation !== reviewGeneration) return
+      setReviewFailure(reviewRunFailureKind(error))
+    } finally {
+      if (generation === reviewGeneration) setReviewing(false)
+    }
+  }
+
+  /** Drops the review the panel shows, any failure, and the highlighted lines. */
+  const closeReviewRun = () => {
+    setReviewRun(null)
+    setReviewFailure(null)
+    setFocusLines(null)
+  }
+
+  /** Shows a finding's lines in the code view. An HTML page opens its source first; the code view then scrolls to them. */
+  const locateReviewLines = (range: ReviewLineRange) => {
+    setShowDiff(false)
+    if (renderKind() === 'html') setShowSource(true)
+    setFocusLines({ start: range.start, end: range.end })
+  }
+
   // Reset the revision cursor, the HTML source toggle, and any image failure
   // when the panel switches to a different artifact — a new selection must open
   // on the newest revision in preview mode. Keyed on the id alone so a version
@@ -533,6 +627,11 @@ export function ArtifactViewer(props: {
       setSavedRevisions([])
       setRestoreFailure(null)
       setPromoteResult(null)
+      reviewGeneration += 1
+      setReviewing(false)
+      setReviewRun(null)
+      setReviewFailure(null)
+      setFocusLines(null)
       openEditor(false)
     },
   )
@@ -830,6 +929,22 @@ export function ArtifactViewer(props: {
               </Switch>
             </button>
           </Show>
+          <Show when={canReview()}>
+            <button
+              type="button"
+              class="verevon-chat-artifact-action"
+              disabled={reviewing()}
+              aria-busy={reviewing() ? 'true' : undefined}
+              title={i18n.tr(
+                'Gjennomgå denne versjonen. Gjennomgangen lagres ikke.',
+                'Review this version. The review is not stored.',
+              )}
+              onClick={() => void runArtifactReview()}
+            >
+              <ScanSearch size={14} />
+              {reviewing() ? i18n.tr('Gjennomgår…', 'Reviewing…') : i18n.tr('Gjennomgå', 'Review')}
+            </button>
+          </Show>
           <Show when={canPromote()}>
             <button
               type="button"
@@ -983,7 +1098,11 @@ export function ArtifactViewer(props: {
               )}
             </Match>
             <Match when={renderKind() === 'code'}>
-              <ArtifactCodeView content={displayed().content} language={artifactLanguage(displayed())} />
+              <ArtifactCodeView
+                content={displayed().content}
+                language={artifactLanguage(displayed())}
+                focus={reviewLocatable() ? focusLines() : null}
+              />
             </Match>
             <Match when={renderKind() === 'document'}>
               <Show
@@ -998,7 +1117,13 @@ export function ArtifactViewer(props: {
             <Match when={renderKind() === 'html'}>
               <Show
                 when={!showSource()}
-                fallback={<ArtifactCodeView content={displayed().content} language="html" />}
+                fallback={(
+                  <ArtifactCodeView
+                    content={displayed().content}
+                    language="html"
+                    focus={reviewLocatable() ? focusLines() : null}
+                  />
+                )}
               >
                 <Show
                   when={!previewGated()}
@@ -1051,6 +1176,21 @@ export function ArtifactViewer(props: {
         </Show>
         </Show>
       </div>
+      <Show when={reviewOffered() && !editorOpen()}>
+        <Show when={reviewRun()}>
+          {(run) => (
+            <ReviewRunCard
+              card={run().card}
+              locatable={reviewLocatable()}
+              onLocate={locateReviewLines}
+              onClose={closeReviewRun}
+            />
+          )}
+        </Show>
+        <Show when={reviewFailure()}>
+          {(kind) => <ReviewRunFailure kind={kind()} />}
+        </Show>
+      </Show>
       <Show when={!personVersions().has(revision().version)}>
         <ArtifactProvenance provenance={(artifact() as { provenance?: unknown }).provenance} />
       </Show>
@@ -1062,15 +1202,32 @@ export function ArtifactViewer(props: {
  * Code with a line-number gutter and basic, dependency-free highlighting (see
  * chat-code-highlight.ts — this project ships no highlighter library).
  */
-export function ArtifactCodeView(props: { content: string; language: string }) {
+export function ArtifactCodeView(props: { content: string; language: string; focus?: ReviewLineRange | null }) {
   const lines = createMemo(() => highlightCode(props.content, props.language))
+  let viewRef: HTMLDivElement | undefined
+  /** Whether a line is one the chosen review finding points at (F-t3-086). */
+  const focused = (number: number) => props.focus != null && number >= props.focus.start && number <= props.focus.end
+  // The chosen lines are brought into view when the person chooses them. jsdom has no scrollIntoView, hence the optional call.
+  createEffect(
+    () => props.focus,
+    (focus) => {
+      if (!focus) return
+      viewRef?.querySelector<HTMLElement>(`[data-line="${focus.start}"]`)?.scrollIntoView?.({ block: 'center' })
+    },
+  )
   return (
-    <div class="verevon-chat-artifact-code">
+    <div class="verevon-chat-artifact-code" ref={viewRef}>
       <pre>
         <code>
           <For each={lines()}>
             {(line) => (
-              <span class="verevon-chat-artifact-code__line">
+              <span
+                class={{
+                  'verevon-chat-artifact-code__line': true,
+                  'verevon-chat-artifact-code__line--focus': focused(line.number),
+                }}
+                data-line={line.number}
+              >
                 <span class="verevon-chat-artifact-code__gutter" aria-hidden="true">{line.number}</span>
                 <span class="verevon-chat-artifact-code__text">
                   <For each={line.tokens}>

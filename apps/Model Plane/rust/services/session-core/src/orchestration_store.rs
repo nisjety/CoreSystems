@@ -1251,14 +1251,17 @@ async fn decide_approval_inner(
     }
 
     if updated && matches!(status, "denied" | "timed_out") {
-        sqlx::query(
-            "DELETE FROM approval_continuation_descriptors \
-             WHERE approval_id = $1 AND org_id = $2",
-        )
-        .bind(id)
-        .bind(org_id)
-        .execute(&mut *transaction)
-        .await?;
+        // The one descriptor that outlives its denial is a `browser_human_assist` pause's ("Skip this
+        // site"): the continuation of a skipped site reads the tools and authority it retained
+        // (`read_skipped_assist_authority`), and it is never consumed or run. It is encrypted as
+        // before and the expired-descriptor sweep still removes it at the approval's expiry; a
+        // timed-out pause keeps nothing.
+        sqlx::query(DELETE_DECIDED_DESCRIPTOR_SQL)
+            .bind(id)
+            .bind(org_id)
+            .bind(mp_contracts::approval_cause::CauseCode::BrowserHumanAssist.as_str())
+            .execute(&mut *transaction)
+            .await?;
         // A held quarantined output is blanked with it (build plan WS10 S8).
         sqlx::query(crate::space::quarantine::PURGE_FOR_APPROVAL_SQL)
             .bind(id)
@@ -1316,6 +1319,18 @@ async fn decide_approval_inner(
         create_scope_grant(&mut transaction, id, org_id, record).await?;
     }
 
+    // The run's retention class is read once for both audit rows: the authz row marks a ZDR run,
+    // and the approval row is not written for one at all (DEC-32).
+    let retention: Option<String> = if updated && (record.audit || record.authz_audit) {
+        sqlx::query_scalar(APPROVAL_RUN_RETENTION_SQL)
+            .bind(id)
+            .bind(org_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+    } else {
+        None
+    };
+
     if updated && record.authz_audit {
         let (_, run_id, owner_user_id, metadata): (String, String, String, JsonValue) =
             sqlx::query_as(APPROVAL_AUDIT_CONTEXT_SQL)
@@ -1325,11 +1340,6 @@ async fn decide_approval_inner(
                 .await?;
         // A run that keeps no state (or whose class cannot be read) is reported as ZDR, so the
         // row carries ids and words only and no host class.
-        let retention: Option<String> = sqlx::query_scalar(APPROVAL_RUN_RETENTION_SQL)
-            .bind(id)
-            .bind(org_id)
-            .fetch_optional(&mut *transaction)
-            .await?;
         let zdr = retention.as_deref() != Some("persistent");
         let body = crate::audit_publisher::build_authz_decision_body(
             &crate::audit_publisher::AuthzDecisionAudit {
@@ -1354,7 +1364,9 @@ async fn decide_approval_inner(
             .await?;
     }
 
-    if updated && record.audit {
+    // A ZDR or waived run (or one whose class cannot be read) gets no approval_decided row; the
+    // skip is silent so no log line names the run (DEC-32).
+    if updated && record.audit && approval_audit_row_allowed(retention.as_deref()) {
         let (kind, run_id, owner_user_id, metadata): (String, String, String, JsonValue) =
             sqlx::query_as(APPROVAL_AUDIT_CONTEXT_SQL)
                 .bind(id)
@@ -1394,6 +1406,15 @@ async fn decide_approval_inner(
         delivery_id,
         loop_owned,
     })
+}
+
+/// Whether a decision on an approval may leave an `approval_decided` audit row, given the
+/// owning run's `retention_class`. Only a persistent run may: a zero-retention (`zdr`) or waived
+/// (`zdr_waived`) run keeps no durable record naming it, and a class that is missing or not
+/// recognised counts as ZDR (DEC-32, Approvals v2 ledger point 6).
+#[must_use]
+fn approval_audit_row_allowed(retention_class: Option<&str>) -> bool {
+    retention_class == Some("persistent")
 }
 
 /// Why a standing scope could not be recorded with its decision (build plan WS13 S6). The
@@ -1748,20 +1769,26 @@ const APPROVAL_GRANT_CONTEXT_SQL: &str = "SELECT a.user_id, a.run_id, r.thread_i
 /// already proposed for the owner (build plan WS13 S7). A reused proposal moves to the decision
 /// that renewed it.
 const INSERT_APPROVAL_RULE_PROPOSAL_SQL: &str = "INSERT INTO approval_rule_proposals \
-     (id, org_id, user_id, created_from_approval_id, tool_name, tool_digest) \
-     VALUES ($1, $2, $3, $4, $5, $6) \
+     (id, org_id, user_id, created_from_approval_id, tool_name, tool_digest, capability_id) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7) \
      ON CONFLICT (org_id, user_id, tool_name, tool_digest) WHERE state = 'proposed' \
-     DO UPDATE SET created_from_approval_id = EXCLUDED.created_from_approval_id \
+     DO UPDATE SET created_from_approval_id = EXCLUDED.created_from_approval_id, \
+                   capability_id = EXCLUDED.capability_id \
      RETURNING id";
 
 const INSERT_APPROVAL_SCOPE_GRANT_SQL: &str = "INSERT INTO approval_scope_grants \
      (id, org_id, user_id, thread_id, run_id, scope, tool_name, action_key, effect_class, \
-      cause_code, created_from_approval_id, expires_at, rule_id) \
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now() + make_interval(secs => $12), $13) \
+      cause_code, created_from_approval_id, expires_at, rule_id, tool_digest) \
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now() + make_interval(secs => $12), $13, \
+             $14) \
      ON CONFLICT (org_id, user_id, thread_id, scope, COALESCE(run_id, ''), action_key) \
      WHERE revoked_at IS NULL \
      DO UPDATE SET expires_at = GREATEST(approval_scope_grants.expires_at, EXCLUDED.expires_at), \
-                   rule_id = COALESCE(EXCLUDED.rule_id, approval_scope_grants.rule_id)";
+                   tool_digest = EXCLUDED.tool_digest, \
+                   effect_class = EXCLUDED.effect_class, \
+                   rule_id = CASE WHEN approval_scope_grants.tool_digest = EXCLUDED.tool_digest \
+                                  THEN COALESCE(EXCLUDED.rule_id, approval_scope_grants.rule_id) \
+                                  ELSE EXCLUDED.rule_id END";
 
 /// Record the standing grant one granted decision creates (build plan WS13 S6), in the decision's
 /// transaction. The scope must be one the cause offers, and the thread must be an ordinary one.
@@ -1812,6 +1839,7 @@ async fn create_scope_grant(
             .bind(approval_id)
             .bind(&cause.tool)
             .bind(&cause.tool_digest)
+            .bind(&cause.capability_id)
             .fetch_one(&mut **transaction)
             .await?;
         Some(proposal)
@@ -1832,13 +1860,15 @@ async fn create_scope_grant(
         .bind(approval_id)
         .bind(record.grant_ttl_secs as f64)
         .bind(rule_id)
+        .bind(&cause.tool_digest)
         .execute(&mut **transaction)
         .await?;
     Ok(())
 }
 
 /// The call a standing grant is asked to release (build plan WS13 S6). No argument value is part
-/// of the match: the owner, thread, tool, action key and declared class are the whole of it.
+/// of the match: the owner, thread, tool, action key, declared class and, for a pinned MCP tool,
+/// the definition digest are the whole of it (D2-1123).
 #[derive(Debug, Clone, Copy)]
 pub struct ScopeGrantUse<'a> {
     pub org_id: &'a str,
@@ -1848,11 +1878,14 @@ pub struct ScopeGrantUse<'a> {
     pub tool_name: &'a str,
     pub action_key: &'a str,
     pub effect_class: &'a str,
+    /// The sha256 of the pinned MCP definition the call is bound to, or empty for a built-in tool.
+    /// A grant matches only the digest it was created with, so a changed definition never matches.
+    pub tool_digest: &'a str,
 }
 
 /// The atomic match and count of one standing release. The grant must be live and unexpired for
-/// this owner and thread, name this tool, action and class, and cover this run (a run grant names
-/// one; a thread grant covers any). The run must be a live run of this owner and thread, and a
+/// this owner and thread, name this tool, action, class and definition digest, and cover this run
+/// (a run grant names one; a thread grant covers any). A digest that drifted matches nothing. The run must be a live run of this owner and thread, and a
 /// child agent never matches a grant.
 const USE_APPROVAL_SCOPE_GRANT_SQL: &str = "UPDATE approval_scope_grants \
      SET use_count = use_count + 1, last_used_at = now() \
@@ -1861,6 +1894,7 @@ const USE_APPROVAL_SCOPE_GRANT_SQL: &str = "UPDATE approval_scope_grants \
          JOIN runs r ON r.id = $4 \
          WHERE g.org_id = $1 AND g.user_id = $2 AND g.thread_id = $3 \
            AND g.tool_name = $5 AND g.action_key = $6 AND g.effect_class = $7 \
+           AND g.tool_digest = $8 \
            AND g.revoked_at IS NULL AND g.expires_at > now() \
            AND (g.scope = 'thread' OR g.run_id = $4) \
            AND r.org_id = $1 AND r.user_id = $2 AND r.thread_id = $3 \
@@ -1936,6 +1970,7 @@ pub async fn use_approval_scope_grant(
         .bind(call.tool_name)
         .bind(call.action_key)
         .bind(call.effect_class)
+        .bind(call.tool_digest)
         .fetch_optional(&mut *transaction)
         .await?;
     let Some((grant_id, scope, cause_code, use_count)) = used else {
@@ -2040,6 +2075,245 @@ pub async fn revoke_approval_scope_grant(
         .bind(user_id)
         .fetch_optional(pool)
         .await?)
+}
+
+/// One "Always" rule proposal as its owner reads it (build plan WS13 S7, migration 0126). Ids, a
+/// digest and closed words only: no content.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ApprovalRuleProposalRow {
+    pub id: String,
+    pub tool_name: String,
+    pub tool_digest: String,
+    /// The capability-core id a confirm writes the rule under, or empty for a proposal made
+    /// before migration 0126 (it reads as stale and cannot be confirmed).
+    pub capability_id: String,
+    /// `proposed`, `confirming`, `confirmed` or `dismissed`.
+    pub state: String,
+    pub created_from_approval_id: String,
+    pub created_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
+    /// The capability-core policy a confirm wrote, or empty until then.
+    pub policy_id: String,
+}
+
+const APPROVAL_RULE_PROPOSAL_COLUMNS: &str = "id, tool_name, tool_digest, capability_id, state, \
+     created_from_approval_id, created_at, resolved_at, policy_id";
+
+/// How long a confirm's claim holds a proposal against a dismiss. A confirm is a saga across
+/// services (D-WS13-2): it claims the row, writes the rule in capability-core, then records the
+/// policy. A dismiss refuses while the claim is this fresh, so it cannot land between the write
+/// and the record and leave a live allow behind a dismissed proposal. Mirrored in
+/// [`RESOLVE_RULE_PROPOSAL_DISMISSED_SQL`].
+pub const RULE_PROPOSAL_CLAIM_SECS: u32 = 60;
+
+/// How one call resolves a proposal (build plan WS13 S7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleProposalResolution<'a> {
+    /// A confirm takes the row before it writes the rule. Re-claiming its own claim is the
+    /// idempotent retry.
+    Claim,
+    /// The confirm wrote the rule; the row records the policy and becomes `confirmed`.
+    Confirmed {
+        /// The capability-core policy id the confirm wrote.
+        policy_id: &'a str,
+    },
+    /// The person dismissed the proposal.
+    Dismissed,
+}
+
+/// Why a proposal could not be resolved as asked. Returned as the error of
+/// [`resolve_rule_proposal`]; downcast it like [`ScopeGrantRefusal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleProposalRefusal {
+    /// The proposal is already resolved the other way (or confirmed under another policy).
+    Resolved,
+    /// The proposal predates migration 0126 and names no capability, so it cannot be confirmed.
+    Stale,
+    /// A confirm holds the proposal and its claim is still fresh, so a dismiss must wait.
+    Busy,
+    /// A confirm recorded its result without having claimed the proposal.
+    NotClaimed,
+}
+
+impl RuleProposalRefusal {
+    /// The closed token the refusal reaches the caller as.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::Resolved => "rule_proposal_resolved",
+            Self::Stale => "rule_proposal_stale",
+            Self::Busy => "rule_proposal_busy",
+            Self::NotClaimed => "rule_proposal_not_claimed",
+        }
+    }
+}
+
+impl std::fmt::Display for RuleProposalRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+impl std::error::Error for RuleProposalRefusal {}
+
+/// A confirm takes an open proposal that names a capability. Owner-bound by id, org and user.
+const RESOLVE_RULE_PROPOSAL_CLAIM_SQL: &str = "UPDATE approval_rule_proposals \
+     SET state = 'confirming', claimed_at = now() \
+     WHERE id = $1 AND org_id = $2 AND user_id = $3 \
+       AND state IN ('proposed', 'confirming') AND capability_id <> '' \
+     RETURNING id, tool_name, tool_digest, capability_id, state, created_from_approval_id, \
+               created_at, resolved_at, policy_id";
+
+/// A confirm that wrote its rule records the policy on the row it claimed.
+const RESOLVE_RULE_PROPOSAL_CONFIRMED_SQL: &str = "UPDATE approval_rule_proposals \
+     SET state = 'confirmed', policy_id = $4, resolved_at = now() \
+     WHERE id = $1 AND org_id = $2 AND user_id = $3 AND state = 'confirming' \
+     RETURNING id, tool_name, tool_digest, capability_id, state, created_from_approval_id, \
+               created_at, resolved_at, policy_id";
+
+/// A dismiss takes a proposed row, or a claim old enough that its confirm is presumed dead.
+const RESOLVE_RULE_PROPOSAL_DISMISSED_SQL: &str = "UPDATE approval_rule_proposals \
+     SET state = 'dismissed', resolved_at = now() \
+     WHERE id = $1 AND org_id = $2 AND user_id = $3 \
+       AND (state = 'proposed' \
+            OR (state = 'confirming' AND claimed_at < now() - interval '60 seconds')) \
+     RETURNING id, tool_name, tool_digest, capability_id, state, created_from_approval_id, \
+               created_at, resolved_at, policy_id";
+
+/// The owner's open proposals (proposed, or held by a confirm), oldest first.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn list_open_rule_proposals(
+    pool: &Pool,
+    org_id: &str,
+    user_id: &str,
+) -> Result<Vec<ApprovalRuleProposalRow>> {
+    let sql = format!(
+        "SELECT {APPROVAL_RULE_PROPOSAL_COLUMNS} FROM approval_rule_proposals \
+         WHERE org_id = $1 AND user_id = $2 AND state IN ('proposed', 'confirming') \
+         ORDER BY created_at, id LIMIT 100"
+    );
+    Ok(sqlx::query_as::<_, ApprovalRuleProposalRow>(&sql)
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_all(pool)
+        .await?)
+}
+
+/// One of the owner's proposals in any state, or `None` when the owner has no such proposal.
+/// Another person's proposal reads as absent.
+///
+/// # Errors
+///
+/// Returns an error if the query fails.
+pub async fn get_rule_proposal(
+    pool: &Pool,
+    org_id: &str,
+    user_id: &str,
+    id: &str,
+) -> Result<Option<ApprovalRuleProposalRow>> {
+    let sql = format!(
+        "SELECT {APPROVAL_RULE_PROPOSAL_COLUMNS} FROM approval_rule_proposals \
+         WHERE id = $1 AND org_id = $2 AND user_id = $3"
+    );
+    Ok(sqlx::query_as::<_, ApprovalRuleProposalRow>(&sql)
+        .bind(id)
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?)
+}
+
+/// What a resolution that matched no row means, given the row as it stands (build plan WS13 S7).
+/// A replay of a resolution that already happened returns the row; a resolution the row's state
+/// forbids is a [`RuleProposalRefusal`].
+fn rule_proposal_unmatched(
+    resolution: RuleProposalResolution<'_>,
+    row: ApprovalRuleProposalRow,
+) -> std::result::Result<ApprovalRuleProposalRow, RuleProposalRefusal> {
+    let open = matches!(row.state.as_str(), "proposed" | "confirming");
+    match resolution {
+        RuleProposalResolution::Claim => {
+            if row.state == "confirmed" {
+                Ok(row)
+            } else if open && row.capability_id.is_empty() {
+                Err(RuleProposalRefusal::Stale)
+            } else {
+                Err(RuleProposalRefusal::Resolved)
+            }
+        }
+        RuleProposalResolution::Confirmed { policy_id } => {
+            if row.state == "confirmed" && row.policy_id == policy_id {
+                Ok(row)
+            } else if row.state == "proposed" {
+                Err(RuleProposalRefusal::NotClaimed)
+            } else {
+                Err(RuleProposalRefusal::Resolved)
+            }
+        }
+        RuleProposalResolution::Dismissed => {
+            if row.state == "dismissed" {
+                Ok(row)
+            } else if row.state == "confirming" {
+                Err(RuleProposalRefusal::Busy)
+            } else {
+                Err(RuleProposalRefusal::Resolved)
+            }
+        }
+    }
+}
+
+/// Resolve one of the owner's proposals (build plan WS13 S7). One UPDATE per resolution, every
+/// WHERE bound to the id, org and user. `None` when the owner has no such proposal; a refusal is
+/// an `Err` that downcasts to [`RuleProposalRefusal`].
+///
+/// A confirm calls this with [`RuleProposalResolution::Claim`] before it writes the rule in
+/// capability-core, and with [`RuleProposalResolution::Confirmed`] after, so a dismiss cannot land
+/// between the two (review finding 3). Residual: a confirm that dies after its capability-core
+/// write and before its `Confirmed` leaves a claim. Dismissing it after
+/// [`RULE_PROPOSAL_CLAIM_SECS`] leaves that allow in place; it is revocable with
+/// `DELETE /v1/tool-policies/{capability_id}?scope=user` and lapses after 90 days.
+///
+/// # Errors
+///
+/// Returns an error if a query fails, if a `Confirmed` resolution names an empty policy id, or a
+/// [`RuleProposalRefusal`] when the proposal's state forbids the resolution.
+pub async fn resolve_rule_proposal(
+    pool: &Pool,
+    org_id: &str,
+    user_id: &str,
+    id: &str,
+    resolution: RuleProposalResolution<'_>,
+) -> Result<Option<ApprovalRuleProposalRow>> {
+    let sql = match resolution {
+        RuleProposalResolution::Claim => RESOLVE_RULE_PROPOSAL_CLAIM_SQL,
+        RuleProposalResolution::Confirmed { policy_id } => {
+            if policy_id.is_empty() {
+                bail!("a confirmed proposal records the policy it wrote");
+            }
+            RESOLVE_RULE_PROPOSAL_CONFIRMED_SQL
+        }
+        RuleProposalResolution::Dismissed => RESOLVE_RULE_PROPOSAL_DISMISSED_SQL,
+    };
+    let mut update = sqlx::query_as::<_, ApprovalRuleProposalRow>(sql)
+        .bind(id)
+        .bind(org_id)
+        .bind(user_id);
+    if let RuleProposalResolution::Confirmed { policy_id } = resolution {
+        update = update.bind(policy_id);
+    }
+    if let Some(row) = update.fetch_optional(pool).await? {
+        return Ok(Some(row));
+    }
+    let Some(row) = get_rule_proposal(pool, org_id, user_id, id).await? else {
+        return Ok(None);
+    };
+    match rule_proposal_unmatched(resolution, row) {
+        Ok(row) => Ok(Some(row)),
+        Err(refusal) => Err(refusal.into()),
+    }
 }
 
 /// The call an approval authorised, read from its retained descriptor.
@@ -2420,6 +2694,100 @@ fn consumed_revision(revision: i16, original: Option<String>) -> (u32, String) {
         }
         _ => (0, String::new()),
     }
+}
+
+/// Remove the encrypted continuation descriptor of an approval that was just denied or timed out,
+/// except that of a DENIED `browser_human_assist` pause (`$3` is that cause's code), which the
+/// continuation of a skipped site reads once ([`read_skipped_assist_authority`]). Run in the
+/// decision's own transaction, after the status is written, so the status it reads is the new one.
+const DELETE_DECIDED_DESCRIPTOR_SQL: &str = "DELETE FROM approval_continuation_descriptors AS d \
+     WHERE d.approval_id = $1 AND d.org_id = $2 \
+       AND NOT EXISTS (SELECT 1 FROM approvals AS a \
+                       WHERE a.id = d.approval_id AND a.org_id = d.org_id \
+                         AND a.status = 'denied' \
+                         AND a.metadata #>> '{cause,code}' = $3)";
+
+/// Why the retained authority of a skipped site could not be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkippedAssistRefusal {
+    /// No such approval for this org, run and user, or its run has ended.
+    NotFound,
+    /// The run keeps no state (zero retention or waived), so there is nothing retained to read.
+    NotKeptState,
+    /// The approval is not a denied, unconsumed `browser_human_assist` pause.
+    NotSkipped,
+    /// The step the caller names is not the step the retained descriptor gated.
+    ActionMismatch,
+    /// The approval retains no descriptor, or its descriptor holds no tools and authority.
+    NotResumable,
+}
+
+/// Read, without consuming anything, the tools and authority a DENIED `browser_human_assist` pause
+/// retained ("Skip this site"): the `offered` section of its encrypted continuation descriptor, as
+/// JSON text for the same parser a consume uses (`approved_authority`). Nothing is claimed, spent,
+/// written or logged, and the descriptor stays as it is. The approval must be the caller's own, in
+/// the caller's org and run, of a run that keeps state and has not ended, denied, never consumed,
+/// and raised under `browser_human_assist`; `step_id`, when not empty, must be the step the
+/// descriptor gated.
+///
+/// # Errors
+///
+/// Returns a database, key or decryption error as `Err`, and a closed [`SkippedAssistRefusal`] as
+/// `Ok(Err(..))`.
+pub async fn read_skipped_assist_authority(
+    pool: &Pool,
+    id: &str,
+    org_id: &str,
+    run_id: &str,
+    user_id: &str,
+    step_id: &str,
+) -> Result<std::result::Result<String, SkippedAssistRefusal>> {
+    let row: Option<(String, String, bool, String, Option<String>)> = sqlx::query_as(
+        "SELECT a.status, COALESCE(a.metadata #>> '{cause,code}', ''), a.consumed_at IS NOT NULL, \
+                r.retention_class, d.ciphertext \
+         FROM approvals a \
+         JOIN runs r ON r.id = a.run_id AND r.org_id = a.org_id \
+         LEFT JOIN approval_continuation_descriptors d \
+           ON d.approval_id = a.id AND d.org_id = a.org_id AND d.run_id = a.run_id \
+          AND d.user_id = a.user_id \
+         WHERE a.id = $1 AND a.org_id = $2 AND a.run_id = $3 AND a.user_id = $4 \
+           AND r.status NOT IN ('completed', 'failed', 'cancelled')",
+    )
+    .bind(id)
+    .bind(org_id)
+    .bind(run_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((status, cause_code, consumed, retention_class, ciphertext)) = row else {
+        return Ok(Err(SkippedAssistRefusal::NotFound));
+    };
+    if retention_class != "persistent" {
+        return Ok(Err(SkippedAssistRefusal::NotKeptState));
+    }
+    if status != "denied"
+        || consumed
+        || cause_code != mp_contracts::approval_cause::CauseCode::BrowserHumanAssist.as_str()
+    {
+        return Ok(Err(SkippedAssistRefusal::NotSkipped));
+    }
+    let Some(ciphertext) = ciphertext else {
+        return Ok(Err(SkippedAssistRefusal::NotResumable));
+    };
+    let plaintext = DescriptorCipher::from_env()?.decrypt(id, org_id, user_id, &ciphertext)?;
+    let descriptor: JsonValue = serde_json::from_str(&plaintext)
+        .map_err(|error| anyhow::anyhow!("stored continuation descriptor is invalid: {error}"))?;
+    let gated_step = descriptor
+        .get("step_id")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    if !step_id.is_empty() && step_id != gated_step {
+        return Ok(Err(SkippedAssistRefusal::ActionMismatch));
+    }
+    Ok(descriptor
+        .get("offered")
+        .map(JsonValue::to_string)
+        .ok_or(SkippedAssistRefusal::NotResumable))
 }
 
 const DECIDE_APPROVAL_SQL: &str =
@@ -3150,6 +3518,157 @@ pub async fn list_continuation_evidence_for_run(
 }
 
 // ---------------------------------------------------------------------------
+// Browser walkthrough (proof bundle, F-t3-050)
+// ---------------------------------------------------------------------------
+
+/// The most walkthrough steps one proof bundle carries. A run with more browser
+/// actions than this shows its earliest steps and sets `truncated`.
+pub const BROWSER_WALKTHROUGH_STEP_CAP: usize = 200;
+
+/// One browser event row as `persist_browser_event` wrote it to the event log.
+/// Only the two walkthrough event types are selected into this shape.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct BrowserEventRow {
+    pub event_type: String,
+    pub payload: JsonValue,
+    pub ts: DateTime<Utc>,
+}
+
+/// One browser action of a walkthrough, joined with the observation recorded
+/// after it. Only what the event log already holds: the page facts the executor
+/// reported (URL and title scrubbed at emission) and references, never DOM or page text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrowserWalkthroughStepRow {
+    pub action_id: String,
+    pub action_type: String,
+    pub page_url: String,
+    pub page_title: String,
+    pub status: String,
+    pub screenshot_ref: String,
+    pub at: DateTime<Utc>,
+}
+
+/// A run's walkthrough steps in order, and whether the read or the step cap
+/// stopped it short of the run's whole browser history.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BrowserWalkthroughSteps {
+    pub steps: Vec<BrowserWalkthroughStepRow>,
+    pub truncated: bool,
+}
+
+/// List one run's browser walkthrough, tenant-scoped. The rows are the
+/// `BROWSER_ACTION_DISPATCHED` and `BROWSER_OBSERVATION_RECEIVED` events that
+/// `persist_browser_event` wrote, read in time order and joined into steps.
+///
+/// `limit` is the most steps returned. The read fetches at most two rows per
+/// step, plus one row to learn whether the run has more, so a long browser
+/// history costs a bounded read.
+///
+/// # Errors
+///
+/// Returns an error when the tenant is empty or the query fails.
+pub async fn list_browser_walkthrough_for_run(
+    pool: &Pool,
+    run_id: &str,
+    org_id: &str,
+    limit: usize,
+) -> Result<BrowserWalkthroughSteps> {
+    if org_id.trim().is_empty() {
+        bail!("org_id is required");
+    }
+    let row_bound = limit.saturating_mul(2);
+    let fetch = i64::try_from(row_bound.saturating_add(1)).unwrap_or(i64::MAX);
+    let mut rows = sqlx::query_as::<_, BrowserEventRow>(
+        "SELECT event_type, payload, ts FROM events \
+         WHERE run_id = $1 AND org_id = $2 \
+           AND event_type IN ('BROWSER_ACTION_DISPATCHED', 'BROWSER_OBSERVATION_RECEIVED') \
+         ORDER BY ts ASC, id ASC LIMIT $3",
+    )
+    .bind(run_id)
+    .bind(org_id)
+    .bind(fetch)
+    .fetch_all(pool)
+    .await?;
+    let read_truncated = rows.len() > row_bound;
+    rows.truncate(row_bound);
+    Ok(join_browser_walkthrough(&rows, limit, read_truncated))
+}
+
+/// Join walkthrough rows into steps, one per browser action, in the order each
+/// action first appears. An action is keyed by its plan and its action id, since
+/// action ids restart within each plan. The dispatch row gives the action type.
+/// The latest observation row gives the page facts, the status and the screenshot
+/// reference, and its time becomes the step's time. An action with no observation
+/// yet keeps those fields empty and is timed by its dispatch. Rows without an
+/// action id are not a step and are skipped.
+///
+/// `read_truncated` says the read stopped short; `step_cap` bounds the steps.
+#[must_use]
+pub fn join_browser_walkthrough(
+    rows: &[BrowserEventRow],
+    step_cap: usize,
+    read_truncated: bool,
+) -> BrowserWalkthroughSteps {
+    let mut steps: Vec<BrowserWalkthroughStepRow> = Vec::new();
+    let mut position: std::collections::HashMap<(&str, &str), usize> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let action_id = row.payload.get("action_id").and_then(JsonValue::as_str);
+        let Some(action_id) = action_id.filter(|id| !id.trim().is_empty()) else {
+            continue;
+        };
+        let plan_id = row
+            .payload
+            .get("plan_id")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default();
+        let index = *position.entry((plan_id, action_id)).or_insert_with(|| {
+            steps.push(BrowserWalkthroughStepRow {
+                action_id: action_id.to_owned(),
+                action_type: String::new(),
+                page_url: String::new(),
+                page_title: String::new(),
+                status: String::new(),
+                screenshot_ref: String::new(),
+                at: row.ts,
+            });
+            steps.len() - 1
+        });
+        let step = &mut steps[index];
+        match row.event_type.as_str() {
+            "BROWSER_ACTION_DISPATCHED" => {
+                if step.action_type.is_empty() {
+                    step.action_type = payload_text(&row.payload, "action_type");
+                }
+            }
+            "BROWSER_OBSERVATION_RECEIVED" => {
+                step.page_url = payload_text(&row.payload, "page_url");
+                step.page_title = payload_text(&row.payload, "page_title");
+                step.status = payload_text(&row.payload, "status");
+                step.screenshot_ref = payload_text(&row.payload, "screenshot_ref");
+                step.at = row.ts;
+            }
+            _ => {}
+        }
+    }
+    let over_cap = steps.len() > step_cap;
+    steps.truncate(step_cap);
+    BrowserWalkthroughSteps {
+        steps,
+        truncated: read_truncated || over_cap,
+    }
+}
+
+/// The string at `key` of a walkthrough payload, or empty when it is absent or not text.
+fn payload_text(payload: &JsonValue, key: &str) -> String {
+    payload
+        .get(key)
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+// ---------------------------------------------------------------------------
 // Verification metrics (verevon-vision.md §2.1 / §7, roadmap P1 item 5)
 // ---------------------------------------------------------------------------
 
@@ -3309,6 +3828,9 @@ pub struct NewRunQuestion<'a> {
     pub origin: &'a str,
     /// Empty for a `model` origin; the server's name otherwise.
     pub origin_label: &'a str,
+    /// Store the question only while the run is live and holds a paused input fold whose
+    /// `pause_ref` is this question's idempotency key (a `resume` question, WS14 S5).
+    pub require_paused_fold: bool,
 }
 
 /// What [`create_run_question`] did.
@@ -3322,6 +3844,9 @@ pub enum CreatedRunQuestion {
     BudgetExhausted,
     /// The idempotency key belongs to another run's question.
     KeyInUse,
+    /// The question needs a paused input fold and the run has none: the run is over, or its
+    /// checkpoint is not a paused fold with this question's reference.
+    PauseMissing,
 }
 
 /// Store a question, once per idempotency key, within the run's question budget.
@@ -3329,6 +3854,12 @@ pub enum CreatedRunQuestion {
 /// The run row is locked for the duration so two concurrent asks cannot both fit under the
 /// budget. A retry that names an existing key is answered with the stored row before the
 /// budget is looked at, so a retry never fails for a question it already made.
+///
+/// With `require_paused_fold` set, the question is stored only while the run has not ended and
+/// holds a paused fold whose `pause_ref` equals the idempotency key. The key is the namespaced
+/// input reference, which an approval fold's `pause_ref` never equals, so only an input pause
+/// matches; the fold itself is never opened. The check follows the replay read, so a retry of a
+/// question already stored returns it as before.
 ///
 /// # Errors
 ///
@@ -3360,6 +3891,30 @@ pub async fn create_run_question(
             } else {
                 CreatedRunQuestion::KeyInUse
             });
+        }
+    }
+
+    if new.require_paused_fold {
+        let live: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM runs WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled')",
+        )
+        .bind(new.run_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let paused: Option<i32> = if live.is_some() && !new.idempotency_key.is_empty() {
+            sqlx::query_scalar(
+                "SELECT 1 FROM run_loop_checkpoints                  WHERE run_id = $1 AND kind = 'pause' AND state = 'paused' AND pause_ref = $2",
+            )
+            .bind(new.run_id)
+            .bind(new.idempotency_key)
+            .fetch_optional(&mut *transaction)
+            .await?
+        } else {
+            None
+        };
+        if paused.is_none() {
+            transaction.commit().await?;
+            return Ok(CreatedRunQuestion::PauseMissing);
         }
     }
 
@@ -3577,24 +4132,36 @@ pub enum ConsumedRunQuestion {
     NotAnswered,
     /// The question is not a `resume` question of this run.
     NotResumable,
-    /// The question lapsed before it was answered.
+    /// The question lapsed before it was answered, or its answer was not spent inside the resume window.
     Expired,
     /// No such question for this owner and run.
     NotFound,
+    /// The run is gone or already ended (completed, failed or cancelled): there is no continuation to
+    /// hand the answer to, and the question is left untouched.
+    RunEnded,
 }
 
 /// Spend the answer of a `resume` question once, for the continuation of the run that asked it
-/// (build plan WS14 S5).
+/// (build plan WS14 S5; D2-1162, D2-1168).
 ///
-/// The spend is one compare-and-set on `consumed_at IS NULL`, with the owner, org, run and delivery as
-/// predicates, so two continuations race and exactly one wins. The winner stores the hash of its claim
-/// token: a retry with that token replays the answer, and any other claim is refused. The spend does
-/// not read `expires_at`, because the answer was accepted while the question was still open.
+/// The spend is one transaction. It first takes the run row `FOR SHARE`, the row that terminalization
+/// locks `FOR UPDATE`, so the two serialise (lock order: runs, then run_questions, as terminalization).
+/// A missing run, or one that is completed, failed or cancelled, is [`ConsumedRunQuestion::RunEnded`]
+/// and the question is not touched. Then comes one compare-and-set on `consumed_at IS NULL`, with the
+/// owner, org, run and delivery as predicates, so two continuations race and exactly one wins. Both an
+/// answered question and a skipped one are spendable (a skip continues the run too). The spend reads
+/// `answered_at` against the resume window
+/// ([`mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS`]), the same window the recovery hold and the
+/// recovery lapse read; it does not read `expires_at`, because the answer was accepted while the question
+/// was still open. The winner stores the hash of its claim token: a retry with that token replays the
+/// answer, and any other claim is refused. A winning spend also renews the run's recovery deadline in the
+/// same transaction (as the approval spend does), because the answer no longer holds the run back and
+/// recovery must not end the continuation before its first heartbeat; a replay renews nothing.
 ///
 /// # Errors
 ///
-/// Returns an error if a statement fails, or if the question is still answered and unspent after two
-/// attempts (a state these statements cannot reach).
+/// Returns an error if a statement fails, or if the question is still answered and unspent inside its
+/// window after two attempts (a state these statements cannot reach).
 pub async fn consume_run_question(
     pool: &Pool,
     question_id: &str,
@@ -3603,6 +4170,22 @@ pub async fn consume_run_question(
     run_id: &str,
     claim_hash: &str,
 ) -> Result<ConsumedRunQuestion> {
+    let window_secs = f64::from(mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS);
+    let mut transaction = pool.begin().await?;
+    let run_status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM runs WHERE id = $1 AND org_id = $2 FOR SHARE")
+            .bind(run_id)
+            .bind(org_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+    let run_is_live = run_status
+        .as_deref()
+        .is_some_and(|status| !matches!(status, "completed" | "failed" | "cancelled"));
+    if !run_is_live {
+        transaction.commit().await?;
+        return Ok(ConsumedRunQuestion::RunEnded);
+    }
+
     // An answer recorded between a missed spend and its read is spent by the second attempt. An
     // answered question is never answered again, so one retry is enough.
     for _ in 0..2 {
@@ -3610,7 +4193,8 @@ pub async fn consume_run_question(
             "UPDATE run_questions \
                 SET consumed_at = now(), consumed_claim_hash = $5 \
               WHERE id = $1 AND org_id = $2 AND user_id = $3 AND run_id = $4 \
-                AND delivery = 'resume' AND state = 'answered' AND consumed_at IS NULL \
+                AND delivery = 'resume' AND state IN ('answered', 'skipped') AND consumed_at IS NULL \
+                AND answered_at > now() - make_interval(secs => $6) \
           RETURNING {RUN_QUESTION_COLUMNS}"
         ))
         .bind(question_id)
@@ -3618,9 +4202,12 @@ pub async fn consume_run_question(
         .bind(user_id)
         .bind(run_id)
         .bind(claim_hash)
-        .fetch_optional(pool)
+        .bind(window_secs)
+        .fetch_optional(&mut *transaction)
         .await?;
         if let Some(row) = won {
+            renew_recovery_deadline(&mut transaction, org_id, run_id).await?;
+            transaction.commit().await?;
             info!(question_id = %row.id, run_id = %row.run_id, "run question answer consumed");
             return Ok(ConsumedRunQuestion::Consumed(row));
         }
@@ -3634,37 +4221,57 @@ pub async fn consume_run_question(
         .bind(question_id)
         .bind(org_id)
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *transaction)
         .await?;
-        let Some(row) = get_run_question(pool, question_id, org_id, user_id).await? else {
+        let row = sqlx::query_as::<_, RunQuestionRow>(&format!(
+            "SELECT {RUN_QUESTION_COLUMNS} FROM run_questions \
+             WHERE id = $1 AND org_id = $2 AND user_id = $3"
+        ))
+        .bind(question_id)
+        .bind(org_id)
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.commit().await?;
             return Ok(ConsumedRunQuestion::NotFound);
         };
         if row.run_id != run_id {
+            transaction.commit().await?;
             return Ok(ConsumedRunQuestion::NotFound);
         }
         if row.delivery != "resume" {
+            transaction.commit().await?;
             return Ok(ConsumedRunQuestion::NotResumable);
         }
-        match row.state.as_str() {
-            "expired" => return Ok(ConsumedRunQuestion::Expired),
-            "requested" | "skipped" | "cancelled" => return Ok(ConsumedRunQuestion::NotAnswered),
-            "answered" => {
-                let stored: Option<String> =
-                    sqlx::query_scalar("SELECT consumed_claim_hash FROM run_questions WHERE id = $1")
-                        .bind(question_id)
-                        .fetch_one(pool)
-                        .await?;
+        let outcome = match row.state.as_str() {
+            "expired" => ConsumedRunQuestion::Expired,
+            "requested" | "cancelled" => ConsumedRunQuestion::NotAnswered,
+            "answered" | "skipped" => {
+                let (stored, lapsed): (Option<String>, bool) = sqlx::query_as(
+                    "SELECT consumed_claim_hash, \
+                            COALESCE(answered_at <= now() - make_interval(secs => $2), false) AS lapsed \
+                     FROM run_questions WHERE id = $1",
+                )
+                .bind(question_id)
+                .bind(window_secs)
+                .fetch_one(&mut *transaction)
+                .await?;
                 match stored {
-                    Some(stored) if stored == claim_hash => {
-                        return Ok(ConsumedRunQuestion::Replay(row));
-                    }
-                    Some(_) => return Ok(ConsumedRunQuestion::AlreadyConsumed),
-                    // Answered after the spend missed and still unspent: the next attempt spends it.
-                    None => {}
+                    Some(stored) if stored == claim_hash => ConsumedRunQuestion::Replay(row),
+                    Some(_) => ConsumedRunQuestion::AlreadyConsumed,
+                    // The answer lapsed unspent. This check comes before the retry arm, so a lapsed row
+                    // never loops into the final bail.
+                    None if lapsed => ConsumedRunQuestion::Expired,
+                    // Answered after the spend missed and still unspent inside its window: the next
+                    // attempt spends it.
+                    None => continue,
                 }
             }
             other => bail!("run question {question_id} has an unknown state {other}"),
-        }
+        };
+        transaction.commit().await?;
+        return Ok(outcome);
     }
     bail!("run question {question_id} could not be spent after two attempts")
 }
@@ -3729,9 +4336,44 @@ mod run_question_tests {
             .expect("the spend function is present")..];
         let body = &body[..body.find("\n}\n").expect("end of the function")];
         assert!(body.contains("WHERE id = $1 AND org_id = $2 AND user_id = $3 AND run_id = $4"));
-        assert!(body.contains("AND delivery = 'resume' AND state = 'answered' AND consumed_at IS NULL"));
+        assert!(body.contains(
+            "AND delivery = 'resume' AND state IN ('answered', 'skipped') AND consumed_at IS NULL"
+        ));
+        assert!(body.contains("AND answered_at > now() - make_interval(secs => $6)"));
         assert!(body.contains("SET consumed_at = now(), consumed_claim_hash = $5"));
         assert!(!body.contains("claim_token"), "the raw claim token is never bound");
+    }
+
+    /// The spend serialises with terminalization on the runs row, refuses an ended run before it touches
+    /// the question, reads the one shared answer window, and renews the recovery deadline once, behind the
+    /// winning branch and before the commit.
+    #[test]
+    fn run_question_the_spend_locks_the_run_reads_the_window_and_renews_once_behind_a_win() {
+        let source = include_str!("orchestration_store.rs").replace("\r\n", "\n");
+        let body = &source[source
+            .find("pub async fn consume_run_question(")
+            .expect("the spend function is present")..];
+        let body = &body[..body.find("\n}\n").expect("end of the function")];
+        let lock = body
+            .find("SELECT status FROM runs WHERE id = $1 AND org_id = $2 FOR SHARE")
+            .expect("the run row is locked first");
+        let cas = body.find("SET consumed_at = now()").expect("the compare-and-set");
+        let ended = body.find("ConsumedRunQuestion::RunEnded").expect("an ended run is refused");
+        assert!(lock < ended && ended < cas, "the run is read and refused before the question is touched");
+        assert!(body.contains("f64::from(mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS)"));
+        assert!(!body.contains("interval '1 hour'"), "the window is the shared constant, never a literal");
+        assert!(body.contains("answered_at <= now() - make_interval(secs => $2)"));
+        assert_eq!(body.matches("renew_recovery_deadline(").count(), 1);
+        let renew = body.find("renew_recovery_deadline(").unwrap();
+        let won = body.find("if let Some(row) = won").expect("the winning branch");
+        let commit = renew + body[renew..].find("transaction.commit()").expect("the win commits");
+        let consumed = body.find("ConsumedRunQuestion::Consumed(row)").expect("the win returns Consumed");
+        assert!(won < renew && renew < commit && commit < consumed, "the renewal is inside the winning transaction");
+        // The lapse check precedes the retry arm, so a lapsed row never loops into the final bail.
+        let lapsed_arm = body.find("None if lapsed => ConsumedRunQuestion::Expired").expect("the lapsed arm");
+        let retry_arm = body.find("None => continue").expect("the retry arm");
+        assert!(lapsed_arm < retry_arm);
+        assert!(!body.contains("claim_token"));
     }
 }
 
@@ -3757,6 +4399,15 @@ mod tests {
         assert!(DECIDE_APPROVAL_SQL.contains("'{decision}', $7::jsonb, true)"));
         assert!(INSERT_APPROVAL_AUDIT_OUTBOX_SQL.contains("ON CONFLICT (event_id) DO NOTHING"));
         assert!(APPROVAL_AUDIT_CONTEXT_SQL.contains("id = $1 AND org_id = $2"));
+    }
+
+    #[test]
+    fn approval_audit_row_is_allowed_only_for_a_persistent_run() {
+        assert!(approval_audit_row_allowed(Some("persistent")));
+        assert!(!approval_audit_row_allowed(Some("zdr")));
+        assert!(!approval_audit_row_allowed(Some("zdr_waived")));
+        assert!(!approval_audit_row_allowed(None));
+        assert!(!approval_audit_row_allowed(Some("anything_else")));
     }
 
     #[test]
@@ -3787,8 +4438,11 @@ mod tests {
 
     #[test]
     fn the_grant_names_its_proposal_and_a_renewal_keeps_the_link() {
-        assert!(INSERT_APPROVAL_SCOPE_GRANT_SQL
-            .contains("rule_id = COALESCE(EXCLUDED.rule_id, approval_scope_grants.rule_id)"));
+        assert!(INSERT_APPROVAL_SCOPE_GRANT_SQL.contains(
+            "rule_id = CASE WHEN approval_scope_grants.tool_digest = EXCLUDED.tool_digest \
+             THEN COALESCE(EXCLUDED.rule_id, approval_scope_grants.rule_id) \
+             ELSE EXCLUDED.rule_id END"
+        ));
         assert!(INSERT_APPROVAL_RULE_PROPOSAL_SQL.contains("WHERE state = 'proposed'"));
     }
 
@@ -5655,6 +6309,26 @@ mod run_question_db_tests {
         Seed { run_id, thread_id, org, user }
     }
 
+    /// A second run of `seed`'s own owner, org and thread. `seed_run` mints a fresh org for every call,
+    /// so a run that must sit beside `seed` in one org is seeded here.
+    async fn seed_sibling_run(pool: &Pool, seed: &Seed, tag: &str) -> Seed {
+        let run_id = format!("rq-r-{tag}-{}", mp_ids::new_ulid());
+        sqlx::query("INSERT INTO runs (id,thread_id,goal,org_id,user_id) VALUES ($1,$2,'g',$3,$4)")
+            .bind(&run_id)
+            .bind(&seed.thread_id)
+            .bind(&seed.org)
+            .bind(&seed.user)
+            .execute(pool)
+            .await
+            .expect("seed sibling run");
+        Seed {
+            run_id,
+            thread_id: seed.thread_id.clone(),
+            org: seed.org.clone(),
+            user: seed.user.clone(),
+        }
+    }
+
     fn spec() -> JsonValue {
         serde_json::json!([{
             "id": "scope", "kind": "single", "prompt": "Which one?",
@@ -5685,6 +6359,7 @@ mod run_question_db_tests {
                 expires_at: Utc::now() + expires_in,
                 origin: "model",
                 origin_label: "",
+                require_paused_fold: false,
             },
             3,
         )
@@ -5788,6 +6463,7 @@ mod run_question_db_tests {
                         expires_at: Utc::now() + chrono::Duration::hours(1),
                         origin: "model",
                         origin_label: "",
+                        require_paused_fold: false,
                     },
                     3,
                 )
@@ -6015,6 +6691,7 @@ mod run_question_db_tests {
                 expires_at: Utc::now() + expires_in,
                 origin: "model",
                 origin_label: "",
+                require_paused_fold: false,
             },
             3,
         )
@@ -6086,7 +6763,8 @@ mod run_question_db_tests {
     async fn run_question_a_spend_is_refused_for_another_owner_run_delivery_or_state() {
         let Some(pool) = scratch_pool().await else { return };
         let seed = seed_run(&pool, "refuse").await;
-        let other_run = seed_run(&pool, "refuse-other").await;
+        // Same owner, org and thread as `seed`, so only the run id differs.
+        let other_run = seed_sibling_run(&pool, &seed, "refuse-other").await;
         let question = resume_question(&pool, &seed, "refuse-1", chrono::Duration::hours(1)).await;
         answer(&pool, &seed, &question.id, "a", false).await;
 
@@ -6109,9 +6787,8 @@ mod run_question_db_tests {
 
         let waiting = resume_question(&pool, &seed, "refuse-2", chrono::Duration::hours(1)).await;
         assert!(matches!(spend(&pool, &seed, &waiting.id, "x").await, ConsumedRunQuestion::NotAnswered));
-        let skipped = resume_question(&pool, &seed, "refuse-3", chrono::Duration::hours(1)).await;
-        answer(&pool, &seed, &skipped.id, "a", true).await;
-        assert!(matches!(spend(&pool, &seed, &skipped.id, "x").await, ConsumedRunQuestion::NotAnswered));
+        // A skipped resume question is spendable (b1): see
+        // run_question_a_skip_is_spendable_once_and_the_same_claim_replays_it.
         // A run asks at most three questions, so the next-turn question lives on its own run.
         let turn = created(&pool, &other_run, "refuse-4").await;
         answer(&pool, &other_run, &turn.id, "a", false).await;
@@ -6125,6 +6802,167 @@ mod run_question_db_tests {
         let seed = seed_run(&pool, "lapsed").await;
         let question = resume_question(&pool, &seed, "lapsed-1", -chrono::Duration::hours(1)).await;
         assert!(matches!(spend(&pool, &seed, &question.id, "x").await, ConsumedRunQuestion::Expired));
+    }
+
+    /// Build plan WS14 S5 b1 (D2-1162, D2-1168). WRITTEN, NOT RUN by the author: the tests below need the
+    /// disposable-Postgres harness, which the lead runs.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_a_skip_is_spendable_once_and_the_same_claim_replays_it() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "skip-spend").await;
+        let question = resume_question(&pool, &seed, "skip-1", chrono::Duration::hours(1)).await;
+        answer(&pool, &seed, &question.id, "a", true).await;
+        match spend(&pool, &seed, &question.id, "claim-a").await {
+            ConsumedRunQuestion::Consumed(row) => assert_eq!(row.state, "skipped"),
+            other => panic!("the first claim spends the skip, got {other:?}"),
+        }
+        assert!(
+            matches!(spend(&pool, &seed, &question.id, "claim-a").await, ConsumedRunQuestion::Replay(_)),
+            "a retried skip continuation replays"
+        );
+        assert!(
+            matches!(spend(&pool, &seed, &question.id, "claim-b").await, ConsumedRunQuestion::AlreadyConsumed),
+            "a different claim after a skip spend is refused"
+        );
+    }
+
+    /// Age the answer of a question by `secs` seconds.
+    async fn age_answer(pool: &Pool, question: &str, secs: f64) {
+        sqlx::query("UPDATE run_questions SET answered_at = now() - make_interval(secs => $2) WHERE id = $1")
+            .bind(question)
+            .bind(secs)
+            .execute(pool)
+            .await
+            .expect("age the answer");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_a_spend_past_the_answer_window_is_expired_and_spends_nothing() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "window").await;
+        let window = f64::from(mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS);
+        for (key, skip) in [("window-1", false), ("window-2", true)] {
+            let question = resume_question(&pool, &seed, key, chrono::Duration::hours(2)).await;
+            answer(&pool, &seed, &question.id, "a", skip).await;
+            age_answer(&pool, &question.id, window + 60.0).await;
+            assert!(
+                matches!(spend(&pool, &seed, &question.id, "late").await, ConsumedRunQuestion::Expired),
+                "an answer past its window is not spendable (skip: {skip})"
+            );
+            let stored: Option<String> =
+                sqlx::query_scalar("SELECT consumed_claim_hash FROM run_questions WHERE id = $1")
+                    .bind(&question.id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("hash");
+            assert!(stored.is_none(), "a lapsed answer stores no claim");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_a_spend_on_an_ended_run_is_run_ended_and_leaves_the_question_untouched() {
+        let Some(pool) = scratch_pool().await else { return };
+        for status in ["completed", "failed", "cancelled"] {
+            let seed = seed_run(&pool, &format!("ended-{status}")).await;
+            let question = resume_question(&pool, &seed, "ended-1", chrono::Duration::hours(1)).await;
+            answer(&pool, &seed, &question.id, "a", false).await;
+            sqlx::query("UPDATE runs SET status = $2, ended_at = now() WHERE id = $1")
+                .bind(&seed.run_id)
+                .bind(status)
+                .execute(&pool)
+                .await
+                .expect("end the run");
+            assert!(
+                matches!(spend(&pool, &seed, &question.id, "x").await, ConsumedRunQuestion::RunEnded),
+                "{status}"
+            );
+            let stored: Option<String> =
+                sqlx::query_scalar("SELECT consumed_claim_hash FROM run_questions WHERE id = $1")
+                    .bind(&question.id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("hash");
+            assert!(stored.is_none(), "{status}: the answer stays unspent");
+            let after = get_run_question(&pool, &question.id, &seed.org, &seed.user)
+                .await
+                .expect("get")
+                .expect("owner reads it");
+            assert_eq!(after.state, "answered", "{status}: the question is untouched");
+        }
+        // A run that does not exist is an ended run too.
+        let seed = seed_run(&pool, "ended-missing").await;
+        let question = resume_question(&pool, &seed, "ended-2", chrono::Duration::hours(1)).await;
+        let ghost = Seed {
+            run_id: "no-such-run".to_owned(),
+            thread_id: seed.thread_id.clone(),
+            org: seed.org.clone(),
+            user: seed.user.clone(),
+        };
+        assert!(matches!(spend(&pool, &ghost, &question.id, "x").await, ConsumedRunQuestion::RunEnded));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres"]
+    async fn run_question_a_winning_spend_renews_the_recovery_deadline_and_a_replay_does_not() {
+        let Some(pool) = scratch_pool().await else { return };
+        let seed = seed_run(&pool, "renew").await;
+        sqlx::query(
+            "INSERT INTO managed_run_terminalization_outbox \
+             (run_id, org_id, user_id, start_key, configured_source, \
+              configured_terminal_step_id, zdr, state, deadline_at, next_attempt_at) \
+             VALUES ($1, $2, $3, $4, 'execution_agent', 'execution-core-agent-final', false, 'open', \
+                     now() - interval '1 hour', now() - interval '1 hour')",
+        )
+        .bind(&seed.run_id)
+        .bind(&seed.org)
+        .bind(&seed.user)
+        .bind(format!("sk-{}", mp_ids::new_ulid()))
+        .execute(&pool)
+        .await
+        .expect("seed the obligation");
+        let deadline = |pool: Pool, run: String| async move {
+            sqlx::query_scalar::<_, DateTime<Utc>>(
+                "SELECT deadline_at FROM managed_run_terminalization_outbox WHERE run_id = $1",
+            )
+            .bind(run)
+            .fetch_one(&pool)
+            .await
+            .expect("deadline")
+        };
+        let question = resume_question(&pool, &seed, "renew-1", chrono::Duration::hours(1)).await;
+        answer(&pool, &seed, &question.id, "a", false).await;
+        let before = deadline(pool.clone(), seed.run_id.clone()).await;
+        assert!(before < Utc::now() - chrono::Duration::minutes(30));
+
+        assert!(matches!(
+            spend(&pool, &seed, &question.id, "claim-a").await,
+            ConsumedRunQuestion::Consumed(_)
+        ));
+        let renewed = deadline(pool.clone(), seed.run_id.clone()).await;
+        assert!(renewed > Utc::now(), "the winning spend moved the deadline into the future");
+
+        // Put the obligation back to a stale shape: a replay and a lost claim must not renew it.
+        sqlx::query(
+            "UPDATE managed_run_terminalization_outbox \
+             SET deadline_at = now() - interval '1 hour' WHERE run_id = $1",
+        )
+        .bind(&seed.run_id)
+        .execute(&pool)
+        .await
+        .expect("stale again");
+        let stale = deadline(pool.clone(), seed.run_id.clone()).await;
+        assert!(matches!(
+            spend(&pool, &seed, &question.id, "claim-a").await,
+            ConsumedRunQuestion::Replay(_)
+        ));
+        assert!(matches!(
+            spend(&pool, &seed, &question.id, "claim-b").await,
+            ConsumedRunQuestion::AlreadyConsumed
+        ));
+        assert_eq!(deadline(pool, seed.run_id.clone()).await, stale, "only a won spend renews");
     }
 
     /// A `next_turn` question with the given origin, straight to the store: the schema's own
@@ -6153,6 +6991,7 @@ mod run_question_db_tests {
                 expires_at: Utc::now() + chrono::Duration::hours(1),
                 origin,
                 origin_label,
+                require_paused_fold: false,
             },
             3,
         )
@@ -6395,6 +7234,7 @@ mod approval_scope_grant_db_tests {
             tool_name: "knowledge_search",
             action_key: "knowledge_search",
             effect_class: "read",
+            tool_digest: "",
         }
     }
 
@@ -6434,6 +7274,7 @@ mod approval_scope_grant_db_tests {
             tool_name: "knowledge_search",
             action_key: "knowledge_search",
             effect_class: "read",
+            tool_digest: "",
         };
         let body = approval_auto_released_body(&call, "apg_1", "consent_to_disclose", "thread", 2);
         assert_eq!(body["event"], EVENT_APPROVAL_AUTO_RELEASED);
@@ -6779,9 +7620,9 @@ mod approval_scope_grant_db_tests {
         let p = pending(
             &pool,
             "always",
-            "risky_effect_under_ask",
+            "capability_high_risk",
             "mcp__fixture__create_note",
-            "external_write",
+            "read",
         )
         .await;
         sqlx::query(
@@ -6793,6 +7634,15 @@ mod approval_scope_grant_db_tests {
         .execute(&pool)
         .await
         .expect("pin the tool definition");
+        sqlx::query(
+            "UPDATE approvals SET metadata = jsonb_set(metadata, '{cause,capability_id}', to_jsonb($2::text)) \
+             WHERE id = $1",
+        )
+        .bind(&p.approval_id)
+        .bind("cap.mcp_tool.fixture.create_note")
+        .execute(&pool)
+        .await
+        .expect("bind the registry capability");
         let record = DecisionRecord {
             source: "user",
             scope: "thread",
@@ -7938,3 +8788,8 @@ mod approval_edit_db_tests {
         assert_eq!((call.revision, call.original_action_fingerprint.as_str()), (0, ""));
     }
 }
+
+/// Owed approvals tests (verification plan 3.2, 3.3).
+#[cfg(test)]
+#[path = "orchestration_store_owed_tests.rs"]
+mod owed_tests;

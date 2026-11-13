@@ -1,0 +1,25 @@
+/*
+ * F-t3-098: the environment pill in the navbar. It is drawn only with VITE_ENV_PILL="true" and a
+ * non-production answer from the gateway. Colours come from theme tokens, so light and dark mode follow.
+ */
+.core-navbar__env-pill {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--verevon-border-strong);
+  border-radius: 999px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.dark .core-navbar__env-pill {
+  border-color: var(--verevon-dark-border);
+  background: var(--verevon-dark-surface-soft);
+  color: var(--verevon-border-warm);
+}

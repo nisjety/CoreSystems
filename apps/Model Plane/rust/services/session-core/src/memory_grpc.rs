@@ -13,7 +13,8 @@ use crate::{
 use chrono::{DateTime, Utc};
 use mp_contracts::model_plane::v1::{
     memory_service_server::{MemoryService, MemoryServiceServer},
-    DeleteMemoryRequest, DeleteMemoryResponse, GetMemoryControlsRequest,
+    CheckMemoryWriteRequest, CheckMemoryWriteResponse, DeleteMemoryRequest, DeleteMemoryResponse,
+    EraseAgentMemoryRequest, EraseAgentMemoryResponse, GetMemoryControlsRequest,
     GetMemoryControlsResponse, GetUserProfileRequest, IndexMemoryRequest, IndexMemoryResponse,
     ListMemoryRequest, ListMemoryResponse, MemoryControls, MemoryEntry, MemoryHealthRequest,
     MemoryHealthResponse, MemoryState, RebuildUserProfileRequest, ResetMemoryRequest,
@@ -280,6 +281,84 @@ impl MemoryGrpc {
             })
             .collect();
         // No semantic tier: Space rows are never mirrored (EP-8 S6).
+        Ok(Response::new(list_response(entries, None)))
+    }
+
+    /// `ListMemory` with `space_id` and `agent_subject_id` (EP-6 P3, EP-8 S10): one named agent's notes
+    /// in the Space, under the same Control Space memory decision as the Space list. A ZDR or waived
+    /// caller is refused `named_agent` before any note is read, since a note is retained content; with
+    /// agent memory off no agent row is read and the answer is empty.
+    async fn list_agent_memory(
+        &self,
+        caller: &VerifiedIdentity,
+        req: &ListMemoryRequest,
+    ) -> Result<Response<ListMemoryResponse>, Status> {
+        let (org_id, user_id, space_id, agent_subject_id) = (
+            req.org_id.trim(),
+            req.user_id.trim(),
+            req.space_id.trim(),
+            req.agent_subject_id.trim(),
+        );
+        let verified = self
+            .authorize_space_memory(
+                caller,
+                org_id,
+                user_id,
+                space_id,
+                req.space_control_decision_ref.trim(),
+                req.space_control_decision_token.trim(),
+                crate::grpc::SPACE_MEMORY_OPERATION_LIST,
+                "",
+            )
+            .await?;
+        if !matches!(MemoryRetention::of(caller), MemoryRetention::Durable)
+            || verified.zero_data_retention
+        {
+            return Err(mp_contracts::zdr_refusal::Refusal::feature_not_supported(
+                crate::space_memory::AGENT_ZDR_FEATURE,
+            )
+            .grpc_status(tonic::Code::FailedPrecondition));
+        }
+        if !crate::space_memory::agent_enabled() {
+            return Ok(Response::new(list_response(Vec::new(), None)));
+        }
+        let Some(scope_id) = crate::space_memory::agent_scope_id(space_id, agent_subject_id) else {
+            return Err(Status::invalid_argument(
+                "space_id and agent_subject_id name no agent",
+            ));
+        };
+        let limit = if req.limit == 0 { 100 } else { req.limit };
+        let rows = crate::space_memory::list_agent_memory(
+            &self.pool,
+            org_id,
+            &scope_id,
+            &verified.recipient_audience_hash,
+            i64::from(limit),
+        )
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        let entries = rows
+            .into_iter()
+            .map(|row| MemoryEntry {
+                memory_id: row.id,
+                thread_id: row.thread_id,
+                topic: row.topic,
+                content: row.content,
+                score: 0.0,
+                updated_at: Some(timestamp(row.updated_at)),
+                user_id: String::new(),
+                provenance: memory_provenance(row.provenance) as i32,
+                origin_space_ref: String::new(),
+                withheld_reason: if row.withheld {
+                    crate::dreaming::WITHHELD_AUDIENCE_CHANGED.to_owned()
+                } else {
+                    String::new()
+                },
+                scope: crate::space_memory::AGENT_SCOPE.to_owned(),
+                scope_id: scope_id.clone(),
+                source_label: row.source_label,
+            })
+            .collect();
         Ok(Response::new(list_response(entries, None)))
     }
 
@@ -770,11 +849,14 @@ impl MemoryService for MemoryGrpc {
                     crate::space_memory::Skip::Waived.refusal(),
                 ));
             }
+            // The person origin is earned by the credential, not the request: a
+            // service asserting "user" here is counted and, under enforce, downgraded.
+            let mode = write_policy::Mode::configured();
             write_policy::gate(
-                write_policy::Mode::configured(),
+                mode,
                 &req.content,
                 crate::space_memory::SPACE_SCOPE,
-                write_policy::Origin::from_wire(&req.origin),
+                write_policy::Origin::from_wire(&req.origin).bound_for(mode, !caller.is_service(), false),
             )
             .map_err(|code| Status::failed_precondition(code.status_message()))?;
             let written = crate::space_memory::index_space_memory(
@@ -814,11 +896,13 @@ impl MemoryService for MemoryGrpc {
                     crate::space_memory::Skip::NotAgentTurn.agent_refusal(),
                 ));
             }
+            // The turn check above reads the claimed origin; the gate gets the bound one.
+            let mode = write_policy::Mode::configured();
             write_policy::gate(
-                write_policy::Mode::configured(),
+                mode,
                 &req.content,
                 crate::space_memory::AGENT_SCOPE,
-                origin,
+                origin.bound_for(mode, !caller.is_service(), false),
             )
             .map_err(|code| Status::failed_precondition(code.status_message()))?;
             let written = crate::space_memory::index_agent_memory(
@@ -845,11 +929,12 @@ impl MemoryService for MemoryGrpc {
         // so a paused person is told about the pause, and it precedes the write, so a
         // refusal leaves neither a row nor a semantic mirror.
         let scope = crate::dreaming::scope_for_topic(&crate::dreaming::normalize_topic(&req.topic));
+        let mode = write_policy::Mode::configured();
         write_policy::gate(
-            write_policy::Mode::configured(),
+            mode,
             &req.content,
             scope,
-            write_policy::Origin::from_wire(&req.origin),
+            write_policy::Origin::from_wire(&req.origin).bound_for(mode, !caller.is_service(), false),
         )
         .map_err(|code| Status::failed_precondition(code.status_message()))?;
         let memory_id = crate::dreaming::index_agent_memory(
@@ -931,7 +1016,17 @@ impl MemoryService for MemoryGrpc {
             return Err(Status::invalid_argument("user_id is required"));
         }
         if !req.space_id.trim().is_empty() {
+            if !req.agent_subject_id.trim().is_empty() {
+                return self.list_agent_memory(&caller, &req).await;
+            }
             return self.list_space_memory(&caller, &req).await;
+        }
+        // A named agent's notes exist only within one Space: an agent without its Space is refused,
+        // never answered with the personal list.
+        if !req.agent_subject_id.trim().is_empty() {
+            return Err(Status::invalid_argument(
+                "agent_subject_id requires space_id",
+            ));
         }
         let org_id = req.org_id.trim();
         let user_id = req.user_id.trim();
@@ -1144,6 +1239,68 @@ impl MemoryService for MemoryGrpc {
         )))
     }
 
+    async fn erase_agent_memory(
+        &self,
+        request: Request<EraseAgentMemoryRequest>,
+    ) -> Result<Response<EraseAgentMemoryResponse>, Status> {
+        let caller = identity(&request)?;
+        let req = request.into_inner();
+        let (org_id, user_id, space_id, agent_subject_id) = (
+            req.org_id.trim(),
+            req.user_id.trim(),
+            req.space_id.trim(),
+            req.agent_subject_id.trim(),
+        );
+        if org_id.is_empty() {
+            return Err(Status::invalid_argument("org_id is required"));
+        }
+        if user_id.is_empty() {
+            return Err(Status::invalid_argument("user_id is required"));
+        }
+        if space_id.is_empty() {
+            return Err(Status::invalid_argument("space_id is required"));
+        }
+        if agent_subject_id.is_empty() {
+            return Err(Status::invalid_argument("agent_subject_id is required"));
+        }
+        // The same authority as a Space memory list or delete: a person, the caller's own org and user,
+        // a verified Control decision for this Space and this agent (issued to the Space's owner or
+        // admin), and no membership revocation. Allowed under every retention posture: removing is
+        // never storing, and the call carries ids, never content.
+        self.authorize_space_memory(
+            &caller,
+            org_id,
+            user_id,
+            space_id,
+            req.space_control_decision_ref.trim(),
+            req.space_control_decision_token.trim(),
+            crate::grpc::SPACE_MEMORY_OPERATION_ERASE_AGENT,
+            agent_subject_id,
+        )
+        .await?;
+        // Not gated by SESSION_AGENT_MEMORY_ENABLED (EP-8 S10): a row written while the switch was on
+        // must go with its binding even when the switch is off by then. A Space id holding ':' names
+        // no one binding, so it is refused rather than answered with a silent zero.
+        if crate::space_memory::agent_scope_id(space_id, agent_subject_id).is_none() {
+            return Err(Status::invalid_argument(
+                "space_id and agent_subject_id name no agent",
+            ));
+        }
+        let erased = crate::space_memory::erase_agent_memory(&self.pool, org_id, space_id, agent_subject_id)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        // Ids and a count only, never content: who erased which agent's notes in which Space.
+        tracing::info!(
+            org_id,
+            space_id,
+            agent_subject_id,
+            actor = user_id,
+            erased,
+            "agent memory erased on binding revocation"
+        );
+        Ok(Response::new(EraseAgentMemoryResponse { erased }))
+    }
+
     async fn health(
         &self,
         request: Request<MemoryHealthRequest>,
@@ -1171,6 +1328,57 @@ impl MemoryService for MemoryGrpc {
         let controls = memory_controls_view(&self.pool, caller.zdr(), org_id, user_id).await?;
         Ok(Response::new(GetMemoryControlsResponse {
             controls: Some(controls),
+        }))
+    }
+
+    /// Asks the content policy about one write and stores nothing (WS26-S4,
+    /// D2-480). A writer that stores `agent_memory` rows itself asks here before
+    /// its INSERT or UPDATE, so the proxy is not a path around the gate that every
+    /// other writer passes. The content is read, never logged: a refusal is
+    /// counted and logged by [`write_policy::gate`] with the rule, the origin and
+    /// a hash only. Authorized like `get_memory_controls`; a ZDR or waived caller
+    /// is not refused because nothing is written or kept, and the writer refuses
+    /// a ZDR run itself before it asks.
+    async fn check_memory_write(
+        &self,
+        request: Request<CheckMemoryWriteRequest>,
+    ) -> Result<Response<CheckMemoryWriteResponse>, Status> {
+        let caller = identity(&request)?;
+        let req = request.into_inner();
+        if req.org_id.trim().is_empty() {
+            return Err(Status::invalid_argument("org_id is required"));
+        }
+        if req.user_id.trim().is_empty() {
+            return Err(Status::invalid_argument("user_id is required"));
+        }
+        if req.scope.trim().is_empty() {
+            return Err(Status::invalid_argument("scope is required"));
+        }
+        authorize_user_memory_preflight(
+            &caller,
+            req.org_id.trim(),
+            req.user_id.trim(),
+            MEMORY_CONTROLS_READ_SCOPE,
+        )?;
+        // capability-core authenticates a person and asks on that person's behalf, so it
+        // is the one service whose "user" origin is kept; any other service is downgraded.
+        let trusted_checker = caller.is_service() && caller.principal_id() == "service:capability-core";
+        let mode = write_policy::Mode::configured();
+        let verdict = write_policy::gate(
+            mode,
+            &req.content,
+            req.scope.trim(),
+            write_policy::Origin::from_wire(&req.origin).bound_for(mode, !caller.is_service(), trusted_checker),
+        );
+        Ok(Response::new(match verdict {
+            Ok(()) => CheckMemoryWriteResponse {
+                allowed: true,
+                refusal_code: String::new(),
+            },
+            Err(code) => CheckMemoryWriteResponse {
+                allowed: false,
+                refusal_code: code.as_str().to_owned(),
+            },
         }))
     }
 

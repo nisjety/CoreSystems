@@ -9,6 +9,7 @@ import { SkillsSection } from '@/features/settings/components/SkillsSection'
 import { SkillLibrary } from '@/features/skills/components/SkillLibrary'
 import { AgentModesSection, orgAgentPolicyAvailable } from '@/features/customize/AgentModesSection'
 import { HooksSection } from '@/features/customize/HooksSection'
+import { PermissionRulesSection } from '@/features/customize/PermissionRulesSection'
 import { OrgWebAccessSection } from '@/features/customize/OrgWebAccessSection'
 
 /**
@@ -19,6 +20,8 @@ import { OrgWebAccessSection } from '@/features/customize/OrgWebAccessSection'
  */
 /** EP-11 S9: the Space-scoped skill library, off unless the build sets VITE_SKILL_LIBRARY to the literal `true`. */
 const skillLibraryEnabled = () => import.meta.env.VITE_SKILL_LIBRARY === 'true'
+/** W5-074-c: the organisation permission rules, off unless the build sets VITE_PERMISSION_RULES to the literal `true`. */
+const permissionRulesEnabled = () => import.meta.env.VITE_PERMISSION_RULES === 'true'
 
 export default function CustomizeHub() {
   const i18n = useI18n()
@@ -55,6 +58,9 @@ export default function CustomizeHub() {
         </Match>
         <Match when={available() === true}>
           <AgentModesSection />
+          <Show when={permissionRulesEnabled()}>
+            <PermissionRulesSection />
+          </Show>
           <OrgWebAccessSection />
           <HooksSection />
           <McpServersSection />

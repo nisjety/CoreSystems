@@ -2,9 +2,10 @@
 //! the SPA, and pins that only the continue handler relays upstream error codes.
 //!
 //! The vocabulary has three homes that must agree: model-gateway (which says the
-//! codes), the BFF's `CONTINUE_RELAYED_ERRORS` (which relays eight of them with
-//! their upstream status), and the SPA's `chat-run-continue-contract.ts` (which
-//! reads them). A code added in one place and not the others fails silently: the
+//! codes), the BFF's `CONTINUE_RELAYED_ERRORS` (which relays fifteen of them with
+//! their upstream status: the approval and park forms' nine, the question form's five and
+//! `org_policy_unavailable`, which every form sends), and the SPA's `chat-run-continue-contract.ts`
+//! (which reads them). A code added in one place and not the others fails silently: the
 //! BFF turns an unlisted code into `model_error` and the SPA's guard returns null.
 //!
 //! Source-scanning, in the style of `tests/sse_relay_no_allowlist.rs`, with the
@@ -18,7 +19,11 @@
 //!   status for every code, and the difference is exactly `continue_incomplete` (the BFF's
 //!   own blank check answers first) and `missing_bearer` (a 401, which stays
 //!   `unauthorized`);
-//! * the SPA's stream-frame tuple = model-gateway's `CONTINUE_FRAME_REFUSALS`, in order;
+//! * the question form's HTTP codes (`CONTINUE_QUESTION_HTTP_REFUSALS` less the two the BFF never
+//!   relays, and the answer route's `question_already_answered` and `invalid_answer`) are inside the
+//!   BFF's list under the same statuses, and the codes the BFF's list adds beyond them are named;
+//! * the SPA's stream-frame tuple = model-gateway's `CONTINUE_FRAME_REFUSALS`, in order, then
+//!   the tokens only the question form's `CONTINUE_QUESTION_FRAME_REFUSALS` adds (WS14 S5);
 //! * the SPA's run-end list (`CHAT_RUN_CONTINUE_SPENT_RUN_END_FRAMES`, the three frames that
 //!   follow the executor's answer and are final after a pre-consume) = model-gateway's
 //!   `CONTINUE_SPENT_RUN_END_FRAMES`, and neither refusal list holds them;
@@ -26,7 +31,9 @@
 //!   typed ChatGPT-subscription failures a spent run can end on, final after a pre-consume)
 //!   = model-gateway's `CONTINUE_SPENT_SUBSCRIPTION_FRAMES`, disjoint from the run-end list
 //!   and from both refusal lists;
-//! * every `proxy_sse_stream_with_data_plane` caller other than `continue_run` passes `&[]`;
+//! * every relay caller (`proxy_sse_stream_with_data_plane` and `proxy_sse_stream_with_browser`) passes
+//!   `&[]`, except `continue_run`'s two calls (CONTINUE_RELAYED_ERRORS), the space live route's one call
+//!   (its own named RELAYED list) and the forwarder in upstream.rs, which passes on its caller's list;
 //! * the frame of a failed PARK continue (WS03 S8-A): model-gateway's `park_refusal_event`
 //!   writes `park_continue: true` and never `approval_spent`, the SPA's park reader reads that
 //!   marker, the tokens such a frame carries are in the closed frame lists, and the BFF reads
@@ -173,8 +180,8 @@ fn the_bff_relay_list_is_the_spa_http_list() {
     let spa = spa_http_refusals();
     assert_eq!(
         bff.len(),
-        8,
-        "the BFF relays exactly eight closed codes; parsed {bff:?}"
+        15,
+        "the BFF relays exactly fifteen closed codes; parsed {bff:?}"
     );
     assert_eq!(
         bff, spa,
@@ -234,6 +241,42 @@ fn gateway_http_refusals() -> Vec<(String, u16)> {
             "UNAUTHORIZED" => 401,
             "NOT_FOUND" => 404,
             "CONFLICT" => 409,
+            "FORBIDDEN" => 403,
+            "SERVICE_UNAVAILABLE" => 503,
+            other => panic!(
+                "StatusCode::{other} is not in this test's table: add its number, do not skip the entry"
+            ),
+        };
+        pairs.push((code, status));
+        rest = &rest[open + 1 + entry.len() + 1..];
+    }
+    pairs
+}
+
+/// The gateway's (code, status) pairs from `CONTINUE_QUESTION_HTTP_REFUSALS` (WS14 S5), the
+/// question form's own list.
+fn gateway_question_http_refusals() -> Vec<(String, u16)> {
+    let list = gateway_const_list(&model_gateway_sse_source(), "CONTINUE_QUESTION_HTTP_REFUSALS");
+    let mut pairs = Vec::new();
+    let mut rest = list.as_str();
+    while let Some(open) = rest.find('(') {
+        let entry = delimited(&rest[open..], "(", '(', ')');
+        let code = string_literals(entry, '"')
+            .into_iter()
+            .next()
+            .expect("an entry names its code first");
+        let name = entry
+            .split("StatusCode::")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no StatusCode on `{entry}`"))
+            .trim();
+        let status = match name {
+            "BAD_REQUEST" => 400,
+            "UNAUTHORIZED" => 401,
+            "NOT_FOUND" => 404,
+            "CONFLICT" => 409,
+            "GONE" => 410,
+            "FORBIDDEN" => 403,
             "SERVICE_UNAVAILABLE" => 503,
             other => panic!(
                 "StatusCode::{other} is not in this test's table: add its number, do not skip the entry"
@@ -278,19 +321,37 @@ fn the_bff_relay_list_is_the_gateways_http_list_less_the_two_codes_it_never_rela
     let gateway = gateway_http_refusals();
     assert_eq!(
         gateway.len(),
-        10,
-        "model-gateway's CONTINUE_HTTP_REFUSALS has ten rows; parsed {gateway:?}"
+        12,
+        "model-gateway's CONTINUE_HTTP_REFUSALS has twelve rows; parsed {gateway:?}"
     );
     no_duplicates(
         "model-gateway's CONTINUE_HTTP_REFUSALS",
         &gateway.iter().map(|(code, _)| code.clone()).collect::<Vec<_>>(),
     );
     let bff = bff_relayed();
+    // The codes the gateway sends outside CONTINUE_HTTP_REFUSALS, each pinned to the source that
+    // writes it: the question form's own list (WS14 S5) and the answer route's two typed refusals
+    // (the question form relays them from the same Session Core statuses). The org pause and the
+    // org policy refusal are in CONTINUE_HTTP_REFUSALS; their constants are pinned below.
+    let mut sent = gateway.clone();
+    sent.extend(gateway_question_http_refusals());
+    sent.extend(answer_route_refusals());
+    let policy = read(&gateway_file(
+        "../../../../Model Plane/rust/services/model-gateway/src/org_agent_policy.rs",
+    ));
+    assert!(
+        policy.contains("pub const AGENTS_PAUSED_CODE: &str = \"org_agents_paused\";"),
+        "org_agent_policy.rs no longer names org_agents_paused"
+    );
+    assert!(
+        policy.contains("pub const POLICY_UNAVAILABLE_CODE: &str = \"org_policy_unavailable\";"),
+        "org_agent_policy.rs no longer names org_policy_unavailable"
+    );
     for (code, status) in &bff {
-        match gateway.iter().find(|(known, _)| known == code) {
+        match sent.iter().find(|(known, _)| known == code) {
             None => panic!(
-                "the BFF relays `{code}`, which model-gateway's CONTINUE_HTTP_REFUSALS does not \
-                 list: the gateway never sends it, so the entry is dead or the gateway lost a code"
+                "the BFF relays `{code}`, which model-gateway's refusal lists do not list: the \
+                 gateway never sends it, so the entry is dead or the gateway lost a code"
             ),
             Some((_, upstream)) => assert_eq!(
                 upstream, status,
@@ -313,6 +374,79 @@ fn the_bff_relay_list_is_the_gateways_http_list_less_the_two_codes_it_never_rela
     );
 }
 
+/// The two typed refusals of the answer route that the question form relays: `question_already_answered`
+/// (409) and `invalid_answer` (422). Each is pinned to the line of `http_routes.rs` that sends it.
+fn answer_route_refusals() -> Vec<(String, u16)> {
+    let routes = read(&gateway_file(
+        "../../../../Model Plane/rust/services/model-gateway/src/http_routes.rs",
+    ));
+    assert!(
+        routes.contains("StatusCode::CONFLICT, \"question_already_answered\""),
+        "http_routes.rs no longer sends question_already_answered with 409"
+    );
+    assert!(
+        routes.contains("StatusCode::UNPROCESSABLE_ENTITY,\n                \"invalid_answer\""),
+        "http_routes.rs no longer sends invalid_answer with 422"
+    );
+    vec![
+        ("question_already_answered".to_owned(), 409),
+        ("invalid_answer".to_owned(), 422),
+    ]
+}
+
+/// The (code, status) pairs the question form sends over HTTP: model-gateway's question list less the two
+/// codes the BFF never relays on any route (`continue_incomplete`, `missing_bearer`), and the answer route's
+/// two typed refusals.
+fn question_form_codes() -> Vec<(String, u16)> {
+    let mut codes: Vec<(String, u16)> = gateway_question_http_refusals()
+        .into_iter()
+        .filter(|(code, _)| code != "continue_incomplete" && code != "missing_bearer")
+        .collect();
+    codes.extend(answer_route_refusals());
+    codes
+}
+
+/// The question form sends a subset of the codes the BFF relays, each under the status the BFF relays it
+/// with. The codes the BFF relays beyond that subset are exactly the approval and park forms' codes, and they
+/// are named here. A code added to the question form and not to CONTINUE_RELAYED_ERRORS fails (the BFF would
+/// turn it into `model_error`); a code added to CONTINUE_RELAYED_ERRORS that the question form does not send
+/// fails until it is named here.
+#[test]
+fn the_bff_relay_list_covers_the_question_form_and_names_each_code_it_adds() {
+    let bff = bff_relayed();
+    let question = question_form_codes();
+    for (code, status) in &question {
+        match bff.iter().find(|(known, _)| known == code) {
+            None => panic!(
+                "the question form sends `{code}`, which CONTINUE_RELAYED_ERRORS does not list: the \
+                 BFF would relay it as model_error"
+            ),
+            Some((_, relayed)) => assert_eq!(
+                relayed, status,
+                "the question form sends `{code}` with {status} but the BFF relays it under {relayed}"
+            ),
+        }
+    }
+    let added: BTreeSet<&str> = bff
+        .iter()
+        .map(|(code, _)| code.as_str())
+        .filter(|code| !question.iter().any(|(known, _)| known.as_str() == *code))
+        .collect();
+    assert_eq!(
+        added,
+        BTreeSet::from([
+            "approval_not_found",
+            "approval_not_granted",
+            "approval_expired",
+            "approval_not_resumable",
+            "continuation_already_consumed",
+            "continue_unavailable",
+        ]),
+        "CONTINUE_RELAYED_ERRORS lists a code beyond the question form that this test does not name: name \
+         each approval or park code here, or the question form must send it too"
+    );
+}
+
 /// The SPA reads the frames the gateway writes: the tuple is the gateway's list, so a
 /// token the gateway can put in an `error` frame is a token the guard recognises.
 #[test]
@@ -322,16 +456,56 @@ fn the_spa_frame_tuple_is_the_gateways_frame_list() {
     let spa = spa_frame_refusals();
     assert_eq!(
         gateway.len(),
-        25,
-        "model-gateway's CONTINUE_FRAME_REFUSALS has 25 tokens; parsed {gateway:?}"
+        26,
+        "model-gateway's CONTINUE_FRAME_REFUSALS has 26 tokens; parsed {gateway:?}"
     );
     no_duplicates("model-gateway's CONTINUE_FRAME_REFUSALS", &gateway);
     no_duplicates("the SPA's CHAT_RUN_CONTINUE_FRAME_REFUSALS", &spa);
+    // The question form (WS14 S5) writes frames from its own list; the tokens it adds to the base
+    // list are the SPA's too, after the base tokens and in the question list's order.
+    let question = string_literals(
+        &gateway_const_list(&model_gateway_sse_source(), "CONTINUE_QUESTION_FRAME_REFUSALS"),
+        '"',
+    );
+    no_duplicates("model-gateway's CONTINUE_QUESTION_FRAME_REFUSALS", &question);
+    let question_only: Vec<String> = question
+        .iter()
+        .filter(|token| !gateway.contains(token))
+        .cloned()
+        .collect();
     assert_eq!(
-        spa, gateway,
-        "the SPA's CHAT_RUN_CONTINUE_FRAME_REFUSALS and model-gateway's CONTINUE_FRAME_REFUSALS \
-         must list the same tokens in the same order. A token only the gateway knows is a frame \
-         the SPA's guards read as null."
+        question_only,
+        [
+            "question_answer_released",
+            "question_resume_unavailable",
+            "question_not_answered",
+            "question_expired",
+            "question_not_found",
+            "question_not_resumable",
+        ],
+        "the question form adds exactly six frame tokens to the base list; parsed {question_only:?}"
+    );
+    // The question form's authority refusals are base tokens (the executor's refusals of the same
+    // check, which the approval also carries), so they sit in the base list and the SPA's tuple, and
+    // the question list must still name them: `question_refusal_event` debug-asserts that.
+    for token in [
+        "authority_widened",
+        "authority_space_mismatch",
+        "authority_route_mismatch",
+        "continue_space_scope_unsupported",
+    ] {
+        assert!(
+            question.iter().any(|known| known == token),
+            "the question form refuses with `{token}`, which CONTINUE_QUESTION_FRAME_REFUSALS does not list"
+        );
+    }
+    let expected: Vec<String> = gateway.iter().cloned().chain(question_only).collect();
+    assert_eq!(
+        spa, expected,
+        "the SPA's CHAT_RUN_CONTINUE_FRAME_REFUSALS must be model-gateway's \
+         CONTINUE_FRAME_REFUSALS, in order, followed by the tokens only \
+         CONTINUE_QUESTION_FRAME_REFUSALS adds. A token only the gateway knows is a frame the \
+         SPA's guards read as null."
     );
 }
 
@@ -472,12 +646,15 @@ fn the_spa_subscription_frames_are_the_gateways_and_stay_out_of_every_other_list
     }
 }
 
-/// Every call of the relay other than `continue_run`'s passes the empty list, so no
-/// other route's error body is ever read or relayed by code.
+/// Every relay call that passes a non-empty list is one of the named ones, and no other route's error
+/// body is ever read or relayed by code: `continue_run`'s two calls (CONTINUE_RELAYED_ERRORS), the space
+/// live route's call (its own RELAYED list, the second and separately named relay) and upstream.rs's
+/// forwarder of the list its caller gave it.
 #[test]
 fn only_the_continue_handler_relays_upstream_error_codes() {
-    /// Every call of the relay in `source`: its last argument, and the text before it.
-    fn calls(source: &str) -> Vec<(String, String)> {
+    /// Every call of the relay `needle` (`name(`) in `source`: its last argument, and the text before
+    /// it. A name inside a string literal is not a call (a test's `matches("name(")` quotes it).
+    fn calls(source: &str, needle: &str) -> Vec<(String, String)> {
         // Whole-line comments never carry a call.
         let source: String = source
             .lines()
@@ -490,15 +667,14 @@ fn only_the_continue_handler_relays_upstream_error_codes() {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let needle = "proxy_sse_stream_with_data_plane(";
         let mut found = Vec::new();
         let mut from = 0;
         while let Some(at) = source[from..].find(needle) {
             let at = at + from;
             from = at + needle.len();
             let before = &source[..at];
-            if before.trim_end().ends_with("fn") {
-                continue; // the definition
+            if before.trim_end().ends_with("fn") || before.ends_with('"') {
+                continue; // the definition, or the name quoted in a string
             }
             let args = delimited(&source[at..], needle, '(', ')');
             // Split at top-level commas and take the last non-empty argument.
@@ -546,14 +722,37 @@ fn only_the_continue_handler_relays_upstream_error_codes() {
         files.len()
     );
 
-    let mut relaying = Vec::new();
+    /// The name of the innermost `fn` before `before` ends: the last `fn <name>` in it, as a whole word.
+    fn enclosing_fn(before: &str) -> String {
+        let at = before
+            .rmatch_indices("fn ")
+            .map(|(at, _)| at)
+            .find(|&at| match before[..at].chars().next_back() {
+                None => true,
+                Some(c) => !(c.is_alphanumeric() || c == '_'),
+            })
+            .expect("a relay call sits inside a function");
+        before[at + "fn ".len()..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect()
+    }
+
+    // (path under src/, last argument, enclosing fn) of every call that passes a non-empty list.
+    let mut relaying: Vec<(String, String, String)> = Vec::new();
     let mut total = 0usize;
+    let src_root = gateway_file("src");
     for path in files {
         let normalized = path.to_string_lossy().replace('\\', "/");
+        let relative = path
+            .strip_prefix(&src_root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
         let source = read(&path);
         // upstream.rs holds the relay itself and the unit tests of its error
         // branch; only the production text (before the first test module) is a
-        // caller scan, and its two wrappers must pass the empty list.
+        // caller scan.
         let scanned = if normalized.ends_with("src/upstream.rs") {
             let end = source
                 .find("#[cfg(test)]")
@@ -562,10 +761,12 @@ fn only_the_continue_handler_relays_upstream_error_codes() {
         } else {
             &source[..]
         };
-        for (last, before) in calls(scanned) {
-            total += 1;
-            if last != "&[]" {
-                relaying.push((normalized.clone(), last, before));
+        for needle in ["proxy_sse_stream_with_data_plane(", "proxy_sse_stream_with_browser("] {
+            for (last, before) in calls(scanned, needle) {
+                total += 1;
+                if last != "&[]" {
+                    relaying.push((relative.clone(), last, enclosing_fn(&before)));
+                }
             }
         }
     }
@@ -574,27 +775,25 @@ fn only_the_continue_handler_relays_upstream_error_codes() {
         "found only {total} relay callers; the scan is vacuous"
     );
 
-    // The one non-empty caller is `continue_run`, passing CONTINUE_RELAYED_ERRORS.
+    // The closed set: continue_run's two calls (the skip-site browser path and the plain relay) pass
+    // CONTINUE_RELAYED_ERRORS; the space live route passes its own named list, RELAYED; and upstream.rs's
+    // proxy_sse_stream_with_data_plane forwards the relayed_errors its caller gave it. Nothing else.
+    let mut actual = relaying.clone();
+    actual.sort();
+    let mut expected: Vec<(String, String, String)> = [
+        ("domains/orchestration.rs", "CONTINUE_RELAYED_ERRORS", "continue_run"),
+        ("domains/orchestration.rs", "CONTINUE_RELAYED_ERRORS", "continue_run"),
+        ("domains/spaces/run_live.rs", "RELAYED", "space_run_live"),
+        ("upstream.rs", "relayed_errors", "proxy_sse_stream_with_data_plane"),
+    ]
+    .map(|(file, list, handler)| (file.to_owned(), list.to_owned(), handler.to_owned()))
+    .into_iter()
+    .collect();
+    expected.sort();
     assert_eq!(
-        relaying.len(),
-        1,
-        "exactly one caller may pass a relay list; found {:?}",
-        relaying
-            .iter()
-            .map(|(file, last, _)| (file, last))
-            .collect::<Vec<_>>()
-    );
-    let (file, last, before) = &relaying[0];
-    assert!(file.ends_with("src/domains/orchestration.rs"), "{file}");
-    assert_eq!(last, "CONTINUE_RELAYED_ERRORS");
-    let handler = before
-        .rfind("pub(crate) async fn ")
-        .map(|at| &before[at..])
-        .expect("an enclosing function");
-    assert!(
-        handler.starts_with("pub(crate) async fn continue_run("),
-        "the relay list is passed from `{}`, not from continue_run",
-        handler.lines().next().unwrap_or("")
+        actual, expected,
+        "the calls that pass a non-empty relay list are not the closed set (file, list, enclosing fn); \
+         any other caller must pass &[]"
     );
 }
 

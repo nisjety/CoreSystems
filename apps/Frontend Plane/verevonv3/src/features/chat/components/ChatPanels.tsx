@@ -11,7 +11,7 @@ import {
   Sparkles,
   Square,
 } from '@/shared/icons'
-import type { ThreadContext } from '@/shared/api/chat-client'
+import type { ChatTurnTiming, ThreadContext } from '@/shared/api/chat-client'
 import { OPEN_FEEDBACK_EVENT } from '@/features/core/components/FeedbackWidget'
 import { isSafeLinkHref } from '../lib/safe-href'
 import {
@@ -28,6 +28,7 @@ import {
 } from '@/shared/api/orchestration-client'
 import { approvalKindLabel } from '@/shared/approvals/approval-copy'
 import { ToolCallCard } from './ChatMessages'
+import { ThreadApprovalGrants } from './ThreadApprovalGrants'
 import { createEffect, createMemo, createSignal, For, Match, onCleanup, Show, Switch } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import type { JSX } from '@solidjs/web'
@@ -1061,6 +1062,11 @@ export function StepsPanel(props: {
                 </For>
               </section>
             </Show>
+            {/* WS13-S6: the standing approvals live in this thread, each with Revoke. Off until
+                the grants flag is "true"; the list is the caller's own and empty under ZDR. */}
+            <Show when={import.meta.env.VITE_APPROVAL_SCOPE_GRANTS === 'true' && props.threadId}>
+              {(id) => <ThreadApprovalGrants threadId={id()} />}
+            </Show>
             {/* Question 4: what happened underneath. Run telemetry, the lifecycle
                 rows and the raw event stream in one collapsed disclosure, the
                 same shape the live rail uses -- not four peers of the work
@@ -1572,6 +1578,8 @@ export function TracePanel(props: {
   runId?: string | null
   /** A tool call the Inspect action asked the ledger to select (EP-14 S4). Read only with the ledger on. */
   inspectRequest?: { callId: string } | null
+  /** Each turn's `turn_timing` by turn id, so the ledger can show a turn's rounds. Read only with the ledger on. */
+  timings?: ReadonlyMap<string, ChatTurnTiming>
 }) {
   const i18n = useI18n()
   return (
@@ -1590,7 +1598,7 @@ export function TracePanel(props: {
           <span>{props.events.length} hendelser</span>
         </header>
         {runLedgerEnabled ? (
-          <RunLedger events={props.events} replayTruncated={props.replayTruncated} inspectRequest={props.inspectRequest} />
+          <RunLedger events={props.events} replayTruncated={props.replayTruncated} inspectRequest={props.inspectRequest} timings={props.timings} />
         ) : (
           <>
             <Show when={props.replayTruncated}>

@@ -56,7 +56,7 @@ export function ingestBatchRequest(urls: readonly string[]) {
 
 /** The ZDR refusal code a gateway error carries in `details.zdr_refusal`, or null. */
 function zdrRefusalCode(error: unknown): string | null {
-  if (!(error instanceof ApiError)) return null
+  if (!(error instanceof ApiError) || Array.isArray(error.details)) return null
   const refusal = error.details?.zdr_refusal
   if (!refusal || typeof refusal !== 'object') return null
   const code = (refusal as { code?: unknown }).code

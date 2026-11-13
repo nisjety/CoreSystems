@@ -21,7 +21,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use std::time::Instant;
 use tonic::{Request, Response, Status};
 
-use crate::auth::{authorize_operation, identity, OwnerIntent};
+use crate::auth::{authorize_operation, identity, OwnerIntent, VerifiedIdentity};
 use crate::grpc::{authorize_thread_owner, record_metrics};
 
 /// The environment switch for the tree. Default off, read by the strict parser the other
@@ -341,6 +341,7 @@ impl MessageTreeGrpc {
     ) -> Result<Response<pb::SetActiveLeafResponse>, Status> {
         let caller = identity(&request)?;
         authorize_operation(&caller, "session:write")?;
+        refuse_waived_versions(&caller)?;
         let req = request.into_inner();
         if req.org_id.is_empty() || req.thread_id.is_empty() || req.target_message_id.is_empty() {
             return Err(Status::invalid_argument(
@@ -357,6 +358,22 @@ impl MessageTreeGrpc {
         tx.commit().await.map_err(internal)?;
         Ok(Response::new(response))
     }
+}
+
+/// A waived caller keeps no message versions (DEC-32): a waived run counts as zero-retention for
+/// every new store, and the message tree is such a store. `authorize_operation` already refuses a
+/// zero-retention caller typed; this refuses the waived one the same way, before the org check,
+/// the switch check and any read, so a waived caller gets the catalogue refusal and never
+/// `message_versions_disabled`. The key is the one the gateway uses for a zero-retention
+/// regenerate or edit.
+fn refuse_waived_versions(caller: &VerifiedIdentity) -> Result<(), Status> {
+    if caller.zdr_waiver().is_some() {
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported("message_versions")
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
+    }
+    Ok(())
 }
 
 /// The move itself, under the thread lock: every refusal is decided before any row changes.
@@ -380,9 +397,10 @@ async fn set_active_leaf_in_tx(
         ));
     }
     if thread_is_waived(tx, &req.thread_id).await? {
-        return Err(Status::failed_precondition(
-            "a thread with a waived run keeps no message versions",
-        ));
+        return Err(
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported("message_versions")
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
     }
     if has_active_run(tx, &req.thread_id).await? {
         return Err(Status::failed_precondition("active_run_blocks_switch"));
@@ -644,7 +662,11 @@ mod tests {
         // many versions a turn has, inactive ones included. Erasing a thread removes every turn.
         // The bootstrap-send replay check is a resend lookup too: it asks whether this
         // client_message_id was already stored, on any branch.
-        const WRITER_SIDE: [&str; 8] = [
+        // The Space-deletion legal-hold candidate read (GDPR-order-rel1) resolves a memory row's
+        // `message:` citation to its thread, whichever branch the cited turn is on: a citation of
+        // an inactive version is still a citation, and a hold on that thread must refuse the
+        // erasure. It returns thread ids only, never content.
+        const WRITER_SIDE: [&str; 9] = [
             "SELECT id, sequence, role, content FROM messages",
             "SELECT id, sequence, role, content, post_kind, author_subject_id FROM messages",
             "SELECT id FROM messages",
@@ -653,6 +675,7 @@ mod tests {
             "SELECT COUNT(*) FROM messages AS s",
             "DELETE FROM messages",
             "SELECT EXISTS(SELECT 1 FROM messages WHERE thread_id = $1 AND client_message_id = $2)",
+            "JOIN messages m ON m.id = substr(sl.link, 9)",
         ];
         let sources = [
             ("grpc.rs", include_str!("grpc.rs")),
@@ -945,5 +968,21 @@ mod tests {
         let error = move_leaf(&pool, &thread, &a, &b).await.unwrap_err();
         assert_eq!(error.code(), tonic::Code::FailedPrecondition);
         assert_eq!(error.message(), "active_run_blocks_switch");
+    }
+
+    #[test]
+    fn a_waived_caller_is_refused_message_versions_typed() {
+        let waived =
+            VerifiedIdentity::user_for_test_with_waiver("org-1", "user-1", "conn-1", "ack-1");
+        let status = refuse_waived_versions(&waived).expect_err("a waived caller is refused");
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        let refusal =
+            mp_contracts::zdr_refusal::Refusal::from_status(&status).expect("a catalogue refusal");
+        assert_eq!(
+            refusal,
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported("message_versions")
+        );
+        let plain = VerifiedIdentity::user_for_test("org-1", "user-1");
+        assert!(refuse_waived_versions(&plain).is_ok());
     }
 }

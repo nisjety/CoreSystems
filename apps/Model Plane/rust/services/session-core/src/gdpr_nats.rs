@@ -158,17 +158,54 @@ async fn handle_message(
 ) -> anyhow::Result<Outcome> {
     let Some(erasure) = parse_erasure_event(payload).map_err(|e| anyhow::anyhow!(e.to_string()))?
     else {
-        // EP-8 S7: a per-user erasure drops that person's part of Space memory, nothing else.
+        // EP-8 S7 and S4: a per-user erasure drops that person's part of Space memory, then their
+        // standing profile and personal memory. It never purges the organization. A user_anonymize
+        // event keeps the Space rows (records, not identity) and removes the profile and personal
+        // memory.
         if let Some(user) =
             crate::gdpr::parse_user_erasure_event(payload).map_err(|e| anyhow::anyhow!(e.to_string()))?
         {
-            let space =
-                crate::gdpr::erase_user_space_memory_sources(pool, &user.org_id, &user.user_id).await?;
+            // The legal-hold checks come first: a held organization, and (OD-59 switch on) a held
+            // thread whose memory this erasure touches, erase nothing, so no store is touched before
+            // a refusal. Either maps to a delayed nak in the consumer.
+            crate::gdpr::ensure_user_erasure_not_held(&user.org_id).await?;
+            let checked = crate::gdpr::ensure_user_thread_erasure_not_held(
+                pool,
+                &user.org_id,
+                &user.user_id,
+                user.kind,
+            )
+            .await?;
+            if user.kind == crate::gdpr::UserErasureKind::Erase {
+                let space =
+                    crate::gdpr::erase_user_space_memory_sources(pool, &user.org_id, &user.user_id).await?;
+                info!(
+                    org_id = %user.org_id,
+                    deleted = space.deleted,
+                    narrowed = space.narrowed,
+                    "GDPR user erasure: Space memory sources dropped"
+                );
+            }
+            let personal = crate::gdpr::erase_user_personal_data_for(
+                pool,
+                &user.org_id,
+                &user.user_id,
+                user.kind,
+                &checked,
+                letta,
+            )
+            .await?;
             info!(
                 org_id = %user.org_id,
-                deleted = space.deleted,
-                narrowed = space.narrowed,
-                "GDPR user erasure: Space memory sources dropped"
+                user_profiles = personal.user_profiles,
+                personal_memory = personal.personal_memory,
+                thread_memory = personal.thread_memory,
+                thread_memory_narrowed = personal.thread_memory_narrowed,
+                run_request_snapshots = personal.run_request_snapshots,
+                run_request_snapshot_blobs = personal.run_request_snapshot_blobs,
+                promote_use_counts = personal.promote_use_counts,
+                complete = personal.erasure_is_complete(),
+                "GDPR user erasure: standing profile and personal memory erased"
             );
         }
         return Ok(Outcome::Skipped);

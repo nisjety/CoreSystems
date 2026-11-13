@@ -21,6 +21,8 @@ use mp_contracts::site_policy::{
     MAX_RESOLVE_HOSTS, WEB_DOMAIN_POLICY_MODE_ENV,
 };
 
+use mp_contracts::model_plane::v1::WebSearchResult;
+
 use crate::quarry::SearchReply;
 use crate::state::AppState;
 
@@ -37,10 +39,49 @@ pub const SITE_BLOCKED_CODE: &str = "org_site_blocked";
 /// The process's switch, read once so it cannot change under a request.
 #[must_use]
 pub fn policy_mode() -> WebDomainPolicyMode {
+    #[cfg(test)]
+    {
+        if let Some(mode) = test_seam::mode() {
+            return mode;
+        }
+    }
     static MODE: OnceLock<WebDomainPolicyMode> = OnceLock::new();
     *MODE.get_or_init(|| {
         WebDomainPolicyMode::from_env_value(std::env::var(WEB_DOMAIN_POLICY_MODE_ENV).ok().as_deref())
     })
+}
+
+/// A test seam for the switch. The process's switch is read once, so a test cannot set it through the environment
+/// without changing every other test in the binary. A test names the mode its own thread sees instead, and the guard
+/// restores what the thread saw before.
+#[cfg(test)]
+pub(crate) mod test_seam {
+    use std::cell::Cell;
+
+    use mp_contracts::site_policy::WebDomainPolicyMode;
+
+    thread_local! {
+        static MODE: Cell<Option<WebDomainPolicyMode>> = const { Cell::new(None) };
+    }
+
+    /// The mode this thread's calls see, when a test has named one.
+    pub(crate) fn mode() -> Option<WebDomainPolicyMode> {
+        MODE.with(Cell::get)
+    }
+
+    /// Makes `mode` what this thread's calls see until the guard is dropped.
+    pub(crate) fn set(mode: WebDomainPolicyMode) -> Guard {
+        Guard(MODE.with(|cell| cell.replace(Some(mode))))
+    }
+
+    /// Restores the mode this thread saw before [`set`] named one.
+    pub(crate) struct Guard(Option<WebDomainPolicyMode>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            MODE.with(|cell| cell.set(self.0));
+        }
+    }
 }
 
 /// The process's checker, so every turn shares one cache.
@@ -317,6 +358,50 @@ pub async fn fetch_refusal(
     }
 }
 
+/// The refusal a web call meets when the page it read ended on a host the org's rules do not allow, for example an
+/// allowed address that redirected onto a blocked one. `requested` is the URL the call named (already checked by
+/// [`fetch_refusal`]); `final_url` is the address the reader says it ended on. `None` means the page may reach the
+/// model: under `off`, when `final_url` is empty, when it has the same canonical host as `requested`, or when the rules
+/// allow its host. Otherwise the refusal is logged with the closed fields of [`fetch_refusal`] (no path, no query), and
+/// under `enforce` the typed message for the FINAL host is returned. Under `shadow` it is logged and `None` is
+/// returned. An answer that cannot be read, or a final URL with no host the rules can name, counts as refused.
+pub async fn final_url_refusal(
+    mode: WebDomainPolicyMode,
+    checker: &SiteChecker,
+    owner: &SiteOwner<'_>,
+    org_id: &str,
+    requested: &str,
+    final_url: &str,
+    tool: &str,
+) -> Option<String> {
+    if mode == WebDomainPolicyMode::Off {
+        return None;
+    }
+    let final_url = final_url.trim();
+    if final_url.is_empty() {
+        return None;
+    }
+    let final_host = host_of_url(final_url);
+    if final_host.is_some() && final_host == host_of_url(requested) {
+        return None;
+    }
+    let hosts: Vec<String> = final_host.into_iter().collect();
+    let verdicts = checker.verdicts(owner, org_id, &hosts).await;
+    let refusal = refusal_for(final_url, &verdicts)?;
+    tracing::info!(
+        %org_id,
+        %tool,
+        reason = refusal.reason(),
+        host = refusal.host().unwrap_or(""),
+        enforced = mode == WebDomainPolicyMode::Enforce,
+        "org web domain policy refused the page a web call ended on"
+    );
+    match mode {
+        WebDomainPolicyMode::Enforce => Some(refusal.message(tool)),
+        WebDomainPolicyMode::Off | WebDomainPolicyMode::Shadow => None,
+    }
+}
+
 /// Drops from the search replies every hit on a host the org's rules do not allow, and returns how many it dropped.
 /// Under `shadow` it counts them and drops none. Under `off` nothing is read. A hit with no host the rules can name
 /// counts as refused, so an unreadable hit does not reach the model under enforcement.
@@ -351,6 +436,47 @@ pub async fn drop_denied_replies(
                 .count();
         }
     }
+    if refused > 0 {
+        tracing::info!(
+            %org_id,
+            refused,
+            enforced,
+            "org web domain policy: search hits on hosts the organisation does not allow"
+        );
+    }
+    refused
+}
+
+/// The same drop as [`drop_denied_replies`], over the hits of a gRPC `WebSearch` response, which carry the proto's
+/// `WebSearchResult` and not a Quarry `SearchReply`. The verdicts, the switch and the rule that a hit with no host the
+/// rules can name counts as refused are the same. Under `shadow` it counts the hits and drops none. Under `off` nothing
+/// is read. Only canonical hosts go to org-core, and the log carries a count, never a URL.
+pub async fn drop_denied_results_in(
+    mode: WebDomainPolicyMode,
+    checker: &SiteChecker,
+    owner: &SiteOwner<'_>,
+    org_id: &str,
+    results: &mut Vec<WebSearchResult>,
+) -> usize {
+    if mode == WebDomainPolicyMode::Off {
+        return 0;
+    }
+    let hosts: Vec<String> = results
+        .iter()
+        .filter_map(|hit| host_of_url(&hit.url))
+        .collect();
+    let verdicts = checker.verdicts(owner, org_id, &hosts).await;
+    let enforced = mode == WebDomainPolicyMode::Enforce;
+    let refused = if enforced {
+        let before = results.len();
+        results.retain(|hit| verdicts.allows_url(&hit.url));
+        before - results.len()
+    } else {
+        results
+            .iter()
+            .filter(|hit| !verdicts.allows_url(&hit.url))
+            .count()
+    };
     if refused > 0 {
         tracing::info!(
             %org_id,

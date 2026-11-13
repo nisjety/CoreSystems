@@ -148,15 +148,31 @@ fn space_append_retrieval_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> 
 /// The switch that lets a Do run's `knowledge_search` retrieve under the Space decision its turn holds
 /// (WS18-S5). Opt-in: only the literal `true` enables it. Off, a Do run searches the organisation's own
 /// knowledge, as it always has. execution-core reads no switch of its own: this one decides whether the
-/// run carries the Space retrieval header at all.
+/// run carries the Space retrieval header at all, and the knowledge receipt that follows it. It does not
+/// decide the inline loop's refusal of the organisation-wide document inventory, which reads
+/// `OWNER_LIST_SPACE_REFUSE` (C-05).
 const SPACE_AGENTIC_RETRIEVAL_VAR: &str = "AGENTIC_SPACE_RETRIEVAL_ENABLED";
 
-fn space_agentic_retrieval_enabled() -> bool {
+pub(crate) fn space_agentic_retrieval_enabled() -> bool {
     space_agentic_retrieval_enabled_with(&|key| std::env::var(key).ok())
 }
 
 fn space_agentic_retrieval_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
     get(SPACE_AGENTIC_RETRIEVAL_VAR).is_some_and(|value| value == "true")
+}
+
+/// The one switch that refuses the organisation-wide document inventory (`knowledge_list_documents`) on a
+/// Space-scoped turn of the inline loop (D2-769, D2-774, C-05). execution-core reads the same name for a Do
+/// run, so both paths refuse together. Strict: only the literal `true` enables it. Off, the inventory stays
+/// organisation-wide, as it always has.
+const OWNER_LIST_SPACE_REFUSE_VAR: &str = "OWNER_LIST_SPACE_REFUSE";
+
+pub(crate) fn owner_list_space_refuse_enabled() -> bool {
+    owner_list_space_refuse_enabled_with(&|key| std::env::var(key).ok())
+}
+
+fn owner_list_space_refuse_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(OWNER_LIST_SPACE_REFUSE_VAR).is_some_and(|value| value == "true")
 }
 
 /// The Space retrieval a Do run's `knowledge_search` is authorised with, forwarded to execution-core in
@@ -169,6 +185,32 @@ fn agentic_space_retrieval(space_id: &str, decision: Option<&str>, enabled: bool
         return None;
     }
     Some(decision.unwrap_or_default().trim().to_owned())
+}
+
+/// The knowledge receipt frame of a Do run (WS18-S5-a): what the Space's knowledge does for the run's
+/// `knowledge_search`, told once after `connected`. It reads the Space retrieval the run is dispatched with
+/// (`agentic_space_retrieval`), so it exists exactly when that header does: `None` for a run no Space scopes,
+/// for a continuation, and for every run while `AGENTIC_SPACE_RETRIEVAL_ENABLED` is off, which leaves those
+/// runs' frames as they were. An empty value is a refusal, so the receipt says `not_entitled`; any other value
+/// says `retrieval`. A Do run never reaches `not_searched`: a conversation-only turn and a source filter other
+/// than `Auto` are both refused before the agentic launch, so the receipt is read with the run's own `Auto`
+/// scope. The run's search has not returned when this is sent, so no source count rides it. It is the
+/// `source_scope_applied` frame the Ask turn sends, with the scope `auto` and nothing excluded: a mode only,
+/// no content, and nothing persists it (a ZDR or waived run gets it too).
+fn agentic_knowledge_frame(space_retrieval: Option<&str>) -> Option<crate::sse_events::ChatEvent> {
+    let knowledge = crate::knowledge_receipt::knowledge_receipt(
+        space_retrieval.is_some(),
+        space_retrieval.is_some_and(|decision| decision.trim().is_empty()),
+        crate::normalize::RetrievalScope::Auto,
+        false,
+        None,
+    )?;
+    Some(crate::sse_events::ChatEvent::SourceScopeApplied {
+        scope: "auto".to_owned(),
+        excluded_tools: Vec::new(),
+        knowledge: Some(knowledge),
+        reason: None,
+    })
 }
 
 /// The switch that lets a Do run carry its agent role catalogue to execution-core (EP-6 S10). Opt-in:
@@ -307,9 +349,10 @@ fn agent_tool_allowlist_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bo
 /// cannot be read is refused rather than dropped, because dropping it would drop its allowlist and cap.
 const AGENT_PIN_INVALID_CODE: &str = "agent_pin_invalid";
 
-/// The typed refusal for a Do or execute turn whose agent states a tool allowlist. execution-core
-/// owns the binding from a tool to its governed capability (`trusted_capability_id`) and does not
-/// receive the allowlist yet, so such a run could reach tools outside it.
+/// The typed refusal for a Do or execute turn that reaches the gateway's own tool narrowing. A Do or
+/// execute turn is never narrowed here: its allowlist travels on the run (`RunAgentRequest.agent_tool_allowlist`)
+/// and execution-core, which owns the binding from a tool to its governed capability, applies it. So this refusal
+/// guards the split: a Do turn passed to the Ask narrowing is refused, never left unnarrowed.
 const AGENT_ALLOWLIST_DO_CODE: &str = "agent_tool_allowlist_do_unsupported";
 
 /// The bound Convex puts on a version's allowlist (`MAX_TOOL_CAPABILITY_IDS`).
@@ -431,12 +474,38 @@ fn agent_pin(
     }))
 }
 
-/// Narrows a turn to its agent's tool allowlist: one more intersection beside the binding policy
+/// The version a managed run records on `runs.metadata.agent` (EP-6 S9): its id and digest only,
+/// never the instructions or the tool list.
+fn agent_version_pin_of(pin: &AgentPin) -> mp_contracts::model_plane::v1::AgentVersionPin {
+    mp_contracts::model_plane::v1::AgentVersionPin {
+        agent_ref: pin.agent_ref.clone(),
+        version: pin.version,
+        digest: pin.digest.clone(),
+    }
+}
+
+/// The tool allowlist a Do or execute turn carries on its run (EP-6 S9): the capability ids its pinned version
+/// states, with the version they were read from. Ids only, never the instructions. `None` when the turn has no pin
+/// or the version states no allowlist, so the run is offered exactly the tools it was offered before.
+fn agent_tool_allowlist_of(
+    pin: Option<&AgentPin>,
+) -> Option<mp_contracts::model_plane::v1::AgentToolAllowlist> {
+    let pin = pin?;
+    let capability_ids = pin.tool_capability_ids.clone()?;
+    Some(mp_contracts::model_plane::v1::AgentToolAllowlist {
+        agent_ref: pin.agent_ref.clone(),
+        version: pin.version,
+        capability_ids,
+    })
+}
+
+/// Narrows an Ask turn to its agent's tool allowlist: one more intersection beside the binding policy
 /// (BFF), the org policy and the WS05 bindings, so it only ever removes. The gateway holds no binding
 /// from a client-declared or built-in tool name to its governed capability (execution-core does), so
 /// no tool of an Ask turn can be shown to be on the list: the tool loop, the client tools and the web
-/// toggle are all withdrawn. A Do or execute turn is refused (see [`AGENT_ALLOWLIST_DO_CODE`]). A
-/// version without an allowlist changes nothing.
+/// toggle are all withdrawn. A Do or execute turn is never narrowed here (its allowlist is carried on the
+/// run, see [`agent_tool_allowlist_of`]), so one that reaches this function is refused (see
+/// [`AGENT_ALLOWLIST_DO_CODE`]). A version without an allowlist changes nothing.
 fn narrow_to_agent_allowlist(
     pin: Option<&AgentPin>,
     execute_granted: bool,
@@ -642,6 +711,20 @@ fn vision_catalogue_request(provider_hint: &str) -> mp_contracts::model_plane::v
     }
 }
 
+/// The speed tier a turn's model calls carry for `model`: `priority` when the catalogue lists that exact
+/// model with `priority_tier` set, and `""` (no choice) otherwise. A Verevon mode is not a catalogue entry,
+/// so no record declares the tier for it and it gets none.
+fn speed_tier_for_model(
+    models: &[mp_contracts::model_plane::v1::ModelInfo],
+    model: &str,
+) -> &'static str {
+    if models.iter().any(|listed| listed.id == model && listed.priority_tier) {
+        crate::pricing::SERVICE_TIER_PRIORITY
+    } else {
+        ""
+    }
+}
+
 fn error_stream(
     request_id: &str,
     code: &str,
@@ -659,6 +742,23 @@ fn error_stream(
         let _ = tx.send(Ok(sse)).await;
     });
     Sse::new(ReceiverStream::new(rx))
+}
+
+/// The stream's `error` code and message for a refused branch move (WS17 S9): the same typed mapping the unary
+/// route answers with (`branch_thread_error`), carried as the frame's code and message. The message is the
+/// mapping's own text, never thread content.
+fn branch_move_refusal(error: &tonic::Status) -> (String, String) {
+    let (_, axum::Json(body)) = crate::http_routes::branch_thread_error(error);
+    let field = |name: &str| {
+        body.get("error")
+            .and_then(|inner| inner.get(name))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    (
+        field("code").unwrap_or_else(|| "history_branch_refused".to_owned()),
+        field("message").unwrap_or_else(|| "the branch could not be moved".to_owned()),
+    )
 }
 
 /// A typed zero-data-retention refusal as the stream's terminal `error` frame:
@@ -1129,6 +1229,14 @@ pub(crate) fn subscription_scoped_request(request: InferRequest, route: &InferRe
         request.subscription_connection_id.clone_from(&route.subscription_connection_id);
         request.zdr = route.zdr;
     }
+    // A customer-gateway turn's auxiliary calls (title, follow-ups, judge) take its gateway and model too
+    // (W4-BYO-6), so the turn's content reaches the user's own connection and no platform provider.
+    if !route.model_connection_id.is_empty() {
+        request.model.clone_from(&route.model);
+        request.provider_hint.clone_from(&route.provider_hint);
+        request.model_connection_id.clone_from(&route.model_connection_id);
+        request.zdr = route.zdr;
+    }
     request
 }
 
@@ -1202,6 +1310,45 @@ fn with_loop_stop(
     let mut metadata = metadata.unwrap_or_default();
     metadata.fields.insert(
         "loop_stop".to_owned(),
+        prost_types::Value {
+            kind: Some(Kind::StructValue(prost_types::Struct { fields })),
+        },
+    );
+    Some(metadata)
+}
+
+/// The metadata key a turn's routing decision is stored under (W5-073-b).
+const ROUTING_DECISION_KEY: &str = "routing_decision";
+
+/// Records in the answer's metadata the routing decision its route note stated (W5-073-b), so a reopened thread
+/// shows the model and reason the live Details popover showed. The entry holds closed tokens only, the same ones
+/// the usage frame states, so it is written on every turn, zero retention included. With no decision the metadata
+/// is returned as it was.
+fn with_routing_decision(
+    metadata: Option<prost_types::Struct>,
+    decision: Option<&serde_json::Value>,
+) -> Option<prost_types::Struct> {
+    use prost_types::value::Kind;
+
+    let Some(decision) = decision.and_then(serde_json::Value::as_object) else {
+        return metadata;
+    };
+    let fields: std::collections::BTreeMap<String, prost_types::Value> = decision
+        .iter()
+        .filter_map(|(key, token)| {
+            token.as_str().map(|token| {
+                (
+                    key.clone(),
+                    prost_types::Value {
+                        kind: Some(Kind::StringValue(token.to_owned())),
+                    },
+                )
+            })
+        })
+        .collect();
+    let mut metadata = metadata.unwrap_or_default();
+    metadata.fields.insert(
+        ROUTING_DECISION_KEY.to_owned(),
         prost_types::Value {
             kind: Some(Kind::StructValue(prost_types::Struct { fields })),
         },
@@ -2337,20 +2484,33 @@ pub async fn invoke_stream_sse(
             "agent version pinned for the turn"
         );
     }
-    if let Err(code) = narrow_to_agent_allowlist(
-        agent_pin.as_ref(),
-        req.execute_granted,
-        &mut req.features,
-        &mut req.tools,
-        &mut req.browse_web,
-    ) {
-        return error_stream(
-            &request_id,
-            code,
-            "This agent's tool list cannot be enforced on a Do run yet. Ask it instead.",
+    // The version a managed run records on `runs.metadata.agent` (EP-6 S9): ids and a digest only.
+    // None with the switch off, so the start carries no pin and nothing is recorded.
+    let agent_version_pin = agent_pin.as_ref().map(agent_version_pin_of);
+    // EP-6 S9: an Ask turn narrows its own tool loop here, as it always has. A Do or execute turn is not narrowed
+    // here: its agent's allowlist (ids only) travels on the run, and execution-core offers and admits only the tools
+    // it names. Off, or for a version without an allowlist, the run carries none and is offered what it was before.
+    let do_turn = req.execute_granted || req.features.iter().any(|feature| feature == "agentic");
+    let run_tool_allowlist = if do_turn {
+        agent_tool_allowlist_of(agent_pin.as_ref())
+    } else {
+        // An Ask turn is never an execute turn, so the narrowing is told it is not one.
+        if let Err(code) = narrow_to_agent_allowlist(
+            agent_pin.as_ref(),
             false,
-        );
-    }
+            &mut req.features,
+            &mut req.tools,
+            &mut req.browse_web,
+        ) {
+            return error_stream(
+                &request_id,
+                code,
+                "This agent's tool list cannot be enforced on a Do run yet. Ask it instead.",
+                false,
+            );
+        }
+        None
+    };
     let features = req.features.clone();
     let conversation_only = features.iter().any(|f| f == "conversation_only");
     if conversation_only && (req.deep_research || req.generate_image
@@ -2401,13 +2561,51 @@ pub async fn invoke_stream_sse(
     // the body's flag alone.
     let requested_route = crate::zdr_posture::Route::named(
         req.provider.as_deref(),
-        req.subscription_connection_id.as_deref(),
+        crate::normalize::connection_named_by(&req),
         req.zdr,
     );
     let turn_posture = match crate::zdr_posture::decide_for(&claims, &requested_route) {
         Ok(turn_posture) => turn_posture,
         Err(refusal) => return zdr_refusal_stream(&request_id, refusal),
     };
+    // A regenerate or an edit of a turn that was served on one of the caller's customer-gateway connections
+    // is served on it again (W4-BYO, GAP-W4-BYO-1). The thread is read here, without moving anything, for
+    // the connection id the source turn holds, and that id is set on the request before it is normalized,
+    // so every rule of a connection turn applies to it; a request that names a platform provider is refused
+    // typed, before anything is moved or written, and never reaches the platform chain. A zero-retention or
+    // waived turn keeps no thread to read (the durable-mutation refusal below answers it). The plan is
+    // applied at the branch move below, so the thread is read once. The posture above stays: a ZDR or waived
+    // turn is never replayed, and a turn that holds an id is never reclassified as ZDR.
+    let mut version_plan: Option<crate::session_flow::VersionPlan> = None;
+    if let Some(replay_turn) = crate::normalize::version_turn(&req).ok().flatten() {
+        if crate::http_routes::message_versions_enabled() && !turn_posture.zdr() && !turn_posture.is_waived() {
+            let replay_thread = req.thread_id.as_deref().map(str::trim).unwrap_or_default().to_owned();
+            match crate::session_flow::plan_version_move(&state, &claims.org_id, &replay_thread, &replay_turn, &model_bearer).await {
+                Ok(plan) => {
+                    if let Err((_, axum::Json(refusal))) =
+                        crate::normalize::replay_stored_connection(&mut req, &plan.model_connection_id)
+                    {
+                        let code = refusal.get("code").and_then(Value::as_str).unwrap_or("invalid_request");
+                        let message = refusal
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("this turn cannot be replayed on this route");
+                        return error_stream(&request_id, code, message, false);
+                    }
+                    version_plan = Some(plan);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        grpc_code = ?error.code(),
+                        request_id = %request_id,
+                        "session-core read of the source turn of a regenerate or an edit failed"
+                    );
+                    let (code, message) = branch_move_refusal(&error);
+                    return error_stream(&request_id, &code, &message, false);
+                }
+            }
+        }
+    }
     // A wake starts a durable run from a stored post (WS08-S3): refused, typed, for a zero-retention
     // or waived turn before anything else, then checked against the post it was approved for.
     if let Some(wake) = req.wake_context.as_ref() {
@@ -2576,11 +2774,13 @@ pub async fn invoke_stream_sse(
     {
         Ok(cap) => cap,
         Err(code) => {
+            // The words and retry hint follow the code: a paused org is refused until an admin resumes agent runs, while an
+            // unreadable policy may clear on a retry (F-t3-083).
             return error_stream(
                 &request_id,
                 code,
-                crate::org_agent_policy::POLICY_UNAVAILABLE_MESSAGE,
-                true,
+                crate::org_agent_policy::refusal_answer(code).1,
+                code == crate::org_agent_policy::POLICY_UNAVAILABLE_CODE,
             );
         }
     };
@@ -2679,6 +2879,17 @@ pub async fn invoke_stream_sse(
             return error_stream(&request_id, code, message, false);
         }
     };
+    // A regenerate or an edit moves the thread's branch, which is a durable write (WS17 S9). A ZDR or
+    // waived turn keeps no thread to move, so it is refused with the typed durable-mutation refusal
+    // before the branch is read or moved. Normalization above has already validated the turn, and with
+    // the message-version switch off it has refused it, so this is reached only with the switch on.
+    let version_turn = crate::normalize::version_turn(&req).ok().flatten();
+    if version_turn.is_some() && (turn_posture.zdr() || turn_posture.is_waived()) {
+        return zdr_refusal_stream(
+            &request_id,
+            mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN,
+        );
+    }
     // The organisation's model policy, asked of inference-core before a run, a
     // thread or a message exists: a refused turn is the stream's one `error`
     // frame and leaves nothing behind, and the ZDR branch below is under the
@@ -2748,6 +2959,23 @@ pub async fn invoke_stream_sse(
         // plain ungrounded completion and no sign the research never ran.
         if let Some(refusal) = crate::zdr_features::refusal(&req) {
             return zdr_refusal_stream(&request_id, refusal);
+        }
+        // Under the ZDR ledger switch (DEF-Z-06b) the turn is checked against the org's budget as a persistent turn is,
+        // before any retrieval or provider call: a read of ceilings and spend, never of content. A turn over its
+        // ceiling is refused here, so it cannot exceed one it was never checked against.
+        if zdr_ledger_rows_switch() {
+            if let Some(refusal) = zdr_budget_refusal(
+                &state,
+                &request_id,
+                &org_id,
+                &user_id,
+                cost_bearer.as_ref(),
+                &normalized,
+            )
+            .await
+            {
+                return refusal;
+            }
         }
         let grounding = if !conversation_only
             && retrieval_scope != crate::normalize::RetrievalScope::WebOnly
@@ -2842,6 +3070,7 @@ pub async fn invoke_stream_sse(
             state,
             request_id,
             org_id,
+            user_id,
             model,
             provider_content,
             features,
@@ -2896,11 +3125,12 @@ pub async fn invoke_stream_sse(
     // budget gate above resolves them. The tracker exists only when a switch acts on it, and its
     // frames carry the ceiling only with the progress stream they ride on.
     let run_ceiling = crate::sse_events::run_ceiling::CeilingTracker::for_turn(
-        crate::sse_events::run_ceiling::RunCeiling::resolve(
+        crate::sse_events::run_ceiling::RunCeiling::resolve_with(
             normalized.max_cost_usd,
             normalized.max_tokens,
             org_limits.max_cost_usd,
             org_limits.max_tokens,
+            cap_min_switch(),
         ),
         run_ceiling_warn_switch() && usage_progress_switch(),
         run_ceiling_enforce_switch(),
@@ -2950,6 +3180,8 @@ pub async fn invoke_stream_sse(
     // leaves both exactly as normalized.
     let provider_hint = normalized.provider_hint.clone();
     let subscription_connection_id = normalized.subscription_connection_id.clone();
+    // The customer-gateway connection the turn names (W4-BYO-6), empty on every other turn.
+    let model_connection_id = normalized.model_connection_id.clone();
     // chat-parity §2: opt-in rich SSE event families. Empty = plain path.
 
     // chat-parity §1 — stream-path idempotency. A concurrent duplicate (same
@@ -3259,6 +3491,35 @@ pub async fn invoke_stream_sse(
         let (images, bytes) = image_parts.summary();
         tracing::info!(request_id = %request_id, images, bytes, "images ride as parts of the turn");
     }
+    // The speed tier the person asked for (`speed: "priority"`), decided once for the whole turn and carried by
+    // every model call of it (`latency_levers::speed_tier`). It needs the operator's lever on, a turn that keeps
+    // data (a zero-retention turn returns before the rounds and names no tier), and a picked model whose catalogue
+    // record declares the tier. Anything else is no choice: the request is what it was before the field existed.
+    let turn_speed_tier: &'static str = if state.latency_levers.speed_tier
+        && !effective_zdr
+        && req.speed.as_deref().map(str::trim) == Some(crate::pricing::SERVICE_TIER_PRIORITY)
+    {
+        match state
+            .inference_client
+            .clone()
+            .list_models(authenticated_inference_request(
+                mp_contracts::model_plane::v1::ListModelsRequest {
+                    provider: provider_hint.clone(),
+                    ..Default::default()
+                },
+                &inference_bearer,
+            ))
+            .await
+        {
+            Ok(listed) => speed_tier_for_model(&listed.into_inner().models, &model),
+            Err(error) => {
+                tracing::warn!(%error, request_id = %request_id, "model catalogue unavailable; the turn carries no speed tier");
+                ""
+            }
+        }
+    } else {
+        ""
+    };
     // The attachments a Do run carries: judged and hashed here, before any run exists, so a
     // refusal leaves no run behind. Empty (and nothing is read) with the switch off.
     let do_attachments = if carries_do_attachments && !req.attachments.is_empty() {
@@ -3331,7 +3592,58 @@ pub async fn invoke_stream_sse(
         mp_contracts::model_plane::v1::ManagedRunSource::GatewayDirect
     };
     let admitted_ms = timing.close(crate::turn_timing::Phase::Admission, 0);
-    let session_run = match crate::session_flow::with_user_context_refs(
+    // A regenerate or an edit moves the thread's branch before the run that answers it starts (WS17 S9).
+    // This is the last step before the managed start, after every refusal above, so a refused turn leaves
+    // the thread on the branch it had. A refused move starts nothing. A regenerate's question is read
+    // from the thread and replaces the content, as on the unary route.
+    let version_thread = match version_turn {
+        Some(turn) => {
+            let thread_id = req.thread_id.as_deref().map(str::trim).unwrap_or_default().to_owned();
+            let version_moved = match version_plan.as_ref() {
+                Some(plan) => crate::session_flow::apply_version_move(&state, &org_id, &thread_id, plan, &model_bearer).await,
+                None => crate::session_flow::move_active_leaf(&state, &org_id, &thread_id, &turn, &model_bearer).await,
+            };
+            match version_moved {
+                Ok(version_move) => {
+                    if let Some(goal) = version_move.goal {
+                        req.content = goal;
+                    }
+                    Some((thread_id, turn))
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        grpc_code = ?error.code(),
+                        request_id = %request_id,
+                        "session-core branch move for a regenerate or an edit failed"
+                    );
+                    let (code, message) = branch_move_refusal(&error);
+                    return error_stream(&request_id, &code, &message, false);
+                }
+            }
+        }
+        None => None,
+    };
+    // The user turn the run appends records the connection it is served on: the customer-gateway connection (W4-BYO),
+    // so a later regenerate or edit of it replays on the same connection, and the subscription connection (DEC-V-R8),
+    // so a side question on the thread is answered on it. Nothing is recorded for a ZDR turn.
+    let started = crate::session_flow::with_user_turn_connections(&normalized.model_connection_id, &normalized.subscription_connection_id, effective_zdr, async { match version_thread.as_ref() {
+        Some((thread_id, turn)) => {
+            crate::session_flow::with_user_context_refs(
+                context_refs.as_ref(),
+                crate::session_flow::prepare_version_run_authenticated(
+                    &state,
+                    thread_id,
+                    &org_id,
+                    &user_id,
+                    &req.content,
+                    turn,
+                    &managed_start_key,
+                    &model_bearer,
+                ),
+            )
+            .await
+        }
+        None => crate::session_flow::with_user_context_refs(
         context_refs.as_ref(),
         crate::session_flow::prepare_managed_run_authenticated_with_receipt(
         &state,
@@ -3366,9 +3678,11 @@ pub async fn invoke_stream_sse(
             req.idempotency_key.as_deref(),
         ),
         req.wake_context.as_ref(),
+        agent_version_pin.as_ref(),
     ))
-    .await
-    {
+        .await,
+    } }).await;
+    let session_run = match started {
         Ok(run) => run,
         Err(error) => {
             if crate::session_flow::thread_run_active(&error) {
@@ -3660,6 +3974,10 @@ pub async fn invoke_stream_sse(
             wide_research,
             goal_recitation,
             goal_turn,
+            // The agent's tool allowlist of this Do turn (EP-6 S9); `None` for an Ask turn.
+            run_tool_allowlist,
+            // The turn's coordinator flag (`InvokeRequest.coordinator`); the dispatch decides whether it is sent.
+            req.coordinator,
         );
     }
 
@@ -3746,6 +4064,7 @@ pub async fn invoke_stream_sse(
             model: &model,
             provider_hint: &provider_hint,
             subscription_connection_id: &subscription_connection_id,
+            model_connection_id: &model_connection_id,
             zdr: effective_zdr,
             conversation_only,
             min_privacy_tier: min_privacy_tier_wire,
@@ -4108,39 +4427,45 @@ pub async fn invoke_stream_sse(
     // behaviour that was previously absent (MatchSkills had no internal caller).
     let SkillContext {
         blocks: skill_context,
-        requested_ids: requested_skill_ids,
         skills_truncated,
         skills_dropped,
         skill_file_offered,
         pins: skill_pins,
-    } = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly { SkillContext::default() } else { fetch_skill_context(
-        &state,
-        &model_bearer,
-        capability_bearer.as_ref().map(VerifiedCapabilityBearer::as_str),
-        &org_id,
-        &user_id,
-        &session_run.thread_id,
-        &req.content,
-        &crate::context_refs::merged_skill_ids(&req.skill_ids, context_refs.as_ref()),
-    )
-    .await };
+    } = if conversation_only || retrieval_scope == crate::normalize::RetrievalScope::WebOnly {
+        // Nothing is injected, but the turn still records its keyword matches for rating. A turn that
+        // injects skills records itself inside `fetch_skill_context`, before its footers are built.
+        crate::chat_turn_registry::record_chat_turn(
+            &state,
+            &req_id,
+            &org_id,
+            &user_id,
+            &session_run.run_id,
+            &req.content,
+            &[],
+            MAX_INJECTED_SKILLS,
+            &[],
+        );
+        SkillContext::default()
+    } else {
+        fetch_skill_context(
+            &state,
+            &model_bearer,
+            capability_bearer
+                .as_ref()
+                .map(VerifiedCapabilityBearer::as_str),
+            &org_id,
+            &user_id,
+            &session_run.thread_id,
+            &req.content,
+            &crate::context_refs::merged_skill_ids(&req.skill_ids, context_refs.as_ref()),
+            &req_id,
+            &session_run.run_id,
+            turn_posture.zdr(),
+        )
+        .await
+    };
     // Counts only: the skill guidance that was cut to its budget, sent after the compaction frame.
     let skills_frame = lifecycle_events::skills_truncated(skills_truncated, skills_dropped);
-    // Remember which skills this turn injected, keyed by the request_id the SPA
-    // already has. A thumbs-up has to credit the skills that actually shaped the
-    // answer, and the client must not be trusted to name them — so the mapping
-    // is recorded server-side here and resolved at rating time.
-    crate::chat_turn_registry::record_chat_turn(
-        &state,
-        &req_id,
-        &org_id,
-        &user_id,
-        &session_run.run_id,
-        &req.content,
-        &requested_skill_ids,
-        MAX_INJECTED_SKILLS,
-        &skill_pins,
-    );
     // EP-11 S3: stamp the versions this turn injected on its run record, spawned so
     // the turn never waits on it. Never for a ZDR or waived turn: session-core
     // refuses both, and their run record keeps nothing durable about the turn.
@@ -4366,6 +4691,15 @@ pub async fn invoke_stream_sse(
     } else {
         Vec::new()
     };
+    // The org's agent policy withdraws the inline code interpreter from an Ask turn under a lockdown cap
+    // (D-f06-B, O-14), whatever the turn asked for. Off, shadow, a read-only or other cap, and a policy that
+    // cannot be read leave the list as it was. A turn with staged files and no code tool is refused below, as
+    // any turn without the tool is.
+    tool_defs = crate::org_agent_policy::ask_turn_tools_under_policy(
+        crate::org_agent_policy::policy_mode(),
+        tool_defs,
+        org_mode_cap,
+    );
     if conversation_only {
         tool_defs.retain(|tool| crate::tool_loop::conversation_tool_allowed(&tool.name));
         prompt.conversation_scope = Some(ChatMessage {
@@ -4407,6 +4741,23 @@ pub async fn invoke_stream_sse(
             ..Default::default()
         });
     }
+    // A customer-gateway turn is text-only (W4-BYO-6): no tool is offered to it, so the tool phase never runs
+    // and no tool round is sent to a platform provider on its behalf (a tool round never names a gateway).
+    if !model_connection_id.is_empty() {
+        tool_defs.clear();
+    }
+    // The image tool (W4-IMG-3) is offered where the composer gate allows it: the switch is on, the turn is persistent,
+    // not conversation-only and not a customer-gateway turn. With the switch off the list is left as it was. The tool
+    // loop reads the org's capability policy before its first round and withdraws the tool if the policy withholds it.
+    let image_offered = features.iter().any(|f| f == "tools")
+        && crate::image_tool::composer_offers(
+            crate::image_tool::enabled(),
+            effective_zdr,
+            data_plane_mode.is_some(),
+            conversation_only,
+            !model_connection_id.is_empty(),
+        );
+    tool_defs = crate::image_tool::tools_for_turn(tool_defs, image_offered);
     // The tools lead an OpenAI prompt, so with the stable order the ones
     // offered on some turns only go last and the rest stay one prefix.
     if cache_options.stable_prompt_order {
@@ -4585,6 +4936,8 @@ pub async fn invoke_stream_sse(
             "run_id": &session_run_id,
             "thread_id": &session_thread_id,
             "model": &model_clone,
+            // Whether this server serves a regenerate or an edit on a versioned thread (WS17 S9).
+            "versions_enabled": crate::http_routes::message_versions_enabled(),
         });
         // A disconnect during the first thread handoff is not a cancellation.
         // The browser can reload while its active-thread projection is being
@@ -5287,6 +5640,7 @@ pub async fn invoke_stream_sse(
                 &staged,
                 &image_parts,
                 rounds_tiers,
+                turn_speed_tier,
             )
             .await;
             seq = sink.sync_cursor(seq).await;
@@ -5408,6 +5762,7 @@ pub async fn invoke_stream_sse(
             model: answer_model.clone(),
             provider_hint,
             subscription_connection_id,
+            model_connection_id: model_connection_id.clone(),
             messages,
             temperature: 0.7,
             max_tokens: answer_token_budget(),
@@ -5425,16 +5780,18 @@ pub async fn invoke_stream_sse(
             thinking_budget_tokens: thinking_plan.budget_tokens,
             reasoning_effort: thinking_plan.effort_wire(),
             prompt_tiers: answer_tiers,
+            speed_tier: turn_speed_tier.to_owned(),
             cache_scope_key,
             ..Default::default()
         };
         crate::vision::parts::attach(&mut grpc_req, &image_parts);
-        // Read before any retry rewrites the request: on a subscription route
+        // Read before any retry rewrites the request: on a subscription or customer-gateway route
         // the turn is never priced from API list prices, including an
         // artifact turn whose synthetic answer names no serving provider.
-        let route_cost_basis = crate::pricing::CostBasis::of_route(
+        let route_cost_basis = crate::pricing::CostBasis::of_request(
             &grpc_req.provider_hint,
             &grpc_req.subscription_connection_id,
+            &grpc_req.model_connection_id,
         );
         // Advisory cache-miss classification (WS02-S2): digest the leading
         // system messages now, before any retry rewrites the request. A ZDR
@@ -5837,6 +6194,8 @@ pub async fn invoke_stream_sse(
         // so `invoke_resume` can replay the finished answer on reconnect. A
         // deliberate cancel arrives via `cancel_flag` (the cancel registry)
         // and is checked every iteration, so cancel keeps working mid-drain.
+        // Read once per turn, before the relay: the answer's routing decision (W5-073-b) is stated only under its switch.
+        let routing_decision_on = routing_decision_switch();
         let mut failure_code = "inference_stream_ended_without_terminal";
         let mut heartbeat =
             tokio::time::interval(crate::session_flow::MANAGED_RUN_HEARTBEAT_INTERVAL);
@@ -6104,9 +6463,20 @@ pub async fn invoke_stream_sse(
                         output: i64::from(output_tokens),
                         cache_read: i64::from(cache_read_tokens),
                         cache_write: i64::from(cache_creation_tokens),
+                        // Served on the priority tier only when the final chunk reports it, as the unary
+                        // answer reads `InferResponse.service_tier_used`: the same multiplier then
+                        // applies once, in `turn_usage`'s pricing, for the frames and the ledger row.
+                        priority: chunk.service_tier_used == crate::pricing::SERVICE_TIER_PRIORITY,
                     });
                     // The route note rides the final chunk, so the answer's routing is read with its call (WS27-S7).
                     let answer_routing = crate::tool_loop::route_shift(chunk.route_note.as_ref());
+                    // The same note's decision (W5-073-b), under its switch: the answer's usage frames, its usage
+                    // envelope and its persisted metadata state it, and nothing else does.
+                    let answer_routing_decision = if routing_decision_on {
+                        crate::tool_loop::route_decision(chunk.route_note.as_ref())
+                    } else {
+                        None
+                    };
                     let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
                     // inference-core sets this ONLY when the provider connection
                     // broke before any proper termination signal arrived — a
@@ -6681,7 +7051,7 @@ pub async fn invoke_stream_sse(
                             crate::session_flow::DirectAnswer {
                                 content: &assistant_output,
                                 agent_name: session_agent_name.as_deref(),
-                                metadata: with_loop_stop(
+                                metadata: with_routing_decision(with_loop_stop(
                                     crate::compaction::stamp_generation(
                                         crate::session_flow::with_work_summary(
                                         crate::session_flow::with_head_summary(
@@ -6748,6 +7118,8 @@ pub async fn invoke_stream_sse(
                                         head_summary.as_ref(),
                                     ),
                                     loop_stop.as_ref(),
+                                ),
+                                answer_routing_decision.as_ref(),
                                 ),
                             },
                             &req_id,
@@ -7007,6 +7379,11 @@ pub async fn invoke_stream_sse(
                         cache_creation_tokens,
                         cost_basis,
                     );
+                    // The answer's served tier rides its ledger row, as the frames above price it.
+                    stamp_served_tier(
+                        &mut usage_envelope,
+                        answer_call.as_ref().is_some_and(|call| call.priority),
+                    );
                     // Read only now: the verification pass above records its judge and resample
                     // calls, and a read before it would leave them out of the rows and the total.
                     let overhead = sink.overhead_usage();
@@ -7032,10 +7409,13 @@ pub async fn invoke_stream_sse(
                         }
                         usage_envelope.payload["run_id"] = json!(session_run_for_terminal.run_id);
                     }
+                    // A waived turn's row states its retention class under the ZDR ledger switch (DEF-Z-06b).
+                    stamp_retention_class(&mut usage_envelope, retention_class);
                     // A summary as of now, beside the unchanged `latency_ms`.
                     usage_envelope.payload["timing"] = timing.summary();
                     if let Some(reason) = cache_telemetry::miss_reason_for_turn(
-                        cache_prefix.filter(|_| cost_basis != crate::pricing::CostBasis::Subscription),
+                        // Only a platform-metered call is classified: a subscription's or a customer gateway's cache is not ours to read.
+                        cache_prefix.filter(|_| cost_basis == crate::pricing::CostBasis::Metered),
                         &org_clone,
                         &session_thread_id,
                         &model_used,
@@ -7043,6 +7423,10 @@ pub async fn invoke_stream_sse(
                         cache_read_tokens,
                     ) {
                         usage_envelope.payload["cache_miss_reason"] = reason.into();
+                    }
+                    // The route decision rides the envelope under its switch (W5-073-b); cost-core reads its keys by name.
+                    if let Some(decision) = answer_routing_decision.clone() {
+                        usage_envelope.payload["routing_decision"] = decision;
                     }
                     if let Err(e) = publisher
                         .publish(&subjects::usage_subject(&org_clone), &usage_envelope)
@@ -7167,6 +7551,7 @@ pub async fn invoke_stream_sse(
                                 snapshot: turn,
                                 ceiling: sink.run_ceiling_at_turn_end(&turn, turn_metered),
                                 routing: answer_routing,
+                                routing_decision: answer_routing_decision.clone(),
                             },
                         )
                         .await;
@@ -7185,6 +7570,7 @@ pub async fn invoke_stream_sse(
                         calls: turn.calls,
                         unpriced_calls: turn.unpriced_calls,
                         cost_by_category: turn.by_category,
+                        routing_decision: answer_routing_decision.clone(),
                     };
                     emit_and_buffer(
                         &tx,
@@ -7530,13 +7916,11 @@ const MAX_INJECTED_SKILLS: i32 = 3;
 /// context budget (`skills::SKILL_CONTEXT_BUDGET_CHARS`) still bounds the total.
 const MAX_REQUESTED_SKILLS: usize = 4;
 
-/// What `fetch_skill_context` injected: the formatted blocks, plus the ids of
-/// the member's explicit picks that actually resolved — the server's list, for
-/// the turn registry, never the client's claim.
+/// What `fetch_skill_context` injected: the formatted blocks, plus the counts and
+/// the pins the turn carries.
 #[derive(Default)]
 struct SkillContext {
     blocks: Vec<String>,
-    requested_ids: Vec<String>,
     /// Blocks shortened, and blocks left out, to fit the context budget.
     skills_truncated: usize,
     skills_dropped: usize,
@@ -7593,7 +7977,9 @@ fn answer_token_budget() -> i32 {
 /// with. Reaching it means a cut-off answer only where the provider enforces
 /// it. The subscription broker does not (Codex takes no output cap) and
 /// counts reasoning inside its output tokens, so on that route the check gets
-/// no budget (0) and a long answer is not scored as truncated.
+/// no budget (0) and a long answer is not scored as truncated. A customer
+/// gateway is sent the same output cap (`max_tokens`) as a platform route, so
+/// it is checked the same way.
 ///
 /// `reasoning_allowance` is what the effort level may add to the ceiling (0
 /// without a level): reasoning tokens count toward `output_tokens`, so a
@@ -7601,11 +7987,13 @@ fn answer_token_budget() -> i32 {
 fn truncation_budget(cost_basis: crate::pricing::CostBasis, reasoning_allowance: i32) -> u32 {
     match cost_basis {
         crate::pricing::CostBasis::Subscription => 0,
-        crate::pricing::CostBasis::Metered => u32::try_from(crate::thinking::raised_ceiling(
-            answer_token_budget(),
-            reasoning_allowance,
-        ))
-        .unwrap_or(0),
+        crate::pricing::CostBasis::Metered | crate::pricing::CostBasis::CustomerBilled => {
+            u32::try_from(crate::thinking::raised_ceiling(
+                answer_token_budget(),
+                reasoning_allowance,
+            ))
+            .unwrap_or(0)
+        }
     }
 }
 
@@ -8030,6 +8418,8 @@ struct SummarizerContext<'a> {
     model: &'a str,
     provider_hint: &'a str,
     subscription_connection_id: &'a str,
+    /// The customer-gateway connection of the turn (W4-BYO-6). A summary is never made on a gateway turn.
+    model_connection_id: &'a str,
     zdr: bool,
     conversation_only: bool,
     /// Caller-selected minimum privacy tier, already normalized to the wire
@@ -8680,6 +9070,7 @@ async fn summarize_head(
             summarizer.model,
             summarizer.provider_hint,
             summarizer.subscription_connection_id,
+            summarizer.model_connection_id,
             &crate::compaction::summary_prompt_with_memory(transcript, &memory_directive),
             // The summary becomes a prefix later turns repeat; on an adapter
             // that forwards a temperature, sampling must not vary it.
@@ -8788,7 +9179,9 @@ async fn budget_compacted_thread(
 /// actually steers the model — the load-bearing Claude-Code skill behaviour.
 /// Lazy-loads the org's LEARNED skills from session-core once per org (mirrors
 /// the `MatchSkills` gRPC read path). Advisory: any failure yields an empty Vec
-/// so inference still proceeds.
+/// so inference still proceeds. The turn is recorded here, once its skills are
+/// matched and before its footers are built, because a footer names a `/skills`
+/// mount only where the turn's record puts that skill's bundle on the turn (WS19-S8).
 async fn fetch_skill_context(
     state: &AppState,
     bearer: &VerifiedModelBearer,
@@ -8798,8 +9191,13 @@ async fn fetch_skill_context(
     thread_id: &str,
     query: &str,
     requested: &[String],
+    request_id: &str,
+    run_id: &str,
+    zdr: bool,
 ) -> SkillContext {
-    use mp_contracts::model_plane::v1::{ListAgentSkillsRequest, MatchSkillsRequest, Skill};
+    use mp_contracts::model_plane::v1::{
+        ListAgentSkillsRequest, MatchSkillsRequest, Skill, SkillPin,
+    };
 
     if org_id.trim().is_empty() {
         return SkillContext::default();
@@ -8949,7 +9347,7 @@ async fn fetch_skill_context(
     let skill_ids: Vec<String> = chosen.iter().map(|s| s.id.clone()).collect();
     // EP-11 S3: pin every skill the turn set out to inject, a block the budget cut
     // or dropped included: `reattach_skill` recovers exactly those, at this version.
-    let pins = if crate::skills::skill_pins_enabled() {
+    let pins: Vec<SkillPin> = if crate::skills::skill_pins_enabled() {
         chosen
             .iter()
             .filter(|s| !s.body.trim().is_empty())
@@ -8958,7 +9356,27 @@ async fn fetch_skill_context(
     } else {
         Vec::new()
     };
+    // Remember which skills this turn injected, keyed by the request_id the SPA
+    // already has. A thumbs-up has to credit the skills that actually shaped the
+    // answer, and the client must not be trusted to name them — so the mapping
+    // is recorded server-side here and resolved at rating time.
+    crate::chat_turn_registry::record_chat_turn(
+        state,
+        request_id,
+        org_id,
+        user_id,
+        run_id,
+        query,
+        &requested_ids,
+        MAX_INJECTED_SKILLS,
+        &pins,
+    );
     let bundles = skill_bundle_summaries(state, capability_bearer, org_id, &skill_ids).await;
+    // The `/skills` mounts this turn carries (WS19-S8), read from the record just written: a footer
+    // names one only where the turn's bundle is mounted.
+    let mounts = crate::tool_loop::skill_mounts_for_footers(
+        state, request_id, org_id, user_id, zdr, &bundles,
+    );
     // Bounded by SIZE as well as count — see `skills::fit_skill_blocks_with_footers`.
     let fitted = crate::skills::fit_skill_blocks_with_footers(
         chosen
@@ -8969,7 +9387,15 @@ async fn fetch_skill_context(
                     .iter()
                     .find(|bundle| bundle.skill_id == s.id)
                     .map(|bundle| {
-                        crate::skills::bundle_footer(&s.name, bundle.file_count, bundle.total_bytes)
+                        let footer = crate::skills::bundle_footer(
+                            &s.name,
+                            bundle.file_count,
+                            bundle.total_bytes,
+                        );
+                        match mounts.iter().find(|mount| mount.skill_id == s.id) {
+                            Some(mount) => bundle_footer_naming_mount(&footer, &mount.name),
+                            None => footer,
+                        }
                     })
                     .unwrap_or_default();
                 (crate::skills::format_skill_block(&s), footer)
@@ -8987,12 +9413,20 @@ async fn fetch_skill_context(
     }
     SkillContext {
         blocks: fitted.blocks,
-        requested_ids,
         skills_truncated: fitted.truncated,
         skills_dropped: fitted.dropped,
         skill_file_offered: !bundles.is_empty(),
         pins,
     }
+}
+
+/// The bundle footer with the path its mount has inside `code_interpreter` (WS19-S8): one plain
+/// sentence, placed inside the footer's brackets, before the closing `]`.
+fn bundle_footer_naming_mount(footer: &str, mount_name: &str) -> String {
+    let open = footer.strip_suffix(']').unwrap_or(footer);
+    format!(
+        "{open} Inside code_interpreter its files can be read and run under /skills/{mount_name}/, read-only, and cannot be written.]"
+    )
 }
 
 /// The bundles of the skills a turn injected (WS19-S7). Asked only while
@@ -9248,6 +9682,7 @@ fn image_gen_stream(
                     size: "1024x1024".to_owned(),
                     quality: "standard".to_owned(),
                     n: 1,
+                    strict_provider: false,
                 },
                 &inference_bearer,
             ))
@@ -9812,9 +10247,10 @@ async fn run_infer_fallback(
     let fallback_zdr = grpc_req.zdr;
     let reasoning_allowance = crate::thinking::allowance_for_wire(grpc_req.reasoning_effort);
     let subscription_route = !grpc_req.subscription_connection_id.trim().is_empty();
-    let route_cost_basis = crate::pricing::CostBasis::of_route(
+    let route_cost_basis = crate::pricing::CostBasis::of_request(
         &grpc_req.provider_hint,
         &grpc_req.subscription_connection_id,
+        &grpc_req.model_connection_id,
     );
     // Advisory cache-miss classification (WS02-S2); never for a ZDR turn.
     let cache_prefix =
@@ -9837,6 +10273,12 @@ async fn run_infer_fallback(
     match result {
         Ok(resp) => {
             let resp = resp.into_inner();
+            // The fallback answer's routing decision (W5-073-b), under the same switch as the stream's answer.
+            let answer_routing_decision = if routing_decision_switch() {
+                crate::tool_loop::route_decision(resp.route_note.as_ref())
+            } else {
+                None
+            };
             let model_used = if resp.model_used.is_empty() {
                 model.to_owned()
             } else {
@@ -10027,7 +10469,7 @@ async fn run_infer_fallback(
                     // The fallback path runs no tool loop, so retrieval grounding
                     // is the only evidence it can have — and it runs no
                     // verification pass either, so there is no verdict to record.
-                    metadata: crate::compaction::stamp_generation(
+                    metadata: with_routing_decision(crate::compaction::stamp_generation(
                         crate::session_flow::with_work_summary(
                         crate::session_flow::with_head_summary(
                             crate::session_flow::with_compaction_summary(
@@ -10053,6 +10495,8 @@ async fn run_infer_fallback(
                         fallback_zdr,
                         ),
                         head_summary,
+                    ),
+                    answer_routing_decision.as_ref(),
                     ),
                 },
                 request_id,
@@ -10250,6 +10694,11 @@ async fn run_infer_fallback(
                 cache_creation_tokens,
                 cost_basis,
             );
+            // The answer's served tier rides its ledger row, as the unary frames price it.
+            stamp_served_tier(
+                &mut usage,
+                resp.service_tier_used == crate::pricing::SERVICE_TIER_PRIORITY,
+            );
             // Under the switch, the tool phase's calls get ledger rows of their own and the row names the run.
             if turn_usage_complete_switch() {
                 let calls: Vec<&crate::usage_meter::CallUsage> = tool_usage.iter().collect();
@@ -10270,9 +10719,12 @@ async fn run_infer_fallback(
                 }
                 usage.payload["run_id"] = json!(run.run_id);
             }
+            // A waived turn's row states its retention class under the ZDR ledger switch (DEF-Z-06b).
+            stamp_retention_class(&mut usage, retention_class);
             usage.payload["timing"] = timing.summary();
             if let Some(reason) = cache_telemetry::miss_reason_for_turn(
-                cache_prefix.filter(|_| cost_basis != crate::pricing::CostBasis::Subscription),
+                // Only a platform-metered call is classified, as on the streaming path.
+                cache_prefix.filter(|_| cost_basis == crate::pricing::CostBasis::Metered),
                 org_id,
                 &thread_id,
                 &model_used,
@@ -10280,6 +10732,9 @@ async fn run_infer_fallback(
                 cache_read_tokens,
             ) {
                 usage.payload["cache_miss_reason"] = reason.into();
+            }
+            if let Some(decision) = answer_routing_decision.clone() {
+                usage.payload["routing_decision"] = decision;
             }
             let _ = publisher
                 .publish(&subjects::usage_subject(org_id), &usage)
@@ -10300,6 +10755,7 @@ async fn run_infer_fallback(
                 output: i64::from(output_tokens),
                 cache_read: i64::from(cache_read_tokens),
                 cache_write: i64::from(cache_creation_tokens),
+                priority: resp.service_tier_used == crate::pricing::SERVICE_TIER_PRIORITY,
             };
             let turn =
                 turn_usage(&state.pricing, tool_usage, &[], Some(answer_usage.clone())).await;
@@ -10323,6 +10779,7 @@ async fn run_infer_fallback(
                         snapshot: turn,
                         ceiling: sink.run_ceiling_at_turn_end(&turn, turn_metered),
                         routing: crate::tool_loop::route_shift(resp.route_note.as_ref()),
+                        routing_decision: answer_routing_decision.clone(),
                     },
                 )
                 .await;
@@ -10348,6 +10805,7 @@ async fn run_infer_fallback(
                 calls: turn.calls,
                 unpriced_calls: turn.unpriced_calls,
                 cost_by_category: turn.by_category,
+                routing_decision: answer_routing_decision.clone(),
             };
             // Buffered like the chunks around it, so a resumed fallback turn
             // replays its tokens, latency, confidence and cost basis too.
@@ -11116,6 +11574,9 @@ struct DirectAnswer {
     /// call; zero where it reports none. Counts only.
     cache_read_tokens: u32,
     cache_write_tokens: u32,
+    /// The routing decision the serving call's route note stated (W5-073-b). Closed tokens only, carried to the
+    /// usage frame under its switch and never to any store, since a direct answer persists nothing.
+    routing_decision: Option<serde_json::Value>,
 }
 
 impl DirectAnswer {
@@ -11138,13 +11599,15 @@ impl DirectAnswer {
             output_tokens: u32::try_from(response.output_tokens).unwrap_or(0),
             cache_read_tokens: u32::try_from(response.cache_read_input_tokens).unwrap_or(0),
             cache_write_tokens: u32::try_from(response.cache_creation_input_tokens).unwrap_or(0),
+            routing_decision: crate::tool_loop::route_decision(response.route_note.as_ref()),
         }
     }
 }
 
 /// What a ZDR answer states about its own cost (WS27-S5, DEC-18): numbers only. It
-/// is priced for the one stream that states it and written nowhere, so a ZDR turn
-/// still has no ledger row and no usage envelope.
+/// is priced for the one stream that states it and written nowhere. A ZDR turn's spend
+/// reaches the ledger only under `MODEL_GATEWAY_ZDR_LEDGER_ROWS` (DEF-Z-06b), as a
+/// content-free row built by `record_zdr_spend`.
 #[derive(Debug, Clone, Copy)]
 struct StatedCost {
     /// The answer's cost in USD; `None` when its model's price is unknown.
@@ -11182,12 +11645,20 @@ async fn direct_infer(
     model: &str,
     provider_hint: &str,
     subscription_connection_id: &str,
+    model_connection_id: &str,
     content: &str,
     temperature: f32,
     zdr: bool,
     min_privacy_tier: i32,
     inference_bearer: &VerifiedInferenceBearer,
 ) -> Result<DirectAnswer, tonic::Status> {
+    // A customer-gateway turn's content never goes to a platform provider, so no summary is made for it here
+    // (W4-BYO-6). The caller takes the truncation fallback on a failed summary, as it does for any other failure.
+    if !model_connection_id.trim().is_empty() {
+        return Err(tonic::Status::failed_precondition(
+            "compaction is not made on a customer gateway turn",
+        ));
+    }
     direct_infer_turn(
         state,
         request_id,
@@ -11467,6 +11938,7 @@ async fn judge_sources(
                 &route.model,
                 &route.provider_hint,
                 &route.subscription_connection_id,
+                &route.model_connection_id,
             );
             crate::tool_loop::stream_call_usage(state, sink, &call, None).await;
             sink.record_overhead(call);
@@ -11481,6 +11953,73 @@ async fn judge_sources(
             SourceVerdict::Unrelated
         }
     }
+}
+
+/// The evidence the goal judge may cite for a settled run (EP-7 S3): the knowledge search that
+/// grounded the answer, and each round's tool-call count. Ids and counts only. The run's response
+/// names no tool calls, so none are named here; the caller adds the run's named tool calls, read by
+/// run id (`thread_goal::run_tool_call_evidence`). The answer excerpt is the only content the judge
+/// reads besides the goal itself.
+fn goal_judge_evidence(response: &RunAgentResponse) -> Vec<crate::goal_judge::EvidenceLine> {
+    let mut evidence = Vec::new();
+    if response.grounded {
+        evidence.push(crate::goal_judge::EvidenceLine {
+            id: "tool:knowledge_search".to_owned(),
+            line: "knowledge_search status=ok".to_owned(),
+        });
+    }
+    for round in &response.round_timing {
+        if round.tool_count > 0 {
+            evidence.push(crate::goal_judge::EvidenceLine {
+                id: format!("round:{}", round.round),
+                line: format!("round {} tool_calls={}", round.round, round.tool_count),
+            });
+        }
+    }
+    evidence.truncate(crate::goal_judge::MAX_EVIDENCE_LINES);
+    evidence
+}
+
+/// The completion judge of a settled goal turn (EP-7 S3): whether the run's answer meets the goal's
+/// criteria, judged on the evidence the run offers. It records the verdict and the judge's own metered
+/// tokens on the turn, and answers the goal with one more `goal_progress` frame carrying the verdict.
+/// Best-effort: every failure is logged by its code and leaves the goal as it stands (active), so the
+/// user closes it by hand. The caller reaches this only after the run's tool-call evidence read
+/// answered (`thread_goal::run_tool_call_evidence`), which is session-core's thread check: a turn whose
+/// read did not answer is never judged, so no answer of a thread holding a ZDR or waived run reaches
+/// the judge model.
+async fn judge_settled_goal_turn(
+    state: &AppState,
+    inference_bearer: &VerifiedInferenceBearer,
+    route: &InferRequest,
+    served_model: &str,
+    request_id: &str,
+    org_id: &str,
+    zdr: bool,
+    settled: &crate::thread_goal::SettledGoalTurn,
+    answer: &str,
+    evidence: &[crate::goal_judge::EvidenceLine],
+) -> Option<crate::sse_events::ChatEvent> {
+    let turn_no = settled.turn_no;
+    // The judge is the one shared path (`thread_goal::judge_goal_turn`), the same one the unattended
+    // judge route runs (EP-7 S6): credential first, then the call, then the verdict write.
+    let recorded = crate::thread_goal::judge_goal_turn(
+        state,
+        inference_bearer,
+        crate::thread_goal::GoalJudgeCall {
+            route,
+            served_model,
+            request_id,
+            org_id,
+            zdr,
+            goal: &settled.goal,
+            turn_no,
+            answer,
+            evidence,
+        },
+    )
+    .await?;
+    crate::thread_goal::progress_event(&recorded, turn_no)
 }
 
 /// Re-ask the question and see whether the answer holds.
@@ -11545,6 +12084,7 @@ async fn resample_answer(
                     model,
                     &route.provider_hint,
                     &route.subscription_connection_id,
+                    &route.model_connection_id,
                 );
                 crate::tool_loop::stream_call_usage(state, sink, &call, None).await;
                 sink.record_overhead(call);
@@ -12022,6 +12562,174 @@ fn zdr_stream_cost_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
     get(ZDR_STREAM_COST_VAR).is_some_and(|value| value.trim() == "true")
 }
 
+/// The switch that puts a ZDR turn's spend in the usage ledger (DEF-Z-06b). Opt-in: only
+/// the literal `true` enables it. Off, a ZDR turn is not checked against the org's budget
+/// and publishes no ledger row, exactly as it did before the switch existed. Turning it
+/// on is an owner call under DEC-18(d).
+const ZDR_LEDGER_ROWS_VAR: &str = "MODEL_GATEWAY_ZDR_LEDGER_ROWS";
+
+fn zdr_ledger_rows_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(ZDR_LEDGER_ROWS_VAR).is_some_and(|value| value.trim() == "true")
+}
+
+/// The switch as this process's environment states it. The ZDR branch and the ledger
+/// helpers read it through here, so the handler itself reads no environment.
+fn zdr_ledger_rows_switch() -> bool {
+    zdr_ledger_rows_enabled_with(&|key| std::env::var(key).ok())
+}
+
+/// Stamps the retention class of a ZDR or waived turn on its ledger row, under the ZDR
+/// ledger switch (DEF-Z-06b). A turn that states no class, and every turn while the switch
+/// is off, leaves its row as it was. The class is a closed token, never content.
+fn stamp_retention_class(
+    envelope: &mut Envelope,
+    retention_class: Option<crate::sse_events::RetentionClass>,
+) {
+    if let Some(class) = retention_class.filter(|_| zdr_ledger_rows_switch()) {
+        envelope.payload["retention_class"] = json!(class.as_str());
+    }
+}
+
+/// The budget check of a ZDR turn (DEF-Z-06b), run before its provider call under the ZDR
+/// ledger switch. It is the check a persistent turn runs: the org's ceilings are read from
+/// org-core and the org's spend from cost-core, by ids and amounts only, and no content of
+/// the turn leaves the gateway. A refusal is the stream the persistent path would send for
+/// the same check, so the client sees one wording either way. `None` lets the turn go on.
+async fn zdr_budget_refusal(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+    cost_bearer: Option<&VerifiedCostBearer>,
+    normalized: &crate::normalize::NormalizedRequest,
+) -> Option<Sse<ReceiverStream<Result<Event, Infallible>>>> {
+    let org_limits = crate::org_quota::fetch_org_limits(
+        &state.http_client,
+        &state.org_core_base_url,
+        org_id,
+        &state.org_core_service_id,
+        &state.org_core_service_token,
+    )
+    .await;
+    let (status, Json(error)) = crate::budget::check_budget(
+        &state.http_client,
+        org_id,
+        user_id,
+        cost_bearer.map_or("", VerifiedCostBearer::as_str),
+        normalized,
+        org_limits,
+    )
+    .await
+    .err()?;
+    let code = error
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or("budget_unavailable");
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("Unable to verify the request budget.");
+    tracing::warn!(request_id = %request_id, code = %code, "zdr turn refused by the budget check before any provider call");
+    Some(error_stream(
+        request_id,
+        code,
+        message,
+        status == StatusCode::SERVICE_UNAVAILABLE,
+    ))
+}
+
+/// The ledger row of a ZDR answer (DEF-Z-06b, FU-30): an explicit `ZDR_SPEND` envelope that
+/// keeps `zdr: true`. Its payload is exactly the allowlist of `mp_contracts::zdr_spend`: ids
+/// (org, user, request), the served model and provider, the four token counts, the amount and
+/// its currency when the answer was priced, the cost basis and the retention class. It carries
+/// no prompt, no answer, no thread or message id, no tool argument and no run, and the envelope
+/// attaches no agent, origin or cause. The publisher admits a `zdr: true` envelope only by this
+/// kind and only with nothing outside the list, and cost-core enforces the same list, so a field
+/// added to the ordinary usage envelope later cannot reach the ledger through a ZDR turn.
+fn build_zdr_usage_envelope(
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+    answer: &DirectAnswer,
+    basis: crate::pricing::CostBasis,
+    cost_usd: Option<f64>,
+) -> Envelope {
+    let mut payload = json!({
+        "request_id": request_id,
+        "org_id": org_id,
+        "user_id": user_id,
+        "model": answer.model_used,
+        "provider_used": answer.provider_used,
+        "input_tokens": answer.input_tokens,
+        "output_tokens": answer.output_tokens,
+        "cache_read_input_tokens": answer.cache_read_tokens,
+        "cache_creation_input_tokens": answer.cache_write_tokens,
+        "currency": mp_contracts::zdr_spend::CURRENCY,
+        "cost_basis": basis.as_str(),
+        "retention_class": crate::sse_events::RetentionClass::Zdr.as_str(),
+    });
+    if let Some(usd) = cost_usd {
+        payload["cost_usd"] = json!(usd);
+    }
+    Envelope {
+        event_id: new_ulid(),
+        event_type: mp_contracts::zdr_spend::EVENT_TYPE.to_owned(),
+        schema_version: 1,
+        ts: Utc::now(),
+        producer: "model-gateway".to_owned(),
+        correlation_id: request_id.to_owned(),
+        causation_id: String::new(),
+        idempotency_key: format!("{request_id}-{}", mp_contracts::zdr_spend::EVENT_TYPE),
+        org_id: org_id.to_owned(),
+        user_id: user_id.to_owned(),
+        resource_ref: format!("request/{request_id}"),
+        payload,
+        zdr: true,
+        ..Default::default()
+    }
+}
+
+/// Puts a completed ZDR answer's spend on the usage ledger (DEF-Z-06b), under the ZDR
+/// ledger switch; off, it returns at once. `stated` is the answer's price when the
+/// in-stream cost already priced it, so the catalogue is read once; otherwise it is priced
+/// here. The row goes through the usage publisher every chat row uses, so no new store is
+/// written. Best effort, like the persistent path's row: a failed publish is logged with
+/// ids only and changes nothing the client sees. The publish is spawned so the answer's
+/// first byte does not wait on it.
+async fn record_zdr_spend(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+    route: &crate::zdr_precheck::ConnectionRoute,
+    answer: &DirectAnswer,
+    stated: Option<StatedCost>,
+) {
+    if !zdr_ledger_rows_switch() {
+        return;
+    }
+    let stated = match stated {
+        Some(stated) => stated,
+        None => zdr_stated_cost(state, route, answer).await,
+    };
+    let envelope = build_zdr_usage_envelope(
+        request_id,
+        org_id,
+        user_id,
+        answer,
+        stated.basis,
+        stated.usd,
+    );
+    let publisher = state.publisher.clone();
+    let subject = subjects::usage_subject(org_id);
+    let request_id = request_id.to_owned();
+    tokio::spawn(async move {
+        if let Err(error) = publisher.publish(&subject, &envelope).await {
+            tracing::warn!(%error, request_id = %request_id, "failed to publish a zdr turn's usage envelope");
+        }
+    });
+}
+
 /// The cost a ZDR answer states, priced from its own counts and the model that served
 /// it. The basis is the route's, settled by the provider that answered, as the durable
 /// path settles it. The catalogue is read and the figure returned; nothing is stored or
@@ -12064,6 +12772,9 @@ async fn zdr_direct_stream(
     state: AppState,
     request_id: String,
     org_id: String,
+    // The caller's user id: the ledger row of the answer (DEF-Z-06b) names the user the spend is attributed to, as
+    // every chat row does. An id only; read nowhere else in this path.
+    user_id: String,
     model: String,
     content: String,
     features: Vec<String>,
@@ -12174,6 +12885,18 @@ async fn zdr_direct_stream(
     } else {
         None
     };
+    // Under its own switch the answer's spend reaches the ledger as a content-free row (DEF-Z-06b). The in-stream
+    // cost above is unchanged: it is stated only when its own switch priced the answer.
+    record_zdr_spend(
+        &state,
+        &request_id,
+        &org_id,
+        &user_id,
+        &route,
+        &answer,
+        stated_cost,
+    )
+    .await;
     zdr_answer_stream(
         request_id,
         grounding,
@@ -12203,7 +12926,7 @@ fn zdr_answer_stream(
     // The answer's provenance as the serving call stated it, floored at the ZDR
     // tier the call was made under. It carries counts and provenance only, never
     // content. The cost and the cache counts it was priced from are stated only when
-    // the cost switch priced this answer; persisting a ZDR turn's cost is DEF-Z-06b.
+    // the cost switch priced this answer; the ledger row of a ZDR turn's cost is `record_zdr_spend`, under its own switch.
     let (cost_usd, cost_basis, cache_read_tokens, cache_write_tokens, cost_by_category) =
         match stated_cost {
             Some(stated) => (
@@ -12234,6 +12957,11 @@ fn zdr_answer_stream(
         calls: 1,
         unpriced_calls: u32::from(cost_usd.is_none()),
         cost_by_category,
+        // The route decision the serving call stated, under its switch (W5-073-b). A direct answer stores nothing.
+        routing_decision: answer
+            .routing_decision
+            .clone()
+            .filter(|_| routing_decision_switch()),
     };
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -12883,6 +13611,37 @@ fn ask_user_max_questions(
     }
 }
 
+/// Whether the deployment runs coordinator mode (`EXECUTION_COORDINATOR_MODE_ENABLED`), read once per process so a
+/// run cannot see it change. Only the literal `true` enables it, and the default is off.
+fn coordinator_mode_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        coordinator_switch(
+            std::env::var("EXECUTION_COORDINATOR_MODE_ENABLED")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+/// The strict reading of `EXECUTION_COORDINATOR_MODE_ENABLED`: only the literal `true` enables it.
+fn coordinator_switch(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// Whether a Do turn's coordinator flag is sent to execution-core as `RunAgentRequest.coordinator`. It is sent only
+/// while the switch is on, and never for a zero-retention or waived turn or a continuation: a continuation resumes the
+/// tools its pause retained, so it carries no offer of its own to narrow. Execution-core applies the same rule.
+fn coordinator_forwarded(
+    on: bool,
+    requested: bool,
+    zdr: bool,
+    waived: bool,
+    continuation: bool,
+) -> bool {
+    on && requested && !zdr && !waived && !continuation
+}
+
 /// The question a run is waiting on, if its `ask_user` call put one to the owner (build plan WS14 S4): the
 /// newest `REQUESTED` question of the run in session-core's run-scoped list. Best-effort: a failed lookup
 /// sends no card, and the prose the turn ends with still carries the question.
@@ -12911,6 +13670,22 @@ async fn requested_question_for_run(
     questions.into_iter().rev().find(|question| {
         question.state == mp_contracts::model_plane::v1::QuestionState::Requested as i32
     })
+}
+
+/// The `user_question` card event of a run's question (WS14 S4, S5): the id, the delivery, when it
+/// expires, the items as the card reads them and, for a server's question, who asked.
+fn user_question_event(
+    question: &mp_contracts::model_plane::v1::RunQuestion,
+) -> crate::sse_events::ChatEvent {
+    let fields = crate::http_routes::run_question_value(question);
+    crate::sse_events::ChatEvent::UserQuestion {
+        question_id: question.id.clone(),
+        delivery: question.delivery.clone(),
+        expires_at: fields["expires_at"].as_str().map(str::to_owned),
+        items: fields["items"].clone(),
+        origin: fields["origin"].as_str().map(str::to_owned),
+        origin_label: fields["origin_label"].as_str().map(str::to_owned),
+    }
 }
 
 #[cfg(test)]
@@ -13312,6 +14087,10 @@ fn spawn_run_dispatch(
     max_questions: u32,
     // The wide-research request (EP-2 S8), item cap clamped to the org's; `None` for every other run.
     wide_research: Option<mp_contracts::model_plane::v1::WideResearchRequest>,
+    // The agent's tool allowlist of a Do turn (EP-6 S9); `None` for every other dispatch.
+    agent_tool_allowlist: Option<mp_contracts::model_plane::v1::AgentToolAllowlist>,
+    // Coordinator mode (`coordinator_forwarded`): sent as `RunAgentRequest.coordinator`, `false` for every other dispatch.
+    coordinator: bool,
 ) -> Result<tokio::task::JoinHandle<Result<RunAgentResponse, tonic::Status>>, tonic::Status> {
     let mut execution_client = state.execution_client.clone();
     // The graded authority execution-core enforces PER CALL.
@@ -13440,6 +14219,8 @@ fn spawn_run_dispatch(
     );
     // The question tool's cap for this run (build plan WS14 S4), set by the caller as the org policy is.
     run_agent_req.max_questions = max_questions;
+    // Coordinator mode, decided by the caller (`coordinator_forwarded`): sent only while its switch is on.
+    run_agent_req.coordinator = coordinator;
     // A wide-research run (EP-2 S8) delegates no wider than its org-clamped item cap: the narrower
     // of that cap and the server's own subagent budget, never wider than either.
     if let Some(wide) = wide_research {
@@ -13447,6 +14228,9 @@ fn spawn_run_dispatch(
             wide_research_max_subagents(run_agent_req.max_subagents, wide.item_cap);
         run_agent_req.wide_research = Some(wide);
     }
+    // The agent's tool allowlist of this Do run (EP-6 S9), ids only: execution-core offers and admits only the tools
+    // it names, and never adds one. Absent for an Ask-only dispatch, so the request is what it was before.
+    run_agent_req.agent_tool_allowlist = agent_tool_allowlist;
     let run_agent_req = authenticated_run_agent_request(
         run_agent_req,
         execution_bearer,
@@ -13707,6 +14491,11 @@ fn build_run_agent_request(
         // A wide-research request is set by the caller (`spawn_run_dispatch`) once the org's cap is
         // read (EP-2 S8); none here, so every other run is the bytes it was.
         wide_research: None,
+        // The agent's tool allowlist is set by the caller (`spawn_run_dispatch`), which holds the turn's pin (EP-6 S9);
+        // none here.
+        agent_tool_allowlist: None,
+        // Coordinator mode is set by the caller (`spawn_run_dispatch`), which decides it from the turn; none here.
+        coordinator: false,
     }
 }
 
@@ -13747,6 +14536,10 @@ pub(crate) enum AgenticRunOutcome {
     Completed,
     Failed,
     AwaitingApproval,
+    /// The run paused for the owner's answer to an `ask_user` question (WS14 S5): non-terminal, nothing
+    /// appended and no receipt written. The run stays open and is resumed through the question form of
+    /// `/continue`.
+    AwaitingInput,
     /// The executor parked the run (WS03 S8-A): a typed, recoverable stop saved as a durable
     /// park; the run stays open and is resumed through the park form of `/continue`.
     Parked,
@@ -13806,6 +14599,8 @@ fn classify_agentic_run_outcome(status: &str) -> AgenticRunOutcome {
         // Execution Core deliberately uses this non-terminal status after it
         // has persisted the approval record. Gateway must preserve that pause.
         "awaiting_approval" => AgenticRunOutcome::AwaitingApproval,
+        // Non-terminal too (WS14 S5): the run waits for the owner's answer to its question.
+        "awaiting_input" => AgenticRunOutcome::AwaitingInput,
         // Non-terminal too (WS03 S8-A): the run is parked, nothing was appended and no
         // receipt was written. Read only with a park reason this build knows
         // ([`run_parked_event`]); otherwise the stream treats it as an unknown status.
@@ -14251,6 +15046,13 @@ fn agentic_run_stream(
     // The claimed goal turn of a Continue turn (EP-7 S2), settled from this run's answer and
     // answered with a `goal_progress` frame. `None` for every other turn and every continuation.
     goal_turn: Option<crate::thread_goal::GoalTurnLedger>,
+    // The agent's tool allowlist of a Do turn (EP-6 S9), carried on the run for execution-core to enforce. `None`
+    // for an Ask turn, for a turn whose version states none (or with MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST off), and
+    // for a continuation, whose tools are the snapshot its pause retained.
+    agent_tool_allowlist: Option<mp_contracts::model_plane::v1::AgentToolAllowlist>,
+    // Whether the turn asked for coordinator mode (`InvokeRequest.coordinator`). `false` for a continuation. The
+    // dispatch sends it only as `coordinator_forwarded` allows.
+    coordinator_requested: bool,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
     tokio::spawn(async move {
@@ -14269,6 +15071,10 @@ fn agentic_run_stream(
         // executor resumes it or session-core's park TTL ends it. Computed once, here, so no
         // dispatch arm is guarded by the resume itself.
         let parking = resume.as_ref().is_some_and(|r| r.mode == "park");
+        // A question continuation (WS14 S5): the resume of a run that paused for the owner's answer. It
+        // spends nothing and the gateway never terminalizes it: every failure below that happens before the
+        // executor starts it is a `question_continue` frame, and the run stays paused.
+        let question_continuing = resume.as_ref().is_some_and(|r| !r.question_id.is_empty());
 
         // A Stop reaches this run while it is followed: the cancel route, a durable cancel of the
         // run and a peer's Stop over the bus all find the entry made here. It is in place before
@@ -14294,6 +15100,15 @@ fn agentic_run_stream(
                 .event("connected")
                 .data(connected.to_string())))
             .await;
+
+        // The Space knowledge receipt (WS18-S5-a): whether this run's `knowledge_search` runs under the
+        // turn's Space decision or is refused for want of one. Told before the first run event, a mode
+        // only; with the switch off, for a run no Space scopes and for a continuation there is no frame.
+        if let Some(receipt) = agentic_knowledge_frame(space_retrieval.as_deref())
+            .filter(|receipt| receipt.should_emit(&features))
+        {
+            let _ = tx.send(Ok(receipt.to_sse(&request_id))).await;
+        }
 
         // The run's context: the instructions an Ask turn would carry, and with `full`
         // the thread's recent turns and recalled memory. Composed after `connected`
@@ -14405,6 +15220,18 @@ fn agentic_run_stream(
             !space_id.is_empty(),
             resume.is_some(),
         );
+        // Coordinator mode (`coordinator_forwarded`): the flag is sent only while its switch is on, and never for a
+        // zero-retention or waived turn or a continuation.
+        let coordinator = coordinator_forwarded(
+            coordinator_mode_enabled(),
+            coordinator_requested,
+            zdr,
+            matches!(
+                retention_class,
+                Some(crate::sse_events::RetentionClass::ZdrWaived { .. })
+            ),
+            resume.is_some(),
+        );
         // Construct the authenticated request before reporting the run as
         // started. A deterministic local credential/metadata failure is a
         // confirmed pre-dispatch rejection, not an ambiguous remote outage.
@@ -14454,6 +15281,8 @@ fn agentic_run_stream(
             run_effort,
             max_questions,
             wide_research,
+            agent_tool_allowlist,
+            coordinator,
         ) {
             Ok(dispatch) => dispatch,
             Err(error) => {
@@ -14464,6 +15293,19 @@ fn agentic_run_stream(
                     // claimed, started or published; the run stays parked.
                     let _ = tx
                         .send(Ok(park_refusal_event(
+                            &request_id,
+                            &run.run_id,
+                            "continue_refused",
+                        )))
+                        .await;
+                    return;
+                }
+                if question_continuing {
+                    // A question continuation skips the pre-consume check (it spends nothing), so a
+                    // credential that is not valid metadata is answered here. Nothing was claimed,
+                    // started or published; the run stays paused for its answer.
+                    let _ = tx
+                        .send(Ok(question_refusal_event(
                             &request_id,
                             &run.run_id,
                             "continue_refused",
@@ -14623,6 +15465,43 @@ fn agentic_run_stream(
                     .await;
                 let _ = tx
                     .send(Ok(park_refusal_event(
+                        &request_id,
+                        &run.run_id,
+                        park_frame_token(&failure),
+                    )))
+                    .await;
+                return;
+            }
+            ParkDispatch::Pass(result) => result,
+        };
+
+        // A question continuation the executor did not start (WS14 S5): intercepted HERE, as the park
+        // continue's is, so the dispatch match keeps its committed arms. The gateway never terminalizes it
+        // and consumes nothing: RUN_STARTED is already on the run subject, so the attempt is closed there
+        // by one event, and the client gets one final `question_continue` frame by closed code, never the
+        // executor's message text.
+        let dispatch_result = match park_dispatch_of(question_continuing, dispatch_result) {
+            ParkDispatch::Refused(status) => {
+                let failure = classify_question_dispatch_failure(&status);
+                tracing::warn!(
+                    code = ?status.code(),
+                    ?failure,
+                    run_id = %run.run_id,
+                    "RunAgent of a question continuation did not start; the run stays paused"
+                );
+                let question_closing = build_stream_envelope(
+                    &request_id,
+                    park_dispatch_run_event(&failure),
+                    &org_id,
+                    &user_id,
+                    &model,
+                );
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &question_closing)
+                    .await;
+                let _ = tx
+                    .send(Ok(question_refusal_event(
                         &request_id,
                         &run.run_id,
                         park_frame_token(&failure),
@@ -14945,8 +15824,10 @@ fn agentic_run_stream(
                 ),
                 (None, _) => None,
             };
+            let outcome =
+                crate::thread_goal::settle_outcome(classify_agentic_run_outcome(&response.status));
             let settlement = crate::thread_goal::TurnSettlement::of_run(
-                crate::thread_goal::settle_outcome(classify_agentic_run_outcome(&response.status)),
+                outcome,
                 response.usage.as_ref(),
                 progress,
                 cost_usd,
@@ -14957,8 +15838,75 @@ fn agentic_run_stream(
                 &route.provider_hint,
                 &route.subscription_connection_id,
             );
-            if let Some(frame) = ledger.settle(&settlement).await {
-                let _ = tx.send(Ok(frame.to_sse(&request_id))).await;
+            if let Some(settled) = ledger.settle(&settlement).await {
+                if let Some(frame) =
+                    crate::thread_goal::progress_event(&settled.goal, settled.turn_no)
+                {
+                    let _ = tx.send(Ok(frame.to_sse(&request_id))).await;
+                }
+                // EP-7 S3: the completion judge judges a completed turn that has an answer. A ZDR or
+                // waived turn is never judged, so no content reaches the judge or the verdict write
+                // for one; a goal turn is never either (no goal exists under ZDR).
+                if crate::goal_judge::should_judge_turn(
+                    crate::goal_judge::goal_judge_enabled(),
+                    outcome,
+                ) && !zdr
+                    && retention_class.is_none()
+                    && !response.final_output.trim().is_empty()
+                {
+                    let judge_route = InferRequest {
+                        model: model.clone(),
+                        provider_hint: route.provider_hint.clone(),
+                        subscription_connection_id: route.subscription_connection_id.clone(),
+                        min_privacy_tier: min_privacy_tier_wire,
+                        run_id: run.run_id.clone(),
+                        zdr,
+                        ..Default::default()
+                    };
+                    // The run's tool calls, by name and status, read by run id. The read is also the
+                    // thread check: session-core refuses it for a thread holding a ZDR or waived run,
+                    // so the turn is judged only after it answered. Any failure skips the judge.
+                    match crate::thread_goal::run_tool_call_evidence(
+                        &state,
+                        &org_id,
+                        &run.run_id,
+                        zdr || retention_class.is_some(),
+                    )
+                    .await
+                    {
+                        Err(crate::thread_goal::JudgeSkipped) => {
+                            tracing::warn!(
+                                %request_id,
+                                turn_no = settled.turn_no,
+                                "goal judge skipped: evidence read incomplete"
+                            );
+                        }
+                        Ok(mut evidence) => {
+                            for line in goal_judge_evidence(&response) {
+                                if !evidence.iter().any(|kept| kept.id == line.id) {
+                                    evidence.push(line);
+                                }
+                            }
+                            evidence.truncate(crate::goal_judge::MAX_EVIDENCE_LINES);
+                            if let Some(frame) = judge_settled_goal_turn(
+                                &state,
+                                &inference_bearer,
+                                &judge_route,
+                                &model,
+                                &request_id,
+                                &org_id,
+                                zdr,
+                                &settled,
+                                &response.final_output,
+                                &evidence,
+                            )
+                            .await
+                            {
+                                let _ = tx.send(Ok(frame.to_sse(&request_id))).await;
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -15009,6 +15957,44 @@ fn agentic_run_stream(
                         .to_string(),
                     )))
                     .await;
+                return;
+            }
+            // The run paused for the owner's answer (WS14 S5): non-terminal, nothing appended, no final
+            // frame and no receipt. The run subject is told RUN_AWAITING_INPUT; the owner's stream gets the
+            // question's card (whatever `max_questions` says, since a continuation offers none) and then
+            // `awaiting_input`. A question that cannot be read still gets the frame, with an empty id.
+            AgenticRunOutcome::AwaitingInput => {
+                let paused = build_stream_envelope(
+                    &request_id,
+                    "RUN_AWAITING_INPUT",
+                    &org_id,
+                    &user_id,
+                    &model,
+                );
+                let _ = state
+                    .publisher
+                    .publish(&subjects::run_event_subject(&run.run_id), &paused)
+                    .await;
+                // A zero-retention or waived run stores no question, so none is looked up.
+                let question = if zdr || retention_class.is_some() {
+                    None
+                } else {
+                    requested_question_for_run(&state, &run.run_id, &org_id, &model_bearer).await
+                };
+                let question_id = match question.as_ref() {
+                    Some(question) => {
+                        let _ = tx
+                            .send(Ok(user_question_event(question).to_sse(&request_id)))
+                            .await;
+                        question.id.clone()
+                    }
+                    None => String::new(),
+                };
+                let event = crate::sse_events::ChatEvent::AwaitingInput {
+                    run_id: run.run_id.clone(),
+                    question_id,
+                };
+                let _ = tx.send(Ok(event.to_sse(&request_id))).await;
                 return;
             }
             AgenticRunOutcome::Failed => {
@@ -15161,15 +16147,7 @@ fn agentic_run_stream(
             if let Some(question) =
                 requested_question_for_run(&state, &run.run_id, &org_id, &model_bearer).await
             {
-                let fields = crate::http_routes::run_question_value(&question);
-                let event = crate::sse_events::ChatEvent::UserQuestion {
-                    question_id: question.id,
-                    delivery: question.delivery,
-                    expires_at: fields["expires_at"].as_str().map(str::to_owned),
-                    items: fields["items"].clone(),
-                    origin: fields["origin"].as_str().map(str::to_owned),
-                    origin_label: fields["origin_label"].as_str().map(str::to_owned),
-                };
+                let event = user_question_event(&question);
                 let _ = tx.send(Ok(event.to_sse(&request_id))).await;
             }
         }
@@ -15282,6 +16260,8 @@ fn agentic_run_stream(
             // all.
             served_by: None,
             retention_class,
+            // An agent run's frame states no answer route, so it carries no decision.
+            routing_decision: None,
         };
         if usage_event.should_emit(&features) {
             let _ = tx.send(Ok(usage_event.to_sse(&request_id))).await;
@@ -15440,6 +16420,21 @@ fn usage_progress_switch() -> bool {
     usage_progress_enabled(&|key| std::env::var(key).ok())
 }
 
+/// Switch for a chat answer's routing decision (W5-073-b): the Verevon mode, complexity and reason its route
+/// note states, carried on the answer's usage frames, its usage envelope and its persisted metadata. Only the
+/// literal `true` enables it, and it is read per turn, so a restart is not needed to turn it off.
+const ROUTING_DECISION_ENV: &str = "MODEL_GATEWAY_ROUTING_DECISION_ENABLED";
+
+fn routing_decision_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    lookup(ROUTING_DECISION_ENV).as_deref() == Some("true")
+}
+
+/// The switch as this process's environment states it. The answer paths read it through here, so the
+/// handler itself reads no environment.
+fn routing_decision_switch() -> bool {
+    routing_decision_enabled(&|key| std::env::var(key).ok())
+}
+
 /// The run ceiling's two switches as this process's environment states them (WS27-S6). The turn reads
 /// them once, when it resolves its ceiling, so the handler itself reads no environment.
 fn run_ceiling_warn_switch() -> bool {
@@ -15448,6 +16443,12 @@ fn run_ceiling_warn_switch() -> bool {
 
 fn run_ceiling_enforce_switch() -> bool {
     crate::sse_events::run_ceiling::enforce_enabled(&|key| std::env::var(key).ok())
+}
+
+/// The per-run cap rule switch (D2-698) as this process's environment states it: on, a request cap
+/// can only tighten the org ceiling. The gate in `budget.rs` reads the same variable.
+fn cap_min_switch() -> bool {
+    crate::budget::cap_min_enabled(&|key| std::env::var(key).ok())
 }
 
 /// The turn's usage as one meter: every call of the tool phase, the overhead calls beside the
@@ -15462,19 +16463,32 @@ async fn turn_usage(
     let rates = pricing.snapshot().await;
     let mut meter = crate::usage_meter::UsageMeter::default();
     for call in tool_calls.iter().chain(overhead) {
-        meter.record(call, &rates.priced(call.basis, &call.model, call.legs()));
+        meter.record(
+            call,
+            &rates.priced_at_tier(call.basis, &call.model, call.legs(), call.priority),
+        );
     }
     match answer {
-        Some(call) => meter.record(&call, &rates.priced(call.basis, &call.model, call.legs())),
+        Some(call) => meter.record(
+            &call,
+            &rates.priced_at_tier(call.basis, &call.model, call.legs(), call.priority),
+        ),
         None => meter.snapshot(),
     }
 }
 
-/// The cost a usage frame states: the metered total, `0.0` for a turn the subscription carried
-/// (older clients read that field), or null when a metered call's price is unknown.
+/// The cost a usage frame states: the metered total, `0.0` for a turn the subscription or the customer's own
+/// gateway carried (older clients read that field), or null when a metered call's price is unknown.
 fn frame_cost_usd(turn: &crate::usage_meter::Snapshot) -> Option<f64> {
-    turn.cost_usd
-        .or_else(|| (turn.basis == Some(crate::pricing::CostBasis::Subscription)).then_some(0.0))
+    turn.cost_usd.or_else(|| {
+        matches!(
+            turn.basis,
+            Some(
+                crate::pricing::CostBasis::Subscription | crate::pricing::CostBasis::CustomerBilled
+            )
+        )
+        .then_some(0.0)
+    })
 }
 
 /// The ledger rows of a turn's calls other than its answer, one per call and stamped with the
@@ -15525,9 +16539,20 @@ fn turn_call_rows(
         );
         row.idempotency_key = format!("{request_id}-USAGE_ENVELOPE-{tag}{index}");
         row.payload["run_id"] = json!(run_id);
+        stamp_served_tier(&mut row, call.priority);
         rows.push(row);
     }
     rows
+}
+
+/// States on a ledger row that its call was served on the priority tier, so cost-core prices the row at
+/// the priority multiplier the frames already state. A call served on any other tier, or on none, adds no
+/// key, so a row is byte-identical to the one an older gateway writes. The tier is a label and carries no
+/// content, so Zero Data Retention does not change it.
+fn stamp_served_tier(envelope: &mut Envelope, priority: bool) {
+    if priority {
+        envelope.payload["service_tier_used"] = json!(crate::pricing::SERVICE_TIER_PRIORITY);
+    }
 }
 
 /// A token count as a ledger field: a negative count is nothing, an overflowing one the maximum.
@@ -15789,6 +16814,7 @@ impl AgentRunUsage {
             output: call_tokens(tokens.output),
             cache_read: call_tokens(tokens.cache_read),
             cache_write: call_tokens(tokens.cache_write),
+            priority: false,
         }
     }
 
@@ -15809,12 +16835,15 @@ impl AgentRunUsage {
             reported.since(self.reported),
         );
         self.reported = self.reported.at_least(reported);
-        let priced = self.rates.priced(call.basis, &call.model, call.legs());
+        let priced = self
+            .rates
+            .priced_at_tier(call.basis, &call.model, call.legs(), call.priority);
         crate::sse_events::ChatEvent::UsageProgress {
             phase: crate::usage_meter::CallPhase::AgentRound,
             snapshot: self.meter.record(&call, &priced),
             ceiling: None,
             routing: None,
+            routing_decision: None,
         }
     }
 
@@ -15850,7 +16879,9 @@ impl AgentRunUsage {
         let mut unpriced_calls = 0u32;
         for leg in agent_usage_legs(usage) {
             let call = self.call(&leg.provider_used, &leg.model_used, RunTokens::of_leg(&leg));
-            let priced = self.rates.priced(call.basis, &call.model, call.legs());
+            let priced = self
+                .rates
+                .priced_at_tier(call.basis, &call.model, call.legs(), call.priority);
             let snapshot = meter.record(&call, &priced);
             if snapshot.unpriced_calls > unpriced_calls {
                 unpriced_calls = snapshot.unpriced_calls;
@@ -17875,6 +18906,7 @@ mod tests {
             output,
             cache_read: 0,
             cache_write: 0,
+            priority: false,
         }
     }
 
@@ -20627,7 +21659,28 @@ mod zdr_provenance_tests {
 pub(crate) struct ContinueRunRequest {
     pub approval_id: String,
     pub claim_token: String,
+    /// "Skip this site" (EP-1 S2, D3-647): the approval named is a DENIED `browser_human_assist`
+    /// pause, and the run continues with the paused call answered as skipped
+    /// ([`continue_skipped_site`]). Absent is `false`, and every other body is the committed one.
+    #[serde(default)]
+    pub skipped: bool,
+    /// The question form (WS14 S5): the `resume` question this continuation answers (its `q_` id). Absent
+    /// is empty, and every other body is the committed one. `approval_id` stays a required key; the
+    /// question form sends it present and exactly empty, as the park form does.
+    #[serde(default)]
+    pub question_id: String,
+    /// The answers to the question's items (question form only): at most
+    /// [`mp_contracts::user_question::MAX_ITEMS`], and exactly one of this list or `question_skip`.
+    #[serde(default)]
+    pub answers: Vec<ContinueAnswerItem>,
+    /// The owner skipped the question (question form only). Named apart from the skipped-site `skipped`
+    /// flag on purpose.
+    #[serde(default)]
+    pub question_skip: bool,
 }
+
+/// One answer item of the question form of `/continue`: the answer route's own item type.
+pub(crate) type ContinueAnswerItem = crate::http_routes::AnswerQuestionItemBody;
 
 /// The two checks that need nothing but the switch and the caller's credential, so
 /// they can run before the run, the approval or any upstream is read: the route is
@@ -20754,6 +21807,24 @@ fn continue_error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
     )
 }
 
+/// The HTTP answer of a continuation the org's agent policy refuses (F-t3-083, WS25-S9): the closed code, its status and
+/// the words a person reads, from [`crate::org_agent_policy::refusal_answer`]. The codes are listed in
+/// [`CONTINUE_HTTP_REFUSALS`] and in [`CONTINUE_QUESTION_HTTP_REFUSALS`] (C-14-mg-rel1), so the answer is a closed one on
+/// every form of the route. The BFF's relay list and the SPA's list are pinned to the first of them: a change to these
+/// two codes reaches them in the same change.
+fn continue_policy_error(code: &'static str) -> (StatusCode, Json<Value>) {
+    let (status, message) = crate::org_agent_policy::refusal_answer(code);
+    debug_assert!(
+        CONTINUE_HTTP_REFUSALS.contains(&(code, status))
+            && CONTINUE_QUESTION_HTTP_REFUSALS.contains(&(code, status)),
+        "{code} with {status} is not in the closed continue HTTP vocabulary of both forms"
+    );
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": message } })),
+    )
+}
+
 // ---- The gateway's pre-consume of a continuation: the pure building blocks (build plan
 // WS03 S7c-A4) and their wiring in `continue_run` and `agentic_run_stream` (S7c-B1).
 // With the resume switch on, `continue_run` consumes the approval itself, spend only,
@@ -20767,6 +21838,10 @@ fn continue_error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
 /// preempts it) and `missing_bearer` (which it maps to `unauthorized`). Every other
 /// HTTP answer of the route keeps `grpc_status_to_http`'s body. Closed and
 /// test-pinned; the BFF's and the SPA's lists are scanned against this one.
+///
+/// The last two rows are the org's agent-policy refusals that [`continue_policy_error`] sends (F-t3-083, WS25-S9,
+/// C-14-mg-rel1), each with the status [`crate::org_agent_policy::refusal_answer`] gives it. The question form lists
+/// them too, in [`CONTINUE_QUESTION_HTTP_REFUSALS`].
 pub(crate) const CONTINUE_HTTP_REFUSALS: &[(&str, StatusCode)] = &[
     ("continue_disabled", StatusCode::CONFLICT),
     ("not_resumable", StatusCode::CONFLICT),
@@ -20778,6 +21853,8 @@ pub(crate) const CONTINUE_HTTP_REFUSALS: &[(&str, StatusCode)] = &[
     ("approval_not_resumable", StatusCode::CONFLICT),
     ("continuation_already_consumed", StatusCode::CONFLICT),
     ("continue_unavailable", StatusCode::SERVICE_UNAVAILABLE),
+    ("org_agents_paused", StatusCode::FORBIDDEN),
+    ("org_policy_unavailable", StatusCode::SERVICE_UNAVAILABLE),
 ];
 
 /// The messages the executor's refusals of a continuation carry, exactly. A status
@@ -20786,6 +21863,8 @@ pub(crate) const CONTINUE_HTTP_REFUSALS: &[(&str, StatusCode)] = &[
 /// token needs a row here. The last three (`park_not_restorable`,
 /// `park_route_unavailable`, `park_not_due`) are the executor's refusals of the
 /// resume of a PARKED run (WS03 S8); the executor builds them from S8-6 on.
+/// `skip_authority_unavailable` is the executor's refusal of a skipped-site continuation
+/// whose retained authority cannot be read (nothing is run under placeholders).
 pub(crate) const CONTINUE_EXECUTOR_MESSAGE_TOKENS: &[&str] = &[
     "continue_disabled",
     "resume_incomplete",
@@ -20804,6 +21883,7 @@ pub(crate) const CONTINUE_EXECUTOR_MESSAGE_TOKENS: &[&str] = &[
     "resume_checkpoint_unavailable",
     "not_resumable",
     "resume_forbidden",
+    "skip_authority_unavailable",
     "park_not_restorable",
     "park_route_unavailable",
     "park_not_due",
@@ -20841,6 +21921,7 @@ pub(crate) const CONTINUE_FRAME_REFUSALS: &[&str] = &[
     "resume_checkpoint_unavailable",
     "not_resumable",
     "resume_forbidden",
+    "skip_authority_unavailable",
     "park_not_restorable",
     "park_route_unavailable",
     "park_not_due",
@@ -21554,6 +22635,717 @@ fn connected_payload(
     payload
 }
 
+// ---- The skipped site (EP-1 S2, D3-647): "Skip this site" on a held browser page, through the one
+// `/continue` route. The approval it names is DENIED, so it is never consumed: nothing is spent, and
+// the executor releases the page and continues the run with the paused call answered as skipped.
+
+/// The checks a skipped site's continuation makes before anything is launched, as a pure function so
+/// each refusal is testable: the route is on and the turn keeps state ([`continue_turn_gate`]), the
+/// run has not ended, and the approval is this run's DENIED `browser_human_assist` pause, one the
+/// durable loop owns (`continuation_mode` `loop`, which only a run with no Space and no pinned route
+/// pauses with, so the route a `/continue` states is the run's own). A granted, pending or
+/// expired approval is not a skip, and a consumed one never is.
+fn skipped_preflight(
+    enabled: bool,
+    run_status: &str,
+    approval_matches_run: bool,
+    approval_denied_help_pause: bool,
+    continuation_mode: &str,
+    approval_consumed: bool,
+    persistent: bool,
+) -> Result<(), (StatusCode, &'static str)> {
+    continue_turn_gate(enabled, persistent)?;
+    if matches!(run_status, "completed" | "failed" | "cancelled") {
+        return Err((StatusCode::CONFLICT, "not_resumable"));
+    }
+    if !approval_matches_run {
+        return Err((StatusCode::NOT_FOUND, "approval_not_found"));
+    }
+    if !approval_denied_help_pause {
+        return Err((StatusCode::CONFLICT, "approval_not_resumable"));
+    }
+    if approval_consumed {
+        return Err((StatusCode::CONFLICT, "continuation_already_consumed"));
+    }
+    if continuation_mode != "loop" {
+        return Err((StatusCode::CONFLICT, "not_resumable"));
+    }
+    Ok(())
+}
+
+/// The `/continue` of a skipped site (EP-1 S2, D3-647), called by [`continue_run`] for a body that
+/// says `skipped`. The approval it names is the person's DENIAL of a `browser_human_assist` pause
+/// ("Skip this site"), so, unlike every other continuation, it is neither granted nor consumed:
+/// nothing is spent (`NotSpent`), and the executor reads the approval itself, releases the page the
+/// run held for the person and continues the run with the paused call answered by
+/// `browser_site_skipped`. The run's browser bearer is forwarded with it (only the executor's own
+/// help switch lets it act on it); without one the executor cannot release the page, so the
+/// continuation is refused here as `missing_bearer`. The person's reason is neither read nor
+/// logged: only the approval's state and cause are.
+#[allow(clippy::too_many_arguments)]
+async fn continue_skipped_site(
+    state: AppState,
+    claims: Claims,
+    model_bearer: VerifiedModelBearer,
+    inference_bearer: VerifiedInferenceBearer,
+    execution_bearer: Option<Extension<VerifiedExecutionBearer>>,
+    data_plane_bearer: Option<Extension<VerifiedBearer>>,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    browser_bearer: Option<Extension<VerifiedBrowserBearer>>,
+    run_id: String,
+    req: ContinueRunRequest,
+) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
+    let (
+        Some(Extension(execution_bearer)),
+        Some(Extension(data_plane_bearer)),
+        Some(Extension(browser_bearer)),
+    ) = (execution_bearer, data_plane_bearer, browser_bearer)
+    else {
+        return Err(continue_error(StatusCode::UNAUTHORIZED, "missing_bearer"));
+    };
+    crate::session_flow::require_durable_run_owner_with_token(
+        &state,
+        &run_id,
+        &claims.org_id,
+        &claims.user_id,
+        model_bearer.as_str(),
+    )
+    .await
+    .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?;
+    // The org's agent-run pause, read after the owner check and before the run or the approval is read. A lockdown mode
+    // cap refuses it too, and a read-only cap states `plan_mode` on the continuation it starts (D2-1114, D2-1117).
+    let org_plan_mode = crate::org_agent_policy::admit_continuation(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        &claims.org_id,
+        capability_bearer
+            .as_deref()
+            .map_or("", VerifiedCapabilityBearer::as_str),
+    )
+    .await
+    .map_err(continue_policy_error)?;
+
+    let detail = state
+        .run_client
+        .clone()
+        .get_run(
+            authenticated_session_request(
+                mp_contracts::model_plane::v1::GetRunRequest {
+                    run_id: run_id.clone(),
+                },
+                &model_bearer,
+            )
+            .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?,
+        )
+        .await
+        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?
+        .into_inner();
+    let approval = state
+        .orchestration_client
+        .clone()
+        .get_approval(
+            authenticated_session_request(
+                mp_contracts::model_plane::v1::GetApprovalRequest {
+                    approval_id: req.approval_id.clone(),
+                    // Scoped to the verified org, never a client value.
+                    org_id: claims.org_id.clone(),
+                    ..Default::default()
+                },
+                &model_bearer,
+            )
+            .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?,
+        )
+        .await
+        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?
+        .into_inner()
+        .approval;
+    let denied = mp_contracts::model_plane::v1::ApprovalState::Denied as i32;
+    let help_pause = mp_contracts::approval_cause::CauseCode::BrowserHumanAssist.as_str();
+    let (matches_run, denied_help_pause, mode, consumed) = match approval.as_ref() {
+        Some(approval) => (
+            approval.run_id == run_id,
+            approval.state == denied
+                && approval
+                    .cause
+                    .as_ref()
+                    .is_some_and(|cause| cause.code == help_pause),
+            approval.continuation_mode.clone(),
+            approval.consumed_at.is_some(),
+        ),
+        None => (false, false, String::new(), false),
+    };
+    skipped_preflight(
+        mp_contracts::loop_fold::continue_after_approval_enabled(),
+        &detail.status,
+        matches_run,
+        denied_help_pause,
+        &mode,
+        consumed,
+        continue_turn_is_persistent(&claims),
+    )
+    .map_err(|(status, code)| continue_error(status, code))?;
+
+    // A request that can never be sent is refused before the run is launched, as a continuation's is.
+    if let Err(error) = run_agent_request_is_buildable(
+        &execution_bearer,
+        &data_plane_bearer,
+        &model_bearer,
+        &inference_bearer,
+    ) {
+        tracing::warn!(%error, run_id = %run_id, "skipped-site continuation refused: its RunAgent request cannot be built");
+        return Ok(unbuildable_continuation_stream(&run_id));
+    }
+    tracing::info!(run_id = %run_id, "the person skipped the site; continuing the run");
+
+    let run = crate::session_flow::SessionRun {
+        thread_id: detail.thread_id.clone(),
+        run_id: run_id.clone(),
+        org_id: claims.org_id.clone(),
+        already_started: true,
+        terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+    };
+    let resume = continue_resume(
+        &req.approval_id,
+        &req.claim_token,
+        resume_mode_for(true, false, false),
+    );
+    Ok(agentic_run_stream(
+        state,
+        run,
+        new_ulid(),
+        claims.org_id.clone(),
+        claims.user_id.clone(),
+        String::new(),
+        detail.goal,
+        Vec::new(),
+        Vec::new(),
+        false,
+        None,
+        0,
+        CONTINUE_PERMISSION_MODE.to_owned(),
+        // The org's read-only cap holds the resumed run to plan mode (D2-1117); false when the cap states none.
+        org_plan_mode,
+        // Never an execute turn: its authority is the run's own.
+        false,
+        // Nor an approve-then-execute turn: it names no plan.
+        None,
+        execution_bearer,
+        data_plane_bearer,
+        model_bearer,
+        inference_bearer,
+        String::new(),
+        // Never Space-scoped: the pause's approval is `loop`, which a Space run never has.
+        None,
+        None,
+        // The run's browser bearer, so the executor can release the page the person skipped.
+        Some(browser_bearer),
+        AgentRoute::default(),
+        None,
+        Some(resume),
+        // Nothing was consumed: the denied approval stays as it is.
+        approval_spend_for(false),
+        None,
+        Vec::new(),
+        Vec::new(),
+        0,
+        Vec::new(),
+        None,
+        String::new(),
+        None,
+        None,
+        false,
+    ))
+}
+
+// ---- The question form (WS14 S5): the answer to an `ask_user` question that paused its run, through the
+// one `/continue` route. The question is session-core's: this gateway reads it, records the answer only
+// while it is still requested, and launches the resume. Nothing is spent here (`NotSpent`), and the
+// gateway never consumes a question: execution-core claims it and applies or releases the stored row.
+
+/// Whether the deployment accepts the question form of `/continue` and relays `awaiting_input`
+/// (`AGENT_ASK_USER_RESUME_ENABLED`, read once per process so a run cannot see it change). Only the
+/// literal `true` enables it, the default is off, and it takes effect only with the loop resume switch
+/// ([`mp_contracts::loop_fold::loop_resume_enabled`]), which the executor needs to resume in place.
+fn ask_resume_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        ask_resume_switch(std::env::var("AGENT_ASK_USER_RESUME_ENABLED").ok().as_deref())
+    }) && mp_contracts::loop_fold::loop_resume_enabled()
+}
+
+/// The strict reading of `AGENT_ASK_USER_RESUME_ENABLED`: only the literal `true` enables it.
+fn ask_resume_switch(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// The HTTP refusals of the question form, each with the status it is sent with. The first four are the
+/// route's own closed vocabulary ([`CONTINUE_HTTP_REFUSALS`]); the next two are the org's agent-policy refusals,
+/// which the question form's admission sends too ([`continue_policy_error`], C-14-mg-rel1); the last three are the
+/// question's. A refusal Session Core makes of the answer itself (`invalid_answer` 422) keeps its typed body from
+/// `http_routes::record_question_answer`.
+pub(crate) const CONTINUE_QUESTION_HTTP_REFUSALS: &[(&str, StatusCode)] = &[
+    ("continue_disabled", StatusCode::CONFLICT),
+    ("continue_incomplete", StatusCode::BAD_REQUEST),
+    ("not_resumable", StatusCode::CONFLICT),
+    ("missing_bearer", StatusCode::UNAUTHORIZED),
+    ("org_agents_paused", StatusCode::FORBIDDEN),
+    ("org_policy_unavailable", StatusCode::SERVICE_UNAVAILABLE),
+    ("question_not_found", StatusCode::NOT_FOUND),
+    ("question_not_resumable", StatusCode::CONFLICT),
+    ("question_expired", StatusCode::GONE),
+];
+
+/// The typed HTTP refusal of the question form: the closed code and its plain words, in the route's
+/// `{ error: { code, message } }` shape.
+fn question_continue_error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
+    debug_assert!(
+        CONTINUE_QUESTION_HTTP_REFUSALS.contains(&(code, status)),
+        "{code} with {status} is not in the closed question-continue HTTP vocabulary"
+    );
+    (
+        status,
+        Json(json!({ "error": { "code": code, "message": code.replace('_', " ") } })),
+    )
+}
+
+/// The messages the executor refuses a question continuation with, exactly. A status whose message is
+/// in this list is a typed refusal the gateway can name; any other message is never echoed and becomes
+/// `continue_refused`. The three authority tokens are what the question path's `effective_authority` check
+/// refuses with; the scope token is the executor's own word for a Space scope it cannot restore, listed
+/// with the others so both lists carry the same executor words. `run_ended` is not listed: the executor
+/// sends a run that has ended as `not_resumable`, which is already here.
+pub(crate) const CONTINUE_QUESTION_EXECUTOR_TOKENS: &[&str] = &[
+    "question_answer_released",
+    "question_resume_unavailable",
+    "question_not_answered",
+    "question_expired",
+    "question_not_found",
+    "question_not_resumable",
+    "continuation_already_consumed",
+    "continue_in_progress",
+    "not_resumable",
+    "resume_forbidden",
+    "authority_widened",
+    "authority_space_mismatch",
+    "authority_route_mismatch",
+    "continue_space_scope_unsupported",
+    "continue_disabled",
+    "resume_incomplete",
+    "resume_checkpoint_unavailable",
+];
+
+/// The `code` of an `error` frame of a question continuation that did not start: the executor's tokens
+/// above, `durable_mutation_forbidden` (the zero-retention trailer) and the three the gateway makes
+/// (`continue_refused`, `continue_unreachable`, `continue_outcome_unknown`). Closed.
+pub(crate) const CONTINUE_QUESTION_FRAME_REFUSALS: &[&str] = &[
+    "question_answer_released",
+    "question_resume_unavailable",
+    "question_not_answered",
+    "question_expired",
+    "question_not_found",
+    "question_not_resumable",
+    "continuation_already_consumed",
+    "continue_in_progress",
+    "not_resumable",
+    "resume_forbidden",
+    "authority_widened",
+    "authority_space_mismatch",
+    "authority_route_mismatch",
+    "continue_space_scope_unsupported",
+    "continue_disabled",
+    "resume_incomplete",
+    "resume_checkpoint_unavailable",
+    "durable_mutation_forbidden",
+    "continue_refused",
+    "continue_unreachable",
+    "continue_outcome_unknown",
+];
+
+/// The checks the question form makes of its body before anything is read, as a pure function so each
+/// refusal is testable: the switch is on (409 `continue_disabled`), and the body is the question form
+/// and nothing else (400 `continue_incomplete`): the approval id present and exactly empty, the
+/// skipped-site flag false, a question id and a claim token that are not blank, and exactly one of a
+/// skip or a non-empty list of at most [`mp_contracts::user_question::MAX_ITEMS`] answers.
+fn question_form_preflight(
+    resume_on: bool,
+    approval_id: &str,
+    skipped: bool,
+    question_id: &str,
+    claim_token: &str,
+    question_skip: bool,
+    answer_count: usize,
+) -> Result<(), (StatusCode, &'static str)> {
+    if !resume_on {
+        return Err((StatusCode::CONFLICT, "continue_disabled"));
+    }
+    if !approval_id.is_empty()
+        || skipped
+        || question_id.trim().is_empty()
+        || claim_token.trim().is_empty()
+        || question_skip == (answer_count > 0)
+        || answer_count > mp_contracts::user_question::MAX_ITEMS
+    {
+        return Err((StatusCode::BAD_REQUEST, "continue_incomplete"));
+    }
+    Ok(())
+}
+
+/// What the gateway does about the question a question continuation names, once it has read it.
+enum QuestionDisposition {
+    /// Still requested: record the body's answer, then resume.
+    Record,
+    /// Already answered or skipped: write nothing and resume with the stored answer.
+    AlreadyRecorded,
+}
+
+/// The read-before-write judgement of a question continuation, as a pure function over the question as
+/// session-core lists it for the path's run. No answer is written before it passes: a missing question
+/// is 404 `question_not_found`; one that is not a `resume` question of this run is 409
+/// `question_not_resumable`; an expired or cancelled one is 410 `question_expired`; a requested one is
+/// [`QuestionDisposition::Record`]; an answered or skipped one is [`QuestionDisposition::AlreadyRecorded`].
+fn question_disposition(
+    question: Option<&mp_contracts::model_plane::v1::RunQuestion>,
+    run_id: &str,
+) -> Result<QuestionDisposition, (StatusCode, &'static str)> {
+    use mp_contracts::model_plane::v1::QuestionState;
+    let Some(question) = question else {
+        return Err((StatusCode::NOT_FOUND, "question_not_found"));
+    };
+    if question.delivery != mp_contracts::user_question::DELIVERY_RESUME || question.run_id != run_id
+    {
+        return Err((StatusCode::CONFLICT, "question_not_resumable"));
+    }
+    match QuestionState::try_from(question.state).unwrap_or(QuestionState::Unspecified) {
+        QuestionState::Expired | QuestionState::Cancelled => {
+            Err((StatusCode::GONE, "question_expired"))
+        }
+        QuestionState::Requested => Ok(QuestionDisposition::Record),
+        QuestionState::Answered | QuestionState::Skipped => Ok(QuestionDisposition::AlreadyRecorded),
+        QuestionState::Unspecified => Err((StatusCode::CONFLICT, "question_not_resumable")),
+    }
+}
+
+/// The resume echo of a question session-core already holds an answer for: the stored answers, or a
+/// skip. A shape echo for the executor, which applies session-core's row and never this text.
+fn stored_resume_answer(question: &mp_contracts::model_plane::v1::RunQuestion) -> String {
+    let skipped = question.state == mp_contracts::model_plane::v1::QuestionState::Skipped as i32;
+    let answers: Vec<mp_contracts::user_question::Answer> = if skipped {
+        Vec::new()
+    } else {
+        question
+            .answers
+            .iter()
+            .map(|answer| mp_contracts::user_question::Answer {
+                item_id: answer.item_id.clone(),
+                option_ids: answer.option_ids.clone(),
+                text: answer.text.clone(),
+            })
+            .collect()
+    };
+    mp_contracts::user_question::encode_resume_answer(&answers, skipped)
+}
+
+/// The resume a question continuation carries: the in-place stage (`loop`), the question, the echo of its
+/// answer and the claim. It names no approval, step, tool or brief.
+fn question_resume(
+    question_id: &str,
+    answer_json: String,
+    claim_token: &str,
+) -> mp_contracts::model_plane::v1::AgentResume {
+    mp_contracts::model_plane::v1::AgentResume {
+        mode: "loop".to_owned(),
+        claim_token: claim_token.to_owned(),
+        question_id: question_id.to_owned(),
+        answer_json,
+        ..Default::default()
+    }
+}
+
+/// The run's questions as session-core lists them for the verified org.
+async fn list_questions_of_run(
+    state: &AppState,
+    run_id: &str,
+    org_id: &str,
+    bearer: &VerifiedModelBearer,
+) -> Result<Vec<mp_contracts::model_plane::v1::RunQuestion>, tonic::Status> {
+    let request = authenticated_session_request(
+        mp_contracts::model_plane::v1::ListRunQuestionsRequest {
+            run_id: run_id.to_owned(),
+            org_id: org_id.to_owned(),
+        },
+        bearer,
+    )?;
+    Ok(state
+        .orchestration_client
+        .clone()
+        .list_run_questions(request)
+        .await?
+        .into_inner()
+        .questions)
+}
+
+/// What a failed `RunAgent` of a question continuation is, in the terms of its frame. The executor's
+/// question tokens are named exactly; everything else takes [`classify_continue_dispatch_failure`], except
+/// that a `NotFound` the executor did not word as a question token is `continue_refused`, never the
+/// approval's `approval_not_found`.
+fn classify_question_dispatch_failure(status: &tonic::Status) -> ContinueDispatchFailure {
+    if mp_contracts::zdr_refusal::Refusal::from_status(status).is_none() {
+        match status.code() {
+            tonic::Code::FailedPrecondition
+            | tonic::Code::Aborted
+            | tonic::Code::NotFound
+            | tonic::Code::InvalidArgument
+            | tonic::Code::PermissionDenied
+            | tonic::Code::Unauthenticated => {
+                return ContinueDispatchFailure::Refused(
+                    CONTINUE_QUESTION_EXECUTOR_TOKENS
+                        .iter()
+                        .copied()
+                        .find(|token| *token == status.message())
+                        .unwrap_or("continue_refused"),
+                );
+            }
+            _ => {}
+        }
+    }
+    classify_continue_dispatch_failure(status)
+}
+
+/// The `error` frame of a question continuation that did not start: the closed token as code and as a
+/// plain message, never retryable, naming the run, and the closed additive marker
+/// `question_continue: true`. It NEVER says `approval_spent`: a question continuation spends nothing.
+/// `token` is in [`CONTINUE_QUESTION_FRAME_REFUSALS`]; the executor's message text is never relayed.
+fn question_refusal_event(request_id: &str, run_id: &str, token: &'static str) -> Event {
+    debug_assert!(
+        CONTINUE_QUESTION_FRAME_REFUSALS.contains(&token),
+        "{token} is not in the closed question-continue frame vocabulary"
+    );
+    let event = crate::sse_events::ChatEvent::Error {
+        code: token.to_owned(),
+        message: token.replace('_', " "),
+        retryable: false,
+    };
+    let mut payload = event.payload(request_id);
+    payload["run_id"] = json!(run_id);
+    payload["question_continue"] = json!(true);
+    Event::default()
+        .event(event.name())
+        .data(payload.to_string())
+}
+
+/// The `/continue` of a question (WS14 S5), called by [`continue_run`] for a body that names a
+/// `question_id`. The run paused for the owner's answer to an `ask_user` question; the answer arrives
+/// here, is recorded through session-core only while the question is still requested, and the run is
+/// resumed in place. Nothing is spent: the executor claims the question and applies session-core's
+/// stored row, never the body (DEC-WS14-7), or releases it.
+///
+/// Order: the switch and the body's shape; a persistent (not ZDR, not waived) credential; the owner;
+/// the org's agent-run pause; the run; the question is READ and judged ([`question_disposition`]);
+/// only then is the answer written. The answers are never logged: log lines carry the run, the
+/// question and a closed code.
+#[allow(clippy::too_many_arguments)]
+async fn continue_question_form(
+    state: AppState,
+    claims: Claims,
+    model_bearer: VerifiedModelBearer,
+    inference_bearer: VerifiedInferenceBearer,
+    execution_bearer: Option<Extension<VerifiedExecutionBearer>>,
+    data_plane_bearer: Option<Extension<VerifiedBearer>>,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    run_id: String,
+    req: ContinueRunRequest,
+) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
+    let ContinueRunRequest {
+        approval_id,
+        claim_token,
+        skipped,
+        question_id,
+        answers,
+        question_skip,
+    } = req;
+    question_form_preflight(
+        ask_resume_on(),
+        &approval_id,
+        skipped,
+        &question_id,
+        &claim_token,
+        question_skip,
+        answers.len(),
+    )
+    .map_err(|(status, code)| question_continue_error(status, code))?;
+    // A waived or ZDR turn keeps no state to continue and stores no answer: refused again here, whatever
+    // the approval switch says, before the owner, the run or the question is read.
+    continue_turn_gate(true, continue_turn_is_persistent(&claims))
+        .map_err(|(status, code)| question_continue_error(status, code))?;
+    let (Some(Extension(execution_bearer)), Some(Extension(data_plane_bearer))) =
+        (execution_bearer, data_plane_bearer)
+    else {
+        return Err(question_continue_error(
+            StatusCode::UNAUTHORIZED,
+            "missing_bearer",
+        ));
+    };
+    crate::session_flow::require_durable_run_owner_with_token(
+        &state,
+        &run_id,
+        &claims.org_id,
+        &claims.user_id,
+        model_bearer.as_str(),
+    )
+    .await
+    .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?;
+    // The org's agent-run pause, read after the owner check and before the run or the question is read,
+    // so a paused org records no answer. A lockdown mode cap refuses it too, and a read-only cap states
+    // `plan_mode` on the continuation it starts.
+    let org_plan_mode = crate::org_agent_policy::admit_continuation(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        &claims.org_id,
+        capability_bearer
+            .as_deref()
+            .map_or("", VerifiedCapabilityBearer::as_str),
+    )
+    .await
+    .map_err(continue_policy_error)?;
+
+    let detail = state
+        .run_client
+        .clone()
+        .get_run(
+            authenticated_session_request(
+                mp_contracts::model_plane::v1::GetRunRequest {
+                    run_id: run_id.clone(),
+                },
+                &model_bearer,
+            )
+            .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?,
+        )
+        .await
+        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?
+        .into_inner();
+    if matches!(detail.status.as_str(), "completed" | "failed" | "cancelled") {
+        return Err(question_continue_error(StatusCode::CONFLICT, "not_resumable"));
+    }
+
+    // READ BEFORE WRITE: the question is found among the path run's own questions and judged before any
+    // answer is written.
+    let questions = list_questions_of_run(&state, &run_id, &claims.org_id, &model_bearer)
+        .await
+        .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?;
+    let found = questions.iter().find(|question| question.id == question_id);
+    let disposition = question_disposition(found, &run_id)
+        .map_err(|(status, code)| question_continue_error(status, code))?;
+
+    // The echo is a shape for the executor, which applies session-core's row. The body's answers for a
+    // question this request records; the stored ones for a question already answered.
+    let echoed: Vec<mp_contracts::user_question::Answer> = answers
+        .iter()
+        .map(|answer| mp_contracts::user_question::Answer {
+            item_id: answer.item_id.clone(),
+            option_ids: answer.option_ids.clone(),
+            text: answer.text.clone(),
+        })
+        .collect();
+    let mut answer_json = mp_contracts::user_question::encode_resume_answer(&echoed, question_skip);
+    match disposition {
+        QuestionDisposition::AlreadyRecorded => {
+            if let Some(stored) = found {
+                answer_json = stored_resume_answer(stored);
+            }
+        }
+        QuestionDisposition::Record => {
+            match crate::http_routes::record_question_answer(
+                &state,
+                &claims,
+                &model_bearer,
+                question_id.clone(),
+                answers,
+                question_skip,
+            )
+            .await
+            {
+                Ok(_) => {}
+                // A race with another answer: the question is answered, which is what this request
+                // wanted. The stored answer is read back for the echo; the resume goes ahead either way.
+                Err(error)
+                    if error.1 .0["error"]["code"].as_str() == Some("question_already_answered") =>
+                {
+                    if let Ok(relisted) =
+                        list_questions_of_run(&state, &run_id, &claims.org_id, &model_bearer).await
+                    {
+                        if let Some(stored) =
+                            relisted.iter().find(|question| question.id == question_id)
+                        {
+                            answer_json = stored_resume_answer(stored);
+                        }
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    tracing::info!(run_id = %run_id, question_id = %question_id, "the owner answered the question; continuing the run");
+
+    let run = crate::session_flow::SessionRun {
+        thread_id: detail.thread_id.clone(),
+        run_id: run_id.clone(),
+        org_id: claims.org_id.clone(),
+        already_started: true,
+        terminal_source: mp_contracts::model_plane::v1::ManagedRunSource::ExecutionAgent,
+    };
+    let resume = question_resume(&question_id, answer_json, &claim_token);
+    Ok(agentic_run_stream(
+        state,
+        run,
+        new_ulid(),
+        claims.org_id.clone(),
+        claims.user_id.clone(),
+        String::new(),
+        detail.goal,
+        Vec::new(),
+        Vec::new(),
+        false,
+        None,
+        0,
+        CONTINUE_PERMISSION_MODE.to_owned(),
+        // The org's read-only cap holds the resumed run to plan mode; false when the cap states none.
+        org_plan_mode,
+        // Never an execute turn: its authority is the run's own.
+        false,
+        // Nor an approve-then-execute turn: it names no plan.
+        None,
+        execution_bearer,
+        data_plane_bearer,
+        model_bearer,
+        inference_bearer,
+        String::new(),
+        // Never Space-scoped here: the pause's authority is the run's own.
+        None,
+        None,
+        // A question continuation never forwards a browser bearer.
+        None,
+        AgentRoute::default(),
+        None,
+        Some(resume),
+        // A question continuation spends nothing in the gateway.
+        approval_spend_for(false),
+        None,
+        Vec::new(),
+        Vec::new(),
+        0,
+        Vec::new(),
+        None,
+        String::new(),
+        None,
+        None,
+        false,
+    ))
+}
+
 /// `POST /v1/orchestration/runs/{run_id}/continue` (build plan WS03 S3): continue a
 /// run that paused for a granted approval, as a fresh segment of the SAME run.
 ///
@@ -21578,6 +23370,10 @@ pub(crate) async fn continue_run(
     inference_bearer: VerifiedInferenceBearer,
     execution_bearer: Option<Extension<VerifiedExecutionBearer>>,
     data_plane_bearer: Option<Extension<VerifiedBearer>>,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
+    // The run's browser bearer, read only for a skipped site (EP-1 S2, D3-647); every other
+    // continuation never forwards one (WS21-S2).
+    browser_bearer: Option<Extension<VerifiedBrowserBearer>>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
     axum::Json(req): axum::Json<ContinueRunRequest>,
 ) -> Result<Sse<ReceiverStream<Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
@@ -21590,12 +23386,45 @@ pub(crate) async fn continue_run(
         &claims,
     )
     .map_err(|(status, code)| continue_error(status, code))?;
+    // The question form (WS14 S5): a body that names a question is answered by its own function, which
+    // reads the question before it writes the answer and spends nothing.
+    let question_form = !req.question_id.is_empty();
+    if question_form {
+        return continue_question_form(
+            state,
+            claims,
+            model_bearer,
+            inference_bearer,
+            execution_bearer,
+            data_plane_bearer,
+            capability_bearer,
+            run_id,
+            req,
+        )
+        .await;
+    }
     // The park form (WS03 S8-A): an EXACTLY empty approval id, accepted only with this
     // service's parking switch on, resumes the run's current parked fold. With the switch off
     // it is the committed 400, and so is a blank id that is not empty.
     let parking = req.approval_id.is_empty() && mp_contracts::loop_fold::loop_parking_enabled();
     if (!parking && req.approval_id.trim().is_empty()) || req.claim_token.trim().is_empty() {
         return Err(continue_error(StatusCode::BAD_REQUEST, "continue_incomplete"));
+    }
+    // "Skip this site" (EP-1 S2, D3-647): a DENIED help pause spends nothing and has its own checks.
+    if req.skipped && !parking {
+        return continue_skipped_site(
+            state,
+            claims,
+            model_bearer,
+            inference_bearer,
+            execution_bearer,
+            data_plane_bearer,
+            capability_bearer,
+            browser_bearer,
+            run_id,
+            req,
+        )
+        .await;
     }
     let (Some(Extension(execution_bearer)), Some(Extension(data_plane_bearer))) =
         (execution_bearer, data_plane_bearer)
@@ -21611,6 +23440,22 @@ pub(crate) async fn continue_run(
     )
     .await
     .map_err(|error| crate::http_routes::grpc_status_to_http(&error))?;
+    // The org's agent-run pause (F-t3-083, WS25-S9): a paused org starts no continuation, and a policy that cannot be read
+    // starts none either, as a Do turn is refused. Read after the owner check and before the run or the approval is read,
+    // so no approval is spent by a refused continuation. A lockdown mode cap refuses it too, and a read-only cap states
+    // `plan_mode` on the continuation it starts (D2-1114, D2-1117).
+    let org_plan_mode = crate::org_agent_policy::admit_continuation(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        &claims.org_id,
+        capability_bearer
+            .as_deref()
+            .map_or("", VerifiedCapabilityBearer::as_str),
+    )
+    .await
+    .map_err(continue_policy_error)?;
 
     let detail = state
         .run_client
@@ -21752,7 +23597,8 @@ pub(crate) async fn continue_run(
             None,
             0,
             CONTINUE_PERMISSION_MODE.to_owned(),
-            false,
+            // The org's read-only cap holds the continuation to plan mode (D2-1117); false when the cap states none.
+            org_plan_mode,
             // A continuation is never an execute turn: its authority is the pause's.
             false,
             // Nor an approve-then-execute turn (WS14 S2): it names no plan.
@@ -21787,6 +23633,10 @@ pub(crate) async fn continue_run(
             String::new(),
             // Nor a goal turn: a continuation resumes a run, it claims no new turn (EP-7 S2).
             None,
+            // Nor an agent allowlist: its tools are the snapshot the pause retained, already narrowed (EP-6 S9).
+            None,
+            // Nor coordinator mode: its tools are the snapshot the pause retained, so there is no offer to narrow.
+            false,
         )
     };
     if !resume_enabled {
@@ -22451,9 +24301,21 @@ mod continue_run_tests {
             state.matches("consume_client").count() >= 5,
             "AppState declares, builds and overrides consume_client in new() and in both from_env branches"
         );
+        // consume_client's own binding, up to the end of its statement. The session-core clients
+        // bound after it (approval grant, rule proposal) do not move this check.
+        let built = state
+            .split("let consume_client = ")
+            .nth(1)
+            .and_then(|rest| rest.split_once(";\n"))
+            .map(|(construction, _)| construction)
+            .expect("from_env binds consume_client");
         assert!(
-            state.contains("\"SESSION_CORE_URL\",\n            \"SESSION_CORE_ADDR\",\n            \"http://localhost:9091\",\n        )?);\n        let orchestration_client"),
-            "from_env points consume_client at the session endpoint"
+            built.contains("\"SESSION_CORE_URL\",\n            \"SESSION_CORE_ADDR\",\n            \"http://localhost:9091\",\n        )?)"),
+            "from_env points consume_client at the session endpoint, found: {built}"
+        );
+        assert!(
+            !built.contains("ORCHESTRATOR_CORE"),
+            "consume_client never reaches orchestrator-core, found: {built}"
         );
     }
 
@@ -22487,11 +24349,11 @@ mod continue_run_tests {
     #[test]
     fn the_continue_vocabularies_have_the_designed_shape() {
         let http: Vec<&str> = CONTINUE_HTTP_REFUSALS.iter().map(|(code, _)| *code).collect();
-        assert_eq!(http.len(), 10, "{http:?}");
+        assert_eq!(http.len(), 12, "{http:?}");
         assert_distinct(&http);
-        assert_eq!(CONTINUE_EXECUTOR_MESSAGE_TOKENS.len(), 20);
+        assert_eq!(CONTINUE_EXECUTOR_MESSAGE_TOKENS.len(), 21);
         assert_distinct(CONTINUE_EXECUTOR_MESSAGE_TOKENS);
-        assert_eq!(CONTINUE_FRAME_REFUSALS.len(), 25);
+        assert_eq!(CONTINUE_FRAME_REFUSALS.len(), 26);
         assert_distinct(CONTINUE_FRAME_REFUSALS);
 
         let mut expected: Vec<&str> = CONTINUE_EXECUTOR_MESSAGE_TOKENS.to_vec();
@@ -22518,6 +24380,241 @@ mod continue_run_tests {
         }
     }
 
+    /// C-14, the model-gateway part: the question form's closed lists and the pinned `/continue` lists must
+    /// not drift. The question form answers with lists of its own (WS14 S5), so a code added to one side and
+    /// not the other is either answered as the anonymous `continue_refused` or never named at all. Each
+    /// difference is NAMED below with the reason it exists, so a new code on either side fails this test
+    /// until its partner is added or the difference is named here.
+    #[test]
+    fn the_question_form_lists_agree_with_the_pinned_continue_lists() {
+        use std::collections::BTreeSet;
+        let set =
+            |words: &[&'static str]| -> BTreeSet<&'static str> { words.iter().copied().collect() };
+
+        // The pinned message tokens the question form never receives. Its launch is a `loop` resume that names
+        // no approval, step, tool or brief, and its preflight refuses a non-empty approval id and a skipped
+        // site. So these are the approval's own refusals, the skipped site's closer and the park resume's.
+        const PINNED_NOT_ON_QUESTION: [&str; 10] = [
+            "approval_not_granted",
+            "approval_expired",
+            "approval_not_resumable",
+            "approval_action_mismatch",
+            "approval_snapshot_mismatch",
+            "not_releasable",
+            "skip_authority_unavailable",
+            "park_not_restorable",
+            "park_route_unavailable",
+            "park_not_due",
+        ];
+        // The six words only the question form's own spend and read of the question name.
+        const QUESTION_ONLY: [&str; 6] = [
+            "question_answer_released",
+            "question_resume_unavailable",
+            "question_not_answered",
+            "question_expired",
+            "question_not_found",
+            "question_not_resumable",
+        ];
+        let pinned = set(CONTINUE_EXECUTOR_MESSAGE_TOKENS);
+        let question = set(CONTINUE_QUESTION_EXECUTOR_TOKENS);
+        let pinned_frames = set(CONTINUE_FRAME_REFUSALS);
+        let question_frames = set(CONTINUE_QUESTION_FRAME_REFUSALS);
+        assert_distinct(CONTINUE_QUESTION_EXECUTOR_TOKENS);
+        assert_distinct(CONTINUE_QUESTION_FRAME_REFUSALS);
+        let off_question = set(&PINNED_NOT_ON_QUESTION[..]);
+        let question_only = set(&QUESTION_ONLY[..]);
+
+        // The names are true: each is on the list it is named against, and no pinned list carries a question word.
+        for word in &off_question {
+            assert!(
+                pinned.contains(word),
+                "{word} is named off the question form, but CONTINUE_EXECUTOR_MESSAGE_TOKENS does not list it"
+            );
+        }
+        for word in &question_only {
+            assert!(
+                question.contains(word) && !pinned.contains(word) && !pinned_frames.contains(word),
+                "{word} is named a question-only word, but it is missing from the question list or on a pinned list"
+            );
+        }
+
+        // The message tokens: the question list is the pinned list less the named words, plus the named question words.
+        let mut expected: BTreeSet<&str> = pinned.difference(&off_question).copied().collect();
+        expected.extend(question_only.iter().copied());
+        assert_eq!(
+            question,
+            expected,
+            "CONTINUE_QUESTION_EXECUTOR_TOKENS drifted: the question list has these but must not {:?}, and lacks these it must have {:?}",
+            question.difference(&expected).collect::<Vec<_>>(),
+            expected.difference(&question).collect::<Vec<_>>(),
+        );
+
+        // The frame list: the question's tokens plus the four the gateway makes or the zero-retention trailer carries.
+        let mut expected_frames = expected.clone();
+        expected_frames.extend([
+            "durable_mutation_forbidden",
+            "continue_refused",
+            "continue_unreachable",
+            "continue_outcome_unknown",
+        ]);
+        assert_eq!(
+            question_frames,
+            expected_frames,
+            "CONTINUE_QUESTION_FRAME_REFUSALS is not the question tokens plus the four gateway and catalogue codes"
+        );
+        // The pinned frame list differs from the question's by the named words and by `approval_not_found`: the
+        // executor derives it from NotFound on the approval path, and the question form answers NotFound with
+        // `question_not_found` or `continue_refused`. Nothing else differs.
+        let mut off_question_frames = off_question.clone();
+        off_question_frames.insert("approval_not_found");
+        assert_eq!(
+            pinned_frames.difference(&question_frames).copied().collect::<BTreeSet<_>>(),
+            off_question_frames,
+            "the pinned frame list differs from the question frame list by a word not named off the question form"
+        );
+        assert_eq!(
+            question_frames.difference(&pinned_frames).copied().collect::<BTreeSet<_>>(),
+            question_only,
+            "the question frame list has a word no pinned frame list has that is not named a question word"
+        );
+
+        // The HTTP list: the six shared codes are sent by both forms with the same status. Four are the route's own;
+        // the last two are the org-policy refusals `admit_continuation` can return, which both forms answer through
+        // `continue_policy_error` (C-14-mg-rel1). The three question codes after them are the question's
+        // (`question_disposition`). The route's other six are approval refusals of its pre-consume, which the question
+        // form never makes: it has no pre-consume.
+        const SHARED_HTTP: [&str; 6] = [
+            "continue_disabled",
+            "continue_incomplete",
+            "not_resumable",
+            "missing_bearer",
+            "org_agents_paused",
+            "org_policy_unavailable",
+        ];
+        const QUESTION_ONLY_HTTP: [&str; 3] = [
+            "question_not_found",
+            "question_not_resumable",
+            "question_expired",
+        ];
+        const PINNED_HTTP_NOT_ON_QUESTION: [&str; 6] = [
+            "approval_not_found",
+            "approval_not_granted",
+            "approval_expired",
+            "approval_not_resumable",
+            "continuation_already_consumed",
+            "continue_unavailable",
+        ];
+        let status_of = |list: &[(&str, StatusCode)], code: &str| -> Option<StatusCode> {
+            list.iter()
+                .find(|(listed, _)| *listed == code)
+                .map(|(_, status)| *status)
+        };
+        for code in SHARED_HTTP {
+            assert!(
+                status_of(CONTINUE_HTTP_REFUSALS, code).is_some(),
+                "{code} is named shared, but CONTINUE_HTTP_REFUSALS does not list it"
+            );
+            assert_eq!(
+                status_of(CONTINUE_QUESTION_HTTP_REFUSALS, code),
+                status_of(CONTINUE_HTTP_REFUSALS, code),
+                "{code} is sent with another status by the question form"
+            );
+        }
+        let question_codes: Vec<&str> = CONTINUE_QUESTION_HTTP_REFUSALS
+            .iter()
+            .map(|(code, _)| *code)
+            .collect();
+        assert_distinct(&question_codes);
+        let question_codes: BTreeSet<&str> = question_codes.into_iter().collect();
+        let route_codes: BTreeSet<&str> = CONTINUE_HTTP_REFUSALS
+            .iter()
+            .map(|(code, _)| *code)
+            .collect();
+        assert_eq!(
+            question_codes
+                .intersection(&route_codes)
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            set(&SHARED_HTTP[..]),
+            "the question and route HTTP lists share a code that is not named as shared"
+        );
+        assert_eq!(
+            question_codes.difference(&route_codes).copied().collect::<BTreeSet<_>>(),
+            set(&QUESTION_ONLY_HTTP[..]),
+            "the question HTTP list has a code the route list lacks that is not named a question code"
+        );
+        assert_eq!(
+            route_codes.difference(&question_codes).copied().collect::<BTreeSet<_>>(),
+            set(&PINNED_HTTP_NOT_ON_QUESTION[..]),
+            "the route HTTP list has a code the question list lacks that is not named off the question form"
+        );
+    }
+
+    /// C-14-mg-rel1: the org's agent-policy refusals of `/continue` are closed codes. `admit_continuation` refuses with
+    /// only the two below (the next test pins that), every form of the route answers them through `continue_policy_error`,
+    /// and both HTTP lists hold each one with the status `refusal_answer` gives it, so the body is the route's typed
+    /// `{ error: { code, message } }`. A lockdown cap is `org_agents_paused` on that route on purpose, so
+    /// `mode_lockdown` is not among them.
+    #[test]
+    fn the_org_policy_refusals_of_continue_are_closed_codes_with_their_refusal_answer_status() {
+        for code in [
+            crate::org_agent_policy::AGENTS_PAUSED_CODE,
+            crate::org_agent_policy::POLICY_UNAVAILABLE_CODE,
+        ] {
+            let (status, message) = crate::org_agent_policy::refusal_answer(code);
+            assert!(
+                CONTINUE_HTTP_REFUSALS.contains(&(code, status)),
+                "{code} with {status} is sent by continue_run but CONTINUE_HTTP_REFUSALS does not list it"
+            );
+            assert!(
+                CONTINUE_QUESTION_HTTP_REFUSALS.contains(&(code, status)),
+                "{code} with {status} is sent by the question form but CONTINUE_QUESTION_HTTP_REFUSALS does not list it"
+            );
+            let (sent, Json(body)) = continue_policy_error(code);
+            assert_eq!(
+                sent, status,
+                "{code} is sent with its refusal_answer status"
+            );
+            assert_eq!(
+                body,
+                json!({ "error": { "code": code, "message": message } }),
+                "{code} is sent in the route's typed refusal shape"
+            );
+        }
+    }
+
+    /// The codes `admit_continuation` can refuse with are the two above and no other: a code it gains without a row in
+    /// both HTTP lists would reach the browser as an unlisted refusal, so a new one fails here first. Scope: the body
+    /// of `admit_continuation` in `org_agent_policy.rs`, by name. Lowercase `Err(error)` is a match arm's binding.
+    #[test]
+    fn admit_continuation_refuses_only_with_the_two_listed_policy_codes() {
+        let policy = include_str!("org_agent_policy.rs").replace("\r\n", "\n");
+        let body = policy
+            .split("pub async fn admit_continuation(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("admit_continuation is in org_agent_policy.rs");
+        let mut refused = std::collections::BTreeSet::new();
+        for part in body.split("Err(").skip(1) {
+            let path: String = part
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == ':')
+                .collect();
+            let name = path.rsplit("::").next().unwrap_or_default();
+            if name.chars().any(|c| c.is_ascii_uppercase()) {
+                refused.insert(name.to_owned());
+            }
+        }
+        assert_eq!(
+            refused,
+            std::collections::BTreeSet::from([
+                "AGENTS_PAUSED_CODE".to_owned(),
+                "POLICY_UNAVAILABLE_CODE".to_owned(),
+            ]),
+            "admit_continuation refuses with a code other than the two listed org-policy codes"
+        );
+    }
+
     /// The HTTP list states each code with the status it is sent with, and the three
     /// statuses of the codes the BFF relays are the ones the BFF's own list pins.
     #[test]
@@ -22542,6 +24639,11 @@ mod continue_run_tests {
         assert_eq!(find("missing_bearer"), StatusCode::UNAUTHORIZED);
         assert_eq!(find("approval_not_found"), StatusCode::NOT_FOUND);
         assert_eq!(find("continue_unavailable"), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(find("org_agents_paused"), StatusCode::FORBIDDEN);
+        assert_eq!(
+            find("org_policy_unavailable"),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     /// Every `(StatusCode::X, "code")` pair a route function states is in the HTTP
@@ -23684,6 +25786,8 @@ mod continue_run_tests {
             None,
             String::new(),
             None,
+            None,
+            false,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -25194,6 +27298,8 @@ mod continue_run_tests {
             None,
             String::new(),
             None,
+            None,
+            false,
         );
         let frames = frames_of_stream(stream).await;
         let names: Vec<&str> = frames.iter().map(|(name, _)| name.as_str()).collect();
@@ -25956,6 +28062,7 @@ mod execute_turn_tests {
             snapshot,
             ceiling: None,
             routing: Some("tier_shifted"),
+            routing_decision: None,
         };
         assert_eq!(routed.payload("req-route")["routing"], "tier_shifted");
         let unrouted = crate::sse_events::ChatEvent::UsageProgress {
@@ -25963,6 +28070,7 @@ mod execute_turn_tests {
             snapshot,
             ceiling: None,
             routing: None,
+            routing_decision: None,
         };
         assert!(unrouted.payload("req-route").get("routing").is_none());
     }
@@ -25989,9 +28097,12 @@ mod execute_turn_tests {
             !continuation.contains("execute_granted"),
             "a continuation never names the flag; its slot is a literal false"
         );
+        // `code_of` drops the comment lines, so the slots are matched on their code alone.
         assert!(
-            continuation.contains("CONTINUE_PERMISSION_MODE.to_owned(),\n            false,\n            false,\n"),
-            "plan_mode false, execute_granted false: {continuation}"
+            continuation.contains(
+                "CONTINUE_PERMISSION_MODE.to_owned(),\n            org_plan_mode,\n            false,\n"
+            ),
+            "plan_mode is the org cap's flag, execute_granted false: {continuation}"
         );
         let stream = code_of("fn agentic_run_stream(", "\n}\n");
         assert!(stream.contains("dispatch_rejection_event(&error)"), "the typed mapping");
@@ -26365,6 +28476,33 @@ mod do_attachment_tests {
         }));
     }
 
+    /// C-05: the inline Space listing refusal has one switch, `OWNER_LIST_SPACE_REFUSE`, read strictly, and the
+    /// retrieval switch does not decide it.
+    #[test]
+    fn the_owner_list_space_refuse_switch_is_strict_and_separate_from_retrieval() {
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("TRUE"),
+            Some(" true"),
+            Some("yes"),
+            Some("false"),
+        ] {
+            let value = value.map(str::to_owned);
+            assert!(
+                !owner_list_space_refuse_enabled_with(&|_| value.clone()),
+                "{value:?}"
+            );
+        }
+        assert!(owner_list_space_refuse_enabled_with(&|key| {
+            (key == OWNER_LIST_SPACE_REFUSE_VAR).then(|| "true".to_owned())
+        }));
+        assert!(!owner_list_space_refuse_enabled_with(&|key| {
+            (key == SPACE_AGENTIC_RETRIEVAL_VAR).then(|| "true".to_owned())
+        }));
+    }
+
     /// The header follows the Space and the switch alone: a run that is not Space-scoped, or any run with the
     /// switch off, carries none; a Space-scoped run with the switch on carries its decision, and an empty value
     /// when its turn holds none (WS18-S5).
@@ -26672,6 +28810,38 @@ mod ask_turn_tests {
             + declared.len();
         let end = inference[start..].find('"').expect("a closing quote");
         assert_eq!(&inference[start..start + end], VISION_UNSUPPORTED);
+    }
+
+    /// The Ask turn's tool list is held to the org's agent policy with the cap the admission read (D-f06-B,
+    /// O-14), and that happens before the staged-file check that needs the code tool. A turn that skipped it
+    /// would offer the inline code interpreter under a lockdown cap.
+    #[test]
+    fn the_ask_turn_tool_list_is_held_to_the_org_policy_before_the_staged_files_are_checked() {
+        let source = include_str!("sse.rs").replace("\r\n", "\n");
+        let body = source
+            .split("pub async fn invoke_stream_sse(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n#[cfg(test)]").next())
+            .expect("invoke_stream_sse is in this file");
+        let admitted = body
+            .find("let org_mode_cap = match crate::org_agent_policy::admit_turn(")
+            .expect("the turn's admission reads the org's mode cap");
+        let held = body
+            .find("crate::org_agent_policy::ask_turn_tools_under_policy(")
+            .expect("the Ask turn's tool list is held to the org policy");
+        let staged = body
+            .find("if !staged.is_empty() && !tool_defs.iter().any(|tool| tool.name == \"code_interpreter\")")
+            .expect("staged files need the code tool");
+        assert!(
+            admitted < held && held < staged,
+            "the admission reads the cap, the org policy holds the tool list, then the staged-file check runs"
+        );
+        assert_eq!(
+            body.matches("crate::org_agent_policy::ask_turn_tools_under_policy(")
+                .count(),
+            1,
+            "one withdrawal per turn"
+        );
     }
 }
 
@@ -27090,5 +29260,123 @@ mod authored_kinds_tests {
         assert!(!body.contains("space_id: "), "the pull never names a Space");
         assert!(body.contains("state.skills.refresh_space("));
         assert!(body.contains("crate::skills::usable_space_skills("));
+    }
+}
+
+/// W2-WS14-S5-g: the question form of `/continue`, as pure checks. The preflight table refuses anything but the question
+/// form before any read; the read-before-write judgement writes nothing for a question already answered and refuses a
+/// question of another run or delivery; the refusal frame names the run and never says `approval_spent`.
+#[cfg(test)]
+mod question_form_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::{QuestionState, RunQuestion};
+
+    #[test]
+    fn question_form_preflight_table() {
+        let max = mp_contracts::user_question::MAX_ITEMS;
+        // (resume_on, approval_id, skipped, question_id, claim, skip, answers) -> expected
+        let cases: [(bool, &str, bool, &str, &str, bool, usize, Result<(), (StatusCode, &str)>); 12] = [
+            (true, "", false, "q-1", "claim", false, 1, Ok(())),
+            (true, "", false, "q-1", "claim", true, 0, Ok(())),
+            (true, "", false, "q-1", "claim", false, max, Ok(())),
+            (false, "", false, "q-1", "claim", false, 1, Err((StatusCode::CONFLICT, "continue_disabled"))),
+            // The switch is checked first, so a malformed body with the switch off is still `continue_disabled`.
+            (false, "appr-1", true, "", "", true, 3, Err((StatusCode::CONFLICT, "continue_disabled"))),
+            (true, "appr-1", false, "q-1", "claim", false, 1, Err((StatusCode::BAD_REQUEST, "continue_incomplete"))),
+            (true, "", true, "q-1", "claim", false, 1, Err((StatusCode::BAD_REQUEST, "continue_incomplete"))),
+            (true, "", false, "  ", "claim", false, 1, Err((StatusCode::BAD_REQUEST, "continue_incomplete"))),
+            (true, "", false, "q-1", " ", false, 1, Err((StatusCode::BAD_REQUEST, "continue_incomplete"))),
+            // Exactly one of a skip or answers.
+            (true, "", false, "q-1", "claim", true, 1, Err((StatusCode::BAD_REQUEST, "continue_incomplete"))),
+            (true, "", false, "q-1", "claim", false, 0, Err((StatusCode::BAD_REQUEST, "continue_incomplete"))),
+            (true, "", false, "q-1", "claim", false, max + 1, Err((StatusCode::BAD_REQUEST, "continue_incomplete"))),
+        ];
+        for (index, (on, approval, skipped, question, claim, skip, answers, want)) in cases.into_iter().enumerate() {
+            assert_eq!(
+                question_form_preflight(on, approval, skipped, question, claim, skip, answers),
+                want,
+                "case {index}"
+            );
+        }
+    }
+
+    fn question(state: QuestionState, delivery: &str, run_id: &str) -> RunQuestion {
+        RunQuestion {
+            id: "q-1".to_owned(),
+            run_id: run_id.to_owned(),
+            state: state as i32,
+            delivery: delivery.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn disposition(question: Option<&RunQuestion>) -> Result<&'static str, (StatusCode, &'static str)> {
+        question_disposition(question, "run-1").map(|found| match found {
+            QuestionDisposition::Record => "record",
+            QuestionDisposition::AlreadyRecorded => "already",
+        })
+    }
+
+    #[test]
+    fn an_answered_question_launches_without_a_write_and_a_foreign_one_is_refused() {
+        let resume = mp_contracts::user_question::DELIVERY_RESUME;
+        assert_eq!(disposition(None), Err((StatusCode::NOT_FOUND, "question_not_found")));
+        assert_eq!(disposition(Some(&question(QuestionState::Requested, resume, "run-1"))), Ok("record"));
+        for done in [QuestionState::Answered, QuestionState::Skipped] {
+            assert_eq!(disposition(Some(&question(done, resume, "run-1"))), Ok("already"), "{done:?}");
+        }
+        for gone in [QuestionState::Expired, QuestionState::Cancelled] {
+            assert_eq!(
+                disposition(Some(&question(gone, resume, "run-1"))),
+                Err((StatusCode::GONE, "question_expired")),
+                "{gone:?}"
+            );
+        }
+        // Another run's question, or one delivered as a next message, is never resumed here.
+        assert_eq!(
+            disposition(Some(&question(QuestionState::Requested, resume, "run-2"))),
+            Err((StatusCode::CONFLICT, "question_not_resumable"))
+        );
+        assert_eq!(
+            disposition(Some(&question(QuestionState::Requested, "next_message", "run-1"))),
+            Err((StatusCode::CONFLICT, "question_not_resumable"))
+        );
+        assert_eq!(
+            disposition(Some(&question(QuestionState::Unspecified, resume, "run-1"))),
+            Err((StatusCode::CONFLICT, "question_not_resumable"))
+        );
+    }
+
+    #[test]
+    fn a_question_resume_names_no_approval_and_carries_the_claim() {
+        let resume = question_resume("q-1", "{\"skipped\":true}".to_owned(), "claim-1");
+        assert_eq!(resume.mode, "loop");
+        assert_eq!(resume.question_id, "q-1");
+        assert_eq!(resume.claim_token, "claim-1");
+        assert!(resume.approval_id.is_empty(), "{resume:?}");
+    }
+
+    #[tokio::test]
+    async fn a_question_refusal_frame_names_the_run_and_never_says_approval_spent() {
+        use axum::response::IntoResponse;
+        for &token in CONTINUE_QUESTION_FRAME_REFUSALS {
+            let event = question_refusal_event("req-1", "run-42", token);
+            let body = Sse::new(futures::stream::iter([Ok::<_, Infallible>(event)]))
+                .into_response()
+                .into_body();
+            let bytes = axum::body::to_bytes(body, usize::MAX).await.expect("body");
+            let text = String::from_utf8(bytes.to_vec()).expect("utf-8");
+            let data = text
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .expect("a data line");
+            let frame: Value = serde_json::from_str(data).expect("json");
+            assert_eq!(frame["code"], token, "{frame}");
+            assert_eq!(frame["run_id"], "run-42", "{frame}");
+            assert_eq!(frame["question_continue"], true, "{frame}");
+            assert_eq!(frame["retryable"], false, "{frame}");
+            assert!(frame.get("approval_spent").is_none(), "{frame}");
+            assert!(!text.contains("approval_spent"), "{text}");
+        }
     }
 }

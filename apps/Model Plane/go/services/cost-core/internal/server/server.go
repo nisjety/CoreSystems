@@ -687,18 +687,91 @@ func budgetDecision(maxCostUSD float64, maxTokens int64, cost float64, tokens in
 // publishes token counts only), cost-core prices it authoritatively from the
 // catalogue so the dollar ledger and the budget posture are real, never $0.
 //
-// The exception is a subscription entry (cost_basis "subscription"): the call
-// was served by the user's own ChatGPT subscription, so there is no per-token
-// charge to price. It keeps cost 0 with its real token counts, and API list
-// prices never reach it. An entry with no basis is priced as metered.
+// The exception is a subscription entry (cost_basis "subscription") or a
+// customer-gateway entry (cost_basis "customer_connection", W4-BYO-5): the call
+// was served by the user's own ChatGPT subscription or the organisation's own
+// gateway, so there is no per-token charge to price. It keeps cost 0 with its
+// real token counts, and API list prices never reach it. An entry with no basis
+// is priced as metered.
 func (s *Server) RecordUsage(ctx context.Context, e ledger.Entry) error {
 	if err := ledger.ValidateEntry(e); err != nil {
 		return err
 	}
 	if e.CostUSD == 0 && (e.InputTokens > 0 || e.OutputTokens > 0) && s.pricing != nil &&
-		e.CostBasis != ledger.CostBasisSubscription {
+		ledger.IsPlatformSpend(e.CostBasis) {
 		e.CostUSD = s.pricing.CostWithCache(e.Model, e.InputTokens, e.OutputTokens, e.CacheReadInputTokens, e.CacheCreationInputTokens)
+		// A call served on the priority tier costs its list price times the
+		// priority multiplier, as the gateway's frames state it. This is the one
+		// place the ledger applies it, and only to a cost priced here: a cost the
+		// producer stated is kept as stated.
+		if e.PriorityTier {
+			e.CostUSD *= pricing.PriorityTierMultiplierFromEnv()
+		}
 	}
+	return s.recordPriced(ctx, e)
+}
+
+// ImageUsage is the image-generation part of a usage event: the size and quality
+// the images were made at, and how many there were. The decoder bounds Count.
+type ImageUsage struct {
+	Size    string
+	Quality string
+	Count   int
+}
+
+// RecordImageUsage records an image_generation usage event. Its images are
+// priced per image from the image catalogue (pricing.ImageCost), and any tokens
+// it carries are priced as RecordUsage prices them. As with RecordUsage, a cost
+// the producer stated is kept, and a subscription entry is never priced.
+//
+// An image the catalogue has no price for is recorded with no image cost. It is
+// logged and counted with price_unknown=true, never priced at a guess.
+func (s *Server) RecordImageUsage(ctx context.Context, e ledger.Entry, image ImageUsage) error {
+	if err := ledger.ValidateEntry(e); err != nil {
+		return err
+	}
+	known := true
+	if e.CostUSD == 0 && ledger.IsPlatformSpend(e.CostBasis) {
+		if s.pricing != nil && (e.InputTokens > 0 || e.OutputTokens > 0) {
+			e.CostUSD = s.pricing.CostWithCache(e.Model, e.InputTokens, e.OutputTokens, e.CacheReadInputTokens, e.CacheCreationInputTokens)
+		}
+		var imageCost float64
+		imageCost, known = s.imageCostOf(e.Model, image)
+		e.CostUSD += imageCost
+	}
+	if err := s.recordPriced(ctx, e); err != nil {
+		return err
+	}
+	telemetry.ImagesRecorded.Add(ctx, int64(image.Count), metric.WithAttributes(
+		attribute.Bool("price_unknown", !known),
+	))
+	if !known {
+		slog.Warn("image usage has no catalogue price; recorded with no image cost",
+			"org_id", e.OrgID,
+			"request_id", e.RequestID,
+			"model", e.Model,
+			"size", image.Size,
+			"quality", image.Quality,
+			"images", image.Count,
+			"price_unknown", true,
+		)
+	}
+	return nil
+}
+
+// imageCostOf prices the images of an image usage from the catalogue. known is
+// false when no rate matches the model, size and quality.
+func (s *Server) imageCostOf(model string, image ImageUsage) (usd float64, known bool) {
+	if s.pricing == nil {
+		return 0, false
+	}
+	return s.pricing.ImageCost(model, image.Size, image.Quality, image.Count)
+}
+
+// recordPriced validates an entry that already carries its cost, appends it to
+// the ledger and records its tokens. RecordUsage and RecordImageUsage both end
+// here.
+func (s *Server) recordPriced(ctx context.Context, e ledger.Entry) error {
 	if err := ledger.ValidateEntry(e); err != nil {
 		return err
 	}

@@ -641,8 +641,8 @@ describe('Stop cancels the durable run of every turn that has one', () => {
     controller.handleStop()
     await tick(8)
 
-    expect(mocks.cancelInvocation).toHaveBeenCalledWith('req-1')
-    expect(mocks.cancelRun).toHaveBeenCalledWith(RUN_ID)
+    expect(mocks.cancelInvocation).toHaveBeenCalledWith('req-1', undefined)
+    expect(mocks.cancelRun).toHaveBeenCalledWith(RUN_ID, undefined, undefined)
     // The wave-1 reconciliation still runs and keeps the honoured stop.
     expect(mocks.getRun).toHaveBeenCalledWith(RUN_ID, expect.any(AbortSignal))
     expect(controller.state.turns.at(-1)).toMatchObject({ status: 'stopped', content: 'Delvis' })
@@ -658,8 +658,8 @@ describe('Stop cancels the durable run of every turn that has one', () => {
     await deliver(live, frame('connected', { ok: true, request_id: 'req-late', thread_id: THREAD, run_id: RUN_ID }, 1))
     await tick(8)
 
-    expect(mocks.cancelInvocation).toHaveBeenCalledWith('req-late')
-    expect(mocks.cancelRun).toHaveBeenCalledWith(RUN_ID)
+    expect(mocks.cancelInvocation).toHaveBeenCalledWith('req-late', undefined)
+    expect(mocks.cancelRun).toHaveBeenCalledWith(RUN_ID, undefined, undefined)
     dispose()
   })
 

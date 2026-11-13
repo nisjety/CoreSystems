@@ -44,7 +44,8 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use mp_contracts::loop_fold::{
     self as lf, Authority, FoldCall, FoldCompleted, FoldMessage, LoopFoldV1, ParkReason, PauseKind,
-    PendingPause, RoundInFlight, EXT_EFFECT_LEDGER, FOLD_VERSION,
+    PendingPause, RoundInFlight, EXT_CONNECTOR_SCOPE, EXT_CONNECTOR_TAINT, EXT_EFFECT_LEDGER,
+    EXT_OFFERED_TOOLS, FOLD_VERSION,
 };
 use mp_contracts::model_plane::v1::{self as pb, session_core_client::SessionCoreClient};
 use tonic::transport::Channel;
@@ -437,6 +438,16 @@ pub(crate) struct Snapshot<'a> {
     /// The writer requires the effect ledger, so this is `true` for any fold that
     /// is written; it is recorded so a resume knows it may reconcile effects.
     pub effect_ledger: bool,
+    /// The turn's screening taint (`ctx.taint.is_marked()`): connector content was seen.
+    /// Always written as `EXT_CONNECTOR_TAINT`, so a resume never has to guess.
+    pub connector_taint: bool,
+    /// The turn's connector selection (`connector_scope_of(req)`); written as
+    /// `EXT_CONNECTOR_SCOPE` only when non-empty.
+    pub connector_scope: &'a [String],
+    /// The tool definitions offered to the model, for a fold a question resume must
+    /// rebuild the offer from (the input pause); `None` everywhere else. Written as
+    /// `EXT_OFFERED_TOOLS` only when `Some`.
+    pub offered_tools: Option<&'a [pb::ToolDefinition]>,
 }
 
 /// The shared `prompt_digest` of a run: the code-owned system prompt and the tools
@@ -477,6 +488,42 @@ pub(crate) fn build_fold(
     let mut extensions = serde_json::Map::new();
     if snapshot.effect_ledger {
         extensions.insert(EXT_EFFECT_LEDGER.to_owned(), serde_json::Value::Bool(true));
+    }
+    // The taint is always recorded (a bool), so a fold without the key reads as written by
+    // an older writer, never as "clear".
+    extensions.insert(
+        EXT_CONNECTOR_TAINT.to_owned(),
+        serde_json::Value::Bool(snapshot.connector_taint),
+    );
+    if !snapshot.connector_scope.is_empty() {
+        extensions.insert(
+            EXT_CONNECTOR_SCOPE.to_owned(),
+            serde_json::Value::Array(
+                snapshot
+                    .connector_scope
+                    .iter()
+                    .map(|id| serde_json::Value::String(id.clone()))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(tools) = snapshot.offered_tools {
+        // Definitions only (code-owned schemas): no user content.
+        extensions.insert(
+            EXT_OFFERED_TOOLS.to_owned(),
+            serde_json::Value::Array(
+                tools
+                    .iter()
+                    .map(|tool| {
+                        serde_json::json!({
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters_json": tool.parameters_json,
+                        })
+                    })
+                    .collect(),
+            ),
+        );
     }
     LoopFoldV1 {
         v: FOLD_VERSION,
@@ -1463,18 +1510,48 @@ impl PauseFold<'_, '_> {
         tool_name: &str,
         action_fingerprint: &str,
     ) -> PauseSaved {
-        self.fold.pending = Some(PendingPause {
+        let pause_ref = format!("{}:{step_id}", self.writer.run_id);
+        let pending = PendingPause {
             kind: PauseKind::Approval,
-            pause_ref: format!("{}:{step_id}", self.writer.run_id),
+            pause_ref: pause_ref.clone(),
             step_id: step_id.to_owned(),
             call: tool_name.to_owned(),
             action_fingerprint: action_fingerprint.to_owned(),
-        });
-        let pause_ref = format!("{}:{step_id}", self.writer.run_id);
+        };
+        self.save_pending(pending, &pause_ref).await
+    }
+
+    /// Save the fold for an input pause on `step_id`: `pending` is a [`PauseKind::Input`] pause
+    /// named by `pause_ref`, which the caller takes from `user_question::input_pause_ref`. That
+    /// reference is also the resume question's idempotency key, so the fold is saved before the
+    /// question exists, as an approval's is. `call` is the paused tool call's name and
+    /// `fingerprint` the digest of the exact call. Content refusals and store failures end as
+    /// they do in [`Self::save`].
+    pub(crate) async fn save_input(
+        &mut self,
+        pause_ref: &str,
+        step_id: &str,
+        call: &str,
+        fingerprint: &str,
+    ) -> PauseSaved {
+        let pending = PendingPause {
+            kind: PauseKind::Input,
+            pause_ref: pause_ref.to_owned(),
+            step_id: step_id.to_owned(),
+            call: call.to_owned(),
+            action_fingerprint: fingerprint.to_owned(),
+        };
+        self.save_pending(pending, pause_ref).await
+    }
+
+    /// The part of a pause save every kind shares: set `pending`, save the fold under
+    /// `pause_ref`, and on a content refusal save a tombstone under the same reference.
+    async fn save_pending(&mut self, pending: PendingPause, pause_ref: &str) -> PauseSaved {
+        self.fold.pending = Some(pending);
         let header = Header::of(&self.fold);
         match self
             .writer
-            .save_fold(SaveKind::Pause, self.fold.clone(), &pause_ref)
+            .save_fold(SaveKind::Pause, self.fold.clone(), pause_ref)
             .await
         {
             Ok(seq) => {
@@ -1488,7 +1565,7 @@ impl PauseFold<'_, '_> {
             Err(SaveError::ContentRefused { reason }) if self.writer.is_active() => {
                 match self
                     .writer
-                    .save_tombstone_as(&header, reason, SaveKind::Pause, &pause_ref)
+                    .save_tombstone_as(&header, reason, SaveKind::Pause, pause_ref)
                     .await
                 {
                     Ok(seq) => {
@@ -1520,9 +1597,9 @@ impl PauseFold<'_, '_> {
         }
     }
 
-    /// The approval could not be created after the fold was saved: close the fold,
-    /// so no orphan paused row stays behind. Best effort; a no-op if nothing saved.
-    pub(crate) async fn close_after_failed_approval(&mut self) {
+    /// The pause's approval or question could not be created after the fold was saved: close
+    /// the fold, so no orphan paused row stays behind. Best effort; a no-op if nothing saved.
+    pub(crate) async fn close_after_failed_pause(&mut self) {
         let (Some(seq), Some(bearer)) = (self.saved_seq.take(), self.writer.bearer) else {
             return;
         };
@@ -1783,6 +1860,9 @@ mod tests {
             authority: authority(),
             prompt_digest: &digest,
             effect_ledger: true,
+            connector_taint: false,
+            connector_scope: &[],
+            offered_tools: None,
         };
 
         // round: between rounds, no open round, no pause.
@@ -1893,6 +1973,9 @@ mod tests {
                 authority: authority(),
                 prompt_digest: "the-digest",
                 effect_ledger: true,
+                connector_taint: false,
+                connector_scope: &[],
+                offered_tools: None,
             },
             None,
             None,
@@ -1934,6 +2017,9 @@ mod tests {
                     authority: authority(),
                     prompt_digest: "",
                     effect_ledger: true,
+                    connector_taint: false,
+                    connector_scope: &[],
+                    offered_tools: None,
                 }
             },
             None,
@@ -2071,10 +2157,83 @@ mod tests {
                 authority: authority(),
                 prompt_digest: "d",
                 effect_ledger: true,
+                connector_taint: false,
+                connector_scope: &[],
+                offered_tools: None,
             },
             None,
             None,
         )
+    }
+
+    /// A fold built from fixed locals with the three connector fields chosen by the caller.
+    fn connector_fold(
+        taint: bool,
+        scope: &[String],
+        offered: Option<&[pb::ToolDefinition]>,
+    ) -> LoopFoldV1 {
+        let retrievals = BTreeSet::new();
+        let messages = vec![chat("system", "preamble"), chat("user", "the goal")];
+        build_fold(
+            &Snapshot {
+                run_id: "run-1",
+                segment_no: 1,
+                rounds_executed: 1,
+                delegated_rounds: 0,
+                step_seq: 1,
+                children_started: 0,
+                grounded: false,
+                compaction_triggered: false,
+                attempted_retrievals: &retrievals,
+                messages: &messages,
+                authority: authority(),
+                prompt_digest: "d",
+                effect_ledger: true,
+                connector_taint: taint,
+                connector_scope: scope,
+                offered_tools: offered,
+            },
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn a_fold_always_records_the_screening_taint_as_a_bool() {
+        let clear = connector_fold(false, &[], None);
+        assert_eq!(clear.extensions[EXT_CONNECTOR_TAINT], false);
+        assert_eq!(lf::connector_taint_in(&clear), lf::TaintRead::Clear);
+        let marked = connector_fold(true, &[], None);
+        assert_eq!(marked.extensions[EXT_CONNECTOR_TAINT], true);
+        assert_eq!(lf::connector_taint_in(&marked), lf::TaintRead::Marked);
+    }
+
+    #[test]
+    fn a_fold_records_the_connector_scope_only_when_it_is_non_empty() {
+        let none = connector_fold(false, &[], None);
+        assert!(!none.extensions.contains_key(EXT_CONNECTOR_SCOPE));
+        assert_eq!(lf::connector_scope_in(&none), None);
+        let ids = vec!["conn_1".to_owned(), "conn-2".to_owned()];
+        let scoped = connector_fold(false, &ids, None);
+        assert_eq!(lf::connector_scope_in(&scoped), Some(ids));
+    }
+
+    #[test]
+    fn a_fold_records_the_offered_tools_only_when_given() {
+        let absent = connector_fold(false, &[], None);
+        assert!(!absent.extensions.contains_key(EXT_OFFERED_TOOLS));
+        assert_eq!(lf::offered_tools_in(&absent), None);
+        let tools = vec![pb::ToolDefinition {
+            name: "knowledge_search".to_owned(),
+            description: "search the knowledge base".to_owned(),
+            parameters_json: r#"{"type":"object"}"#.to_owned(),
+        }];
+        let offered = connector_fold(false, &[], Some(&tools));
+        let read = lf::offered_tools_in(&offered).expect("the offered tools read back");
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].name, "knowledge_search");
+        assert_eq!(read[0].description, "search the knowledge base");
+        assert_eq!(read[0].parameters_json, r#"{"type":"object"}"#);
     }
 
     #[test]
@@ -2633,6 +2792,68 @@ mod tests {
         }
     }
 
+    /// An approval pause names itself `{run_id}:{step_id}` as before; an input pause carries the
+    /// reference its caller gives it, as kind `input`. A writer with no credential is off and makes
+    /// no RPC, so its zero is checked first. The active writers save to a port nothing listens on,
+    /// as the sibling tests do: each save is refused at once, and only the pause naming is observed.
+    #[tokio::test]
+    async fn save_input_writes_an_input_pause_and_save_keeps_the_approval_pause() {
+        let probe = Probe::bind();
+        let channel = probe.channel();
+        let mut off = FoldWriter::new(&channel, None, "run-1", all_good());
+        assert!(
+            off.pause_fold(fold_with(Vec::new())).is_none(),
+            "no credential, no pause fold"
+        );
+        assert_eq!(probe.connections(), 0, "no credential, no RPC");
+
+        let closed = tonic::transport::Endpoint::from_static("http://127.0.0.1:1").connect_lazy();
+        let mut writer = FoldWriter::new(&closed, Some("b"), "run-1", all_good());
+        let mut approval = writer
+            .pause_fold(fold_with(Vec::new()))
+            .expect("an active writer");
+        assert_eq!(
+            approval.save("tool_1_c1", "delete_records", "fp").await,
+            PauseSaved::NotSaved
+        );
+        assert_eq!(
+            approval.fold.pending,
+            Some(PendingPause {
+                kind: PauseKind::Approval,
+                pause_ref: "run-1:tool_1_c1".to_owned(),
+                step_id: "tool_1_c1".to_owned(),
+                call: "delete_records".to_owned(),
+                action_fingerprint: "fp".to_owned(),
+            })
+        );
+
+        let mut writer = FoldWriter::new(&closed, Some("b"), "run-1", all_good());
+        let mut input = writer
+            .pause_fold(fold_with(Vec::new()))
+            .expect("an active writer");
+        let pause_ref = mp_contracts::user_question::input_pause_ref(
+            "run-1",
+            "tool_1_c1",
+            mp_contracts::user_question::ORIGIN_MODEL,
+        );
+        assert_eq!(
+            input
+                .save_input(&pause_ref, "tool_1_c1", "ask_user", "fp")
+                .await,
+            PauseSaved::NotSaved
+        );
+        assert_eq!(
+            input.fold.pending,
+            Some(PendingPause {
+                kind: PauseKind::Input,
+                pause_ref: "run-1:tool_1_c1:input".to_owned(),
+                step_id: "tool_1_c1".to_owned(),
+                call: "ask_user".to_owned(),
+                action_fingerprint: "fp".to_owned(),
+            })
+        );
+    }
+
     /// Every save entry point of a writer, driven once.
     async fn drive_every_save(writer: &mut FoldWriter<'_>) -> PreEffect {
         let fold = || fold_with(vec![chat("system", "p"), chat("user", "g")]);
@@ -2640,7 +2861,7 @@ mod tests {
         let pre_effect = writer.save_pre_effect(fold()).await;
         if let Some(mut pause) = writer.pause_fold(fold()) {
             pause.save("tool_1_c1", "delete_records", "fp").await;
-            pause.close_after_failed_approval().await;
+            pause.close_after_failed_pause().await;
         }
         pre_effect
     }
@@ -2733,8 +2954,10 @@ mod tests {
         // One more refused-under-ZDR row than before: the browser tools' row (WS21-S5a); and the
         // long-page reader's ZDR and waived rows (EP-2 S2), both writer-off; the cited-passage ZDR
         // and research-metadata waived rows (EP-2 S4) and the deck-manifest waived row (EP-5 S3).
-        // The computer tools' row (W4-C C1) is one more ZDR row.
-        assert_eq!((on, off), (3, 13), "every served row was checked");
+        // The computer tools' row (W4-C C1) is one more ZDR row; the web-search and file-output
+        // row (Z-05a) one more ZDR row; the message-version rows (WS17 S8/S9) one ZDR and one
+        // waived row.
+        assert_eq!((on, off), (3, 16), "every served row was checked");
     }
 
     /// The control for the no-call proofs: the same drive against an ACTIVE writer does
@@ -3249,8 +3472,10 @@ mod tests {
             (open, zdr_off, waived_off),
             // The long-page reader added one ZDR and one waived row (EP-2 S2); the cited-passage
             // viewer one ZDR and one waived row (EP-2 S4); the deck manifest one waived row (EP-5 S3).
-            // The computer tools' row (W4-C C1) is one more ZDR row.
-            (3, 8, 5),
+            // The computer tools' row (W4-C C1) is one more ZDR row; the web-search and file-output
+            // row (Z-05a) one more ZDR row; the message-version rows (WS17 S8/S9) one ZDR and one
+            // waived row.
+            (3, 10, 6),
             "every served row was checked"
         );
     }

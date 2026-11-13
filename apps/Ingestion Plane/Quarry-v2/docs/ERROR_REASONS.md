@@ -438,3 +438,14 @@ A compile with `canonical` true builds a version 2 procedure: semantic targets, 
 | 400 | `BAD_REQUEST` | `reason` `prefix_needs_v2` | the replay check sets `prefix` on a version 1 procedure | compile a canonical procedure and check against that, or send the whole action list |
 
 A version 2 replay check compares each action with its step after two fields are set aside: `snapshot_id` and `generation` of a semantic action (handles scoped to one run) and `text` of a slot step (bound at replay). Every other field must match. With `prefix` the replay may stop early; actions beyond the procedure are always a repair. A version 1 procedure is compared as before.
+
+## Teach mode: `GET /v1/agent/runs/{run_id}/procedure-draft` (F-t3-081, dark)
+
+The redacted procedure draft of a run's human steps (`docs/openapi.yaml`, `getAgentProcedureDraft`). It is off unless the edge runs with `QUARRY_TEACH_MODE_ENABLED` set to the literal `true`. The switch is read before the run is looked up, so while it is off every run id gets the same answer. A ZDR run keeps no receipts, so it has no draft.
+
+| status and code | `details.reason` | meaning | what a caller does |
+|---|---|---|---|
+| 404 `NOT_FOUND` | `teach_mode_disabled` | `QUARRY_TEACH_MODE_ENABLED` is not the literal `true` on this edge (the default) | none: the operator turns the switch on |
+| 409 `CONFLICT` | `zdr_not_supported` | the run is under Zero Data Retention, or the caller's token carries the ZDR floor; with the floor, every run id gets this answer, so it reveals nothing about which runs exist | none: a ZDR run gives no draft |
+
+A run the caller does not own, or one that does not exist, is a plain 404 with no `details.reason` (the message is `agent run not found`). The route only reads.

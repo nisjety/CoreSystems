@@ -286,14 +286,16 @@
     "consumerEnv": "INFERENCE_ROUTING_SERVICE_API_KEY",
     "orgIds": [],
     "retentionByAudience": {
-      "session-core": "zdr"
+      "session-core": "persistent"
     },
     "scopes": [
-      "routing:read"
+      "routing:read",
+      "session:request-snapshots:write"
     ],
     "scopesByAudience": {
       "session-core": [
-        "routing:read"
+        "routing:read",
+        "session:request-snapshots:write"
       ]
     }
   },
@@ -357,6 +359,27 @@
       "quarry": "tenant"
     }
   },
+  "model-gateway-goal-judge": {
+    "tenancy": "directory",
+    "audiences": [
+      "session-core"
+    ],
+    "consumerEnv": "MODEL_GATEWAY_GOAL_JUDGE_SERVICE_API_KEY",
+    "orgIds": [],
+    "retentionByAudience": {
+      "session-core": "persistent"
+    },
+    "scopes": [
+      "session:goal-judge:read",
+      "session:goal-verdict:write"
+    ],
+    "scopesByAudience": {
+      "session-core": [
+        "session:goal-judge:read",
+        "session:goal-verdict:write"
+      ]
+    }
+  },
   "model-gateway-mail-task-bridge": {
     "tenancy": "directory",
     "audiences": [
@@ -382,7 +405,8 @@
       "session-core",
       "inference-core",
       "capability-core",
-      "letta-bridge"
+      "letta-bridge",
+      "model-gateway"
     ],
     "consumerEnv": "ORCHESTRATOR_CORE_SERVICE_API_KEY",
     "orgIds": [],
@@ -390,6 +414,7 @@
       "capability-core": "persistent",
       "inference-core": "persistent",
       "letta-bridge": "persistent",
+      "model-gateway": "persistent",
       "session-core": "persistent"
     },
     "scopes": [
@@ -398,6 +423,8 @@
       "inference:invoke",
       "memory:read",
       "memory:write",
+      "model:goal_judge",
+      "session:memory-controls:read",
       "session:runs:system-owner",
       "session:write"
     ],
@@ -413,7 +440,11 @@
         "memory:read",
         "memory:write"
       ],
+      "model-gateway": [
+        "model:goal_judge"
+      ],
       "session-core": [
+        "session:memory-controls:read",
         "session:runs:system-owner",
         "session:write"
       ]

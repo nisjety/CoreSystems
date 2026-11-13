@@ -26,6 +26,9 @@ pub fn tool_data_category(tool: &str) -> &'static str {
         | "thread_read" => "customer_private",
         // A connected account's records are the user's own personal data.
         "list_provider_actions" | "read_provider_action" | "execute_provider_action" => "personal",
+        // An image the person asked for in their own words. The prompt is the person's content, so the call is recorded as
+        // a use of customer content, as a read of their own documents is (W4-IMG-3).
+        "generate_image" => "customer_private",
         _ => "unclassified",
     }
 }

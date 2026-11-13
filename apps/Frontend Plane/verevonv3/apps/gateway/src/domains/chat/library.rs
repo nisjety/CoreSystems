@@ -3,8 +3,9 @@
 //!
 //! `GET /api/v1/chat/library?kind=generated|uploaded|all&limit=&offset=` relays documents-api's
 //! `GET /v1/documents/library`. The origins are fixed here, not by the browser: `generated` is
-//! `chat-artifact`, `uploaded` is `chat-attachment`, and `all` is both, so the library cannot list
-//! another kind of document. The route is dark with the artifact-promote switch (404
+//! `chat-artifact`, `uploaded` is `chat-attachment` and `chat-transcript` (a transcript of an audio
+//! upload, W5-090-b), and `all` is every one of them, so the library cannot list another kind of
+//! document. The route is dark with the artifact-promote switch (404
 //! `library_disabled` while it is off), since a saved copy is what that switch enables.
 //!
 //! Documents-api applies the viewer's own predicate (owner, org-visible, or an explicit grant), so a
@@ -24,7 +25,7 @@ use crate::{
     config::AppState, envelope::error, middleware::AuthenticatedUser, upstream::authorized_org_id,
 };
 
-use super::documents::{CHAT_ARTIFACT_ORIGIN, CHAT_ATTACHMENT_ORIGIN};
+use super::documents::{CHAT_ARTIFACT_ORIGIN, CHAT_ATTACHMENT_ORIGIN, CHAT_TRANSCRIPT_ORIGIN};
 
 /// The page size when the browser names none, and the largest page documents-api serves.
 const DEFAULT_LIBRARY_PAGE: u32 = 50;
@@ -57,8 +58,12 @@ pub(super) async fn list_chat_library(
     }
     let origins = match query.kind.as_deref().unwrap_or("all") {
         "generated" => vec![CHAT_ARTIFACT_ORIGIN],
-        "uploaded" => vec![CHAT_ATTACHMENT_ORIGIN],
-        "all" => vec![CHAT_ARTIFACT_ORIGIN, CHAT_ATTACHMENT_ORIGIN],
+        "uploaded" => vec![CHAT_ATTACHMENT_ORIGIN, CHAT_TRANSCRIPT_ORIGIN],
+        "all" => vec![
+            CHAT_ARTIFACT_ORIGIN,
+            CHAT_ATTACHMENT_ORIGIN,
+            CHAT_TRANSCRIPT_ORIGIN,
+        ],
         _ => {
             return no_store(
                 (

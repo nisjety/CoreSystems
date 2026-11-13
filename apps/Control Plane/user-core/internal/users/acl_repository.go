@@ -268,6 +268,25 @@ func (r *AclRepository) RevokeAllForSubject(ctx context.Context, orgID, subjectT
 	return result.RowsAffected(), nil
 }
 
+// DeleteGrantsForOrg removes every resource grant of an organisation, across
+// all resource types and subject types (this covers the shared-snapshot view
+// grants a purged org leaves behind). It is the Control side of the cross-plane
+// organisation erasure: Control owns grants, so user-core erases its own rows
+// when the organisation is purged, and no other plane acts as the owner. It is
+// a single statement and returns the number of rows removed; the caller logs
+// the org id and that count only.
+func (r *AclRepository) DeleteGrantsForOrg(ctx context.Context, orgID string) (int64, error) {
+	orgID = strings.TrimSpace(orgID)
+	if orgID == "" {
+		return 0, fmt.Errorf("failed to delete grants for org: org id is required")
+	}
+	result, err := r.db.Pool.Exec(ctx, `DELETE FROM resource_grants WHERE org_id=$1`, orgID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete grants for org: %w", err)
+	}
+	return result.RowsAffected(), nil
+}
+
 // NormalizeGrantRole is normalizeRole for callers outside the package (the
 // owner-asserted facade decides role_not_supported from the normalized role).
 func NormalizeGrantRole(role string) (string, error) { return normalizeRole(role) }

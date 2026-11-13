@@ -6,6 +6,7 @@ import type { NettTabSelection } from '@/features/core/assistant-agent/assistant
 import type { ChatSourceScope } from '@/shared/actions/chat-source-scope'
 import type { BrowserAttachSharedJarEvent } from '@/shared/api/run-console-client'
 import { useI18n } from '@/shared/i18n'
+import { translateApiError } from '@/shared/i18n/errors'
 import './global-assistant.css'
 
 /** Only real run events may move this state to a terminal value. */
@@ -169,7 +170,7 @@ export function GlobalAssistant(props: {
     } catch (cause) {
       const currentRequest = siteAccessRequest()
       if (!currentRequest || (allowSiteAccess && currentRequest === accessRequest)) {
-        setError(cause instanceof Error ? cause.message : i18n.tr('Kunne ikke starte oppgaven. Utkastet er beholdt.', 'Could not start the task. Your draft has been kept.'))
+        setError(translateApiError(cause, i18n.tr, { no: 'Kunne ikke starte oppgaven. Utkastet er beholdt.', en: 'Could not start the task. Your draft has been kept.' }))
       }
     } finally {
       setPending(false)

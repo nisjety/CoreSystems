@@ -306,6 +306,22 @@ message InferRequest {
   // model, then the cheap fallback. Empty names none. It carries no content, so
   // Zero Data Retention does not change it.
   string role_fallback_model = 23;
+
+  // The opaque Integration Core id of a customer-gateway model connection (W4-BYO-5): the
+  // organisation's own OpenAI-compatible endpoint, registered and held in Integration Core. Read only
+  // when INFERENCE_BYO_GATEWAY_ENABLED is the literal true. A call that names a connection is served by
+  // that gateway alone, never by a platform provider, and a call that names one while the switch is off
+  // is refused. Model Plane never receives the gateway's address or key. A customer gateway is never zero
+  // data retention, so a ZDR call that names one is refused. Empty names no connection.
+  string model_connection_id = 24;
+
+  // The speed tier this call asks for: "" (no choice, the default), "standard" or "priority". Read
+  // only when INFERENCE_SPEED_TIER_SPLIT is the literal true, and only by the subscription adapter,
+  // which serves "priority" when the model's record declares it (ModelInfo.priority_tier). Speed is
+  // separate from reasoning effort, so a quick turn never implies priority. A value other than
+  // "priority" does not ask for it, though the legacy prefer_priority_service_tier flag still does.
+  // It carries no content, so Zero Data Retention does not change it.
+  string speed_tier = 25;
 }
 
 // InferImagePart — one image attached to a message of an InferRequest. Bytes
@@ -465,6 +481,12 @@ message InferResponse {
   // layer routed it under a budget posture. Absent for a pinned model or while
   // INFERENCE_ROUTE_NOTE is off.
   RouteNote route_note = 15;
+
+  // The service tier this call was sent to the subscription broker on: "priority" when the priority
+  // tier went upstream, empty when none did or the serving provider does not report one. It states
+  // what was requested of the provider, never a guarantee the provider billed that tier. It carries
+  // no content, so Zero Data Retention does not change it.
+  string service_tier_used = 16;
 }
 
 // InferChunk — a single chunk in a streaming inference response.
@@ -532,6 +554,14 @@ message InferChunk {
   // The route note of the call, on the final chunk only, as provider_timing is
   // (WS27-S7). Absent for a pinned model or while INFERENCE_ROUTE_NOTE is off.
   RouteNote route_note = 16;
+
+  // The service tier the provider actually served this stream on, populated on
+  // the final (usage-bearing) chunk only, as the token counts are. "priority"
+  // when the priority tier went upstream; empty when the provider does not
+  // report one. Same meaning as InferResponse.service_tier_used: it is never
+  // inferred from the request, and it carries no content, so Zero Data
+  // Retention does not change it.
+  string service_tier_used = 17;
 }
 
 // ProviderTiming — where inference-core's share of one Infer or InferStream
@@ -628,6 +658,23 @@ message RouteNote {
   // "table", "turn_model" or "cheap_fallback". Empty for every call that named
   // no role.
   string role_source = 6;
+
+  // The Verevon auto mode the intent layer resolved the call under: "budget",
+  // "balance" or "genius". Empty when the intent layer resolved no mode, as for
+  // a call that named a pinned model.
+  string verevon_mode = 7;
+
+  // The complexity the intent layer estimated for the call: "simple",
+  // "moderate" or "complex". Empty when the intent layer resolved no mode.
+  string complexity = 8;
+
+  // Why the intent layer chose the model: "mode_cell" (the policy cell the mode
+  // names, at a healthy budget or under a constrained one that changed no
+  // model), "budget_tier_shift" (a constrained budget moved the call one tier
+  // cheaper), "budget_cheap_fallback" (an exhausted budget forced the cheap
+  // fallback) or "posture_unknown" (no budget posture could be read). Empty
+  // when the intent layer resolved no mode.
+  string reason = 9;
 }
 
 // CreateEmbeddingRequest — text to embed via a provider-owned model/deployment.
@@ -737,6 +784,16 @@ message ModelInfo {
   // (EP-9 C5). Unset when neither an attested deployment nor a cited source states
   // anything, which is "not stated", never "no".
   ProviderDataUse data_use = 12;
+
+  // The model the vendor names as this one's replacement. Set only on a deprecated model
+  // whose cited vendor page names one; empty means no sourced record names a replacement
+  // (F-t3-073). Display only: nothing switches to it, and a thread stays on the model it pinned.
+  string successor = 13;
+
+  // Whether this model is served on the priority service tier when a call asks for it with
+  // InferRequest.speed_tier. False when the model's record does not declare the tier, so a caller
+  // must not offer the choice for it. Advertised whatever INFERENCE_SPEED_TIER_SPLIT says.
+  bool priority_tier = 14;
 }
 
 // ProviderDataUse — the data-handling statements a provider makes for one model (EP-9 C5).
@@ -1290,6 +1347,13 @@ message GenerateImageRequest {
 
   // Number of images requested.
   uint32 n = 8;
+
+  // When true, the call is served by one provider only: the first configured provider that matches
+  // provider_hint and, when model is set, lists that model as an image model. That provider alone is
+  // tried, and its error comes back as it is, so no other provider answers in its place. A request
+  // that names no such provider is refused as image_model_unavailable before any provider is called.
+  // False walks the ordered provider chain, as before.
+  bool strict_provider = 9;
 }
 
 // GeneratedImage — one generated image artifact.

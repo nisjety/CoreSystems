@@ -77,12 +77,18 @@ import {
 } from "solid-js";
 import { Dynamic, Portal, type JSX } from "@solidjs/web";
 import { createResource } from "@/shared/lib/create-resource-compat";
+import { listCustomerGateways } from "@/shared/api/model-connections-client";
 import { dictateAudioBlob } from "@/shared/api/audio-client";
 import {
 	actionKey,
 	BUILTIN_ACTIONS,
+	LEARN_ACTION,
+	LEARN_NOTE_MAX_CHARS,
+	learnCommandAvailable,
 	loadSlashTemplates,
 	loadSpecializedActions,
+	requestLearnFromThread,
+	type LearnCommandContext,
 	type SpecializedAction,
 	type SpecializedActionKind,
 } from "@/shared/api/chat-actions-client";
@@ -121,16 +127,19 @@ import {
 	enforcedMaxEffort,
 	extractChatDocument,
 	getAttachmentPolicy,
+	getComposerCapabilities,
 	getModelEntitlementMeta,
 	groupChatModels,
 	catalogueAdvertisesConnectorScope,
 	filterModels,
+	formatContextWindow,
 	formatModelListPrice,
 	hasZeroRetentionModel,
 	isExpensiveModel,
 	listChatThreads,
 	listModels,
 	modelEffortLevels,
+	modelReplacement,
 	modelSupportsAgentic,
 	modelSupportsVision,
 	saveChatThreadSnapshot,
@@ -201,6 +210,9 @@ import { ApiError } from "@/shared/api/http";
 import { cn } from "@/shared/lib/cn";
 import { getSession } from "@/shared/session/session-store";
 import { getOrganizationZdr } from "@/shared/api/organization-client";
+import { getConnectionZdr, isZdrWaiverUiEnabled } from "@/shared/api/connection-zdr-client";
+import { en as enStrings } from "@/shared/i18n/en";
+import { no as noStrings } from "@/shared/i18n/no";
 import {
 	lastKnownAiModelPrivacyTier,
 	readAiModelSelection,
@@ -454,6 +466,14 @@ export type DashboardComposerBrowserRegionIntake = {
 };
 
 /**
+ * Build-time switch for the `/learn` command (EP-11 S7). Only the literal `true` turns it on, the same
+ * strict reading the server's `LEARN_COMMAND_ENABLED` uses. Default off.
+ */
+export function learnCommandEnabled(): boolean {
+	return import.meta.env.VITE_LEARN_COMMAND === "true";
+}
+
+/**
  * The `browserContext` a send carries, or undefined when it carries none:
  * no session, a zero-retention turn, or no `@tab` token in the text.
  */
@@ -580,6 +600,8 @@ export type DashboardComposerSubmitPayload = {
 	provider?: string;
 	/** Opaque Integration Core connection id; this is not a ChatGPT credential. */
 	subscriptionConnectionId?: string;
+	/** Opaque Integration Core id of a "Your gateway" customer connection (W4-BYO-6). Never a key. */
+	modelConnectionId?: string;
 	text: string;
 	tools: Array<"image" | "research" | "search">;
 	/**
@@ -611,6 +633,8 @@ export type DashboardComposerSubmitPayload = {
 	 * popover) while no product surface ever wrote it.
 	 */
 	effort?: Exclude<EffortProfile, "standard"> | EffortLevel;
+	/** The Fast chip's speed (W5-095-b), present only while the chip is on and set to priority. */
+	speed?: 'priority';
 };
 
 type PanelPosition = {
@@ -787,6 +811,14 @@ const BUILTIN_COMMANDS: ComposerCommand[] = [
 		name: "schedule",
 	},
 ];
+
+/** The composer's registry id for `/learn` (EP-11 S7), kept with the other fixed `builtin:` ids. */
+const LEARN_COMMAND_ID = "builtin:learn";
+/** What a refused `/learn` says when the server's code has no copy of its own. The draft is kept. */
+const LEARN_FAILED_COPY = {
+	no: "Kunne ikke be Verevon lære av samtalen. Utkastet er beholdt.",
+	en: "Could not ask Verevon to learn from this conversation. Your draft has been kept.",
+};
 
 // The `/` menu opens only when the slash starts the draft. A slash typed inside
 // a sentence — "2026/09", "og/eller", "kr 200/mnd" — is ordinary text and stays
@@ -1087,6 +1119,9 @@ export function DashboardComposer(props: {
 	onMessageChange: (value: string) => void;
 	onPlanModeChange?: (value: boolean) => void;
 	planMode?: boolean;
+	/** The Fast chip's speed choice (W5-095-b): `priority` asks for the priority tier on this turn. */
+	speedTier?: 'standard' | 'priority';
+	onSpeedTierChange?: (value: 'standard' | 'priority') => void;
 	/**
 	 * The strictest agent mode the organisation allows (WS25-S11), read from the org agent policy. Present only
 	 * where that policy is on: the picker then offers this mode and every stricter one, and no other.
@@ -1164,6 +1199,12 @@ export function DashboardComposer(props: {
 	 * where a send navigates away (the dashboard), so Voice mode closes instead.
 	 */
 	voiceReply?: VoiceReply | null;
+	/**
+	 * What the `/learn` command (EP-11 S7) needs from the page: the saved thread, and whether this chat is
+	 * temporary, zero retention and allowed to learn. Ignored unless VITE_LEARN_COMMAND is "true"; without it
+	 * the command is not offered.
+	 */
+	learnContext?: LearnCommandContext;
 }) {
 	const i18n = useI18n();
 	const navigate = useNavigate();
@@ -1248,6 +1289,8 @@ export function DashboardComposer(props: {
 	// While either is held the page shows its notice instead of reloading.
 	onCleanup(registerReloadGuard(() => files().length > 0 || handoffPending()));
 	const [submitError, setSubmitError] = createSignal<string | null>(null);
+	// What a `/learn` that was queued says, under the composer (EP-11 S7). Cleared by the next send or `/learn`.
+	const [learnNotice, setLearnNotice] = createSignal<string | null>(null);
 	const [historyPanelPosition, setHistoryPanelPosition] =
 		createSignal<PanelPosition>({ bottom: 0, right: 0, maxHeight: 400 });
 	const [historyThreads, setHistoryThreads] = createSignal<
@@ -1389,6 +1432,18 @@ export function DashboardComposer(props: {
 	);
 	const zeroRetentionTurn = () =>
 		Boolean(props.temporaryChatLocked || props.temporaryChat) || orgZeroRetention() === true;
+	// Deep research over the organization's knowledge (EP-2 S7): the gateway says whether it serves that scope, and
+	// it never does for a zero-retention caller. Asked only once "Kun organisasjon" is picked; until the answer
+	// arrives, and on any failure, the composer offers nothing.
+	const [composerCapabilities] = createResource(
+		() => retrievalScope() === 'knowledge_only',
+		() => getComposerCapabilities(),
+	);
+	// Deep research stays off under "Kun organisasjon" unless the gateway serves that scope. A zero-retention turn,
+	// a Temporary chat included, is refused for deep research whatever its scope, so it stays off there too.
+	const deepSearchBlockedByScope = () =>
+		retrievalScope() === 'knowledge_only'
+		&& (composerCapabilities()?.deepResearchKnowledge !== true || zeroRetentionTurn());
 	// `@tab` chips (E3.3-c, D9): one per token in the draft, resolved against
 	// the caller's tab list as a preview only. Empty with the flag off or no
 	// session, so nothing renders.
@@ -1623,6 +1678,16 @@ export function DashboardComposer(props: {
 	// tier a turn sends comes from `resolveTurnPrivacyTier`, which does not
 	// read `undefined` from a catalogue that has not loaded yet.
 	const selectedPrivacyTier = createMemo(() => selectedCatalogModel()?.privacyTier);
+	// The Fast chip (W5-095-b): behind VITE_CHAT_SPEED_TIER, and only on a model whose catalogue record declares the
+	// priority tier. A zero-retention turn runs no subscription route, the only route that serves the tier, so it
+	// shows no chip. Off, the composer shows no chip and sends no speed.
+	const speedChipShown = createMemo(
+		() =>
+			import.meta.env.VITE_CHAT_SPEED_TIER === "true" &&
+			selectedCatalogModel()?.priorityTier === true &&
+			!zeroRetentionTurn(),
+	);
+	const speedPriority = () => props.speedTier === "priority";
 	const selectedSubscriptionRoute = createMemo(() => {
 		const connection = activeSubscriptionConnection();
 		// Catalog loading is independent of connection ownership. A delayed
@@ -1631,9 +1696,58 @@ export function DashboardComposer(props: {
 			? { provider: OPENAI_CODEX_SUBSCRIPTION_PROVIDER, connectionId: connection.id }
 			: undefined;
 	});
+	// "Not ZDR in this chat" (ZDR Z-20): the selected model runs on a subscription connection that cannot give zero data
+	// retention, the organisation has it on, and the member's acknowledgement of the connection is in force. Then the
+	// chat is not ZDR, and the chip is the visible record of that. The assessment is read from Integration Core and kept
+	// only in memory; with VITE_ZDR_WAIVER_UI off nothing is read and nothing is shown.
+	const [waiverAssessment] = createResource(
+		() =>
+			isZdrWaiverUiEnabled() && orgZeroRetention() === true
+				? (selectedSubscriptionRoute()?.connectionId ?? false)
+				: false,
+		async (connectionId) => {
+			try {
+				return await getConnectionZdr(connectionId, i18n.locale(), "org_zdr_on");
+			} catch {
+				return null;
+			}
+		},
+	);
+	const waiverChipShown = createMemo(() => {
+		const assessment = waiverAssessment();
+		return (
+			isZdrWaiverUiEnabled() &&
+			orgZeroRetention() === true &&
+			Boolean(selectedSubscriptionRoute()) &&
+			assessment?.requiresAcknowledgement === true &&
+			assessment.acknowledgement?.state === "active"
+		);
+	});
+	const waiverCopy = () => (i18n.locale() === "no" ? noStrings : enStrings).zdr.waiver;
+	// W4-BYO-6: a customer gateway the person picked under "Your gateway". The gateway is text-only and never zero
+	// retention, so its group is offered only outside a Temporary chat and for an organisation without zero retention.
+	const customerGatewayEnabled = import.meta.env.VITE_BYO_GATEWAY === "true";
+	const [selectedGatewayConnectionId, setSelectedGatewayConnectionId] = createSignal<string | undefined>(
+		initialModelSelection.modelConnectionId,
+	);
+	const gatewayRoute = createMemo(() => {
+		const connectionId = selectedGatewayConnectionId();
+		return connectionId ? { connectionId } : undefined;
+	});
+	const [customerGateways] = createResource(
+		() => (customerGatewayEnabled && activeOrgId() ? activeOrgId() : false),
+		async () => {
+			try {
+				return await listCustomerGateways();
+			} catch {
+				return [];
+			}
+		},
+	);
 	const [staleSubscriptionNotice, setStaleSubscriptionNotice] =
 		createSignal(false);
 	const selectModel = (id: string, provider?: string) => {
+		setSelectedGatewayConnectionId(undefined);
 		setStaleSubscriptionNotice(false);
 		setPolicyResetModel(null);
 		setSubmitError(null);
@@ -1655,6 +1769,21 @@ export function DashboardComposer(props: {
 		});
 		setModelOpen(false);
 	};
+	// A "Your gateway" model: served on the person's own connection, never on a platform provider (W4-BYO-6).
+	const selectGatewayModel = (connectionId: string, modelId: string) => {
+		setStaleSubscriptionNotice(false);
+		setPolicyResetModel(null);
+		setSubmitError(null);
+		setSelectedModel(modelId);
+		setSelectedModelProvider(undefined);
+		setSelectedGatewayConnectionId(connectionId);
+		rememberAiModelSelection(activeOrgId() || "", {
+			model: modelId,
+			label: modelId,
+			modelConnectionId: connectionId,
+		});
+		setModelOpen(false);
+	};
 	// The model the organisation's policy took from this person, by name, until
 	// they choose again. A selection is local state (and remembered in the browser),
 	// so a policy change leaves a stale one behind; sending it would be refused.
@@ -1665,8 +1794,11 @@ export function DashboardComposer(props: {
 			meta: entitlementMeta(),
 			model: selectedModel(),
 			provider: selectedModelProvider(),
+			gateway: selectedGatewayConnectionId(),
 		}),
 		(state) => {
+			// A gateway model is not in the platform catalogue, so the catalogue never lists it.
+			if (state.gateway) return;
 			if (!selectionIsStale({ model: state.model, provider: state.provider }, state.catalogue, state.meta)) {
 				return;
 			}
@@ -1786,10 +1918,12 @@ export function DashboardComposer(props: {
 		const parsed = draftCommand();
 		return parsed ? parsed.argument : props.message;
 	});
+	// A typed `/learn` is a request even with no note, so the command itself counts as content (EP-11 S7).
+	const learnDraft = createMemo(() => draftCommand()?.command.registered?.id === LEARN_COMMAND_ID);
 	// Measured on the body, not the raw draft: a bare "/image" is an unfinished
 	// command, not a message, and must not arm the send button.
 	const hasContent = createMemo(
-		() => commandBody().trim().length > 0 || files().length > 0,
+		() => commandBody().trim().length > 0 || files().length > 0 || learnDraft(),
 	);
 	const imageMode = createMemo(() => !subscriptionBacked() && (props.imageMode ?? false));
 	const planMode = createMemo(() => planModeAvailable() && (props.planMode ?? false));
@@ -1828,6 +1962,95 @@ export function DashboardComposer(props: {
 	const temporaryChat = createMemo(
 		() => props.temporaryChatLocked || (props.temporaryChat ?? false),
 	);
+	// `/learn` (EP-11 S7). Offered only behind VITE_LEARN_COMMAND, and only where the page says this chat is saved,
+	// W4-BYO-6: the "Your gateway" models the menu offers. None in a Temporary chat or for a zero-retention organisation.
+	const gatewayModelOptions = createMemo(() => {
+		if (!customerGatewayEnabled || temporaryChat() || orgZeroRetention() === true) return [];
+		return (customerGateways() ?? []).flatMap((connection) =>
+			connection.modelIds.map((modelId) => ({ connectionId: connection.id, modelId })),
+		);
+	});
+	// not temporary or zero retention, and allowed to learn. The composer also reads its own temporary and
+	// zero-retention state (the organization's included), so a page that leaves that out still hides it. The server
+	// refuses each case on its own too.
+	const learnAvailable = createMemo(() => {
+		const context = props.learnContext;
+		if (!learnCommandEnabled() || !context) return false;
+		return learnCommandAvailable({
+			threadId: context.threadId,
+			temporaryChat: context.temporaryChat || temporaryChat(),
+			zeroRetention: context.zeroRetention || zeroRetentionTurn(),
+			learningAllowed: context.learningAllowed,
+		});
+	});
+	// Asks Verevon to learn from this saved conversation. The note is what was typed after the command, and the
+	// server reads it as data. The draft is cleared only once the request is queued, so a refusal keeps it.
+	const runLearnCommand = async (typedNote: string): Promise<ComposerSubmitResult> => {
+		const threadId = props.learnContext?.threadId?.trim() ?? "";
+		if (!threadId || !learnAvailable() || handoffPending()) return { ok: false };
+		setSubmitError(null);
+		setLearnNotice(null);
+		const note = typedNote.trim();
+		if (Array.from(note).length > LEARN_NOTE_MAX_CHARS) {
+			const message = i18n.tr(
+				`Notatet er for langt: høyst ${LEARN_NOTE_MAX_CHARS} tegn. Utkastet er beholdt.`,
+				`The note is too long: at most ${LEARN_NOTE_MAX_CHARS} characters. Your draft has been kept.`,
+			);
+			setSubmitError(message);
+			return { ok: false, message };
+		}
+		const sentDraft = props.message;
+		setHandoffPending(true);
+		try {
+			await requestLearnFromThread(threadId, note);
+			// Cleared only if the person has not typed since the command went out.
+			if (props.message === sentDraft) {
+				flush(() => {
+					props.onMessageChange("");
+					setEntities([]);
+				});
+			}
+			setLearnNotice(
+				i18n.tr(
+					"Verevon lærer av samtalen; forslaget kommer i læringsinnboksen.",
+					"Verevon is learning from this conversation; the proposal will reach the learning inbox.",
+				),
+			);
+			return { ok: true };
+		} catch (error) {
+			const message = translateApiError(error, i18n.tr, LEARN_FAILED_COPY);
+			setSubmitError(message);
+			return { ok: false, message };
+		} finally {
+			setHandoffPending(false);
+		}
+	};
+	const learnCommand: RegisteredSlashCommand = {
+		id: LEARN_COMMAND_ID,
+		name: "learn",
+		aliases: ["lær"],
+		label: LEARN_ACTION.name,
+		description: {
+			no: "Verevon foreslår en ferdighet fra denne samtalen. Ingenting tas i bruk før du godtar.",
+			en: "Verevon proposes a skill from this conversation. Nothing is used until you accept it.",
+		},
+		icon: BookOpen,
+		// Picked from the menu: the draft holds only `/learn` by then, so there is no note to send.
+		run: () => {
+			void runLearnCommand("");
+		},
+	};
+	// Registered while `/learn` is offered and withdrawn the moment it is not, so the menu never lists a command the
+	// page would refuse. The registry belongs to this composer, so it starts without the command.
+	let unregisterLearn: (() => void) | undefined;
+	createEffect(() => learnAvailable(), (available) => {
+		if (available && !unregisterLearn) unregisterLearn = slashRegistry.register(learnCommand);
+		if (!available && unregisterLearn) {
+			unregisterLearn();
+			unregisterLearn = undefined;
+		}
+	});
+	onCleanup(() => unregisterLearn?.());
 	// WS14 S2a, the "Kjør plan" pill. Why the turn that runs the approved plan
 	// cannot be sent from here, or undefined when it can. Each reason mirrors a
 	// condition the controller and the gateway enforce again at send time, so the
@@ -2371,10 +2594,10 @@ export function DashboardComposer(props: {
 				"Import job started. The files will be available in organisation knowledge when it finishes.",
 			));
 		} catch (error) {
-			setKnowledgeImportNotice(error instanceof Error ? error.message : i18n.tr(
-				"Kunne ikke starte importen.",
-				"Could not start the import.",
-			));
+			setKnowledgeImportNotice(translateApiError(error, i18n.tr, {
+				no: "Kunne ikke starte importen.",
+				en: "Could not start the import.",
+			}));
 		} finally {
 			setKnowledgeImporting(false);
 		}
@@ -2975,6 +3198,10 @@ export function DashboardComposer(props: {
 			applySlashTemplate(pendingTemplate, pendingCommand?.argument ?? "");
 			return { ok: false };
 		}
+		// A typed `/learn note` is never a chat turn: the note goes to the learning request instead (EP-11 S7).
+		if (pendingCommand?.command.registered?.id === LEARN_COMMAND_ID) {
+			return runLearnCommand(pendingCommand?.argument ?? "");
+		}
 		// Typed commands apply even when the menu was never opened: "/image en
 		// rød katt" straight off the keyboard must carry the image tool, and
 		// "/kvalitet rapport uke 12" must carry the skill.
@@ -3071,6 +3298,7 @@ export function DashboardComposer(props: {
 			provider: subscriptionRoute?.provider,
 			responseMode: effectiveResponseMode(),
 			subscriptionConnectionId: subscriptionRoute?.connectionId,
+			modelConnectionId: gatewayRoute()?.connectionId,
 			text: initialSnapshot.submittedText,
 			tone: settings().tone,
 			zdr: temporaryChat(),
@@ -3116,11 +3344,14 @@ export function DashboardComposer(props: {
 		// The mode chosen for this send, read before the tier lookup may wait. Not sent in a conversation-only
 		// turn, which runs no agent.
 		const submittedAgentMode = conversationOnly() ? undefined : agentMode();
+		// The Fast chip's choice, read before the tier lookup may wait. Carried only while the chip is shown and on.
+		const submittedSpeed = speedChipShown() && speedPriority() ? ("priority" as const) : undefined;
 
 		// Pending from here, so the composer is inert (and a second Enter is
 		// refused) while the tier lookup waits.
 		setHandoffPending(true);
 		setSubmitError(null);
+		setLearnNotice(null);
 		try {
 			const turnTier = resolveTurnPrivacyTier(payloadInput.model, modelProvider);
 			const payload = createComposerSubmitPayload({
@@ -3140,7 +3371,10 @@ export function DashboardComposer(props: {
 			if (submittedContextRefs.length > 0) payload.contextRefs = submittedContextRefs;
 			// Omitted when nothing was picked, like `connectorScope` above.
 			if (submittedAgentMode !== undefined) payload.agentMode = submittedAgentMode;
-			// Omitted unless the text has a mention or a browser region is attached (see above).
+			// Omitted unless the chip is shown and on, so a plain send stays byte-identical on the wire.
+			if (submittedSpeed) payload.speed = submittedSpeed;
+			// Omitted unless the text has a mention or a browser region is attached (see above). A conversation-only
+			// turn already dropped its tab mentions there; its regions still travel so the controller refuses them.
 			if (submittedBrowserContext) payload.browserContext = submittedBrowserContext;
 			if (submittedConversationOnly) {
 				payload.tools = [];
@@ -3161,7 +3395,7 @@ export function DashboardComposer(props: {
 					: error.reason === 'too_large'
 						? i18n.tr('Vedleggene er for store for chat. Velg mindre filer og prøv igjen.', 'The attachments are too large for chat. Choose smaller files and retry.')
 						: i18n.tr('Kunne ikke overføre utkastet. Frigjør nettleserlagring og prøv igjen. Teksten og filene er beholdt.', 'Could not transfer the draft. Free browser storage and retry. Your text and files have been kept.')
-				: error instanceof Error ? error.message : i18n.tr('Kunne ikke sende. Prøv igjen.', 'Could not send. Please retry.');
+				: translateApiError(error, i18n.tr, { no: 'Kunne ikke sende. Prøv igjen.', en: 'Could not send. Please retry.' });
 			setSubmitError(message);
 			return { ok: false, message };
 		} finally {
@@ -3483,13 +3717,49 @@ export function DashboardComposer(props: {
 										)}
 										tabindex={0}
 									>
-										<For each={shownChatModelGroups()}>
-											{(group) => (
-												<div class="dashboard-composer-model-group">
-													<p class="dashboard-composer-model-group__label">
-												{group.label}
-													</p>
-											<For each={group.models}>
+										<Show when={gatewayModelOptions().length > 0}>
+	<div class="dashboard-composer-model-group">
+		<p class="dashboard-composer-model-group__label">{i18n.tr("Din gateway", "Your gateway")}</p>
+		<For each={gatewayModelOptions()}>
+			{(option) => (
+				<button
+					type="button"
+					title={i18n.tr(`Bruk ${option.modelId} på din gateway`, `Use ${option.modelId} on your gateway`)}
+					onClick={() => selectGatewayModel(option.connectionId, option.modelId)}
+					class={{
+						"dashboard-composer-model-menu__item--active":
+							selectedGatewayConnectionId() === option.connectionId && selectedModel() === option.modelId,
+					}}
+				>
+					<span>
+						<span>
+							<Zap class="size-3" />
+						</span>
+						<span>{option.modelId}</span>
+					</span>
+					<span class="dashboard-composer-model-menu__right">
+						<span class="dashboard-composer-model-badge dashboard-composer-model-badge--cheap">
+							{i18n.tr("Egen gateway", "Own gateway")}
+						</span>
+						<Show when={selectedGatewayConnectionId() === option.connectionId && selectedModel() === option.modelId}>
+							<Check class="size-4" />
+						</Show>
+					</span>
+				</button>
+			)}
+		</For>
+	</div>
+</Show>
+<For each={shownChatModelGroups()}>
+											{(group) => {
+												// A folded group opens by itself while the search is on (it lists only matching models) and when the selection is one of its models.
+												const opened = () =>
+													activeModelQuery() !== "" ||
+													group.models.some(
+														(model) => model.id === selectedModel() && model.provider === selectedModelProvider(),
+													);
+												const rows = () => (
+												<For each={group.models}>
 												{(model) => (
 													<button
 														type="button"
@@ -3513,6 +3783,20 @@ export function DashboardComposer(props: {
 															</span>
 															<span>
 																{model.name}
+																<Show when={modelReplacement(models() ?? [], model)}>
+																	{(replacement) => (
+																		<span class="dashboard-composer-model-successor">
+																			{i18n.tr(`Erstattes av ${replacement().name}`, `Replaced by ${replacement().name}`)}
+																		</span>
+																	)}
+																</Show>
+																<Show when={formatContextWindow(model.contextWindowTokens)}>
+																	{(windowLabel) => (
+																		<span class="dashboard-composer-model-context">
+																			{windowLabel()}
+																		</span>
+																	)}
+																</Show>
 																<Show when={model.price}>
 																	{(price) => (
 																		<span class="dashboard-composer-model-price">
@@ -3550,6 +3834,11 @@ export function DashboardComposer(props: {
 																	</span>
 																)}
 															</Show>
+															<Show when={model.lifecycle === "preview"}>
+																<span class="dashboard-composer-model-badge dashboard-composer-model-badge--preview">
+																	{i18n.tr("Forhåndsversjon", "Preview")}
+																</span>
+															</Show>
 															<Show when={isExpensiveModel(model)}>
 																<span
 																	class="dashboard-composer-model-badge dashboard-composer-model-badge--premium"
@@ -3569,9 +3858,23 @@ export function DashboardComposer(props: {
 														</span>
 													</button>
 												)}
-											</For>
-												</div>
-											)}
+												</For>
+												);
+												return group.folded ? (
+													<details
+														class="dashboard-composer-model-group dashboard-composer-model-group--folded"
+														open={opened()}
+													>
+														<summary class="dashboard-composer-model-group__label">{group.label}</summary>
+														{rows()}
+													</details>
+												) : (
+													<div class="dashboard-composer-model-group">
+														<p class="dashboard-composer-model-group__label">{group.label}</p>
+														{rows()}
+													</div>
+												);
+											}}
 										</For>
 										<Show when={activeModelQuery() !== "" && shownChatModelGroups().length === 0}>
 											<p class="dashboard-composer-model-empty" role="status">
@@ -3583,6 +3886,13 @@ export function DashboardComposer(props: {
 								<Show when={selectedPrivacyTier() === "sovereign"}>
 									<p class="dashboard-composer-model-tier-note" role="note">
 										{sovereignCatalogNotice(i18n)}
+									</p>
+								</Show>
+								<Show when={waiverChipShown()}>
+									<p class="dashboard-composer-model-tier-note" role="note" title={waiverCopy().chip_title}>
+										<span class="dashboard-composer-model-badge" data-tone="plain">
+											{waiverCopy().chip}
+										</span>
 									</p>
 								</Show>
 							</div>
@@ -4058,6 +4368,9 @@ export function DashboardComposer(props: {
 					<Show when={submitError()}>
 						<p class="dashboard-composer-attachments__notice" role="alert">{submitError()}</p>
 					</Show>
+					<Show when={learnNotice()}>
+						<p class="dashboard-composer-attachments__notice" role="status">{learnNotice()}</p>
+					</Show>
 					{/* Seen after a press on Voice input in Temporary chat; screen
 					    readers get the same words from its description and status. */}
 					<Show when={temporaryChat() && voiceInputBlockedShown()}>
@@ -4368,11 +4681,11 @@ export function DashboardComposer(props: {
 							</ComposerIconButton>
 							<ComposerIconButton
 								active={deepSearch()}
-								disabled={subscriptionBacked() || conversationOnly() || retrievalScope() === 'knowledge_only'}
+								disabled={subscriptionBacked() || conversationOnly() || deepSearchBlockedByScope()}
 								label={
 									subscriptionBacked()
 										? `${i18n.tr("Dyp research", "Deep search")} — ${subscriptionDisabledTitle()}`
-										: retrievalScope() === 'knowledge_only'
+										: deepSearchBlockedByScope()
 											? `${i18n.tr("Dyp research", "Deep search")} — ${i18n.tr("Ikke tilgjengelig med kildefilteret Kun organisasjon", "Not available with the Organization only source filter")}`
 											: i18n.tr("Dyp research", "Deep search")
 								}
@@ -4451,6 +4764,21 @@ export function DashboardComposer(props: {
 								>
 									<ImagePlus class="size-4" />
 									{i18n.tr("Bilde", "Image")}
+								</button>
+							</Show>
+							<Show when={props.onSpeedTierChange && speedChipShown()}>
+								<button
+									type="button"
+									aria-pressed={speedPriority() ? "true" : "false"}
+									aria-label={i18n.tr("Fast: prioritert tjeneste", "Fast: priority tier")}
+									title={i18n.tr(
+										"Prioritert tjeneste for dette svaret: raskere, men dyrere",
+										"Priority tier for this answer: faster, but costs more",
+									)}
+									onClick={() => props.onSpeedTierChange?.(speedPriority() ? "standard" : "priority")}
+									class={composerImageButtonClass(speedPriority())}
+								>
+									{i18n.tr("Fast", "Fast")}
 								</button>
 							</Show>
 						</div>
@@ -4731,6 +5059,7 @@ function createComposerSubmitPayload(input: {
 	provider?: string;
 	responseMode: ResponseMode;
 	subscriptionConnectionId?: string;
+	modelConnectionId?: string;
 	text: string;
 	tone: ComposerTone;
 	zdr: boolean;
@@ -4755,6 +5084,9 @@ function createComposerSubmitPayload(input: {
 			...(input.provider ? { provider: input.provider } : {}),
 			...(input.subscriptionConnectionId
 				? { subscriptionConnectionId: input.subscriptionConnectionId }
+				: {}),
+			...(input.modelConnectionId
+				? { modelConnectionId: input.modelConnectionId }
 				: {}),
 			// Key omitted entirely when no tier applies (intent modes, unspecified):
 			// callers and tests treat presence as "the user pinned a tier".

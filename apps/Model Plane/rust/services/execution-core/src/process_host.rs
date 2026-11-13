@@ -2,7 +2,8 @@
 //!
 //! sandbox-manager owns the rows; this module owns the actual child process:
 //! it spawns under the same bwrap argv every other sandboxed call uses, pipes
-//! its stdio, batches and redacts its output into the registry, delivers
+//! its stdio (or, where `process_start` asks and the switch allows, runs it on
+//! a pseudo-terminal), batches and redacts its output into the registry, delivers
 //! signals, enforces the TTL, and reports every transition. It persists
 //! nothing itself and decides no authority — `RegisterProcess` is what admits
 //! a process, and this module treats its refusal as final.
@@ -21,13 +22,12 @@
 //! advertises to Control is what it can really do.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use dashmap::DashMap;
 use mp_contracts::model_plane::v1::{ProcessOutputChunk, ProcessSignal, ProcessStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::ChildStdin;
 use tokio::sync::{mpsc, Mutex, OnceCell};
 use tonic::Status;
 use tracing::{info, warn};
@@ -68,8 +68,25 @@ const DEFAULT_TTL: Duration = Duration::from_mins(30);
 
 /// Total output one process may produce before it is stopped. The registry's
 /// head+tail retention keeps this readable, but an unbounded logger is a
-/// resource bug rather than a use case.
-const MAX_TOTAL_OUTPUT_BYTES: i64 = 64 * 1024 * 1024;
+/// resource bug rather than a use case. Also the most one `process_read` spill
+/// writes out, so it is shared with [`crate::process_tools`].
+pub(crate) const MAX_TOTAL_OUTPUT_BYTES: i64 = 64 * 1024 * 1024;
+
+/// The environment switch that lets `process_start` ask for a pseudo-terminal.
+/// Only the literal `true` turns it on. Off, a `tty` request gets the plain
+/// pipes every process has always had.
+pub const TTY_SWITCH_ENV: &str = "EXECUTION_PROCESS_TTY_ENABLED";
+
+/// The refusal a terminal request gets where one cannot be made. Named by its
+/// code so the model can read why, and so the registry never records a row for
+/// a process that could not start.
+const TTY_UNSUPPORTED: &str =
+    "process_tty_unsupported: a pseudo-terminal needs a unix host; start the process without tty";
+
+/// The end-of-input character of a terminal (Ctrl-D, the line discipline's
+/// default VEOF). Closing stdin on a terminal sends it, because the child's end
+/// of the terminal stays open after the parent lets go of its own.
+const TERMINAL_EOF: u8 = 0x04;
 
 /// Where a process's staged program and scratch files live — outside the
 /// Space workspace, so a background process's own scaffolding never shows up
@@ -109,6 +126,11 @@ pub struct StartRequest<'a> {
     pub ttl: Option<Duration>,
     /// Whether the child's stdin stays open for later writes.
     pub stdin: bool,
+    /// Whether the child runs on a pseudo-terminal. Honoured only where
+    /// [`tty_enabled`] is on; otherwise the child gets pipes, as it always has.
+    /// Its stdin is the terminal either way, but the caller can write to it only
+    /// when `stdin` is also set.
+    pub tty: bool,
 }
 
 /// What a caller gets back from a successful start.
@@ -122,10 +144,31 @@ enum Control {
     Signal(ProcessSignal),
 }
 
+/// The write side of a live process's stdin: a pipe, or the master end of its
+/// terminal.
+struct StdinSink {
+    writer: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+    /// Whether `writer` is a terminal's master. Ending input on a terminal sends
+    /// its end-of-input character; ending input on a pipe closes it.
+    terminal: bool,
+}
+
+/// Where a spawned child's output comes from.
+enum ChildOutput {
+    /// Its stdout and stderr pipes, read as two streams.
+    Pipes {
+        stdout: Option<tokio::process::ChildStdout>,
+        stderr: Option<tokio::process::ChildStderr>,
+    },
+    /// The master end of its terminal. A terminal carries both streams in one,
+    /// so the output is read as stdout.
+    Terminal(tokio::fs::File),
+}
+
 struct LiveProcess {
     lease_id: String,
     /// `None` once closed, or when the caller never asked for stdin.
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    stdin: Arc<Mutex<Option<StdinSink>>>,
     control: mpsc::Sender<Control>,
 }
 
@@ -240,8 +283,12 @@ impl ProcessHost {
     /// Whatever `RegisterProcess` refused with — `permission_denied` when the
     /// Space was never granted `space:processes`, `resource_exhausted` at the
     /// limit, `failed_precondition` for an ineligible lease — or `internal`
-    /// when the scratch directory or program file cannot be written.
+    /// when the scratch directory or program file cannot be written. A terminal
+    /// request this platform cannot give is refused first, before any row exists.
     pub async fn start(&self, request: &StartRequest<'_>) -> Result<StartedProcess, Status> {
+        if request.tty && tty_enabled() && !cfg!(unix) {
+            return Err(Status::failed_precondition(TTY_UNSUPPORTED));
+        }
         self.reconcile(request.org_id).await;
 
         let ttl = request.ttl.unwrap_or(DEFAULT_TTL).min(MAX_TTL);
@@ -338,18 +385,37 @@ impl ProcessHost {
             entry.stdin.clone()
         };
         let mut guard = handle.lock().await;
-        let stdin = guard
+        let sink = guard
             .as_mut()
             .ok_or_else(|| Status::failed_precondition("the process's stdin is closed"))?;
-        stdin
+        sink.writer
             .write_all(data)
             .await
             .map_err(|error| Status::internal(format!("write to process stdin: {error}")))?;
-        stdin
+        sink.writer
             .flush()
             .await
             .map_err(|error| Status::internal(format!("flush process stdin: {error}")))?;
         if close {
+            if sink.terminal {
+                // A pipe ends its input when it closes. A terminal's child end
+                // stays open, so the program sees the end of input as the
+                // end-of-file character at the start of a line. Text written
+                // without a trailing newline is still waiting in that line, and
+                // the first character only ends the line, so a second is sent.
+                let unfinished = !data.is_empty() && !data.ends_with(b"\n");
+                let end: &[u8] = if unfinished {
+                    &[TERMINAL_EOF, TERMINAL_EOF]
+                } else {
+                    &[TERMINAL_EOF]
+                };
+                sink.writer.write_all(end).await.map_err(|error| {
+                    Status::internal(format!("end input on the process terminal: {error}"))
+                })?;
+                sink.writer.flush().await.map_err(|error| {
+                    Status::internal(format!("flush process terminal: {error}"))
+                })?;
+            }
             *guard = None;
         }
         Ok(data.len())
@@ -423,7 +489,15 @@ impl ProcessHost {
             writable_roots: vec![request.workspace.to_path_buf(), scratch.clone()],
             network: MpNetworkPolicy::Disabled,
         };
-        let env = crate::code_interpreter::child_env_for(request.workspace);
+        // A terminal only where the deployment has switched it on; otherwise the
+        // plain pipes this has always used.
+        let tty = request.tty && tty_enabled();
+        let mut env = crate::code_interpreter::child_env_for(request.workspace);
+        if tty {
+            // A dumb terminal: a program writes no escape sequences into output
+            // that is kept as text and read back by a model.
+            env.push(("TERM".to_owned(), "dumb".to_owned()));
+        }
         // WS06-S8: a background process's CPU budget is sized from its TTL.
         let limits = crate::policy::limits_for(request.ttl.unwrap_or(DEFAULT_TTL).min(MAX_TTL));
         let options = crate::sandbox::LaunchOptions {
@@ -452,24 +526,50 @@ impl ProcessHost {
             .current_dir(request.workspace)
             .env_clear()
             .envs(env.iter().map(|(k, v)| (k, v)))
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .stdin(if request.stdin {
-                std::process::Stdio::piped()
-            } else {
-                std::process::Stdio::null()
-            })
             // Belt and braces alongside --die-with-parent: if this task is
             // dropped the child does not outlive it.
             .kill_on_drop(true);
-        let mut child = command.spawn()?;
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let stdin = child.stdin.take();
+        let (child, output, stdin) = if tty {
+            let Terminal { master, slave } = open_terminal()?;
+            // All three of the child's streams are the terminal's slave end. The
+            // parent keeps the master's write side only when the caller asked for
+            // stdin, so without it nothing can be typed into the terminal.
+            command
+                .stdin(std::process::Stdio::from(slave.try_clone()?))
+                .stdout(std::process::Stdio::from(slave.try_clone()?))
+                .stderr(std::process::Stdio::from(slave));
+            let child = command.spawn()?;
+            // The parent's copies of the slave end are closed now. Keeping one
+            // open would stop the master from ever reporting end-of-file once the
+            // child exits, and the output pump would wait for it forever.
+            drop(command);
+            let reader = tokio::fs::File::from_std(master.try_clone()?);
+            let writer = request.stdin.then(|| StdinSink {
+                writer: Box::new(tokio::fs::File::from_std(master)),
+                terminal: true,
+            });
+            (child, ChildOutput::Terminal(reader), writer)
+        } else {
+            command
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .stdin(if request.stdin {
+                    std::process::Stdio::piped()
+                } else {
+                    std::process::Stdio::null()
+                });
+            let mut child = command.spawn()?;
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+            let stdin = child.stdin.take().map(|pipe| StdinSink {
+                writer: Box::new(pipe),
+                terminal: false,
+            });
+            (child, ChildOutput::Pipes { stdout, stderr }, stdin)
+        };
         Ok(SpawnedChild {
             child,
-            stdout,
-            stderr,
+            output,
             stdin,
             scratch,
         })
@@ -507,7 +607,7 @@ impl ProcessHost {
             ttl: request.ttl.unwrap_or(DEFAULT_TTL).min(MAX_TTL),
             scratch: spawned.scratch,
         };
-        tokio::spawn(supervisor.run(spawned.child, spawned.stdout, spawned.stderr, control_rx));
+        tokio::spawn(supervisor.run(spawned.child, spawned.output, control_rx));
     }
 }
 
@@ -517,11 +617,62 @@ fn not_local() -> Status {
     )
 }
 
+/// Whether this deployment lets a background process run on a pseudo-terminal.
+/// Read once, as the host's own switch is: it is a property of the deployment,
+/// not of a request.
+#[must_use]
+pub fn tty_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| tty_enabled_from(std::env::var(TTY_SWITCH_ENV).ok().as_deref()))
+}
+
+/// The strict parse: only the exact value `true` enables it.
+fn tty_enabled_from(raw: Option<&str>) -> bool {
+    raw == Some("true")
+}
+
+/// Both ends of a new pseudo-terminal, held only until the child has been
+/// spawned.
+struct Terminal {
+    master: std::fs::File,
+    slave: std::fs::File,
+}
+
+/// Open a pseudo-terminal at a fixed size. Nothing on the model's side can
+/// resize it, so the size is fixed rather than guessed at.
+#[cfg(unix)]
+fn open_terminal() -> std::io::Result<Terminal> {
+    const COLUMNS: u16 = 120;
+    const ROWS: u16 = 40;
+    let size = nix::pty::Winsize {
+        ws_row: ROWS,
+        ws_col: COLUMNS,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let pair = nix::pty::openpty(Some(&size), None::<&nix::sys::termios::Termios>)
+        .map_err(std::io::Error::from)?;
+    Ok(Terminal {
+        master: std::fs::File::from(pair.master),
+        slave: std::fs::File::from(pair.slave),
+    })
+}
+
+/// A platform without pseudo-terminals refuses them rather than quietly giving
+/// the process pipes it did not ask for. `start` refuses first, so this is the
+/// backstop for a spawn that reaches it anyway.
+#[cfg(not(unix))]
+fn open_terminal() -> std::io::Result<Terminal> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        TTY_UNSUPPORTED,
+    ))
+}
+
 struct SpawnedChild {
     child: tokio::process::Child,
-    stdout: Option<tokio::process::ChildStdout>,
-    stderr: Option<tokio::process::ChildStderr>,
-    stdin: Option<ChildStdin>,
+    output: ChildOutput,
+    stdin: Option<StdinSink>,
     scratch: PathBuf,
 }
 
@@ -557,16 +708,24 @@ impl Supervisor {
     async fn run(
         self,
         mut child: tokio::process::Child,
-        stdout: Option<tokio::process::ChildStdout>,
-        stderr: Option<tokio::process::ChildStderr>,
+        output: ChildOutput,
         mut control: mpsc::Receiver<Control>,
     ) {
         let (out_tx, out_rx) = mpsc::channel::<Incoming>(64);
-        if let Some(stdout) = stdout {
-            tokio::spawn(pump(stdout, ProcessStream::Stdout, out_tx.clone()));
-        }
-        if let Some(stderr) = stderr {
-            tokio::spawn(pump(stderr, ProcessStream::Stderr, out_tx.clone()));
+        match output {
+            ChildOutput::Pipes { stdout, stderr } => {
+                if let Some(stdout) = stdout {
+                    tokio::spawn(pump(stdout, ProcessStream::Stdout, out_tx.clone()));
+                }
+                if let Some(stderr) = stderr {
+                    tokio::spawn(pump(stderr, ProcessStream::Stderr, out_tx.clone()));
+                }
+            }
+            // One stream for a terminal: it carries stdout and stderr together,
+            // and it ends (end-of-file on the master) once the child has gone.
+            ChildOutput::Terminal(master) => {
+                tokio::spawn(pump(master, ProcessStream::Stdout, out_tx.clone()));
+            }
         }
         drop(out_tx);
 
@@ -1070,6 +1229,7 @@ mod tests {
             staged: None,
             ttl: None,
             stdin: false,
+            tty: false,
         };
         let _held = crate::executor::hold_every_spawn_permit_for_test().await;
         let Err(err) = host.spawn(&request, "proc-ws06s7-gate", "sh", &[]).await else {
@@ -1081,5 +1241,31 @@ mod tests {
             !scratch_dir("space-ws06s7-gate", "proc-ws06s7-gate").exists(),
             "the refusal comes before any scratch directory is created"
         );
+    }
+}
+
+/// Section 3.4: the switch is documented as "only the literal true". A padded, differently cased or
+/// truthy-word value must leave it off, so a mis-set deployment keeps today's behaviour.
+#[cfg(test)]
+mod switch_literal_parse {
+    #[test]
+    fn only_the_literal_true_switches_it_on() {
+        assert!(super::tty_enabled_from(Some("true")));
+        for raw in [
+            None,
+            Some(""),
+            Some(" true"),
+            Some("true\n"),
+            Some("TRUE"),
+            Some("True"),
+            Some("1"),
+            Some("on"),
+            Some("yes"),
+        ] {
+            assert!(
+                !super::tty_enabled_from(raw),
+                "{raw:?} must leave the switch off"
+            );
+        }
     }
 }

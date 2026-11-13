@@ -6398,8 +6398,16 @@ type Plugin struct {
 	// Last-known status string ("active", "stale", "missing").
 	Status          string `protobuf:"bytes,7,opt,name=status,proto3" json:"status,omitempty"`
 	InstalledAtUnix int64  `protobuf:"varint,8,opt,name=installed_at_unix,json=installedAtUnix,proto3" json:"installed_at_unix,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Supply-chain source kind (W4-PL-1): "git_commit" or "archive". Registration requires it while
+	// PLUGIN_LOADER_ENABLED is on; capability-core refuses a plugin without a pin.
+	SourceKind string `protobuf:"bytes,9,opt,name=source_kind,json=sourceKind,proto3" json:"source_kind,omitempty"`
+	// Supply-chain source pin (W4-PL-1): a full 40-hex commit SHA for "git_commit", or "sha256:" and
+	// 64 lowercase hex digits for "archive". A branch or a tag never pins a source.
+	SourcePin string `protobuf:"bytes,10,opt,name=source_pin,json=sourcePin,proto3" json:"source_pin,omitempty"`
+	// Supply-chain source URL (W4-PL-1): an https URL with a host and no credentials, query or fragment.
+	SourceRef     string `protobuf:"bytes,11,opt,name=source_ref,json=sourceRef,proto3" json:"source_ref,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Plugin) Reset() {
@@ -6486,6 +6494,27 @@ func (x *Plugin) GetInstalledAtUnix() int64 {
 		return x.InstalledAtUnix
 	}
 	return 0
+}
+
+func (x *Plugin) GetSourceKind() string {
+	if x != nil {
+		return x.SourceKind
+	}
+	return ""
+}
+
+func (x *Plugin) GetSourcePin() string {
+	if x != nil {
+		return x.SourcePin
+	}
+	return ""
+}
+
+func (x *Plugin) GetSourceRef() string {
+	if x != nil {
+		return x.SourceRef
+	}
+	return ""
 }
 
 type RegisterPluginRequest struct {
@@ -10034,7 +10063,7 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\voutput_json\x18\x02 \x01(\tR\n" +
 	"outputJson\x12#\n" +
 	"\rerror_message\x18\x03 \x01(\tR\ferrorMessage\x12G\n" +
-	"\velicitation\x18\x04 \x01(\v2%.model_plane.v1.McpElicitationPendingR\velicitation\"\xe8\x01\n" +
+	"\velicitation\x18\x04 \x01(\v2%.model_plane.v1.McpElicitationPendingR\velicitation\"\xc7\x02\n" +
 	"\x06Plugin\x12\x1b\n" +
 	"\tplugin_id\x18\x01 \x01(\tR\bpluginId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x18\n" +
@@ -10043,7 +10072,14 @@ const file_model_plane_v1_gateway_proto_rawDesc = "" +
 	"\fmanifest_url\x18\x05 \x01(\tR\vmanifestUrl\x12\x18\n" +
 	"\aenabled\x18\x06 \x01(\bR\aenabled\x12\x16\n" +
 	"\x06status\x18\a \x01(\tR\x06status\x12*\n" +
-	"\x11installed_at_unix\x18\b \x01(\x03R\x0finstalledAtUnix\"}\n" +
+	"\x11installed_at_unix\x18\b \x01(\x03R\x0finstalledAtUnix\x12\x1f\n" +
+	"\vsource_kind\x18\t \x01(\tR\n" +
+	"sourceKind\x12\x1d\n" +
+	"\n" +
+	"source_pin\x18\n" +
+	" \x01(\tR\tsourcePin\x12\x1d\n" +
+	"\n" +
+	"source_ref\x18\v \x01(\tR\tsourceRef\"}\n" +
 	"\x15RegisterPluginRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +

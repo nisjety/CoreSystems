@@ -5,7 +5,15 @@
 //! and nothing fires. A stored trigger is not authority: every later fire is re-authorised by Control
 //! through `FireAuthorizer` (the cron rule, `capability-core/internal/cron/sweeper.go`). The consumer
 //! of `webhook_received` and the fire path are in capability-core (`internal/eventtrigger`, W4-F T2).
-//! The wake gate and the clock arm come in later slices.
+//! The clock arm comes in a later slice; the wake gate reads the wake filter stored here (W4-F T5).
+//!
+//! A trigger may name one cron schedule, the scheduled run a fire starts (W4-F T3). The binding is checked
+//! here against that schedule's org, Space, creator and consent contract, and grants nothing: every fire is
+//! re-authorised by Control, as before.
+//!
+//! A trigger may also carry a wake filter (W4-F T5): a closed, version 1 predicate over the webhook event a
+//! fire is for. This store checks it against the closed schema and keeps it in canonical form. capability-core
+//! evaluates it before a fire is decided, and it grants nothing either.
 //!
 //! The record is the member's own configuration. Only that member reads or changes it, a service
 //! caller owns none and is refused, and a zero-retention or waived credential is refused on every RPC
@@ -32,6 +40,9 @@ const DISABLED: &str = "event_triggers_disabled";
 pub(crate) const INVALID_TRIGGER: &str = "invalid_event_trigger";
 pub(crate) const REVISION_CONFLICT: &str = "event_trigger_revision_conflict";
 pub(crate) const TRIGGER_CLOSED: &str = "event_trigger_closed";
+/// A schedule a trigger may not be bound to: not the member's own live schedule in the trigger's org and Space,
+/// or one with no approval contract. Refused as `InvalidArgument` with this token.
+pub(crate) const SCHEDULE_MISMATCH: &str = "trigger_schedule_mismatch";
 /// The one connector event type a trigger may name in this slice (the table's CHECK).
 pub(crate) const EVENT_TYPE_WEBHOOK_RECEIVED: &str = "webhook_received";
 /// The longest label, in characters (the table's CHECK).
@@ -41,7 +52,30 @@ const MAX_REF_CHARS: usize = 128;
 /// The most triggers one listing returns, newest first.
 const LIST_LIMIT: i64 = 200;
 /// The fields an update may name, in `UpdateEventTriggerRequest`'s words.
-const UPDATE_PATHS: [&str; 3] = ["name", "clock_enabled", "status"];
+const UPDATE_PATHS: [&str; 5] = [
+    "name",
+    "clock_enabled",
+    "status",
+    "schedule_id",
+    "wake_filter_json",
+];
+/// The longest wake filter, in bytes, as a member writes it. Postgres re-spaces the stored JSON, so the stored text can
+/// be up to twice this long; the migration's CHECK bounds it at 16 KiB.
+const MAX_WAKE_FILTER_BYTES: usize = 4096;
+/// The one wake filter schema version this store writes and accepts.
+const WAKE_FILTER_VERSION: u64 = 1;
+/// The most entries `event_types` and `providers` may hold.
+const MAX_WAKE_TOKENS: usize = 10;
+/// The most entries `subject_contains` may hold.
+const MAX_WAKE_SUBJECTS: usize = 5;
+/// The most `field_equals` entries a filter may hold.
+const MAX_WAKE_FIELDS: usize = 5;
+/// The most segments in a `field_equals` path.
+const MAX_WAKE_PATH_SEGMENTS: usize = 5;
+/// The longest event type, provider or subject needle, in characters.
+const MAX_WAKE_TOKEN_CHARS: usize = 100;
+/// The longest `field_equals` value, in characters.
+const MAX_WAKE_VALUE_CHARS: usize = 200;
 
 /// Whether the store answers. Read where it is used, with the parser the other switches use.
 pub(crate) fn event_triggers_enabled() -> bool {
@@ -178,6 +212,139 @@ fn bounded_text(raw: &str, max_chars: usize, field: &str) -> Result<String, Stat
     Ok(value.to_owned())
 }
 
+/// An optional schedule id: empty means no binding, otherwise 1 to `MAX_REF_CHARS` characters after trimming.
+fn optional_schedule(raw: &str) -> Result<Option<String>, Status> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    bounded_text(raw, MAX_REF_CHARS, "schedule_id").map(Some)
+}
+
+/// The closed wake filter schema, version 1, as a member writes it. `deny_unknown_fields` refuses every other key.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct WakeFilter {
+    version: u64,
+    #[serde(default)]
+    event_types: Vec<String>,
+    #[serde(default)]
+    providers: Vec<String>,
+    #[serde(default)]
+    field_equals: Vec<FieldEquals>,
+    #[serde(default)]
+    subject_contains: Vec<String>,
+}
+
+/// One `field_equals` entry: the string at the dotted `path` must equal `value` exactly.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct FieldEquals {
+    path: String,
+    value: String,
+}
+
+/// A wake filter as the member wrote it, checked against the closed schema and returned as canonical JSON. An empty
+/// value is no filter (NULL), as an empty schedule id is no binding. Every bound is checked here, so the gate only
+/// ever reads a filter the schema allows.
+fn optional_wake_filter(raw: &str) -> Result<Option<serde_json::Value>, Status> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    if raw.len() > MAX_WAKE_FILTER_BYTES {
+        return Err(invalid("wake_filter is larger than 4 KiB"));
+    }
+    // The parser's own message is not returned: it can quote the member's text, and the refusal names the schema only.
+    let filter: WakeFilter = serde_json::from_str(raw)
+        .map_err(|_| invalid("wake_filter must be a JSON object in the closed version 1 schema"))?;
+    let canonical = canonical_wake_filter(filter)?;
+    serde_json::to_value(canonical)
+        .map(Some)
+        .map_err(|_| Status::internal("wake_filter could not be encoded"))
+}
+
+/// Checks each bound of the closed schema and rebuilds the filter in canonical form: strings trimmed, providers in
+/// lowercase (the form the Ingestion Plane stores them in), and every list in the order the member wrote it.
+fn canonical_wake_filter(filter: WakeFilter) -> Result<WakeFilter, Status> {
+    if filter.version != WAKE_FILTER_VERSION {
+        return Err(invalid("wake_filter version must be 1"));
+    }
+    if filter.field_equals.len() > MAX_WAKE_FIELDS {
+        return Err(invalid(&format!(
+            "wake_filter field_equals allows at most {MAX_WAKE_FIELDS} entries"
+        )));
+    }
+    for entry in &filter.field_equals {
+        check_wake_path(&entry.path)?;
+        if entry.value.chars().count() > MAX_WAKE_VALUE_CHARS {
+            return Err(invalid(&format!(
+                "wake_filter field_equals values are at most {MAX_WAKE_VALUE_CHARS} characters"
+            )));
+        }
+    }
+    let providers: Vec<String> =
+        canonical_wake_tokens(filter.providers, MAX_WAKE_TOKENS, "providers")?
+            .into_iter()
+            .map(|provider| provider.to_ascii_lowercase())
+            .collect();
+    Ok(WakeFilter {
+        version: WAKE_FILTER_VERSION,
+        event_types: canonical_wake_tokens(filter.event_types, MAX_WAKE_TOKENS, "event_types")?,
+        providers,
+        field_equals: filter.field_equals,
+        subject_contains: canonical_wake_tokens(
+            filter.subject_contains,
+            MAX_WAKE_SUBJECTS,
+            "subject_contains",
+        )?,
+    })
+}
+
+/// A `field_equals` path: one to five dot-separated segments, each made of lowercase letters, digits and underscores.
+/// Only such segments can be named, so the reserved, camel-case keys the gate sets are never addressable.
+fn check_wake_path(path: &str) -> Result<(), Status> {
+    let segments: Vec<&str> = path.split('.').collect();
+    let well_formed = segments.len() <= MAX_WAKE_PATH_SEGMENTS
+        && segments.iter().all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        });
+    if well_formed {
+        Ok(())
+    } else {
+        Err(invalid(
+            "wake_filter field_equals paths are 1 to 5 segments of lowercase letters, digits and underscores",
+        ))
+    }
+}
+
+/// A list of strings, each trimmed to 1 to [`MAX_WAKE_TOKEN_CHARS`] characters, of at most `limit` entries.
+fn canonical_wake_tokens(
+    values: Vec<String>,
+    limit: usize,
+    field: &str,
+) -> Result<Vec<String>, Status> {
+    if values.len() > limit {
+        return Err(invalid(&format!(
+            "wake_filter {field} allows at most {limit} entries"
+        )));
+    }
+    values
+        .into_iter()
+        .map(|value| {
+            let trimmed = value.trim();
+            let chars = trimmed.chars().count();
+            if chars == 0 || chars > MAX_WAKE_TOKEN_CHARS {
+                return Err(invalid(&format!(
+                    "wake_filter {field} entries are 1 to {MAX_WAKE_TOKEN_CHARS} characters"
+                )));
+            }
+            Ok(trimmed.to_owned())
+        })
+        .collect()
+}
+
 /// The one event type this slice accepts.
 fn check_event_type(raw: &str) -> Result<&'static str, Status> {
     match raw.trim() {
@@ -219,9 +386,40 @@ fn check_revision(current: i64, expected: u64) -> Result<(), Status> {
     Ok(())
 }
 
+/// Whether a trigger of `member` in `org_id` and `space_ref` may be bound to `schedule_id`. The schedule must be
+/// that member's own live schedule (not soft-deleted) in the same org and Space, and carry its approval contract
+/// as a non-empty text value: the WS20 stored consent in the schedule's task template. The check is read in the
+/// caller's transaction. It grants nothing: every fire is re-authorised by Control, so a schedule deleted just
+/// after this check stops its triggers from firing.
+async fn check_schedule_binding(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    org_id: &str,
+    space_ref: &str,
+    member: &str,
+    schedule_id: &str,
+) -> Result<(), Status> {
+    let bound: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM cron_schedules
+         WHERE id = $1 AND org_id = $2 AND space_ref = $3 AND creator_subject_id = $4
+           AND deleted_at IS NULL
+           AND jsonb_typeof(task_template -> 'approval_contract') = 'string'
+           AND length(task_template ->> 'approval_contract') > 0",
+    )
+    .bind(schedule_id)
+    .bind(org_id)
+    .bind(space_ref)
+    .bind(member)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(internal)?;
+    bound
+        .map(|_| ())
+        .ok_or_else(|| Status::invalid_argument(SCHEDULE_MISMATCH))
+}
+
 /// The columns a trigger is read with, in [`TriggerRow`]'s order.
 const TRIGGER_COLUMNS: &str = "id, org_id, space_ref, connection_id, member_user_id, event_type, \
-     name, clock_enabled, status, revision, created_at, updated_at";
+     name, clock_enabled, status, revision, created_at, updated_at, schedule_id, wake_filter";
 
 #[derive(Debug, sqlx::FromRow)]
 struct TriggerRow {
@@ -237,6 +435,8 @@ struct TriggerRow {
     revision: i64,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    schedule_id: Option<String>,
+    wake_filter: Option<serde_json::Value>,
 }
 
 impl TriggerRow {
@@ -254,6 +454,11 @@ impl TriggerRow {
             revision: u64::try_from(self.revision).unwrap_or_default(),
             created_at: Some(to_proto_timestamp(self.created_at)),
             updated_at: Some(to_proto_timestamp(self.updated_at)),
+            schedule_id: self.schedule_id.unwrap_or_default(),
+            wake_filter_json: self
+                .wake_filter
+                .map(|filter| filter.to_string())
+                .unwrap_or_default(),
         }
     }
 }
@@ -271,6 +476,7 @@ fn internal(error: sqlx::Error) -> Status {
 
 /// Record a trigger for the caller, active. The org must be the caller's own; the Space and the
 /// connection are stored as the caller names them (Control verifies them per fire in a later slice).
+/// A named schedule is checked first against the caller's own schedule in this org and Space.
 pub(crate) async fn create_event_trigger(
     pool: &PgPool,
     caller: &VerifiedIdentity,
@@ -282,10 +488,17 @@ pub(crate) async fn create_event_trigger(
     let connection_id = bounded_text(&req.connection_id, MAX_REF_CHARS, "connection_id")?;
     let event_type = check_event_type(&req.event_type)?;
     let name = bounded_text(&req.name, MAX_NAME_CHARS, "name")?;
+    let schedule_id = optional_schedule(&req.schedule_id)?;
+    let wake_filter = optional_wake_filter(&req.wake_filter_json)?;
+    let mut tx = pool.begin().await.map_err(internal)?;
+    if let Some(schedule) = &schedule_id {
+        check_schedule_binding(&mut tx, caller.org_id(), &space_ref, member, schedule).await?;
+    }
     let row: TriggerRow = sqlx::query_as(&format!(
         "INSERT INTO event_triggers
-         (id, org_id, space_ref, connection_id, member_user_id, event_type, name, clock_enabled, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active')
+         (id, org_id, space_ref, connection_id, member_user_id, event_type, name, clock_enabled, status, schedule_id,
+          wake_filter)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active', $9, $10)
          RETURNING {TRIGGER_COLUMNS}"
     ))
     .bind(format!("trg_{}", new_ulid()))
@@ -296,9 +509,12 @@ pub(crate) async fn create_event_trigger(
     .bind(event_type)
     .bind(&name)
     .bind(req.clock_enabled)
-    .fetch_one(pool)
+    .bind(&schedule_id)
+    .bind(&wake_filter)
+    .fetch_one(&mut *tx)
     .await
     .map_err(internal)?;
+    tx.commit().await.map_err(internal)?;
     Ok(found(row))
 }
 
@@ -393,10 +609,28 @@ pub(crate) async fn update_event_trigger(
     if wants("status") {
         trigger.status = check_status(&req.status)?.to_owned();
     }
+    if wants("schedule_id") {
+        trigger.schedule_id = optional_schedule(&req.schedule_id)?;
+        if let Some(schedule) = &trigger.schedule_id {
+            check_schedule_binding(
+                &mut tx,
+                &trigger.org_id,
+                &trigger.space_ref,
+                &trigger.member_user_id,
+                schedule,
+            )
+            .await?;
+        }
+    }
+
+    if wants("wake_filter_json") {
+        trigger.wake_filter = optional_wake_filter(&req.wake_filter_json)?;
+    }
 
     let row: TriggerRow = sqlx::query_as(&format!(
         "UPDATE event_triggers
-         SET name = $2, clock_enabled = $3, status = $4, revision = revision + 1, updated_at = now()
+         SET name = $2, clock_enabled = $3, status = $4, schedule_id = $5, wake_filter = $6,
+             revision = revision + 1, updated_at = now()
          WHERE id = $1
          RETURNING {TRIGGER_COLUMNS}"
     ))
@@ -404,6 +638,8 @@ pub(crate) async fn update_event_trigger(
     .bind(&trigger.name)
     .bind(trigger.clock_enabled)
     .bind(&trigger.status)
+    .bind(&trigger.schedule_id)
+    .bind(&trigger.wake_filter)
     .fetch_one(&mut *tx)
     .await
     .map_err(internal)?;
@@ -430,6 +666,8 @@ mod tests {
             event_type: EVENT_TYPE_WEBHOOK_RECEIVED.to_owned(),
             name: "Supplier mail".to_owned(),
             clock_enabled: false,
+            schedule_id: String::new(),
+            wake_filter_json: String::new(),
         }
     }
 
@@ -525,6 +763,8 @@ mod tests {
             revision: 4,
             created_at: at,
             updated_at: at,
+            schedule_id: None,
+            wake_filter: None,
         };
         let proto = row.into_proto();
         assert_eq!(proto.id, "trg_01");

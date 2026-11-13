@@ -136,6 +136,7 @@ fn start_request(
         user_id: OWNER.to_owned(),
         start_key: key.to_owned(),
         terminal_source: source as i32,
+        agent_version_pin: None,
     }
 }
 

@@ -13,6 +13,7 @@ import { fireEvent, render, screen, waitFor, within } from '@solidjs/testing-lib
 import { createSignal, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/shared/api/http'
+import { LocalizedError } from '@/shared/i18n/errors'
 import type { VoiceReply } from '@/features/voice/VoiceModeDialog'
 import { latestVoiceReply } from '@/features/voice/voice-reply'
 import { speechPlayer } from '@/features/voice/speech-playback'
@@ -329,7 +330,7 @@ describe('Voice mode sends like a typed message', () => {
     const { submitted } = renderComposer({
       initialMessage: 'Skrevet',
       onSubmit: () => {
-        throw new Error('Kunne ikke nå Verevon.')
+        throw new LocalizedError({ no: 'Kunne ikke nå Verevon.', en: 'Could not reach Verevon.' })
       },
     })
     const dialog = await openVoiceMode()

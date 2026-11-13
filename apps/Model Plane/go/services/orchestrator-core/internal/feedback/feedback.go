@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -70,6 +71,19 @@ func scoreWeight(rating string) (good bool, err error) {
 	}
 }
 
+// SkillVersionsEnvVar is the switch for EP-11 S3 part b: rate and quarantine
+// skills per version. Only the literal "true" turns it on.
+const SkillVersionsEnvVar = "FEEDBACK_SKILL_VERSIONS"
+
+// SkillVersionsEnabled reports whether ratings are keyed by skill version.
+//
+// Off (the default), every rating carries version 0 and every read pools a skill
+// across versions, exactly as before. Read at call time, like the other
+// orchestrator-core switches, so a test can flip it with t.Setenv.
+func SkillVersionsEnabled() bool {
+	return os.Getenv(SkillVersionsEnvVar) == "true"
+}
+
 // Rating is one recorded operator rating.
 type Rating struct {
 	// OrgID is the tenant. Aggregation never pools ratings across tenants.
@@ -81,9 +95,14 @@ type Rating struct {
 	RunID string
 	// SkillID is the injected skill this rating attaches to. Empty = the
 	// run-level rating, which is recorded but is not a promotion candidate.
-	SkillID   string
-	FromScope string
-	ToScope   string
+	SkillID string
+	// SkillVersion is the version of SkillID the turn pinned (`id@N`), 0 when
+	// unknown. Normalize keeps it only while [SkillVersionsEnabled]; otherwise it
+	// is forced to 0 so the switch-off behaviour is today's pooling. Always 0 on a
+	// run-level rating.
+	SkillVersion int
+	FromScope    string
+	ToScope      string
 	// Rating must be one of the canonical tokens.
 	Rating string
 	// Source is [SourceExplicit] or [SourceImplicit]. An empty value normalises
@@ -108,13 +127,16 @@ type Rating struct {
 
 // Candidate is a skill whose feedback crossed the promotion bar.
 type Candidate struct {
-	OrgID     string
-	SkillID   string
-	FromScope string
-	ToScope   string
-	Good      int
-	Total     int
-	Score     float64
+	OrgID   string
+	SkillID string
+	// SkillVersion is the version whose evidence crossed the bar; 0 when
+	// [SkillVersionsEnabled] is off or no version was recorded.
+	SkillVersion int
+	FromScope    string
+	ToScope      string
+	Good         int
+	Total        int
+	Score        float64
 }
 
 // Store is the durable rating sink + promotion-candidate read model.
@@ -142,6 +164,10 @@ type Store interface {
 type QuarantineCandidate struct {
 	OrgID   string
 	SkillID string
+	// SkillVersion is the current version whose evidence fell below the bar, so
+	// an operator can see which version was judged. 0 when
+	// [SkillVersionsEnabled] is off or no version was recorded.
+	SkillVersion int
 	// Score is the full verdict, carried so an operator can see the evidence
 	// behind the decision rather than just its outcome.
 	Score quality.Score
@@ -173,7 +199,18 @@ func Normalize(r Rating) (Rating, error) {
 	r.OrgID = strings.TrimSpace(r.OrgID)
 	r.UserID = strings.TrimSpace(r.UserID)
 	r.RunID = strings.TrimSpace(r.RunID)
-	r.SkillID, _ = SplitSkillRef(strings.TrimSpace(r.SkillID))
+	id, refVersion := SplitSkillRef(strings.TrimSpace(r.SkillID))
+	r.SkillID = id
+	// Keep the parsed version only behind the switch, and only for a skill-attached
+	// rating. Switch off stores 0 so the bare id keeps pooling every version.
+	switch {
+	case !SkillVersionsEnabled() || r.SkillID == "":
+		r.SkillVersion = 0
+	case refVersion > 0:
+		r.SkillVersion = refVersion
+	case r.SkillVersion < 0:
+		r.SkillVersion = 0
+	}
 	r.FromScope = strings.TrimSpace(r.FromScope)
 	r.ToScope = strings.TrimSpace(r.ToScope)
 	r.Rating = strings.ToLower(strings.TrimSpace(r.Rating))
@@ -215,6 +252,7 @@ func Normalize(r Rating) (Rating, error) {
 
 type memoryKey struct {
 	orgID, runID, userID, skillID string
+	skillVersion                  int
 }
 
 type memoryValue struct {
@@ -247,7 +285,7 @@ func (s *MemoryStore) Record(_ context.Context, r Rating) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.ratings[memoryKey{clean.OrgID, clean.RunID, clean.UserID, clean.SkillID}] = memoryValue{
+	s.ratings[memoryKey{clean.OrgID, clean.RunID, clean.UserID, clean.SkillID, clean.SkillVersion}] = memoryValue{
 		fromScope: clean.FromScope,
 		toScope:   clean.ToScope,
 		rating:    clean.Rating,
@@ -262,6 +300,9 @@ func (s *MemoryStore) Record(_ context.Context, r Rating) error {
 // be two chances to group differently.
 type groupKey struct {
 	orgID, skillID, fromScope, toScope string
+	// skillVersion is 0 unless [SkillVersionsEnabled], in which case each version
+	// is its own bucket until [currentVersionOnly] picks the one that counts.
+	skillVersion int
 }
 
 // aggregate accumulates one skill's evidence, keeping explicit and implicit
@@ -289,24 +330,90 @@ func (a *aggregate) add(rating string, source string, strength float64) {
 	a.evidence.ExplicitBad++
 }
 
+// merge folds a whole bucket of evidence in. Used where a store has already
+// counted rows (SQL) and only needs to combine buckets.
+func (a *aggregate) merge(e quality.Evidence) {
+	a.evidence.ExplicitGood += e.ExplicitGood
+	a.evidence.ExplicitBad += e.ExplicitBad
+	a.evidence.ImplicitBadWeight += e.ImplicitBadWeight
+	a.evidence.ImplicitGoodWeight += e.ImplicitGoodWeight
+}
+
+// skillKey identifies one skill within one tenant, across versions.
+type skillKey struct {
+	orgID, skillID string
+}
+
+// bucketVersion is the version a row is bucketed under: its own while
+// [SkillVersionsEnabled], else 0, which pools every version of the skill exactly
+// as before the switch existed.
+func bucketVersion(version int, versioned bool) int {
+	if !versioned {
+		return 0
+	}
+	return version
+}
+
+// keepCurrentVersions drops every bucket that is not its skill's current version
+// (the highest with evidence), so promotion is judged on the version that would
+// actually be served. A no-op when every bucket is version 0.
+func keepCurrentVersions(groups map[groupKey]*aggregate) {
+	versions := make(map[skillKey][]int)
+	for gk := range groups {
+		sk := skillKey{gk.orgID, gk.skillID}
+		versions[sk] = append(versions[sk], gk.skillVersion)
+	}
+	for gk := range groups {
+		if gk.skillVersion != quality.CurrentVersion(versions[skillKey{gk.orgID, gk.skillID}]) {
+			delete(groups, gk)
+		}
+	}
+}
+
+// quarantineFromVersions applies the demotion rule to per-version evidence. Each
+// skill is judged on its current version only; with the switch off every skill
+// has a single version-0 bucket, so this is the old pooled verdict.
+func quarantineFromVersions(evidence map[skillKey]map[int]quality.Evidence) []QuarantineCandidate {
+	out := make([]QuarantineCandidate, 0)
+	for sk, byVersion := range evidence {
+		version, score := quality.EvaluateCurrent(byVersion)
+		if quality.Decide(quality.StateActive, score) != quality.DecisionQuarantine {
+			continue
+		}
+		out = append(out, QuarantineCandidate{
+			OrgID:        sk.orgID,
+			SkillID:      sk.skillID,
+			SkillVersion: version,
+			Score:        score,
+		})
+	}
+	sortQuarantine(out)
+	return out
+}
+
 // Candidates aggregates skill-attached ratings. Run-only ratings (SkillID "")
 // are recorded but are never promotion candidates — there is no skill to promote.
 func (s *MemoryStore) Candidates(_ context.Context, minSamples int, threshold float64) ([]Candidate, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	versioned := SkillVersionsEnabled()
 	groups := make(map[groupKey]*aggregate)
 	for key, value := range s.ratings {
 		if key.skillID == "" {
 			continue
 		}
-		gk := groupKey{key.orgID, key.skillID, value.fromScope, value.toScope}
+		gk := groupKey{key.orgID, key.skillID, value.fromScope, value.toScope,
+			bucketVersion(key.skillVersion, versioned)}
 		agg, ok := groups[gk]
 		if !ok {
 			agg = &aggregate{}
 			groups[gk] = agg
 		}
 		agg.add(value.rating, value.source, value.strength)
+	}
+	if versioned {
+		keepCurrentVersions(groups)
 	}
 
 	out := make([]Candidate, 0, len(groups))
@@ -326,13 +433,14 @@ func (s *MemoryStore) Candidates(_ context.Context, minSamples int, threshold fl
 			continue
 		}
 		out = append(out, Candidate{
-			OrgID:     gk.orgID,
-			SkillID:   gk.skillID,
-			FromScope: gk.fromScope,
-			ToScope:   gk.toScope,
-			Good:      agg.evidence.ExplicitGood,
-			Total:     agg.evidence.ExplicitGood + agg.evidence.ExplicitBad,
-			Score:     score.LowerBound,
+			OrgID:        gk.orgID,
+			SkillID:      gk.skillID,
+			SkillVersion: gk.skillVersion,
+			FromScope:    gk.fromScope,
+			ToScope:      gk.toScope,
+			Good:         agg.evidence.ExplicitGood,
+			Total:        agg.evidence.ExplicitGood + agg.evidence.ExplicitBad,
+			Score:        score.LowerBound,
 		})
 	}
 	sortCandidates(out)
@@ -348,12 +456,33 @@ func (s *MemoryStore) Quarantine(_ context.Context) ([]QuarantineCandidate, erro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	versioned := SkillVersionsEnabled()
+	if versioned {
+		// Per (skill, version), judging only the current version, so a poor v3
+		// does not quarantine the v4 that replaced it. Scopes are folded together
+		// here, as the Postgres store does.
+		evidence := make(map[skillKey]map[int]quality.Evidence)
+		for key, value := range s.ratings {
+			if key.skillID == "" {
+				continue
+			}
+			sk := skillKey{key.orgID, key.skillID}
+			if evidence[sk] == nil {
+				evidence[sk] = make(map[int]quality.Evidence)
+			}
+			agg := aggregate{evidence: evidence[sk][key.skillVersion]}
+			agg.add(value.rating, value.source, value.strength)
+			evidence[sk][key.skillVersion] = agg.evidence
+		}
+		return quarantineFromVersions(evidence), nil
+	}
+
 	groups := make(map[groupKey]*aggregate)
 	for key, value := range s.ratings {
 		if key.skillID == "" {
 			continue
 		}
-		gk := groupKey{key.orgID, key.skillID, value.fromScope, value.toScope}
+		gk := groupKey{orgID: key.orgID, skillID: key.skillID, fromScope: value.fromScope, toScope: value.toScope}
 		agg, ok := groups[gk]
 		if !ok {
 			agg = &aggregate{}

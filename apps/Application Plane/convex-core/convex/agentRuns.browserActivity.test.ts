@@ -18,6 +18,7 @@ import {
   getByRunIdHandler,
   listForOrgHandler,
   projectRunForViewer,
+  rateHandler,
   upsertBrowserActivityHandler,
 } from "./agentRuns";
 
@@ -54,6 +55,14 @@ function fakeCtx(viewerExternalAuthId: string | null, tables: Record<string, Row
         const row = rows.find((candidate) => candidate._id === id);
         if (row) Object.assign(row, fields);
       }
+    },
+    // Like Convex, `get` returns a copy, so a handler cannot mutate the stored row through it.
+    async get(id: string) {
+      for (const rows of Object.values(tables)) {
+        const row = rows.find((candidate) => candidate._id === id);
+        if (row) return { ...row };
+      }
+      return null;
     },
   };
   const auth = {
@@ -260,4 +269,52 @@ test("projection_holds_no_payload_text: free text and bad numbers are refused", 
       JSON.stringify(overrides),
     );
   }
+});
+
+test("a non-owner org member who rates gets the reply without browserActivity", async () => {
+  const tables = seed();
+  await upsertBrowserActivityHandler(
+    fakeCtx(null, tables).ctx,
+    update({ sessionState: "open", control: "agent", steps: 3 }),
+  );
+
+  const { ctx } = fakeCtx("colleague", tables);
+  const reply = await rateHandler(ctx, { runId: "run-1", externalOrgId: ORG, rating: "good", note: "clear" });
+  assert.equal(reply.runId, "run-1");
+  assert.equal(reply.rating, "good");
+  assert.equal(reply.ratingNote, "clear");
+  assert.equal("browserActivity" in reply, false);
+  // The rating is stored on the row; only the reply is narrowed.
+  assert.equal(tables.agentRuns[0].rating, "good");
+  assert.ok(tables.agentRuns[0].browserActivity);
+});
+
+test("the run owner who rates still gets browserActivity in the reply", async () => {
+  const tables = seed();
+  await upsertBrowserActivityHandler(fakeCtx(null, tables).ctx, update({ steps: 2 }));
+
+  const { ctx } = fakeCtx("owner", tables);
+  const reply = await rateHandler(ctx, { runId: "run-1", externalOrgId: ORG, rating: "poor" });
+  assert.equal(reply.rating, "poor");
+  assert.equal(reply.browserActivity.steps, 2);
+});
+
+test("with the consumer switch off, the rate reply is the stored row unchanged", async () => {
+  // Nothing has written browserActivity (the consumer is off), so the reply is the plain row.
+  const tables = seed();
+  const { ctx } = fakeCtx("colleague", tables);
+  const reply = await rateHandler(ctx, { runId: "run-1", externalOrgId: ORG, rating: "acceptable" });
+  assert.equal("browserActivity" in reply, false);
+  assert.deepEqual(reply, tables.agentRuns[0]);
+});
+
+test("a viewer outside the run's org cannot rate, and nothing is written", async () => {
+  const tables = seed();
+  await upsertBrowserActivityHandler(fakeCtx(null, tables).ctx, update());
+  const { ctx } = fakeCtx("outsider", tables);
+  await assert.rejects(
+    rateHandler(ctx, { runId: "run-1", externalOrgId: ORG, rating: "good" }),
+    /Unauthorized/,
+  );
+  assert.equal(tables.agentRuns[0].rating, undefined);
 });

@@ -57,6 +57,7 @@ import {
   whyNoAnswerHint,
 } from '../lib/wake-policy'
 import { SpaceAgentWakePolicyEditor } from './SpaceAgentWakePolicyEditor'
+import { SpaceAgentMemoryPanel, spaceAgentMemoryEnabled } from './SpaceAgentMemoryPanel'
 import {
   SpaceLeaveRoomButton,
   SpaceMemberControls,
@@ -1724,6 +1725,12 @@ function SpaceAgentCard(props: {
           {(message) => (
             <p class="verevon-space-agent__error" role="alert">{message()}</p>
           )}
+        </Show>
+
+        {/* What this agent remembers in this room (EP-6 P3-c), behind VITE_SPACE_AGENT_MEMORY. Control answers the
+            list to the room's owner or an admin only, so it is offered where the governance controls are. */}
+        <Show when={spaceAgentMemoryEnabled() && props.canGovern && governable() && agent().subject_id}>
+          <SpaceAgentMemoryPanel spaceRef={props.spaceRef} agentSubjectId={agent().subject_id} />
         </Show>
 
         <Show

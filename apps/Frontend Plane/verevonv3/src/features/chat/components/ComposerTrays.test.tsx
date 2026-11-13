@@ -85,10 +85,11 @@ describe('ComposerTrays', () => {
     const approveButtons = view.container.querySelectorAll<HTMLButtonElement>('.verevon-chat-approval__approve')
     expect(approveButtons).toHaveLength(2)
     fireEvent.click(approveButtons[1]!)
-    expect(view.onApprovalDecision).toHaveBeenCalledWith('asst-2', 'a2', 'approve')
+    // The trailing scope and promote are the tray's own: an approve with no standing scope chosen passes none.
+    expect(view.onApprovalDecision).toHaveBeenCalledWith('asst-2', 'a2', 'approve', undefined, undefined)
 
     fireEvent.click(view.container.querySelectorAll<HTMLButtonElement>('.verevon-chat-approval__reject')[0]!)
-    expect(view.onApprovalDecision).toHaveBeenLastCalledWith('asst-1', 'a1', 'reject')
+    expect(view.onApprovalDecision).toHaveBeenLastCalledWith('asst-1', 'a1', 'reject', undefined, undefined)
   })
 
   it('shows only the first tray and names the others under it', () => {

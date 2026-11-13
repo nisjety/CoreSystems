@@ -53,6 +53,44 @@ func TestScanComposeFindsServiceDeclarations(t *testing.T) {
 	}
 }
 
+// composeFourSpaceFixture indents services by four spaces, as the Control Plane
+// compose does. A scanner that reads only the two-space layout names no service.
+const composeFourSpaceFixture = `name: control-plane
+
+x-core-security: &core-security
+    read_only: true
+
+services:
+    auth-core:
+        image: example
+        environment:
+            WEB_POLICY_CLAIM_ENABLED: ${WEB_POLICY_CLAIM_ENABLED:-0}
+            MP_COMPAT_MODE: v1_only
+    audit-siem-exporter:
+        environment:
+            AUDIT_SIEM_EXPORT_ENABLED: ${AUDIT_SIEM_EXPORT_ENABLED:-0}
+            AUDIT_CHAIN_VERIFY_ENABLED: ${AUDIT_CHAIN_VERIFY_ENABLED:-}
+
+networks:
+    controlplane-net:
+        name: example
+`
+
+func TestScanComposeNamesServicesAtFourSpaces(t *testing.T) {
+	want := []ComposeDecl{
+		{Service: "auth-core", Env: "WEB_POLICY_CLAIM_ENABLED", Host: "WEB_POLICY_CLAIM_ENABLED", Default: "0"},
+		{Service: "audit-siem-exporter", Env: "AUDIT_SIEM_EXPORT_ENABLED", Host: "AUDIT_SIEM_EXPORT_ENABLED", Default: "0"},
+		{Service: "audit-siem-exporter", Env: "AUDIT_CHAIN_VERIFY_ENABLED", Host: "AUDIT_CHAIN_VERIFY_ENABLED", Default: ""},
+	}
+	got, err := ScanCompose(strings.NewReader(composeFourSpaceFixture))
+	if err != nil {
+		t.Fatalf("ScanCompose: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ScanCompose = %+v, want %+v", got, want)
+	}
+}
+
 func TestIsConventionName(t *testing.T) {
 	inside := []string{
 		"AGENTIC_SUBSCRIPTION_ENABLED",

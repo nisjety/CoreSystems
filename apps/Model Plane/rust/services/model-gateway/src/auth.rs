@@ -294,6 +294,23 @@ impl VerifiedIngestionBearer {
     }
 }
 
+/// Independently verified `aud=quarry` user bearer of the caller, forwarded by the BFF as
+/// `x-quarry-authorization` (Teach mode, F-t3-081). Model Gateway uses it only to read one run's
+/// procedure draft as the person who drove the run. It is never the gateway's own service
+/// principal, which is not that run's actor, and it is never accepted from a body or a query.
+#[derive(Clone)]
+pub struct VerifiedQuarryBearer(Arc<str>);
+
+impl VerifiedQuarryBearer {
+    fn new(token: &str) -> Self {
+        Self(Arc::from(token))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Marker proving that the public Model Gateway bearer passed verification.
 /// The ingress credential is deliberately not retained: every downstream
 /// boundary uses its own independently verified audience token.
@@ -782,6 +799,28 @@ where
     }
 }
 
+impl fmt::Debug for VerifiedQuarryBearer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("VerifiedQuarryBearer([REDACTED])")
+    }
+}
+
+#[axum::async_trait]
+impl<S> FromRequestParts<S> for VerifiedQuarryBearer
+where
+    S: Send + Sync,
+{
+    type Rejection = StatusCode;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<Self>()
+            .cloned()
+            .ok_or(StatusCode::UNAUTHORIZED)
+    }
+}
+
 impl Claims {
     fn principal_kind(&self) -> Result<PrincipalKind, StatusCode> {
         match self.principal_type.as_deref().unwrap_or("user") {
@@ -1129,6 +1168,24 @@ async fn verify_delegated_ingestion_bearer(
     .map(|token| token.map(|token| VerifiedIngestionBearer::new(&token)))
 }
 
+/// The caller's `aud=quarry` bearer (Teach mode, F-t3-081), verified like every user bearer: the
+/// same subject, user and tenant as the ingress token, and the same retention posture. Its audience
+/// is `QUARRY_AUTH_AUDIENCE`, which defaults to `quarry` as the edge's own audience does.
+async fn verify_delegated_quarry_bearer(
+    headers: &HeaderMap,
+    model_claims: &Claims,
+) -> Result<Option<VerifiedQuarryBearer>, AuthRejection> {
+    verify_delegated_user_bearer(
+        headers,
+        "x-quarry-authorization",
+        "QUARRY_AUTH_AUDIENCE",
+        "quarry",
+        model_claims,
+    )
+    .await
+    .map(|token| token.map(|token| VerifiedQuarryBearer::new(&token)))
+}
+
 async fn verify_delegated_capability_bearer(
     headers: &HeaderMap,
     model_claims: &Claims,
@@ -1310,6 +1367,7 @@ const API_KEY_FORBIDDEN_DELEGATIONS: &[&str] = &[
     "x-execution-authorization",
     "x-ingestion-authorization",
     "x-sandbox-authorization",
+    "x-quarry-authorization",
 ];
 
 /// INNH-10: verify the `aud=browser-broker` bearer of an `api_key` principal. It is accepted only
@@ -1456,6 +1514,23 @@ async fn verify_delegated_service_inference_bearer(
     Ok(Some(VerifiedInferenceBearer::new(&token)))
 }
 
+/// The judge route's caller check (EP-7 S6), held to the rules of the delegated service bearers: the
+/// verified token must be orchestrator-core's own service principal (its `service_id` is its `sub`),
+/// hold the judge scope, and name the org the request body names. A token that is not a well-formed
+/// principal is `401`; any other caller is `403`.
+pub(crate) fn verify_goal_judge_caller(claims: &Claims, org_id: &str) -> Result<(), StatusCode> {
+    if claims.principal_kind()? != PrincipalKind::Service
+        || claims.sub != SERVICE_GOAL_JUDGE_CALLER
+        || claims.service_id.as_deref() != Some(SERVICE_GOAL_JUDGE_CALLER)
+        || !claims.has_scope(SERVICE_SCOPE_MODEL_GOAL_JUDGE)
+        || claims.org_id.is_empty()
+        || claims.org_id != org_id
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(())
+}
+
 async fn decode_delegated_bearer(
     headers: &HeaderMap,
     header_name: &'static str,
@@ -1573,6 +1648,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
         let browser_bearer = verify_delegated_browser_bearer(req.headers(), &claims).await?;
         let ingestion_bearer = verify_delegated_ingestion_bearer(req.headers(), &claims).await?;
         let sandbox_bearer = verify_delegated_sandbox_bearer(req.headers(), &claims).await?;
+        let quarry_bearer = verify_delegated_quarry_bearer(req.headers(), &claims).await?;
         req.extensions_mut().insert(claims);
         req.extensions_mut()
             .insert(VerifiedModelBearer::new(&token));
@@ -1613,6 +1689,9 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
         }
         if let Some(sandbox_bearer) = sandbox_bearer {
             req.extensions_mut().insert(sandbox_bearer);
+        }
+        if let Some(quarry_bearer) = quarry_bearer {
+            req.extensions_mut().insert(quarry_bearer);
         }
         return Ok(next.run(req).await);
     }
@@ -1705,6 +1784,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
         browser_bearer,
         ingestion_bearer,
         sandbox_bearer,
+        quarry_bearer,
     ) = match principal_kind {
         PrincipalKind::User => (
             verify_delegated_data_plane_bearer(req.headers(), &token_data.claims).await?,
@@ -1716,6 +1796,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
             verify_delegated_browser_bearer(req.headers(), &token_data.claims).await?,
             verify_delegated_ingestion_bearer(req.headers(), &token_data.claims).await?,
             verify_delegated_sandbox_bearer(req.headers(), &token_data.claims).await?,
+            verify_delegated_quarry_bearer(req.headers(), &token_data.claims).await?,
         ),
         PrincipalKind::Service => {
             if req.headers().contains_key("x-data-plane-authorization")
@@ -1725,6 +1806,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
                 || req.headers().contains_key("x-browser-authorization")
                 || req.headers().contains_key("x-ingestion-authorization")
                 || req.headers().contains_key("x-sandbox-authorization")
+                || req.headers().contains_key("x-quarry-authorization")
                 || (req.headers().contains_key("x-session-authorization")
                     && req.headers().contains_key("x-inference-authorization"))
             {
@@ -1744,6 +1826,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
                 None,
                 session_bearer,
                 inference_bearer,
+                None,
                 None,
                 None,
                 None,
@@ -1784,7 +1867,7 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
                     verify_delegated_api_key_inference_bearer(req.headers(), &token_data.claims)
                         .await?;
             }
-            (None, None, None, None, None, None, None, None, None)
+            (None, None, None, None, None, None, None, None, None, None)
         }
     };
     if let Some(bearer) = api_key_browser_bearer {
@@ -1827,6 +1910,9 @@ pub async fn require_auth(mut req: Request, next: Next) -> Result<Response, Auth
     if let Some(sandbox_bearer) = sandbox_bearer {
         req.extensions_mut().insert(sandbox_bearer);
     }
+    if let Some(quarry_bearer) = quarry_bearer {
+        req.extensions_mut().insert(quarry_bearer);
+    }
     Ok(next.run(req).await)
 }
 
@@ -1841,6 +1927,13 @@ const CONTROL_SPACE_DELETION_SERVICE: &str = "service:control-space-deletion";
 /// authenticates to audit-core/org-core/billing-core.
 const MAIL_TASK_BRIDGE_CALLER_SERVICE: &str = "service:verevon-gateway";
 const SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD: &str = "mail-task:prepare-thread";
+/// EP-7 S6: the one caller that asks for the completion judge of an unattended goal fire,
+/// orchestrator-core, which runs the scheduled fire (owner decision D9). Only this principal holds
+/// the judge scope.
+const SERVICE_GOAL_JUDGE_CALLER: &str = "service:orchestrator-core";
+const SERVICE_SCOPE_MODEL_GOAL_JUDGE: &str = "model:goal_judge";
+/// EP-7 S6: the judge route's path, written as the router names it (`:goal_id` is one segment).
+pub const GOAL_JUDGE_TURN_PATH: &str = "/internal/v1/goals/:goal_id/judge-turn";
 
 /// One row of the service route table: a service principal may call `method path` when it holds
 /// `scope` and, if `service` is set, is exactly that service. `service: None` means any service
@@ -1898,6 +1991,15 @@ pub const SERVICE_ROUTE_GRANTS: &[ServiceRouteGrant] = &[
         scope: SERVICE_SCOPE_MAIL_TASK_PREPARE_THREAD,
         flag: None,
     },
+    // EP-7 S6: orchestrator-core asks for the completion judge of one unattended goal fire. The route
+    // answers 404 while its two switches are off (goal_unattended), so this row carries no flag.
+    ServiceRouteGrant {
+        service: Some(SERVICE_GOAL_JUDGE_CALLER),
+        method: "POST",
+        path: GOAL_JUDGE_TURN_PATH,
+        scope: SERVICE_SCOPE_MODEL_GOAL_JUDGE,
+        flag: None,
+    },
     // E3.6-8: the two routes below exist for a service only while their switch is on.
     ServiceRouteGrant {
         service: None,
@@ -1919,11 +2021,35 @@ pub const SERVICE_ROUTE_GRANTS: &[ServiceRouteGrant] = &[
 pub const SERVICE_INFERENCE_BEARER_HEADER: &str = "x-inference-authorization";
 const SERVICE_INFERENCE_BEARER_AUDIENCE: &str = "inference-core";
 
+/// Whether a route-table `template` names the request `path`. A `:name` segment of the template
+/// matches one non-empty segment of the path; every other segment must be equal, so a template with
+/// no parameter matches exactly what it always did.
+fn route_path_matches(template: &str, path: &str) -> bool {
+    let mut template_segments = template.split('/');
+    let mut path_segments = path.split('/');
+    loop {
+        match (template_segments.next(), path_segments.next()) {
+            (None, None) => return true,
+            (Some(expected), Some(actual)) => {
+                let segment_ok = if expected.starts_with(':') {
+                    !actual.is_empty()
+                } else {
+                    expected == actual
+                };
+                if !segment_ok {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+}
+
 /// Whether `claims`, a service principal, may call `method path`.
 fn service_route_allowed(claims: &Claims, method: &str, path: &str) -> bool {
     SERVICE_ROUTE_GRANTS.iter().any(|grant| {
         grant.method == method
-            && grant.path == path
+            && route_path_matches(grant.path, path)
             && grant.service.is_none_or(|service| claims.sub == service)
             && claims.has_scope(grant.scope)
     })
@@ -1946,7 +2072,7 @@ fn service_route_switched_off(
 ) -> bool {
     SERVICE_ROUTE_GRANTS.iter().any(|grant| {
         grant.method == method
-            && grant.path == path
+            && route_path_matches(grant.path, path)
             && grant.service.is_none_or(|service| claims.sub == service)
             && claims.has_scope(grant.scope)
             && grant
@@ -4607,7 +4733,8 @@ mod tests {
         include_str!("../tests/fixtures/auth-core/quarry-token-claims.golden.sha256");
 
     /// The nine delegated user bearers, each with the audience it is minted for.
-    const DELEGATED_USER_BEARERS: [(&str, &str); 9] = [
+    // Ten: Teach mode's `aud=quarry` bearer (F-t3-081, W5-081-c) is checked like every other one.
+    const DELEGATED_USER_BEARERS: [(&str, &str); 10] = [
         ("x-data-plane-authorization", "data-plane"),
         ("x-ingestion-authorization", "ingestion"),
         ("x-capability-authorization", "capability-core"),
@@ -4617,6 +4744,7 @@ mod tests {
         ("x-execution-authorization", "execution-core"),
         ("x-browser-authorization", "browser-broker"),
         ("x-sandbox-authorization", "sandbox-manager"),
+        ("x-quarry-authorization", "quarry"),
     ];
 
     /// The user claims Auth Core really minted for one golden case, with the
@@ -4809,7 +4937,7 @@ mod tests {
             assert_eq!(
                 status,
                 StatusCode::OK,
-                "all nine user bearers at zdr={zdr}: {body}"
+                "all ten user bearers at zdr={zdr}: {body}"
             );
         }
         clear_env();

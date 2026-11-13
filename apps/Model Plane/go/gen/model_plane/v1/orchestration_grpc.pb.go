@@ -33,6 +33,7 @@ const (
 	OrchestrationCoreService_DecideApproval_FullMethodName                    = "/model_plane.v1.OrchestrationCoreService/DecideApproval"
 	OrchestrationCoreService_RerouteApproval_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/RerouteApproval"
 	OrchestrationCoreService_ConsumeApproval_FullMethodName                   = "/model_plane.v1.OrchestrationCoreService/ConsumeApproval"
+	OrchestrationCoreService_GetSkippedAssistAuthority_FullMethodName         = "/model_plane.v1.OrchestrationCoreService/GetSkippedAssistAuthority"
 	OrchestrationCoreService_ClaimOnceApproval_FullMethodName                 = "/model_plane.v1.OrchestrationCoreService/ClaimOnceApproval"
 	OrchestrationCoreService_HoldQuarantinedOutput_FullMethodName             = "/model_plane.v1.OrchestrationCoreService/HoldQuarantinedOutput"
 	OrchestrationCoreService_ClaimQuarantineRelease_FullMethodName            = "/model_plane.v1.OrchestrationCoreService/ClaimQuarantineRelease"
@@ -111,6 +112,13 @@ type OrchestrationCoreServiceClient interface {
 	// a granted approval is executed by the loop once and never also by the cold
 	// delivery worker. Caller-scoped (user bearer), not service-only.
 	ConsumeApproval(ctx context.Context, in *ConsumeApprovalRequest, opts ...grpc.CallOption) (*ConsumeApprovalResponse, error)
+	// Read, without consuming, the tools and authority a DENIED browser_human_assist pause
+	// retained, so a skipped site's continuation runs under the pause's authority and never
+	// under the /continue placeholders. Read-only: it claims, spends and stores nothing, and
+	// the denied approval stays as it is. Same caller scope, run, org and owner checks as
+	// ConsumeApproval. Refused typed for a zero-retention or waived run; any state other than
+	// a denied, unconsumed browser_human_assist approval is FAILED_PRECONDITION.
+	GetSkippedAssistAuthority(ctx context.Context, in *GetSkippedAssistAuthorityRequest, opts ...grpc.CallOption) (*GetSkippedAssistAuthorityResponse, error)
 	// Claim the granted once-approval for one exact action, so the agent's retry of a
 	// non-resumable call passes the Space gate exactly once (build plan WS10 S3). The
 	// caller is the run owner's session; the claim is one atomic update, so two
@@ -326,6 +334,16 @@ func (c *orchestrationCoreServiceClient) ConsumeApproval(ctx context.Context, in
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ConsumeApprovalResponse)
 	err := c.cc.Invoke(ctx, OrchestrationCoreService_ConsumeApproval_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *orchestrationCoreServiceClient) GetSkippedAssistAuthority(ctx context.Context, in *GetSkippedAssistAuthorityRequest, opts ...grpc.CallOption) (*GetSkippedAssistAuthorityResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetSkippedAssistAuthorityResponse)
+	err := c.cc.Invoke(ctx, OrchestrationCoreService_GetSkippedAssistAuthority_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -588,6 +606,13 @@ type OrchestrationCoreServiceServer interface {
 	// a granted approval is executed by the loop once and never also by the cold
 	// delivery worker. Caller-scoped (user bearer), not service-only.
 	ConsumeApproval(context.Context, *ConsumeApprovalRequest) (*ConsumeApprovalResponse, error)
+	// Read, without consuming, the tools and authority a DENIED browser_human_assist pause
+	// retained, so a skipped site's continuation runs under the pause's authority and never
+	// under the /continue placeholders. Read-only: it claims, spends and stores nothing, and
+	// the denied approval stays as it is. Same caller scope, run, org and owner checks as
+	// ConsumeApproval. Refused typed for a zero-retention or waived run; any state other than
+	// a denied, unconsumed browser_human_assist approval is FAILED_PRECONDITION.
+	GetSkippedAssistAuthority(context.Context, *GetSkippedAssistAuthorityRequest) (*GetSkippedAssistAuthorityResponse, error)
 	// Claim the granted once-approval for one exact action, so the agent's retry of a
 	// non-resumable call passes the Space gate exactly once (build plan WS10 S3). The
 	// caller is the run owner's session; the claim is one atomic update, so two
@@ -710,6 +735,9 @@ func (UnimplementedOrchestrationCoreServiceServer) RerouteApproval(context.Conte
 }
 func (UnimplementedOrchestrationCoreServiceServer) ConsumeApproval(context.Context, *ConsumeApprovalRequest) (*ConsumeApprovalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ConsumeApproval not implemented")
+}
+func (UnimplementedOrchestrationCoreServiceServer) GetSkippedAssistAuthority(context.Context, *GetSkippedAssistAuthorityRequest) (*GetSkippedAssistAuthorityResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetSkippedAssistAuthority not implemented")
 }
 func (UnimplementedOrchestrationCoreServiceServer) ClaimOnceApproval(context.Context, *ClaimOnceApprovalRequest) (*ClaimOnceApprovalResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClaimOnceApproval not implemented")
@@ -1038,6 +1066,24 @@ func _OrchestrationCoreService_ConsumeApproval_Handler(srv interface{}, ctx cont
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(OrchestrationCoreServiceServer).ConsumeApproval(ctx, req.(*ConsumeApprovalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _OrchestrationCoreService_GetSkippedAssistAuthority_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetSkippedAssistAuthorityRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(OrchestrationCoreServiceServer).GetSkippedAssistAuthority(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: OrchestrationCoreService_GetSkippedAssistAuthority_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(OrchestrationCoreServiceServer).GetSkippedAssistAuthority(ctx, req.(*GetSkippedAssistAuthorityRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1439,6 +1485,10 @@ var OrchestrationCoreService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ConsumeApproval",
 			Handler:    _OrchestrationCoreService_ConsumeApproval_Handler,
+		},
+		{
+			MethodName: "GetSkippedAssistAuthority",
+			Handler:    _OrchestrationCoreService_GetSkippedAssistAuthority_Handler,
 		},
 		{
 			MethodName: "ClaimOnceApproval",
@@ -1984,6 +2034,209 @@ var ApprovalScopeGrantService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RevokeApprovalScopeGrant",
 			Handler:    _ApprovalScopeGrantService_RevokeApprovalScopeGrant_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "model_plane/v1/orchestration.proto",
+}
+
+const (
+	ApprovalRuleProposalService_ListApprovalRuleProposals_FullMethodName   = "/model_plane.v1.ApprovalRuleProposalService/ListApprovalRuleProposals"
+	ApprovalRuleProposalService_GetApprovalRuleProposal_FullMethodName     = "/model_plane.v1.ApprovalRuleProposalService/GetApprovalRuleProposal"
+	ApprovalRuleProposalService_ResolveApprovalRuleProposal_FullMethodName = "/model_plane.v1.ApprovalRuleProposalService/ResolveApprovalRuleProposal"
+)
+
+// ApprovalRuleProposalServiceClient is the client API for ApprovalRuleProposalService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// The owner's "Always allow this tool" proposals. Served by session-core, which owns the
+// proposals. It is its own service rather than a method of OrchestrationCoreService, as
+// ApprovalScopeGrantService is, so the implementations of that service, and their test doubles,
+// need no change. The RPCs act for the verified owner only and are not model-executable. A confirm
+// is orchestrated by model-gateway, which writes the rule in capability-core and hands back the
+// policy id.
+type ApprovalRuleProposalServiceClient interface {
+	// The verified caller's own open proposals (proposed, or held by a confirm), oldest first.
+	ListApprovalRuleProposals(ctx context.Context, in *ListApprovalRuleProposalsRequest, opts ...grpc.CallOption) (*ListApprovalRuleProposalsResponse, error)
+	// One of the verified caller's own proposals, in any state.
+	GetApprovalRuleProposal(ctx context.Context, in *GetApprovalRuleProposalRequest, opts ...grpc.CallOption) (*GetApprovalRuleProposalResponse, error)
+	// Moves one of the verified caller's proposals to CONFIRMING, CONFIRMED or DISMISSED. CONFIRMING
+	// and CONFIRMED need APPROVAL_RULE_PROPOSALS_ENABLED; DISMISSED always works, so a person can
+	// still remove a proposal made while the switch was on. A ZDR or waived caller is refused.
+	ResolveApprovalRuleProposal(ctx context.Context, in *ResolveApprovalRuleProposalRequest, opts ...grpc.CallOption) (*ResolveApprovalRuleProposalResponse, error)
+}
+
+type approvalRuleProposalServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewApprovalRuleProposalServiceClient(cc grpc.ClientConnInterface) ApprovalRuleProposalServiceClient {
+	return &approvalRuleProposalServiceClient{cc}
+}
+
+func (c *approvalRuleProposalServiceClient) ListApprovalRuleProposals(ctx context.Context, in *ListApprovalRuleProposalsRequest, opts ...grpc.CallOption) (*ListApprovalRuleProposalsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListApprovalRuleProposalsResponse)
+	err := c.cc.Invoke(ctx, ApprovalRuleProposalService_ListApprovalRuleProposals_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *approvalRuleProposalServiceClient) GetApprovalRuleProposal(ctx context.Context, in *GetApprovalRuleProposalRequest, opts ...grpc.CallOption) (*GetApprovalRuleProposalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetApprovalRuleProposalResponse)
+	err := c.cc.Invoke(ctx, ApprovalRuleProposalService_GetApprovalRuleProposal_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *approvalRuleProposalServiceClient) ResolveApprovalRuleProposal(ctx context.Context, in *ResolveApprovalRuleProposalRequest, opts ...grpc.CallOption) (*ResolveApprovalRuleProposalResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ResolveApprovalRuleProposalResponse)
+	err := c.cc.Invoke(ctx, ApprovalRuleProposalService_ResolveApprovalRuleProposal_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ApprovalRuleProposalServiceServer is the server API for ApprovalRuleProposalService service.
+// All implementations must embed UnimplementedApprovalRuleProposalServiceServer
+// for forward compatibility.
+//
+// The owner's "Always allow this tool" proposals. Served by session-core, which owns the
+// proposals. It is its own service rather than a method of OrchestrationCoreService, as
+// ApprovalScopeGrantService is, so the implementations of that service, and their test doubles,
+// need no change. The RPCs act for the verified owner only and are not model-executable. A confirm
+// is orchestrated by model-gateway, which writes the rule in capability-core and hands back the
+// policy id.
+type ApprovalRuleProposalServiceServer interface {
+	// The verified caller's own open proposals (proposed, or held by a confirm), oldest first.
+	ListApprovalRuleProposals(context.Context, *ListApprovalRuleProposalsRequest) (*ListApprovalRuleProposalsResponse, error)
+	// One of the verified caller's own proposals, in any state.
+	GetApprovalRuleProposal(context.Context, *GetApprovalRuleProposalRequest) (*GetApprovalRuleProposalResponse, error)
+	// Moves one of the verified caller's proposals to CONFIRMING, CONFIRMED or DISMISSED. CONFIRMING
+	// and CONFIRMED need APPROVAL_RULE_PROPOSALS_ENABLED; DISMISSED always works, so a person can
+	// still remove a proposal made while the switch was on. A ZDR or waived caller is refused.
+	ResolveApprovalRuleProposal(context.Context, *ResolveApprovalRuleProposalRequest) (*ResolveApprovalRuleProposalResponse, error)
+	mustEmbedUnimplementedApprovalRuleProposalServiceServer()
+}
+
+// UnimplementedApprovalRuleProposalServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedApprovalRuleProposalServiceServer struct{}
+
+func (UnimplementedApprovalRuleProposalServiceServer) ListApprovalRuleProposals(context.Context, *ListApprovalRuleProposalsRequest) (*ListApprovalRuleProposalsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListApprovalRuleProposals not implemented")
+}
+func (UnimplementedApprovalRuleProposalServiceServer) GetApprovalRuleProposal(context.Context, *GetApprovalRuleProposalRequest) (*GetApprovalRuleProposalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetApprovalRuleProposal not implemented")
+}
+func (UnimplementedApprovalRuleProposalServiceServer) ResolveApprovalRuleProposal(context.Context, *ResolveApprovalRuleProposalRequest) (*ResolveApprovalRuleProposalResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ResolveApprovalRuleProposal not implemented")
+}
+func (UnimplementedApprovalRuleProposalServiceServer) mustEmbedUnimplementedApprovalRuleProposalServiceServer() {
+}
+func (UnimplementedApprovalRuleProposalServiceServer) testEmbeddedByValue() {}
+
+// UnsafeApprovalRuleProposalServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ApprovalRuleProposalServiceServer will
+// result in compilation errors.
+type UnsafeApprovalRuleProposalServiceServer interface {
+	mustEmbedUnimplementedApprovalRuleProposalServiceServer()
+}
+
+func RegisterApprovalRuleProposalServiceServer(s grpc.ServiceRegistrar, srv ApprovalRuleProposalServiceServer) {
+	// If the following call panics, it indicates UnimplementedApprovalRuleProposalServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ApprovalRuleProposalService_ServiceDesc, srv)
+}
+
+func _ApprovalRuleProposalService_ListApprovalRuleProposals_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListApprovalRuleProposalsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ApprovalRuleProposalServiceServer).ListApprovalRuleProposals(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ApprovalRuleProposalService_ListApprovalRuleProposals_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ApprovalRuleProposalServiceServer).ListApprovalRuleProposals(ctx, req.(*ListApprovalRuleProposalsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ApprovalRuleProposalService_GetApprovalRuleProposal_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetApprovalRuleProposalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ApprovalRuleProposalServiceServer).GetApprovalRuleProposal(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ApprovalRuleProposalService_GetApprovalRuleProposal_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ApprovalRuleProposalServiceServer).GetApprovalRuleProposal(ctx, req.(*GetApprovalRuleProposalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ApprovalRuleProposalService_ResolveApprovalRuleProposal_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ResolveApprovalRuleProposalRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ApprovalRuleProposalServiceServer).ResolveApprovalRuleProposal(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ApprovalRuleProposalService_ResolveApprovalRuleProposal_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ApprovalRuleProposalServiceServer).ResolveApprovalRuleProposal(ctx, req.(*ResolveApprovalRuleProposalRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// ApprovalRuleProposalService_ServiceDesc is the grpc.ServiceDesc for ApprovalRuleProposalService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ApprovalRuleProposalService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "model_plane.v1.ApprovalRuleProposalService",
+	HandlerType: (*ApprovalRuleProposalServiceServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "ListApprovalRuleProposals",
+			Handler:    _ApprovalRuleProposalService_ListApprovalRuleProposals_Handler,
+		},
+		{
+			MethodName: "GetApprovalRuleProposal",
+			Handler:    _ApprovalRuleProposalService_GetApprovalRuleProposal_Handler,
+		},
+		{
+			MethodName: "ResolveApprovalRuleProposal",
+			Handler:    _ApprovalRuleProposalService_ResolveApprovalRuleProposal_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

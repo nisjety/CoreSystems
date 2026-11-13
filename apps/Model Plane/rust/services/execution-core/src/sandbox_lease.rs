@@ -117,7 +117,9 @@ pub struct SandboxLeaseContext<'a> {
 /// none is cached yet. A run's SECOND and later Space-scoped
 /// `code_interpreter` step reuses the first step's lease — `AcquireLease`
 /// mints a fresh lease id on every call (it is not idempotent by scope), so
-/// without this cache every step would open its own, orphaned lease.
+/// without this cache every step would open its own, orphaned lease. Two first
+/// calls of one run that race here are serialised by `StateStore::setup_guard`:
+/// the second waits, then reuses the lease the first caches.
 ///
 /// # Errors
 /// Fails closed — never falls back to running `code_interpreter` without a
@@ -132,6 +134,13 @@ pub async fn ensure_sandbox_lease(
     org_id: &str,
     user_id: &str,
 ) -> Result<SandboxLease, Status> {
+    if let Some(existing) = state.sandbox_lease(run_id) {
+        return Ok(existing);
+    }
+    // The run's first-setup guard, held until the lease is cached below. A concurrent first call
+    // waits here and finds that lease on the second check, so it never acquires a second, orphaned
+    // one. The guard is an owned value, so every error return below releases it.
+    let _setup = state.setup_guard(run_id).await;
     if let Some(existing) = state.sandbox_lease(run_id) {
         return Ok(existing);
     }
@@ -253,7 +262,9 @@ pub async fn ensure_thread_lease(
 /// ACTIVE — this module's own first real caller of `ActivateLease`, since
 /// nothing durable existed for this lease to read before now), fetches its
 /// current workspace manifest, and hydrates it. Every later call reuses the
-/// cached directory without any further sandbox-manager round trip.
+/// cached directory without any further sandbox-manager round trip. Concurrent
+/// first calls are serialised the same way as the lease, by
+/// `StateStore::setup_guard`, so one run hydrates one directory.
 ///
 /// # Errors
 /// Fails closed — never runs `code_interpreter` against an unhydrated or
@@ -267,6 +278,12 @@ pub async fn ensure_hydrated_workspace(
     org_id: &str,
     lease: &SandboxLease,
 ) -> Result<PathBuf, Status> {
+    if let Some(existing) = state.hydrated_workspace(run_id) {
+        return Ok(existing.path);
+    }
+    // The same guard as the lease, held through the activate, manifest and hydrate steps and the
+    // cache write. A concurrent first call waits here and finds the directory this call hydrates.
+    let _setup = state.setup_guard(run_id).await;
     if let Some(existing) = state.hydrated_workspace(run_id) {
         return Ok(existing.path);
     }
@@ -521,8 +538,14 @@ pub async fn release_sandbox_lease_if_any(
     process_host: Option<&crate::process_host::ProcessHost>,
     run_id: &str,
     org_id: &str,
+    persistence_free: bool,
 ) -> Option<WorkspaceUploadOutcome> {
     let lease = state.take_sandbox_lease(run_id)?;
+    let upload = workspace_sync::release_upload(
+        workspace_sync::lease_release_filter_switched_on(),
+        workspace_sync::space_write_through_switched_on(),
+        persistence_free,
+    );
 
     // Stop this lease's background processes BEFORE the workspace is diffed
     // and uploaded: a process still writing into it would otherwise race the
@@ -532,6 +555,15 @@ pub async fn release_sandbox_lease_if_any(
     // dies with the host.
     if let Some(host) = process_host {
         host.kill_for_lease(&lease.lease_id).await;
+    }
+    // A run that keeps no content never reaches an upload: the workspace is discarded here, before
+    // any credential is requested. The log names the run and the reason, never a file.
+    if upload == workspace_sync::ReleaseUpload::Discard {
+        if let Some(workspace) = state.take_hydrated_workspace(run_id) {
+            cleanup_workspace_dir(&workspace.path);
+            warn!(run_id = %run_id, reason = "zdr_or_waived_run", "Space workspace discarded at lease release; nothing uploaded");
+        }
+        return None;
     }
     let token = match tokens.token(org_id).await {
         Ok(token) => token,
@@ -554,12 +586,14 @@ pub async fn release_sandbox_lease_if_any(
 
     let outcome = match state.take_hydrated_workspace(run_id) {
         Some(workspace) => Some(
-            upload_and_discard_workspace(
+            upload_and_discard_workspace_with(
                 sandbox_manager_client,
                 cas_client,
                 &token,
                 &lease,
                 &workspace,
+                upload == workspace_sync::ReleaseUpload::SyncableOnly
+                    || workspace_sync::space_write_through_switched_on(),
             )
             .await,
         ),
@@ -610,13 +644,34 @@ async fn upload_and_discard_workspace(
     lease: &SandboxLease,
     workspace: &HydratedWorkspace,
 ) -> WorkspaceUploadOutcome {
-    let outcome = record_workspace_overlay(
+    upload_and_discard_workspace_with(
         sandbox_manager_client,
         cas_client,
         token,
         lease,
         workspace,
         workspace_sync::space_write_through_switched_on(),
+    )
+    .await
+}
+
+/// [`upload_and_discard_workspace`] with the file filter chosen by the caller: `syncable_only` keeps
+/// only the files the per-step write-through accepts.
+async fn upload_and_discard_workspace_with(
+    sandbox_manager_client: &SandboxManagerClient,
+    cas_client: Option<&CasClient>,
+    token: &str,
+    lease: &SandboxLease,
+    workspace: &HydratedWorkspace,
+    syncable_only: bool,
+) -> WorkspaceUploadOutcome {
+    let outcome = record_workspace_overlay(
+        sandbox_manager_client,
+        cas_client,
+        token,
+        lease,
+        workspace,
+        syncable_only,
     )
     .await;
     cleanup_workspace_dir(&workspace.path);
@@ -648,8 +703,15 @@ async fn record_workspace_overlay(
             )
             .await
         } else {
-            crate::workspace_hydrate::diff_and_upload(cas, &workspace.path, &workspace.baseline)
-                .await
+            // Everything the run changed, except a process's output spill (W4-P6). A spill is
+            // never durable: it is local to this lease's workspace and goes with it.
+            crate::workspace_hydrate::diff_and_upload_where(
+                cas,
+                &workspace.path,
+                &workspace.baseline,
+                |path, _| !crate::process_tools::is_output_spill(path),
+            )
+            .await
         };
         match diffed {
             Ok(changed) if changed.is_empty() => outcome.uploaded = true,
@@ -838,6 +900,7 @@ mod tests {
             None,
             "run-1",
             "org-a",
+            false,
         )
         .await;
     }
@@ -869,6 +932,7 @@ mod tests {
             None,
             "run-1",
             "org-a",
+            false,
         )
         .await;
 
@@ -986,6 +1050,7 @@ mod tests {
             None,
             "run-1",
             "org-a",
+            false,
         )
         .await;
 
@@ -1207,6 +1272,7 @@ mod tests {
             None,
             "run-1",
             "org-a",
+            false,
         )
         .await
         .expect("a run with a workspace always reports its outcome");
@@ -1239,5 +1305,264 @@ mod tests {
         assert!(error
             .to_string()
             .contains("invalid sandbox-manager credential"));
+    }
+}
+
+/// W2-WS24-S4-a: two first calls of one run that race into `ensure_sandbox_lease` acquire ONE lease. The
+/// second waits on the run's setup guard and reuses the lease the first cached, so no lease is orphaned.
+#[cfg(test)]
+mod concurrent_first_setup {
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use mp_contracts::model_plane::v1::sandbox_manager_server::{
+        SandboxManager, SandboxManagerServer,
+    };
+    use mp_contracts::model_plane::v1::{
+        AcquireLeaseRequest, AcquireLeaseResponse, ActivateLeaseRequest, ActivateLeaseResponse,
+        AppendProcessOutputRequest, AppendProcessOutputResponse,
+        ApplyThreadWorkspaceChangesRequest, ApplyThreadWorkspaceChangesResponse,
+        DeleteThreadWorkspaceRequest, DeleteThreadWorkspaceResponse, GetLeaseStatusRequest,
+        GetLeaseStatusResponse, GetProcessRequest, GetProcessResponse, GetThreadWorkspaceRequest,
+        GetThreadWorkspaceResponse, GetWorkspaceManifestRequest, GetWorkspaceManifestResponse,
+        ListProcessesRequest, ListProcessesResponse, PromoteWorkspaceRequest,
+        PromoteWorkspaceResponse, ReadProcessOutputRequest, ReadProcessOutputResponse,
+        ReconcileProcessesRequest, ReconcileProcessesResponse, RegisterProcessRequest,
+        RegisterProcessResponse, ReleaseLeaseRequest, ReleaseLeaseResponse, SandboxHealthRequest,
+        SandboxHealthResponse, SnapshotRequest, SnapshotResponse, UpdateProcessStateRequest,
+        UpdateProcessStateResponse,
+    };
+    use tonic::{Request, Response, Status};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use super::*;
+
+    /// A sandbox-manager that counts `AcquireLease` and mints a fresh lease id on every call, as the real one
+    /// does (it is not idempotent by scope). It answers slowly, so two racing first calls overlap.
+    #[derive(Clone, Default)]
+    struct CountingSandboxManager {
+        acquired: Arc<AtomicUsize>,
+    }
+
+    fn unused<T>() -> Result<Response<T>, Status> {
+        Err(Status::unimplemented(
+            "not used by the concurrent setup test",
+        ))
+    }
+
+    #[tonic::async_trait]
+    impl SandboxManager for CountingSandboxManager {
+        async fn acquire_lease(
+            &self,
+            _: Request<AcquireLeaseRequest>,
+        ) -> Result<Response<AcquireLeaseResponse>, Status> {
+            let n = self.acquired.fetch_add(1, Ordering::SeqCst) + 1;
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            Ok(Response::new(AcquireLeaseResponse {
+                lease_id: format!("lease-{n}"),
+                backend_id: "backend-1".to_owned(),
+                ..Default::default()
+            }))
+        }
+        async fn release_lease(
+            &self,
+            _: Request<ReleaseLeaseRequest>,
+        ) -> Result<Response<ReleaseLeaseResponse>, Status> {
+            unused()
+        }
+        async fn snapshot_sandbox(
+            &self,
+            _: Request<SnapshotRequest>,
+        ) -> Result<Response<SnapshotResponse>, Status> {
+            unused()
+        }
+        async fn activate_lease(
+            &self,
+            _: Request<ActivateLeaseRequest>,
+        ) -> Result<Response<ActivateLeaseResponse>, Status> {
+            unused()
+        }
+        async fn get_workspace_manifest(
+            &self,
+            _: Request<GetWorkspaceManifestRequest>,
+        ) -> Result<Response<GetWorkspaceManifestResponse>, Status> {
+            unused()
+        }
+        async fn promote_workspace(
+            &self,
+            _: Request<PromoteWorkspaceRequest>,
+        ) -> Result<Response<PromoteWorkspaceResponse>, Status> {
+            unused()
+        }
+        async fn health(
+            &self,
+            _: Request<SandboxHealthRequest>,
+        ) -> Result<Response<SandboxHealthResponse>, Status> {
+            unused()
+        }
+        async fn register_process(
+            &self,
+            _: Request<RegisterProcessRequest>,
+        ) -> Result<Response<RegisterProcessResponse>, Status> {
+            unused()
+        }
+        async fn update_process_state(
+            &self,
+            _: Request<UpdateProcessStateRequest>,
+        ) -> Result<Response<UpdateProcessStateResponse>, Status> {
+            unused()
+        }
+        async fn append_process_output(
+            &self,
+            _: Request<AppendProcessOutputRequest>,
+        ) -> Result<Response<AppendProcessOutputResponse>, Status> {
+            unused()
+        }
+        async fn reconcile_processes(
+            &self,
+            _: Request<ReconcileProcessesRequest>,
+        ) -> Result<Response<ReconcileProcessesResponse>, Status> {
+            unused()
+        }
+        async fn get_process(
+            &self,
+            _: Request<GetProcessRequest>,
+        ) -> Result<Response<GetProcessResponse>, Status> {
+            unused()
+        }
+        async fn list_processes(
+            &self,
+            _: Request<ListProcessesRequest>,
+        ) -> Result<Response<ListProcessesResponse>, Status> {
+            unused()
+        }
+        async fn read_process_output(
+            &self,
+            _: Request<ReadProcessOutputRequest>,
+        ) -> Result<Response<ReadProcessOutputResponse>, Status> {
+            unused()
+        }
+        async fn get_thread_workspace(
+            &self,
+            _: Request<GetThreadWorkspaceRequest>,
+        ) -> Result<Response<GetThreadWorkspaceResponse>, Status> {
+            unused()
+        }
+        async fn apply_thread_workspace_changes(
+            &self,
+            _: Request<ApplyThreadWorkspaceChangesRequest>,
+        ) -> Result<Response<ApplyThreadWorkspaceChangesResponse>, Status> {
+            unused()
+        }
+        async fn delete_thread_workspace(
+            &self,
+            _: Request<DeleteThreadWorkspaceRequest>,
+        ) -> Result<Response<DeleteThreadWorkspaceResponse>, Status> {
+            unused()
+        }
+        async fn get_lease_status(
+            &self,
+            _: Request<GetLeaseStatusRequest>,
+        ) -> Result<Response<GetLeaseStatusResponse>, Status> {
+            unused()
+        }
+    }
+
+    async fn start(fake: CountingSandboxManager) -> SandboxManagerClient {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a local port");
+        let address: SocketAddr = listener.local_addr().expect("local address");
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(SandboxManagerServer::new(fake))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .expect("the fake sandbox-manager serves");
+        });
+        let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+            .expect("a valid endpoint")
+            .connect()
+            .await
+            .expect("connect to the fake");
+        SandboxManagerClient::new(channel)
+    }
+
+    async fn control() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/internal/spaces/sandbox-capability-decision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": {
+                    "decision": "v2.<key>.<payload>.<sig>",
+                    "claims": {
+                        "backend_id": "backend-1",
+                        "profile_digest": "sha256:abc",
+                        "persistence": "ephemeral",
+                        "processes": "bounded_oneshot",
+                        "backup": false,
+                        "egress": "disabled_by_default",
+                        "credential_mode": "none",
+                    },
+                },
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_concurrent_first_calls_of_one_run_acquire_one_lease() {
+        let fake = CountingSandboxManager::default();
+        let acquired = fake.acquired.clone();
+        let sandbox_manager_client = start(fake).await;
+        let control = control().await;
+        let capability_client =
+            crate::capability_client::CapabilityClient::for_test(&control.uri());
+        let tokens = SandboxManagerTokenProvider::new_for_test(
+            "http://127.0.0.1:1",
+            "execution-core",
+            "test-service-secret-at-least-32-bytes",
+        );
+        let ctx = SandboxLeaseContext {
+            space_id: "space-1",
+            sandbox_bearer: "bearer",
+            capability_client: Some(&capability_client),
+            sandbox_manager_client: &sandbox_manager_client,
+            backend_id: "backend-1",
+            cas_client: None,
+            sandbox_tokens: &tokens,
+            process_host: None,
+        };
+        let state = StateStore::new();
+
+        let (first, second) = tokio::join!(
+            ensure_sandbox_lease(&ctx, &state, "run-1", "org-a", "user-a"),
+            ensure_sandbox_lease(&ctx, &state, "run-1", "org-a", "user-a"),
+        );
+        let first = first.expect("the first call acquires");
+        let second = second.expect("the second call reuses");
+
+        assert_eq!(
+            acquired.load(Ordering::SeqCst),
+            1,
+            "one AcquireLease for one run"
+        );
+        assert_eq!(
+            first.lease_id, second.lease_id,
+            "both calls hold the same lease"
+        );
+        assert_eq!(
+            state.sandbox_lease("run-1").map(|lease| lease.lease_id),
+            Some(first.lease_id)
+        );
+
+        // A different run is not serialised behind this one and acquires its own lease.
+        ensure_sandbox_lease(&ctx, &state, "run-2", "org-a", "user-a")
+            .await
+            .expect("another run acquires");
+        assert_eq!(acquired.load(Ordering::SeqCst), 2);
     }
 }

@@ -758,8 +758,8 @@ impl RunService for RunServiceImpl {
             ));
         }
         caller.authorize_org(&req.org_id)?;
-        let row: Option<(String, String, String, String, String)> = sqlx::query_as(
-            "SELECT r.id, r.thread_id, r.org_id, r.goal, r.status
+        let row: Option<(String, String, String, String, String, String)> = sqlx::query_as(
+            "SELECT r.id, r.thread_id, r.org_id, r.goal, r.status, r.retention_class
              FROM runs r
              JOIN threads t ON t.id = r.thread_id
              WHERE r.id = $1 AND r.thread_id = $2 AND r.org_id = $3
@@ -773,7 +773,7 @@ impl RunService for RunServiceImpl {
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| Status::internal(error.to_string()))?;
-        let Some((run_id, thread_id, org_id, goal, status)) = row else {
+        let Some((run_id, thread_id, org_id, goal, status, retention_class)) = row else {
             return Err(Status::not_found("scheduled run context not found"));
         };
         Ok(Response::new(pb::ScheduledStepContext {
@@ -782,6 +782,9 @@ impl RunService for RunServiceImpl {
             org_id,
             goal,
             status,
+            // The run's real retention, so the lane can refuse a zero-retention or waived run.
+            zdr: retention_class == "zdr",
+            zdr_waived: retention_class == "zdr_waived",
             // The contract body, digest and expiry (WS20-S5) are not served yet: empty means
             // "no contract".
             ..Default::default()

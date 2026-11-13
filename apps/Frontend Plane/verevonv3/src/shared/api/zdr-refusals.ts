@@ -7,6 +7,9 @@
 // The English text below is that golden's text, verbatim; the Norwegian is this
 // SPA's own. The test beside this file fails if either drifts from the golden.
 //
+// The Norwegian text, and any English that describes retention, is assumed copy:
+// the owner confirms it (OD-LEGAL) against the vendor facts before it ships.
+//
 // A code this SPA does not know (a newer server) gets the generic text, never the
 // server's own English, and never a claim about where the request went.
 
@@ -74,6 +77,16 @@ export type ZdrFeatureKey =
   | 'session_resume'
   | 'page_screenshot'
   | 'browser_page_context'
+  | 'legal_hold'
+  | 'learn_command'
+  | 'skill_authoring'
+  | 'named_agent'
+  | 'process_output_spill'
+  | 'mcp_secret_ref'
+  | 'custom_rest'
+  | 'teach_mode'
+  | 'reasoning_translation'
+  | 'artifact_output'
 
 /** The reader's-language chooser, the same shape the rest of the SPA passes around. */
 export type Translate = (noText: string, enText: string) => string
@@ -81,7 +94,7 @@ export type Translate = (noText: string, enText: string) => string
 type Copy = { readonly no: string; readonly en: string }
 
 /** The sha256 of `./contracts/zdr-refusals.json`. Changing the golden changes this too. */
-export const ZDR_REFUSALS_CONTRACT_SHA256 = 'ff743796aa9c006d5afee9e511762a9a2df7e69a844aee4954d4353f1305c53f'
+export const ZDR_REFUSALS_CONTRACT_SHA256 = 'd3f71609bbd04dbf53c060c07e4a007fc56339df28a73232c65a4ccce8e9a374'
 
 export type ZdrRefusalText = {
   /** Norwegian. A feature refusal names the feature with `{feature}`. */
@@ -216,6 +229,20 @@ export const FEATURE_LABELS: Record<ZdrFeatureKey, Copy> = {
   session_resume: { no: 'gjenopptak av en lagret nettleserøkt', en: 'resuming a saved browser session' },
   page_screenshot: { no: 'skjermbilder av sider', en: 'page screenshots' },
   browser_page_context: { no: 'vedlagte nettleserfaner og sideutsnitt', en: 'attached browser tabs and page regions' },
+  legal_hold: { no: 'juridisk bevaring av en samtale', en: 'a legal hold on a thread' },
+  learn_command: { no: 'læring fra denne samtalen', en: 'learning from this conversation' },
+  skill_authoring: { no: 'lagring og redigering av ferdigheter', en: 'saving or editing skills' },
+  named_agent: { no: 'minnet til navngitte agenter', en: 'named agent memory' },
+  process_output_spill: { no: 'lagring av utdata fra bakgrunnsprosesser i filer', en: 'saving background process output to files' },
+  mcp_secret_ref: { no: 'MCP-servere som bruker lagret legitimasjon', en: 'MCP servers that use a stored credential' },
+  custom_rest: { no: 'egendefinerte REST-tilkoblinger', en: 'custom REST connectors' },
+  teach_mode: { no: 'lagring av stegene i en kjøring som ferdighet', en: "saving a run's steps as a skill" },
+  reasoning_translation: { no: 'oversettelse av en resonneringstekst', en: 'translating a reasoning text' },
+  // Added by ZDR-Z-05a in the Model Plane's FEATURES vocabulary (mp-contracts
+  // zdr_refusal.rs) and carried by the vendored golden since FU-11. Assumed
+  // wording, owner to confirm (OD-LEGAL): it describes what is not stored, so
+  // legal signs it off.
+  artifact_output: { no: 'filer og dokumenter assistenten oppretter', en: 'files and documents the assistant creates' },
 }
 
 /** A refusal whose feature the SPA does not know names it this way. */

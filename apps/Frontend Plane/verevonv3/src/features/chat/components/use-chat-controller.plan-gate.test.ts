@@ -15,6 +15,7 @@
 import { createRoot, flush } from 'solid-js'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ChatStreamHandlers } from '@/shared/api/chat-client'
+import { ApiError } from '@/shared/api/http'
 import { __resetRetentionForTests } from '@/features/chat/lib/chat-retention'
 
 type CapturedStream = {
@@ -204,6 +205,8 @@ describe('plan-gate: proposed-plan wiring', () => {
         'writes its report',
         'plan_1',
         edits,
+        // No ZDR waiver here: the waiver UI is off in tests and this turn has no subscription connection.
+        undefined,
       )
       // setPlanMode(false) fires on approve.
       expect(controller.planMode()).toBe(false)
@@ -230,7 +233,7 @@ describe('plan-gate: proposed-plan wiring', () => {
       const turnId = controller.state.turns.at(-1)!.id
       await controller.rejectTurnPlan(turnId, 'Ikke nødvendig lenger')
 
-      expect(mockRejectPlan).toHaveBeenCalledWith('run-1', 'plan_1', 'Ikke nødvendig lenger')
+      expect(mockRejectPlan).toHaveBeenCalledWith('run-1', 'plan_1', 'Ikke nødvendig lenger', undefined)
       // setPlanMode(false) fires on reject too — the user must ask again in a
       // fresh message rather than silently retrying (owner ruling, no
       // revise-after-reject in this wave).
@@ -265,6 +268,9 @@ describe('plan-gate: proposed-plan wiring', () => {
       expect(controller.state.turns.at(-1)?.planRejected).toBeUndefined()
       // Plan mode stays on: nothing was decided, so nothing was left behind.
       expect(controller.planMode()).toBe(true)
+      // The card says why in the reader's language; the gateway's own sentence is never shown.
+      expect(controller.planApprovalError()[turnId]).toMatch(/Avvisningen gikk ikke gjennom|The rejection did not go through/)
+      expect(controller.planApprovalError()[turnId]).not.toContain('decided by another request')
     })
   })
 
@@ -290,6 +296,60 @@ describe('plan-gate: proposed-plan wiring', () => {
 
       expect(controller.state.turns.at(-1)?.grantedRung).toBeUndefined()
       expect(controller.planMode()).toBe(true)
+      expect(controller.planApprovalError()[turnId]).toMatch(/Godkjenningen gikk ikke gjennom|The approval did not go through/)
+      expect(controller.planApprovalError()[turnId]).not.toContain('every step removed')
+    })
+  })
+
+  it('a gateway refusal with its own English message shows the app words, never that message', async () => {
+    mockApprovePlan.mockRejectedValue(new ApiError('plan step step_9 is no longer in the plan', 409, 'plan_step_stale'))
+    await withController(async (controller) => {
+      await tick()
+      controller.setPlanMode(true)
+      flush()
+      await send(controller, 'Send fakturaen')
+      await tick()
+      streams[0]!.handlers.onConnected?.({ requestId: 'req-1', threadId: 't-1', runId: 'run-1' })
+      flush()
+      streams[0]!.handlers.onPlanProposed?.({
+        planId: 'plan_1',
+        summary: 'Send the overdue invoice',
+        steps: [{ id: 'step_1', title: 'Draft the email' }],
+      })
+      flush()
+
+      const turnId = controller.state.turns.at(-1)!.id
+      await controller.approveTurnPlan(turnId, 'workspace_write', 'writes its report', [])
+
+      expect(controller.planApprovalError()[turnId]).toMatch(/Godkjenningen gikk ikke gjennom|The approval did not go through/)
+      expect(controller.planApprovalError()[turnId]).not.toContain('no longer in the plan')
+    })
+  })
+
+  it('a zero-retention refusal of the approval shows its own words, not the gateway text', async () => {
+    mockApprovePlan.mockRejectedValue(
+      new ApiError('zdr_durable_mutation_forbidden: operator text', 403, 'zdr_durable_mutation_forbidden'),
+    )
+    await withController(async (controller) => {
+      await tick()
+      controller.setPlanMode(true)
+      flush()
+      await send(controller, 'Send fakturaen')
+      await tick()
+      streams[0]!.handlers.onConnected?.({ requestId: 'req-1', threadId: 't-1', runId: 'run-1' })
+      flush()
+      streams[0]!.handlers.onPlanProposed?.({
+        planId: 'plan_1',
+        summary: 'Send the overdue invoice',
+        steps: [{ id: 'step_1', title: 'Draft the email' }],
+      })
+      flush()
+
+      const turnId = controller.state.turns.at(-1)!.id
+      await controller.approveTurnPlan(turnId, 'workspace_write', 'writes its report', [])
+
+      expect(controller.planApprovalError()[turnId]).toMatch(/Zero Data Retention/)
+      expect(controller.planApprovalError()[turnId]).not.toContain('operator text')
     })
   })
 })

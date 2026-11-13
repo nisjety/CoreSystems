@@ -152,7 +152,7 @@ function describeWriteError(err: unknown, tr: Tr): string {
           'The setting was changed by someone else. The latest version is loaded; check your draft and save again.',
         )
       case 'space_policy_zdr_conflict': {
-        const keys = Array.isArray(err.details?.keys)
+        const keys = !Array.isArray(err.details) && Array.isArray(err.details?.keys)
           ? (err.details?.keys as unknown[]).filter((k): k is string => typeof k === 'string')
           : []
         const named = keys.map((key) => labelFor(key, tr)).join(', ')

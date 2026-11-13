@@ -230,3 +230,65 @@ export function browserActionLines(facts: BrowserActionFacts, tr: BrowserActionB
   }
   return lines
 }
+
+/**
+ * The step fields the brief reads. A gateway step has no `action`; a chat-rail step carries the
+ * action facts its run's own events gave.
+ */
+export type BrowserTimelineBriefEntry = {
+  step: number
+  url?: string | null
+  title?: string | null
+  screenshotArtifactId?: string | null
+  action?: {
+    id: string
+    type: string
+    /** False until the action's observation arrives, so the step is still in flight. */
+    observed: boolean
+    /** The observation's status once it arrives: success, failed, timeout, blocked or site_blocked. */
+    status: string
+  } | null
+}
+
+/** The approval gate on a step's action, as the approval list holds it. */
+export type BrowserTimelineBriefApproval = {
+  riskCategory: string
+  status: BrowserApprovalStatus
+}
+
+/**
+ * The brief facts for one timeline step, read from what the step already holds. The entry gives the
+ * page it landed on, its screenshot reference and, when a run's events supplied them, the action's
+ * type, its observation status and whether it was observed yet. Without an action, the step's
+ * rationale gives the action type and reason, and the step counts as observed, since a gateway
+ * timeline lists observations. `approval` is the gate on that action, when the caller found one.
+ * Pure: it fetches nothing and stores nothing.
+ */
+export function factsFromTimelineEntry(
+  entry: BrowserTimelineBriefEntry,
+  rationale: { actionType: string | null; reason: string | null } | null,
+  approval: BrowserTimelineBriefApproval | null,
+): BrowserActionFacts {
+  const action = entry.action ?? null
+  let facts = withBrowserDispatched(emptyBrowserActionFacts(action?.id || String(entry.step)), {
+    actionType: action?.type || rationale?.actionType || '',
+    reason: rationale?.reason || '',
+    url: entry.url || '',
+  })
+  if (!action || action.observed) {
+    facts = withBrowserObserved(facts, {
+      // A run-event step's title can be its action type, so only a gateway step's title is the page's.
+      pageTitle: action ? '' : (entry.title || ''),
+      pageUrl: entry.url || '',
+      screenshotRef: entry.screenshotArtifactId || '',
+      status: action?.status || '',
+    })
+  }
+  if (approval) {
+    facts = withBrowserDecided(
+      withBrowserApprovalRequired(facts, { riskCategory: approval.riskCategory }),
+      { decision: approval.status },
+    )
+  }
+  return facts
+}

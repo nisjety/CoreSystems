@@ -134,6 +134,12 @@ import {
   replayScrubberEnabled,
   replayScrubSteps,
 } from '@/features/browser/replay/browser-replay-scrubber'
+import {
+  browserActionBriefEnabled,
+  browserActionPill,
+  browserActionTitle,
+  factsFromTimelineEntry,
+} from '@/features/browser/replay/browser-action-brief'
 import { BrowserControlStrip } from '@/features/browser/dock/BrowserControlStrip'
 import { useAssistantBrowser } from '@/features/core/assistant-agent/assistant-browser-context'
 import { assistantBrowserTarget } from '@/features/core/assistant-agent/assistant-browser-agent'
@@ -824,6 +830,19 @@ export function BrowserChrome(props: {
         url: session().url,
       }]
   const timelineTabs = () => session().timeline.filter((entry) => entry.step > 0).slice(-8)
+  // The one-line brief for a timeline step (F-t3-050 R2), behind VITE_BROWSER_ACTION_BRIEF. Its facts
+  // come from the step's entry, the rationale recorded for the step and the approval on its action. It
+  // is null while the switch is off, so the timeline keeps its own labels.
+  const briefTr = (noText: string, enText: string) => i18n.tr(noText, enText)
+  const timelineBrief = (entry: BrowserTimelineViewEntry) => {
+    if (!browserActionBriefEnabled()) return null
+    const action = entry.action ?? null
+    const approval = action
+      ? ((props.browserApprovals ?? []).find((item) => item.actionId === action.id) ?? null)
+      : null
+    const facts = factsFromTimelineEntry(entry, rationaleForStep(props.browserRationales ?? [], entry.step), approval)
+    return { pill: browserActionPill(facts, briefTr), title: browserActionTitle(facts, briefTr) }
+  }
   // Replay scrubber (F-t3-050 R1, behind VITE_BROWSER_REPLAY_SCRUBBER=true). It covers every recorded
   // step, and while one is on screen the frame never falls back to a later frame.
   const replaySteps = () => replayScrubSteps(session().timeline)
@@ -3164,14 +3183,26 @@ export function BrowserChrome(props: {
                     onClick={() => setSelectedTimelineStep((current) => (current === entry.step ? null : entry.step))}
                   >
                     <span>#{entry.step}</span>
-                    <strong>{entry.title || compactBrowserUrl(entry.url || session().url)}</strong>
-                    <Show when={rationaleForStep(props.browserRationales ?? [], entry.step) || entry.visualObservationArtifactId}>
+                    <Show
+                      when={timelineBrief(entry)}
+                      fallback={<strong>{entry.title || compactBrowserUrl(entry.url || session().url)}</strong>}
+                    >
+                      {(brief) => <strong>{brief().title}</strong>}
+                    </Show>
+                    <Show when={rationaleForStep(props.browserRationales ?? [], entry.step) || entry.visualObservationArtifactId || timelineBrief(entry)}>
                       <span class="knowledge-browser-timeline__markers">
                         <Show when={rationaleForStep(props.browserRationales ?? [], entry.step)}>
                           <Sparkles class="size-3" aria-label="AI-foreslått steg" />
                         </Show>
                         <Show when={entry.visualObservationArtifactId}>
                           <Eye class="size-3" aria-label="Visuell observasjon tilgjengelig" />
+                        </Show>
+                        <Show when={timelineBrief(entry)}>
+                          {(brief) => (
+                            <span class={`verevon-run-timeline__pill verevon-run-timeline__pill--${brief().pill.tone}`}>
+                              {brief().pill.label}
+                            </span>
+                          )}
                         </Show>
                       </span>
                     </Show>

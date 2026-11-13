@@ -94,12 +94,15 @@ describe('the chat controller hands the browser back', () => {
     await withController((controller) => controller.giveBackBrowserRun('run_1', 'use the second result'))
 
     expect(mockListApprovals).toHaveBeenCalledWith('run_1')
-    expect(mockDecideApproval).toHaveBeenCalledWith('apr-takeover', 'approve', 'use the second result')
+    // The trailing arguments are the real ones: no signal, a once-scope decision, no promotion, no edit, and no ZDR waiver here.
+    expect(mockDecideApproval).toHaveBeenCalledWith('apr-takeover', 'approve', 'use the second result', undefined, 'once', false, undefined, undefined)
     expect(mockContinueRun).toHaveBeenCalledWith(
       'run_1',
       'apr-takeover',
       expect.stringMatching(/^claim-/),
       expect.any(Function),
+      undefined,
+      undefined,
     )
   })
 

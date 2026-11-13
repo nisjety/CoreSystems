@@ -73,6 +73,15 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
             feature: None,
         },
     ),
+    // A customer-gateway connection is refused by the turn's posture decision as well (W4-BYO-6), before this
+    // module is consulted; the same code as the subscription connection.
+    (
+        "model_connection_id",
+        Treatment::Refused {
+            code: code::CONNECTION_NOT_ACKNOWLEDGED,
+            feature: None,
+        },
+    ),
     (
         "session_key",
         Treatment::Inert(
@@ -152,6 +161,14 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     ("agent_mode", Treatment::Honored),
     ("verbosity", Treatment::Honored),
     ("effort", Treatment::Honored),
+    // The speed tier is a subscription route's choice (`InferRequest.speed_tier`), and a ZDR turn never runs
+    // on a subscription route (`subscription_connection_id` above), so no ZDR call names a tier.
+    (
+        "speed",
+        Treatment::Inert(
+            "the priority tier is served only on a subscription route, which a ZDR turn refuses, so no ZDR call names a speed tier",
+        ),
+    ),
     ("features", Treatment::PerMember),
     (
         "idempotency_key",
@@ -166,6 +183,12 @@ pub const FIELD_TREATMENTS: &[(&str, Treatment)] = &[
     // plan and no grant, so it is refused through the `agentic` feature it rides on.
     ("execute_granted", refused_feature("agentic")),
     ("approved_plan_id", refused_feature("agentic")),
+    // Coordinator mode is never sent for a ZDR turn: the gateway sends the flag as false, so the turn is answered with
+    // the tools an ordinary run is offered, and nothing is refused for asking.
+    (
+        "coordinator",
+        Treatment::Inert("a ZDR turn is never coordinated: the gateway sends the flag as false on it"),
+    ),
     // A client's own tool definitions. Those the composer derives from its
     // actions are declared here too, so an action is refused the same way.
     ("tools", refused_feature("client_tools")),
@@ -285,6 +308,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         model: _,
         provider: _,
         subscription_connection_id: _,
+        model_connection_id: _,
         session_key: _,
         thread_id: _,
         space_append_context: _,
@@ -312,6 +336,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         agent_mode: _,
         verbosity: _,
         effort: _,
+        speed: _,
         features: _,
         idempotency_key: _,
         attachments: _,
@@ -319,6 +344,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         plan_mode: _,
         execute_granted: _,
         approved_plan_id: _,
+        coordinator: _,
         tools: _,
         org_name: _,
         user_name: _,
@@ -352,6 +378,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "model",
         "provider",
         "subscription_connection_id",
+        "model_connection_id",
         "session_key",
         "thread_id",
         "space_append_context",
@@ -379,6 +406,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "agent_mode",
         "verbosity",
         "effort",
+        "speed",
         "features",
         "idempotency_key",
         "attachments",
@@ -386,6 +414,7 @@ pub fn invoke_field_names(request: &InvokeRequest) -> Vec<&'static str> {
         "plan_mode",
         "execute_granted",
         "approved_plan_id",
+        "coordinator",
         "tools",
         "org_name",
         "user_name",

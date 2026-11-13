@@ -102,7 +102,34 @@ type Config struct {
 	// (one Codex auth.json per connection, written by the Codex CLI sign-in
 	// and refreshed in place by the broker), never in the integration
 	// database.
-	ZDRAcknowledgementEnabled          bool
+	// CustomerGatewayConnectionsEnabled mounts the customer-gateway model connection routes
+	// (an org admin's own OpenAI-compatible endpoint, key sealed in this service) and the
+	// Model-Plane-only inference broker. Off unless CUSTOMER_GATEWAY_CONNECTIONS_ENABLED is
+	// exactly "true".
+	CustomerGatewayConnectionsEnabled bool
+	// CustomerGatewayModelPlaneAPIKey authenticates Model Plane on the customer-gateway
+	// broker routes. It falls back to CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY, the same
+	// Model-Plane-to-Integration-Core credential, when CUSTOMER_GATEWAY_MODEL_PLANE_API_KEY
+	// is unset.
+	CustomerGatewayModelPlaneAPIKey string
+	// CredentialRefSealKeys is CREDENTIAL_REF_SEAL_KEYS: principal=key pairs, comma separated, for
+	// the credential-reference routes (model-gateway seals, execution-core redeems). Each route
+	// takes its own principal's key, never the internal API key. Read only with
+	// CREDENTIAL_BINDINGS_ENABLED.
+	CredentialRefSealKeys string
+	// CredentialBindingsEnabled mounts the credential-binding admin routes
+	// (/api/v1/credential-bindings): an org admin binds a secret to one host, sealed in this
+	// service and never returned. Off unless CREDENTIAL_BINDINGS_ENABLED is exactly "true";
+	// while off the routes answer 404.
+	CredentialBindingsEnabled bool
+	// CustomRESTConnectorsEnabled turns on custom_rest.call (W4-CC-6): a server-side REST proxy for
+	// connections of provider custom_rest, called with a sealed credential binding's secret. Off
+	// unless CUSTOM_REST_CONNECTORS_ENABLED is exactly "true"; while off the provider is unknown to
+	// the actions surface, as before. Needs CREDENTIAL_BINDINGS_ENABLED.
+	CustomRESTConnectorsEnabled        bool
+	ZDRAcknowledgementEnabled          bool // exactly "true" only (ZDR_ACKNOWLEDGEMENT_ENABLED)
+	ZDRAcknowledgementRetentionDays    int  // ZDR_ACK_RETENTION_DAYS: revoked rows are swept after this, default 365, clamped 30..3650
+	ZDROrgEffectivePostureRead         bool // exactly "true" only (INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED): org-core client reads the org record
 	NotionPageContentReadEnabled       bool
 	ActionsCatalogEnabled              bool
 	CodexSubscriptionEnabled           bool
@@ -408,7 +435,15 @@ func Load() (Config, error) {
 		RateLimitWindow:     envDuration("INTEGRATION_RATE_LIMIT_WINDOW", time.Minute),
 		TokenLeaseConsumers: envCSV("INTEGRATION_TOKEN_LEASE_CONSUMERS", "finspo-core,conversation-core,data-plane-v2,model-plane,application-plane,verevon-v2-bff,verevon-v3-gateway,social-publisher,email-worker"),
 
-		ZDRAcknowledgementEnabled:          envBool("ZDR_ACKNOWLEDGEMENT_ENABLED", false),
+		// Exactly "true" only: envBool uses ParseBool, which would also switch this on for "1" or "T".
+		CustomerGatewayConnectionsEnabled:  strings.TrimSpace(os.Getenv("CUSTOMER_GATEWAY_CONNECTIONS_ENABLED")) == "true",
+		CustomerGatewayModelPlaneAPIKey:    strings.TrimSpace(envOr("CUSTOMER_GATEWAY_MODEL_PLANE_API_KEY", os.Getenv("CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY"))),
+		CredentialBindingsEnabled:          strings.TrimSpace(os.Getenv("CREDENTIAL_BINDINGS_ENABLED")) == "true",
+		CustomRESTConnectorsEnabled:        strings.TrimSpace(os.Getenv("CUSTOM_REST_CONNECTORS_ENABLED")) == "true",
+		CredentialRefSealKeys:              strings.TrimSpace(os.Getenv("CREDENTIAL_REF_SEAL_KEYS")),
+		ZDRAcknowledgementEnabled:          envStrictTrue("ZDR_ACKNOWLEDGEMENT_ENABLED"),
+		ZDRAcknowledgementRetentionDays:    clampInt(envInt("ZDR_ACK_RETENTION_DAYS", 365), 30, 3650),
+		ZDROrgEffectivePostureRead:         envStrictTrue("INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED"),
 		NotionPageContentReadEnabled:       envBool("INTEGRATION_NOTION_PAGE_CONTENT_READ", false),
 		ActionsCatalogEnabled:              envBool("INTEGRATION_ACTIONS_CATALOG", false),
 		CodexSubscriptionEnabled:           envBool("CODEX_SUBSCRIPTION_ENABLED", false),
@@ -555,6 +590,25 @@ func (c Config) ValidateRuntime() error {
 	if c.ControlPlaneInternalAPIKey() == "" {
 		return fmt.Errorf("AUTH_CORE_INTERNAL_API_KEY or INTERNAL_API_KEY is required")
 	}
+	if c.CustomerGatewayConnectionsEnabled {
+		if c.CustomerGatewayModelPlaneAPIKey == "" {
+			return fmt.Errorf("CUSTOMER_GATEWAY_MODEL_PLANE_API_KEY (or CODEX_SUBSCRIPTION_MODEL_PLANE_API_KEY) is required when CUSTOMER_GATEWAY_CONNECTIONS_ENABLED=true")
+		}
+		if len(c.EncryptionKey) == 0 {
+			return fmt.Errorf("the credential encryption key is required when CUSTOMER_GATEWAY_CONNECTIONS_ENABLED=true")
+		}
+	}
+	if c.CredentialBindingsEnabled && len(c.EncryptionKey) == 0 {
+		return fmt.Errorf("the credential encryption key is required when CREDENTIAL_BINDINGS_ENABLED=true")
+	}
+	if c.CustomRESTConnectorsEnabled && !c.CredentialBindingsEnabled {
+		return fmt.Errorf("CREDENTIAL_BINDINGS_ENABLED=true is required when CUSTOM_REST_CONNECTORS_ENABLED=true")
+	}
+	if c.CredentialBindingsEnabled {
+		if problems := c.credentialRefSealKeyProblems(); len(problems) > 0 {
+			return fmt.Errorf("%s", problems[0])
+		}
+	}
 	if c.CodexSubscriptionEnabled {
 		if strings.TrimSpace(c.CodexAppServerCommand) == "" {
 			return fmt.Errorf("CODEX_APP_SERVER_COMMAND is required when CODEX_SUBSCRIPTION_ENABLED=true")
@@ -698,6 +752,74 @@ func (c Config) ControlPlaneInternalAPIKey() string {
 		return strings.TrimSpace(c.AuthCoreInternalAPIKey)
 	}
 	return strings.TrimSpace(c.InternalAPIKey)
+}
+
+// The credential-reference principals (W4-CC-4, CREDENTIAL_REF_SEAL_KEYS). The seal route admits
+// model-gateway and the redeem route admits execution-core, each with its own key. The shared
+// internal key opens neither.
+const (
+	CredentialRefPrincipalModelGateway  = "model-gateway"
+	CredentialRefPrincipalExecutionCore = "execution-core"
+)
+
+// CredentialRefPrincipalKeys returns the principal keys that CREDENTIAL_REF_SEAL_KEYS names. Entries
+// that do not parse, and repeats, are left out; credentialRefSealKeyProblems reports them.
+func (c Config) CredentialRefPrincipalKeys() map[string]string {
+	keys := map[string]string{}
+	for _, entry := range strings.Split(c.CredentialRefSealKeys, ",") {
+		name, key, found := strings.Cut(strings.TrimSpace(entry), "=")
+		name, key = strings.TrimSpace(name), strings.TrimSpace(key)
+		if !found || name == "" || key == "" {
+			continue
+		}
+		if _, repeated := keys[name]; repeated {
+			continue
+		}
+		keys[name] = key
+	}
+	return keys
+}
+
+// credentialRefSealKeyProblems lists what is wrong with CREDENTIAL_REF_SEAL_KEYS, checked when the
+// credential-binding switch is on. Each entry is principal=key for one of the two principals. Each
+// key is a non-placeholder secret of at least 32 bytes, distinct from the other principal's key and
+// from both internal API keys. A principal with no entry is not an error: its route answers 401.
+// Problems name the variable and the principal, never a key value.
+func (c Config) credentialRefSealKeyProblems() []string {
+	var problems []string
+	internalKeys := []string{strings.TrimSpace(c.InternalAPIKey), c.ControlPlaneInternalAPIKey()}
+	seen := map[string]bool{}
+	owners := map[string]string{}
+	for _, entry := range strings.Split(c.CredentialRefSealKeys, ",") {
+		trimmed := strings.TrimSpace(entry)
+		if trimmed == "" {
+			continue
+		}
+		name, key, found := strings.Cut(trimmed, "=")
+		name, key = strings.TrimSpace(name), strings.TrimSpace(key)
+		if !found || (name != CredentialRefPrincipalModelGateway && name != CredentialRefPrincipalExecutionCore) {
+			problems = append(problems, "CREDENTIAL_REF_SEAL_KEYS entries must be principal=key, with principal model-gateway or execution-core")
+			continue
+		}
+		if seen[name] {
+			problems = append(problems, "CREDENTIAL_REF_SEAL_KEYS names "+name+" more than once")
+			continue
+		}
+		seen[name] = true
+		if !validDedicatedServiceToken(key) {
+			problems = append(problems, "CREDENTIAL_REF_SEAL_KEYS key for "+name+" must be a non-placeholder secret of at least 32 bytes")
+		}
+		for _, internal := range internalKeys {
+			if internal != "" && key == internal {
+				problems = append(problems, "CREDENTIAL_REF_SEAL_KEYS key for "+name+" must not reuse the internal API key")
+			}
+		}
+		if other, reused := owners[key]; reused {
+			problems = append(problems, "CREDENTIAL_REF_SEAL_KEYS key for "+name+" must not reuse the key for "+other)
+		}
+		owners[key] = name
+	}
+	return problems
 }
 
 func (c Config) ValidateProvider(providerKey string) error {
@@ -1351,6 +1473,22 @@ func envBool(key string, fallback bool) bool {
 		return fallback
 	}
 	return parsed
+}
+
+// envStrictTrue is true only when the trimmed value is the literal "true". Unlike envBool it does not
+// accept 1, t or TRUE, so a dark switch cannot be opened by a near miss.
+func envStrictTrue(key string) bool {
+	return strings.TrimSpace(os.Getenv(key)) == "true"
+}
+
+func clampInt(value, low, high int) int {
+	if value < low {
+		return low
+	}
+	if value > high {
+		return high
+	}
+	return value
 }
 
 func envInt(key string, fallback int) int {

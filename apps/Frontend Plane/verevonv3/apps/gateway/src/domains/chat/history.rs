@@ -92,6 +92,11 @@ struct ChatThreadSummary {
     /// The thread this one was forked from, when it is a fork (build plan WS17 S6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     forked_from_thread_id: Option<String>,
+    /// The status of the thread's latest goal (EP-7 S5), relayed from Model Gateway: one closed
+    /// token. Absent while the thread has no goal or the goal or attention switch is off, so the
+    /// sidebar chip needs no second call.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    goal_status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +155,9 @@ pub(crate) struct ThreadListQuery {
     limit: Option<usize>,
     archived: Option<String>,
     starred_only: Option<bool>,
+    /// One named agent's threads (EP-6 P3). Forwarded verbatim as a query value to Model Gateway,
+    /// which validates it and reads it only while its own switch is on. Never an org or user scope.
+    agent: Option<String>,
 }
 
 /// What one ListThreads call asks Model Gateway for. `limit` is the page size.
@@ -159,6 +167,7 @@ struct ThreadListRequest<'a> {
     archived: Option<&'a str>,
     thread_id: Option<&'a str>,
     starred_only: bool,
+    agent: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -227,6 +236,8 @@ struct DurableThreadSummary {
     attention_unseen: bool,
     #[serde(default, alias = "forkedFromThreadId")]
     forked_from_thread_id: String,
+    #[serde(default, alias = "goalStatus")]
+    goal_status: String,
 }
 
 pub(super) async fn list_threads(
@@ -248,6 +259,11 @@ pub(super) async fn list_threads(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let agent = query
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let request = ThreadListRequest {
         cursor,
         limit: query
@@ -257,6 +273,7 @@ pub(super) async fn list_threads(
         archived,
         thread_id: None,
         starred_only: query.starred_only.unwrap_or(false),
+        agent,
     };
     let (sessions, next_cursor) =
         match fetch_durable_threads(&state, &user, &headers, request).await {
@@ -489,6 +506,7 @@ pub(crate) async fn delete_thread(
         archived: None,
         thread_id: None,
         starred_only: false,
+        agent: None,
     };
     let (sessions, _) = match fetch_durable_threads(&state, &user, &headers, request).await {
         Ok(page) => page,
@@ -757,6 +775,109 @@ fn export_answer_headers(content_type: Option<&str>, disposition: Option<&str>) 
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers
+}
+
+/// The body of `POST /api/v1/chat/threads/import` (EP-12 S15): the export file's text and an optional title.
+/// Nothing else is read, so an owner or organisation named in the body is refused rather than used.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ImportThreadBody {
+    export_json: String,
+    title: Option<String>,
+}
+
+/// The largest import body the gateway takes: Model Gateway's own file cap (`IMPORT_BODY_LIMIT_BYTES`). The file
+/// travels inside this JSON body, so a file near the cap can meet the limit here first.
+pub(super) const THREAD_IMPORT_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+
+/// The longest title an import takes. The title rides on the upstream query string, so it is kept short, as a
+/// fork's title is.
+const THREAD_IMPORT_TITLE_MAX_CHARS: usize = 96;
+
+/// Make one of the caller's own export files into a new conversation (EP-12 S15). The BFF adds only the org
+/// scope and the owner's own bearers, as the export does. Model Gateway refuses a zero-retention or waived caller
+/// before it reads the file, and Session Core parses the file strictly and stores the turns it keeps; each refusal
+/// reaches the browser as the gateway wrote it. Nothing is stored here.
+pub(super) async fn import_thread(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<ImportThreadBody>,
+) -> Response {
+    if let Err(response) = scope_for(&state, &user).await {
+        return response;
+    }
+    let title = body.title.as_deref().unwrap_or_default().trim();
+    if title.chars().count() > THREAD_IMPORT_TITLE_MAX_CHARS {
+        return bad_request("title is too long.");
+    }
+    let url = thread_import_url(&state.model_gateway_url, title);
+    let model_token = shared::model_token(&state, &user, &headers).await;
+    let session_token = match shared::required_session_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    relay_thread_import(
+        &state,
+        &user,
+        &url,
+        body.export_json,
+        model_token.as_deref(),
+        &session_token,
+    )
+    .await
+}
+
+/// The upstream import URL. Model Gateway reads the file from the body and the title from the query, so the
+/// title, when the owner gave one, is the only thing that rides on the query string.
+fn thread_import_url(base: &str, title: &str) -> String {
+    if title.is_empty() {
+        format!("{base}/v1/threads/import")
+    } else {
+        format!(
+            "{base}/v1/threads/import?title={}",
+            urlencoding::encode(title)
+        )
+    }
+}
+
+/// One call to Model Gateway's import route under the owner's own model and session bearers, as the export
+/// sends them. The file is the body, as Model Gateway reads it. Its answer is relayed with its status, a typed
+/// refusal included; an answer that is not JSON becomes the gateway's own unavailable envelope.
+async fn relay_thread_import(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    url: &str,
+    export_json: String,
+    model_token: Option<&str>,
+    session_token: &str,
+) -> Response {
+    let org_id = authorized_org_id(state, user).await;
+    let request = owner_export_request(
+        state
+            .client
+            .post(url)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(export_json),
+        &user.user_id,
+        org_id.trim(),
+        model_token,
+        session_token,
+    );
+    let response = match crate::request_id::apply(request).send().await {
+        Ok(response) => response,
+        Err(_) => return export_unavailable(),
+    };
+    let status =
+        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let body = match response.bytes().await {
+        Ok(body) => body,
+        Err(_) => return export_unavailable(),
+    };
+    match serde_json::from_slice::<Value>(&body) {
+        Ok(answer) => (status, [(header::CACHE_CONTROL, "no-store")], Json(answer)).into_response(),
+        Err(_) => export_unavailable(),
+    }
 }
 
 /// The body of `PUT /api/v1/chat/threads/{id}/goal` (Wave 3 EP-7 S1). Only these fields are
@@ -1093,6 +1214,7 @@ async fn read_durable_thread(
         archived: Some("all"),
         thread_id: Some(thread_id),
         starred_only: false,
+        agent: None,
     };
     let (sessions, _) = fetch_durable_threads(state, user, headers, request).await?;
     Ok(chat_history_sessions(sessions)
@@ -1113,6 +1235,9 @@ fn durable_thread_list_url(base: &str, request: &ThreadListRequest<'_>) -> Strin
     }
     if request.starred_only {
         params.push("starred_only=true".to_owned());
+    }
+    if let Some(agent) = request.agent {
+        params.push(format!("agent={}", urlencoding::encode(agent)));
     }
     format!("{base}/v1/threads?{}", params.join("&"))
 }
@@ -1152,6 +1277,8 @@ fn durable_to_summary(item: DurableThreadSummary, now: &str) -> Option<ChatThrea
             .filter(|value| !value.is_empty()),
         attention_since: Some(item.attention_since.trim().to_owned())
             .filter(|value| !value.is_empty()),
+        // A closed status token from Model Gateway, relayed as it arrived; empty while goals are off.
+        goal_status: item.goal_status.trim().to_owned(),
     })
 }
 
@@ -1263,13 +1390,25 @@ async fn delete_durable_thread(
         state.model_gateway_url,
         urlencoding::encode(thread_id),
     );
-    let (status, Json(payload)) = shared::proxy_model_json_with_session(
+    // The owner's own delegated Data Plane credential, as the snapshot share routes send it. Model
+    // Gateway forwards it to Session Core only, which uses it to revoke the deleted thread's
+    // snapshot view grants at Control. Best-effort: without it the delete runs exactly as before.
+    let data_plane_token = shared::data_plane_token(state, user, headers).await;
+    let (status, Json(payload)) = shared::proxy_model_json_with_delegations(
         state,
         Method::DELETE,
         &url,
         None,
         token.as_deref(),
+        data_plane_token.as_deref(),
+        None,
+        None,
+        None,
+        None,
         Some(&session_token),
+        None,
+        None,
+        None,
         user,
     )
     .await;
@@ -1293,13 +1432,23 @@ async fn delete_durable_threads(
         .await
         .map_err(|error| shared::delegated_auth_unavailable(error).into_response())?;
     let url = format!("{}/v1/threads", state.model_gateway_url);
-    let (status, Json(payload)) = shared::proxy_model_json_with_session(
+    // Same delegation as the single delete: the owner's own credential, for Session Core's grant revoke.
+    let data_plane_token = shared::data_plane_token(state, user, headers).await;
+    let (status, Json(payload)) = shared::proxy_model_json_with_delegations(
         state,
         Method::DELETE,
         &url,
         None,
         token.as_deref(),
+        data_plane_token.as_deref(),
+        None,
+        None,
+        None,
+        None,
         Some(&session_token),
+        None,
+        None,
+        None,
         user,
     )
     .await;
@@ -1377,6 +1526,92 @@ struct CanonicalMessage {
     /// thread because the only copy lived in the browser that streamed it.
     #[serde(default)]
     artifacts: Option<Value>,
+    /// The context chips a user turn was sent with (Wave 3 EP-3 S5), flattened
+    /// from `messages.metadata.context_refs` like the keys above. Held as a raw
+    /// value and re-emitted through `relayed_context_refs`, which keeps only
+    /// `kind`, `id` and `label`: the metadata map carries gateway bookkeeping
+    /// that must never reach the browser.
+    #[serde(default)]
+    context_refs: Option<Value>,
+    /// The deep-research plan an assistant plan turn ended with (Wave 3 EP-2 S5),
+    /// flattened from `messages.metadata.research_plan`. Re-emitted through
+    /// `relayed_research_plan`, which keeps only the sub-queries and questions.
+    #[serde(default)]
+    research_plan: Option<Value>,
+}
+
+/// Most chips a turn relays: the gateway's own cap on `context_refs`.
+const RELAYED_CONTEXT_REFS_MAX: usize = 20;
+/// Longest chip label relayed, in characters: the gateway cuts labels at the same length.
+const RELAYED_CONTEXT_REF_LABEL_MAX: usize = 120;
+/// Longest chip id relayed: the gateway's own id bound.
+const RELAYED_CONTEXT_REF_ID_MAX: usize = 128;
+/// The chip kinds the composer can attach.
+const RELAYED_CONTEXT_REF_KINDS: [&str; 5] = ["document", "thread", "space", "skill", "artifact_selection"];
+/// Most sub-queries a relayed plan keeps.
+const RELAYED_PLAN_SUB_QUERIES_MAX: usize = 20;
+/// Longest sub-query or question relayed, in characters.
+const RELAYED_PLAN_TEXT_MAX: usize = 200;
+/// Most clarifying questions a relayed plan keeps: the plan card's own cap.
+const RELAYED_PLAN_QUESTIONS_MAX: usize = 3;
+
+/// The chips of a stored `context_refs` value, as `[{kind, id, label}]`, or `None` when nothing
+/// valid is left. Only an array is read, only an object entry with a known kind and an id is kept,
+/// and every other key on an entry (a selection range, anything the gateway added) is dropped.
+fn relayed_context_refs(value: Option<&Value>) -> Option<Value> {
+    let entries = value?.as_array()?;
+    let chips: Vec<Value> = entries
+        .iter()
+        .filter_map(|entry| {
+            let entry = entry.as_object()?;
+            let kind = entry.get("kind")?.as_str()?;
+            if !RELAYED_CONTEXT_REF_KINDS.contains(&kind) {
+                return None;
+            }
+            let id = entry.get("id")?.as_str()?;
+            if id.is_empty() || id.chars().count() > RELAYED_CONTEXT_REF_ID_MAX {
+                return None;
+            }
+            let label: String = entry
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .chars()
+                .take(RELAYED_CONTEXT_REF_LABEL_MAX)
+                .collect();
+            Some(json!({ "kind": kind, "id": id, "label": label }))
+        })
+        .take(RELAYED_CONTEXT_REFS_MAX)
+        .collect();
+    (!chips.is_empty()).then(|| Value::Array(chips))
+}
+
+/// The non-blank strings of one plan list, cut to length and to `max` entries.
+fn relayed_plan_strings(value: Option<&Value>, max: usize) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| text.chars().take(RELAYED_PLAN_TEXT_MAX).collect::<String>())
+                .take(max)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The plan of a stored `research_plan` value, as `{sub_queries, questions}`, or `None` when it is
+/// not an object or holds no sub-query. Everything else on the record (its version, its caps) is
+/// dropped; the card re-derives its cap itself.
+fn relayed_research_plan(value: Option<&Value>) -> Option<Value> {
+    let record = value?.as_object()?;
+    let sub_queries = relayed_plan_strings(record.get("sub_queries"), RELAYED_PLAN_SUB_QUERIES_MAX);
+    if sub_queries.is_empty() {
+        return None;
+    }
+    let questions = relayed_plan_strings(record.get("questions"), RELAYED_PLAN_QUESTIONS_MAX);
+    Some(json!({ "sub_queries": sub_queries, "questions": questions }))
 }
 
 async fn read_canonical_transcript(
@@ -1477,6 +1712,14 @@ fn canonical_messages_to_transcript(
                 .filter(|value| value.as_array().is_some_and(|list| !list.is_empty()))
             {
                 turn["artifacts"] = artifacts;
+            }
+            // Allowlisted re-emits (Wave 3 EP-3 S5 / EP-2 S5): absent unless the stored
+            // value is the expected shape, and never the metadata map itself.
+            if let Some(refs) = relayed_context_refs(message.context_refs.as_ref()) {
+                turn["contextRefs"] = refs;
+            }
+            if let Some(plan) = relayed_research_plan(message.research_plan.as_ref()) {
+                turn["researchPlan"] = plan;
             }
             turn
         })
@@ -1783,6 +2026,7 @@ mod tests {
                 attention_since: String::new(),
                 attention_unseen: false,
                 forked_from_thread_id: String::new(),
+                goal_status: String::new(),
             },
             now,
         )
@@ -1808,6 +2052,7 @@ mod tests {
                 attention_since: String::new(),
                 attention_unseen: false,
                 forked_from_thread_id: String::new(),
+                goal_status: String::new(),
             },
             now,
         )
@@ -1852,6 +2097,7 @@ mod tests {
                     attention_since: String::new(),
                     attention_unseen: false,
                     forked_from_thread_id: String::new(),
+                    goal_status: String::new(),
                 },
                 now,
             )
@@ -1901,6 +2147,7 @@ mod tests {
                 attention_since: String::new(),
                 attention_unseen: false,
                 forked_from_thread_id: String::new(),
+                goal_status: String::new(),
             },
             now,
         )
@@ -1932,6 +2179,7 @@ mod tests {
                 attention_since: String::new(),
                 attention_unseen: false,
                 forked_from_thread_id: String::new(),
+                goal_status: String::new(),
             },
             "2026-08-11T12:00:00Z",
         )
@@ -2071,6 +2319,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2083,6 +2333,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
             ],
         )
@@ -2107,6 +2359,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2118,6 +2372,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
             ],
         )
@@ -2153,6 +2409,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2168,6 +2426,8 @@ mod tests {
                     })),
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2179,6 +2439,8 @@ mod tests {
                     grounding: Some(Value::Null),
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
             ],
         )
@@ -2210,6 +2472,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2221,6 +2485,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2232,6 +2498,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     // An unrecognized value must never be relayed verbatim —
@@ -2245,6 +2513,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
             ],
         )
@@ -2276,6 +2546,8 @@ mod tests {
                     artifacts: Some(json!([
                         { "id": "rapport", "kind": "document", "title": "Salgsrapport", "content": "# Uke 37", "version": 2 },
                     ])),
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2287,6 +2559,8 @@ mod tests {
                     grounding: None,
                     citations: None,
                     artifacts: Some(json!([])),
+                    context_refs: None,
+                    research_plan: None,
                 },
             ],
         )
@@ -2317,6 +2591,8 @@ mod tests {
                         { "id": "w1", "title": "Oslo", "url": "https://example.test/oslo", "snippet": "capital" },
                     ])),
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
                 CanonicalMessage {
                     source_scope: None,
@@ -2329,6 +2605,8 @@ mod tests {
                     // An empty list is not evidence; it must not create the key.
                     citations: Some(json!([])),
                     artifacts: None,
+                    context_refs: None,
+                    research_plan: None,
                 },
             ],
         )
@@ -2370,6 +2648,7 @@ mod thread_paging_tests {
                 attention_since: String::new(),
                 attention_unseen: false,
                 forked_from_thread_id: String::new(),
+                goal_status: String::new(),
             },
             "2026-10-28T11:00:00Z",
         )
@@ -2384,6 +2663,7 @@ mod thread_paging_tests {
                 archived: None,
                 thread_id: None,
                 starred_only: true,
+                agent: None,
             },
         );
         assert!(url.ends_with("&starred_only=true"));
@@ -2399,6 +2679,7 @@ mod thread_paging_tests {
                 archived: Some("all"),
                 thread_id: Some("thread-81"),
                 starred_only: false,
+                agent: None,
             },
         );
         assert_eq!(
@@ -2419,6 +2700,7 @@ mod thread_paging_tests {
                 archived: Some("all"),
                 thread_id: Some("thread-81"),
                 starred_only: false,
+                agent: None,
             },
         );
         assert!(url.contains("thread_id=thread-81"));
@@ -2435,6 +2717,7 @@ mod thread_paging_tests {
                 archived: None,
                 thread_id: None,
                 starred_only: false,
+                agent: None,
             },
         );
         assert_eq!(
@@ -2741,3 +3024,7 @@ mod fork_handler_tests {
         assert!(summary.forked_from_thread_id.is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "history_relay_tests.rs"]
+mod relay_tests;

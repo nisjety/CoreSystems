@@ -571,6 +571,8 @@ func buildMemoryConsolidationInput(raw json.RawMessage, t Tenancy) (any, error) 
 		return nil, err
 	}
 	in.OrgID = t.OrgID
+	// The signed posture wins; the caller cannot hand us a retention value.
+	in.Retention = t.Retention()
 	return in, nil
 }
 

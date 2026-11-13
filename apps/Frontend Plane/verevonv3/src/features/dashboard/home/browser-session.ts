@@ -42,9 +42,23 @@ export type BrowserNetworkEntry = {
   url: string
 }
 
+/** What a run's own events said about one timeline step's action. Only the chat rail's adapter sets it. */
+export type BrowserTimelineAction = {
+  /** The action id the run emitted. */
+  id: string
+  /** The action type the run dispatched, such as click. */
+  type: string
+  /** False until the action's observation arrives, so the step is still in flight. */
+  observed: boolean
+  /** The observation's status once it arrives (success, failed, timeout, blocked); empty before. */
+  status: string
+}
+
 export type BrowserTimelineViewEntry = BrowserTimelineEntry & {
   screenshotUrl?: string | null
   visualObservationUrl?: string | null
+  /** The action behind the step when a run's events supplied it. A gateway step leaves it out. */
+  action?: BrowserTimelineAction | null
 }
 
 export type BrowserReplayViewEvent = BrowserReplayEvent & {

@@ -12,7 +12,7 @@ import type { JSX } from '@solidjs/web'
 import { uiEventLabel } from '@/shared/chat/verevon-ui-events'
 import { useI18n } from '@/shared/i18n'
 import { formatLatency } from './chat-media-markdown'
-import { formatClock, recordAt, spanMs, type LedgerRecord, type LedgerTurn } from '../lib/run-ledger'
+import { formatClock, recordAt, roundNumberOf, spanMs, type LedgerRecord, type LedgerTurn } from '../lib/run-ledger'
 import { RequestInspector, requestInspectorEnabled } from './RequestInspector'
 
 type CopyState = 'request' | 'run' | 'failed' | null
@@ -42,6 +42,8 @@ export function LedgerInspector(props: {
   const clock = (at: string | undefined) => (at === undefined ? notRecorded() : formatClock(at, i18n.locale()) || notRecorded())
   const duration = (ms: number | undefined) => (ms === undefined ? notRecorded() : formatLatency(ms))
   const call = () => (props.record.kind === 'call' ? props.record : undefined)
+  // Known only when the turn's timing carried rounds and the record's time fell inside one.
+  const round = () => roundNumberOf(props.turn, props.record.key)
   const lifecycle = () => props.turn.records.flatMap((record) => (
     record.kind === 'event' && record.event.type.startsWith('lifecycle.') ? [record] : []
   ))
@@ -102,6 +104,9 @@ export function LedgerInspector(props: {
         </Show>
         <Show when={call() === undefined}>
           <Field label={i18n.tr('Tidspunkt', 'Time')}>{clock(recordAt(props.record))}</Field>
+        </Show>
+        <Show when={round() !== undefined}>
+          <Field label={i18n.tr('Runde', 'Round')}>{round()}</Field>
         </Show>
         <Field label={i18n.tr('Turens tidsrom', 'Turn span')}>
           {duration(spanMs(props.turn.startAt, props.turn.endAt))}

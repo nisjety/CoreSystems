@@ -7,15 +7,32 @@ import {
   type ChatGptDeviceLogin,
   type ChatGptSubscriptionConnection,
 } from '@/shared/api/chatgpt-subscription-client'
+import {
+  getConnectionZdr,
+  isZdrWaiverUiEnabled,
+  revokeConnectionZdr,
+  type ConnectionZdrAssessment,
+} from '@/shared/api/connection-zdr-client'
+import type { ConnectionZdrAcknowledgedVia, ConnectionZdrVariant } from '@/shared/actions/connection-zdr'
+import { isLocalRetentionAllowed } from '@/features/chat/lib/chat-retention'
 import { useI18n } from '@/shared/i18n'
+import { en } from '@/shared/i18n/en'
+import { no } from '@/shared/i18n/no'
 import { ApiError } from '@/shared/api/http'
 import { Button } from '@/shared/ui/Button'
+import { ConnectionZdrAcknowledgement } from './ConnectionZdrAcknowledgement'
 
 type ChatGptSubscriptionPanelProps = {
   orgId: string
   /** Used by Settings to refresh its live integration metrics. */
   onConnectionChange?: () => void
   variant?: 'settings' | 'onboarding'
+  /**
+   * Whether the organisation has zero data retention on, from the settings state the parent already holds (the
+   * workspace settings page reads it). Absent, the panel uses the SPA's server-stated retention posture. It is read
+   * here, never fetched from Org Core by this panel.
+   */
+  orgZdr?: boolean
 }
 
 function isConnected(status: string): boolean {
@@ -48,6 +65,17 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
   const [login, setLogin] = createSignal<ChatGptDeviceLogin>()
   const [busy, setBusy] = createSignal<'starting' | 'disconnecting' | null>(null)
   const [notice, setNotice] = createSignal<string | null>(null)
+  // The zero data retention acknowledgement of the connection (ZDR Z-20), behind VITE_ZDR_WAIVER_UI. The assessment is
+  // read from Integration Core and shown as it is; nothing about it is stored in the browser.
+  const [zdrAssessment, setZdrAssessment] = createSignal<ConnectionZdrAssessment | null>(null)
+  const [zdrDialog, setZdrDialog] = createSignal<{
+    connectionId: string
+    variant: ConnectionZdrVariant
+    via: ConnectionZdrAcknowledgedVia
+  } | null>(null)
+  const [confirmingRevoke, setConfirmingRevoke] = createSignal(false)
+  const [zdrBusy, setZdrBusy] = createSignal(false)
+  let zdrReadAttempt = 0
   let pollTimer: number | undefined
   let disposed = false
   let loginAttempt = 0
@@ -59,6 +87,41 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
   }
 
   const notifyConnectionChange = () => props.onConnectionChange?.()
+
+  const zdrCopy = () => (i18n.locale() === 'no' ? no : en).zdr.waiver
+  const orgIsZdr = () => props.orgZdr ?? !isLocalRetentionAllowed()
+
+  /** Reads the connection's assessment, to know whether it needs an acknowledgement and whether one is in force. */
+  const refreshZdr = async (connectionId: string) => {
+    const attempt = ++zdrReadAttempt
+    if (!isZdrWaiverUiEnabled()) return
+    try {
+      const assessment = await getConnectionZdr(connectionId, i18n.locale(), orgIsZdr() ? 'org_zdr_on' : 'org_zdr_off')
+      if (disposed || attempt !== zdrReadAttempt) return
+      setZdrAssessment(assessment)
+    } catch {
+      if (disposed || attempt !== zdrReadAttempt) return
+      // Not knowing is not a reason to offer anything: the review entry stays out of sight.
+      setZdrAssessment(null)
+    }
+  }
+
+  const revokeZdr = async () => {
+    const current = connection()
+    if (!current || zdrBusy()) return
+    setZdrBusy(true)
+    try {
+      await revokeConnectionZdr(current.id)
+      setConfirmingRevoke(false)
+      setNotice(zdrCopy().revoked)
+      await refreshZdr(current.id)
+      notifyConnectionChange()
+    } catch {
+      setNotice(zdrCopy().revoke_failed)
+    } finally {
+      setZdrBusy(false)
+    }
+  }
 
   const refreshConnection = async (orgId: string) => {
     if (!orgId.trim()) return
@@ -84,6 +147,11 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
       setNotice(i18n.tr('ChatGPT-abonnementet er koblet til og klart for AI-kjøringer.', 'Your ChatGPT subscription is connected and ready for AI runs.'))
       notifyConnectionChange()
       await refreshConnection(props.orgId)
+      // The connection cannot give zero data retention. When the organisation has it on, the member confirms, once,
+      // the exact text Integration Core serves before the connection can be used (ZDR Z-20).
+      if (isZdrWaiverUiEnabled() && orgIsZdr() && !disposed) {
+        setZdrDialog({ connectionId: nextConnection.id, variant: 'org_zdr_on', via: 'connect' })
+      }
       return
     }
     setNotice(status === 'expired'
@@ -180,6 +248,8 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
       await disconnectChatGptSubscription(props.orgId, currentConnection.id)
       setConnection(undefined)
       setLogin(undefined)
+      setZdrAssessment(null)
+      setConfirmingRevoke(false)
       setNotice(i18n.tr('ChatGPT-abonnementet er koblet fra.', 'Your ChatGPT subscription has been disconnected.'))
       notifyConnectionChange()
     } catch {
@@ -198,6 +268,9 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
       setConnection(undefined)
       setLogin(undefined)
       setNotice(null)
+      setZdrAssessment(null)
+      setZdrDialog(null)
+      setConfirmingRevoke(false)
       void refreshConnection(orgId)
     },
   )
@@ -223,6 +296,18 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
   )
 
   const connected = () => Boolean(connection() && isConnected(connection()!.status))
+  // Read the assessment of a connected connection, so the review and withdraw entries show only when they mean something.
+  createEffect(
+    () => (connected() ? connection()!.id : undefined),
+    (connectionId) => {
+      setZdrAssessment(null)
+      if (!connectionId || !isZdrWaiverUiEnabled()) return
+      void refreshZdr(connectionId)
+    },
+  )
+  const zdrNeedsAcknowledgement = () =>
+    isZdrWaiverUiEnabled() && connected() && zdrAssessment()?.requiresAcknowledgement === true
+  const zdrAcknowledged = () => zdrAssessment()?.acknowledgement?.state === 'active'
   const awaitingSignIn = () => Boolean(login() && !isTerminalLogin(login()!.status))
   const statusLabel = () => {
     if (connected()) return i18n.tr('Tilkoblet', 'Connected')
@@ -281,6 +366,27 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
               <Button size="sm" disabled={busy() === 'disconnecting'} onClick={() => void disconnect()}>
                 {busy() === 'disconnecting' ? i18n.tr('Kobler fra …', 'Disconnecting …') : i18n.tr('Koble fra', 'Disconnect')}
               </Button>
+              {/* Zero data retention (ZDR Z-20): review the text served for this connection, or withdraw the
+                  confirmation. Both are the member's own acts and both read what Integration Core serves. */}
+              <Show when={zdrNeedsAcknowledgement()}>
+                <Button
+                  size="sm"
+                  onClick={() =>
+                    setZdrDialog({
+                      connectionId: connection()!.id,
+                      variant: orgIsZdr() ? 'org_zdr_on' : 'org_zdr_off',
+                      via: 'settings',
+                    })
+                  }
+                >
+                  {zdrCopy().review}
+                </Button>
+                <Show when={zdrAcknowledged() && !confirmingRevoke()}>
+                  <Button size="sm" disabled={zdrBusy()} onClick={() => setConfirmingRevoke(true)}>
+                    {zdrCopy().revoke}
+                  </Button>
+                </Show>
+              </Show>
             </Show>
           </div>
         }
@@ -307,6 +413,18 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
         )}
       </Show>
 
+      <Show when={confirmingRevoke() && zdrAcknowledged()}>
+        <div class="verevon-chatgpt-subscription__actions" role="group" aria-label={zdrCopy().revoke}>
+          <p class="verevon-chatgpt-subscription__privacy">{zdrCopy().revoke_confirm}</p>
+          <Button size="sm" variant="primary" disabled={zdrBusy()} onClick={() => void revokeZdr()}>
+            {zdrCopy().revoke_yes}
+          </Button>
+          <Button size="sm" disabled={zdrBusy()} onClick={() => setConfirmingRevoke(false)}>
+            {zdrCopy().revoke_no}
+          </Button>
+        </div>
+      </Show>
+
       <p class="verevon-chatgpt-subscription__privacy">
         {i18n.tr(
           'Verevon mottar aldri passordet ditt eller en API-nøkkel. Tilkoblingslegitimasjon lagres kun i Integration Core.',
@@ -314,6 +432,21 @@ export function ChatGptSubscriptionPanel(props: ChatGptSubscriptionPanelProps) {
         )}
       </p>
       <Show when={notice()}>{(message) => <p class="verevon-chatgpt-subscription__notice" role="status">{message()}</p>}</Show>
+      <Show when={zdrDialog()}>
+        {(dialog) => (
+          <ConnectionZdrAcknowledgement
+            connectionId={dialog().connectionId}
+            variant={dialog().variant}
+            acknowledgedVia={dialog().via}
+            onAcknowledged={() => {
+              setNotice(zdrCopy().confirmed)
+              void refreshZdr(dialog().connectionId)
+              notifyConnectionChange()
+            }}
+            onClose={() => setZdrDialog(null)}
+          />
+        )}
+      </Show>
     </section>
   )
 }

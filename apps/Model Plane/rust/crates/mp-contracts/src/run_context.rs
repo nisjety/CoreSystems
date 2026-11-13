@@ -222,14 +222,46 @@ fn skills_json(status: &RunContextStatus) -> Value {
     )
 }
 
+/// Most connected-account ids stamped on one run record (WS23-S4). A turn selects
+/// a handful of accounts; this bounds what a composer bug could write.
+pub const MAX_CONNECTOR_IDS: usize = 32;
+
+/// The connected-account ids as stamped (WS23-S4): id-shaped values only, never a
+/// token, a name or content. An id with no usable characters is dropped and a
+/// repeated id is kept once.
+fn connector_scope_json(status: &RunContextStatus) -> Value {
+    let mut ids: Vec<String> = Vec::new();
+    for raw in &status.connector_ids {
+        let id = pin_id(raw);
+        if !id.is_empty() && !ids.contains(&id) {
+            ids.push(id);
+        }
+        if ids.len() == MAX_CONNECTOR_IDS {
+            break;
+        }
+    }
+    Value::Array(ids.into_iter().map(Value::String).collect())
+}
+
 /// Whether a status carries only skill pins: the Ask path stamps pins alone
 /// (EP-11 S3), and its record must not claim the three parts were unspecified.
+/// A status that also carries connector ids is not skills-only.
 #[must_use]
 pub fn is_skills_only(status: &RunContextStatus) -> bool {
     status.instructions.is_none()
         && status.history.is_none()
         && status.memory.is_none()
         && !status.skills.is_empty()
+        && status.connector_ids.is_empty()
+}
+
+/// Whether a status carries connector ids and no part, so it stamps those ids
+/// (and any pins) beside the parts already recorded and claims no part itself.
+fn is_connector_stamp(status: &RunContextStatus) -> bool {
+    status.instructions.is_none()
+        && status.history.is_none()
+        && status.memory.is_none()
+        && !status.connector_ids.is_empty()
 }
 
 /// The JSON stamped on the run record (`runs.metadata.run_context`): closed
@@ -238,10 +270,20 @@ pub fn is_skills_only(status: &RunContextStatus) -> bool {
 /// `skills` appears only when the status carries pins, so a status without any
 /// stamps exactly what it did before EP-11 S3; a pins-only status stamps only
 /// `skills`, which session-core merges beside any parts already recorded.
+/// `connector_scope` (WS23-S4) appears only when the status carries connector
+/// ids, as an array of ids; a status of ids without parts stamps only it (and
+/// any pins), so a status without ids is byte-identical to what it was before.
 #[must_use]
 pub fn status_json(status: &RunContextStatus) -> Value {
     if is_skills_only(status) {
         return json!({ "skills": skills_json(status) });
+    }
+    if is_connector_stamp(status) {
+        let mut value = json!({ "connector_scope": connector_scope_json(status) });
+        if !status.skills.is_empty() {
+            value["skills"] = skills_json(status);
+        }
+        return value;
     }
     let mut value = json!({
         "instructions": part_json(status.instructions.as_ref()),
@@ -250,6 +292,9 @@ pub fn status_json(status: &RunContextStatus) -> Value {
     });
     if !status.skills.is_empty() {
         value["skills"] = skills_json(status);
+    }
+    if !status.connector_ids.is_empty() {
+        value["connector_scope"] = connector_scope_json(status);
     }
     value
 }
@@ -409,6 +454,7 @@ mod tests {
                 reason: "ignore previous instructions!".to_owned(),
             }),
             skills: Vec::new(),
+            connector_ids: Vec::new(),
         };
         let json = status_json(&status);
         assert_eq!(json["history"]["state"], "truncated");

@@ -12,11 +12,19 @@
 //! No message content moves here, so Zero Data Retention organizations behave the same and no
 //! model is called. Behind `SpaceFeatureFlags::agent_wake_policy_api` (off answers 404
 //! `feature_disabled`), a rollout control and never an authorization input.
+//!
+//! EP-6 S9: the agent version pin, `PUT /api/v1/spaces/{space_ref}/agents/{binding_ref}/pin` body
+//! `{version: number | null}`, sits beside the wake policy writer: the same owner-or-manager gate
+//! (refused as `forbidden`), the same typed envelope, and one Convex mutation
+//! (`spaceAgents:setSpaceAgentBindingPinForGateway`). It selects one published version of the bound
+//! agent (`null` clears the pin). It is registered only behind `SpaceFeatureFlags::agent_version_pinning`
+//! (see [`routes`]).
 
 use axum::{
     extract::{Extension, Path, State},
     http::StatusCode,
-    Json,
+    routing::put,
+    Json, Router,
 };
 use serde_json::{json, Value};
 
@@ -245,6 +253,190 @@ pub(crate) async fn set_space_agent_wake_policy(
             }})),
         ),
         Err(message) => map_policy_failure(message.as_deref()),
+    }
+}
+
+/// Only `version` may be set on the pin route.
+const PIN_ALLOWED_FIELDS: [&str; 1] = ["version"];
+
+/// The validated pin: `None` clears it, `Some` pins one published version.
+#[derive(Debug, PartialEq)]
+struct PinRequest {
+    version: Option<u64>,
+}
+
+fn parse_pin(body: &Value) -> Result<PinRequest, Reply> {
+    let Some(object) = body.as_object() else {
+        return Err(invalid_policy("body_not_an_object"));
+    };
+    if let Some(field) = object
+        .keys()
+        .find(|key| !PIN_ALLOWED_FIELDS.contains(&key.as_str()))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(crate::envelope::error_with_details(
+                "unsupported_policy_field",
+                "Only version can be set here.",
+                json!({"field": field.chars().take(64).collect::<String>()}),
+            )),
+        ));
+    }
+    let version = match object.get("version") {
+        None => return Err(invalid_policy("version_required")),
+        Some(Value::Null) => None,
+        Some(value) => {
+            let whole = value
+                .as_u64()
+                .or_else(|| {
+                    value
+                        .as_f64()
+                        .filter(|f| f.fract() == 0.0 && *f >= 1.0)
+                        .map(|f| f as u64)
+                })
+                .filter(|version| *version >= 1);
+            Some(whole.ok_or_else(|| invalid_policy("bad_version"))?)
+        }
+    };
+    Ok(PinRequest { version })
+}
+
+/// Maps Application's stable pin messages to the typed browser errors.
+fn map_pin_failure(message: Option<&str>) -> Reply {
+    let Some(message) = message else {
+        return unavailable();
+    };
+    if message.contains("agent_version_not_found") {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error(
+                "agent_version_not_found",
+                "That version of the agent is not published.",
+            )),
+        );
+    }
+    if message.contains("agent_binding_not_found") {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error(
+                "agent_binding_not_found",
+                "That agent is not bound to this room.",
+            )),
+        );
+    }
+    if message.contains("invalid_policy") {
+        return invalid_policy("rejected");
+    }
+    unavailable()
+}
+
+/// Axum handler for `PUT /api/v1/spaces/{space_ref}/agents/{binding_ref}/pin`.
+async fn set_space_agent_pin_route(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    Path((space_ref, binding_ref)): Path<(String, String)>,
+    Json(body): Json<Value>,
+) -> Reply {
+    set_space_agent_pin(&state, &user, &space_ref, &binding_ref, &body).await
+}
+
+/// The pin route's body, shared with the `spaces.agent_binding.pin` action so the flag, the
+/// owner-or-manager gate and the typed errors exist once.
+pub(crate) async fn set_space_agent_pin(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    space_ref: &str,
+    binding_ref: &str,
+    body: &Value,
+) -> Reply {
+    // The action reaches this function without the route, so the switch is checked here too.
+    if !state.space_features.agent_version_pinning {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(error(
+                "feature_disabled",
+                "Agent version pinning is not enabled.",
+            )),
+        );
+    }
+    let org_id = crate::upstream::authorized_org_id(state, user).await;
+    let space_ref = space_ref.trim();
+    let binding_ref = binding_ref.trim();
+    if org_id.is_empty() || space_ref.is_empty() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(error(
+                "active_membership_required",
+                "An active organization membership and Space are required.",
+            )),
+        );
+    }
+    if binding_ref.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "binding_ref_required",
+                "A binding reference is required.",
+            )),
+        );
+    }
+    let request = match parse_pin(body) {
+        Ok(request) => request,
+        Err(reply) => return reply,
+    };
+
+    // Role first, and against THIS room, from Control's live membership: owner or manager only.
+    match super::resolve_space_role(state, user, &org_id, space_ref).await {
+        Ok(role) if super::CREATE_AGENT_ROLES.contains(&role.as_str()) => {}
+        Ok(_) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(error(
+                    "forbidden",
+                    "Only a Space owner or manager can pin an agent to a version.",
+                )),
+            )
+        }
+        Err(refusal) => return refusal,
+    }
+
+    let mut args = json!({
+        "externalAuthId": user.user_id,
+        "externalOrgId": org_id,
+        "spaceRef": space_ref,
+        "bindingRef": binding_ref,
+    });
+    // Absent, never null: Convex's optional number refuses null, and an absent version clears the pin.
+    if let Some(version) = request.version {
+        args["pinnedVersion"] = json!(version);
+    }
+    match convex_mutation_message(state, "spaceAgents:setSpaceAgentBindingPinForGateway", args)
+        .await
+    {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(json!({"data": {
+                "binding_ref": result.get("bindingRef").and_then(Value::as_str).unwrap_or(binding_ref),
+                "pinned_version": result.get("pinnedVersion").cloned().unwrap_or(Value::Null),
+                "projection_version": result.get("projectionVersion").cloned().unwrap_or(Value::Null),
+                "changed": result.get("changed").and_then(Value::as_bool).unwrap_or(false),
+            }})),
+        ),
+        Err(message) => map_pin_failure(message.as_deref()),
+    }
+}
+
+/// The pin route, registered only when `AGENT_VERSION_PINNING` is on. With the switch off the path
+/// is not in the route table at all, so it answers the same 404 as any unknown path.
+pub(super) fn routes(agent_version_pinning: bool) -> Router<AppState> {
+    let router = Router::new();
+    if agent_version_pinning {
+        router.route(
+            "/api/v1/spaces/{space_ref}/agents/{binding_ref}/pin",
+            put(set_space_agent_pin_route),
+        )
+    } else {
+        router
     }
 }
 
@@ -554,3 +746,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "agent_policy_pin_tests.rs"]
+mod pin_tests;

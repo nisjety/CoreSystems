@@ -16,6 +16,9 @@
 // Unknown/garbage values degrade to `undefined` — neutral presentation, no
 // badge, no fabricated residency claim.
 
+import { en as enStrings } from '@/shared/i18n/en'
+import { no as noStrings } from '@/shared/i18n/no'
+
 /** Wire values exactly as `/v1/models` emits them (snake_case). */
 export const PRIVACY_TIERS = [
   'unspecified',
@@ -167,6 +170,14 @@ export const ANSWER_RESIDENCIES = ['global', 'eu', 'norway'] as const
 
 export type AnswerResidency = (typeof ANSWER_RESIDENCIES)[number]
 
+/**
+ * How the server retained one answer, as the `usage` frame's `retention_class` states it (ZDR Z-21). `zdr_waived` is
+ * a run the member took onto their own connection after acknowledging that it is not zero data retention.
+ */
+export const ANSWER_RETENTION_CLASSES = ['zdr', 'zdr_waived', 'persistent'] as const
+
+export type AnswerRetentionClass = (typeof ANSWER_RETENTION_CLASSES)[number]
+
 /** What the server stamped on one answer. Absent fields are unknown, never defaulted. */
 export type AnswerServedBy = {
   /** Registry id of the serving provider, as stamped. */
@@ -174,6 +185,17 @@ export type AnswerServedBy = {
   residency?: AnswerResidency
   /** Never `'unspecified'`: that is "no constraint", and a stamp says something. */
   privacyTier?: Exclude<PrivacyTier, 'unspecified'>
+  /** How the answer was retained (`retention_class`). Rendered only through {@link answerRetentionLine}. */
+  retentionClass?: AnswerRetentionClass
+}
+
+/** Coerce an untrusted wire value into a stamped retention class, or `undefined`. */
+export function normalizeAnswerRetentionClass(value: unknown): AnswerRetentionClass | undefined {
+  if (typeof value !== 'string') return undefined
+  const key = value.trim().toLowerCase()
+  return (ANSWER_RETENTION_CLASSES as readonly string[]).includes(key)
+    ? (key as AnswerRetentionClass)
+    : undefined
 }
 
 /** Coerce an untrusted wire value into a stamped residency, or `undefined`. */
@@ -195,19 +217,27 @@ export function normalizeAnswerServedBy(wire: {
   provider_used?: unknown
   residency?: unknown
   privacy_tier?: unknown
+  retention_class?: unknown
 }): AnswerServedBy | undefined {
   const providerRaw = typeof wire.provider_used === 'string' ? wire.provider_used.trim() : ''
   const providerUsed = /^[a-z0-9][a-z0-9._-]{0,63}$/i.test(providerRaw) ? providerRaw : undefined
   const residency = normalizeAnswerResidency(wire.residency)
   const tier = normalizePrivacyTier(wire.privacy_tier)
   const privacyTier = tier === undefined || tier === 'unspecified' ? undefined : tier
-  if (providerUsed === undefined && residency === undefined && privacyTier === undefined) {
+  const retentionClass = normalizeAnswerRetentionClass(wire.retention_class)
+  if (
+    providerUsed === undefined
+    && residency === undefined
+    && privacyTier === undefined
+    && retentionClass === undefined
+  ) {
     return undefined
   }
   return {
     ...(providerUsed === undefined ? {} : { providerUsed }),
     ...(residency === undefined ? {} : { residency }),
     ...(privacyTier === undefined ? {} : { privacyTier }),
+    ...(retentionClass === undefined ? {} : { retentionClass }),
   }
 }
 
@@ -284,5 +314,30 @@ export function answerProcessingNote(
           'Behandlingssted og datalagring slik oppsettet erklærer dem. Ikke uavhengig verifisert.',
           'Processing location and data retention as the deployment declares them. Not independently verified.',
         ),
+  }
+}
+
+// ── How an answer was retained ──────────────────────────────────────────────
+// A run the member took onto their own connection after acknowledging it is not
+// zero data retention is stamped `retention_class: 'zdr_waived'` (ZDR Z-21). The
+// line below is the visible record of that waiver. It states nothing for any
+// other class: a ZDR answer's guarantee is the processing note's `ZDR`, and a
+// persistent answer is the ordinary case. Draft wording, pending counsel
+// (OD-LEGAL, D-ZDR-09): the copy keys live in `shared/i18n` under `zdr.waiver`.
+
+/**
+ * The one small line under a waived answer, from the server's stamp alone, or
+ * `undefined` (nothing rendered) for every other class and for no stamp. It never
+ * claims zero data retention, and its hover text says what the provider received.
+ * The caller gates it on `isZdrWaiverUiEnabled()`.
+ */
+export function answerRetentionLine(
+  i18n: { tr(no: string, en: string): string },
+  retentionClass: AnswerRetentionClass | string | undefined | null,
+): AnswerProcessingNote | undefined {
+  if (retentionClass !== 'zdr_waived') return undefined
+  return {
+    text: i18n.tr(noStrings.zdr.waiver.answer_line, enStrings.zdr.waiver.answer_line),
+    title: i18n.tr(noStrings.zdr.waiver.answer_line_title, enStrings.zdr.waiver.answer_line_title),
   }
 }

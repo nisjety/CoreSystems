@@ -1023,6 +1023,59 @@ async function mintEveryLane(source: RetentionPolicy): Promise<Observation[]> {
   }
 }
 
+// Goal judge (EP-7 S3/S6, OD-58), prepared dark. model-gateway's own
+// session-core credential is zero-retention with heartbeat and terminalize only,
+// so the judge's verdict write and its unattended read get a dedicated
+// persistent principal with two narrow scopes. Retention is keyed per principal,
+// not per scope, which is why the zdr `model-gateway` row cannot be widened.
+const goalJudge = 'model-gateway-goal-judge';
+const goalJudgeScopes = [
+  'session:goal-judge:read',
+  'session:goal-verdict:write',
+];
+
+describeIfPolicy(
+  'principal policy goal-judge principal (EP-7 S3/S6, dark)',
+  () => {
+    it('registers the goal judge for session-core alone, persistent, with its two scopes', () => {
+      const principal = policy?.[goalJudge];
+      expect(principal).toMatchObject({
+        tenancy: 'directory',
+        orgIds: [],
+        audiences: ['session-core'],
+        consumerEnv: 'MODEL_GATEWAY_GOAL_JUDGE_SERVICE_API_KEY',
+        scopes: goalJudgeScopes,
+        scopesByAudience: { 'session-core': goalJudgeScopes },
+        retentionByAudience: { 'session-core': 'persistent' },
+      });
+      expect(principal?.tokenExchange).toBeUndefined();
+      expect(Object.keys(principal?.scopesByAudience ?? {})).toEqual([
+        'session-core',
+      ]);
+    });
+
+    it('lets no other principal hold either goal-judge scope on any audience', () => {
+      for (const scope of goalJudgeScopes) {
+        const holders = principalNames().filter((name) =>
+          everyScopeOf(name).includes(scope),
+        );
+        expect({ scope, holders }).toEqual({ scope, holders: [goalJudge] });
+      }
+    });
+
+    it('keeps model-gateway own session-core credential zero-retention beside the judge', () => {
+      // Flipping the shared row to persistent would widen heartbeat and terminalize;
+      // the judge has its own principal for the durable verdict write.
+      const gateway = policy?.['model-gateway'];
+      if (!gateway?.retentionByAudience?.['session-core']) return;
+      expect(gateway.retentionByAudience['session-core']).toBe('zdr');
+      expect(everyScopeOf('model-gateway')).not.toEqual(
+        expect.arrayContaining(goalJudgeScopes),
+      );
+    });
+  },
+);
+
 describeIfPolicy(
   'principal policy retention posture, minted through the real controllers',
   () => {
@@ -2334,6 +2387,7 @@ describeIfPolicy('principal bundle R-13 PR 1: quarry-edge model lanes', () => {
       'inference-core',
       'model-execution',
       'model-gateway',
+      'model-gateway-goal-judge',
       'model-gateway-mail-task-bridge',
       'orchestrator-core',
       'quarry-edge',

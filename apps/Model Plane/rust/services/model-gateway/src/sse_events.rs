@@ -421,6 +421,10 @@ pub enum ChatEvent {
         /// The cost split by what was billed, present exactly when `cost_usd` is a
         /// metered total.
         cost_by_category: Option<crate::pricing::CategoryCost>,
+        /// The answer's routing decision (W5-073-b, `tool_loop::route_decision`): the Verevon mode, complexity
+        /// and reason its route note states. Closed tokens only. `None` keeps the frame's shape, and the key is
+        /// set only while `MODEL_GATEWAY_ROUTING_DECISION_ENABLED` is on.
+        routing_decision: Option<serde_json::Value>,
     },
     /// Per-turn phase timing (Q14): ids, milliseconds and counts, never
     /// content. Emitted once, just before the terminal `done`, `error` or
@@ -584,6 +588,9 @@ pub enum ChatEvent {
         /// How the budget moved this call's route (WS27-S7): `tier_shifted` or `cheap_fallback`, only when
         /// inference-core's route note says the posture moved it. `None` keeps the frame's earlier shape.
         routing: Option<&'static str>,
+        /// The answer's routing decision (W5-073-b), on the answer's own progress frame only. Closed tokens
+        /// only. `None` keeps the frame's shape, as `routing` does.
+        routing_decision: Option<serde_json::Value>,
     },
     // ---- end usage progress (WS27) ----
     // ---- lifecycle (WS15) ----
@@ -627,6 +634,15 @@ pub enum ChatEvent {
         /// When the run can be resumed (RFC 3339, UTC), or `None` when that time is unreadable.
         resume_after: Option<String>,
     },
+    /// The run paused for the owner's answer (WS14 S5): its `ask_user` question is waiting, the run
+    /// stays open and is resumed through the question form of `/continue`. A control event, ungated: a
+    /// client that never opted in still has to hear that its turn waits on an answer. Ids only; the
+    /// question itself rides the `user_question` frame sent just before it. `question_id` is empty when
+    /// the question could not be read.
+    AwaitingInput {
+        run_id: String,
+        question_id: String,
+    },
     /// A goal turn was settled (EP-7 S2): the goal's spend against its caps and its status after
     /// the turn. A control event, ungated: the goal bar needs it whatever the client opted into.
     /// Ids, counts and closed tokens only; the objective never rides it.
@@ -645,6 +661,9 @@ pub enum ChatEvent {
         status: &'static str,
         /// The closed reason beside the status; empty when none.
         status_reason: &'static str,
+        /// The completion judge's verdict on the goal's latest judged turn (`met`, `not_met`, `blocked`,
+        /// `unsure`); empty when none is known (EP-7 S3).
+        last_verdict: &'static str,
     },
     /// The workspace of the sandboxed computer a tool call used: where its files are kept, and whether they
     /// were (WS22-S6). `scope` is the workspace, `state` its outcome, and `cause` the closed reason when the
@@ -770,6 +789,8 @@ impl ChatEvent {
             | ChatEvent::Compaction { .. }
             | ChatEvent::ContextChange { .. }
             | ChatEvent::RunParked { .. }
+            // The run waits on the owner's answer (WS14 S5): the card needs it whatever the client opted into.
+            | ChatEvent::AwaitingInput { .. }
             // A goal's spend after a turn (EP-7 S2): the goal bar shows it on every client.
             | ChatEvent::GoalProgress { .. }
             // The question a run waits on (WS14 S4): the card needs it whatever the client opted into.
@@ -820,6 +841,7 @@ impl ChatEvent {
             ChatEvent::Compaction { .. } => "compaction",
             ChatEvent::ContextChange { .. } => "context_change",
             ChatEvent::RunParked { .. } => "run_parked",
+            ChatEvent::AwaitingInput { .. } => "awaiting_input",
             ChatEvent::GoalProgress { .. } => "goal_progress",
             ChatEvent::Title { .. } => "title",
             ChatEvent::FollowUps { .. } => "follow_ups",
@@ -995,6 +1017,7 @@ impl ChatEvent {
                 calls,
                 unpriced_calls,
                 cost_by_category,
+                routing_decision,
             } => {
                 let mut usage = json!({
                     "input_tokens": input_tokens,
@@ -1035,6 +1058,10 @@ impl ChatEvent {
                     if let Some(reason) = class.reason() {
                         usage["retention_reason"] = json!(reason);
                     }
+                }
+                // Stated only where the answer's route note states a decision, so a frame without one keeps its shape.
+                if let Some(decision) = routing_decision {
+                    usage["routing_decision"] = decision.clone();
                 }
                 usage
             }
@@ -1157,6 +1184,7 @@ impl ChatEvent {
                 snapshot,
                 ceiling,
                 routing,
+                routing_decision,
             } => {
                 let mut payload = json!({
                     "calls": snapshot.calls,
@@ -1195,6 +1223,10 @@ impl ChatEvent {
                 // Stated only on a call the budget moved, so an unmoved frame keeps its shape.
                 if let Some(routing) = routing {
                     payload["routing"] = json!(routing);
+                }
+                // Stated only where the answer's route note states a decision, so an unstated frame keeps its shape.
+                if let Some(decision) = routing_decision {
+                    payload["routing_decision"] = decision.clone();
                 }
                 payload
             }
@@ -1281,6 +1313,16 @@ impl ChatEvent {
                 "reason": reason.as_str(),
                 "resume_after": resume_after,
             }),
+            // The keys are the `awaiting_approval` frame's, plus the question's id (WS14 S5).
+            ChatEvent::AwaitingInput {
+                run_id,
+                question_id,
+            } => json!({
+                "run_id": run_id,
+                "request_id": request_id,
+                "question_id": question_id,
+                "status": "awaiting_input",
+            }),
             // A budget the goal does not set is `null`, so a client reads "none" without a guess.
             ChatEvent::GoalProgress {
                 goal_id,
@@ -1293,6 +1335,7 @@ impl ChatEvent {
                 max_turns,
                 status,
                 status_reason,
+                last_verdict,
             } => json!({
                 "goal_id": goal_id,
                 "turn_no": turn_no,
@@ -1304,6 +1347,7 @@ impl ChatEvent {
                 "max_turns": max_turns,
                 "status": status,
                 "status_reason": status_reason,
+                "last_verdict": last_verdict,
                 "request_id": request_id,
             }),
             ChatEvent::Stopped { reason } => json!({ "reason": reason, "request_id": request_id }),
@@ -1952,6 +1996,8 @@ impl RichEventSink {
                 snapshot,
                 ceiling,
                 routing,
+                // A tool round or overhead call carries no answer decision; only the answer's own frame does.
+                routing_decision: None,
             })
             .await;
         }
@@ -2388,6 +2434,7 @@ mod tests {
             confidence: None,
             served_by: None,
             retention_class: None,
+            routing_decision: None,
         }
         .should_emit(&no_features));
         assert!(ChatEvent::Stopped {
@@ -2550,6 +2597,7 @@ mod tests {
             confidence: Some(0.9),
             served_by: None,
             retention_class: None,
+            routing_decision: None,
         }
         .should_emit(&feats));
         let progress = ChatEvent::UsageProgress {
@@ -2557,6 +2605,7 @@ mod tests {
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
             ceiling: None,
             routing: None,
+            routing_decision: None,
         };
         assert!(progress.should_emit(&feats));
         // Not opted in:
@@ -2604,12 +2653,20 @@ mod tests {
                 output: 100,
                 cache_read: 200,
                 cache_write: 0,
+                priority: false,
             };
             let priced = match basis {
                 CostBasis::Subscription => Priced {
                     usd: Some(0.0),
                     by_category: None,
                     source: PriceSource::Subscription,
+                    note: None,
+                },
+                CostBasis::CustomerBilled => Priced {
+                    usd: Some(0.0),
+                    by_category: None,
+                    source: PriceSource::CustomerBilled,
+                    note: None,
                 },
                 CostBasis::Metered => Priced {
                     usd,
@@ -2620,6 +2677,7 @@ mod tests {
                         output_usd: 0.0,
                     }),
                     source: if usd.is_some() { PriceSource::Exact } else { PriceSource::Default },
+                    note: None,
                 },
             };
             total = meter.record(&call, &priced);
@@ -2636,6 +2694,7 @@ mod tests {
             snapshot: running_total(calls),
             ceiling: None,
             routing: None,
+            routing_decision: None,
         }
         .payload("req-1")
         .as_object()
@@ -2710,6 +2769,7 @@ mod tests {
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.25))]),
             ceiling: None,
             routing: None,
+            routing_decision: None,
         };
         assert_eq!(event.family(), Some("usage"));
         assert_eq!(event.name(), "usage_progress");
@@ -2735,6 +2795,7 @@ mod tests {
                 output: 100,
                 cache_read: 0,
                 cache_write: 0,
+                priority: false,
             };
             let priced = crate::pricing::Priced {
                 usd: Some(0.25),
@@ -2745,6 +2806,7 @@ mod tests {
                     output_usd: 0.0,
                 }),
                 source: crate::pricing::PriceSource::Exact,
+                note: None,
             };
             sink.record_call(&call, &priced, None).await;
             sink.record_call(&call, &priced, None).await;
@@ -2786,6 +2848,7 @@ mod tests {
             output: 100,
             cache_read: 0,
             cache_write: 0,
+            priority: false,
         };
         let priced = crate::pricing::Priced {
             usd: Some(0.1),
@@ -2796,6 +2859,7 @@ mod tests {
                 output_usd: 0.0,
             }),
             source: crate::pricing::PriceSource::Exact,
+            note: None,
         };
         sink.record_call(&call, &priced, None).await;
         assert!(
@@ -2822,6 +2886,7 @@ mod tests {
                 warning: Some(crate::sse_events::run_ceiling::CeilingWarning::Eighty),
             }),
             routing: None,
+            routing_decision: None,
         }
         .payload("req-1");
         assert_eq!(carried["ceiling_usd"], json!(0.05));
@@ -2850,6 +2915,7 @@ mod tests {
             output: 200,
             cache_read: 500,
             cache_write: 0,
+            priority: false,
         };
         assert_eq!(
             metered_tokens(&call(crate::pricing::CostBasis::Metered)),
@@ -2904,6 +2970,7 @@ mod tests {
             confidence: Some(0.77),
             served_by: None,
             retention_class: None,
+            routing_decision: None,
         };
         assert_eq!(usage.name(), "usage");
         let p = usage.payload("req-1");
@@ -2918,6 +2985,7 @@ mod tests {
             snapshot: running_total(&[(crate::pricing::CostBasis::Metered, Some(0.01))]),
             ceiling: None,
             routing: None,
+            routing_decision: None,
         };
         assert_eq!(progress.name(), "usage_progress");
 
@@ -3145,6 +3213,7 @@ mod tests {
             confidence: None,
             served_by: None,
             retention_class: None,
+            routing_decision: None,
         }
         .payload("req-2");
         assert_eq!(subscription["cost_usd"], 0.0);
@@ -3164,6 +3233,7 @@ mod tests {
             confidence: None,
             served_by: None,
             retention_class: None,
+            routing_decision: None,
         }
         .payload("req-3");
         let mut keys: Vec<&str> = unestablished
@@ -3202,6 +3272,7 @@ mod tests {
             confidence: None,
             served_by,
             retention_class: None,
+            routing_decision: None,
         }
         .payload("req-served")
     }
@@ -3225,6 +3296,7 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
             confidence: None,
             served_by: None,
             retention_class: None,
+            routing_decision: None,
         }
         .payload("req-1")
     };
@@ -3361,6 +3433,7 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
             confidence: None,
             served_by: None,
             retention_class: Some(RetentionClass::Zdr),
+            routing_decision: None,
         }
         .payload("req-zdr");
         assert_eq!(zdr["retention_class"], "zdr");
@@ -3391,6 +3464,7 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
             retention_class: Some(RetentionClass::ZdrWaived {
                 reason: "connection_not_zdr_capable",
             }),
+            routing_decision: None,
         }
         .payload("req-waived");
         assert_eq!(waived["retention_class"], "zdr_waived");
@@ -3417,6 +3491,7 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
             confidence: None,
             served_by: None,
             retention_class: Some(RetentionClass::Zdr),
+            routing_decision: None,
         }
         .payload("req-zdr");
         assert_eq!(zdr["retention_class"], "zdr");
@@ -3447,6 +3522,7 @@ fn usage_carries_cache_tokens_and_omits_them_when_zero() {
             confidence: None,
             served_by: None,
             retention_class: None,
+            routing_decision: None,
         };
         assert_eq!(event.name(), "turn_timing");
         assert_eq!(event.family(), usage.family());
@@ -3655,6 +3731,7 @@ mod payload_contract {
         "Compaction",
         "ContextChange",
         "RunParked",
+        "AwaitingInput",
         "GoalProgress",
         "SandboxState",
     ];
@@ -3696,6 +3773,7 @@ mod payload_contract {
             ChatEvent::Compaction { .. } => "Compaction",
             ChatEvent::ContextChange { .. } => "ContextChange",
             ChatEvent::RunParked { .. } => "RunParked",
+            ChatEvent::AwaitingInput { .. } => "AwaitingInput",
             ChatEvent::GoalProgress { .. } => "GoalProgress",
             ChatEvent::SandboxState { .. } => "SandboxState",
         }
@@ -3796,6 +3874,18 @@ mod payload_contract {
         ChatEvent::Grounding { grounding }
     }
 
+    /// The routing decision an answer's route note states (W5-073-b): one of each closed token `route_decision`
+    /// writes. The golden records the key as an object, so the tokens themselves never reach it.
+    fn route_decision_sample() -> Value {
+        json!({
+            "mode": "balance",
+            "complexity": "moderate",
+            "reason": "mode_cell",
+            "role": "follow_ups",
+            "role_source": "table",
+        })
+    }
+
     fn usage(full: bool) -> ChatEvent {
         ChatEvent::Usage {
             input_tokens: 12,
@@ -3824,6 +3914,8 @@ mod payload_contract {
                 cache_write_usd: 0.0,
                 output_usd: 0.0005,
             }),
+            // The full sample states its route note's decision; the minimal one keeps its shape.
+            routing_decision: full.then(route_decision_sample),
         }
     }
 
@@ -3835,10 +3927,11 @@ mod payload_contract {
         basis: Option<crate::pricing::CostBasis>,
         unpriced_calls: u32,
     ) -> ChatEvent {
-        usage_progress_with_ceiling(calls, cost_usd, basis, unpriced_calls, None, None)
+        usage_progress_with_ceiling(calls, cost_usd, basis, unpriced_calls, None, None, None)
     }
 
-    /// A progress frame of the same turn, carrying the run ceiling it states.
+    /// A progress frame of the same turn, carrying the run ceiling it states, the budget's routing token and
+    /// the routing decision its route note states (W5-073-b).
     fn usage_progress_with_ceiling(
         calls: u32,
         cost_usd: Option<f64>,
@@ -3846,6 +3939,7 @@ mod payload_contract {
         unpriced_calls: u32,
         ceiling: Option<crate::sse_events::run_ceiling::CeilingProgress>,
         routing: Option<&'static str>,
+        routing_decision: Option<Value>,
     ) -> ChatEvent {
         ChatEvent::UsageProgress {
             phase: crate::usage_meter::CallPhase::ToolRound,
@@ -3867,6 +3961,7 @@ mod payload_contract {
             },
             ceiling,
             routing,
+            routing_decision,
         }
     }
 
@@ -4052,9 +4147,28 @@ mod payload_contract {
                     warning: Some(crate::sse_events::run_ceiling::CeilingWarning::Eighty),
                 }),
                 None,
+                None,
             ),
             // A frame whose call the budget moved states its routing (WS27-S7).
-            usage_progress_with_ceiling(2, Some(0.001), Some(crate::pricing::CostBasis::Metered), 0, None, Some("tier_shifted")),
+            usage_progress_with_ceiling(
+                2,
+                Some(0.001),
+                Some(crate::pricing::CostBasis::Metered),
+                0,
+                None,
+                Some("tier_shifted"),
+                None,
+            ),
+            // The answer's own frame states the routing decision its route note stated (W5-073-b).
+            usage_progress_with_ceiling(
+                2,
+                Some(0.001),
+                Some(crate::pricing::CostBasis::Metered),
+                0,
+                None,
+                None,
+                Some(route_decision_sample()),
+            ),
             turn_timing(false),
             turn_timing(true),
             ChatEvent::Title { title: s("") },
@@ -4181,6 +4295,8 @@ mod payload_contract {
                 reason: mp_contracts::loop_fold::ParkReason::ProviderExhausted,
                 resume_after: Some(s("2026-10-20T12:00:00Z")),
             },
+            ChatEvent::AwaitingInput { run_id: s("run-1"), question_id: s("") },
+            ChatEvent::AwaitingInput { run_id: s("run-1"), question_id: s("q_1") },
             ChatEvent::GoalProgress {
                 goal_id: s("goal_1"),
                 turn_no: 1,
@@ -4192,6 +4308,7 @@ mod payload_contract {
                 max_turns: 10,
                 status: "active",
                 status_reason: "",
+                last_verdict: "",
             },
             ChatEvent::GoalProgress {
                 goal_id: s("goal_1"),
@@ -4204,6 +4321,7 @@ mod payload_contract {
                 max_turns: 10,
                 status: "budget_reached",
                 status_reason: "token_budget",
+                last_verdict: "not_met",
             },
             ChatEvent::SandboxState {
                 scope: "thread",
@@ -4468,6 +4586,20 @@ mod payload_contract {
             VARIANTS.iter().copied().collect::<BTreeSet<_>>(),
             "samples() and VARIANTS name different variants"
         );
+    }
+
+    /// The golden states `routing_decision` on both usage families: the terminal frame and the answer's progress
+    /// frame carry it, so the key the SPA reads is in the contract (W5-073-b).
+    #[test]
+    fn the_golden_states_a_routing_decision_on_both_usage_families() {
+        let carries = |family: &str| {
+            samples().iter().any(|event| {
+                event.name() == family && event.payload(REQUEST_ID)["routing_decision"].is_object()
+            })
+        };
+        for family in ["usage", "usage_progress"] {
+            assert!(carries(family), "{family} states no routing_decision");
+        }
     }
 
     #[test]

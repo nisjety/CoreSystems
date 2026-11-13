@@ -10,7 +10,9 @@
  * one `message` listener: a widget may size itself, stage a follow-up chip the
  * person clicks, and ask to open a safe link the person confirms
  * (`chat.stage_widget_followup`, `chat.open_widget_link`; limits in
- * `widget-bridge.ts`). Off, nothing the frame posts is listened to.
+ * `widget-bridge.ts`). Off, nothing the frame posts is listened to. With
+ * `VITE_WIDGET_SELECTION` on as well (EP-4 W4-IO-2) it may quote a passage of its own
+ * text in a chip the person clicks into the composer (`chat.stage_widget_selection`).
  */
 
 import { createContext, createMemo, createSignal, onCleanup, Show, useContext } from 'solid-js'
@@ -30,6 +32,12 @@ export const inlineWidgetsEnabled = () => import.meta.env.VITE_CHAT_INLINE_WIDGE
  */
 export const widgetBridgeEnabled = () => import.meta.env.VITE_CHAT_WIDGET_BRIDGE === 'true'
 
+/**
+ * `VITE_WIDGET_SELECTION`, literal `'true'` only; it acts only where the bridge runs. Off: a selection the frame
+ * posts is accepted and ignored, and it spends no follow-up budget.
+ */
+export const widgetSelectionEnabled = () => import.meta.env.VITE_WIDGET_SELECTION === 'true'
+
 export type InlineWidgetSurfaceKind = 'live' | 'inert'
 
 /**
@@ -40,10 +48,12 @@ export type InlineWidgetSurfaceKind = 'live' | 'inert'
  */
 export const InlineWidgetSurface = createContext<InlineWidgetSurfaceKind>('inert')
 
-/** What one assistant answer gives its widgets: the follow-up handler and the budget they share. */
+/** What one assistant answer gives its widgets: the follow-up and quote handlers and the budget they share. */
 type InlineWidgetAnswerScope = {
   /** Read when a follow-up arrives: a turn without the handler stages nothing. */
   followUpHandler: () => ((text: string) => void) | undefined
+  /** Read when a quote arrives (EP-4 W4-IO-2): a turn without it stages no quote, so a quote never replaces the draft. */
+  quoteHandler: () => ((text: string) => void) | undefined
   followupBudget: TokenBucket
 }
 
@@ -53,10 +63,18 @@ const InlineWidgetAnswerContext = createContext<InlineWidgetAnswerScope | null>(
  * Wraps one assistant answer, so its widgets' staged follow-ups go through the
  * answer's own follow-up handler (the one its follow-up chips use) and share one
  * budget. Without it a widget stages nothing.
+ *
+ * A quoted passage goes through `onQuoteSelection` instead (EP-4 W4-IO-2): that handler puts the quote in front of
+ * the composer's draft, where the follow-up handler replaces it. Without it a widget quotes nothing.
  */
-export function InlineWidgetAnswer(props: { onSelectFollowUp?: (text: string) => void; children: JSX.Element }): JSX.Element {
+export function InlineWidgetAnswer(props: {
+  onSelectFollowUp?: (text: string) => void
+  onQuoteSelection?: (text: string) => void
+  children: JSX.Element
+}): JSX.Element {
   const scope: InlineWidgetAnswerScope = {
     followUpHandler: () => props.onSelectFollowUp,
+    quoteHandler: () => props.onQuoteSelection,
     followupBudget: createAnswerFollowupBudget(),
   }
   return <InlineWidgetAnswerContext value={scope}>{props.children}</InlineWidgetAnswerContext>
@@ -132,14 +150,18 @@ function InlineWidgetFrame(props: { source: string; fallback: JSX.Element }): JS
   let frameElement: HTMLIFrameElement | undefined
   const [height, setHeight] = createSignal<number | null>(null)
   const [stagedFollowup, setStagedFollowup] = createSignal<string | null>(null)
+  const [stagedSelection, setStagedSelection] = createSignal<string | null>(null)
   const [pendingLink, setPendingLink] = createSignal<string | null>(null)
   const [linkRefused, setLinkRefused] = createSignal(false)
+  // Read once with the bridge: a frame keeps the switches it was drawn with.
+  const selectionOn = widgetSelectionEnabled()
 
   const bridge = bridgeOn
     ? createWidgetBridgeHost({
       frameWindow: () => frameElement?.contentWindow ?? null,
       // Outside an answer scope a frame still gets a budget of its own, but stages nothing (no handler).
       followupBudget: answer?.followupBudget ?? createAnswerFollowupBudget(),
+      selection: selectionOn,
     })
     : null
 
@@ -162,6 +184,11 @@ function InlineWidgetFrame(props: { source: string; fallback: JSX.Element }): JS
             return
           }
           setStagedFollowup(action.text)
+          return
+        case 'stage_selection':
+          // The quote reaches the composer only through the quote handler, which prefixes the draft: no handler, no chip.
+          if (!selectionOn || !answer?.quoteHandler()) return
+          setStagedSelection(action.text)
           return
         case 'confirm_link':
           // One question at a time: a widget cannot stack link prompts over the one the person reads.
@@ -189,6 +216,13 @@ function InlineWidgetFrame(props: { source: string; fallback: JSX.Element }): JS
   const sendFollowup = (text: string) => {
     clearFollowup()
     answer?.followUpHandler()?.(text)
+  }
+  const clearSelection = () => setStagedSelection(null)
+  // The quote goes into the composer through the answer's quote handler, which puts it in front of the draft rather than
+  // replacing it: the person's click stages it and nothing here sends it, so the person sends it as an ordinary turn.
+  const quoteSelection = (text: string) => {
+    clearSelection()
+    answer?.quoteHandler()?.(text)
   }
 
   return (
@@ -253,6 +287,25 @@ function InlineWidgetFrame(props: { source: string; fallback: JSX.Element }): JS
           </div>
         )}
       </Show>
+      <Show when={stagedSelection()}>
+        {(text) => (
+          <div
+            class="verevon-chat-followups"
+            role="group"
+            aria-label={i18n.tr('Valgt tekst fra widgeten', 'Text selected in the widget')}
+          >
+            <span class="verevon-inline-widget__note">
+              {i18n.tr('Valgt tekst fra widgeten:', 'Text selected in the widget:')}
+            </span>
+            <button type="button" class="verevon-chat-followup-chip" onClick={() => quoteSelection(text())}>
+              {`> ${text()}`}
+            </button>
+            <button type="button" class="verevon-inline-widget__action" onClick={clearSelection}>
+              {i18n.tr('Avvis', 'Dismiss')}
+            </button>
+          </div>
+        )}
+      </Show>
       <Show when={pendingLink()}>
         {(url) => (
           <div
@@ -286,6 +339,8 @@ function InlineWidgetFrame(props: { source: string; fallback: JSX.Element }): JS
       <Show when={showCode()}>
         <div class="verevon-inline-widget__code">{props.fallback}</div>
       </Show>
+      {/* The print export's twin: print.ts replaces the whole figure with this code, so a PDF shows the source, never the frame. */}
+      <pre class="verevon-inline-widget__export" hidden><code>{props.source}</code></pre>
     </figure>
   )
 }

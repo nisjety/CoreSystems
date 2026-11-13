@@ -2,7 +2,7 @@
 //! `browser.observe` just returned (Quarry v2 E4.3, F-t2-043).
 //!
 //! A skill may name the sites it is for (`UpsertAgentSkillRequest.url_patterns`,
-//! stored on `agent_skills` since migration 0116). While `EXECUTION_CORE_SKILL_URL_MATCH`
+//! stored on `agent_skills` since migration 0130). While `EXECUTION_CORE_SKILL_URL_MATCH`
 //! is the literal `true`, a successful `browser.observe` in the Do loop is followed by the
 //! guidance of up to [`MAX_URL_SKILLS`] such skills, framed AFTER the already screened and
 //! rendered page output, so the skill text is never screened or labelled as page content.

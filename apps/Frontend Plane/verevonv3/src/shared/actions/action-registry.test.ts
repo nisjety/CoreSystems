@@ -106,9 +106,10 @@ describe('action registry', () => {
   it('pins the continuation input keys and says in its description what a refusal or a spent frame means', () => {
     const continueRun = getActionDescriptor('chat.run.continue')
 
-    // The wire carries only the three identifiers; nothing else widens a continuation.
+    // The wire carries the three identifiers and the two forms that widen them: the skipped-site form (skipped) and the
+    // question form (questionId, answers, questionSkip). Nothing else widens a continuation.
     expect(Object.keys((continueRun?.inputSchema as unknown as { shape: Record<string, unknown> }).shape).sort())
-      .toEqual(['approvalId', 'claimToken', 'runId'])
+      .toEqual(['answers', 'approvalId', 'claimToken', 'questionId', 'questionSkip', 'runId', 'skipped'])
     expect(continueRun?.risk).toBe('high')
     expect(continueRun?.requiresApproval).toBe(false)
     expect(continueRun?.reversible).toBe(false)
@@ -167,9 +168,10 @@ describe('action registry', () => {
     expect(schema?.safeParse({ runId: 'run_1', claimToken: '' }).success).toBe(false)
     expect(schema?.safeParse({ runId: 'run_1', approvalId: 'appr_1' }).success).toBe(false)
 
-    // The wire still names only the three identifiers, and the action keeps its standing.
+    // The wire names the three identifiers and the two forms that widen them (skipped; questionId, answers, questionSkip),
+    // and the action keeps its standing.
     expect(Object.keys((schema as unknown as { shape: Record<string, unknown> }).shape).sort())
-      .toEqual(['approvalId', 'claimToken', 'runId'])
+      .toEqual(['answers', 'approvalId', 'claimToken', 'questionId', 'questionSkip', 'runId', 'skipped'])
     expect(continueRun?.risk).toBe('high')
     expect(continueRun?.requiresApproval).toBe(false)
     expect(isModelExecutableAction('chat.run.continue')).toBe(false)
@@ -326,10 +328,11 @@ describe('action registry', () => {
     expect(decide?.inputSchema.safeParse({ ...base, decision: 'reject', reason: 'not this one' }).success).toBe(true)
     expect(decide?.inputSchema.safeParse({ ...base, scope: 'once' }).success).toBe(true)
 
-    // A standing scope does not exist yet, and a decision is one of two words.
-    for (const scope of ['thread', 'run', 'forever']) {
-      expect(decide?.inputSchema.safeParse({ ...base, scope }).success).toBe(false)
+    // The standing scopes are thread and run; a forever grant is not in the schema, and a decision is one of two words.
+    for (const scope of ['thread', 'run']) {
+      expect(decide?.inputSchema.safeParse({ ...base, scope }).success).toBe(true)
     }
+    expect(decide?.inputSchema.safeParse({ ...base, scope: 'forever' }).success).toBe(false)
     expect(decide?.inputSchema.safeParse({ ...base, decision: 'maybe' }).success).toBe(false)
     expect(decide?.inputSchema.safeParse({ ...base, approvalId: '' }).success).toBe(false)
     expect(decide?.inputSchema.safeParse({ ...base, reason: 'x'.repeat(501) }).success).toBe(false)
@@ -1806,7 +1809,23 @@ describe('action registry', () => {
     // model-plane (P1 chat.open_computer_viewer: +1): 320 + 3 = 323.
     // +2 after Q2-WS8.I-b registered browser_tab.control and browser_attach.stop, the per-tab Take over and
     // Give back and the Stop agent of an attached browser (325 + 2 = 327).
-    expect(ids).toHaveLength(327)
+    // +1 after EP-6-S9 registered spaces.agent_binding.pin, the Space agent version pin.
+    // +1 after EP-6-S11 registered agents.admitted_actions.list (action-registry.ts, the same tree): 323 + 2 = 325.
+    // +1 after EP-6-S8 registered agents.preview, the builder's draft preview.
+    // +1 after W3-EP-7-S6-c registered chat.goal_away_start, the keep-working-while-away start.
+    // +1 after W4-CC-2 registered mcp.probe_server, the MCP add flow's probe of a server before it is saved.
+    // +3 after W5-077-c registered chat.thread.archive, chat.thread.star and chat.thread.mark_unread, the palette's thread flags.
+    // +5 after W4-PL-4 registered plugins.list_catalog, plugins.install, plugins.uninstall, plugins.approve_catalog and plugins.kill_digest.
+    // +3 after W5-074-c registered org.list_permission_rules, org.create_permission_rule and org.delete_permission_rule, the organization's permission rules.
+    // +3 after W4-CC-8 registered connectors.create_credential_binding, connectors.revoke_credential_binding and connectors.create_custom_rest, the stored connector keys and the custom REST connector.
+    // +1 after W5-081-d registered learning.teach_skill_from_run, the save-as-skill action after a takeover.
+    // +1 after W4-PL-4 registered plugins.lift_kill, the admin's lift of an org kill-list entry.
+    // FU-02 recount of the static registry after the B01-B11 additions (library.*, side chat, org permission rules, plugins, wiki proposals, event triggers, audit/SIEM, connectors and the rest): 325 descriptors in action-registry.ts plus 49 Space fragment entries.
+    // Merge of quarry-w45 into main: main's 374 plus the 8 static descriptors quarry-w45 added over the merge base
+    // (browser.list_origin_consents, browser.revoke_origin_consent, browser_attach.stop, browser_tab.control,
+    // browser_context.resolve_tab_mentions, browser_region.attach, browser_evidence.save_recipe and
+    // chat.research_run.cancel): 374 + 8 = 382.
+    expect(ids).toHaveLength(382)
 
     // The fragments also carry ids outside the `spaces.` prefix (`space.files.*`), so the Space
     // entries are the ones the fragments declare.

@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// int4Max is the largest value of the INTEGER version columns (migration 0039).
+// int4Max is the largest value of the INTEGER version columns (migration 0043).
 const int4Max = 2147483647
 
 // beyondInt4 is one more than the largest INTEGER value. A version number this large cannot be stored.

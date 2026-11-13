@@ -118,8 +118,12 @@ func zdrOwnedModelConnection(c *fiber.Ctx, cfg ServerConfig) (store.Connection, 
 	return connection, nil
 }
 
-// zdrWording is the loaded acknowledgement wording, or a refusal when it cannot be read.
-func zdrWording() (*zdr.Wording, error) {
+// zdrWording is the loaded acknowledgement wording, or a refusal when it cannot be read. The wording the
+// server config supplies wins (a test seam); nil means the embedded wording.
+func zdrWording(cfg ServerConfig) (*zdr.Wording, error) {
+	if cfg.ZDRWording != nil {
+		return cfg.ZDRWording, nil
+	}
 	wording, err := zdr.DefaultWording()
 	if err != nil {
 		return nil, zdrRefuse(fiber.StatusServiceUnavailable, "zdr_wording_unavailable", "The acknowledgement text is unavailable.")
@@ -147,7 +151,7 @@ func zdrAssessmentRead(c *fiber.Ctx, cfg ServerConfig) error {
 	if err != nil {
 		return writeZDRError(c, err)
 	}
-	wording, err := zdrWording()
+	wording, err := zdrWording(cfg)
 	if err != nil {
 		return writeZDRError(c, err)
 	}
@@ -179,7 +183,7 @@ func zdrAssessmentRead(c *fiber.Ctx, cfg ServerConfig) error {
 	if err != nil {
 		return writeZDRError(c, zdrRefuse(fiber.StatusBadRequest, "text_not_available", "There is no text for this connection in that variant."))
 	}
-	acknowledgement, err := zdrAckInForce(c, cfg, connection.ID, record.Digest)
+	acknowledgement, err := zdrAckInForce(c, cfg, connection.ID, record.Digest, wording.MinimumVersion())
 	if err != nil {
 		return writeZDRError(c, err)
 	}
@@ -196,14 +200,15 @@ func zdrAssessmentRead(c *fiber.Ctx, cfg ServerConfig) error {
 	})
 }
 
-// zdrAckInForce returns the active acknowledgement bound to the current digest, or nil.
-func zdrAckInForce(c *fiber.Ctx, cfg ServerConfig, connectionID, digest string) (fiber.Map, error) {
+// zdrAckInForce returns the active acknowledgement bound to the current digest, or nil. An acknowledgement
+// whose text is below the minimum is not in force, exactly as the posture read rules, so it is never shown here.
+func zdrAckInForce(c *fiber.Ctx, cfg ServerConfig, connectionID, digest, minimum string) (fiber.Map, error) {
 	rows, err := cfg.Repo.ListConnectionZDRAcknowledgements(c.UserContext(), connectionID, true)
 	if err != nil {
 		return nil, err
 	}
 	for _, ack := range rows {
-		if ack.Digest == digest && ack.Active() {
+		if ack.Digest == digest && ack.Active() && zdr.TextVersionAtLeast(ack.TextVersion, minimum) {
 			return zdrAckSummary(ack), nil
 		}
 	}
@@ -227,7 +232,9 @@ func zdrAckState(ack store.ConnectionZDRAcknowledgement) string {
 // zdrAcknowledge records the member's acknowledgement. The digest and text version must be the
 // ones the member was shown; a change in either is a 409 with the current assessment. The text is
 // composed on the server from the versioned wording and stored with its hash, and the acknowledgement,
-// its audit row and the outbox event commit together. A replay returns the stored acknowledgement.
+// its audit row and the outbox event commit together. A replay returns the stored acknowledgement. An
+// acknowledgement of the same digest whose text is below the minimum is not in force, so it is superseded
+// first, in the same transaction, and the member's acknowledgement of the current text is then created.
 func zdrAcknowledge(c *fiber.Ctx, cfg ServerConfig) error {
 	connection, err := zdrOwnedModelConnection(c, cfg)
 	if err != nil {
@@ -255,7 +262,7 @@ func zdrAcknowledge(c *fiber.Ctx, cfg ServerConfig) error {
 	if !zdrAckVariantKnown(body.Variant) {
 		return writeZDRError(c, zdrRefuse(fiber.StatusBadRequest, "invalid_variant", "variant must be org_zdr_on or first_use, the text the member was shown."))
 	}
-	wording, err := zdrWording()
+	wording, err := zdrWording(cfg)
 	if err != nil {
 		return writeZDRError(c, err)
 	}
@@ -309,6 +316,11 @@ func zdrAcknowledge(c *fiber.Ctx, cfg ServerConfig) error {
 	var saved store.ConnectionZDRAcknowledgement
 	var created bool
 	err = withAuditTransaction(c.UserContext(), cfg, func(tx store.AuditTransaction, persist func(store.AuditEvent) error) error {
+		// The row below the minimum holds the one active slot of this digest, so the insert below would answer
+		// with it as a replay. It is superseded first, in this transaction, with its audit row.
+		if err := zdrSupersedeBelowMinimum(c.UserContext(), tx, persist, connection.ID, body.Digest, wording.MinimumVersion(), time.Now().UTC()); err != nil {
+			return err
+		}
 		var insertErr error
 		saved, created, insertErr = tx.InsertConnectionZDRAcknowledgement(c.UserContext(), store.NewConnectionZDRAcknowledgement{
 			OrganizationID: connection.OrganizationID, ConnectionID: connection.ID, UserID: connection.UserID,
@@ -358,6 +370,34 @@ func zdrAcknowledge(c *fiber.Ctx, cfg ServerConfig) error {
 		"success": true,
 		"data":    fiber.Map{"created": created, "acknowledgement": zdrAckSummary(saved)},
 	})
+}
+
+// zdrSupersedeBelowMinimum revokes the active acknowledgement of the digest whose text is below the minimum,
+// with reason text_version_superseded, and audits the revocation through persist, in the caller's transaction.
+// Such a row is not in force, and it holds the one active slot the (connection, digest) index allows, so it
+// must be taken out of force before the acknowledgement of the current text is inserted. A row that a
+// concurrent request has already revoked is no longer in force, so it is skipped.
+func zdrSupersedeBelowMinimum(ctx context.Context, tx store.AuditTransaction, persist func(store.AuditEvent) error, connectionID, digest, minimum string, at time.Time) error {
+	rows, err := tx.ListConnectionZDRAcknowledgements(ctx, connectionID, true)
+	if err != nil {
+		return err
+	}
+	for _, ack := range rows {
+		if ack.Digest != digest || zdr.TextVersionAtLeast(ack.TextVersion, minimum) {
+			continue
+		}
+		revoked, revokeErr := tx.RevokeConnectionZDRAcknowledgement(ctx, connectionID, ack.ID, store.ZDRRevokeTextVersionOutdated, at)
+		if errors.Is(revokeErr, store.ErrNotFound) {
+			continue
+		}
+		if revokeErr != nil {
+			return revokeErr
+		}
+		if err := persist(store.ZDRAcknowledgementRevokedAuditEvent(revoked, store.ZDRRevokeTextVersionOutdated, at)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // zdrStoreRefusal maps the ledger's refusals to the API's codes. Anything else is an internal error.
@@ -419,22 +459,40 @@ func zdrRevokeOwn(c *fiber.Ctx, cfg ServerConfig) error {
 	return success(c, fiber.Map{"connectionId": connection.ID, "revoked": revoked})
 }
 
+// Closed codes for why an acknowledgement is not in force (the ackReason of the posture read).
+const (
+	zdrAckReasonNone             = "none"
+	zdrAckReasonRevoked          = "revoked"
+	zdrAckReasonStaleDigest      = "stale_digest"
+	zdrAckReasonTextBelowMinimum = "text_version_below_minimum"
+)
+
 // zdrPostureRead is the user-bound posture Auth Core reads, as the session user, when it decides a
-// turn. It carries only the opaque digest, the text version and the acknowledgement state (and the
-// acknowledgement's id, which the decision binds to). It never carries the capability's basis, the
-// organisation or any text.
+// turn (edge E2). It carries the facts the posture matrix reads and nothing else: the provider the claim
+// binds, the capability, whether a waiver route exists, the opaque digest, the text version, the
+// acknowledgement state and its id (which the decision binds to), and a closed reason code when an
+// acknowledgement is required but not in force. It never carries the capability's basis, the
+// organisation, a request id or any text.
+//
+// ackState is acknowledged only for an active row on the current digest whose text version is at or
+// above the wording's minimum; a revoked row, a row on another digest and a row on an older text are
+// never acknowledged.
 func zdrPostureRead(c *fiber.Ctx, cfg ServerConfig) error {
 	connection, err := zdrOwnedModelConnection(c, cfg)
 	if err != nil {
 		return writeZDRError(c, err)
 	}
-	wording, err := zdrWording()
+	wording, err := zdrWording(cfg)
 	if err != nil {
 		return writeZDRError(c, err)
 	}
 	// A posture read decides whether a turn's content is retained: it is never cached.
 	c.Set("Cache-Control", "no-store")
-	posture := fiber.Map{"connectionId": connection.ID, "ackState": "unassessed", "ackId": "", "digest": "", "textVersion": ""}
+	posture := fiber.Map{
+		"connectionId": connection.ID, "ackState": "unassessed", "ackId": "", "digest": "", "textVersion": "",
+		"providerKey": connection.ProviderKey, "capability": string(zdr.CapabilityCannotVerify),
+		"waiverRoute": false, "ackReason": zdrAckReasonNone,
+	}
 	record, err := cfg.Repo.GetConnectionZDR(c.UserContext(), connection.ID)
 	if errors.Is(err, store.ErrNotFound) {
 		return success(c, posture)
@@ -444,24 +502,60 @@ func zdrPostureRead(c *fiber.Ctx, cfg ServerConfig) error {
 	}
 	posture["digest"] = record.Digest
 	posture["textVersion"] = wording.Version()
+	posture["capability"] = string(record.Capability)
+	posture["waiverRoute"] = zdrWaiverRoute(record)
 	if record.Capability.KeepsZDR() {
 		posture["ackState"] = "not_required"
+		posture["ackReason"] = ""
 		return success(c, posture)
 	}
 	posture["ackState"] = "required"
-	rows, err := cfg.Repo.ListConnectionZDRAcknowledgements(c.UserContext(), connection.ID, true)
+	rows, err := cfg.Repo.ListConnectionZDRAcknowledgements(c.UserContext(), connection.ID, false)
 	if err != nil {
 		return writeZDRError(c, err)
 	}
+	var belowMinimum, revoked, otherDigest bool
 	for _, ack := range rows {
-		if ack.Digest == record.Digest && ack.Active() {
+		switch {
+		case ack.Digest != record.Digest:
+			otherDigest = true
+		case !ack.Active():
+			revoked = true
+		case !zdr.TextVersionAtLeast(ack.TextVersion, wording.MinimumVersion()):
+			belowMinimum = true
+		default:
 			posture["ackState"] = "acknowledged"
 			posture["ackId"] = ack.ID
 			posture["textVersion"] = ack.TextVersion
-			break
+			posture["ackReason"] = ""
+			return success(c, posture)
 		}
 	}
+	reason := zdrAckReasonNone
+	switch {
+	case belowMinimum:
+		reason = zdrAckReasonTextBelowMinimum
+	case revoked:
+		reason = zdrAckReasonRevoked
+	case otherDigest:
+		reason = zdrAckReasonStaleDigest
+	}
+	posture["ackReason"] = reason
 	return success(c, posture)
+}
+
+// zdrWaiverRoute reports whether the capability contract offers a waiver route for the connection's
+// provider and auth mode. It is false when the contract cannot be read or has no row for the connection.
+func zdrWaiverRoute(record store.ConnectionZDR) bool {
+	assessor, err := zdr.Default()
+	if err != nil {
+		return false
+	}
+	assessment, err := assessor.Assess(record.ProviderKey, record.AuthMode)
+	if err != nil {
+		return false
+	}
+	return assessment.WaiverRoute
 }
 
 // zdrAdminList is the organisation's ledger for its admins: ids, states and counts, never the text

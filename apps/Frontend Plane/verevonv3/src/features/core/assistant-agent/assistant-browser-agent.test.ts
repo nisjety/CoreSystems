@@ -465,6 +465,7 @@ describe('assistant browser task', () => {
     ['browser_agent_permission_denied', 'lacks permission'],
     ['browser_timed_out', 'timed out'],
     ['browser_resource_exhausted', 'resource limit'],
+    ['browser_help_timed_out', 'Nobody took over'],
   ])('shows a safe, actionable message for the matching terminal code %s', async (code, expected) => {
     const f = fixture({ replay: vi.fn(async () => ({ runId: 'run-1', events: [
       { eventId: '1', eventType: 'EVENT_TYPE_RUN_FAILED', at: '2026-01-01T00:00:00Z', payload: { run_id: 'run-1', terminal: true, status: 'failed', failure_code: code } },

@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { prepareChatAttachments } from './prepare-chat-attachments'
 import { extractChatDocument, getAttachmentPolicy } from '@/shared/api/chat-client'
+import { LocalizedError, translateApiError } from '@/shared/i18n/errors'
 
 vi.mock('@/shared/api/chat-client', () => ({ extractChatDocument: vi.fn(), getAttachmentPolicy: vi.fn(() => undefined) }))
 const file = (name: string, text: string) => ({ id: name, name, size: text.length, type: 'text/plain', url: `data:text/plain,${encodeURIComponent(text)}` })
@@ -14,7 +15,11 @@ describe('complete attachment preparation before submission', () => {
     vi.mocked(getAttachmentPolicy).mockReturnValueOnce({ maxFileBytes: 4_000_000 } as ReturnType<typeof getAttachmentPolicy>)
     expect((await prepareChatAttachments([big]))[0]?.extractedText).toBe('content')
     vi.mocked(getAttachmentPolicy).mockReturnValueOnce({ maxFileBytes: 1_500_000 } as ReturnType<typeof getAttachmentPolicy>)
-    await expect(prepareChatAttachments([big])).rejects.toThrow('under 1,5 MB')
+    // The Norwegian sentence keeps the Norwegian decimal comma; the English `message` writes 1.5.
+    const limited: unknown = await prepareChatAttachments([big]).then(() => undefined, (error: unknown) => error)
+    expect(limited).toBeInstanceOf(LocalizedError)
+    expect((limited as LocalizedError).copy.no).toContain('under 1,5 MB')
+    expect((limited as LocalizedError).message).toContain('under 1.5 MB')
   })
   it('preserves both same-named files in order', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({ ok: true, text: async () => 'first' }).mockResolvedValueOnce({ ok: true, text: async () => 'second' }))
@@ -23,6 +28,19 @@ describe('complete attachment preparation before submission', () => {
   it('rejects a partial batch when the second file cannot be read', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({ ok: true, text: async () => 'first' }).mockResolvedValueOnce({ ok: false }))
     await expect(prepareChatAttachments([file('first.md', 'first'), file('missing.csv', '')])).rejects.toThrow('missing.csv')
+  })
+  it('refuses an unreadable file as a LocalizedError that names the file in both languages', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false }))
+    const caught: unknown = await prepareChatAttachments([file('missing.md', 'first')]).then(() => undefined, (error: unknown) => error)
+    expect(caught).toBeInstanceOf(LocalizedError)
+    const refusal = caught as LocalizedError
+    expect(refusal.copy.no).toContain('Kunne ikke lese hele «missing.md». Utkastet er beholdt.')
+    expect(refusal.copy.en).toContain('Could not read all of “missing.md”. Your draft has been kept.')
+    expect(refusal.copy.en).not.toMatch(/Kunne ikke|Utkastet|Prøv igjen/)
+    // What a send site shows: the refusal's own words in the reader's language, never its generic fallback.
+    const fallback = { no: 'Kunne ikke sende. Prøv igjen.', en: 'Could not send. Please retry.' }
+    expect(translateApiError(refusal, (noText) => noText, fallback)).toBe(refusal.copy.no)
+    expect(translateApiError(refusal, (_noText, enText) => enText, fallback)).toBe(refusal.copy.en)
   })
   it('rejects over-budget text instead of indexing it after the answer starts', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, text: async () => 'x'.repeat(60_001) }))

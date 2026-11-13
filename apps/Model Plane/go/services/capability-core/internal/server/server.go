@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
 	mpv1 "github.com/triodelab/model-plane/gen/go/model_plane/v1"
 	"github.com/triodelab/model-plane/pkg/authctx"
+	"github.com/triodelab/model-plane/services/capability-core/internal/api"
 	"github.com/triodelab/model-plane/services/capability-core/internal/domain"
 	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
 	"github.com/triodelab/model-plane/services/capability-core/internal/models"
@@ -59,6 +61,25 @@ type Server struct {
 	// honours manifest_sha256 and reads the bundle a pinned version named; off, the field is
 	// ignored and the live bundle is read, as before.
 	skillBundleRetention bool
+
+	// permissionRules reads the org permission rules (W5-074). The gate consults it only while
+	// permissionRulesEnabled is true.
+	permissionRules permissionRuleMatcher
+
+	// permissionRulesEnabled is CAPABILITY_PERMISSION_RULES_ENABLED, parsed by the caller.
+	permissionRulesEnabled bool
+
+	// ruleUses records the use of a stored allow that relaxed a call. It is read only while ruleAudit is true.
+	ruleUses RuleUseRecorder
+
+	// ruleAudit is TOOL_POLICY_RULE_AUDIT_ENABLED, parsed by the caller (policy.ToolPolicyRuleAuditFromLookup).
+	ruleAudit bool
+}
+
+// RuleUseRecorder writes the content-free audit row of a call a stored allow relaxed. *api.ToolPoliciesHandler
+// satisfies it. A failed write fails the decision closed (WS13 S7, K3-2).
+type RuleUseRecorder interface {
+	RecordRuleUse(ctx context.Context, use api.RuleUse) error
 }
 
 // modelCapabilitySource is the narrow slice of the models registry the
@@ -99,6 +120,13 @@ type toolDefinitionSearcher interface {
 type capabilityStore interface {
 	GetForOrg(context.Context, string, string) (*registry.CapabilityRow, error)
 	RankedList(context.Context, string, string, []string, int) ([]registry.ScoredCapability, error)
+}
+
+// permissionRuleMatcher is the org permission rule read the gate applies: the decision the rules of the verified org
+// make for one call, and the id of the rule that made it. An error is a failed read. *api.PermissionRuleStore satisfies
+// it.
+type permissionRuleMatcher interface {
+	Match(ctx context.Context, orgID, tool, kind, value string) (string, string, error)
 }
 
 // toDetail converts a domain Capability into a wire CapabilityDetail.
@@ -231,6 +259,25 @@ func (s *Server) WithSkillBundleRetention(enabled bool) *Server {
 // arrives already parsed by skillbundle.DeckTemplatesFromLookup; off, every summary reports false.
 func (s *Server) WithDeckTemplates(enabled bool) *Server {
 	s.deckTemplatesEnabled = enabled
+	return s
+}
+
+// WithPermissionRules attaches the org permission rules and the switch that lets the gate read them. The switch arrives
+// already parsed (api.PermissionRulesEnabledFromLookup), so only the literal "true" enables it; off, no rule is read and
+// EvaluatePolicy decides as it did before.
+func (s *Server) WithPermissionRules(rules permissionRuleMatcher, enabled bool) *Server {
+	s.permissionRules = rules
+	s.permissionRulesEnabled = enabled && rules != nil
+	return s
+}
+
+// WithRuleAudit attaches the recorder of rule-relaxed calls and the switch that turns the audit on. The switch arrives
+// already parsed (policy.ToolPolicyRuleAuditFromLookup), so only the literal "true" enables it. Off, EvaluatePolicy
+// writes no row and treats an unstated run posture as it did before; an explicit retention_bound run is still never
+// relaxed by a person's allow.
+func (s *Server) WithRuleAudit(recorder RuleUseRecorder, enabled bool) *Server {
+	s.ruleUses = recorder
+	s.ruleAudit = enabled
 	return s
 }
 
@@ -551,6 +598,8 @@ func (s *Server) GetCapability(ctx context.Context, req *mpv1.GetCapabilityReque
 // nowhere is decided against the capability's own class and floor, its ceiling.
 // With TOOL_POLICY_ENFORCED on, the stored tool policies of the org and of the
 // named person apply as well (policy.EvaluateTool).
+// With CAPABILITY_PERMISSION_RULES_ENABLED on, the org's permission rules tighten
+// the decision last (applyPermissionRules).
 // The tool, the user, the class and floor, the policy source and the pinned
 // digest are all signed into the decision evidence.
 func (s *Server) EvaluatePolicy(ctx context.Context, req *mpv1.EvaluatePolicyRequest) (*mpv1.EvaluatePolicyResponse, error) {
@@ -610,11 +659,124 @@ func (s *Server) EvaluatePolicy(ctx context.Context, req *mpv1.EvaluatePolicyReq
 	// EvaluateTool is the capability decision tightened by the binding, and by the
 	// stored policies when TOOL_POLICY_ENFORCED is on. With the switch off the
 	// decision and its signed evidence are the ones this path produced before.
-	result, err := s.policy.EvaluateTool(ctx, capability, binding, req.GetUserId(), req.RunId, req.AgentId, orgID, req.Scope)
+	// A run that stores no content never has a person's allow applied to it (D-WS13-1); the run's posture is the one
+	// execution-core stated, and an unstated one counts as bound while the rule audit is on.
+	retentionBound := policy.RetentionBoundFor(req.GetRunRetention(), s.ruleAudit)
+	result, err := s.policy.EvaluateToolFor(ctx, capability, binding, policy.ToolCall{
+		UserID:         req.GetUserId(),
+		RunID:          req.RunId,
+		AgentID:        req.AgentId,
+		OrgID:          orgID,
+		Scope:          req.Scope,
+		RetentionBound: retentionBound,
+	})
 	if err != nil {
 		return nil, mapErr(err)
 	}
+	if s.permissionRulesEnabled {
+		result = s.applyPermissionRules(ctx, orgID, req, capability, binding, result)
+	}
+	result = s.auditRuleUse(ctx, principal, orgID, req, capability, binding, retentionBound, result)
 	return s.policyResponse(req, orgID, capability, result, binding), nil
+}
+
+// auditRuleUse writes the tool_policy_rule_used row for a call a stored allow relaxed (WS13 S7). It writes nothing
+// while the audit is off, for a call that no allow relaxed, for a retention-bound run (an org allow still applied; a
+// ZDR or waived run gets no row, DEC-32) and for a caller that is not a service (a preview). When the write fails it
+// logs the capability id and the error only, and demotes the decision to an ask: a rule is never used without its row.
+func (s *Server) auditRuleUse(
+	ctx context.Context,
+	principal authctx.Principal,
+	orgID string,
+	req *mpv1.EvaluatePolicyRequest,
+	capability *models.Capability,
+	binding *policy.ToolBinding,
+	retentionBound bool,
+	result *policy.Result,
+) *policy.Result {
+	if !s.ruleAudit || result == nil || result.PolicySource != policy.PolicySourceToolPolicyAllow || result.RulePolicyID == "" {
+		return result
+	}
+	if retentionBound || principal.PrincipalType != "service" || req.GetRunId() == "" {
+		return result
+	}
+	use := api.RuleUse{
+		OrgID:        orgID,
+		PolicyID:     result.RulePolicyID,
+		CapabilityID: capability.ID,
+		ScopeKind:    result.RuleScope,
+		RunID:        req.GetRunId(),
+		Actor:        principal.ActorID,
+	}
+	if binding != nil {
+		use.ToolDigest = binding.ToolDigest
+	}
+	var err error
+	if s.ruleUses == nil {
+		err = errors.New("rule use recorder unavailable")
+	} else {
+		err = s.ruleUses.RecordRuleUse(ctx, use)
+	}
+	if err != nil {
+		slog.Error("tool policy rule use not recorded", "capability_id", capability.ID, "error", err)
+		return &policy.Result{
+			Decision:          policy.DecisionAsk,
+			Reason:            "tool_policy_rule_unaudited",
+			PolicySource:      policy.PolicySourceRiskLevel,
+			ToolPolicyChecked: result.ToolPolicyChecked,
+		}
+	}
+	return result
+}
+
+// orgPermissionRuleReasonPrefix starts the reason of a decision an org permission rule made. The reason names the rule
+// and nothing else: no argument, target or address of the call reaches the signed decision.
+const orgPermissionRuleReasonPrefix = "org_rule:"
+
+// orgPermissionRulesUnavailableReason is the reason of the ask that a failed read of the rule table makes. It names no
+// rule, because none was read.
+const orgPermissionRulesUnavailableReason = "org_rules_unavailable"
+
+// applyPermissionRules tightens a decision with the org's permission rules (W5-074). It never loosens. A deny stands.
+// A rule that denies makes a deny; a rule that asks makes an ask, whether the decision was an allow or an ask already.
+// A failed read of the table makes an ask for an effect class and leaves a read class as it was. The target is the one
+// execution-core derived for the call. A ZDR or waived run sends the kind alone, and a rule of that kind then covers
+// the call whatever its value (targetPatternMatches), so the rules decide such a run as they decide a persistent one,
+// and never more loosely.
+func (s *Server) applyPermissionRules(
+	ctx context.Context,
+	orgID string,
+	req *mpv1.EvaluatePolicyRequest,
+	capability *models.Capability,
+	binding *policy.ToolBinding,
+	result *policy.Result,
+) *policy.Result {
+	if result.Decision == policy.DecisionDeny {
+		return result
+	}
+	decision, ruleID, err := s.permissionRules.Match(ctx, orgID, req.GetToolName(), req.GetTargetKind(), req.GetTargetValue())
+	if err != nil {
+		slog.Error("org permission rules unavailable", "error", err)
+		class, _, _ := evaluatedClass(capability, binding)
+		if result.Decision == policy.DecisionAllow && class != models.SideEffectRead {
+			return &policy.Result{
+				Decision:          policy.DecisionAsk,
+				Reason:            orgPermissionRulesUnavailableReason,
+				PolicySource:      policy.PolicySourceOrgPermissionRule,
+				ToolPolicyChecked: result.ToolPolicyChecked,
+			}
+		}
+		return result
+	}
+	if decision == "" {
+		return result
+	}
+	return &policy.Result{
+		Decision:          decision,
+		Reason:            orgPermissionRuleReasonPrefix + ruleID,
+		PolicySource:      policy.PolicySourceOrgPermissionRule,
+		ToolPolicyChecked: result.ToolPolicyChecked,
+	}
 }
 
 // capabilityForPolicy resolves the capability snapshot a decision is made

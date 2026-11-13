@@ -238,7 +238,9 @@ pub(crate) async fn list_artifact_revisions(
 }
 
 /// What the composer and the Output panel may offer, from this gateway's own switches. Each field
-/// follows the switch behind it; the two reference fields are set by `with_reference_switches`.
+/// follows the switch behind it; the two reference fields are set by `with_reference_switches`,
+/// `deep_research_knowledge` by `with_deep_research_switch` and `wide_research` by
+/// `with_wide_research_switch`.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ComposerCapabilities {
     artifact_history: bool,
@@ -246,6 +248,8 @@ pub(crate) struct ComposerCapabilities {
     context_refs: bool,
     thread_references: bool,
     selection_edit: bool,
+    deep_research_knowledge: bool,
+    wide_research: bool,
 }
 
 fn capabilities_for(mode: ArtifactRevisionsMode, editing: bool, zdr: bool) -> ComposerCapabilities {
@@ -258,6 +262,10 @@ fn capabilities_for(mode: ArtifactRevisionsMode, editing: bool, zdr: bool) -> Co
         context_refs: false,
         thread_references: false,
         selection_edit: crate::selection_guard::enabled_for(mode) && !zdr,
+        // Set by `with_deep_research_switch`, which reads the switch this pure function does not.
+        deep_research_knowledge: false,
+        // Set by `with_wide_research_switch`, which reads the switch this pure function does not.
+        wide_research: false,
     }
 }
 
@@ -274,6 +282,30 @@ fn with_reference_switches(
     capabilities
 }
 
+/// Deep research over the organization's knowledge follows its own switch (EP-2 S7, read by
+/// `deep_research::knowledge_sources_enabled`). A ZDR caller is offered none: deep research is refused
+/// for every zero-retention turn, whatever its scope.
+fn with_deep_research_switch(
+    mut capabilities: ComposerCapabilities,
+    knowledge_sources: bool,
+    zdr: bool,
+) -> ComposerCapabilities {
+    capabilities.deep_research_knowledge = knowledge_sources && !zdr;
+    capabilities
+}
+
+/// The wide-research entry follows its own switch (EP-2 S8, read by `http_routes::wide_research_entry_enabled`:
+/// the literal `true` only). A ZDR caller is offered none: a wide-research run is refused for every
+/// zero-retention turn, and so is its estimate.
+fn with_wide_research_switch(
+    mut capabilities: ComposerCapabilities,
+    entry_enabled: bool,
+    zdr: bool,
+) -> ComposerCapabilities {
+    capabilities.wide_research = entry_enabled && !zdr;
+    capabilities
+}
+
 pub(crate) async fn composer_capabilities(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -285,12 +317,22 @@ pub(crate) async fn composer_capabilities(
     )
     .unwrap_or(true);
     let context_refs = crate::context_refs::enabled();
+    let deep_research_knowledge = crate::deep_research::knowledge_sources_enabled();
+    let wide_research = crate::http_routes::wide_research_entry_enabled();
     Json(json!({
-        "data": with_reference_switches(
-            capabilities_for(state.artifact_revisions_mode, state.artifact_editing_enabled, zdr),
-            context_refs,
-            // A thread is referenced only through a reference, so its tools need the reference switch too.
-            context_refs && crate::thread_reference_tools::enabled(),
+        "data": with_wide_research_switch(
+            with_deep_research_switch(
+                with_reference_switches(
+                    capabilities_for(state.artifact_revisions_mode, state.artifact_editing_enabled, zdr),
+                    context_refs,
+                    // A thread is referenced only through a reference, so its tools need the reference switch too.
+                    context_refs && crate::thread_reference_tools::enabled(),
+                    zdr,
+                ),
+                deep_research_knowledge,
+                zdr,
+            ),
+            wide_research,
             zdr,
         )
     }))
@@ -673,6 +715,32 @@ mod tests {
         assert_eq!(zdr["data"]["artifact_editing"], false);
     }
 
+    /// W3-EP-2-S7-fe: `deep_research_knowledge` follows its own switch and nothing else, and a ZDR caller is
+    /// never offered it, whatever the other capabilities say.
+    #[test]
+    fn deep_research_knowledge_follows_its_switch_and_is_never_offered_under_zdr() {
+        for (mode, editing) in [
+            (ArtifactRevisionsMode::On, true),
+            (ArtifactRevisionsMode::Off, false),
+        ] {
+            let base = |zdr| capabilities_for(mode, editing, zdr);
+            assert!(with_deep_research_switch(base(false), true, false).deep_research_knowledge);
+            assert!(!with_deep_research_switch(base(false), false, false).deep_research_knowledge);
+            assert!(!with_deep_research_switch(base(true), true, true).deep_research_knowledge);
+            // The switch changes this one field and no other.
+            let mut on = with_deep_research_switch(base(false), true, false);
+            on.deep_research_knowledge = false;
+            assert_eq!(on, base(false));
+        }
+        let json = serde_json::to_value(with_deep_research_switch(
+            capabilities_for(ArtifactRevisionsMode::Off, false, false),
+            true,
+            false,
+        ))
+        .expect("serialises");
+        assert_eq!(json["deep_research_knowledge"], true, "{json}");
+    }
+
     #[tokio::test]
     async fn the_capabilities_route_answers_every_key_in_the_envelope() {
         let state = state_with(FakeStore::default(), ArtifactRevisionsMode::On).await;
@@ -686,6 +754,8 @@ mod tests {
                 "context_refs": false,
                 "thread_references": false,
                 "selection_edit": false,
+                "deep_research_knowledge": false,
+                "wide_research": false,
             }})
         );
     }

@@ -7,8 +7,10 @@ import { useI18n } from '@/shared/i18n'
 
 import { initials } from './sidepane/SpaceTurnList'
 import { avatarTextColor, memberTint } from '../lib/agent-avatar'
+import { isElevatedRole } from '../lib/space-roles'
 import { canArchiveRoom, SpaceRoomArchiveControl } from './SpaceRoomArchive'
 import { SpaceRoomSettings } from './SpaceRoomSettings'
+import { SpaceMemoryTab, spaceMemoryTabEnabled } from './SpaceMemoryTab'
 import { EffectivePolicyPanel } from '@/features/chat/components/EffectivePolicyPanel'
 import './space-room-header.css'
 
@@ -220,6 +222,12 @@ export function SpaceRoomHeader(props: SpaceRoomHeaderProps) {
                 onSettingsSaved={props.onSettingsSaved}
               />
               <EffectivePolicyPanel scope={{ kind: 'space', spaceId: props.spaceRef }} />
+
+              {/* EP-8 S7: the room's memory, behind VITE_SPACE_MEMORY_TAB. Offered to the owner or a manager of a shared
+                  room; the gateway and Control decide every read and delete, so this gate is presentation only. */}
+              <Show when={spaceMemoryTabEnabled() && props.kind === 'room' && isElevatedRole(props.role)}>
+                <SpaceMemoryTab spaceRef={props.spaceRef} />
+              </Show>
 
               <Show when={canArchive()}>
                 <SpaceRoomArchiveControl

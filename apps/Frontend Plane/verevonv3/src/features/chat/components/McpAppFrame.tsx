@@ -9,14 +9,19 @@
  * The document is read on demand through the gateway with the viewer's own
  * authority (`getMcpAppResource`) and held only as long as the answer that drew
  * it: nothing is stored, and a temporary (zero-retention) chat draws no app.
- * The frame's CSP stays `PREVIEW_CSP`: an app that declares network origins is
- * told so in a notice and still renders without them (D12).
+ *
+ * The frame's CSP is `PREVIEW_CSP` (D12): an app that declares network origins
+ * is told so in a notice and still renders without them. The one exception is
+ * W4-M2: with `VITE_MCP_APPS_NETWORK` on and the server's `MCP_APPS_NETWORK_ENABLED`
+ * on, the frame takes the policy the server built for the origins the org allows,
+ * once `validatedAppCsp` accepts it. Any other case keeps `PREVIEW_CSP`, and the
+ * notice still shows unless an origin is granted. The sandbox never changes.
  */
 
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, useContext } from 'solid-js'
 import type { JSX } from '@solidjs/web'
 import { useI18n } from '@/shared/i18n'
-import { sandboxWidgetDocument } from '@/shared/lib/sandbox-html'
+import { PREVIEW_CSP, sandboxWidgetDocument, validatedAppCsp } from '@/shared/lib/sandbox-html'
 import { getMcpAppResource, type McpAppResource } from '@/shared/api/chat-client'
 import { widgetThemeCss } from '../lib/inline-widget'
 import { createAnswerFollowupBudget, type TokenBucket } from '../lib/widget-bridge'
@@ -32,6 +37,12 @@ import './inline-widget.css'
  */
 export const mcpAppsEnabled = () =>
   import.meta.env.VITE_MCP_APPS === 'true' && inlineWidgetsEnabled() && widgetBridgeEnabled()
+
+/**
+ * `VITE_MCP_APPS_NETWORK`, literal `'true'` only (W4-M2). On, a frame may take the policy the server built for the
+ * origins an app declares and the org allows, once the client accepts it. Off, every frame keeps `PREVIEW_CSP`.
+ */
+export const mcpAppsNetworkEnabled = () => import.meta.env.VITE_MCP_APPS_NETWORK === 'true'
 
 /** Apps one answer draws on its own; the others wait for "Vis app". Each frame is a whole document. */
 export const MAX_LIVE_APPS_PER_ANSWER = 2
@@ -227,9 +238,18 @@ function McpAppDocument(props: {
 }): JSX.Element {
   const i18n = useI18n()
   const label = () => i18n.tr(`App fra ${props.serverId}`, `App from ${props.serverId}`)
+  // The server's policy counts only with the network switch on and once the client accepts it; otherwise `null`
+  // and the frame keeps `PREVIEW_CSP` (W4-M2).
+  const appCsp = createMemo(() =>
+    mcpAppsNetworkEnabled() && props.resource.csp !== undefined ? validatedAppCsp(props.resource.csp) : null,
+  )
+  // An accepted policy that names no origin grants nothing, so the notice still says the app cannot reach one.
+  const networkGranted = () => appCsp() !== null && appCsp() !== PREVIEW_CSP
   // The theme is read once: the frame reloads whenever srcdoc changes. No widget shim: an app brings its own
   // MCP Apps client, which speaks JSON-RPC to `parent` directly.
-  const documentHtml = createMemo(() => sandboxWidgetDocument(props.resource.html, hostThemeCss()))
+  const documentHtml = createMemo(() =>
+    sandboxWidgetDocument(props.resource.html, hostThemeCss(), { csp: appCsp() ?? undefined }),
+  )
 
   let frameElement: HTMLIFrameElement | undefined
   const [height, setHeight] = createSignal<number | null>(null)
@@ -288,7 +308,7 @@ function McpAppDocument(props: {
         <span class="verevon-inline-widget__title">{label()}</span>
         <span class="verevon-inline-widget__note">{props.tool}</span>
       </figcaption>
-      <Show when={props.resource.needsNetwork}>
+      <Show when={props.resource.needsNetwork && !networkGranted()}>
         <p class="verevon-inline-widget__note" role="note">
           {i18n.tr(
             'Denne appen trenger nettverkstilgang, som ikke er tilgjengelig her',
@@ -340,6 +360,8 @@ function McpAppDocument(props: {
           </div>
         )}
       </Show>
+      {/* The print export's twin: print.ts replaces the whole figure with this document as code, so a PDF shows the app's source, never the frame. */}
+      <pre class="verevon-inline-widget__export" hidden><code>{props.resource.html}</code></pre>
     </figure>
   )
 }

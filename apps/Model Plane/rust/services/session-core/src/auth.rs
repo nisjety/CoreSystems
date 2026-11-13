@@ -69,6 +69,19 @@ pub(crate) fn api_key_principal_enabled(raw: Option<&str>) -> bool {
     mp_contracts::loop_fold::switch_from(raw)
 }
 
+/// `SKILL_ORG_ADMIN_CHECK`: a person writing an org-wide skill (`UpsertAgentSkill`, origin
+/// `user`, scope `""` or `org`) must hold the org admin role, as capability-core's
+/// `registry_apis.go` requires for a human org write (D2-509). Default off; off, a person holding
+/// `session:skills:write` writes an org-wide skill as it always could.
+pub(crate) const SKILL_ORG_ADMIN_CHECK_ENV: &str = "SKILL_ORG_ADMIN_CHECK";
+
+/// Whether the org-admin check on person-written org skills is on. The repo's strict parser
+/// reads it: only the literal `true`.
+#[must_use]
+pub(crate) fn skill_org_admin_check_enabled(raw: Option<&str>) -> bool {
+    mp_contracts::loop_fold::switch_from(raw)
+}
+
 /// `sub` of an `api_key` principal is this prefix plus its `key_id`. The shape rules below are
 /// model-gateway's and inference-core's `is_well_formed_api_key`, so one token reads the same in
 /// every Model Plane service.
@@ -307,6 +320,16 @@ impl VerifiedIdentity {
     #[must_use]
     pub fn has_scope(&self, scope: &str) -> bool {
         self.scopes.iter().any(|candidate| candidate == scope)
+    }
+
+    /// Whether the verified credential carries the org admin role: a signed scope `admin`,
+    /// `org:admin` or any scope ending `:admin`. The rule is capability-core's
+    /// `verifiedIsAdmin`; it reads the verified scopes only, never a header.
+    #[must_use]
+    pub fn is_org_admin(&self) -> bool {
+        self.scopes
+            .iter()
+            .any(|scope| scope == "admin" || scope == "org:admin" || scope.ends_with(":admin"))
     }
 
     /// Whether the trusted issuer marked this credential Zero Data Retention.

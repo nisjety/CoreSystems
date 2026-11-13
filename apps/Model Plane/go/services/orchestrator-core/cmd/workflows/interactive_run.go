@@ -57,16 +57,11 @@ type ScheduledRunInput struct {
 	GoalID string `json:"goal_id,omitempty"`
 }
 
-// GoalJudgeTurnInput asks model-gateway to judge the goal turn one finished fire spent (EP-7 S6).
-// It carries ids only: Temporal history must never hold the objective, the criteria or the answer,
-// so the judge reads them itself from their owners.
-type GoalJudgeTurnInput struct {
-	GoalID     string `json:"goal_id"`
-	RunID      string `json:"run_id"`
-	OrgID      string `json:"org_id"`
-	ScheduleID string `json:"schedule_id"`
-	FireKey    string `json:"fire_key"`
-}
+// GoalJudgeTurnInput is the input of JudgeGoalTurnActivity (EP-7 S6). The type lives in the
+// activities package, which this package already imports, so the workflow and the activity share
+// one definition. It carries ids only: Temporal history must never hold the objective, the criteria
+// or the answer, so the judge reads them itself from their owners.
+type GoalJudgeTurnInput = activities.GoalJudgeTurnInput
 
 const (
 	// SignalApproval is sent to approve a pending human-approval step.
@@ -85,6 +80,12 @@ const (
 	// contract (WS20 S6). Histories that predate it keep the step loops below.
 	scheduledAgentLaneChange  = "scheduled-agent-lane"
 	scheduledAgentLaneVersion = 1
+
+	// scheduledAgentOutcomeChange gates recording an agent-lane run that did not complete its work
+	// (failed, needs_review) through FailRunActivity instead of CompleteRunActivity. Histories that
+	// predate it complete as they did.
+	scheduledAgentOutcomeChange  = "scheduled-agent-outcome"
+	scheduledAgentOutcomeVersion = 1
 
 	// goalJudgeTurnChange gates the judge of a goal-bound fire (EP-7 S6). Histories that predate it
 	// complete without the activity.
@@ -286,6 +287,11 @@ func ScheduledRunSupervision(ctx workflow.Context, input ScheduledRunInput) erro
 	summary := stepOutput.Summary
 	if agentLane {
 		summary = scheduledAgentOutcomeSummary(input.RunID, stepOutput)
+		if workflow.GetVersion(ctx, scheduledAgentOutcomeChange, workflow.DefaultVersion, scheduledAgentOutcomeVersion) == scheduledAgentOutcomeVersion {
+			if reason := scheduledAgentFailureReason(stepOutput); reason != "" {
+				return handleFailure(ctx, input.RunID, input.OrgID, "", input.Retention, reason)
+			}
+		}
 	}
 	completionInput := activities.CompletionInput{
 		RunID:     input.RunID,

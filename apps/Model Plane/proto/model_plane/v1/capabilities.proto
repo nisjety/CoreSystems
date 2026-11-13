@@ -190,6 +190,24 @@ message EvaluatePolicyRequest {
   // decision. An `mcp__` name resolves only from the registry and is denied when
   // the registry does not hold it. Empty means a capability-level evaluation.
   string tool_name = 7;
+
+  // The target the call acts on, derived by execution-core from the tool input and never from the
+  // model's free text claim: "domain" (the host of a web address), "recipient" (the domain of a mail
+  // recipient, never the full address) or "command_prefix" (the first token of a command). Empty when
+  // the call names no target, when the permission rules switch is off, and for a capability-level
+  // evaluation.
+  string target_kind = 8;
+
+  // The value of target_kind: a lower-case host or domain, or a command's first token of at most 64
+  // characters. Empty on a zero-retention or waived run, which sends target_kind alone.
+  string target_value = 9;
+
+  // The run's retention as execution-core resolved it: "persistent" for a run that keeps state,
+  // "retention_bound" for a zero-retention or waived run (DEC-32). Empty when the caller does not
+  // state it. Asserted by the execution-core service principal like user_id. capability-core never
+  // lets a person's allow relax a call stated retention_bound; while TOOL_POLICY_RULE_AUDIT_ENABLED
+  // is on, anything but "persistent" counts as retention_bound (WS13 S7, D-WS13-1).
+  string run_retention = 10;
 }
 
 message EvaluatePolicyResponse {
@@ -230,7 +248,9 @@ message EvaluatePolicyResponse {
   // tool is not approved or is not in the registry), "capability_gate" (the
   // capability is out of rollout, unavailable, out of scope or ungranted) or,
   // only when TOOL_POLICY_ENFORCED is on, a stored per-tool policy:
-  // "tool_policy_never", "tool_policy_ask" or "tool_policy_allow".
+  // "tool_policy_never", "tool_policy_ask" or "tool_policy_allow". Or, only when
+  // CAPABILITY_PERMISSION_RULES_ENABLED is on, "org_permission_rule": an org
+  // permission rule tightened the decision, and the reason names that rule.
   string policy_source = 9;
 
   // Pinned definition digest of the evaluated MCP tool, lower-case hex. Empty

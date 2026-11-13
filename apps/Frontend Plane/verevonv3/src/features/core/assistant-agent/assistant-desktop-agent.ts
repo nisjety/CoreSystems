@@ -2,6 +2,7 @@ import type { DesktopBrowserBridge, DesktopBrowserSnapshot } from '@/features/br
 import type { AssistantAgentView } from '@/features/core/components/GlobalAssistant'
 import { suggestDesktopBrowserAction } from '@/shared/api/desktop-browser-client'
 import { assistantBrowserTarget } from './assistant-browser-agent'
+import { LocalizedError } from '@/shared/i18n/errors'
 
 const maximumSteps = 18
 const taskTimeout = 180_000
@@ -169,13 +170,13 @@ export function createAssistantDesktopAgent({ bridge, scope, onChange, tr, sugge
     const identity = scope()
     const url = assistantBrowserTarget(target)
     const prompt = goal.trim()
-    if (!identity || !url || !prompt || prompt.length > 2000) throw new Error(tr('Oppgi en oppgave og en gyldig nettadresse.', 'Provide a task and a valid web address.'))
-    if (active) throw new Error(tr('En oppgave er allerede i gang.', 'A task is already running.'))
+    if (!identity || !url || !prompt || prompt.length > 2000) throw new LocalizedError({ no: 'Oppgi en oppgave og en gyldig nettadresse.', en: 'Provide a task and a valid web address.' })
+    if (active) throw new LocalizedError({ no: 'En oppgave er allerede i gang.', en: 'A task is already running.' })
     const attempt = resets
     const rejectAllowed = await rejectConsentAllowed()
     // The organization or the assistant may have changed while the policy was read. Nothing starts for the old one.
     if (scope() !== identity || resets !== attempt) return
-    if (active) throw new Error(tr('En oppgave er allerede i gang.', 'A task is already running.'))
+    if (active) throw new LocalizedError({ no: 'En oppgave er allerede i gang.', en: 'A task is already running.' })
     const run = { scope: identity, abort: new AbortController(), lease: bridge.startRun({ consentReject: rejectAllowed }) }
     active = run
     state = { available: true, kind: 'browser', localBrowser: true, status: 'starting', goal: prompt, error: null, action: null, sessionId: null, runId: null, receipt: null }
@@ -188,9 +189,10 @@ export function createAssistantDesktopAgent({ bridge, scope, onChange, tr, sugge
     } catch {
       if (!current(run)) return
       active = null
-      const message = tr('Kunne ikke starte den lokale nettleseren.', 'Could not start the local browser.')
+      const copy = { no: 'Kunne ikke starte den lokale nettleseren.', en: 'Could not start the local browser.' }
+      const message = tr(copy.no, copy.en)
       publish({ status: 'failed', error: message })
-      throw new Error(message)
+      throw new LocalizedError(copy)
     }
   }
 

@@ -8,10 +8,18 @@
  * A failed read yields an empty group, never a fabricated one.
  */
 
-import { readChatThreadHistory } from '@/features/chat/lib/chat-thread-history'
+import {
+  readChatThreadHistory,
+  readChatThreadTranscript,
+  removeChatThreadHistoryItem,
+  upsertChatThreadHistory,
+  upsertChatThreadTranscript,
+} from '@/features/chat/lib/chat-thread-history'
 import { liveThreadsIn } from '@/features/spaces/lib/space-live-work'
 import { getActionDescriptor, type ActionId } from '@/shared/actions/action-registry'
 import { executeAction, previewAction } from '@/shared/actions/action-client'
+import { announceAttentionChanged } from '@/shared/api/attention-client'
+import { archiveChatThread, markChatThreadUnread, setChatThreadStarred } from '@/shared/api/chat-client'
 import type { NavbarSearchResult } from '@/shared/api/navbar-client'
 import {
   getAgentInstallations,
@@ -21,6 +29,7 @@ import {
   type SpaceRosterMember,
   type SpaceSummary,
 } from '@/shared/api/spaces-client'
+import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
 import { getSession } from '@/shared/session/session-store'
 import type { CommandContext } from './command-registry'
 
@@ -232,6 +241,30 @@ const ACTION_INPUTS: Partial<Record<ActionId, (ctx: CommandContext) => unknown |
   'spaces.mark_read': (ctx) => (ctx.spaceRef ? { spaceRef: ctx.spaceRef } : null),
   // WS11-S3: needs no context; moves only the caller's own read positions (gateway: spaces/attention.rs).
   'spaces.mark_all_read': () => ({}),
+  // W5-077-c: the open chat thread (`ctx.chatThreadId`, /chat only). See openChatThreadId for what hides the rows.
+  'chat.thread.archive': (ctx) => {
+    const threadId = openChatThreadId(ctx)
+    return threadId ? { threadId } : null
+  },
+  'chat.thread.star': (ctx) => {
+    const threadId = openChatThreadId(ctx)
+    return threadId ? { threadId, starred: true } : null
+  },
+  'chat.thread.mark_unread': (ctx) => {
+    const threadId = openChatThreadId(ctx)
+    return threadId ? { threadId } : null
+  },
+}
+
+/**
+ * The open chat thread the palette may act on (W5-077-c), or null. The chat page keeps no read state for a
+ * temporary or foreign-origin thread (neither is ever written to the local history) or for a read-only
+ * support thread, so only a thread the sidebar lists is offered.
+ */
+function openChatThreadId(ctx: CommandContext): string | null {
+  const threadId = ctx.chatThreadId
+  if (!threadId || isSupportChatThread(threadId)) return null
+  return readChatThreadHistory().some((item) => item.threadId === threadId) ? threadId : null
 }
 
 export interface PaletteActionLabel {
@@ -242,16 +275,58 @@ export interface PaletteActionLabel {
 const ACTION_LABELS: Partial<Record<ActionId, PaletteActionLabel>> = {
   'spaces.mark_read': { no: 'Merk rommet som lest', en: 'Mark this room read' },
   'spaces.mark_all_read': { no: 'Merk alle rom som lest', en: 'Mark all rooms read' },
+  'chat.thread.archive': { no: 'Arkiver samtalen', en: 'Archive this chat' },
+  'chat.thread.star': { no: 'Stjernemerk samtalen', en: 'Star this chat' },
+  'chat.thread.mark_unread': { no: 'Merk samtalen som ulest', en: 'Mark this chat unread' },
 }
 
 export type PaletteActionOutcome = 'done' | 'needs_input' | 'needs_approval' | 'failed'
 
-/** Preview, refuse anything that is not plainly safe, then execute through the shared action client. */
+/**
+ * The chat-thread flags the palette runs (W5-077-c), each through the chat-client call the sidebar makes for
+ * the same change. Their descriptors are chat-history contract entries with no gateway executor, so the
+ * shared action client does not carry them; `runPaletteAction` still previews them first.
+ */
+type ChatThreadPaletteInput = { readonly threadId: string; readonly starred?: boolean }
+
+const CHAT_THREAD_RUNNERS: Partial<Record<ActionId, (input: ChatThreadPaletteInput) => Promise<unknown>>> = {
+  'chat.thread.archive': (input) => archiveThreadFromPalette(input.threadId),
+  'chat.thread.star': (input) => setChatThreadStarred(input.threadId, input.starred === true),
+  'chat.thread.mark_unread': (input) => markChatThreadUnread(input.threadId).then(() => announceAttentionChanged()),
+}
+
+/**
+ * Hides the thread the way the sidebar does: it leaves the local list first, and comes back with its
+ * transcript if the server refuses the archive.
+ */
+async function archiveThreadFromPalette(threadId: string): Promise<unknown> {
+  const current = readChatThreadHistory().find((item) => item.threadId === threadId)
+  const transcript = readChatThreadTranscript(threadId)
+  removeChatThreadHistoryItem(threadId)
+  try {
+    return await archiveChatThread(threadId)
+  } catch (error) {
+    if (current) upsertChatThreadHistory(current)
+    if (transcript) upsertChatThreadTranscript(transcript)
+    throw error
+  }
+}
+
+/**
+ * Preview, refuse anything that is not plainly safe, then execute: a chat-thread flag through the chat
+ * client, anything else through the shared action client.
+ */
 export async function runPaletteAction(actionId: ActionId, input: unknown): Promise<PaletteActionOutcome> {
   try {
     const preview = await previewAction(actionId, input)
     if (preview.requiresApproval || preview.risk !== 'low') return 'needs_approval'
     if (preview.missingInputs.length > 0) return 'needs_input'
+    const runChatThread = CHAT_THREAD_RUNNERS[actionId]
+    if (runChatThread) {
+      // previewAction has just checked the input against the descriptor's own schema.
+      await runChatThread(input as ChatThreadPaletteInput)
+      return 'done'
+    }
     const session = getSession()
     const userId = session.user?.id
     const orgId = session.activeOrg?.id

@@ -29,6 +29,21 @@ type Organization struct {
 	// The organisation's own website, as its administrators gave it. Nil until one is recorded.
 	WebsiteURL       *string    `json:"website_url,omitempty"`
 	WebsiteUpdatedAt *time.Time `json:"website_updated_at,omitempty"`
+	// RetentionPosture is a read-only projection of the org's effective
+	// zero-data-retention posture, derived from Plan and Metadata by
+	// withRetentionView on every organization the service returns. It is never
+	// stored and never written back.
+	RetentionPosture *OrgRetentionView `json:"retention_posture,omitempty"`
+}
+
+// OrgRetentionView is the org-record form of the effective ZDR posture: the
+// same answer GET /internal/orgs/:orgId/retention-posture serves, computed by
+// the same resolveOrgPosture, in the org record's snake_case JSON.
+type OrgRetentionView struct {
+	// EffectiveZDR is whether interactive traffic for the org must be zero retention.
+	EffectiveZDR bool `json:"effective_zdr"`
+	// Lapsed is true when the org asked for ZDR but its plan no longer entitles it.
+	Lapsed bool `json:"lapsed"`
 }
 
 type Entitlement struct {
@@ -342,10 +357,48 @@ func WebEntitlementsForPlan(plan string) WebEntitlements {
 	}
 }
 
+// PlanLapsePolicy names how a lapsed plan is treated when the org's stored ZDR
+// intent is on but its plan no longer entitles zero data retention
+// (decision OD-LAPSE): "intent_stays_zdr" keeps the org zero-retention and
+// flags it lapsed. Flipping OD-LAPSE means changing this constant together
+// with the matrix rows (policy.plan_lapse, o_plan_lapsed_keeps_zdr and both
+// d_plan_lapsed_* rows) in zdr-posture-matrix.json.
+const PlanLapsePolicy = "intent_stays_zdr"
+
+// resolveOrgPosture is the one place the org ZDR rule lives (the matrix
+// org_posture_rows with lookup ok): the effective posture is the stored intent
+// alone, and the org is lapsed when it holds that intent without a plan that
+// entitles it. Every reader of the posture reads this answer instead of
+// recomputing it.
+func resolveOrgPosture(zdrIntent, entitled bool) (effective, lapsed bool) {
+	return zdrIntent, zdrIntent && !entitled
+}
+
+// withRetentionView sets org.RetentionPosture from the org's own plan and
+// metadata. It derives the stored intent exactly as
+// Repository.GetRetentionPostureState does (metadata.interactiveRetention.zdr
+// is the JSON boolean true; anything else is not intent) and the entitlement
+// from PlanAllowsZeroDataRetention. The field is a projection: it is
+// recomputed on every read and never written. A nil org is left alone.
+func withRetentionView(org *Organization) *Organization {
+	if org == nil {
+		return nil
+	}
+	intent := false
+	if ir, ok := org.Metadata["interactiveRetention"].(map[string]any); ok {
+		if v, isBool := ir["zdr"].(bool); isBool {
+			intent = v
+		}
+	}
+	effective, lapsed := resolveOrgPosture(intent, PlanAllowsZeroDataRetention(org.Plan))
+	org.RetentionPosture = &OrgRetentionView{EffectiveZDR: effective, Lapsed: lapsed}
+	return org
+}
+
 // RetentionPosture is the minimal, server-computed view of an organization's
-// interactive-retention posture: the two facts a token issuer needs and
-// nothing else about the organization. It is what a machine principal holding
-// the org:retention:read:any scope may read
+// interactive-retention posture: the facts a token issuer or any other posture
+// reader needs and nothing else about the organization. It is what a machine
+// principal holding the org:retention:read:any scope may read
 // (GET /internal/orgs/:orgId/retention-posture), so it must never grow
 // organization data (name, plan, members, metadata) without a new scope.
 //
@@ -354,22 +407,42 @@ func WebEntitlementsForPlan(plan string) WebEntitlements {
 //   - Entitled is whether the org's CURRENT plan may use zero data retention
 //     (PlanAllowsZeroDataRetention), so the plan allowlist stays here and no
 //     reader re-implements it.
+//   - EffectiveZDR is the answer readers must use: resolveOrgPosture applied
+//     to the two inputs (a lapsed plan keeps ZDR under PlanLapsePolicy).
+//   - Lapsed is true when the org holds the intent without the entitlement.
+//   - PlanLapsePolicy names the lapse rule that produced EffectiveZDR.
 //
 // The wire field names are a contract with Auth Core
-// (internal/http/testdata/auth-core-org-core-retention-posture.contract.json).
+// (internal/http/testdata/auth-core-org-core-retention-posture.contract.json);
+// the three derived fields are additive.
 type RetentionPosture struct {
-	ZDRIntent bool `json:"zdrIntent"`
-	Entitled  bool `json:"entitled"`
+	ZDRIntent       bool   `json:"zdrIntent"`
+	Entitled        bool   `json:"entitled"`
+	EffectiveZDR    bool   `json:"effectiveZdr"`
+	Lapsed          bool   `json:"lapsed"`
+	PlanLapsePolicy string `json:"planLapsePolicy"`
 }
 
 // NewRetentionPosture derives the posture from the two stored inputs.
 func NewRetentionPosture(plan string, zdrIntent bool) RetentionPosture {
-	return RetentionPosture{ZDRIntent: zdrIntent, Entitled: PlanAllowsZeroDataRetention(plan)}
+	return RetentionPosture{ZDRIntent: zdrIntent, Entitled: PlanAllowsZeroDataRetention(plan)}.Resolved()
 }
 
-// Effective reports whether interactive traffic for the org must be zero
-// retention: the org asked for it AND its plan still allows it. An org whose
-// plan lapsed keeps its stored intent but is not zero-retention.
+// Resolved returns a copy whose derived fields (EffectiveZDR, Lapsed,
+// PlanLapsePolicy) are recomputed from ZDRIntent and Entitled, so a reader that
+// builds a posture by hand can never serve derived fields that disagree with
+// the two inputs.
+func (p RetentionPosture) Resolved() RetentionPosture {
+	p.EffectiveZDR, p.Lapsed = resolveOrgPosture(p.ZDRIntent, p.Entitled)
+	p.PlanLapsePolicy = PlanLapsePolicy
+	return p
+}
+
+// Effective reports whether the org has turned zero retention on AND its plan
+// still allows it: the entitlement-gated enable test, used only by the
+// enable-transition signal (internal/nats/zdr_enabled_signal.go). It is NOT the
+// posture answer: posture readers must read EffectiveZDR, which keeps a lapsed
+// plan zero-retention.
 func (p RetentionPosture) Effective() bool {
 	return p.ZDRIntent && p.Entitled
 }

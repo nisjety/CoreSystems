@@ -164,6 +164,10 @@ pub struct McpRegistry {
     /// Which discovered tools were already reported to capability-core, so a
     /// tool listing does not re-post an unchanged tool (WS05-S2).
     observed: ObservationLedger,
+    /// The integration-corev2 credential binding a static-bearer server redeems for each call, keyed by
+    /// (org, `server_id`). W4-CC-5: in memory like the rest of this registry, and never the token itself. Each
+    /// hydration sets it from the binding capability-core projects, so a restarted gateway recovers it.
+    credential_bindings: Arc<DashMap<(String, String), String>>,
 }
 
 impl McpRegistry {
@@ -174,7 +178,39 @@ impl McpRegistry {
             catalog: Arc::new(DashMap::new()),
             pending_oauth: Arc::new(DashMap::new()),
             observed: ObservationLedger::default(),
+            credential_bindings: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Record the credential binding a static-bearer server redeems for each call (W4-CC-5). Dropped with the
+    /// server it names: by [`Self::remove`], or by [`Self::replace_org`] once an answer no longer lists that server.
+    pub fn set_credential_binding(&self, org_id: &str, server_id: &str, binding_id: &str) {
+        self.credential_bindings.insert(
+            (org_id.to_owned(), server_id.to_owned()),
+            binding_id.to_owned(),
+        );
+    }
+
+    /// The credential binding of a static-bearer server, when it has one.
+    #[must_use]
+    pub fn credential_binding(&self, org_id: &str, server_id: &str) -> Option<String> {
+        self.credential_bindings
+            .get(&(org_id.to_owned(), server_id.to_owned()))
+            .map(|entry| entry.value().clone())
+    }
+
+    /// Forget a server's credential binding, when the record that names the server no longer names one.
+    pub fn clear_credential_binding(&self, org_id: &str, server_id: &str) {
+        self.credential_bindings
+            .remove(&(org_id.to_owned(), server_id.to_owned()));
+    }
+
+    /// A cached server's record, for a call path that needs its URL. A copy: the registry keeps its own.
+    #[must_use]
+    pub fn get_server(&self, org_id: &str, server_id: &str) -> Option<McpServer> {
+        self.inner
+            .get(&(org_id.to_owned(), server_id.to_owned()))
+            .map(|entry| entry.value().clone())
     }
 
     /// Record a fresh OAuth attempt under its `state` value.
@@ -202,6 +238,7 @@ impl McpRegistry {
         // Evict the discovered catalog too, so a decommissioned server's tools
         // stop being advertised to the model immediately (not after the TTL).
         self.catalog.remove(&key);
+        self.credential_bindings.remove(&key);
         self.inner.remove(&key).is_some()
     }
 
@@ -246,6 +283,10 @@ impl McpRegistry {
         }
         // A catalog with no server behind it is never kept, whatever removed the server.
         self.catalog
+            .retain(|key, _| key.0 != org_id || incoming.contains_key(&key.1));
+        // Nor is a credential binding. A server the answer keeps has its binding set by the caller,
+        // before this merge, so only the bindings of servers it no longer lists are dropped here.
+        self.credential_bindings
             .retain(|key, _| key.0 != org_id || incoming.contains_key(&key.1));
         gone
     }
@@ -326,16 +367,23 @@ struct CatalogMcpServer {
     owner_user_id: String,
     #[serde(default)]
     shared_with: Vec<String>,
+    /// The integration-corev2 credential binding of a static-bearer server (W4-CC-5), as capability-core projects
+    /// it: the id its stored `secret_ref` names, never a token and never another config field. Empty for every other
+    /// server. Read only while `MCP_SECRET_REF_AUTH_ENABLED` is on (see [`catalog_mcp_parts`]).
+    #[serde(default)]
+    auth_binding_id: String,
 }
 
 /// Convert the capability-core public projection into the gateway's execution
-/// record and its durable ownership sidecar. The projection intentionally does
-/// not contain an operational token; OAuth credentials are resolved through
-/// capability-core's encrypted token endpoint at dispatch time.
+/// record, its durable ownership sidecar and, for a static-bearer server, the
+/// credential binding its calls redeem. The projection intentionally does not
+/// contain an operational token; OAuth credentials are resolved through
+/// capability-core's encrypted token endpoint at dispatch time, and a stored
+/// bearer is redeemed from its binding for each call.
 fn catalog_mcp_parts(
     current_org_id: &str,
     raw: CatalogMcpServer,
-) -> Result<(McpServer, crate::ownership::Ownership), String> {
+) -> Result<(McpServer, crate::ownership::Ownership, Option<String>), String> {
     let server_id = raw.id.trim();
     if server_id.is_empty() {
         return Err("catalog MCP record has no id".to_owned());
@@ -394,7 +442,21 @@ fn catalog_mcp_parts(
             "catalog MCP record belongs to org '{row_org_id}', not '{current_org_id}'"
         ));
     }
-    Ok((server, ownership))
+    // The credential binding of a static-bearer server (W4-CC-5). A restarted gateway holds none in memory, so it
+    // reads the id capability-core projects, and only while MCP_SECRET_REF_AUTH_ENABLED is on. A record that
+    // names a malformed binding is refused, not listed without its credential.
+    let credential_binding = if crate::mcp_credential_ref::enabled() {
+        match raw.auth_binding_id.trim() {
+            "" => None,
+            binding if crate::mcp_credential_ref::binding_id_valid(binding) => {
+                Some(binding.to_owned())
+            }
+            _ => return Err("catalog MCP record names a malformed credential binding".to_owned()),
+        }
+    } else {
+        None
+    };
+    Ok((server, ownership, credential_binding))
 }
 
 /// Drop everything the replica holds for one tenant's MCP servers: the registry, the
@@ -412,10 +474,10 @@ fn clear_org_mcp_cache(
 /// Refresh one tenant's MCP cache from capability-core using a verified
 /// capability bearer.
 ///
-/// * A successful, parsed answer replaces the tenant's registry, ownership projection
-///   and discovery catalog, as a merge ([`McpRegistry::replace_org`]): a server in both
-///   the old and the new answer is never missing, and keeps its discovered catalog while
-///   its config is unchanged.
+/// * A successful, parsed answer replaces the tenant's registry, ownership projection,
+///   credential bindings and discovery catalog, as a merge ([`McpRegistry::replace_org`]):
+///   a server in both the old and the new answer is never missing, and keeps its discovered
+///   catalog while its config is unchanged.
 /// * A registry that cannot answer fails CLOSED: an unreachable registry, a 5xx or other
 ///   unexpected status, a body that is not the projection, or no registry address clears
 ///   the tenant's cache, so an admin's revocation is not undone by an outage that leaves a
@@ -486,13 +548,15 @@ pub async fn hydrate_mcp_registry(
 
     let mut servers = Vec::with_capacity(payload.servers.len());
     let mut ownership_entries = Vec::with_capacity(payload.servers.len());
+    let mut credential_bindings = Vec::with_capacity(payload.servers.len());
     for raw in payload.servers {
         match catalog_mcp_parts(org_id, raw) {
-            Ok((server, resource_ownership)) => {
+            Ok((server, resource_ownership, credential_binding)) => {
                 // Reuse the exact write-time validation, but never let one
                 // malformed legacy row poison the rest of the tenant cache.
                 let mut checked = server.clone();
                 if validate_mcp_server(org_id, &mut checked).is_ok() {
+                    credential_bindings.push((checked.server_id.clone(), credential_binding));
                     servers.push(checked.clone());
                     ownership_entries.push((checked.server_id, resource_ownership));
                 } else {
@@ -503,8 +567,25 @@ pub async fn hydrate_mcp_registry(
         }
     }
     let count = servers.len();
+    apply_credential_bindings(reg, org_id, credential_bindings);
     apply_mcp_projection(reg, ownership, org_id, servers, ownership_entries);
     Ok(count)
+}
+
+/// Make one tenant's credential bindings the registry's answer: a server whose record names
+/// a binding has that binding, and a server whose record names none loses any binding it
+/// held. It runs before the merge, so a binding is in place before the row that needs it.
+fn apply_credential_bindings(
+    reg: &McpRegistry,
+    org_id: &str,
+    bindings: Vec<(String, Option<String>)>,
+) {
+    for (server_id, binding) in bindings {
+        match binding {
+            Some(binding_id) => reg.set_credential_binding(org_id, &server_id, &binding_id),
+            None => reg.clear_credential_binding(org_id, &server_id),
+        }
+    }
 }
 
 /// Make one tenant's MCP cache the registry's answer, as a merge and never as
@@ -879,6 +960,7 @@ pub async fn full_mcp_tool_defs(
         capability_core_base_url,
         mcp_oauth_service_token,
         false,
+        false,
     )
     .await
     .0
@@ -892,6 +974,10 @@ pub async fn full_mcp_tool_defs(
 /// best effort and off the caller's path (see `capability_observation`). The
 /// caller sets it only for a non-ZDR identity with the switch on; the report
 /// carries digests and hints, never the definition itself.
+///
+/// With `redeem_static_bearers` set, a static-bearer server's stored credential is
+/// redeemed for its discovery (W4-CC-5). Unset, such a server lists nothing: a ZDR
+/// or waived turn never redeems a binding.
 #[allow(clippy::too_many_arguments)]
 pub async fn full_mcp_tool_listing(
     reg: &McpRegistry,
@@ -902,6 +988,7 @@ pub async fn full_mcp_tool_listing(
     capability_core_base_url: &str,
     mcp_oauth_service_token: &str,
     observe: bool,
+    redeem_static_bearers: bool,
 ) -> (Vec<ToolDefinition>, Vec<ToolObservation>) {
     // Tenant scope from the key; ownership filters to the resources THIS user may
     // use (org-wide, owned, or shared-to-them) — never another user's private.
@@ -939,15 +1026,51 @@ pub async fn full_mcp_tool_listing(
     let mut defs: Vec<ToolDefinition> = Vec::new();
     let mut observations: Vec<ToolObservation> = Vec::new();
     for server in servers {
-        let oauth_token = crate::mcp_oauth::resolve_stored_oauth_token(
-            http_client,
-            capability_core_base_url,
-            mcp_oauth_service_token,
-            org_id,
-            &server.server_id,
-        )
-        .await;
-        let discovered = mcp_discover_cached(reg, org_id, &server, oauth_token.as_deref()).await;
+        // A static-bearer server (W4-CC-5) discovers with the credential its binding redeems for this call, and
+        // lists nothing unless the turn may redeem. Every other server keeps its OAuth token, as before.
+        let (static_bearer, oauth_token) = match reg.credential_binding(org_id, &server.server_id) {
+            Some(binding_id) => {
+                if !redeem_static_bearers {
+                    continue;
+                }
+                match crate::mcp_credential_ref::bearer_for(
+                    &server.url,
+                    &binding_id,
+                    org_id,
+                    &new_ulid(),
+                    false,
+                )
+                .await
+                {
+                    Ok(bearer) => (Some(bearer), None),
+                    Err(error) => {
+                        tracing::debug!(
+                            %org_id,
+                            server_id = %server.server_id,
+                            %error,
+                            "mcp_tool_defs: stored credential unavailable; the server lists no tools"
+                        );
+                        continue;
+                    }
+                }
+            }
+            None => (
+                None,
+                crate::mcp_oauth::resolve_stored_oauth_token(
+                    http_client,
+                    capability_core_base_url,
+                    mcp_oauth_service_token,
+                    org_id,
+                    &server.server_id,
+                )
+                .await,
+            ),
+        };
+        let token = static_bearer
+            .as_ref()
+            .map(crate::mcp_credential_ref::SecretBearer::expose)
+            .or(oauth_token.as_deref());
+        let discovered = mcp_discover_cached(reg, org_id, &server, token).await;
         let tools = match &discovered {
             Some(discovered) => filter_allowlist(discovered.clone(), &server.tool_allowlist),
             None => Vec::new(),
@@ -955,7 +1078,7 @@ pub async fn full_mcp_tool_listing(
         tracing::debug!(
             %org_id,
             server_id = %server.server_id,
-            has_oauth_token = oauth_token.is_some(),
+            has_token = token.is_some(),
             discovered_count = discovered.as_ref().map(Vec::len),
             allowlist = ?server.tool_allowlist,
             after_allowlist = tools.len(),
@@ -1027,6 +1150,9 @@ pub struct McpListingOptions {
     /// Report the discovered tools to capability-core (see
     /// [`full_mcp_tool_listing`]).
     pub observe: bool,
+    /// Redeem a static-bearer server's stored credential to discover its tools (W4-CC-5). Off by default, so a
+    /// caller that does not say so lists no static-bearer server; a ZDR or waived turn never sets it.
+    pub redeem_static_bearers: bool,
 }
 
 /// [`mcp_tool_defs`] with the per-tool metadata a governed caller binds to the
@@ -1069,6 +1195,7 @@ pub async fn mcp_tool_listing(
         capability_core_base_url,
         mcp_oauth_service_token,
         options.observe,
+        options.redeem_static_bearers,
     )
     .await;
     let meta = observations.iter().map(ToolObservation::to_meta).collect();
@@ -1127,31 +1254,7 @@ fn validate_mcp_server(org_id: &str, server: &mut McpServer) -> Result<(), Statu
         ));
     }
     "http".clone_into(&mut server.transport);
-    server.url = server.url.trim().trim_end_matches('/').to_owned();
-    if server.url.len() > 2_048 {
-        return Err(Status::invalid_argument("server.url is too long"));
-    }
-    let endpoint = reqwest::Url::parse(&server.url)
-        .map_err(|_| Status::invalid_argument("server.url must be a valid HTTPS URL"))?;
-    // A trusted internal host (opt-in via MCP_INTERNAL_ALLOWED_HOSTS) may register
-    // over plain HTTP on a private address (the bundled bridge sidecar); all other
-    // servers stay public-HTTPS-only + SSRF-guarded. Credential/query/fragment
-    // hygiene is enforced for every server regardless.
-    let host_allowed = endpoint.host_str().is_some_and(host_in_internal_allowlist);
-    let scheme_ok = endpoint.scheme() == "https" || (host_allowed && endpoint.scheme() == "http");
-    if !scheme_ok
-        || endpoint.host().is_none()
-        || !endpoint.username().is_empty()
-        || endpoint.password().is_some()
-        || endpoint.query().is_some()
-        || endpoint.fragment().is_some()
-        || endpoint.port_or_known_default().is_none()
-        || (!host_allowed && endpoint_host_is_forbidden(&endpoint))
-    {
-        return Err(Status::invalid_argument(
-            "server.url must be a public HTTPS base URL (or an allowlisted internal MCP host) without credentials, query, or fragment",
-        ));
-    }
+    server.url = validate_mcp_url(&server.url)?;
     if !server.token.trim().is_empty() {
         return Err(Status::invalid_argument(
             "raw MCP credentials are not accepted; configure a managed secret reference",
@@ -1182,6 +1285,43 @@ fn validate_mcp_server(org_id: &str, server: &mut McpServer) -> Result<(), Statu
     }
     server.tool_allowlist = exact_names;
     Ok(())
+}
+
+/// The URL rules an MCP server must meet, shared by registration and the probe (`mcp_probe`): surrounding
+/// space and trailing slashes are dropped, at most 2 KiB remain, and the URL is a public HTTPS base URL (or
+/// an allowlisted internal MCP host) without credentials, query or fragment. Returns the normalized URL.
+///
+/// # Errors
+///
+/// Returns `Status::invalid_argument` when the URL breaks one of those rules.
+#[allow(clippy::result_large_err)]
+pub(crate) fn validate_mcp_url(raw: &str) -> Result<String, Status> {
+    let url = raw.trim().trim_end_matches('/').to_owned();
+    if url.len() > 2_048 {
+        return Err(Status::invalid_argument("server.url is too long"));
+    }
+    let endpoint = reqwest::Url::parse(&url)
+        .map_err(|_| Status::invalid_argument("server.url must be a valid HTTPS URL"))?;
+    // A trusted internal host (opt-in via MCP_INTERNAL_ALLOWED_HOSTS) may register
+    // over plain HTTP on a private address (the bundled bridge sidecar); all other
+    // servers stay public-HTTPS-only + SSRF-guarded. Credential/query/fragment
+    // hygiene is enforced for every server regardless.
+    let host_allowed = endpoint.host_str().is_some_and(host_in_internal_allowlist);
+    let scheme_ok = endpoint.scheme() == "https" || (host_allowed && endpoint.scheme() == "http");
+    if !scheme_ok
+        || endpoint.host().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || endpoint.port_or_known_default().is_none()
+        || (!host_allowed && endpoint_host_is_forbidden(&endpoint))
+    {
+        return Err(Status::invalid_argument(
+            "server.url must be a public HTTPS base URL (or an allowlisted internal MCP host) without credentials, query, or fragment",
+        ));
+    }
+    Ok(url)
 }
 
 /// Pure allowlist membership test: is `host` one of the comma-separated entries
@@ -1293,15 +1433,17 @@ fn ip_is_forbidden(address: std::net::IpAddr) -> bool {
 /// on `(org_id, name)`.
 ///
 /// SECURITY: the legacy bearer `token` field is never serialized. Secure-MVP
-/// registration rejects raw credentials entirely; a future authenticated
-/// bridge must use a managed secret reference resolved outside catalog records
-/// and logs.
+/// registration rejects raw credentials entirely; a static-bearer server
+/// (W4-CC-5) is catalogued with the reference to its integration-corev2 binding
+/// (`secret_ref`, from [`crate::mcp_credential_ref::secret_ref_for`]), never the
+/// token, and its token is redeemed per call from that binding.
 #[must_use]
 pub fn mcp_capability_payload(
     org_id: &str,
     server: &McpServer,
     ownership: &crate::ownership::Ownership,
     auth_kind: &str,
+    secret_ref: Option<&str>,
 ) -> serde_json::Value {
     // Ownership (scope/owner/shares) rides in config_json so the durable catalog
     // record stays the system-of-record for who-can-see-what, not just the
@@ -1320,12 +1462,18 @@ pub fn mcp_capability_payload(
     // than naming an external vault that holds nothing.
     if auth_kind != "none" {
         if let Some(config) = config_json.as_object_mut() {
+            let reference = secret_ref.map_or_else(
+                || {
+                    format!(
+                        "secret://capability-core/mcp-oauth-tokens/{}",
+                        server.server_id
+                    )
+                },
+                str::to_owned,
+            );
             config.insert(
                 "secret_ref".to_owned(),
-                serde_json::Value::String(format!(
-                    "secret://capability-core/mcp-oauth-tokens/{}",
-                    server.server_id
-                )),
+                serde_json::Value::String(reference),
             );
         }
     }
@@ -1367,6 +1515,7 @@ mod mcp_writethrough_tests {
             &server,
             &crate::ownership::Ownership::org(),
             "bearer",
+            None,
         );
         // Client-supplied id is honored → gateway cache and catalog stay aligned.
         assert_eq!(p["id"], "mcp_abc");
@@ -1402,6 +1551,7 @@ mod mcp_writethrough_tests {
             &server,
             &crate::ownership::Ownership::user("alice"),
             "none",
+            None,
         );
         assert_eq!(p["auth_kind"], "none");
         assert_eq!(p["enabled"], false);
@@ -1430,6 +1580,7 @@ mod mcp_writethrough_tests {
             &server,
             &crate::ownership::Ownership::user("alice"),
             "oauth",
+            None,
         );
         assert_eq!(p["auth_kind"], "oauth");
         let secret_ref = p["config_json"]["secret_ref"]
@@ -1452,7 +1603,7 @@ mod mcp_hydration_tests {
 
     #[test]
     fn catalog_projection_restores_owner_and_shares_without_credentials() {
-        let (server, ownership) = catalog_mcp_parts(
+        let (server, ownership, _) = catalog_mcp_parts(
             "org-1",
             CatalogMcpServer {
                 id: "mcp-1".to_owned(),
@@ -1465,6 +1616,7 @@ mod mcp_hydration_tests {
                 scope: "user".to_owned(),
                 owner_user_id: "alice".to_owned(),
                 shared_with: vec!["bob".to_owned(), "alice".to_owned(), "".to_owned()],
+                auth_binding_id: String::new(),
             },
         )
         .expect("valid catalog projection");
@@ -1493,6 +1645,7 @@ mod mcp_hydration_tests {
             scope: "org".to_owned(),
             owner_user_id: String::new(),
             shared_with: vec![],
+            auth_binding_id: String::new(),
         }
     }
 
@@ -2072,6 +2225,7 @@ mod mcp_exposure_tests {
             McpListingOptions {
                 unstaged: true,
                 observe: false,
+                redeem_static_bearers: false,
             },
         )
         .await;
@@ -2107,6 +2261,7 @@ mod mcp_exposure_tests {
                 McpListingOptions {
                     unstaged: false,
                     observe: true,
+                    redeem_static_bearers: false,
                 },
             )
             .await;

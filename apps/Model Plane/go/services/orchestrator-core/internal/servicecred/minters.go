@@ -47,12 +47,38 @@ type Options struct {
 //   - execution-core `model:schedule:step` — only the dedicated scheduled-step
 //     RPC uses this audience; the gRPC dialer filters the bearer by method and
 //     leaves user-bound ExecuteStep/RunAgent uncredentialed.
+//   - model-gateway `model:goal_judge` — the completion judge of one unattended
+//     goal fire (EP-7 S6). The gateway's judge route admits this bearer only for
+//     orchestrator-core's own principal, pinned to the body's org.
 var DefaultScopes = map[string][]string{
 	AudienceSessionCore:    {"session:write", "session:runs:system-owner"},
 	AudienceInferenceCore:  {"inference:invoke"},
 	AudienceCapabilityCore: {"capability:read", "capability:write"},
 	AudienceLettaBridge:    {"memory:read", "memory:write"},
 	AudienceExecutionCore:  {"model:schedule:step"},
+	AudienceModelGateway:   {"model:goal_judge"},
+}
+
+// ScopeSessionMemoryControlsRead is the session-core scope CheckMemoryWrite asks
+// of a service caller. It is not in [DefaultScopes]: orchestrator-core requests
+// it only while MEMORY_GATE_ORCHESTRATOR_WRITES is on, so an unchanged
+// deployment keeps asking for exactly the scopes it always did.
+const ScopeSessionMemoryControlsRead = "session:memory-controls:read"
+
+// SessionCoreScopesWithMemoryGate is the session-core scope request that adds
+// [ScopeSessionMemoryControlsRead] to the default one. It returns a fresh slice.
+func SessionCoreScopesWithMemoryGate() []string {
+	base := DefaultScopes[AudienceSessionCore]
+	scopes := make([]string, 0, len(base)+1)
+	scopes = append(scopes, base...)
+	return append(scopes, ScopeSessionMemoryControlsRead)
+}
+
+// mintPathOverrides names the audiences whose token route is not
+// /api/{audience}/internal-token. auth-core mints the Model Plane gateway's token
+// on its Model Plane controller, which is the only route that accepts that audience.
+var mintPathOverrides = map[string]string{
+	AudienceModelGateway: "/api/model-plane/internal-token",
 }
 
 // mintReason is audited by Auth Core. It names the concrete caller so an
@@ -101,6 +127,7 @@ func NewMinters(opts Options, logger *slog.Logger) (Minters, error) {
 		AudienceCapabilityCore,
 		AudienceLettaBridge,
 		AudienceExecutionCore,
+		AudienceModelGateway,
 	} {
 		scopes := DefaultScopes[audience]
 		if override, ok := opts.ScopesByAudience[audience]; ok {
@@ -115,6 +142,7 @@ func NewMinters(opts Options, logger *slog.Logger) (Minters, error) {
 			ServiceID:   opts.ServiceID,
 			Credential:  opts.Credential,
 			Audience:    audience,
+			MintPath:    mintPathOverrides[audience],
 			Scopes:      scopes,
 			Reason:      mintReason,
 		})

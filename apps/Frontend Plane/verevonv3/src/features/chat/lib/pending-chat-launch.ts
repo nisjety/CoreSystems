@@ -1,4 +1,5 @@
 import { objectUrlToDataUrl } from '@/shared/lib/blob-data'
+import { normalizeConnectorScope } from '@/shared/actions/chat-connector-scope'
 import { isEffortLevel, type EffortLevel, type EffortProfile } from '@/shared/api/chat-client'
 import { normalizePrivacyTier, type PrivacyTier } from '@/shared/api/privacy-tier'
 import { removeClientValue } from '@/shared/session/client-storage'
@@ -57,6 +58,8 @@ export type PendingChatLaunch = {
   sourceScope?: import('@/shared/actions/chat-source-scope').ChatSourceScope
   actions?: PendingChatAction[]
   attachments?: PendingChatAttachment[]
+  /** Opaque connection ids the person picked as connected apps for this turn; never credentials. */
+  connectorScope?: string[]
   createdAt?: string
   effort?: EffortProfile | EffortLevel
   minPrivacyTier?: PrivacyTier
@@ -67,6 +70,8 @@ export type PendingChatLaunch = {
   startNewThread?: boolean
   /** Opaque Integration Core connection id; never an OAuth credential. */
   subscriptionConnectionId?: string
+  /** Opaque Integration Core id of a customer gateway (W4-BYO-6). Never a key. */
+  modelConnectionId?: string
   /** Exact support scope that should receive the resulting Chat answer. */
   supportHandoff?: PendingSupportHandoff
   text: string
@@ -254,9 +259,12 @@ function clearAttachmentDataSoon(): void {
 }
 
 function normalizeLaunch(launch: PendingChatLaunch): PendingChatLaunch {
+  const connectorScope = normalizeConnectorScope(launch.connectorScope)
   return {
     actions: normalizePendingActions(launch.actions),
     attachments: normalizePendingAttachments(launch.attachments),
+    // Omitted when nothing was picked, so a launch without connected apps keeps its shape.
+    ...(connectorScope.length > 0 ? { connectorScope } : {}),
     createdAt: launch.createdAt,
     effort: normalizeEffort(launch.effort),
     minPrivacyTier: normalizePrivacyTier(launch.minPrivacyTier),
@@ -288,6 +296,7 @@ function isPendingChatLaunch(value: unknown): value is PendingChatLaunch {
   if (record.attachments !== undefined && !Array.isArray(record.attachments)) return false
   if (record.tools !== undefined && !Array.isArray(record.tools)) return false
   if (record.actions !== undefined && !Array.isArray(record.actions)) return false
+  if (record.connectorScope !== undefined && (!Array.isArray(record.connectorScope) || record.connectorScope.some((id) => typeof id !== 'string'))) return false
   if (record.supportHandoff !== undefined && !isPendingSupportHandoff(record.supportHandoff)) return false
   return true
 }

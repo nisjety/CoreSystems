@@ -3,6 +3,7 @@ import { createMemo, createSignal, createUniqueId, For, Show } from 'solid-js'
 import { executeAction } from '@/shared/actions/action-client'
 import type { ActionActor } from '@/shared/actions/types'
 import { TONE_PRESETS, type TonePreset } from '@/shared/api/ai-settings-client'
+import { setPendingRole } from '@/features/chat/lib/pending-role'
 import { getMemoryControls, rememberMemory } from '@/shared/api/memory-client'
 import { getPersonalSetupState } from '@/shared/api/personal-setup-client'
 import { translateApiError, useI18n } from '@/shared/i18n'
@@ -26,8 +27,9 @@ function browserTimeZone(): string {
 /**
  * The personal first-run card (EP-8-S8): one inline, skippable step above the empty chat. It writes the
  * person's own display name, time zone, language and reply tone. A stated role is saved as a memory only
- * on an open thread, and only when memory is on and the organization allows new memories. The card never
- * blocks the composer, and it is shown only while the step is pending.
+ * when memory is on and the organization allows new memories: on an open thread at once, and on an empty
+ * chat it waits for the first send (pending-role.ts). The card never blocks the composer, and it is shown
+ * only while the step is pending.
  */
 export function PersonalSetupCard(props: { threadId?: string | null }) {
   const i18n = useI18n()
@@ -44,15 +46,14 @@ export function PersonalSetupCard(props: { threadId?: string | null }) {
   const [setup] = createResource(() => getPersonalSetupState())
   const offered = createMemo(() => !setup.error && setup()?.available === true && setup()?.step === 'pending')
 
-  // Memory is read only when the card is offered and a thread is open, since the role needs one. A
-  // read that fails hides the role, which is the safe reading.
+  // Memory is read only when the card is offered. The role is offered on an empty chat too (D3-356): it is
+  // saved on the first send. A read that fails hides the role, which is the safe reading.
   const [controls] = createResource(
-    () => offered() && Boolean(props.threadId),
+    () => offered(),
     () => getMemoryControls(),
   )
   const roleOffered = createMemo(
     () =>
-      Boolean(props.threadId) &&
       !controls.error &&
       controls()?.state === 'on' &&
       controls()?.generationAllowed === true,
@@ -111,15 +112,20 @@ export function PersonalSetupCard(props: { threadId?: string | null }) {
       return
     }
     // The step is recorded. A role is saved only when the person asked for it and memory is usable; if
-    // that save fails, the answers stay saved and the card says so.
+    // that save fails, the answers stay saved and the card says so. On an empty chat there is no thread yet,
+    // so the role is held until the first send, which saves it (see pending-role.ts).
     let roleSaved = true
     const content = role().trim()
     const threadId = props.threadId
-    if (rememberRole() && roleOffered() && threadId && content) {
-      try {
-        await rememberMemory(threadId, i18n.tr(`Rolle: ${content}`, `Role: ${content}`))
-      } catch {
-        roleSaved = false
+    if (rememberRole() && roleOffered() && content) {
+      if (threadId) {
+        try {
+          await rememberMemory(threadId, i18n.tr(`Rolle: ${content}`, `Role: ${content}`))
+        } catch {
+          roleSaved = false
+        }
+      } else {
+        setPendingRole(content)
       }
     }
     setSubmitting(false)

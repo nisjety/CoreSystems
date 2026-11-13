@@ -135,15 +135,22 @@ describe('mid-run input is never dropped', () => {
     // time reaches the turn.
     const handlers: string[] = []
     for (let at = text.indexOf('onError: (failure) =>'); at >= 0; at = text.indexOf('onError: (failure) =>', at + 1)) {
-      handlers.push(text.slice(at, text.indexOf('onFrameId:', at)))
+      // A handler ends at its own closing brace, or where its object's next property starts (onFrameId), whichever comes
+      // first. The question continuation's handler has no onFrameId after it, so a slice to onFrameId alone ran on into
+      // the code of the next handler.
+      const indent = /^ */.exec(text.slice(text.lastIndexOf('\n', at) + 1, at))?.[0] ?? ''
+      const ends = [text.indexOf(`\n${indent}},`, at), text.indexOf('onFrameId:', at)].filter((index) => index > at)
+      handlers.push(text.slice(at, ends.length > 0 ? Math.min(...ends) : undefined))
     }
     expect(handlers.length).toBeGreaterThanOrEqual(2)
     expect(text.match(/onError:/g)).toHaveLength(handlers.length)
+    // The live stream's and the resume path's handlers reattach on a lost connection to the same invocation, which is
+    // never a reason to start another one. The question continuation's handler settles the failure it got instead.
+    const reattaching = handlers.filter((handler) => handler.includes('isTransportLossCode(code)'))
+    expect(reattaching).toHaveLength(2)
     for (const handler of handlers) {
       expect(handler).not.toContain('sendContent(')
-      // A lost connection reattaches to the same invocation; it is never a
-      // reason to start another one.
-      expect(handler).toContain('isTransportLossCode(code)')
+      if (!reattaching.includes(handler)) expect(handler).toContain('settleServerFailure(')
     }
     // Only connection-level codes count as transport loss. A server failure
     // (tool, validation, provider) is the run's outcome and is shown as such.

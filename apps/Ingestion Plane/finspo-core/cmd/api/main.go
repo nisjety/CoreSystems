@@ -104,11 +104,20 @@ func run() error {
 			MaxBytes:      cfg.ContentMaxBytes,
 		})
 		documentsClient := dataplane.NewDocumentsClient(cfg.DataPlaneDocumentsURL, dataPlaneTokens)
+		// Sensitivity-label narrowing stays off (nil reader: no Graph label call,
+		// visibility as ACL-classified) unless the switch is the literal "true".
+		var labelReader content.SensitivityLabelReader
+		if cfg.SensitivityLabelsEnabled {
+			labelReader = contentClient
+			logger.Info().Int("restricted_label_count", len(cfg.RestrictedLabelIDs)).Msg("finspo sensitivity-label narrowing ENABLED")
+		}
 		contentSink = content.NewIngestor(content.Config{
-			Fetcher:           contentClient,
-			Docs:              documentsClient,
-			Logger:            logger,
-			ZDRClassification: cfg.ContentZDRClassification,
+			Fetcher:            contentClient,
+			Docs:               documentsClient,
+			Logger:             logger,
+			ZDRClassification:  cfg.ContentZDRClassification,
+			SensitivityLabels:  labelReader,
+			RestrictedLabelIDs: cfg.RestrictedLabelIDs,
 		})
 		pageContentSink = content.NewPagesIngestor(content.PagesConfig{
 			Pages:             pagesClient,

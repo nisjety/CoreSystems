@@ -15,7 +15,8 @@ import (
 )
 
 // startEventTriggerFire wires the EP-7 W4-F T2 fire path. The sweeper decides pending fires with the same fresh
-// Control authorizer the cron sweeper uses, so nothing is decided without one. The consumer also needs
+// Control authorizer the cron sweeper uses, so nothing is decided without one. With EVENT_TRIGGER_RUN_ENABLED the
+// starter also begins a scheduled run for each authorised fire. The consumer also needs
 // EVENT_TRIGGER_NATS_URL and a durable the ingestion stream owner provisioned. Without the URL only the sweeper runs,
 // and it decides nothing until a fire has been recorded.
 func startEventTriggerFire(ctx context.Context, pool *pgxpool.Pool, authorizer *cron.ControlFireAuthorizer, authErr error) {
@@ -28,8 +29,32 @@ func startEventTriggerFire(ctx context.Context, pool *pgxpool.Pool, authorizer *
 		slog.Warn("event trigger sweeper not started", "error", err)
 		return
 	}
+	// EP-7 W4-F T5: the wake gate reads a filtered fire's webhook payload from integration-corev2 and refuses the fire when
+	// the trigger's filter does not match. Strict literal true; off, stored filters are ignored and every fire is decided as
+	// before. It needs integration-corev2's URL and internal key as well.
+	if os.Getenv("EVENT_TRIGGER_WAKE_GATE_ENABLED") == "true" {
+		source := eventtrigger.NewIntegrationWebhookSource(os.Getenv("EVENT_TRIGGER_IC_URL"), os.Getenv("EVENT_TRIGGER_IC_API_KEY"))
+		if !source.Configured() {
+			slog.Warn("event trigger wake gate has no integration-corev2 URL or key; filtered fires stay pending and are refused")
+		}
+		sweeper.EnableWakeGate(source)
+		slog.Info("event trigger wake gate enabled")
+	}
 	go sweeper.Start(ctx)
 	slog.Info("event trigger sweeper started with fresh Control authorization")
+
+	// EP-7 W4-F T4: the starter turns each authorised fire of a trigger that names a schedule into one scheduled run,
+	// through the cron fire path. Strict literal true, in addition to EVENT_TRIGGER_FIRE_ENABLED; off by default.
+	// The workflow dispatcher asks Control again before each run, so the starter needs no authorizer of its own.
+	if os.Getenv("EVENT_TRIGGER_RUN_ENABLED") == "true" {
+		starter, err := eventtrigger.NewStarter(pool)
+		if err != nil {
+			slog.Warn("event trigger starter not started", "error", err)
+		} else {
+			go starter.Start(ctx)
+			slog.Info("event trigger starter started")
+		}
+	}
 
 	url := strings.TrimSpace(os.Getenv("EVENT_TRIGGER_NATS_URL"))
 	if url == "" {

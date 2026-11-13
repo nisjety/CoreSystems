@@ -90,10 +90,11 @@ const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
       "shows Better Auth's own English message; auth-core owns that code set and the SPA has no copy table for it yet (open work, see the codes list section 7)",
   },
   'features/chat/components/use-chat-controller.ts': {
-    sites: 3,
+    sites: 1,
     reason:
-      'two approval/denial catch sites are unreviewed; the third reads the stream failure text that streamFailurePresentation keys by code and only shows for a code it has no copy for',
+      'settleServerFailure passes the stream failure text to streamFailurePresentation, which shows that text for a code it has no copy for (person-facing, unreviewed)',
   },
+  'features/core/assistant-agent/assistant-desktop-agent.ts': { sites: 1, reason: 'reviewed: actionFailure only matches the message against the Quarry adapter sentences to pick a fixed English line for the model step history; the raw text is never shown' },
   'features/core/components/OrgDeletionBanner.tsx': {
     sites: 1,
     reason:
@@ -107,9 +108,9 @@ const NOT_CONVERTED: Record<string, { sites: number; reason: string }> = {
   'features/dashboard/home/BrowserTimelineDetail.tsx': { sites: 1, reason: UNREVIEWED },
   'features/dashboard/home/DashboardCards.tsx': { sites: 3, reason: UNREVIEWED },
   'features/dashboard/home/DashboardComposer.tsx': {
-    sites: 3,
+    sites: 1,
     reason:
-      'the knowledge import notice, the send failure and the gateway-load failure line are unreviewed (the pick error at the same place was converted in round 5)',
+      'the gateway-load failure line is unreviewed (the knowledge import notice, the send failure and the pick error at the same place were converted)',
   },
   'features/inbox/components/InboxPage.tsx': {
     sites: 1,

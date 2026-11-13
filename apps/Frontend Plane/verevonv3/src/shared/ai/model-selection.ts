@@ -5,12 +5,15 @@ import {
 } from '@/shared/api/chatgpt-subscription-client'
 import { VEREVON_BALANCE_MODE_ID } from '@/shared/api/chat-client'
 import { normalizePrivacyTier, type PrivacyTier } from '@/shared/api/privacy-tier'
+import { LocalizedError } from '@/shared/i18n/errors'
 
 export type AiModelSelection = Readonly<{
   model: string
   label: string
   provider?: string
   subscriptionConnectionId?: string
+  /** The customer-gateway connection a "Your gateway" model is served on (W4-BYO-6). Absent otherwise. */
+  modelConnectionId?: string
   /**
    * The tier `/api/v1/models` last reported for this model and provider
    * (`'unspecified'` = it claimed none). Only a fallback: a composer sends it
@@ -51,6 +54,7 @@ function normalizeSelection(value: unknown): AiModelSelection | undefined {
   // A garbled tier is dropped, not guessed: without one the composer falls
   // back to the strictest tier.
   const privacyTier = normalizePrivacyTier(raw.privacyTier)
+  const modelConnectionId = typeof raw.modelConnectionId === 'string' ? raw.modelConnectionId.trim() : ''
   if (!model || !label) return undefined
   if (provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && !subscriptionConnectionId) {
     return { model, label, provider, ...(privacyTier ? { privacyTier } : {}) }
@@ -60,6 +64,7 @@ function normalizeSelection(value: unknown): AiModelSelection | undefined {
     label,
     ...(provider ? { provider } : {}),
     ...(subscriptionConnectionId ? { subscriptionConnectionId } : {}),
+    ...(modelConnectionId ? { modelConnectionId } : {}),
     ...(privacyTier ? { privacyTier } : {}),
   }
 }
@@ -133,7 +138,12 @@ export async function resolveAiModelSelection(orgId: string): Promise<AiModelSel
   if (selected.provider !== OPENAI_CODEX_SUBSCRIPTION_PROVIDER) return selected
   const connections = await listChatGptSubscriptions(orgId)
   const active = activeSubscriptionConnection(connections, selected.subscriptionConnectionId)
-  if (!active) throw new Error('ChatGPT-abonnementet er ikke tilkoblet. Koble til under Profil → ChatGPT-abonnement, eller velg en annen modell.')
+  if (!active) {
+    throw new LocalizedError({
+      no: 'ChatGPT-abonnementet er ikke tilkoblet. Koble til under Profil → ChatGPT-abonnement, eller velg en annen modell.',
+      en: 'The ChatGPT subscription is not connected. Connect it under Profile → ChatGPT subscription, or choose another model.',
+    })
+  }
   return { ...selected, subscriptionConnectionId: active.id }
 }
 

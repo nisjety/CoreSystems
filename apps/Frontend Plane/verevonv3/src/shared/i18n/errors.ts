@@ -39,7 +39,7 @@ type ApiErrorLike =
       blockReason?: string | null
       resumable?: boolean
       feature?: string | null
-      details?: Record<string, unknown> | null
+      details?: Record<string, unknown> | unknown[] | null
     }
   | null
   | undefined
@@ -65,6 +65,17 @@ export class LocalizedError extends Error {
     this.name = 'LocalizedError'
     this.copy = copy
   }
+}
+
+/**
+ * The organisation's agent policy cannot be read inside its bound (C-14-mg-rel1): refused before the run or the approval
+ * is read, on a Do turn's stream and on a continuation over HTTP. Nothing ran. The words carry no retry: a continuation
+ * offers none (its spend is unknown, chat-run-continue-contract.ts), and a Do turn's stream offers its retry as the
+ * turn's action (chat-normalizers.ts), not in these words. Both paths read these words from here.
+ */
+export const ORG_POLICY_UNAVAILABLE_COPY: ErrorCopy = {
+  no: 'Organisasjonens agentpolicy kan ikke leses akkurat nå, så agenten startet ikke. Ingenting ble kjørt.',
+  en: 'The agent policy for this organisation cannot be read right now, so the agent did not start. Nothing was run.',
 }
 
 export const ERROR_COPY: Record<string, ErrorCopy> = {
@@ -108,6 +119,7 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   // Inbox / tickets / conversations
   thread_id_required: { no: 'Ingen samtale er valgt.', en: 'No conversation is selected.' },
   thread_run_active: { no: 'Agenten jobber allerede i denne samtalen. Meldingen er lagt ut. Prøv igjen når den er ferdig.', en: 'An agent is already working in this conversation. Your message was posted. Try again when it finishes.' },
+  continue_space_scope_unsupported: { no: 'Kjøringen i rommet kan ikke fortsettes slik ennå. Ingenting er endret.', en: 'This run cannot be continued in the room this way yet. Nothing was changed.' },
   conversation_membership_required: { no: 'Du har ikke tilgang til denne samtalen.', en: 'You do not have access to this conversation.' },
   conversation_upstream_target_rejected: { no: 'Meldingen kunne ikke sendes til mottakeren.', en: 'The message could not be delivered to the recipient.' },
   // A channel send is not a normal retry: the provider may have received it
@@ -207,6 +219,14 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Forbruket kunne ikke kontrolleres, så agenten startet ikke. Prøv igjen om litt.',
     en: 'Spend could not be verified, so the agent did not start. Try again shortly.',
   },
+  // The organisation's agent-run pause (F-t3-083), on a resume or continuation refused over HTTP. Nothing
+  // ran, so the words say plain chat still works and offer no retry. The words are the stream's own
+  // (chat-normalizers.ts), copied exactly.
+  org_agents_paused: {
+    no: 'Organisasjonen har satt agentkjøringer på pause. Vanlig chat fungerer som før. Ingenting ble kjørt.',
+    en: 'Your organisation has paused agent runs. Plain chat works as before. Nothing was run.',
+  },
+  org_policy_unavailable: ORG_POLICY_UNAVAILABLE_COPY,
   shipping_auth_unavailable: { no: 'Fraktintegrasjonen er ikke koblet til ennå.', en: 'The shipping integration is not connected yet.' },
   social_core_unavailable: { no: 'Sosiale medier-tjenesten er utilgjengelig akkurat nå.', en: 'The social service is unavailable right now.' },
   search_provider_unconfigured: { no: 'Søketjenesten er ikke satt opp ennå.', en: 'The search provider is not configured yet.' },
@@ -838,6 +858,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Lagrede AI-forslag krever at organisasjonen bruker gjennomgang av AI i support. En administrator kan slå det på i innstillingene.',
     en: 'Saved AI proposals need the organization to use AI review in support. An administrator can turn it on in the settings.',
   },
+  council_unavailable: {
+    no: 'Modellrådet er midlertidig utilgjengelig. Prøv igjen om litt.',
+    en: 'The model council is temporarily unavailable. Try again shortly.',
+  },
   zdr_ai_proposal_forbidden: {
     no: 'AI-forslag lagres ikke, fordi organisasjonen har Zero Data Retention slått på.',
     en: 'AI proposals are not kept, because the organization has Zero Data Retention turned on.',
@@ -1080,6 +1104,15 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Forespørselen mangler noe eller er ugyldig. Ingenting er endret. Sjekk og prøv igjen.',
     en: 'The request is missing something or is not valid. Nothing was changed. Check it and try again.',
   },
+  // W4-CC-2 MCP probe: the address did not answer as an MCP server, or it did not answer in time. Nothing is saved.
+  probe_failed: {
+    no: 'Adressen svarte ikke som en MCP-tjener. Kontroller at URL-en er riktig, og prøv igjen. Ingenting er lagret.',
+    en: 'The address did not answer as an MCP server. Check that the URL is right and try again. Nothing was saved.',
+  },
+  probe_timeout: {
+    no: 'Tjeneren svarte ikke i tide. Prøv igjen om litt. Ingenting er lagret.',
+    en: 'The server did not answer in time. Try again in a moment. Nothing was saved.',
+  },
   no_sources_registered: {
     no: 'Ingen kilder er valgt for denne tilkoblingen ennå. Velg et bibliotek først.',
     en: 'No sources are chosen for this connection yet. Choose a library first.',
@@ -1225,6 +1258,14 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   invalid_policy: { no: 'Valget er ikke gyldig. Velg minst én person for en liste, og høyst 50. Ingenting er endret.', en: 'That choice is not valid. A list needs at least one person and at most 50. Nothing was changed.' },
   policy_conflict: { no: 'Noen andre har endret hvem som kan tilkalle agenten. Den nyeste innstillingen er lastet inn; se over og lagre på nytt.', en: 'Someone else changed who can wake the agent. The latest setting is loaded; review it and save again.' },
   space_role_cannot_manage_agent: { no: 'Bare en eier eller leder kan endre hvem som kan tilkalle agenten.', en: 'Only an owner or manager can change who can wake the agent.' },
+  // EP-6 S9 agent version pin (the other pin refusals reuse the codes above)
+  agent_version_not_found: { no: 'Den versjonen av agenten er ikke publisert. Ingenting er endret.', en: 'That version of the agent is not published. Nothing was changed.' },
+  // EP-7 S6 keep working while away: the BFF refuses a goal-bound schedule that names a shared room, and the model
+  // gateway admits one only with its switch, its judge and a read-only template.
+  goal_schedule_personal_only: { no: 'Et mål som fortsetter mens du er borte, kjører bare i ditt personlige rom, ikke i et delt rom.', en: 'A goal that keeps working while you are away runs only in your personal space, not in a shared room.' },
+  goal_unattended_disabled: { no: 'Å la et mål fortsette mens du er borte er ikke slått på her.', en: 'Keeping a goal working while you are away is not turned on here.' },
+  goal_unattended_needs_judge: { no: 'Et mål kan bare fortsette mens du er borte når dommeren for målet er slått på.', en: 'A goal keeps working while you are away only when its completion judge is on.' },
+  invalid_goal_schedule: { no: 'Planen for målet kunne ikke lagres med disse innstillingene. Ingenting er endret.', en: 'The schedule for this goal could not be saved with these settings. Nothing was changed.' },
 
   // WS02 realtime stream
   space_stream_capacity: { no: 'Live-oppdateringer er midlertidig full. Rommet oppdateres hvert par sekunder.', en: 'Live updates are temporarily at capacity. The room is refreshing every few seconds.' },
@@ -1349,6 +1390,9 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   approval_not_addressed_to_you: { no: 'Denne godkjenningen venter på medlemmet som startet kjøringen.', en: 'This approval is waiting for the member who started the run.' },
   approval_not_found: { no: 'Fant ikke godkjenningen.', en: 'The approval was not found.' },
   approval_scope_not_permitted: { no: 'Dette omfanget av godkjenning er ikke tilgjengelig her.', en: 'This approval scope is not available here.' },
+  authority_route_mismatch: { no: 'Kjøringen kan ikke fortsette med en annen modell eller leverandør enn da den ble satt på pause. Ingenting er endret.', en: 'The run cannot continue with a different model or provider than when it paused. Nothing was changed.' },
+  authority_space_mismatch: { no: 'Denne fortsettelsen gjelder et annet rom enn kjøringen. Ingenting er endret.', en: 'This continuation belongs to a different room than the run. Nothing was changed.' },
+  authority_widened: { no: 'Kjøringen kan ikke fortsette med mer tilgang enn da den ble satt på pause. Ingenting er endret.', en: 'The run cannot continue with more access than it had when it paused. Nothing was changed.' },
   feature_unavailable: { no: 'Denne funksjonen er ikke slått på for deg ennå.', en: 'This feature is not turned on for you yet.' },
   files_binding_unavailable: { no: 'Rommet er ikke koblet til en kunnskapskilde for filer.', en: 'This room is not connected to a knowledge target for files.' },
   files_read_not_authorized: { no: 'Du har ikke tilgang til å lese filene i dette rommet.', en: 'You are not allowed to read the files of this room.' },
@@ -1386,10 +1430,10 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   invalid_research_run_id: { no: 'ID-en til research-kjøringen er ugyldig.', en: 'The research run id is not valid.' },
   research_run_not_found: { no: 'Fant ikke research-kjøringen.', en: 'The research run was not found.' },
   research_run_conflict: { no: 'Research-kjøringen kan ikke endres i den tilstanden den er i nå. Last inn på nytt.', en: 'The research run cannot be changed in its current state. Reload to see it.' },
-  invalid_run_id: { no: 'ID-en til kjøringen er ugyldig.', en: 'The run id is not valid.' },
   invalid_trace_types: { no: 'Hendelsestypene i filteret er ugyldige.', en: 'The event types in the filter are not valid.' },
   export_too_large: { no: 'Eksporten er for stor. Velg færre felt eller en mindre grense.', en: 'The export is too large. Choose fewer fields or a smaller limit.' },
   sidebar_too_large: { no: 'Sidepanelets oppsett er for stort til å lagres.', en: 'The sidebar layout is too large to save.' },
+  skip_authority_unavailable: { no: 'Siden kunne ikke hoppes over på en trygg måte. Kjøringen venter fortsatt.', en: 'The page could not be skipped safely. The run is still waiting.' },
   space_reminders_disabled: { no: 'Påminnelser i rom er ikke slått på.', en: 'Space reminders are not turned on.' },
   space_run_control_not_authorized: { no: 'Du kan ikke stoppe denne kjøringen.', en: 'Stopping this run is not authorized.' },
   space_sidebar_conflict: { no: 'Sidepanelets oppsett er endret et annet sted. Last det inn på nytt og gjør endringen igjen.', en: 'The sidebar layout changed somewhere else. Reload it and apply your change again.' },
@@ -1403,6 +1447,53 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   too_many_reminders: { no: 'Du har flest påminnelser som er tillatt. Avbryt én for å legge til en ny.', en: 'You have the most pending reminders allowed. Cancel one to add another.' },
   upload_length_required: { no: 'Opplastingen må oppgi lengden sin.', en: 'The upload must declare its length.' },
   zdr_feature_not_supported: { no: 'Dette støttes ikke med null datalagring ennå: agentkjøringer. Forespørselen ble avvist før noe kall til modellen.', en: 'This is not supported with zero data retention yet: agent runs. The request was refused before any model call.' },
+  // Codes the gateway answers on its browser, assistant, chat, learning, Spaces, integrations and knowledge routes.
+  assistant_navigation_unavailable: { no: 'Navigasjonsassistenten er midlertidig utilgjengelig. Utkastet ditt er beholdt; prøv igjen om litt.', en: 'The navigation assistant is temporarily unavailable. Your draft is kept; try again shortly.' },
+  assistant_profile_not_supported: { no: 'Oppgaven for assistenten trenger en ny nettleser, ikke en lagret profil.', en: 'The assistant task needs a fresh browser, not a saved profile.' },
+  browser_approval_continuation_unavailable: { no: 'Nettleserkjøringen kan ikke kreve godkjenning ennå. Prøv igjen senere.', en: 'The browser run cannot require approval yet. Try again later.' },
+  browser_assistant_scope_invalid: { no: 'En interaktiv assistent krever en tilkoblet kjøring og eksplisitt godkjente nettsteder.', en: 'An interactive assistant needs an attached run and explicitly allowed sites.' },
+  browser_continue_scope_invalid: { no: 'Å fortsette i en fane krever en tilkoblet, interaktiv kjøring for dette nettstedet.', en: 'Continuing in a tab needs an attached, interactive run for this site.' },
+  browser_continue_tab_changed: { no: 'Fanen i nettleseren har endret seg. Se over den før du gir den til assistenten.', en: 'The browser tab has changed. Check it before you hand it to the assistant.' },
+  browser_initial_navigation_failed: { no: 'Siden svarte med en feil, så nettleseren kunne ikke åpne den. Prøv en annen adresse.', en: 'The page answered with an error, so the browser could not open it. Try another address.' },
+  browser_personal_session: { no: 'Denne nettleseren er til personlig bruk. Start en egen assistentoppgave for å gi agenten tilgang til nettstedet.', en: 'This browser is for personal browsing. Start a separate assistant task to give the agent access to the site.' },
+  browser_redirect_access_denied: { no: 'Siden sender videre til et nettsted nettleseren ikke har tilgang til. Be om tilgang, eller velg en annen side.', en: 'The page redirects to a site the browser does not have access to. Ask for access, or choose another page.' },
+  browser_redirect_access_unavailable: { no: 'Tilgangen til nettstedet siden sender videre til, kunne ikke bekreftes. Prøv igjen om litt.', en: 'Access to the site the page redirects to could not be confirmed. Try again shortly.' },
+  browser_redirect_unverified: { no: 'Videresendingen fra denne adressen kunne ikke bekreftes som trygg. Prøv en annen adresse.', en: 'The redirect from this address could not be verified as safe. Try another address.' },
+  desktop_browser_planner_unavailable: { no: 'Nettleserassistenten kunne ikke fullføre dette steget. Prøv igjen.', en: 'The browser assistant could not complete this step. Try again.' },
+  invalid_desktop_observation: { no: 'Sidevisningen kunne ikke brukes av nettleserassistenten. Prøv igjen.', en: 'The page view could not be used by the browser assistant. Try again.' },
+  invalid_model_response: { no: 'Svaret fra modellen kunne ikke brukes. Prøv igjen.', en: 'The answer from the model could not be used. Try again.' },
+  review_unavailable: { no: 'Gjennomgangen er midlertidig utilgjengelig. Prøv igjen om litt.', en: 'The review is temporarily unavailable. Try again shortly.' },
+  reasoning_translate_unavailable: { no: 'Oversettelsen er midlertidig utilgjengelig. Prøv igjen om litt.', en: 'The translation is temporarily unavailable. Try again shortly.' },
+  owner_not_wired: { no: 'Denne handlingen er ikke tilgjengelig ennå. Ingenting ble gjort.', en: 'This action is not available yet. Nothing was done.' },
+  credential_bindings_disabled: { no: 'Lagrede nøkler er ikke slått på i dette miljøet.', en: 'Stored keys are not turned on in this environment.' },
+  org_admin_required: { no: 'Bare en eier eller administrator i organisasjonen kan administrere lagrede nøkler.', en: 'Only an owner or admin of the organization can manage stored keys.' },
+  invalid_binding_id: { no: 'Den lagrede nøkkelen kunne ikke identifiseres. Last inn siden på nytt og prøv igjen.', en: 'The stored key could not be identified. Reload the page and try again.' },
+  invalid_connector_name: { no: 'Navnet på koblingen må ha 1 til 120 tegn.', en: 'The connector name must be 1 to 120 characters.' },
+  invalid_connection_id: { no: 'Tilkoblingen kunne ikke identifiseres. Last inn siden på nytt og prøv igjen.', en: 'The connection could not be identified. Reload the page and try again.' },
+  library_disabled: { no: 'Biblioteket i chatten er ikke slått på.', en: 'The chat library is not turned on.' },
+  invalid_paging: { no: 'Antallet må være mellom 1 og 100.', en: 'The number must be between 1 and 100.' },
+  process_output_disabled: { no: 'Utdata fra bakgrunnsprosesser er ikke slått på.', en: 'Output from background processes is not turned on.' },
+  invalid_run_id: { no: 'Kjøringen er ikke gyldig. Velg den på nytt og prøv igjen.', en: 'That run is not valid. Choose it again and try again.' },
+  invalid_process_id: { no: 'Prosessen er ikke gyldig. Velg den på nytt og prøv igjen.', en: 'That process is not valid. Choose it again and try again.' },
+  media_transcripts_disabled: { no: 'Transkribering av opptak er ikke slått på.', en: 'Transcribing recordings is not turned on.' },
+  transcript_empty: { no: 'Fant ingen tale i opptaket. Prøv med et nytt opptak.', en: 'No speech was found in the recording. Try a new recording.' },
+  transcript_not_saved: { no: 'Transkripsjonen kunne ikke lagres som dokument. Prøv igjen.', en: 'The transcript could not be saved as a document. Try again.' },
+  zdr_transcript_refused: { no: 'Null datalagring gjelder, så opptaket kan ikke lagres som et transkripsjonsdokument.', en: 'Zero Data Retention applies, so this recording cannot be saved as a transcript document.' },
+  transcription_unavailable: { no: 'Transkribering er midlertidig utilgjengelig. Prøv igjen om litt.', en: 'Transcription is temporarily unavailable. Try again shortly.' },
+  transcription_failed: { no: 'Opptaket kunne ikke transkriberes. Prøv et nytt opptak.', en: 'The recording could not be transcribed. Try a new recording.' },
+  invalid_thread_id: { no: 'Samtalen er ikke gyldig. Åpne den på nytt og prøv igjen.', en: 'The conversation is not valid. Open it again and try again.' },
+  learn_note_too_long: { no: 'Notatet er for langt. Det kan være høyst 500 tegn.', en: 'The note is too long. It can be at most 500 characters.' },
+  teach_name_invalid: { no: 'Gi ferdigheten et navn før du lagrer.', en: 'Give the skill a name before you save it.' },
+  teach_goal_hint_too_long: { no: 'Hjelpeteksten for målet er for lang. Den kan være høyst 500 tegn.', en: 'The goal hint is too long. It can be at most 500 characters.' },
+  invalid_grant_id: { no: 'Godkjenningen er ikke gyldig. Last inn siden på nytt og prøv igjen.', en: 'That approval is not valid. Reload the page and try again.' },
+  invalid_proposal_id: { no: 'Regelforslaget er ikke gyldig. Last inn siden på nytt og prøv igjen.', en: 'That rule proposal is not valid. Reload the page and try again.' },
+  invalid_decision: { no: 'Beslutningen ble ikke registrert. Last inn på nytt og prøv igjen.', en: 'The decision was not recorded. Reload and try again.' },
+  wiki_proposal_conflict: { no: 'Det finnes allerede en side på denne adressen. Ingenting ble skrevet, og forslaget er nå merket som en konflikt.', en: 'A page already exists at this address. Nothing was written, and the proposal is now marked as a conflict.' },
+  legal_hold_not_found: { no: 'Den juridiske tilbakeholdelsen ble ikke funnet.', en: 'The legal hold was not found.' },
+  space_scope_unsupported: { no: 'Den gjeldende policyen for et rom kan ikke vises ennå. Velg en samtale i stedet.', en: 'The effective policy of a room cannot be shown yet. Choose a conversation instead.' },
+  space_thread_not_visible: { no: 'Denne samtalen er ikke tilgjengelig for deg.', en: 'This conversation is not available to you.' },
+  space_thread_scope_unavailable: { no: 'Rommet for denne samtalen kunne ikke fastslås. Prøv igjen om litt.', en: 'The room for this conversation could not be determined. Try again shortly.' },
+  invalid_agent: { no: 'Agenten er ikke gyldig. Velg en agent i listen og prøv igjen.', en: 'The agent is not valid. Choose an agent from the list and try again.' },
 }
 
 /**
@@ -1569,7 +1660,8 @@ function describe(
   // A refusal that names why the wall is up gets the sentence for that reason.
   if (kind === 'blocked' && typeof like?.blockReason === 'string') copy = BLOCK_REASON_COPY[like.blockReason]
   // A memory refusal that names a shared Space or an agent run says so.
-  const memoryScope = like?.details?.reason
+  const details = like?.details
+  const memoryScope = details && !Array.isArray(details) ? details.reason : undefined
   if (code === 'memory_not_enabled' && typeof memoryScope === 'string') copy ??= MEMORY_SCOPE_COPY.get(memoryScope)
   copy ??= code ? ERROR_COPY[code] : undefined
   if (!copy) {

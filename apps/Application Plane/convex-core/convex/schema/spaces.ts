@@ -199,7 +199,8 @@ export const spaceTables = {
       ),
     ),
     // EP-6 S7 (AGENT_DEFINITION_VERSIONS): the agent version this binding pins. Absent means
-    // follow the agent's published version. Written only by the EP-6 S9 invoke-time pin.
+    // follow the agent's published version. Written only by the setSpaceAgentBindingPinForGateway
+    // mutation (spaceAgents.ts), the gateway's pin route and `spaces.agent_binding.pin` (EP-6 S9).
     pinnedVersion: v.optional(v.number()),
     projectionVersion: v.number(),
     createdAt: v.number(),

@@ -74,11 +74,57 @@ function waitForFonts(target: Document): Promise<void> {
   return fonts ? fonts.ready.then(() => undefined) : Promise.resolve()
 }
 
+/** Class of the hidden export twin that `InlineWidget` and `McpAppFrame` render inside their frame: the code a print shows. */
+const EXPORT_TWIN_CLASS = 'verevon-inline-widget__export'
+/** The frame roots a print never copies live: an inline widget, and an MCP app (its root carries both classes). */
+const FRAME_SELECTOR = '.verevon-inline-widget, .verevon-mcp-app'
+
+/**
+ * The code one frame prints as: its export twin, moved out of the frame and
+ * made visible; else a `<pre>` of its `data-source`; else `null`, so the frame
+ * is dropped from the print rather than printed as a frame.
+ */
+function codeForFrame(frame: Element, target: Document): Element | null {
+  const twin = Array.from(frame.children).find((child) => child.classList.contains(EXPORT_TWIN_CLASS))
+  if (twin) {
+    twin.removeAttribute('hidden')
+    twin.remove()
+    return twin
+  }
+  const source = frame.getAttribute('data-source')
+  if (!source) return null
+  const pre = target.createElement('pre')
+  const code = target.createElement('code')
+  code.textContent = source
+  pre.appendChild(code)
+  return pre
+}
+
+/**
+ * Replaces every framed widget or app under `root` with its code, then drops
+ * any iframe and toolbar still left there. `root` must be the print's own clone
+ * of the answer: the live answer keeps its frames.
+ */
+function swapFramesForCode(root: Element, target: Document): void {
+  for (const frame of root.querySelectorAll(FRAME_SELECTOR)) {
+    const code = codeForFrame(frame, target)
+    if (code) {
+      frame.replaceWith(code)
+    } else {
+      frame.remove()
+    }
+  }
+  for (const leftover of root.querySelectorAll('iframe, .verevon-inline-widget__toolbar')) {
+    leftover.remove()
+  }
+}
+
 /**
  * Renders `element`'s content into a hidden iframe styled like the page and
  * calls the browser's print dialog on it, so the person can "Save as PDF".
  * `title` becomes the iframe document's `<title>`, which is what browsers
- * offer as the default save-as filename.
+ * offer as the default save-as filename. A widget or MCP app in the answer
+ * prints as its code, never as its live frame (`swapFramesForCode`).
  */
 export function printAnswerAsPdf(element: HTMLElement, title: string): void {
   const iframe = document.createElement('iframe')
@@ -124,6 +170,7 @@ export function printAnswerAsPdf(element: HTMLElement, title: string): void {
   const root = target.createElement('div')
   root.className = 'verevon-chat-print-root'
   root.appendChild(element.cloneNode(true))
+  swapFramesForCode(root, target)
   target.body.appendChild(root)
 
   void Promise.all([waitForFonts(target), waitForImages(root)]).then(() => {

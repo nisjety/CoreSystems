@@ -4,6 +4,7 @@ import { createSignal, flush } from 'solid-js'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('@/shared/i18n', () => ({ useI18n: () => ({ tr: (_no: string, en: string) => en, locale: () => 'en' }) }))
 vi.mock('@/shared/session/session-store', () => ({ getSession: () => ({ user: { id: 'user-a' }, activeOrg: { id: 'org-a' } }) }))
+import { LocalizedError } from '@/shared/i18n/errors'
 import { GlobalAssistant } from '@/features/core/components/GlobalAssistant'
 
 const start = vi.fn<(text: string) => boolean>()
@@ -31,7 +32,7 @@ describe('assistant task input', () => {
   })
   it('retains an unavailable task and shows the error without starting chat', async () => {
     start.mockReturnValue(false)
-    submit.mockRejectedValue(new Error('Agent tasks are not available yet. Your draft has been kept.'))
+    submit.mockRejectedValue(new LocalizedError({ no: 'Agentoppgaver er ikke tilgjengelige ennå. Utkastet er beholdt.', en: 'Agent tasks are not available yet. Your draft has been kept.' }))
     setup(); type('Make a report')
     fireEvent.click(screen.getByRole('button', { name: 'Start task' })); flush()
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('not available yet'))
@@ -56,7 +57,7 @@ describe('assistant task input', () => {
   })
   it('does not interpret slash commands as chat actions', async () => {
     start.mockReturnValue(false)
-    submit.mockRejectedValue(new Error('Unavailable'))
+    submit.mockRejectedValue(new LocalizedError({ no: 'Utilgjengelig', en: 'Unavailable' }))
     setup(); type('/schedule monthly report')
     fireEvent.keyDown(input(), { key: 'Enter' }); flush()
     await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('Unavailable'))

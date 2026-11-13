@@ -274,18 +274,27 @@ fn document_artifact_write(
     kind == Some(ArtifactKind::Document)
 }
 
-/// Validates a model-authored artifact, returning the normalized parts.
+/// Validates a model-authored artifact, returning the normalized parts: the id, the kind it is stored under, the
+/// title, and the content to store. A `web_bundle` (W5-087, behind its switch) is a manifest: it is checked and
+/// inlined here into the `html` document it is stored as, so the manifest itself is never kept.
 fn validate_authored_artifact(
     id: &str,
     kind: &str,
     title: &str,
     content: &str,
-) -> Result<(String, crate::artifacts::ArtifactKind, String), String> {
+) -> Result<(String, crate::artifacts::ArtifactKind, String, String), String> {
     let id = id.trim();
     if id.is_empty() {
         return Err("create_artifact requires a non-empty 'id'".to_owned());
     }
-    let Some(kind) = crate::artifacts::ArtifactKind::parse(kind) else {
+    // `ArtifactKind::parse` does not know a bundle; only the switch admits its kind, and it is stored as html.
+    let bundle = crate::web_bundle::is_bundle_kind(kind);
+    let parsed = if bundle {
+        Some(crate::artifacts::ArtifactKind::Html)
+    } else {
+        crate::artifacts::ArtifactKind::parse(kind)
+    };
+    let Some(kind) = parsed else {
         return Err(format!(
             "unknown artifact kind '{kind}' — use 'document', 'code', or 'html'"
         ));
@@ -305,11 +314,16 @@ fn validate_authored_artifact(
             crate::artifacts::MAX_TEXT_ARTIFACT_CHARS
         ));
     }
+    let content = if bundle {
+        crate::web_bundle::inline_bundle(content)?
+    } else {
+        content.to_owned()
+    };
     let title = title.trim();
     // A missing title would render as an unlabelled panel entry; fall back to
     // the id, which the model chose to be descriptive.
     let title = if title.is_empty() { id } else { title };
-    Ok((id.to_owned(), kind, title.to_owned()))
+    Ok((id.to_owned(), kind, title.to_owned(), content))
 }
 
 fn authored_artifact_payload(
@@ -438,6 +452,8 @@ pub(crate) fn tool_artifact_events(
         "code_interpreter" => code_interpreter_events(outcome, office),
         // The manifest as a `deck` artifact, then the built pptx through the arm above (EP-5 S2).
         "deck" => crate::deck_tool::deck_events(outcome, office),
+        // The generated image as an `image` artifact, and the summary the model reads in its place (W4-IMG-3).
+        "generate_image" => crate::image_tool::image_events(outcome),
         _ => (Vec::new(), None),
     }
 }
@@ -514,6 +530,10 @@ fn authored_artifact_events(
 fn public_tool_output(outcome: &ToolOutcome, source_checked: bool, norwegian: bool) -> String {
     if outcome.error.is_none() && outcome.name == mp_contracts::provider_reads::READ_TOOL_NAME {
         return connector_reads::public_summary(&outcome.output);
+    }
+    // A custom REST read shows its call and HTTP status to the person, never the body (W4-CC-7).
+    if outcome.error.is_none() && outcome.name == mp_contracts::custom_rest::READ_TOOL_NAME {
+        return mp_contracts::custom_rest::public_summary(&outcome.output);
     }
     if outcome.error.is_none() && source_checked {
         return if norwegian { "Utkastet er klart for gjennomgang i Resultat." }
@@ -907,8 +927,10 @@ fn recall_memory_output(items: Vec<serde_json::Value>, skip_reason: &str) -> Str
 pub(crate) fn inline_tool_allowed(name: &str) -> bool {
     // A provider write leaves through execution-core's approval path. The Ask loop reads a connected
     // account and never writes one (WS23-S5).
-    !matches!(name, "save_memory" | "browser_agent" | "execute_provider_action")
-        && !name.starts_with("mcp__")
+    !matches!(
+        name,
+        "save_memory" | "browser_agent" | "execute_provider_action" | "custom_rest.write"
+    ) && !name.starts_with("mcp__")
         && name != "mcp_call"
         && name != "mcp_catalog"
 }
@@ -2445,6 +2467,33 @@ pub(crate) fn err_outcome(call: &ToolCall, msg: impl Into<String>) -> ToolOutcom
     }
 }
 
+/// The ZDR catalogue feature a tool stops on a ZDR or waived turn (Z-05a), or `None` for a tool the switch does
+/// not touch. A search reaches an external engine and an artifact write is kept with the thread's versions, so
+/// neither may run, or be dropped without a word, on such a turn.
+fn zdr_refused_tool_feature(tool: &str) -> Option<&'static str> {
+    match tool {
+        "web_search" => Some("web_search"),
+        "create_artifact" | "update_artifact" => Some("artifact_output"),
+        _ => None,
+    }
+}
+
+/// The typed `zdr_feature_not_supported` outcome for a call of a tool the turn cannot run under ZDR, or `None`
+/// to carry on. `Some` only while `ZDR_TYPED_REFUSALS_ENABLED` is the literal `true` and the turn is ZDR or
+/// waived (`zdr_or_waived`, the same test every other tool site makes). The model reads the catalogue body
+/// (the refusal, as a JSON error), which names the feature and nothing else: never the query, URL, file name or
+/// output. It is returned before any network call or state change. With the switch off this is always `None`.
+fn zdr_typed_tool_refusal(call: &ToolCall, zdr_or_waived: bool) -> Option<ToolOutcome> {
+    let feature = zdr_refused_tool_feature(&call.name)?;
+    let refusal = crate::zdr_posture::refuse_zdr_feature_for(feature, zdr_or_waived)?;
+    tracing::info!(
+        feature,
+        code = refusal.code(),
+        "tool refused under zero data retention before any call"
+    );
+    Some(err_outcome(call, refusal.json_body().to_string()))
+}
+
 fn brreg_base_url() -> String {
     std::env::var("BRREG_API_BASE_URL")
         .ok()
@@ -3190,6 +3239,13 @@ pub async fn dispatch_tool(
     ).await
 }
 
+/// Whether the inline loop refuses the organisation-wide document inventory (`knowledge_list_documents`) on a turn
+/// with this Space (C-05, D2-774). Any non-empty Space id is present, and is refused while `OWNER_LIST_SPACE_REFUSE`
+/// is on, failing closed as the sibling Space arms do. Off, nothing is refused.
+fn knowledge_list_space_refused(space_id: &str, owner_list_space_refuse: bool) -> bool {
+    owner_list_space_refuse && !space_id.is_empty()
+}
+
 /// Lowercase hex SHA-256 of `bytes`, the spelling a bundle manifest records.
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
@@ -3549,6 +3605,11 @@ const MAX_SKILL_MOUNTS: usize = 3;
 /// step with `skill_mounts::RESERVED_NAMES` there, so a skill that would be refused takes no name.
 const RESERVED_MOUNT_NAMES: [&str; 2] = ["skills", "attachments"];
 
+/// What the model is told about a turn's skill bundle mounts (WS19-S8). Appended to the
+/// `code_interpreter` description only on a turn that carries at least one mount, so a turn without
+/// one is offered the unchanged definition.
+const SKILL_MOUNT_TOOL_DESCRIPTION_LINE: &str = " Matched skill bundles, when present, are available read-only under /skills/<name>/ and cannot be written.";
+
 /// Whether `raw` (the value of [`SKILL_BUNDLE_MOUNT_ENV`], if set) is the literal on-word.
 #[must_use]
 fn skill_bundle_mounts_enabled_from(raw: Option<&str>) -> bool {
@@ -3623,6 +3684,57 @@ fn skill_mounts_from_bundles(
     mounts
 }
 
+/// The skills of the turn's record that the caller may read, in record order, as `(id, name)`
+/// (WS19-S8). Empty when the record is gone or belongs to another caller.
+fn record_readable_skills(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+) -> Vec<(String, String)> {
+    let Some(record) = crate::chat_turn_registry::global().lookup(request_id) else {
+        return Vec::new();
+    };
+    if record.org_id != org_id || record.user_id != user_id {
+        return Vec::new();
+    }
+    readable_skills(
+        state,
+        org_id,
+        user_id,
+        // A pinned skill is recorded as `id@version` (EP-11 S3); the catalogue knows the bare id.
+        record
+            .skill_ids
+            .iter()
+            .map(|skill_ref| crate::chat_turn_registry::skill_id_of_ref(skill_ref)),
+    )
+}
+
+/// The `(id, name)` of each of `skill_ids` the caller may read, in order (WS19-S8). The gateway's own
+/// skill read decides visibility, so a skill the caller could not read takes no mount.
+fn readable_skills<'a>(
+    state: &AppState,
+    org_id: &str,
+    user_id: &str,
+    skill_ids: impl Iterator<Item = &'a str>,
+) -> Vec<(String, String)> {
+    use mp_contracts::model_plane::v1::GetSkillRequest;
+
+    skill_ids
+        .filter_map(|skill_id| {
+            let request = GetSkillRequest {
+                request_id: String::new(),
+                org_id: org_id.to_owned(),
+                skill_id: skill_id.to_owned(),
+            };
+            crate::skills::handle_get_skill(&state.skills, request, &state.ownership, user_id)
+                .ok()
+                .and_then(|response| response.skill)
+                .map(|skill| (skill.id, skill.name))
+        })
+        .collect()
+}
+
 /// The `/skills` mounts a turn's `code_interpreter` calls carry (WS19-S8): the bundles of the skills
 /// the turn injected, read once for the turn from the record the gateway wrote before the loop
 /// started. Empty while the switch is off (no call is made), under zero retention, without a
@@ -3637,7 +3749,7 @@ async fn skill_mounts_for_turn(
     capability_bearer: Option<&str>,
     zdr: bool,
 ) -> Vec<SkillMount> {
-    use mp_contracts::model_plane::v1::{GetSkillRequest, ListSkillBundlesRequest};
+    use mp_contracts::model_plane::v1::ListSkillBundlesRequest;
 
     if zdr || !skill_bundle_mounts_enabled() {
         return Vec::new();
@@ -3645,27 +3757,7 @@ async fn skill_mounts_for_turn(
     let Some(bearer) = capability_bearer.filter(|bearer| !bearer.trim().is_empty()) else {
         return Vec::new();
     };
-    let Some(record) = crate::chat_turn_registry::global().lookup(request_id) else {
-        return Vec::new();
-    };
-    if record.org_id != org_id || record.user_id != user_id {
-        return Vec::new();
-    }
-    let mut matched: Vec<(String, String)> = Vec::new();
-    for skill_ref in &record.skill_ids {
-        let request = GetSkillRequest {
-            request_id: String::new(),
-            org_id: org_id.to_owned(),
-            // A pinned skill is recorded as `id@version` (EP-11 S3); the catalogue knows the id.
-            skill_id: crate::chat_turn_registry::skill_id_of_ref(skill_ref).to_owned(),
-        };
-        let found = crate::skills::handle_get_skill(&state.skills, request, &state.ownership, user_id)
-            .ok()
-            .and_then(|response| response.skill);
-        if let Some(skill) = found {
-            matched.push((skill.id, skill.name));
-        }
-    }
+    let matched = record_readable_skills(state, request_id, org_id, user_id);
     if matched.is_empty() {
         return Vec::new();
     }
@@ -3678,6 +3770,27 @@ async fn skill_mounts_for_turn(
             Vec::new()
         }
     }
+}
+
+/// The `/skills` mounts this turn's `code_interpreter` calls will carry, for the bundle footers that
+/// name those paths (WS19-S8). The footers are built before the tool loop runs, so they read the same
+/// record `skill_mounts_for_turn` reads and take the bundle listing the footers came from. Empty on
+/// the conditions `skill_mounts_for_turn` returns empty on, except its own listing call.
+pub(crate) fn skill_mounts_for_footers(
+    state: &AppState,
+    request_id: &str,
+    org_id: &str,
+    user_id: &str,
+    zdr: bool,
+    bundles: &[SkillBundleSummary],
+) -> Vec<SkillMount> {
+    if zdr || !skill_bundle_mounts_enabled() || bundles.is_empty() {
+        return Vec::new();
+    }
+    skill_mounts_from_bundles(
+        &record_readable_skills(state, request_id, org_id, user_id),
+        bundles,
+    )
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -3724,6 +3837,12 @@ async fn dispatch_tool_with_cost(
             call,
             "side-effecting tools require governed agentic execution and approval",
         );
+    }
+
+    // Z-05a: a web search or an artifact write on a ZDR or waived turn is a typed refusal, not a silent drop,
+    // returned before the arguments are read and before any network call or state change. Switch off, never.
+    if let Some(refusal) = zdr_typed_tool_refusal(call, zdr || data_plane_mode.is_some()) {
+        return refusal;
     }
 
     // Check the arguments against the tool's OWN declared schema before anything
@@ -3848,6 +3967,24 @@ async fn dispatch_tool_with_cost(
             )
             .await
         }
+        // One generated image per call, served by inference-core's strict provider choice (W4-IMG-3). Refused on a
+        // zero-retention or waived turn, and on a run that holds no image budget (`image_tool::hold_turn`). With the
+        // switch off the name is an unknown tool, as it was before the tool existed.
+        "generate_image" if crate::image_tool::enabled() => {
+            crate::image_tool::dispatch(
+                &crate::image_tool::ImageCall {
+                    state,
+                    run_id,
+                    org_id,
+                    user_id,
+                    inference_bearer,
+                    zdr,
+                    retention_mode: data_plane_mode.is_some(),
+                },
+                call,
+            )
+            .await
+        }
         // The canvas tools do no I/O: they validate, then hand the content back
         // for the loop to turn into an `artifact` event. Keeping them in
         // `dispatch_tool` (rather than special-casing them in the loop) means
@@ -3858,7 +3995,8 @@ async fn dispatch_tool_with_cost(
             let title = arg_str(&call.arguments_json, "title");
             let content = arg_str(&call.arguments_json, "content");
             match validate_authored_artifact(&id, &kind, &title, &content) {
-                Ok((id, kind, title)) => {
+                // The content is the validator's: a web_bundle manifest arrives here already inlined (W5-087).
+                Ok((id, kind, title, content)) => {
                     // A "new" artifact whose title the user already sees in
                     // this thread is a revision, whatever id the model picked
                     // (RUN-LOG findings 2/5/14: three same-titled documents in
@@ -3954,6 +4092,19 @@ async fn dispatch_tool_with_cost(
                 })
                 .unwrap_or_else(|| id.to_owned());
             let id = resolved_id.as_str();
+            // A slide deck is written only by the deck tool, which owns its manifest (EP-5
+            // S2/S3). A text rewrite would persist hand-made manifest content (forged slide
+            // states, say) under the deck's id, so refuse it and name the owning tool.
+            if state.artifact_versions.kind_of(thread_id, id)
+                == Some(crate::artifacts::ArtifactKind::Deck)
+            {
+                return err_outcome(
+                    call,
+                    format!(
+                        "artifact '{id}' is a slide deck; change it with the deck tool, not update_artifact"
+                    ),
+                );
+            }
             // An unknown id means the model is revising something the user has
             // never seen. Creating it silently would produce a "v1" the user
             // cannot relate to anything, so refuse and name the fix.
@@ -4346,6 +4497,22 @@ async fn dispatch_tool_with_cost(
             // this same arm, so both surfaces get the behaviour.
             match state.quarry.scrape_readable(&url, org_id, zdr).await {
                 Ok(r) => {
+                    // The page may have ended on another host than the one asked for (a redirect, or the browser
+                    // driver's escalation). The org's rules apply to where it ended too, and the body is dropped
+                    // unread, unscreened and unparked when that host is not allowed (EP-9 W3).
+                    if let Some(refusal) = crate::site_policy_client::final_url_refusal(
+                        crate::site_policy_client::policy_mode(),
+                        crate::site_policy_client::shared_checker(),
+                        &crate::site_policy_client::SiteOwner::of(state),
+                        org_id,
+                        &url,
+                        &r.final_url,
+                        &call.name,
+                    )
+                    .await
+                    {
+                        return err_outcome(call, refusal);
+                    }
                     let body = if r.markdown.trim().is_empty() {
                         r.text
                     } else {
@@ -4485,14 +4652,42 @@ async fn dispatch_tool_with_cost(
                 max_output_tokens: crate::web_extraction::DEFAULT_MAX_OUTPUT_TOKENS,
                 inference_bearer: inference_bearer.to_owned(),
                 transport: "tool_loop",
+                site_policy_tool: Some("extract_structured"),
             };
             let outcomes = crate::web_extraction::extract(state, &spec).await;
+            // A page that ended on a host the org's rules refuse was dropped by the extraction BEFORE any inference
+            // call (EP-9 W3). The typed refusal is returned as `fetch_url` returns it, and the whole result is dropped.
+            if let Some(refusal) = outcomes
+                .iter()
+                .map(|o| o.result.error_message.as_str())
+                .find(|m| m.starts_with(crate::site_policy_client::SITE_BLOCKED_CODE))
+            {
+                return err_outcome(call, refusal.to_owned());
+            }
             if outcomes.iter().all(|o| !o.result.error_message.is_empty()) {
                 let reasons: Vec<&str> = outcomes
                     .iter()
                     .map(|o| o.result.error_message.as_str())
                     .collect();
                 return err_outcome(call, format!("extract_structured failed: {}", reasons.join("; ")));
+            }
+            // Each page the reader resolved to is checked against the org's rules too, so an allowed address that
+            // redirected onto a blocked host never has its extraction handed to the model (EP-9 W3). The whole result
+            // is dropped on the first refusal: no extracted data, title or quote is returned.
+            for outcome in &outcomes {
+                if let Some(refusal) = crate::site_policy_client::final_url_refusal(
+                    crate::site_policy_client::policy_mode(),
+                    crate::site_policy_client::shared_checker(),
+                    &crate::site_policy_client::SiteOwner::of(state),
+                    org_id,
+                    &outcome.result.url,
+                    &outcome.result.final_url,
+                    &call.name,
+                )
+                .await
+                {
+                    return err_outcome(call, refusal);
+                }
             }
             let body = crate::web_extraction::tool_output(&outcomes, &mode).to_string();
             // Screen the complete result BEFORE it reaches the model, as `fetch_url` does.
@@ -4908,8 +5103,41 @@ async fn dispatch_tool_with_cost(
             )
             .await
         }
+        // The question to the person (WS14 S6): stored as a `next_turn` run question and shown as a card, and the
+        // turn ends. Refused here again on a zero-retention or waived turn, in a Space, and while its switch is off.
+        crate::ask_user_ask_mode::ASK_TOOL => {
+            crate::ask_user_ask_mode::ask_outcome(
+                state,
+                crate::ask_user_ask_mode::enabled(),
+                !zdr && data_plane_mode.is_none(),
+                !space_id.is_empty(),
+                run_id,
+                org_id,
+                session_bearer,
+                call,
+            )
+            .await
+        }
         // The connected-account read (WS23-S5): offered only on a turn the person selected accounts for, and
         // refused here again whenever the turn does not admit it.
+        // The custom REST read (W4-CC-7): offered on the same turns, and only while the switch is on and capability-core
+        // admits it. A custom REST write is never made from the Ask loop: it is a Do-run call that waits for approval.
+        mp_contracts::custom_rest::READ_TOOL_NAME => {
+            connector_reads::custom_rest_read_outcome(
+                state,
+                connector,
+                zdr,
+                !space_id.is_empty(),
+                ingestion_bearer,
+                capability_bearer,
+                call,
+            )
+            .await
+        }
+        mp_contracts::custom_rest::WRITE_TOOL_NAME => err_outcome(
+            call,
+            "custom_rest.write is not available on this turn: a write is made in a Do run, after the person approves it",
+        ),
         mp_contracts::provider_reads::READ_TOOL_NAME => {
             connector_reads::read_outcome(
                 state,
@@ -5279,6 +5507,15 @@ async fn dispatch_tool_with_cost(
             .await,
         ),
         "knowledge_list_documents" | "knowledge.list_documents" => {
+            // D2-774 and C-05: the organisation-wide document inventory is not a Space's inventory. With the one Space
+            // listing switch (OWNER_LIST_SPACE_REFUSE, the switch execution-core reads too) on, a turn scoped to a Space
+            // is refused here, before any call crosses to Data Plane: a fixed token with no rows, so ZDR gets the same
+            // refusal and nothing is stored. The refusal does not wait on MODEL_ACTION_ADMISSION, which this loop never
+            // reads, or on AGENTIC_SPACE_RETRIEVAL_ENABLED, which decides only the retrieval header and receipt. Off, or
+            // with no Space, this arm is unchanged.
+            if knowledge_list_space_refused(space_id, crate::sse::owner_list_space_refuse_enabled()) {
+                return err_outcome(call, "knowledge_list_documents refused: space_scoped");
+            }
             let Some(bearer) = data_plane_bearer else {
                 return err_outcome(
                     call,
@@ -5913,9 +6150,13 @@ fn writes_document(tool: &str) -> bool {
 
 /// Whether a call may be cut off at a source-bound phase's deadline: only a
 /// read. A document write finishes in place, and a browser run or sandbox job
-/// has its own lifecycle, which no longer waiting for it would not end.
+/// has its own lifecycle, which no longer waiting for it would not end. An image
+/// the provider is making is billed whether or not the turn still waits for it,
+/// so it finishes too (W4-IMG-3).
 fn stops_at_validation_deadline(tool: &str) -> bool {
-    !writes_document(tool) && !matches!(tool, "browser_agent" | "code_interpreter" | "deck")
+    !writes_document(tool)
+        && !matches!(tool, "browser_agent" | "code_interpreter" | "deck")
+        && !crate::image_tool::is_billed(tool)
 }
 
 /// What the model is told about a read cut off at that deadline.
@@ -5961,8 +6202,10 @@ where
         }
         let result = attempt().await;
         let error = result.error.as_deref().unwrap_or_default();
-        let transient =
-            result.error.is_some() && crate::tool_retry::is_transient_tool_failure(error);
+        // A billed call is never replayed: a second attempt at an image the provider already made bills it twice.
+        let transient = !crate::image_tool::is_billed(tool)
+            && result.error.is_some()
+            && crate::tool_retry::is_transient_tool_failure(error);
         if number >= crate::tool_retry::MAX_TOOL_ATTEMPTS || !transient {
             return result;
         }
@@ -6311,6 +6554,7 @@ const ORG_CLASS_TOOLS: &[&str] = &[
 const CONNECTOR_CLASS_TOOLS: &[&str] = &[
     mp_contracts::provider_reads::READ_TOOL_NAME,
     mp_contracts::connector_suggest::TOOL_NAME,
+    mp_contracts::custom_rest::READ_TOOL_NAME,
 ];
 
 /// Whether `name` is a public-web tool, which an org's `web.mode=off` withholds (Wave 3 EP-9 W2). It is the set the
@@ -6352,6 +6596,19 @@ fn tools_for_connector_scope(mut tools: Vec<ToolDefinition>, offered: bool) -> V
     tools.retain(|tool| tool.name != mp_contracts::provider_reads::READ_TOOL_NAME);
     if offered {
         tools.push(connector_reads::tool_definition());
+    }
+    tools
+}
+
+/// The custom REST read's place in a turn's tool set (W4-CC-7). A client's copy of the name is dropped, and the
+/// server's own definition is added last, so the cached prefix holds. It is added only on a turn the Ask loop admits.
+fn tools_for_custom_rest(mut tools: Vec<ToolDefinition>, offered: bool) -> Vec<ToolDefinition> {
+    tools.retain(|tool| {
+        tool.name != mp_contracts::custom_rest::READ_TOOL_NAME
+            && tool.name != mp_contracts::custom_rest::WRITE_TOOL_NAME
+    });
+    if offered {
+        tools.push(connector_reads::custom_rest_tool_definition());
     }
     tools
 }
@@ -6407,6 +6664,8 @@ fn builtin_tool_defs_for(batch: bool) -> Vec<ToolDefinition> {
     advertise_batched_search(&mut defs, batch);
     // Last, and only while its switch is on, so the list is unchanged when it is off (EP-5 S2).
     crate::deck_tool::offer(&mut defs, crate::deck_tool::enabled());
+    // The `web_bundle` kind of `create_artifact` (W5-087), named on the definition only while its switch is on.
+    crate::web_bundle::offer(&mut defs, crate::web_bundle::enabled());
     defs
 }
 
@@ -6821,13 +7080,15 @@ pub struct ToolRounds {
 }
 
 /// The usage of one provider call the tool phase made, as the provider reported
-/// it. The basis is the route's, or the serving provider's once it has answered.
+/// it. The basis is the route's (a customer gateway's when the call names one),
+/// or the serving provider's once it has answered.
 pub(crate) fn metered_call(
     phase: crate::usage_meter::CallPhase,
     response: &mp_contracts::model_plane::v1::InferResponse,
     model: &str,
     provider_hint: &str,
     subscription_connection_id: &str,
+    model_connection_id: &str,
 ) -> crate::usage_meter::CallUsage {
     crate::usage_meter::CallUsage {
         phase,
@@ -6837,12 +7098,17 @@ pub(crate) fn metered_call(
             response.model_used.clone()
         },
         provider: response.provider_used.clone(),
-        basis: crate::pricing::CostBasis::of_route(provider_hint, subscription_connection_id)
-            .served_by(&response.provider_used),
+        basis: crate::pricing::CostBasis::of_request(
+            provider_hint,
+            subscription_connection_id,
+            model_connection_id,
+        )
+        .served_by(&response.provider_used),
         input: i64::from(response.input_tokens),
         output: i64::from(response.output_tokens),
         cache_read: i64::from(response.cache_read_input_tokens),
         cache_write: i64::from(response.cache_creation_input_tokens),
+        priority: response.service_tier_used == crate::pricing::SERVICE_TIER_PRIORITY,
     }
 }
 
@@ -6862,6 +7128,28 @@ pub(crate) fn route_shift(
     }
 }
 
+/// The routing decision a call's route note states (W5-073-b): the Verevon mode, the complexity and the
+/// reason the intent layer gave, and the role and its source for a `verevon-role` call. Closed tokens only,
+/// read from the note's own fields, so it carries no content on any turn. An empty field is left out, and a
+/// note that states none of them (a pinned model, or an unbudgeted call) yields no decision at all.
+pub(crate) fn route_decision(
+    note: Option<&mp_contracts::model_plane::v1::RouteNote>,
+) -> Option<Value> {
+    let note = note?;
+    let decision: serde_json::Map<String, Value> = [
+        ("mode", note.verevon_mode.as_str()),
+        ("complexity", note.complexity.as_str()),
+        ("reason", note.reason.as_str()),
+        ("role", note.role.as_str()),
+        ("role_source", note.role_source.as_str()),
+    ]
+    .into_iter()
+    .filter(|(_, token)| !token.is_empty())
+    .map(|(key, token)| (key.to_owned(), Value::String(token.to_owned())))
+    .collect();
+    (!decision.is_empty()).then_some(Value::Object(decision))
+}
+
 /// Records one provider call the tool phase made and streams the turn's running total after it, when the
 /// turn's sink records calls: it streams usage progress or tracks a run ceiling (WS27-S6). The call is
 /// priced only then, so a turn with neither reads the catalogue no more often than it did before. `routing`
@@ -6877,7 +7165,7 @@ pub(crate) async fn stream_call_usage(
     }
     let priced = state
         .pricing
-        .priced(call.basis, &call.model, call.legs())
+        .priced_at_tier(call.basis, &call.model, call.legs(), call.priority)
         .await;
     sink.record_call(call, &priced, routing).await;
 }
@@ -8578,9 +8866,14 @@ async fn gate_and_ground_web_search_outcome(
 
     let budget = grounding::fetch_budget(tier);
     let started = std::time::Instant::now();
+    // The org's domain rules reach a grounding read as they reach `fetch_url` (C-09): the owner and the tool name are
+    // read once here, and each page is checked against the host it ended on, not only the host the search returned.
+    let owner = crate::site_policy_client::SiteOwner::of(state);
+    let tool = outcome.name.clone();
     let grounded = grounding::ground_pages(question, &pages, budget, |url| {
         let quarry = state.quarry.clone();
         let org_id = org_id.to_owned();
+        let tool = tool.clone();
         async move {
             // `scrape_readable`, not `scrape`, for the same reason `fetch_url`
             // uses it: it resolves Quarry's artifact-referenced page text and
@@ -8590,6 +8883,23 @@ async fn gate_and_ground_web_search_outcome(
             // make a selected passage readable as a quotation.
             match quarry.scrape_readable(&url, &org_id, zdr).await {
                 Ok(page) => {
+                    // The search dropped every hit on a host the org does not allow, but a redirect, or the browser
+                    // escalation, can land the page on one. That page is an unread page here: neither its text nor its
+                    // structured facts become a passage, and the hit keeps its engine snippet, labelled as one. Under
+                    // `off` nothing is refused and the page is read as it always was.
+                    if let Some(refusal) = crate::site_policy_client::final_url_refusal(
+                        crate::site_policy_client::policy_mode(),
+                        crate::site_policy_client::shared_checker(),
+                        &owner,
+                        &org_id,
+                        &url,
+                        &page.final_url,
+                        &tool,
+                    )
+                    .await
+                    {
+                        return Err(refusal);
+                    }
                     // The second channel. `ScrapeResult` projects the prose and
                     // keeps the full envelope under `raw`, which is where
                     // Quarry's structured harvest rides — so it is read from
@@ -8860,6 +9170,7 @@ pub async fn run_tool_rounds_for_model(
         &crate::turn_attachments::ValidatedAttachments::none(),
         images,
         prompt_tiers,
+        "",
     )
     .await
 }
@@ -8906,6 +9217,9 @@ pub async fn run_tool_rounds_for_model_with_attachments(
     attachments: &crate::turn_attachments::ValidatedAttachments,
     images: &crate::vision::parts::ImageParts,
     prompt_tiers: Option<PromptTierPlan>,
+    // The speed tier every model call of the turn carries (`InferRequest.speed_tier`): `priority`, or `""`
+    // for no choice. The caller decides it once for the turn (`sse::invoke_stream_sse`); the rounds carry it.
+    speed_tier: &str,
 ) -> Result<ToolRounds, &'static str> {
     // Every Quarry read of the loop carries its request id and, off ZDR, its run id as advisory attribution
     // (E4.6, 062a). The loop is awaited on this task, not spawned, so the scope reaches each search and page
@@ -8946,6 +9260,7 @@ pub async fn run_tool_rounds_for_model_with_attachments(
             attachments,
             images,
             prompt_tiers,
+            speed_tier,
         ),
     )
     .await
@@ -8984,6 +9299,7 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
     attachments: &crate::turn_attachments::ValidatedAttachments,
     images: &crate::vision::parts::ImageParts,
     prompt_tiers: Option<PromptTierPlan>,
+    speed_tier: &str,
 ) -> Result<ToolRounds, &'static str> {
     // Resolved ONCE for the whole turn rather than per call: the entitlement is a
     // property of the turn, and a value re-derived per round is a value that can
@@ -9008,6 +9324,16 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
         let (files, bytes) = attachments.summary();
         tracing::info!(%request_id, files, bytes, "attached files staged for code_interpreter");
     }
+    // A turn that mounts skill bundles says where they are in the same tool's description (WS19-S8).
+    // Like the attachments line, it is added only on such a turn; every other turn is unchanged.
+    if !skill_mounts.is_empty() {
+        for tool in tools
+            .iter_mut()
+            .filter(|tool| tool.name == "code_interpreter")
+        {
+            tool.description.push_str(SKILL_MOUNT_TOOL_DESCRIPTION_LINE);
+        }
+    }
     // The connected-account read is offered on a turn the person selected accounts for (WS23-S5). The
     // selection rides on the live sink, as the turn's clock does, so a caller without a sink offers nothing.
     let connector_turn = sink.and_then(crate::sse_events::RichEventSink::connector_turn);
@@ -9025,6 +9351,17 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
         .await
         .admits_ask_loop();
     let tools = tools_for_connector_scope(tools, connector_offered);
+    // The custom REST read (W4-CC-7) is offered on the turns the connected-account read is offered on, and only while its
+    // switch is on and capability-core admits it. The switch is read first, so a turn with it off makes no call.
+    let custom_rest_turn = connector_reads::offered(
+        mp_contracts::custom_rest::enabled(),
+        zdr,
+        !space_id.is_empty(),
+        connector_turn,
+    );
+    let custom_rest_offered = custom_rest_turn
+        && connector_reads::custom_rest_read_admitted(state, capability_bearer).await;
+    let tools = tools_for_custom_rest(tools, custom_rest_offered);
     // The connected-app suggestion (EP-10 S8) is offered on a turn that selected no account, read from
     // the same sink selection. With its switch off the list is left as it was.
     let suggestion_offered = connector_suggestion::offered(
@@ -9048,6 +9385,26 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
         data_plane_mode.is_some(),
     );
     let tools = crate::thread_reference_tools::tools_for_turn(tools, thread_refs_offered);
+    // The question tool (WS14 S6) is offered only while its switch is on, and never on a ZDR or waived turn nor in a
+    // Space: a question is kept with the turn's run. A plan turn is a Do-loop turn and never reaches this loop. With
+    // the switch off the list is left as it was.
+    let mut tools = tools;
+    crate::ask_user_ask_mode::offer(
+        &mut tools,
+        crate::ask_user_ask_mode::enabled() && !zdr && data_plane_mode.is_none() && space_id.is_empty(),
+    );
+    // The image tool (W4-IMG-3) was offered by the chat composer on a persistent turn. The org's capability policy has the
+    // last word, read with the person's own capability bearer and reused for a minute per org and person, and the run's
+    // image budget is held only for a tool that is admitted. A subscription turn is never admitted: an image is metered API
+    // spend, which a subscription turn does not carry. A turn the composer did not offer it reads nothing and holds nothing.
+    let image_admitted = crate::image_tool::enabled()
+        && crate::image_tool::offers(&tools)
+        && !zdr
+        && data_plane_mode.is_none()
+        && subscription_connection_id.trim().is_empty()
+        && crate::image_tool::policy_admits(state, org_id, user_id, capability_bearer).await;
+    let _image_turn = crate::image_tool::hold_turn(run_id, image_admitted);
+    let tools = crate::image_tool::tools_for_turn(tools, image_admitted);
     let connector_turn = connector_turn.filter(|_| connector_offered);
     // The turn's clock rides on the live sink; a caller without one (tests,
     // other routes) times nothing.
@@ -9084,6 +9441,8 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
     let mut attempted_calls: BTreeSet<String> = BTreeSet::new();
     // Whether this turn has shown its one connected-app suggestion card (EP-10 S8).
     let mut suggestion_turn = connector_suggestion::SuggestionTurn::default();
+    // Whether this turn has put its one question to the person (WS14 S6). The call that did ends the turn.
+    let mut ask_turn = crate::ask_user_ask_mode::AskTurn::default();
     // The loop guard observes the model's rounds in this turn (WS25-S1). It is built only when
     // `LOOP_GUARD_MODE` observes, so with the switch off no guard runs at all.
     let guard_mode = loop_guard_mode();
@@ -9154,6 +9513,12 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
     }
     if let Some(contract) = source_context.as_ref().and_then(|context| crate::document_contract::CampaignContract::from_messages(&review_messages, context)) {
         messages.push(ChatMessage { role: "system".into(), content: contract.guidance(), ..Default::default() });
+    }
+    // The data-source catalogue (MODEL_GATEWAY_DATA_SOURCE_CATALOGUE, F-t3-093 b): one runtime block naming the sources
+    // the tools offered on this turn reach, with use-when and cost hints. Read from the final set, after the connector,
+    // reader, thread and image tools were added, and absent with the switch off, so the prompt is unchanged.
+    if let Some(catalogue) = crate::retrieval_tools::data_source_catalogue_notice(&tools, zdr) {
+        messages.push(catalogue);
     }
     let mut result_checks = Vec::new();
     let mut count_calls = 0usize;
@@ -9409,6 +9774,9 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
                     thinking_budget_tokens: 0,
                     reasoning_effort: 0,
                     prefer_priority_service_tier: priority_project_author,
+                    // The turn's speed tier rides every round, as it rides the answer (`latency_levers`).
+                    // `prefer_priority_service_tier` above still asks for the legacy priority tier on its own.
+                    speed_tier: speed_tier.to_owned(),
                     request_id: request_id.to_owned(),
                     org_id: org_id.to_owned(),
                     model: model.to_owned(),
@@ -9434,6 +9802,8 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
                     cache_scope_key,
                     image_parts: Vec::new(),
                     role_fallback_model: String::new(),
+                    // A tool round never names a customer-gateway connection (W4-BYO-5): empty names none.
+                    model_connection_id: String::new(),
                 },
                 inference_bearer,
             );
@@ -9546,12 +9916,14 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
 
         // The round's tokens are the provider's own counts. The route guard above has
         // already accepted the answer, so a round a wrong provider answered is not billed.
+        // A tool round never names a customer-gateway connection (W4-BYO-5), so its basis is the route's.
         let round_usage = metered_call(
             crate::usage_meter::CallPhase::ToolRound,
             &resp,
             model,
             provider_hint,
             subscription_connection_id,
+            "",
         );
         if let Some(sink) = sink {
             stream_call_usage(
@@ -9724,7 +10096,7 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
                 model: resolved_model.clone().unwrap_or_else(|| model.to_owned()),
                 provider_hint: provider_hint.to_owned(), subscription_connection_id: subscription_connection_id.to_owned(),
                 messages: review_messages.clone(),
-                max_tokens: TOOL_ROUND_TOKENS, temperature: 0.2, zdr, min_privacy_tier, ..Default::default() };
+                max_tokens: TOOL_ROUND_TOKENS, temperature: 0.2, zdr, min_privacy_tier, speed_tier: speed_tier.to_owned(), ..Default::default() };
             // The nearer of this check's own allowance and the shared phase
             // deadline. What is left of it when the check starts goes into the
             // check's timing, since it decides whether a slow review still fits.
@@ -9777,6 +10149,7 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
                                 model,
                                 provider_hint,
                                 subscription_connection_id,
+                                "",
                             );
                             if let Some(sink) = sink {
                                 stream_call_usage(state, sink, &overhead, None).await;
@@ -10006,6 +10379,8 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
             // One connected-app suggestion per turn (EP-10 S8), decided before its result is shown.
             let answered_call = resp.tool_calls.iter().find(|call| call.id == outcome.call_id);
             let suggestion = suggestion_turn.settle(&mut outcome, answered_call);
+            // One question per turn (WS14 S6), decided before its result is shown.
+            let asked_question = ask_turn.settle(&mut outcome);
             // Artifact-producing tools return their payload through `output`,
             // which would otherwise be appended to the conversation verbatim —
             // a generated .xlsx or a long document would consume the entire
@@ -10154,6 +10529,20 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
             // The suggestion card follows its tool result, as a read's sources do.
             if let Some(card) = suggestion {
                 events.push(card).await;
+            }
+            // The question card (WS14 S6) follows the tool result that stored it.
+            if let Some(question_id) = asked_question {
+                if let Some(card) = crate::ask_user_ask_mode::card_event(
+                    state,
+                    run_id,
+                    org_id,
+                    session_bearer,
+                    &question_id,
+                )
+                .await
+                {
+                    events.push(card).await;
+                }
             }
             // A reduced knowledge search says so to the user at the point its result is shown (Z-41b).
             for notice_event in retrieval_notice_events(&outcome) {
@@ -10328,6 +10717,15 @@ async fn run_tool_rounds_for_model_with_attachments_inner(
         if answered_authoritatively {
             break;
         }
+        // A question put to the person ends the turn: the answer arrives as their next message (WS14 S6).
+        if ask_turn.asked() {
+            messages.push(ChatMessage {
+                role: "system".to_owned(),
+                content: crate::ask_user_ask_mode::END_TURN_NOTE.to_owned(),
+                ..Default::default()
+            });
+            break;
+        }
     }
 
     // A selection edit refused twice ends the turn on every exit from the loop, including a stop by the loop guard (EP-3 S6).
@@ -10369,6 +10767,9 @@ mod tests {
             applied_effort: String::new(),
             role: String::new(),
             role_source: String::new(),
+            verevon_mode: String::new(),
+            complexity: String::new(),
+            reason: String::new(),
         };
         assert_eq!(route_shift(None), None);
         assert_eq!(route_shift(Some(&note(false, false))), None);
@@ -12576,6 +12977,106 @@ mod tests {
         .await;
         let error = outcome.error.expect("missing bearer must error");
         assert!(error.contains("verified user bearer"), "{error}");
+    }
+
+    /// Sets one environment switch for a test and puts the previous value back when the guard drops, so a failed
+    /// assertion cannot leave it on for the next test.
+    struct SpaceListEnv {
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    impl SpaceListEnv {
+        fn set(name: &'static str, value: Option<&str>) -> Self {
+            let previous = std::env::var(name).ok();
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for SpaceListEnv {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
+    /// The error one `knowledge_list_documents` call gets on a turn in `space_id` with no verified bearer. A call
+    /// that is not refused reports the missing bearer, so the two outcomes are told apart by their text.
+    async fn knowledge_list_error(
+        state: &AppState,
+        call: &ToolCall,
+        space_id: &str,
+    ) -> Option<String> {
+        dispatch_tool(
+            state,
+            "run_1",
+            "org_1",
+            "user_1",
+            "thread_1",
+            space_id,
+            &[],
+            "",
+            None,
+            None,
+            "",
+            "",
+            None,
+            false,
+            false,
+            false,
+            call,
+            None,
+            None,
+            None,
+        )
+        .await
+        .error
+    }
+
+    /// C-05: the inline refusal needs the one listing switch and a Space id present on the turn. Any non-empty id
+    /// counts as present, so a malformed one is refused rather than let through.
+    #[test]
+    fn knowledge_list_space_refusal_needs_the_listing_switch_and_a_space_id() {
+        assert!(!knowledge_list_space_refused("space_1", false));
+        assert!(!knowledge_list_space_refused("", false));
+        assert!(knowledge_list_space_refused("space_1", true));
+        assert!(!knowledge_list_space_refused("", true));
+        assert!(knowledge_list_space_refused("   ", true));
+    }
+
+    /// C-05 on the real dispatch, both switch states. `OWNER_LIST_SPACE_REFUSE` alone decides the refusal on a
+    /// Space-scoped turn: `AGENTIC_SPACE_RETRIEVAL_ENABLED` does not gate it, and only the literal `true` enables it.
+    #[tokio::test]
+    async fn knowledge_list_documents_in_a_space_follows_owner_list_space_refuse_alone() {
+        const REFUSED: &str = "knowledge_list_documents refused: space_scoped";
+        const NEEDS_BEARER: &str = "knowledge.list_documents requires a verified user bearer";
+        let state = crate::state::AppState::new();
+        let call = tool_call("knowledge_list_documents", r#"{"limit":5}"#);
+        // (OWNER_LIST_SPACE_REFUSE, AGENTIC_SPACE_RETRIEVAL_ENABLED, space_id, the error the call must get)
+        let cases = [
+            (Some("true"), None, "space_1", REFUSED),
+            (Some("true"), Some("true"), "space_1", REFUSED),
+            (None, Some("true"), "space_1", NEEDS_BEARER),
+            (Some("false"), Some("true"), "space_1", NEEDS_BEARER),
+            (Some("1"), None, "space_1", NEEDS_BEARER),
+            (Some("true"), Some("true"), "", NEEDS_BEARER),
+        ];
+        for (owner, agentic, space_id, expected) in cases {
+            let _owner = SpaceListEnv::set("OWNER_LIST_SPACE_REFUSE", owner);
+            let _agentic = SpaceListEnv::set("AGENTIC_SPACE_RETRIEVAL_ENABLED", agentic);
+            let error = knowledge_list_error(&state, &call, space_id).await;
+            assert_eq!(
+                error.as_deref(),
+                Some(expected),
+                "OWNER_LIST_SPACE_REFUSE={owner:?} AGENTIC_SPACE_RETRIEVAL_ENABLED={agentic:?} space_id={space_id:?}"
+            );
+        }
     }
 
     // `AppState::new()` builds clients that need a reactor, so this is a
@@ -15016,7 +15517,7 @@ mod tests {
         let huge = "x".repeat(crate::artifacts::MAX_TEXT_ARTIFACT_CHARS + 1);
         assert!(validate_authored_artifact("id", "document", "T", &huge).is_err());
         // A missing title falls back to the id rather than rendering blank.
-        let (id, kind, title) =
+        let (id, kind, title, _) =
             validate_authored_artifact("min-rapport", "markdown", "  ", "body").expect("valid");
         assert_eq!(id, "min-rapport");
         assert_eq!(kind, crate::artifacts::ArtifactKind::Document);
@@ -15524,6 +16025,199 @@ mod tests {
             beyond_cap.contains("[SNIPPET ONLY"),
             "the hit past the page cap was never read: {beyond_cap:?}"
         );
+    }
+
+    // --- the grounding read and the org's domain rules (C-09, grounding path) ---
+
+    /// The question the page-read tests ground on. Its prose quotes both of its terms.
+    const GROUNDING_QUESTION: &str = "strømpris i Norge";
+
+    /// The org-core answer the grounding tests use: `blocked.rel1.example` is denied and `allowed.rel1.example` is
+    /// read. `resolves` is how many resolve calls the test expects.
+    async fn grounding_org_rules(org_core: &wiremock::MockServer, org_id: &str, resolves: u64) {
+        let decisions = serde_json::json!([
+            {
+                "host": "blocked.rel1.example",
+                "effective": "deny",
+                "cap": "none",
+                "source": "org_block"
+            },
+            {
+                "host": "allowed.rel1.example",
+                "effective": "read",
+                "cap": "read",
+                "source": "default"
+            }
+        ]);
+        let body = serde_json::json!({
+            "organization_id": org_id,
+            "revision": 1,
+            "decisions": decisions,
+        });
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(format!(
+                "/internal/orgs/{org_id}/browser-sites/resolve"
+            )))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(body))
+            .expect(resolves)
+            .mount(org_core)
+            .await;
+    }
+
+    /// A Quarry scrape whose page ended at `final_url`. Its prose quotes the question and carries a marker, and its
+    /// structured harvest carries a price figure; only that page holds either. `scrapes` is how many scrapes the test
+    /// expects.
+    async fn grounding_scrape(quarry: &wiremock::MockServer, final_url: &str, scrapes: u64) {
+        let markdown = "Strømpris i Norge REL1-MARKER-7f3a for uke 46 følger kraftbørsen time for time. Prisen \
+                        varierer mellom prisområdene i Norge gjennom døgnet, og oversikten over strømpris i Norge \
+                        oppdateres hver time fra nettselskapene i landet.";
+        let body = serde_json::json!({
+            "data": {
+                "status": 200,
+                "url": {"final": final_url},
+                "formats": {"markdown": markdown},
+                "structured": {"figures": [{
+                    "label": "Strømpris",
+                    "value": "4,56",
+                    "unit": "kr/kWh",
+                    "period": "uke 46 2026"
+                }]}
+            }
+        });
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/scrape"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(body))
+            .expect(scrapes)
+            .mount(quarry)
+            .await;
+    }
+
+    /// The gateway state for a grounding read, with Quarry and org-core on the mock servers.
+    fn grounding_state(
+        org_core: &wiremock::MockServer,
+        quarry: &wiremock::MockServer,
+    ) -> crate::state::AppState {
+        let mut state = crate::state::AppState::new();
+        state.quarry = crate::quarry::Client::new(crate::quarry::Config {
+            base_url: quarry.uri(),
+            token: "test-token".to_owned(),
+            timeout: std::time::Duration::from_secs(5),
+        });
+        state.org_core_base_url = org_core.uri();
+        state.org_core_service_token = "test-token".to_owned();
+        state
+    }
+
+    /// Reads one kept hit on `allowed.rel1.example` through the grounding phase for `org_id`. Returns the gate and the
+    /// outcome the model would read.
+    async fn ground_one_hit(
+        state: &crate::state::AppState,
+        org_id: &str,
+    ) -> (WebSearchGate, ToolOutcome) {
+        let mut outcome = web_search_outcome(&[(
+            "https://allowed.rel1.example/strompris",
+            "Strømpris i Norge",
+            "Oversikt over strømpris i Norge.",
+        )]);
+        let gate = gate_and_ground_web_search_outcome(
+            state,
+            GROUNDING_QUESTION,
+            org_id,
+            false,
+            grounding::Tier::Balance,
+            &mut outcome,
+        )
+        .await;
+        (gate, outcome)
+    }
+
+    /// The line of the output that lists the kept hit, which carries the hit's own label. The assertions read the label
+    /// from this line: the output's legend names both labels whatever the outcome, so the whole output cannot tell a
+    /// read page from an unread one.
+    fn hit_line(output: &str) -> &str {
+        output
+            .lines()
+            .find(|line| line.contains("https://allowed.rel1.example/strompris"))
+            .expect("the kept hit is listed in the output")
+    }
+
+    /// C-09, grounding path: a hit on an allowed host whose page ended on a host the org blocks is not read under
+    /// enforce. Neither its prose nor its structured fact becomes a passage, and the hit keeps its engine snippet,
+    /// labelled as one with the refusal's typed code.
+    #[tokio::test]
+    async fn a_page_that_ended_on_a_host_the_org_blocks_is_not_quoted_under_enforce() {
+        let _mode = crate::site_policy_client::test_seam::set(
+            mp_contracts::site_policy::WebDomainPolicyMode::Enforce,
+        );
+        let org_core = wiremock::MockServer::start().await;
+        grounding_org_rules(&org_core, "org_rel1_enforce", 1).await;
+        let quarry = wiremock::MockServer::start().await;
+        grounding_scrape(&quarry, "https://blocked.rel1.example/landing", 1).await;
+        let state = grounding_state(&org_core, &quarry);
+
+        let (gate, outcome) = ground_one_hit(&state, "org_rel1_enforce").await;
+        let output = outcome.output.as_str();
+        let line = hit_line(output);
+
+        assert_eq!(gate.kept, 1, "{output}");
+        assert!(
+            !output.contains("REL1-MARKER-7f3a"),
+            "the blocked page's prose reached the model: {output}"
+        );
+        assert!(
+            !output.contains("4,56"),
+            "the blocked page's structured fact reached the model: {output}"
+        );
+        assert!(!line.contains("[PAGE READ]"), "{line}");
+        assert!(line.contains("[SNIPPET ONLY"), "{line}");
+        assert!(line.contains("org_site_blocked"), "{line}");
+    }
+
+    /// C-09, grounding path: with the switch off the page is read as it always was. Nothing is asked of org-core, and
+    /// the page's prose and its structured fact reach the model.
+    #[tokio::test]
+    async fn a_page_that_ended_on_another_host_is_read_as_before_with_the_switch_off() {
+        let _mode = crate::site_policy_client::test_seam::set(
+            mp_contracts::site_policy::WebDomainPolicyMode::Off,
+        );
+        let org_core = wiremock::MockServer::start().await;
+        grounding_org_rules(&org_core, "org_rel1_off", 0).await;
+        let quarry = wiremock::MockServer::start().await;
+        grounding_scrape(&quarry, "https://blocked.rel1.example/landing", 1).await;
+        let state = grounding_state(&org_core, &quarry);
+
+        let (gate, outcome) = ground_one_hit(&state, "org_rel1_off").await;
+        let output = outcome.output.as_str();
+        let line = hit_line(output);
+
+        assert_eq!(gate.kept, 1, "{output}");
+        assert!(line.contains("[PAGE READ]"), "{line}");
+        assert!(output.contains("REL1-MARKER-7f3a"), "{output}");
+        assert!(output.contains("4,56"), "{output}");
+        assert!(!line.contains("org_site_blocked"), "{line}");
+    }
+
+    /// C-09, grounding path: under shadow the final host's rules are read and the refusal is only logged, so the page
+    /// is read as it is under off.
+    #[tokio::test]
+    async fn a_page_that_ended_on_a_blocked_host_is_only_logged_under_shadow() {
+        let _mode = crate::site_policy_client::test_seam::set(
+            mp_contracts::site_policy::WebDomainPolicyMode::Shadow,
+        );
+        let org_core = wiremock::MockServer::start().await;
+        grounding_org_rules(&org_core, "org_rel1_shadow", 1).await;
+        let quarry = wiremock::MockServer::start().await;
+        grounding_scrape(&quarry, "https://blocked.rel1.example/landing", 1).await;
+        let state = grounding_state(&org_core, &quarry);
+
+        let (gate, outcome) = ground_one_hit(&state, "org_rel1_shadow").await;
+        let output = outcome.output.as_str();
+        let line = hit_line(output);
+
+        assert_eq!(gate.kept, 1, "{output}");
+        assert!(line.contains("[PAGE READ]"), "{line}");
+        assert!(output.contains("REL1-MARKER-7f3a"), "{output}");
+        assert!(!line.contains("org_site_blocked"), "{line}");
     }
 
     // --- the authoritative short-circuit ------------------------------------

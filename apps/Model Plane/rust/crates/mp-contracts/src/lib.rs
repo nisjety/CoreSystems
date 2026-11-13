@@ -7,6 +7,8 @@ pub mod attachments;
 pub mod autonomy;
 pub mod connector_suggest;
 pub mod context_refs;
+pub mod custom_rest;
+pub mod data_sources;
 pub mod dataplane_posture;
 pub mod deck_manifest;
 pub mod deck_theme;
@@ -14,6 +16,7 @@ pub mod document_url;
 pub mod durable_gate;
 pub mod effect_ledger;
 pub mod egress_tiers;
+pub mod json_schema_subset;
 pub mod lifecycle_notice;
 pub mod loop_fold;
 pub mod loop_guard;
@@ -52,9 +55,11 @@ pub mod space_timeline;
 pub mod telemetry_labels;
 pub mod tool_arguments;
 pub mod tool_class;
+pub mod user_content;
 pub mod user_question;
 pub mod write_preview;
 pub mod zdr_refusal;
+pub mod zdr_spend;
 
 /// Generated protobuf and gRPC types for the Model Plane.
 ///

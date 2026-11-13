@@ -442,8 +442,12 @@ func (s *PgStore) CreateScopedSensitiveApproval(ctx context.Context, p ApprovalP
 		if err := scoped(parent, p.OrgID, p.OwnerID, now); err != nil {
 			return err
 		}
+		// Must agree with the memory store's approval-parent check in grant.go
+		// (CreateScopedSensitiveApproval): a read-only parent carries no act
+		// authority, so it cannot mint an approval. No read_only column exists
+		// yet; this refusal keeps the two stores aligned once one is added.
 		if _, ok := approvalParents[parent.Kind]; !ok || parent.SessionKey != p.SessionKey || len(parent.AllowedActions) != 0 ||
-			parent.KeyID != "" {
+			parent.ReadOnly || parent.KeyID != "" {
 			return ErrApprovalParentInvalid
 		}
 		domains, err := NormalizeAllowedDomains(p.AllowedDomains)

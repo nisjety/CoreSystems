@@ -40,8 +40,9 @@ message ThreadGoal {
   // The most continuation turns the goal may take, 1 to 50 (default 10).
   uint32 max_turns = 9;
   // One closed token: "active", "paused", "met", "budget_reached",
-  // "turns_reached", "blocked" or "cleared". This service writes only
-  // "active", "paused" and "cleared"; the other states come from EP-7 S2/S3.
+  // "turns_reached", "blocked" or "cleared". The owner's update writes "active",
+  // "paused", "cleared" and "met"; the judge (RecordGoalVerdict, EP-7 S3) writes "met"
+  // and "blocked"; the budget ledger (EP-7 S2) writes the two budget states.
   string status = 10;
   // A closed token saying why the status was last written; empty when none.
   string status_reason = 11;
@@ -57,7 +58,8 @@ message ThreadGoal {
   uint64 cost_used_usd_micros = 16;
   // Continuation turns settled against `max_turns` (EP-7 S2).
   uint32 turns_used = 17;
-  // The completion judge's last verdict token (EP-7 S3); empty until the judge exists.
+  // The completion judge's verdict on the goal's latest judged turn (EP-7 S3); empty
+  // until a turn is judged.
   string last_verdict = 18;
 }
 
@@ -111,8 +113,9 @@ message UpdateThreadGoalRequest {
   uint64 cost_budget_usd_micros = 7;
   // The new turn cap, 1 to 50 (path "max_turns").
   uint32 max_turns = 8;
-  // The new status (path "status"): only "active", "paused" or "cleared".
-  // A closed goal ("met", a stop state or "cleared") cannot be changed.
+  // The new status (path "status"): "active", "paused", "cleared" or "met" (the owner's
+  // own mark). A met or blocked goal may be reopened to "active"; no other closed goal
+  // can be changed.
   string status = 9;
   // The fields this update writes, by the names above. Empty is refused.
   repeated string update_paths = 10;
@@ -205,12 +208,108 @@ message SettleGoalTurnRequest {
   string usage_source = 11;
 }
 
+// EP-7 S3. Record the completion judge's verdict on a settled goal turn. Called only by the
+// goal-judge principal (service:model-gateway-goal-judge) holding session:goal-verdict:write; a
+// person or any other caller is refused. A thread that holds a zero-retention or waived run is
+// refused with zdr_durable_mutation_forbidden before any read or write, a retry included.
+// `met` closes an open goal as met, `blocked` stops it as "judge_blocked", and `not_met` and
+// `unsure` leave it open. Idempotent per turn: a turn already judged answers the goal as it
+// stands. The judge's tokens count toward the turn and the goal.
+message RecordGoalVerdictRequest {
+  // The goal the judged turn belongs to.
+  string goal_id = 1;
+  // The org the goal belongs to; must match the caller's org.
+  string org_id = 2;
+  // The settled turn the verdict judges; a turn not yet settled is refused.
+  uint32 turn_no = 3;
+  // One closed token: "met", "not_met", "blocked" or "unsure".
+  string verdict = 4;
+  // At most 3 reasons of at most 200 characters each; blank lines are dropped. Validated and
+  // never stored: a verdict row keeps the closed verdict, the judge model and the token count
+  // (content-free).
+  repeated string reasons = 5;
+  // The ids of the evidence the verdict cites: at most 32 of at most 200 characters
+  // each; blank ids are dropped. Validated and never stored (a verdict row is content-free).
+  repeated string evidence_ids = 6;
+  // The model that gave the verdict, at most 128 characters; empty when none is named.
+  string judge_model = 7;
+  // Metered tokens the judge spent on this turn. Added to the turn's judge_tokens and to
+  // the goal's tokens_used here; do not count them again in SettleGoalTurn.judge_tokens.
+  uint64 judge_tokens = 8;
+}
+
+// EP-7 S6. Read the unattended turn one scheduled fire of a goal-bound schedule ledgered on its goal,
+// for the completion judge. Called only by the goal-judge principal (service:model-gateway-goal-judge)
+// holding session:goal-judge:read, for a goal of its own org. The fire is named by its run, schedule
+// and fire key, so the judge is pointed at that fire and no other. A thread holding a zero-retention
+// or waived run is refused with zdr_durable_mutation_forbidden before any read.
+message GetGoalTurnForJudgeRequest {
+  // The goal the fire belongs to.
+  string goal_id = 1;
+  // The org the goal belongs to; must match the caller's org.
+  string org_id = 2;
+  // The scheduled run the fire started.
+  string run_id = 3;
+  // The schedule the fire belongs to; it must be bound to the goal.
+  string schedule_id = 4;
+  // The fire's key within its schedule.
+  string fire_key = 5;
+}
+
+// EP-7 S6. The goal and the unattended turn a fire ledgered, or none.
+message GetGoalTurnForJudgeResponse {
+  // The goal; absent when `found` is false.
+  ThreadGoal goal = 1;
+  // The turn's number within the goal.
+  uint32 turn_no = 2;
+  // The turn's closed outcome: "completed", "failed" or "unknown".
+  string outcome = 3;
+  // The tail of the scheduled answer, at most 4,000 characters. Empty unless the turn completed.
+  // Model text, handed to the judge and not stored on the goal.
+  string answer = 4;
+  // Whether the goal has an unattended turn for the fire.
+  bool found = 5;
+}
+
+// Read the names and closed statuses of the tool calls one run reserved, for the completion judge's
+// evidence. Called only by the goal-judge principal (service:model-gateway-goal-judge) holding
+// session:goal-judge:read, for a run of its own org. A run that is not persistent (zero-retention or
+// waived), or that sits on a thread holding such a run, is refused with
+// zdr_durable_mutation_forbidden before any read; no row of such a run is ever read.
+message ListRunToolCallsForJudgeRequest {
+  // The org the run belongs to; must match the caller's org.
+  string org_id = 1;
+  // The run whose tool calls to list.
+  string run_id = 2;
+}
+
+// One tool call of a run as the judge may cite it: its ids and its status, never its arguments,
+// digests or results.
+message JudgeToolCall {
+  // The ledger's action id for the call.
+  string action_id = 1;
+  // Canonical tool name the call was reserved under.
+  string tool = 2;
+  // "reserved", "completed", "failed", "not_run" or "unknown_outcome".
+  string status = 3;
+}
+
+// The tool calls a run reserved, in reservation order (ties by action id), at most 200. A run that
+// kept no ledger rows answers an empty list; an empty list is not proof that no tool ran.
+message ListRunToolCallsForJudgeResponse {
+  // One entry per ledger row of the run, in reservation order.
+  repeated JudgeToolCall calls = 1;
+}
+
 // EP-7 S1. The thread goal store, hosted by session-core. Off unless
 // SESSION_CORE_THREAD_GOALS_ENABLED is the literal `true`; while off every RPC
 // answers `unavailable` `thread_goals_disabled`. Every RPC refuses a
 // zero-retention or waived credential and another person's thread; a write
 // also refuses a Space thread (`failed_precondition`
 // `thread_goal_space_unsupported`) and a thread holding a waived run.
+// `RecordGoalVerdict` is the one write a service makes: it answers only the goal-judge principal
+// (service:model-gateway-goal-judge, scope session:goal-verdict:write) and checks the org, not an
+// owner.
 service ThreadGoalService {
   // Set a goal on a thread (one open goal per thread).
   // Response type is shared by several goal RPCs; renaming it would break generated code.
@@ -236,4 +335,18 @@ service ThreadGoalService {
   // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
   // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
   rpc SettleGoalTurn(SettleGoalTurnRequest) returns (ThreadGoalResponse);
+  // EP-7 S3. Record the completion judge's verdict on a settled turn (goal-judge principal only,
+  // session:goal-verdict:write; refuses a thread holding a zero-retention or waived run).
+  // Response type is shared by several goal RPCs; renaming it would break generated code.
+  // buf:lint:ignore RPC_REQUEST_RESPONSE_UNIQUE
+  // buf:lint:ignore RPC_RESPONSE_STANDARD_NAME
+  rpc RecordGoalVerdict(RecordGoalVerdictRequest) returns (ThreadGoalResponse);
+  // EP-7 S6. Read the unattended turn of one scheduled fire for the completion judge (goal-judge
+  // principal only, session:goal-judge:read; refuses a thread holding a zero-retention or waived
+  // run). Like RecordGoalVerdict it checks the org, not an owner.
+  rpc GetGoalTurnForJudge(GetGoalTurnForJudgeRequest) returns (GetGoalTurnForJudgeResponse);
+  // Read the names and statuses of the tool calls one run reserved, for the completion judge's
+  // evidence (goal-judge principal only, session:goal-judge:read). Checks the org, not an owner;
+  // refuses a run that is not persistent and a run on a thread holding a zero-retention or waived run.
+  rpc ListRunToolCallsForJudge(ListRunToolCallsForJudgeRequest) returns (ListRunToolCallsForJudgeResponse);
 }

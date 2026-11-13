@@ -93,6 +93,7 @@ describe('PersonalSetupCard', () => {
     fireEvent.input(screen.getByRole('textbox', { name: /visningsnavn|display name/i }), {
       target: { value: 'x'.repeat(81) },
     })
+    await settle()
     fireEvent.click(screen.getByRole('button', { name: /lagre|save/i }))
     await screen.findByRole('alert')
     expect(executeAction).not.toHaveBeenCalled()
@@ -125,14 +126,12 @@ describe('PersonalSetupCard', () => {
     expect(screen.queryByTestId('personal-setup-role')).toBeNull()
   })
 
-  it('hides the role step without a thread, since a role can only be saved on one', async () => {
+  it('offers the role step on an empty chat, since the role is held until the first send', async () => {
     offerSetup()
     getMemoryControls.mockResolvedValue(memoryOn)
     render(() => <PersonalSetupCard threadId={null} />)
-    await screen.findByTestId('personal-setup-card')
-    await settle()
-    expect(getMemoryControls).not.toHaveBeenCalled()
-    expect(screen.queryByTestId('personal-setup-role')).toBeNull()
+    await screen.findByTestId('personal-setup-role')
+    expect(getMemoryControls).toHaveBeenCalled()
   })
 
   it('saves a ticked role on the open thread, after the answers', async () => {
@@ -143,9 +142,11 @@ describe('PersonalSetupCard', () => {
     render(() => <PersonalSetupCard threadId="thread-1" />)
     await screen.findByTestId('personal-setup-role')
     fireEvent.click(screen.getByRole('checkbox'))
+    await settle()
     fireEvent.input(screen.getByRole('textbox', { name: /rolle|role/i }), {
       target: { value: 'Anbudsansvarlig' },
     })
+    await settle()
     fireEvent.click(screen.getByRole('button', { name: /lagre|save/i }))
     await waitFor(() => expect(rememberMemory).toHaveBeenCalledTimes(1))
 
@@ -162,7 +163,9 @@ describe('PersonalSetupCard', () => {
     render(() => <PersonalSetupCard threadId="thread-1" />)
     await screen.findByTestId('personal-setup-role')
     fireEvent.click(screen.getByRole('checkbox'))
+    await settle()
     fireEvent.input(screen.getByRole('textbox', { name: /rolle|role/i }), { target: { value: 'Prosjektleder' } })
+    await settle()
     fireEvent.click(screen.getByRole('button', { name: /lagre|save/i }))
 
     await screen.findByRole('status')

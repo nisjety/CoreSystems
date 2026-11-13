@@ -1,5 +1,5 @@
 import { createMemo, createSignal, For, Show } from 'solid-js'
-import { Lock, ShieldCheck } from '@/shared/icons'
+import { Lock, PauseCircle, ShieldCheck } from '@/shared/icons'
 import { ApiError, requestJson } from '@/shared/api/http'
 import type { AgentModeId, AutonomyRung } from '@/shared/api/chat-client'
 import { createResource } from '@/shared/lib/create-resource-compat'
@@ -16,8 +16,9 @@ import { hasWorkspaceAdminAccess } from '@/shared/session/access'
 
 /**
  * Agent modes and the organisation's agent policy (WS25-S11): the strictest mode agents may run in,
- * the highest autonomy rung they may be granted, lockdown and the MCP allow-list. capability-core is the
- * system of record (DEC-14), read and written through the gateway's `/api/v1/org/agent-policy` routes.
+ * the highest autonomy rung they may be granted, lockdown, the agent-run pause (F-t3-083) and the MCP
+ * allow-list. capability-core is the system of record (DEC-14), read and written through the gateway's
+ * `/api/v1/org/agent-policy` routes.
  * A saved policy takes effect only where the deployment has switched policy enforcement on, so the copy
  * says so instead of implying the cap already holds.
  *
@@ -43,9 +44,14 @@ type OrgAgentPolicySettings = {
   mode_cap: AgentModeId
   rung_cap: AutonomyRung
   lockdown: boolean
+  /** The agents-paused switch (F-t3-083), stored under the key `agents.paused`. */
+  'agents.paused': boolean
   'ext.mcp_servers': { mode: AllowListMode; ids: string[] }
   mcp_tool_approval: McpToolApproval
 }
+
+/** The one write the pause control makes: `pause` turns agent runs off for the organisation, `resume` turns them on. */
+type PauseChange = 'pause' | 'resume'
 
 /** The stored document. A key it does not hold reads as its schema default, as the server answers it. */
 type OrgAgentPolicyDocument = {
@@ -76,6 +82,7 @@ const SCHEMA_DEFAULTS: OrgAgentPolicySettings = {
   mode_cap: 'auto',
   rung_cap: 'danger_full_access',
   lockdown: false,
+  'agents.paused': false,
   'ext.mcp_servers': { mode: 'any', ids: [] },
   mcp_tool_approval: 'trust_annotations',
 }
@@ -167,6 +174,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * The agents-paused switch as the server enforces it (F-t3-083): a key the document omits is off, and a value this
+ * build cannot read is on (the schema's fail-closed value). The section never shows the organisation running when
+ * the server would refuse its agents.
+ */
+function readAgentsPaused(raw: Record<string, unknown>): boolean {
+  const value = raw['agents.paused']
+  if (value === undefined) return SCHEMA_DEFAULTS['agents.paused']
+  return typeof value === 'boolean' ? value : true
+}
+
 /** Reads a stored document into the typed settings; anything malformed reads as its schema default. */
 function readSettings(raw: Record<string, unknown>): OrgAgentPolicySettings {
   const list = raw['ext.mcp_servers']
@@ -177,6 +195,7 @@ function readSettings(raw: Record<string, unknown>): OrgAgentPolicySettings {
     mode_cap: isAgentModeId(raw.mode_cap) ? raw.mode_cap : SCHEMA_DEFAULTS.mode_cap,
     rung_cap: isAutonomyRung(raw.rung_cap) ? raw.rung_cap : SCHEMA_DEFAULTS.rung_cap,
     lockdown: typeof raw.lockdown === 'boolean' ? raw.lockdown : SCHEMA_DEFAULTS.lockdown,
+    'agents.paused': readAgentsPaused(raw),
     'ext.mcp_servers': allowList,
     mcp_tool_approval: isMcpToolApproval(raw.mcp_tool_approval) ? raw.mcp_tool_approval : SCHEMA_DEFAULTS.mcp_tool_approval,
   }
@@ -280,6 +299,8 @@ function settingLabel(key: string, i18n: I18nText): string {
       return i18n.tr('Høyeste tillatelsesnivå', 'Highest permission level')
     case 'lockdown':
       return i18n.tr('Lås ned agenter', 'Lock down agents')
+    case 'agents.paused':
+      return i18n.tr('Agentkjøringer på pause', 'Agent runs paused')
     case 'ext.mcp_servers':
       return i18n.tr('MCP-servere agenten kan bruke', 'MCP servers the agent may use')
     case 'mcp_tool_approval':
@@ -301,6 +322,7 @@ function effectiveValueText(setting: EffectiveSetting, i18n: I18nText): string {
     case 'rung_cap':
       return isAutonomyRung(setting.value) ? autonomyRungLabel(setting.value, i18n) : String(setting.value)
     case 'lockdown':
+    case 'agents.paused':
       return setting.value === true ? i18n.tr('På', 'On') : i18n.tr('Av', 'Off')
     case 'ext.mcp_servers': {
       if (!isRecord(setting.value) || !isAllowListMode(setting.value.mode)) return String(setting.value)
@@ -349,6 +371,10 @@ export function AgentModesSection() {
   const [saving, setSaving] = createSignal(false)
   const [saved, setSaved] = createSignal(false)
   const [problem, setProblem] = createSignal<string | null>(null)
+  // The agents-paused switch writes on its own once the person confirms it, and a save of the draft never writes it.
+  const [pauseChange, setPauseChange] = createSignal<PauseChange | null>(null)
+  const [pauseNote, setPauseNote] = createSignal<string | null>(null)
+  const [pauseProblem, setPauseProblem] = createSignal<string | null>(null)
 
   const shown = createMemo<PolicyDraft | undefined>(() => {
     const edited = draft()
@@ -392,12 +418,40 @@ export function AgentModesSection() {
     setProblem(null)
     setSaved(false)
     try {
-      // Keys this section does not edit (the web switches) ride along, so a save here never resets them.
-      await saveOrgAgentPolicy(doc.revision, { ...doc.settings, ...settings })
+      // Keys this section does not edit (the web switches) ride along, so a save here never resets them. The
+      // agents-paused switch is written by its own control, so the stored value rides along too, as it is held.
+      await saveOrgAgentPolicy(doc.revision, { ...doc.settings, ...settings, 'agents.paused': doc.settings['agents.paused'] })
       setDraft(undefined)
       setSaved(true)
     } catch (error) {
       setProblem(saveFailure(error, i18n))
+    } finally {
+      setSaving(false)
+    }
+    await Promise.allSettled([refetchStored(), refetchEffective()])
+  }
+
+  /**
+   * Writes the agents-paused switch alone, at the revision the page holds, once the person has confirmed it. The other
+   * settings go back as they are stored, so edits not yet saved stay unsaved. An open draft takes the new switch, so
+   * the switch shows what is held.
+   */
+  const setPaused = async (paused: boolean) => {
+    const doc = stored()
+    if (!isAdmin() || !doc || saving()) return
+    setPauseChange(null)
+    setPauseNote(null)
+    setPauseProblem(null)
+    setSaving(true)
+    try {
+      await saveOrgAgentPolicy(doc.revision, { ...doc.settings, 'agents.paused': paused })
+      const edited = draft()
+      if (edited) setDraft({ ...edited, settings: { ...edited.settings, 'agents.paused': paused } })
+      setPauseNote(paused
+        ? i18n.tr('Agentkjøringene er satt på pause.', 'Agent runs are paused.')
+        : i18n.tr('Agentkjøringene er gjenopptatt.', 'Agent runs are resumed.'))
+    } catch (error) {
+      setPauseProblem(saveFailure(error, i18n))
     } finally {
       setSaving(false)
     }
@@ -436,6 +490,96 @@ export function AgentModesSection() {
         <p class="verevon-settings-subnote" role="status" aria-busy="true">
           {i18n.tr('Laster agentpolicyen…', 'Loading the agent policy…')}
         </p>
+      </Show>
+
+      <Show when={shown()}>
+        {(current) => (
+          <>
+            <Show when={!isAdmin() && current().settings['agents.paused']}>
+              <p class="verevon-settings-status-message" role="status">
+                <PauseCircle size={14} aria-hidden="true" />{' '}
+                {i18n.tr(
+                  'Agentkjøringene er satt på pause for organisasjonen. Vanlig chat fungerer som før. Be en organisasjonsadministrator om å gjenoppta dem.',
+                  'Agent runs are paused for your organisation. Plain chat works as before. Ask an organisation administrator to resume them.',
+                )}
+              </p>
+            </Show>
+            <div class="verevon-settings-panel">
+              <ToggleRow
+                title={i18n.tr('Pause alle agentkjøringer i organisasjonen', 'Pause all agent runs in this organisation')}
+                description={i18n.tr(
+                  'Stopper nye agentkjøringer og fortsettelser for alle. Vanlig chat blir ikke berørt.',
+                  'Stops new agent runs and continuations for everyone. Plain chat is not affected.',
+                )}
+                enabled={current().settings['agents.paused']}
+                disabled={!isAdmin() || saving()}
+                onChange={(checked) => {
+                  setPauseNote(null)
+                  setPauseProblem(null)
+                  setPauseChange(checked ? 'pause' : 'resume')
+                }}
+              />
+              <p class="verevon-settings-subnote">
+                {isAdmin()
+                  ? i18n.tr(
+                    'Pausen lagres så snart du har bekreftet. Den gjelder der håndhevingen av agentpolicyen er slått på.',
+                    'The pause is saved as soon as you confirm it. It applies where enforcement of the agent policy is on.',
+                  )
+                  : i18n.tr(
+                    'Den gjelder der håndhevingen av agentpolicyen er slått på.',
+                    'It applies where enforcement of the agent policy is on.',
+                  )}
+              </p>
+              <Show when={isAdmin() ? pauseChange() : null}>
+                {(change) => (
+                  <div class="verevon-settings-actions">
+                    <p>
+                      {change() === 'pause'
+                        ? i18n.tr(
+                          'Nye agentkjøringer og fortsettelser blir avvist for alle i organisasjonen til pausen slås av. Vanlig chat blir ikke berørt.',
+                          'New agent runs and continuations are refused for everyone in the organisation until the pause is turned off. Plain chat is not affected.',
+                        )
+                        : i18n.tr(
+                          'Medlemmene kan starte agentkjøringer igjen, innenfor de andre innstillingene i agentpolicyen.',
+                          'Members can start agent runs again, within the other settings of the agent policy.',
+                        )}
+                    </p>
+                    <div>
+                      <SettingsButton settingsSize="sm" disabled={saving()} onClick={() => setPauseChange(null)}>
+                        {i18n.tr('Avbryt', 'Cancel')}
+                      </SettingsButton>{' '}
+                      <SettingsButton
+                        variant={change() === 'pause' ? undefined : 'primary'}
+                        danger={change() === 'pause'}
+                        settingsSize="sm"
+                        disabled={saving()}
+                        onClick={() => void setPaused(change() === 'pause')}
+                      >
+                        {change() === 'pause'
+                          ? i18n.tr('Pause agentkjøringer', 'Pause agent runs')
+                          : i18n.tr('Gjenoppta agentkjøringer', 'Resume agent runs')}
+                      </SettingsButton>
+                    </div>
+                  </div>
+                )}
+              </Show>
+              <Show when={isAdmin() ? pauseProblem() : null}>
+                {(message) => (
+                  <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
+                    {message()}
+                  </p>
+                )}
+              </Show>
+              <Show when={pauseNote()}>
+                {(message) => (
+                  <p class="verevon-settings-status-message" role="status">
+                    {message()}
+                  </p>
+                )}
+              </Show>
+            </div>
+          </>
+        )}
       </Show>
 
       <Show when={shown()}>

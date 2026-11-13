@@ -7,9 +7,11 @@
 //! convincing cannot close a goal. The user can override the verdict either way.
 //!
 //! Everything here is pure: the prompt, the request, the verdict parser and the
-//! gates. The call site (after the turn is settled) belongs with the goal ledger
-//! of S2. Switch `MODEL_GATEWAY_GOAL_JUDGE_ENABLED`, off by default: off means no
-//! judge call, the verdict stays empty and the user closes goals by hand.
+//! gates. The call site is `agentic_run_stream` in `sse.rs`, after the goal turn
+//! is settled (`judge_settled_goal_turn`); the verdict is recorded through
+//! `thread_goal::record_verdict`. Switch `MODEL_GATEWAY_GOAL_JUDGE_ENABLED`, off by
+//! default: off means no judge call, the verdict stays empty and the user closes
+//! goals by hand.
 
 use mp_contracts::model_plane::v1::{ChatMessage, InferPurpose, InferRequest, InferResponse};
 use serde_json::Value;
@@ -100,6 +102,54 @@ impl GoalVerdict {
 pub struct EvidenceLine {
     pub id: String,
     pub line: String,
+}
+
+/// The longest tool name an evidence id carries; a longer name is no canonical tool name.
+const EVIDENCE_TOOL_NAME_MAX_CHARS: usize = 64;
+/// The ledger statuses an evidence id may name. Anything else is not offered as evidence.
+const EVIDENCE_TOOL_STATUSES: [&str; 5] = [
+    "reserved",
+    "completed",
+    "failed",
+    "not_run",
+    "unknown_outcome",
+];
+
+/// The evidence a run's tool calls offer the judge: one line per distinct tool name and status, id
+/// `tool:<name>:<status>`, with the number of calls that share them. Names, statuses and counts only;
+/// the read behind it carries no arguments or results. A name that is not a plain tool token, or a
+/// status outside the ledger's closed set, is left out rather than offered.
+#[must_use]
+pub fn tool_call_evidence(
+    calls: &[mp_contracts::model_plane::v1::JudgeToolCall],
+) -> Vec<EvidenceLine> {
+    let mut grouped: Vec<(String, String, u32)> = Vec::new();
+    for call in calls {
+        let name = call.tool.trim();
+        let status = call.status.trim();
+        let plain_name = !name.is_empty()
+            && name.chars().count() <= EVIDENCE_TOOL_NAME_MAX_CHARS
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        if !plain_name || !EVIDENCE_TOOL_STATUSES.contains(&status) {
+            continue;
+        }
+        match grouped
+            .iter_mut()
+            .find(|(seen_name, seen_status, _)| seen_name == name && seen_status == status)
+        {
+            Some((_, _, count)) => *count = count.saturating_add(1),
+            None => grouped.push((name.to_owned(), status.to_owned(), 1)),
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(name, status, count)| EvidenceLine {
+            id: format!("tool:{name}:{status}"),
+            line: format!("{name} status={status} calls={count}"),
+        })
+        .collect()
 }
 
 /// A parsed verdict, already held to the evidence rule.
@@ -249,11 +299,16 @@ pub fn goal_judge_request(
 }
 
 /// The judge's tokens the goal debits: metered tokens only, the rule of the goal
-/// budget and the run ceiling. A subscription call spends no metered tokens.
+/// budget and the run ceiling. A subscription or customer-gateway call spends no
+/// metered tokens.
 #[must_use]
 pub fn judge_metered_tokens(response: &InferResponse, route: &InferRequest) -> u64 {
-    let basis = crate::pricing::CostBasis::of_route(&route.provider_hint, &route.subscription_connection_id)
-        .served_by(&response.provider_used);
+    let basis = crate::pricing::CostBasis::of_request(
+        &route.provider_hint,
+        &route.subscription_connection_id,
+        &route.model_connection_id,
+    )
+    .served_by(&response.provider_used);
     if basis != crate::pricing::CostBasis::Metered {
         return 0;
     }

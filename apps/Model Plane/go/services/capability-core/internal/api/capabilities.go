@@ -57,6 +57,7 @@ func (h *CapabilitiesHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/capabilities/owner-actions/health", h.attestOwnerActionHealth)
 	mux.HandleFunc("/api/v1/capabilities/browser/health", h.attestBrowserOwnerHealth)
 	mux.HandleFunc(modelActionViewPath, h.resolveModelActionView)
+	mux.HandleFunc(ownerActionsAdmittedPath, h.listAdmittedOwnerActions)
 	mux.HandleFunc("/api/v1/capabilities/ranked", h.ranked)
 	mux.HandleFunc("/api/v1/capabilities/tools", h.listTools)
 	mux.HandleFunc("/api/v1/capabilities/scopes", h.listScopes)

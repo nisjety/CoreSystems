@@ -32,6 +32,9 @@ import { isChatBrowserDockEnabled } from '@/features/browser/dock/browser-dock-s
  *     narrow: DashboardComposer and CoreNavbar already own Escape-driven
  *     menu/panel closing; this only adds the "get me out of the textarea"
  *     behavior neither of them provides.
+ *   - Escape, Escape -> stop the streaming answer (F-t3-077). Two bare Escape
+ *     presses within 600 ms, behind VITE_CHAT_DOUBLE_ESCAPE_STOP; see
+ *     createDoubleEscape. The second press takes the place of the blur.
  *   - Cmd/Ctrl+Alt+B -> show or hide the browser dock beside a live run, and
  *     Cmd/Ctrl+Alt+L -> cycle its layout (WS9.G). Matched by the physical key
  *     (`event.code`), because Option changes `event.key` on macOS, and refused
@@ -40,6 +43,22 @@ import { isChatBrowserDockEnabled } from '@/features/browser/dock/browser-dock-s
  */
 
 const CHAT_COMPOSER_SELECTOR = '.verevon-dashboard-textarea'
+
+/**
+ * The chat page's key bindings, one row each. The command palette and the shortcut sheet take their
+ * hotkey strings from here (chat-commands.ts), and matchChatShortcut matches these same combos, so a
+ * change to a row reaches the sheet with it. `stopRun` is the double-Escape stop, which createDoubleEscape
+ * matches instead of matchChatShortcut.
+ */
+export const CHAT_SHORTCUTS = {
+  newChat: 'mod+shift+o',
+  focusComposer: 'mod+i',
+  threadPrev: 'mod+shift+arrowup',
+  threadNext: 'mod+shift+arrowdown',
+  browserDockToggle: 'mod+alt+b',
+  browserDockCycle: 'mod+alt+l',
+  stopRun: 'escape escape',
+} as const
 
 export type ChatShortcutEventLike = {
   altKey: boolean
@@ -55,6 +74,8 @@ export type ChatShortcutEventLike = {
 
 export type ChatShortcutTargetLike = {
   classList?: { contains: (name: string) => boolean }
+  /** Finds the nearest ancestor (or the target itself) that matches a selector. */
+  closest?: (selector: string) => unknown
   isContentEditable?: boolean
   tagName?: string
 }
@@ -67,6 +88,7 @@ export type ChatShortcutAction =
   | { type: 'focus-composer' }
   | { type: 'new-chat' }
   | { type: 'select-thread'; direction: ChatShortcutDirection }
+  | { type: 'stop-run' }
   | { type: 'toggle-browser-dock' }
 
 /**
@@ -96,6 +118,7 @@ export function isChatComposerTarget(target: ChatShortcutTargetLike | null | und
  * testable without a full DOM: given an event-shaped object and a
  * target-shaped object, returns the action to perform, or null if the key
  * combo is not one of ours (or is suppressed by the typing guard).
+ * The combos are the rows of CHAT_SHORTCUTS.
  */
 export function matchChatShortcut(
   event: ChatShortcutEventLike,
@@ -237,6 +260,94 @@ export function nextThreadIdForDirection(
   return next && next.threadId !== activeThreadId ? next.threadId : null
 }
 
+/**
+ * Moves focus into the chat composer. The keydown and the command palette both run this, so the two
+ * cannot disagree about what the shortcut does.
+ */
+export function focusChatComposer(): void {
+  document.querySelector<HTMLTextAreaElement>(CHAT_COMPOSER_SELECTOR)?.focus()
+}
+
+/**
+ * Blurs the composer when it has focus, which is what a bare Escape does on this page. The single-press
+ * dismiss and a double-Escape that stops nothing both run it.
+ */
+function blurChatComposer(): void {
+  const active = document.activeElement as HTMLElement | null
+  if (active && isChatComposerTarget(active)) active.blur()
+}
+
+/**
+ * Selects the sidebar thread one step up or down from the active one. Returns the id it selected, or
+ * null when there is none (the keydown then leaves the key to the browser). Shared by the keydown and
+ * the command palette.
+ */
+export function selectAdjacentChatThread(direction: ChatShortcutDirection): string | null {
+  const nextId = nextThreadIdForDirection(readChatThreadHistory(), readActiveChatThreadId(), direction)
+  if (nextId) selectChatThread(nextId)
+  return nextId
+}
+
+/**
+ * Whether the double-Escape stop is on for this build (F-t3-077). `VITE_CHAT_DOUBLE_ESCAPE_STOP` counts only as
+ * the literal "true", so an unset variable is off and Escape keeps its single-press blur.
+ */
+export const chatDoubleEscapeStopEnabled = (): boolean => import.meta.env.VITE_CHAT_DOUBLE_ESCAPE_STOP === 'true'
+
+export type DoubleEscapeEventLike = ChatShortcutEventLike & {
+  /** True when an open surface (an autocomplete, a popover) already took the press. */
+  defaultPrevented?: boolean
+  isComposing?: boolean
+  /** True for an auto-repeat of a held key: holding Escape is one press, not two. */
+  repeat?: boolean
+}
+
+/** Feeds one keydown to the double-Escape stop. Returns stop-run on the second press, and null otherwise. */
+export type DoubleEscape = (
+  event: DoubleEscapeEventLike,
+  target: ChatShortcutTargetLike | null | undefined,
+  now?: number,
+) => ChatShortcutAction | null
+
+/**
+ * An Escape that another surface owns: an open menu or dialog closes on it, and a field other than the
+ * composer keeps it (a search box clears on it). Such a press neither counts toward a stop nor starts one.
+ */
+function isEscapeOwnedElsewhere(target: ChatShortcutTargetLike | null | undefined): boolean {
+  if (isEditableTarget(target) && !isChatComposerTarget(target)) return true
+  return Boolean(target?.closest?.('[role="dialog"], [role="menu"]'))
+}
+
+/**
+ * The double-Escape stop (F-t3-077). A stateful companion to matchChatShortcut: create one per page and give
+ * it every keydown. The second bare Escape within `windowMs` of the first returns stop-run. Any other key
+ * starts the count over, and so does an Escape that is modified, already taken by an open surface, or owned
+ * elsewhere. A held key's repeats and the Escape of an IME composition are ignored. Off unless
+ * VITE_CHAT_DOUBLE_ESCAPE_STOP is "true".
+ */
+export function createDoubleEscape(windowMs = 600): DoubleEscape {
+  let firstPressAt: number | null = null
+  return (event, target, now = Date.now()) => {
+    if (!chatDoubleEscapeStopEnabled()) return null
+    if (event.key !== 'Escape') {
+      firstPressAt = null
+      return null
+    }
+    if (event.repeat || event.isComposing) return null
+    const modified = event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
+    if (modified || event.defaultPrevented || isEscapeOwnedElsewhere(target)) {
+      firstPressAt = null
+      return null
+    }
+    if (firstPressAt === null || now - firstPressAt > windowMs) {
+      firstPressAt = now
+      return null
+    }
+    firstPressAt = null
+    return { type: 'stop-run' }
+  }
+}
+
 export interface UseChatShortcutsOptions {
   /**
    * Starts a new chat. Passed in by the caller rather than imported directly
@@ -252,6 +363,12 @@ export interface UseChatShortcutsOptions {
   toggleBrowserDock?: () => void
   /** Moves the browser dock to its next layout (WS9.G). The same flag rule applies. */
   cycleBrowserDock?: () => void
+  /**
+   * Stops the streaming answer on a double Escape (F-t3-077). Acted on only while VITE_CHAT_DOUBLE_ESCAPE_STOP is
+   * "true". The page decides whether there is a run to stop, and returns true only when it stopped one. Otherwise
+   * the second Escape is an ordinary Escape.
+   */
+  stopRun?: () => boolean
 }
 
 /**
@@ -262,9 +379,12 @@ export function useChatShortcuts(options: UseChatShortcutsOptions): void {
   createEffect(
     () => undefined,
     () => {
+      const doubleEscape = createDoubleEscape()
       const handleKeyDown = (event: KeyboardEvent) => {
         const target = event.target as HTMLElement | null
-        const action = matchChatShortcut(event, target)
+        // The double-Escape stop sees every key, so any other key starts its count over. On the second press it
+        // takes the Escape; its stop-run case blurs the composer when that stopped nothing.
+        const action = doubleEscape(event, target) ?? matchChatShortcut(event, target)
         if (!action) return
 
         switch (action.type) {
@@ -275,19 +395,18 @@ export function useChatShortcuts(options: UseChatShortcutsOptions): void {
           }
           case 'focus-composer': {
             event.preventDefault()
-            document.querySelector<HTMLTextAreaElement>(CHAT_COMPOSER_SELECTOR)?.focus()
+            focusChatComposer()
             break
           }
           case 'select-thread': {
-            const nextId = nextThreadIdForDirection(
-              readChatThreadHistory(),
-              readActiveChatThreadId(),
-              action.direction,
-            )
-            if (nextId) {
-              event.preventDefault()
-              selectChatThread(nextId)
-            }
+            // Left to the browser when there is no thread to move to (Shift+Arrow keeps its native selection).
+            if (selectAdjacentChatThread(action.direction)) event.preventDefault()
+            break
+          }
+          case 'stop-run': {
+            if (options.stopRun?.()) break
+            // Nothing was stopped, so this Escape is an ordinary one and blurs the composer as the first press did.
+            blurChatComposer()
             break
           }
           case 'toggle-browser-dock': {
@@ -305,8 +424,7 @@ export function useChatShortcuts(options: UseChatShortcutsOptions): void {
             break
           }
           case 'dismiss': {
-            const active = document.activeElement as HTMLElement | null
-            if (active && isChatComposerTarget(active)) active.blur()
+            blurChatComposer()
             break
           }
         }

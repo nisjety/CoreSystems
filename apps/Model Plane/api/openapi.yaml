@@ -488,6 +488,193 @@ paths:
         "422":
           description: The scope is not available (error code scope_not_enabled)
 
+  /v1/orchestration/threads/{thread_id}/approval-grants:
+    get:
+      operationId: listApprovalGrants
+      tags: [orchestration]
+      summary: List the caller's standing approval grants in a thread
+      description: >
+        The "this thread" and "this run" grants the verified caller made in one thread, live and
+        revoked. Served whether or not standing scopes are enabled, so a grant made while they
+        were on stays visible. A ZDR credential holds no grant and gets an empty list. The call
+        digest and the action key are never part of a grant.
+      parameters:
+        - $ref: "#/components/parameters/ThreadId"
+      responses:
+        "200":
+          description: The caller's grants in the thread
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      grants:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/ApprovalGrant"
+        "400":
+          description: The thread id is empty or longer than 128 characters (error code invalid_thread_id)
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/orchestration/approval-grants/{grant_id}:
+    delete:
+      operationId: revokeApprovalGrant
+      tags: [orchestration]
+      summary: Revoke one of the caller's standing approval grants
+      description: >
+        Takes effect at once and only narrows what the agent may do. Served whether or not standing
+        scopes are enabled. Only the grant's owner may revoke it; a ZDR credential holds no grant
+        and is refused by Session Core.
+      parameters:
+        - name: grant_id
+          in: path
+          required: true
+          description: Grant id, prefixed apg_ and at most 128 characters.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The grant as it stands after the revocation
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      grant:
+                        $ref: "#/components/schemas/ApprovalGrant"
+        "400":
+          description: The grant id does not start with apg_ or is longer than 128 characters (error code invalid_grant_id)
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/orchestration/rule-proposals:
+    get:
+      operationId: listRuleProposals
+      tags: [orchestration]
+      summary: List the caller's open "Always allow this tool" proposals
+      description: >
+        The verified caller's own proposals that are not yet confirmed or dismissed, oldest first.
+        Served whether or not rule proposals are enabled, so a proposal made while they were on
+        stays visible and removable. A ZDR credential holds no proposal and gets an empty list.
+      responses:
+        "200":
+          description: The caller's open proposals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      proposals:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/ApprovalRuleProposal"
+
+  /v1/orchestration/rule-proposals/{proposal_id}/confirm:
+    post:
+      operationId: confirmRuleProposal
+      tags: [orchestration]
+      summary: Confirm a proposal and write the standing allow rule
+      description: >
+        The body is empty or an empty JSON object; the capability, the digest, the scope and the
+        expiry all come from the proposal the server holds, never from the request. The gateway
+        claims the proposal in Session Core, writes the user-scope allow rule through
+        Capability Core (which refuses it unless the tool still carries the reviewed definition,
+        and lapses it on its own default lifetime), then records the policy id on the proposal.
+        Every step may be retried. Answers 404 rule_proposals_disabled while
+        APPROVAL_RULE_PROPOSALS_ENABLED is off. A ZDR or waived credential is refused.
+      parameters:
+        - name: proposal_id
+          in: path
+          required: true
+          description: Proposal id, prefixed arp_ and at most 128 characters.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The confirmed proposal and the rule written for it (also the answer to a replay)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      proposal:
+                        $ref: "#/components/schemas/ApprovalRuleProposal"
+                      rule:
+                        type: object
+                        properties:
+                          policy_id:
+                            type: string
+                          capability_id:
+                            type: string
+                          expires_at:
+                            type: string
+                            format: date-time
+                            nullable: true
+        "400":
+          description: The proposal id is malformed (invalid_proposal_id) or the body is not empty (invalid_request)
+        "404":
+          description: Rule proposals are disabled (rule_proposals_disabled) or the proposal is not the caller's (rule_proposal_not_found)
+        "409":
+          description: The proposal is already resolved the other way, is stale, or is held by a confirm (rule_proposal_resolved, rule_proposal_stale, rule_proposal_busy, rule_proposal_not_claimed), or Capability Core refused the rule because the pinned definition changed
+        "412":
+          description: A ZDR credential may not confirm a rule (zdr_durable_mutation_forbidden)
+        "422":
+          description: Capability Core refused the rule because the class of the tool cannot be relaxed
+        "503":
+          description: The rule was written but the proposal could not be marked confirmed (rule_confirm_incomplete); retry the confirm
+
+  /v1/orchestration/rule-proposals/{proposal_id}/dismiss:
+    post:
+      operationId: dismissRuleProposal
+      tags: [orchestration]
+      summary: Dismiss an "Always allow this tool" proposal
+      description: >
+        The body is empty or an empty JSON object. Narrows authority, so it works whether or not
+        rule proposals are enabled. Session Core refuses a dismiss while a confirm holds the
+        proposal, for the first 60 seconds of its claim (rule_proposal_busy). A ZDR or waived
+        credential is refused.
+      parameters:
+        - name: proposal_id
+          in: path
+          required: true
+          description: Proposal id, prefixed arp_ and at most 128 characters.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The proposal as it stands after the dismissal
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      proposal:
+                        $ref: "#/components/schemas/ApprovalRuleProposal"
+        "400":
+          description: The proposal id is malformed (invalid_proposal_id) or the body is not empty (invalid_request)
+        "404":
+          description: The proposal is not the caller's (rule_proposal_not_found)
+        "409":
+          description: The proposal is already confirmed or is held by a confirm (rule_proposal_resolved, rule_proposal_busy)
+        "412":
+          description: A ZDR credential may not dismiss a rule proposal (zdr_durable_mutation_forbidden)
+
   /v1/orchestration/runs/{run_id}/cancel:
     post:
       operationId: cancelRun
@@ -1948,6 +2135,7 @@ components:
             - browser_action_risk
             - auto_posture_provider_write
             - browser_human_assist
+            - tainted_egress
             - unclassified_gate
         tool:
           type: string
@@ -1973,6 +2161,95 @@ components:
         step_up_required:
           type: boolean
           description: True when granting needs a recent re-authentication.
+        rule_offered:
+          type: boolean
+          description: >-
+            True when the card offers Always: the "Always allow this tool" rule switch and the
+            standing-scope switch are both on and the cause is a pinned MCP tool pause that a
+            confirmed rule lifts. It is true exactly when the decide route would accept promote.
+
+    ApprovalRuleProposal:
+      type: object
+      description: >-
+        An "Always allow this tool" proposal as its owner sees it. It carries ids and a digest,
+        never an argument value. A proposal a confirm holds is shown as proposed.
+      properties:
+        id:
+          type: string
+          description: Proposal id, prefixed arp_.
+        tool_name:
+          type: string
+        tool_digest:
+          type: string
+          description: The pinned definition digest of the MCP tool the person reviewed.
+        capability_id:
+          type: string
+          nullable: true
+          description: The capability the confirmed rule is written under. Null for a proposal that predates the field; it cannot be confirmed.
+        state:
+          type: string
+          enum: [proposed, confirmed, dismissed]
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        resolved_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null while the proposal is open.
+
+    ApprovalGrant:
+      type: object
+      description: >-
+        A standing release for one eligible call, as its owner sees it. An allowlisted projection:
+        the action key, the call digest and any argument value are never part of it.
+      properties:
+        id:
+          type: string
+          description: Grant id, prefixed apg_.
+        thread_id:
+          type: string
+        run_id:
+          type: string
+          nullable: true
+          description: The run a run grant covers. Null for a thread grant.
+        scope:
+          type: string
+          nullable: true
+          enum: [thread, run]
+        tool_name:
+          type: string
+        effect_class:
+          type: string
+          nullable: true
+        cause_code:
+          type: string
+          description: Closed cause code of the approval that created the grant.
+        created_from_approval_id:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        revoked_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null while the grant is live.
+        use_count:
+          type: integer
+          format: int64
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null until the grant first releases a call.
 
     SubagentLineage:
       type: object

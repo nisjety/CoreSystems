@@ -205,6 +205,10 @@ message ScheduledStepContext {
   string contract_digest = 7;
   // Expiry of the stored-consent contract, re-verified per step.
   string contract_expires_at = 8;
+  // The run's retention, stated as two flags (F-f10-26). `zdr` is a zero-retention run;
+  // `zdr_waived` is a run whose zero-retention was waived. Both false is a persistent run.
+  bool zdr = 9;
+  bool zdr_waived = 10;
 }
 
 message ListRunsRequest {
@@ -516,6 +520,10 @@ message RunContextStatus {
   // EP-11 S3: the skill versions the run injected, one pin per skill. Ids,
   // numbers and hashes only, so the pin is allowed wherever the run record is.
   repeated SkillPin skills = 4;
+  // WS23-S4: the ids of the connected accounts the person selected for this
+  // turn. Ids only, no tokens, names or content, so the list is allowed
+  // wherever the run record is; never recorded for a zero-retention or waived run.
+  repeated string connector_ids = 5;
 }
 
 // EP-11 S3: one skill version a run used. Recovery inside the run reads this

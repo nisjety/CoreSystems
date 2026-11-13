@@ -62,14 +62,27 @@ const (
 	// token counts are usage, not spend. It is never priced from the
 	// catalogue.
 	CostBasisSubscription = "subscription"
+	// CostBasisCustomerConnection is a call served by the organisation's own
+	// customer gateway (W4-BYO-5). The gateway bills the call, not the
+	// platform: its cost stays 0 and its token counts are usage, not spend.
+	// It is never priced from the catalogue.
+	CostBasisCustomerConnection = "customer_connection"
 )
+
+// IsPlatformSpend reports whether an entry with this cost basis is platform
+// spend, which cost-core prices from the catalogue. A subscription or a
+// customer-gateway call is usage, not spend, and is never priced. Every other
+// basis, unreported ones included, is priced as metered.
+func IsPlatformSpend(basis string) bool {
+	return basis != CostBasisSubscription && basis != CostBasisCustomerConnection
+}
 
 // NormalizeCostBasis maps a reported cost basis to its canonical value.
 // Surrounding space and case are ignored. ok is false for a non-empty value
 // that is not a known basis; the returned basis is then CostBasisUnknown.
 func NormalizeCostBasis(raw string) (basis string, ok bool) {
 	switch value := strings.ToLower(strings.TrimSpace(raw)); value {
-	case CostBasisUnknown, CostBasisMetered, CostBasisSubscription:
+	case CostBasisUnknown, CostBasisMetered, CostBasisSubscription, CostBasisCustomerConnection:
 		return value, true
 	default:
 		return CostBasisUnknown, false
@@ -132,6 +145,17 @@ type Entry struct {
 	// with a cost of 0; the other bases are priced from the catalogue when
 	// they arrive without a cost.
 	CostBasis string
+	// PriorityTier is true when the call was served on the provider's priority
+	// tier (the usage payload's service_tier_used). It is a pricing input only:
+	// RecordUsage multiplies a catalogue-priced metered entry by the
+	// priority-tier multiplier, and the entry is stored with the resulting
+	// cost. It is not a ledger column and carries no content.
+	PriorityTier bool
+	// ZDR marks the content-free spend row of a zero-data-retention turn (FU-30):
+	// ids, token counts and an amount, admitted by cost-core by its ZDR_SPEND kind
+	// and stored with this mark so a reader can tell it from an ordinary row. It is
+	// false for every other entry.
+	ZDR bool
 }
 
 // ValidateEntry rejects values that can poison aggregates, overflow durable
@@ -178,7 +202,7 @@ func ValidateEntry(e Entry) error {
 		return fmt.Errorf("%w: cost_usd must be finite and between 0 and %.0f", ErrInvalidEntry, MaxCostUSD)
 	}
 	if basis, ok := NormalizeCostBasis(e.CostBasis); !ok || basis != e.CostBasis {
-		return fmt.Errorf("%w: cost_basis must be empty, %q or %q", ErrInvalidEntry, CostBasisMetered, CostBasisSubscription)
+		return fmt.Errorf("%w: cost_basis must be empty, %q, %q or %q", ErrInvalidEntry, CostBasisMetered, CostBasisSubscription, CostBasisCustomerConnection)
 	}
 	return nil
 }
@@ -237,7 +261,7 @@ type Usage struct {
 	TotalCacheReadInputTokens     int64
 	TotalCacheCreationInputTokens int64
 	// MeteredInputTokens and MeteredOutputTokens roll up the tokens of every
-	// entry that is not CostBasisSubscription (an unreported basis counts as
+	// entry that is platform spend (see IsPlatformSpend; an unreported basis counts as
 	// metered). Token budgets cap these: a subscription call is usage, not
 	// spend, so it never exhausts max_tokens. The Total* fields still report
 	// every entry.
@@ -259,7 +283,7 @@ type Usage struct {
 
 // meteredTokens is the part of e's token counts that a token budget caps.
 func meteredTokens(e Entry) (input, output int64) {
-	if e.CostBasis == CostBasisSubscription {
+	if !IsPlatformSpend(e.CostBasis) {
 		return 0, 0
 	}
 	return e.InputTokens, e.OutputTokens

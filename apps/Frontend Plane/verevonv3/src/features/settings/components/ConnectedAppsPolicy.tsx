@@ -2,6 +2,7 @@ import { createSignal, Show } from 'solid-js'
 import { createResource } from '@/shared/lib/create-resource-compat'
 import { translateApiError, useI18n } from '@/shared/i18n'
 import { SectionHeader, SettingsSelect } from '@/features/settings/components/settings-ui'
+import { hasErrorCode } from '@/shared/api/api-error'
 import {
   listConnectorPolicies,
   setConnectorPolicy,
@@ -120,21 +121,34 @@ export function ConnectedAppsPolicy() {
   const [policies, { refetch }] = createResource(() => listConnectorPolicies())
   const [busy, setBusy] = createSignal(false)
   const [actionError, setActionError] = createSignal<string | null>(null)
+  const [actionNote, setActionNote] = createSignal<string | null>(null)
 
   const change = async (input: ConnectorPolicyInput) => {
     if (busy()) return
     setBusy(true)
     setActionError(null)
+    setActionNote(null)
     try {
       await setConnectorPolicy(input)
       await refetch()
     } catch (err) {
-      setActionError(
-        translateApiError(err, i18n.tr, {
-          no: 'Kunne ikke lagre valget.',
-          en: 'Could not save the choice.',
-        }),
-      )
+      // Every provider write already asks the person, so the server refuses an ask as already_always_ask.
+      // That tells the person what already happens: an info note, not a failure to save the choice.
+      if (hasErrorCode(err, 'already_always_ask')) {
+        setActionNote(
+          i18n.tr(
+            'Verevon spør deg allerede før hver handling i denne appen.',
+            'Verevon already asks you before every action in this app.',
+          ),
+        )
+      } else {
+        setActionError(
+          translateApiError(err, i18n.tr, {
+            no: 'Kunne ikke lagre valget.',
+            en: 'Could not save the choice.',
+          }),
+        )
+      }
     } finally {
       setBusy(false)
     }
@@ -145,6 +159,13 @@ export function ConnectedAppsPolicy() {
       <Show when={actionError()}>
         {(message) => (
           <p class="verevon-settings-status-message verevon-settings-status-message--error" role="alert">
+            {message()}
+          </p>
+        )}
+      </Show>
+      <Show when={actionNote()}>
+        {(message) => (
+          <p class="verevon-settings-status-message" role="note">
             {message()}
           </p>
         )}

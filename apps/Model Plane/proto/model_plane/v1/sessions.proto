@@ -293,9 +293,11 @@ service MessageTreeService {
   // rewind: the leaf becomes the target and nothing is deleted. Any other target is
   // a version switch: the leaf becomes the newest turn beneath it, so the chosen
   // branch shows its own continuation. With `exact` set, the leaf is the target
-  // itself (an undo of a rewind). Owner only, with `session:write`. Refused
-  // for a Space thread, a thread that holds a waived run and a thread with a queued
-  // or running run. Refused with unavailable `message_versions_disabled` while
+  // itself (an undo of a rewind). Owner only, with `session:write`. Refused with
+  // zdr_durable_mutation_forbidden for a zero-retention caller, and with
+  // zdr_feature_not_supported (feature message_versions) for a waived caller or a
+  // thread that holds a waived run. Refused for a Space thread and a thread with a
+  // queued or running run. Refused with unavailable `message_versions_disabled` while
   // SESSION_CORE_MESSAGE_VERSIONS_ENABLED is not `true`.
   rpc SetActiveLeaf(SetActiveLeafRequest) returns (SetActiveLeafResponse);
 }
@@ -544,6 +546,24 @@ message AppendMessageRequest {
   // (invalid_argument), and a failed validation refuses the append. Stored under
   // messages.metadata.entry; never part of model context. Unset = no entry.
   MessageEntry entry = 21;
+
+  // The customer-gateway connection (W4-BYO) that served or will serve this turn: the opaque
+  // Integration Core connection id, so a regenerate, edit or retry of the turn replays on the same
+  // connection and never falls through to a platform provider. An opaque id only, never a key or a
+  // secret; the shape rule is the one `InferRequest.model_connection_id` has (at most 128 bytes of
+  // ASCII letters, digits, '-', '_' and '.'), and a malformed id is refused (invalid_argument).
+  // Stored only on a turn row: a zero-retention caller cannot append at all, and a post ignores it.
+  // Empty = a platform turn, today's behaviour; a send without one never touches the column.
+  string model_connection_id = 22;
+
+  // The subscription connection (the caller's own ChatGPT subscription, `openai-codex-subscription`) that
+  // served or will serve this turn: the opaque Integration Core subscription connection id. It is kept on the
+  // turn so that a side question about the thread is answered on the same subscription connection and never on
+  // the platform chain (DEC-V-R8). An opaque id only, never a key or a secret; the shape rule is the one
+  // `model_connection_id` has, and a malformed id is refused (invalid_argument). Stored only on a turn row: a
+  // zero-retention caller cannot append at all, and a post ignores it. Empty = not a subscription turn; a send
+  // without one never touches the column.
+  string subscription_connection_id = 23;
 }
 
 message AppendMessageResponse {
@@ -733,6 +753,19 @@ enum TerminalOutcome {
   TERMINAL_OUTCOME_FAILED = 2;
 }
 
+// The agent version a managed run runs under (EP-6 S9; owner: model-gateway sends it,
+// session-core records it). Ids and a digest only, never the agent's instructions or
+// tools. Session Core writes it to `runs.metadata.agent` in the run's own insert for a
+// non-ZDR caller, and never for a ZDR caller.
+message AgentVersionPin {
+  // The agent definition's stable id: `[A-Za-z0-9_.:-]`, at most 128 bytes.
+  string agent_ref = 1;
+  // The published version the run runs: immutable, and from 1.
+  uint32 version = 2;
+  // The version's canonical digest: `sha256:` and 64 lowercase hex characters.
+  string digest = 3;
+}
+
 // Starts a run and its durable terminalization obligation in one transaction.
 // This is additive; StartRun keeps its existing behavior for legacy clients.
 message StartManagedRunRequest {
@@ -754,6 +787,9 @@ message StartManagedRunRequest {
   // Wake mode (WS08-S2): start this run from a stored human post for one addressed agent.
   // Absent keeps every existing start unchanged. Refused for a zero-retention caller.
   RunWakeContext wake = 10;
+  // The agent version this run runs under (EP-6 S9). Absent keeps every existing start
+  // unchanged. A malformed pin is refused as invalid_agent_version_pin, for every caller.
+  AgentVersionPin agent_version_pin = 11;
 }
 
 message StartManagedRunResponse {
@@ -1108,15 +1144,15 @@ message UpsertAgentSkillRequest {
   repeated string trigger_file_patterns = 6;
   repeated string tool_restrictions = 7;
   bool enabled = 8;
-  // Provenance: "user" or "background_review". A background_review upsert
+  // Provenance: "user", "background_review" or "teach". A background_review upsert
   // must never overwrite a user-authored skill (enforced server-side).
   string origin = 9;
-  // Ownership and review (WS07 S7). For origin "background_review" session-core
-  // ignores `scope`, `owner_user_id`, `review_state` and `enabled` and writes a
-  // disabled, user-scoped, "proposed" row owned by the caller's `owner_user_id`
-  // (required: a learned skill without an owner is refused). For origin "user"
-  // an empty `scope` is "org" and `review_state` is ignored (a human write is
-  // "accepted").
+  // Ownership and review (WS07 S7). For origin "background_review" or "teach"
+  // session-core ignores `scope`, `owner_user_id`, `review_state` and `enabled` and
+  // writes a disabled, user-scoped, "proposed" row owned by the caller's
+  // `owner_user_id` (required: a learned or taught skill without an owner is
+  // refused). For origin "user" an empty `scope` is "org" and `review_state` is
+  // ignored (a human write is "accepted").
   string scope = 10;
   string owner_user_id = 11;
   // Review state of the skill. Ignored for a human write, which is accepted.
@@ -1193,7 +1229,7 @@ message AgentSkill {
   repeated string trigger_file_patterns = 6;
   repeated string tool_restrictions = 7;
   bool enabled = 8;
-  // Provenance: "user" or "background_review".
+  // Provenance: "user", "background_review" or "teach".
   string origin = 9;
   // Ownership/sharing (SKILL-1): mirrors mcp_servers' scope + owner +
   // explicit-share shape. "org" (default) or "user"; owner_user_id and
@@ -1369,6 +1405,18 @@ message SessionMessage {
   // Set only on a deleted user message: an agent answer to it already exists, and
   // that answer is not retracted by the deletion.
   bool agent_followed_up = 19;
+
+  // The customer-gateway connection this turn was written under (see
+  // AppendMessageRequest.model_connection_id): an opaque id, never a key. Empty for a platform turn
+  // and for every row written before the column existed. The gateway reads it off the source turn
+  // of a regenerate or an edit and replays on the same connection.
+  string model_connection_id = 20;
+
+  // The subscription connection this turn was written under (see
+  // AppendMessageRequest.subscription_connection_id): an opaque id, never a key. Empty for a platform or a
+  // customer-gateway turn and for every row written before the column existed. The gateway's side-chat route
+  // reads it off the thread to answer a side question on the same subscription connection.
+  string subscription_connection_id = 21;
 }
 
 message ListConversationResponse {
@@ -1531,6 +1579,12 @@ message ListThreadsRequest {
   // ordinary listing, so a starred page never skips a starred thread beyond the
   // first page.
   bool starred_only = 11;
+  // Optional named-agent filter (EP-6 P3). When set, only threads with a run woken
+  // for this agent (runs.agent_subject_id) are listed. It narrows the caller's
+  // already-visible set inside the same owner-bound query, so it never widens what
+  // the caller may list. The gateway sends it only while its named-agent thread
+  // switch is on. Empty means no agent filter.
+  string agent_subject_id = 12;
 }
 
 // Which archive state a ListThreads call returns. Values are prefixed because
@@ -1638,6 +1692,12 @@ message ThreadSummary {
   // second call. Empty when the thread has no goal, its goal was cleared, or the thread goals switch
   // or the attention switch is off. A status token only, never the objective.
   string goal_status = 29;
+
+  // Whether the thread holds a run kept under zero data retention or a waived run (DEC-32). Read
+  // only when ListThreadsRequest.thread_id names one thread, so that a caller can refuse a content
+  // read of that thread before it happens; a listing without a thread_id filter leaves it false and
+  // it must not be read as "holds none". A flag only, never a retention class or run id.
+  bool holds_retention_run = 30;
 }
 
 message ListThreadsResponse {
@@ -2474,4 +2534,39 @@ message ThreadReferenceOutlineItem {
   string first_line = 3;
   // When the turn was written.
   google.protobuf.Timestamp created_at = 4;
+}
+
+// --- Promote-on-use durable counter (W5-093-b) ---
+
+// PromoteOnUseService: the durable per-org counter behind execution-core's promote-on-use trigger. A
+// separate service, as ThreadReferenceService is, so that SessionCore and every mock of it stay
+// source-compatible. The counter stores a hash of the normalised URL, never the URL, and execution-core
+// calls it only when PROMOTE_ON_USE_DURABLE is on.
+service PromoteOnUseService {
+  // Count one grounded use of a page by (org, user, url hash) and say whether this use is the one that
+  // reaches the threshold. `fire` is true exactly once per key: the use that takes the count to the
+  // threshold while the key has no promotion recorded; the promotion is recorded in the same statement.
+  // Refused to a zero-retention or waived credential (failed_precondition), to a service credential
+  // without `session:promote:write`, and for another org or, for a user credential, another user.
+  rpc IncrementPromoteUse(IncrementPromoteUseRequest) returns (IncrementPromoteUseResponse);
+}
+
+// One grounded use of a page to count.
+message IncrementPromoteUseRequest {
+  // The organisation the use belongs to. Must be the caller's.
+  string org_id = 1;
+  // The user the use belongs to. For a user credential, must be the caller.
+  string user_id = 2;
+  // SHA-256 of the normalised URL: exactly 32 bytes. The URL itself is never sent or stored.
+  bytes url_hash = 3;
+  // The count at which `fire` turns true. Must be at least 1.
+  uint32 threshold = 4;
+}
+
+// The counter after one use.
+message IncrementPromoteUseResponse {
+  // The use count for the key, this use included.
+  uint32 count = 1;
+  // True when this use reached the threshold and no promotion was recorded before. True at most once per key.
+  bool fire = 2;
 }

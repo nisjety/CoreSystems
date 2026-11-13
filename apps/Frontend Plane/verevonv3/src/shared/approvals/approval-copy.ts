@@ -29,6 +29,7 @@ export const APPROVAL_CAUSE_CODES = [
   'browser_action_risk',
   'auto_posture_provider_write',
   'browser_human_assist',
+  'tainted_egress',
   'unclassified_gate',
 ] as const
 
@@ -43,6 +44,13 @@ export type ApprovalCause = {
   ruleId?: string
   scopeOptions: string[]
   stepUpRequired: boolean
+  /**
+   * The server offers "Always" for this approval: a pinned MCP tool paused only by its high-risk
+   * capability check, the one pause a confirmed rule lifts (D-WS13-8), with standing grants and
+   * rule proposals switched on. Absent means not offered; the SPA never offers what the server did
+   * not.
+   */
+  ruleOffered?: boolean
   /**
    * A `browser_human_assist` pause only (EP-1): which wall the page showed (`login`, `captcha`,
    * `consent`, `waf`) or `user_takeover`, who started it (`agent` or `person`), and the host of
@@ -283,6 +291,15 @@ const CAUSE_COPY: Record<CauseCode, (i18n: ApprovalCopyI18n, cause: ApprovalCaus
       ),
     }
   },
+  // WS23-S3: an egress call the run made after a connected-app read came back flagged. It is held
+  // for the person, so the card says what was read and what is about to leave, not a generic gate.
+  tainted_egress: (i18n) => ({
+    headline: i18n.tr('Utsending etter flagget innhold', 'Sending out after flagged content'),
+    reason: i18n.tr(
+      'Agenten leste innhold fra en tilkoblet tjeneste som ble flagget som mulig risikabelt. Nå vil den sende noe ut, og det gjør den bare hvis du godkjenner.',
+      'The agent read content from a connected service that was flagged as possibly risky. It now wants to send something out, and it does so only if you approve.',
+    ),
+  }),
   unclassified_gate: (i18n) => ({
     headline: i18n.tr('Agenten venter på godkjenning', 'The agent is waiting for approval'),
     reason: i18n.tr(

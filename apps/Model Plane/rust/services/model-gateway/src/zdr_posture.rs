@@ -305,6 +305,52 @@ pub fn decide_content_route(
     Err(http(&refusal))
 }
 
+/// The switch for typed refusals of the features a ZDR or waived turn drops (Z-05a). Only the literal
+/// `true` turns it on; off is today's behaviour, byte for byte.
+pub const TYPED_REFUSALS_ENV: &str = "ZDR_TYPED_REFUSALS_ENABLED";
+
+/// Whether the switch is on, from its raw value: the strict literal `true`, trimmed, nothing else.
+#[must_use]
+pub fn parse_typed_refusals(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// The switch as this process reads it.
+#[must_use]
+pub fn typed_refusals_enabled() -> bool {
+    parse_typed_refusals(std::env::var(TYPED_REFUSALS_ENV).ok().as_deref())
+}
+
+/// The refusal for a feature a ZDR or waived turn cannot use, over an explicit switch value so the
+/// rule is testable: `Some` only when `enabled` and the turn is ZDR or waived. A waived turn counts as
+/// ZDR for these features (DEC-32, ZDR.md 5.5). The refusal carries the feature key and nothing else:
+/// never a query, a URL, a file name or an output.
+#[must_use]
+pub fn refuse_zdr_feature_when(
+    enabled: bool,
+    key: &'static str,
+    zdr_or_waived: bool,
+) -> Option<Refusal> {
+    (enabled && zdr_or_waived).then(|| Refusal::feature_not_supported(key))
+}
+
+/// The refusal for a feature that cannot run on this turn, or `None` to carry on. `Some` only when the
+/// switch ([`TYPED_REFUSALS_ENV`]) is on and the turn is ZDR or waived; the caller returns it before any
+/// network call or state change, in HTTP through [`http`] or gRPC through [`grpc_code`]. `key` is a key of
+/// the catalogue vocabulary (`mp_contracts::zdr_refusal::FEATURES`). With the switch off this is always
+/// `None`, and the feature behaves as it did.
+#[must_use]
+pub fn refuse_zdr_feature(key: &'static str, posture: &TurnPosture) -> Option<Refusal> {
+    refuse_zdr_feature_for(key, posture.zdr() || posture.is_waived())
+}
+
+/// [`refuse_zdr_feature`] for a site that holds the turn's flags rather than its [`TurnPosture`] (the tool
+/// loop is handed `zdr` and the Data Plane mode, which is present on a ZDR or waived turn).
+#[must_use]
+pub fn refuse_zdr_feature_for(key: &'static str, zdr_or_waived: bool) -> Option<Refusal> {
+    refuse_zdr_feature_when(typed_refusals_enabled(), key, zdr_or_waived)
+}
+
 fn is_credential_refusal(refusal: &Refusal) -> bool {
     matches!(
         refusal.code(),
@@ -839,6 +885,10 @@ pub(crate) mod tests {
             ("http_routes.rs", "ai_realtime"),
             ("http_routes.rs", "ai_video_generate"),
             ("review_run_routes.rs", "review_run_with"),
+            ("side_chat_routes.rs", "side_chat_with"),
+            ("reasoning_translate_routes.rs", "reasoning_translate_with"),
+            ("council_routes.rs", "council_with"),
+            ("teach_routes.rs", "post_teach_skill_draft"),
             ("assistant_navigation.rs", "start_navigation"),
             ("dataplane.rs", "reject_zdr_durable_mutation"),
             ("dataplane.rs", "retrieve"),
@@ -889,10 +939,15 @@ pub(crate) mod tests {
             ("http_routes.rs", "create_org_hook_proxy"),
             ("http_routes.rs", "update_org_hook_proxy"),
             ("http_routes.rs", "delete_org_hook_proxy"),
+            ("http_routes.rs", "create_org_permission_rule_proxy"),
+            ("http_routes.rs", "delete_org_permission_rule_proxy"),
             ("http_routes.rs", "approve_plan"),
             ("http_routes.rs", "reject_plan"),
             ("http_routes.rs", "update_todo_status"),
             ("http_routes.rs", "decide_approval"),
+            // WS13-S7: a confirm writes a standing allow, a dismiss resolves a durable proposal.
+            ("http_routes.rs", "confirm_rule_proposal"),
+            ("http_routes.rs", "dismiss_rule_proposal"),
             ("http_routes.rs", "resume_run"),
             // `/continue` consumes a granted approval and starts a segment of a stored
             // run (build plan WS03 S3): the same continuation gate, then a stricter
@@ -904,6 +959,8 @@ pub(crate) mod tests {
             // gated too, since a waived run never owns a question.
             ("http_routes.rs", "list_run_questions"),
             ("http_routes.rs", "answer_run_question"),
+            // A branch move rewrites the thread's active path (WS17 S8, DEC-29).
+            ("http_routes.rs", "branch_thread"),
             // Human posts in a Space room (WS01-S4) store free text under a member's name.
             ("space_routes/posts.rs", "create_space_post"),
             ("space_routes/posts.rs", "append_space_post"),
@@ -999,10 +1056,24 @@ pub(crate) mod tests {
                 "generate_follow_ups",
                 "the turn's route, inherited (subscription_scoped_request)",
             ),
+            // The goal judge (EP-7 S3, S6), the one shared call. The attended settle builds its route in sse.rs
+            // (`judge_route`: the turn's provider hint, subscription connection and zdr) and judges only a turn that
+            // is neither ZDR nor waived; the unattended route passes a default route (no connection, zdr false, and
+            // the scheduled lane denies ZDR). goal_judge_request copies that route through subscription_scoped_request.
+            (
+                "thread_goal.rs",
+                "judge_goal_turn",
+                "the route its caller passes (the attended judge's route, or a default route unattended), copied by goal_judge_request through subscription_scoped_request",
+            ),
             (
                 "sse.rs",
                 "image_gen_stream",
                 "the default chain; refused on a waived turn at the stream entry",
+            ),
+            (
+                "image_tool.rs",
+                "generate",
+                "the chat turn's default chain; offered only on a persistent turn (composer_offers) and refused on a zero-retention or waived turn before the call (dispatch)",
             ),
             (
                 "sse.rs",
@@ -1085,6 +1156,31 @@ pub(crate) mod tests {
                 "review_run_routes.rs",
                 "review_run_with",
                 "the request's route, plain (zdr_or_refuse); read-only, nothing stored",
+            ),
+            (
+                "side_chat_routes.rs",
+                "side_chat_with",
+                "the request's route, plain (zdr_or_refuse); read-only, nothing stored",
+            ),
+            (
+                "reasoning_translate_routes.rs",
+                "reasoning_translate_with",
+                "the request's route, plain (zdr_or_refuse); a ZDR turn is refused with reasoning_translation before this call, so the call only runs persistent; nothing stored",
+            ),
+            (
+                "council_routes.rs",
+                "council_infer",
+                "the request's route, plain (zdr_or_refuse in council_with); every member and the synthesis carry that zdr flag, and a refused call is reported, never retried",
+            ),
+            (
+                "council_routes.rs",
+                "chat_catalogue",
+                "catalogue read: no user content",
+            ),
+            (
+                "teach_routes.rs",
+                "teach_skill_draft_with",
+                "the request's route, plain: post_teach_skill_draft refuses a ZDR or waived caller (teach_mode) before this call, so the call only runs persistent and carries zdr false",
             ),
             (
                 "http_routes.rs",
@@ -1567,6 +1663,18 @@ pub(crate) mod tests {
         assert_eq!(computed, [("?".to_owned(), "<non-literal path>".to_owned())]);
         // A handler named like a verb is not a verb.
         assert!(non_get_routes(r#"Router::new().route("/a", get(get_chunks))"#).is_empty());
+    }
+
+    /// The judge route is written as a literal in `http_routes.rs`, so the lint above reads it; its service grant
+    /// in `auth.rs` names the same path through `GOAL_JUDGE_TURN_PATH`. The two must stay one path.
+    #[test]
+    fn the_goal_judge_route_literal_is_the_granted_path() {
+        let router = include_str!("http_routes.rs");
+        let literal = format!("\"{}\"", crate::auth::GOAL_JUDGE_TURN_PATH);
+        assert!(
+            router.contains(&literal),
+            "http_routes.rs does not register {literal}, the path the judge's service grant names"
+        );
     }
 
     #[test]

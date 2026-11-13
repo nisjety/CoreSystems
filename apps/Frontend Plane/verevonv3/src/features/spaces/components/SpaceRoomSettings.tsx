@@ -81,7 +81,8 @@ export function SpaceRoomSettings(props: SpaceRoomSettingsProps) {
   function invalidCopy(err: unknown): string | undefined {
     const code = (err as { code?: unknown } | null)?.code
     if (code !== 'room_details_invalid') return undefined
-    const details = (err as { details?: Readonly<Record<string, unknown>> | null }).details
+    const raw = (err as { details?: unknown }).details
+    const details = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Readonly<Record<string, unknown>>) : null
     const field = details?.field
     const reason = details?.reason
     if (field === 'name' && reason === 'name_required') {

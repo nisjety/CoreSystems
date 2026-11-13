@@ -408,6 +408,49 @@ pub const FEATURES: &[Feature] = &[
         key: "skill_authoring",
         label: "saving or editing skills",
     },
+    // EP-6 P3: one named agent's notes in a Space are retained content, so a ZDR or waived caller is
+    // refused the listing before any read.
+    Feature {
+        key: "named_agent",
+        label: "named agent memory",
+    },
+    // W4-P6: process_read's spill writes a background process's output into a workspace file, which is
+    // retained content, so a ZDR or waived run is refused before any read or write.
+    Feature {
+        key: "process_output_spill",
+        label: "saving background process output to files",
+    },
+    // W4-CC-5: a static-bearer MCP server redeems its stored credential for each call. A ZDR or waived turn never
+    // redeems one, so a request that would use such a server is refused before any call.
+    Feature {
+        key: "mcp_secret_ref",
+        label: "MCP servers that use a stored credential",
+    },
+    // W4-CC-7: a custom REST tool calls the organisation's own API with a stored credential, so a ZDR or waived run is
+    // refused before any read or write.
+    Feature {
+        key: "custom_rest",
+        label: "custom REST connectors",
+    },
+    // W5-081-c (F-t3-081): teach mode drafts a skill from one run's takeover steps and files it as a proposal, which is
+    // retained content. A ZDR or waived caller is refused before any read, Quarry call or model call.
+    Feature {
+        key: "teach_mode",
+        label: "saving a run's steps as a skill",
+    },
+    // W5-098-b (F-t3-098): translating a reasoning text sends the person's own conversation text to a model. A ZDR or
+    // waived caller is refused before any model call: a ZDR turn is never translated.
+    Feature {
+        key: "reasoning_translation",
+        label: "translating a reasoning text",
+    },
+    // Z-05a: the assistant's file or document output (an artifact or a canvas write) is kept with the thread's
+    // artifact versions, which is retained content. A ZDR or waived turn is refused with this feature before any
+    // write, so the output is never silently dropped (ZDR_TYPED_REFUSALS_ENABLED).
+    Feature {
+        key: "artifact_output",
+        label: "files and documents the assistant creates",
+    },
     // Quarry WS4.I: Quarry refuses a ZDR caller before it persists a durable crawl or batch, a
     // saved browser profile, a resumable browser session or a page screenshot.
     Feature {

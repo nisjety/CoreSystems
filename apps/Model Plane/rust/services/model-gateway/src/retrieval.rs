@@ -933,6 +933,22 @@ pub(crate) fn retrieval_http_base_url() -> String {
         .to_owned()
 }
 
+/// `MODEL_GATEWAY_GRAPH_SPACE_SCOPE`: only the literal `true`, after trimming, turns it on.
+fn graph_space_scope_enabled_from(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// Whether graph grounding carries the Space read decision of a scoped turn (WS18-S2). Read once per
+/// process, so it cannot change under a request.
+fn graph_space_scope_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        graph_space_scope_enabled_from(
+            std::env::var("MODEL_GATEWAY_GRAPH_SPACE_SCOPE").ok().as_deref(),
+        )
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct GraphRetrieveEntity {
     #[serde(default)]
@@ -964,12 +980,19 @@ fn build_graph_grounding_request(
     org_id: &str,
     query: &str,
     zdr_mode: Option<String>,
+    space_decision: Option<&str>,
 ) -> Result<reqwest::Request, reqwest::Error> {
-    client
+    let mut builder = client
         .post(format!("{base_url}/v1/retrieve/graph"))
         .timeout(GRAPH_TIMEOUT)
         .bearer_auth(bearer.as_str())
-        .header("x-org-id", org_id)
+        .header("x-org-id", org_id);
+    // A scoped turn carries the Space read decision it was given, exactly as the vector leg does.
+    // Absent (switch off, or an unscoped turn) the request is what it has always been.
+    if let Some(token) = space_decision {
+        builder = builder.header("x-space-decision", token);
+    }
+    builder
         .json(&json!({
             "org_id": org_id,
             "query": query,
@@ -986,7 +1009,21 @@ async fn load_graph_grounding(
     org_id: &str,
     query: &str,
     zdr_mode: Option<String>,
+    space_decision: Option<&str>,
 ) -> Option<GroundingGraph> {
+    // MODEL_GATEWAY_GRAPH_SPACE_SCOPE off: the request is what it has always been. On, a scoped turn
+    // sends its decision, and one whose decision is unusable never reaches the organisation-wide graph.
+    let scoped_token = if graph_space_scope_enabled() {
+        match scoped_retrieval_token(space_decision) {
+            Ok(token) => token,
+            Err(()) => {
+                tracing::warn!(org_id = %org_id, "scoped graph grounding suppressed because retrieval authority is absent");
+                return None;
+            }
+        }
+    } else {
+        None
+    };
     let request = match build_graph_grounding_request(
         &state.http_client,
         &retrieval_http_base_url(),
@@ -994,6 +1031,7 @@ async fn load_graph_grounding(
         org_id,
         query,
         zdr_mode,
+        scoped_token,
     ) {
         Ok(request) => request,
         Err(error) => {
@@ -1009,6 +1047,17 @@ async fn load_graph_grounding(
             return None;
         }
     };
+    if scoped_token.is_some() && response.status() == reqwest::StatusCode::FORBIDDEN {
+        // The Data Plane refuses a Space decision on the graph endpoint until it has a Space predicate for
+        // graph. That is "graph grounding is not available in a Space", not a reason to retry without the
+        // header: the organisation-wide graph is never read for a scoped turn.
+        tracing::warn!(
+            status = %response.status(),
+            org_id = %org_id,
+            "graph grounding is not available in a Space; proceeding without graph context"
+        );
+        return None;
+    }
     if !response.status().is_success() {
         tracing::warn!(
             status = %response.status(),
@@ -1156,7 +1205,7 @@ pub async fn retrieve_checked(
         grpc_req.metadata_mut().insert("x-space-decision", metadata);
     }
     let retrieval_future = retrieval_client.retrieve(grpc_req);
-    let graph_future = load_graph_grounding(state, bearer, org_id, query, zdr_mode);
+    let graph_future = load_graph_grounding(state, bearer, org_id, query, zdr_mode, space_decision);
     let (retrieval_result, graph) = tokio::join!(retrieval_future, graph_future);
 
     match retrieval_result {
@@ -1829,6 +1878,7 @@ mod tests {
             "org-from-claims",
             "bounded query",
             Some("ephemeral".to_owned()),
+            None,
         )
         .expect("request should build");
 
@@ -1862,6 +1912,7 @@ mod tests {
                 "org-from-claims",
                 "bounded query",
                 mode,
+                None,
             )
             .expect("request should build");
             let body = request.body().and_then(reqwest::Body::as_bytes).unwrap();

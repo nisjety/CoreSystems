@@ -1,0 +1,33 @@
+/*
+ * F-t3-098: the Translate control in the Details popover's reasoning section (W5-098-c). The popover mounts it only with
+ * VITE_REASONING_TRANSLATE=true on a settled, non-temporary turn, so with the switch off none of these rules matches.
+ */
+
+.verevon-chat-reasoning-translate {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin-top: 8px;
+}
+
+.verevon-chat-reasoning-translate button {
+  border: 0;
+  border-radius: 999px;
+  background: var(--verevon-surface-soft);
+  padding: 4px 10px;
+  color: var(--verevon-text-subtle);
+  font-size: 11px;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.verevon-chat-reasoning-translate button:disabled {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.verevon-chat-reasoning-translate__note {
+  color: var(--verevon-e-subtle);
+  font-size: 11px;
+}

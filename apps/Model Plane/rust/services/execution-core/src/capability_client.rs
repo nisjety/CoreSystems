@@ -183,6 +183,12 @@ impl CapabilityClient {
         Self::new_with_transport(&base_url, &service_token, allow_insecure_loopback).map(Some)
     }
 
+    /// A client for a local stand-in Control (loopback allowed), for tests in other modules.
+    #[cfg(test)]
+    pub(crate) fn for_test(base_url: &str) -> Self {
+        Self::new_with_transport(base_url, &"a".repeat(32), true).expect("a test capability client")
+    }
+
     fn new_with_transport(
         base_url: &str,
         service_token: &str,

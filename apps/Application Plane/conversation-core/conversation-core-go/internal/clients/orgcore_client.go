@@ -6,6 +6,7 @@ package clients
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -25,6 +26,10 @@ type OrgCoreClient struct {
 	servicePrincipal string
 	serviceToken     string
 	httpClient       *http.Client
+	// effectivePostureRead selects where the ZDR answer comes from. Off (the
+	// default): the raw metadata.interactiveRetention.zdr flag. On: the
+	// effective posture org-core computes (retention_posture.effective_zdr).
+	effectivePostureRead bool
 }
 
 // NewOrgCoreClient returns nil when any piece is unset. The process may still
@@ -45,9 +50,28 @@ func NewOrgCoreClient(baseURL, servicePrincipal, serviceToken string) *OrgCoreCl
 	}
 }
 
+// WithEffectivePostureRead turns the effective-posture ZDR read on or off and
+// returns the client for chaining. Safe on a nil client (the typed nil that
+// NewOrgCoreClient returns when unconfigured stays nil).
+func (c *OrgCoreClient) WithEffectivePostureRead(on bool) *OrgCoreClient {
+	if c == nil {
+		return nil
+	}
+	c.effectivePostureRead = on
+	return c
+}
+
+// orgCoreRetentionPosture is org-core's computed retention projection on the
+// organization record. Pointers keep "absent" distinct from false.
+type orgCoreRetentionPosture struct {
+	EffectiveZDR *bool `json:"effective_zdr"`
+	Lapsed       *bool `json:"lapsed"`
+}
+
 type orgCoreOrganization struct {
-	ID       string         `json:"id"`
-	Metadata map[string]any `json:"metadata"`
+	ID               string                   `json:"id"`
+	Metadata         map[string]any           `json:"metadata"`
+	RetentionPosture *orgCoreRetentionPosture `json:"retention_posture"`
 }
 
 type orgCoreListOrganizationsResponse struct {
@@ -106,7 +130,13 @@ func (c *OrgCoreClient) ZDREnabledOrgIDs(ctx context.Context) (map[string]bool, 
 		}
 
 		for _, org := range decoded.Organizations {
-			if isZDREnabled(org.Metadata) {
+			zdr, err := c.zdrPosture(org)
+			if err != nil {
+				// Never a partial exclusion list: one unknown org aborts the call
+				// so the corpus builder skips the sweep.
+				return nil, err
+			}
+			if zdr {
 				zdrOrgIDs[org.ID] = true
 			}
 		}
@@ -118,7 +148,23 @@ func (c *OrgCoreClient) ZDREnabledOrgIDs(ctx context.Context) (map[string]bool, 
 	return zdrOrgIDs, nil
 }
 
-func isZDREnabled(metadata map[string]any) bool {
+// zdrPosture answers whether the org is under Zero Data Retention. Switch off:
+// the raw metadata rule, with a nil error. Switch on: org-core's effective_zdr
+// must be present, otherwise it returns an error; it never guesses, so a
+// missing field can not read as "not ZDR".
+func (c *OrgCoreClient) zdrPosture(org orgCoreOrganization) (bool, error) {
+	if c == nil || !c.effectivePostureRead {
+		return metadataZDREnabled(org.Metadata), nil
+	}
+	if org.RetentionPosture == nil || org.RetentionPosture.EffectiveZDR == nil {
+		return false, errNoRetentionPosture
+	}
+	return *org.RetentionPosture.EffectiveZDR, nil
+}
+
+var errNoRetentionPosture = errors.New("org-core record has no retention posture")
+
+func metadataZDREnabled(metadata map[string]any) bool {
 	retention, ok := metadata["interactiveRetention"].(map[string]any)
 	if !ok {
 		return false
@@ -148,8 +194,12 @@ func (c *OrgCoreClient) SupportPolicy(ctx context.Context, orgID, role string) (
 	if err != nil {
 		return SupportPolicy{}, err
 	}
+	zdrEnabled, err := c.zdrPosture(*organization)
+	if err != nil {
+		return SupportPolicy{}, err
+	}
 	return SupportPolicy{
-		ZDREnabled:        isZDREnabled(organization.Metadata),
+		ZDREnabled:        zdrEnabled,
 		AIReviewEnabled:   supportAIReviewEnabled(organization.Metadata),
 		RecurrenceAllowed: containsCapability(capabilities, "support:recurrence:read"),
 	}, nil
@@ -166,7 +216,11 @@ func (c *OrgCoreClient) AllowAIProposal(ctx context.Context, orgID string) error
 	if err != nil {
 		return fmt.Errorf("%w: %v", conversation.ErrPolicyUnavailable, err)
 	}
-	if isZDREnabled(organization.Metadata) {
+	zdrEnabled, err := c.zdrPosture(*organization)
+	if err != nil {
+		return fmt.Errorf("%w: %v", conversation.ErrPolicyUnavailable, err)
+	}
+	if zdrEnabled {
 		return conversation.ErrZDRAIProposalForbidden
 	}
 	if !supportAIReviewEnabled(organization.Metadata) {

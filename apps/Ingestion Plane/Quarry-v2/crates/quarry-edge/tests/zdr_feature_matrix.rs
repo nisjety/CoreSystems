@@ -250,7 +250,13 @@ fn every_enforced_honouring_row_cites_a_test_or_says_why_it_cannot() {
         .collect();
     assert_eq!(
         without_a_test,
-        vec!["search_similar", "agent_resume", "agent_attach", "internal_run_page"],
+        vec![
+            "search_similar",
+            "agent_resume",
+            "agent_attach",
+            "agent_procedure_draft",
+            "internal_run_page"
+        ],
         "a new honoured or refused row without a test: add the test, or add it here on purpose"
     );
 }
@@ -407,7 +413,14 @@ fn in_catalogue(list: &[String], name: &str) -> bool {
 /// Quarry's durable refusals answer `zdr_durable_mutation_forbidden`, which takes
 /// no feature, so the matrix keeps Quarry's own names below. They are listed
 /// here so a new one is a visible decision, not drift.
-const PENDING_CODES: &[&str] = &["BAD_REQUEST", "FORBIDDEN"];
+const PENDING_CODES: &[&str] = &[
+    "BAD_REQUEST",
+    "FORBIDDEN",
+    // W5-081-a / F-t3-081: the procedure-draft route answers a ZDR run `409` with
+    // `details.reason` `zdr_not_supported` under the envelope code `CONFLICT`; Quarry
+    // refusals do not carry a catalogue code yet.
+    "CONFLICT",
+];
 const PENDING_FEATURES: &[&str] = &[
     "durable_job",
     "persistent_profile",
@@ -430,6 +443,9 @@ const PENDING_FEATURES: &[&str] = &[
     // Q3-E3.4-7a: a download's knowledge handoff is refused under ZDR (403 download_handoff_zdr_refused)
     // before any receipt or byte is read. The catalogue has no key for it.
     "download_handoff",
+    // W5-081-a / F-t3-081: the read-only procedure-draft route refuses a ZDR run. The
+    // catalogue's `teach_mode` covers Model Gateway's skill-draft write (W5-081-c), not this read.
+    "procedure_draft",
 ];
 
 fn refusals_named_by_the_matrix() -> (BTreeSet<&'static str>, BTreeSet<&'static str>) {
@@ -450,13 +466,16 @@ fn every_code_and_feature_the_matrix_names_is_in_the_closed_catalogue_list() {
     let catalogue_codes = catalogue_codes();
     let catalogue_features = catalogue_features();
     assert_eq!(catalogue_codes.len(), 10, "the plan's closed list has 10 codes");
-    // 51, the count of the vendored catalogue, which its .sha256 pin fixes to the Model Plane
+    // 58, the count of the vendored catalogue, which its .sha256 pin fixes to the Model Plane
     // golden. The earlier 40 was already stale at the merge base (46 keys); the W1-W5 regeneration
-    // (791c6b8f5) took the catalogue to 51.
+    // (791c6b8f5) took the catalogue to 51, and the merge with main (Model Plane W4/W5) to 58.
     assert_eq!(
         catalogue_features.len(),
-        51,
-        "the vendored catalogue holds 51 feature keys, the count of the Model Plane golden it is pinned to"
+        58,
+        "the vendored catalogue holds 58 feature keys: the 46 of the merge base, the Quarry keys \
+         durable_crawl, browser_profile, session_resume, page_screenshot and browser_page_context \
+         (X-16, WS4.I), and the Model Plane W4/W5 keys process_output_spill, mcp_secret_ref, \
+         custom_rest, teach_mode, reasoning_translation, artifact_output and named_agent"
     );
     let (codes, features) = refusals_named_by_the_matrix();
     assert!(!codes.is_empty() && !features.is_empty(), "no refusal row names a code: the premise is gone");
@@ -509,10 +528,14 @@ fn the_vendored_catalogue_is_the_one_its_pin_names() {
 #[test]
 fn the_pending_codes_are_quarry_error_wire_names() {
     use quarry_core::error::ErrorCode;
-    let wire: BTreeSet<&str> = [ErrorCode::Forbidden, ErrorCode::BadRequest]
-        .iter()
-        .map(|code| code.wire_name())
-        .collect();
+    let wire: BTreeSet<&str> = [
+        ErrorCode::Forbidden,
+        ErrorCode::BadRequest,
+        ErrorCode::Conflict,
+    ]
+    .iter()
+    .map(|code| code.wire_name())
+    .collect();
     for code in PENDING_CODES {
         assert!(wire.contains(code), "{code} is not an ErrorCode wire name");
     }

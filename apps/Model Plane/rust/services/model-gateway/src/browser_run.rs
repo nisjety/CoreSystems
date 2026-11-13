@@ -39,8 +39,9 @@ use tracing::{info, warn};
 
 use crate::{
     auth::{
-        Claims, VerifiedBrowserBearer, VerifiedDataPlaneBearer as VerifiedBearer,
-        VerifiedExecutionBearer, VerifiedInferenceBearer, VerifiedSessionBearer,
+        Claims, VerifiedBrowserBearer, VerifiedCapabilityBearer,
+        VerifiedDataPlaneBearer as VerifiedBearer, VerifiedExecutionBearer,
+        VerifiedInferenceBearer, VerifiedSessionBearer,
     },
     http_routes::grpc_status_to_http,
     state::AppState,
@@ -2043,6 +2044,31 @@ fn browser_run_zdr_refusal() -> ApiError {
     )
 }
 
+/// Admits a standalone browser run against the org's agent policy. A refusal is the `{ error: { code, message,
+/// details } }` envelope the Do-turn refusals answer with, and nothing has been written when it is returned.
+async fn admit_standalone_browser_run(
+    state: &AppState,
+    org_id: &str,
+    capability_bearer: Option<&Extension<VerifiedCapabilityBearer>>,
+) -> Result<(), ApiError> {
+    crate::org_agent_policy::admit_standalone_run(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        org_id,
+        capability_bearer.map_or("", |Extension(bearer)| bearer.as_str()),
+    )
+    .await
+    .map_err(|code| {
+        let (status, message) = crate::org_agent_policy::refusal_answer(code);
+        (
+            status,
+            Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
+        )
+    })
+}
+
 fn browser_grant_forbidden() -> ApiError {
     (
         StatusCode::FORBIDDEN,
@@ -2174,6 +2200,7 @@ async fn browser_run_start(
     session_bearer: VerifiedSessionBearer,
     inference_bearer: VerifiedInferenceBearer,
     browser_bearer: VerifiedBrowserBearer,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
     headers: HeaderMap,
     Json(req): Json<BrowserRunStartRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -2186,6 +2213,7 @@ async fn browser_run_start(
         session_bearer,
         inference_bearer,
         browser_bearer,
+        capability_bearer,
         headers,
         Json(req),
     );
@@ -2215,6 +2243,7 @@ async fn browser_run_start_inner(
     session_bearer: VerifiedSessionBearer,
     inference_bearer: VerifiedInferenceBearer,
     browser_bearer: VerifiedBrowserBearer,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
     headers: HeaderMap,
     Json(req): Json<BrowserRunStartRequest>,
 ) -> Result<Json<Value>, ApiError> {
@@ -2228,6 +2257,10 @@ async fn browser_run_start_inner(
             ),
         ));
     }
+    // The org's pause and mode cap bind a standalone browser run as they bind a Do turn (D2-1119, WS25-S9). A browser
+    // run clicks and types, so a lockdown or read-only cap refuses it. Read after the ZDR refusal and before any grant,
+    // thread or run write.
+    admit_standalone_browser_run(&state, &claims.org_id, capability_bearer.as_ref()).await?;
     let data_plane_bearer = data_plane_bearer
         .map(|Extension(value)| value)
         .ok_or_else(|| {
@@ -5587,6 +5620,7 @@ mod tests {
             VerifiedSessionBearer::for_test("session-token"),
             VerifiedInferenceBearer::for_test("inference-token"),
             VerifiedBrowserBearer::for_test("browser-user-token"),
+            None,
             HeaderMap::new(),
             Json(request),
         )
@@ -6259,6 +6293,7 @@ mod tests {
                     VerifiedSessionBearer::for_test("session-token"),
                     VerifiedInferenceBearer::for_test("inference-token"),
                     VerifiedBrowserBearer::for_test("browser-user-token"),
+                    None,
                     headers,
                     Json(request),
                 )

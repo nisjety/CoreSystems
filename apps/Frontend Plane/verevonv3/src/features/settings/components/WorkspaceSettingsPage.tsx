@@ -27,6 +27,10 @@ import { OrgSpacePolicySection } from '@/features/settings/components/OrgSpacePo
 import { MemorySection } from '@/features/settings/components/MemorySection'
 import { LearningSection } from '@/features/settings/components/LearningSection'
 import { ChatGptSubscriptionPanel } from '@/features/integrations/components/ChatGptSubscriptionPanel'
+import { CustomConnectorSection } from '@/features/settings/components/CustomConnectorSection'
+import { OrgZdrAcknowledgementsSection } from '@/features/settings/components/OrgZdrAcknowledgementsSection'
+import { CustomerGatewaySection } from '@/features/settings/components/CustomerGatewaySection'
+import { ApprovalRuleProposalsSection } from '@/features/settings/components/ApprovalRuleProposalsSection'
 import { ConnectedAppsPolicy } from '@/features/settings/components/ConnectedAppsPolicy'
 import { HyperswitchCheckout } from '@/features/billing/components/HyperswitchCheckout'
 import { NexiCheckout } from '@/features/billing/components/NexiCheckout'
@@ -1910,6 +1914,9 @@ function IntegrationsSection() {
         )}
       </Show>
       <ChatGptSubscriptionPanel orgId={orgId()} onConnectionChange={() => void refresh()} />
+      <OrgZdrAcknowledgementsSection />
+      <CustomerGatewaySection orgId={orgId()} />
+      <CustomConnectorSection orgId={orgId()} />
       <section class="verevon-settings-social-layer" aria-labelledby="verevon-settings-social-title">
         <div class="verevon-settings-social-layer__header">
           <div>
@@ -2062,6 +2069,9 @@ function IntegrationsSection() {
         {loadFailed() ? ` ${i18n.tr('Integrasjonstilstanden kunne ikke oppdateres fra de lokale tjenestene.', 'Integration state could not be refreshed from the local services.')}` : ''}
       </p>
       <ConnectedAppsPolicy />
+      <Show when={import.meta.env.VITE_APPROVAL_RULE_PROPOSALS === 'true'}>
+        <ApprovalRuleProposalsSection />
+      </Show>
       <Show when={notice()}>
         {(message) => <p class="verevon-settings-status-message" role="status">{message()}</p>}
       </Show>

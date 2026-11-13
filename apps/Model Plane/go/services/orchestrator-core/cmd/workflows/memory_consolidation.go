@@ -14,6 +14,13 @@ import (
 type MemoryConsolidationInput struct {
 	OrgID    string `json:"org_id"`
 	MaxItems int    `json:"max_items"`
+
+	// Retention is the caller's signed retention posture, stamped by the start
+	// path and never taken from the request body. It is handed to
+	// WriteConsolidatedMemoryActivity, which refuses to write anything that is not
+	// an attested durable posture while the Session Core content gate is on. The
+	// zero value is unattested, so an input that never carried one fails closed.
+	Retention activities.Retention `json:"retention"`
 }
 
 // MemoryConsolidationOutput contains the results of memory consolidation.
@@ -86,7 +93,8 @@ func MemoryConsolidationWorkflow(ctx workflow.Context, input MemoryConsolidation
 
 	// Step 3: Write consolidated entries back.
 	writeInput := activities.WriteMemoryInput{
-		Entries: consolidated.ConsolidatedEntries,
+		Entries:   consolidated.ConsolidatedEntries,
+		Retention: input.Retention,
 	}
 
 	err = workflow.ExecuteActivity(actCtx,

@@ -19,6 +19,15 @@
  * `zdr = zdrIntent && entitled`; an org whose plan lapsed keeps its stored
  * intent but is not zero-retention (and a warning says so).
  *
+ * Effective posture (ZDR-Z-03b, behind AUTH_CORE_ZDR_EFFECTIVE_POSTURE_ENABLED,
+ * default off). org-core also answers `{ effectiveZdr, lapsed, planLapsePolicy }`
+ * on the same route, with the lapse rule applied (the posture matrix row
+ * `o_plan_lapsed_keeps_zdr`: a lapsed org stays ZDR). With the switch on, Auth
+ * Core stops owning a copy of that rule and reads `effectiveZdr` directly; the
+ * answer must carry boolean `effectiveZdr` and `lapsed` or the lookup is an
+ * `org_core_malformed_response` failure (never a guess). With the switch off
+ * everything above applies unchanged.
+ *
  * Authentication: org-core applies service authentication to every route, so
  * the request carries `x-service-id: auth-core` and `x-service-token`
  * (`ORG_CORE_SERVICE_TOKEN`), the same credential Auth Core's other org-core
@@ -189,13 +198,44 @@ class PostureLookupFailure extends Error {
 type PostureEntry = Readonly<{
   zdrIntent: boolean;
   entitled: boolean;
+  /**
+   * org-core's effective answer (lapse rule applied). Absent on an entry written
+   * from an answer that did not carry it; with the switch on such an entry is
+   * treated as a cache miss.
+   */
+  effectiveZdr?: boolean;
+  /** org-core's lapsed flag: intent on, entitlement gone. Same absence rule. */
+  lapsed?: boolean;
   /** When org-core last answered successfully; never moved by a stale serve. */
   resolvedAt: number;
 }>;
 
 type LookupResult =
-  | Readonly<{ kind: 'found'; zdrIntent: boolean; entitled: boolean }>
+  | Readonly<{
+      kind: 'found';
+      zdrIntent: boolean;
+      entitled: boolean;
+      effectiveZdr?: boolean;
+      lapsed?: boolean;
+    }>
   | Readonly<{ kind: 'not_found' }>;
+
+/**
+ * ZDR-Z-03b switch: read org-core's `effectiveZdr` instead of computing
+ * `zdrIntent && entitled` here. Default off; only the literal string 'true'
+ * turns it on, read once at module load (anything else is off).
+ *
+ * Rollout order: org-core with ZDR-Z-03a (which serves effectiveZdr, lapsed and
+ * planLapsePolicy) goes first, then this switch. Flipping it against an older
+ * org-core makes every lookup an org_core_malformed_response failure, so every
+ * token mint answers 503 retention_posture_unavailable platform-wide: fail
+ * closed, never a guess. Flip it together with integration-corev2's
+ * INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED (D-ZDR-10); with only this one on, a
+ * lapsed org is ZDR in the decision while integration-corev2 refuses the
+ * acknowledgement with zdr_org_not_on.
+ */
+let EFFECTIVE_POSTURE_READ =
+  process.env.AUTH_CORE_ZDR_EFFECTIVE_POSTURE_ENABLED === 'true';
 
 const postureCache = new Map<string, PostureEntry>();
 const lookupsInFlight = new Map<string, Promise<LookupResult>>();
@@ -216,12 +256,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-function isZdr(entry: Pick<PostureEntry, 'zdrIntent' | 'entitled'>): boolean {
+/**
+ * The one ZDR rule every reader below follows. Switch on: org-core's
+ * `effectiveZdr`. Switch off: `zdrIntent && entitled`, exactly as before.
+ */
+function isZdr(
+  entry: Pick<PostureEntry, 'zdrIntent' | 'entitled' | 'effectiveZdr'>,
+): boolean {
+  if (EFFECTIVE_POSTURE_READ) return entry.effectiveZdr === true;
   return entry.zdrIntent && entry.entitled;
 }
 
 function toPosture(
-  entry: Pick<PostureEntry, 'zdrIntent' | 'entitled'>,
+  entry: Pick<PostureEntry, 'zdrIntent' | 'entitled' | 'effectiveZdr'>,
 ): InteractiveRetentionPosture {
   return isZdr(entry) ? ZDR_POSTURE : DEFAULT_POSTURE;
 }
@@ -230,6 +277,23 @@ function staleWindowMs(entry: PostureEntry): number {
   return isZdr(entry)
     ? RETENTION_STALE_ZDR_MAX_AGE_MS
     : RETENTION_STALE_NON_ZDR_MAX_AGE_MS;
+}
+
+/**
+ * The remembered entry for an org. With the switch on, an entry written before
+ * the switch flipped has no boolean `effectiveZdr` and counts as a cache miss,
+ * so it is neither served fresh nor as a stale answer.
+ */
+function cachedEntry(organizationId: string): PostureEntry | undefined {
+  const entry = postureCache.get(organizationId);
+  if (
+    entry &&
+    EFFECTIVE_POSTURE_READ &&
+    typeof entry.effectiveZdr !== 'boolean'
+  ) {
+    return undefined;
+  }
+  return entry;
 }
 
 function usableStale(
@@ -368,7 +432,23 @@ async function fetchPosture(organizationId: string): Promise<LookupResult> {
   ) {
     throw new PostureLookupFailure('org_core_malformed_response');
   }
-  return { kind: 'found', zdrIntent: body.zdrIntent, entitled: body.entitled };
+  if (
+    EFFECTIVE_POSTURE_READ &&
+    (typeof body.effectiveZdr !== 'boolean' || typeof body.lapsed !== 'boolean')
+  ) {
+    // An org-core that does not serve the effective posture yet: a failure, so
+    // the stale-if-error rule and the 503 apply and nothing is guessed.
+    throw new PostureLookupFailure('org_core_malformed_response');
+  }
+  return {
+    kind: 'found',
+    zdrIntent: body.zdrIntent,
+    entitled: body.entitled,
+    ...(typeof body.effectiveZdr === 'boolean'
+      ? { effectiveZdr: body.effectiveZdr }
+      : {}),
+    ...(typeof body.lapsed === 'boolean' ? { lapsed: body.lapsed } : {}),
+  };
 }
 
 /** Concurrent mints for one org share a single org-core read. */
@@ -447,7 +527,7 @@ export async function resolveInteractiveRetentionPosture(
     throw unavailable(organizationId, 'invalid_organization_id');
   }
 
-  const known = postureCache.get(organizationId);
+  const known = cachedEntry(organizationId);
   if (known && Date.now() - known.resolvedAt < RETENTION_POSTURE_FRESH_TTL_MS) {
     return toPosture(known);
   }
@@ -495,10 +575,20 @@ export async function resolveInteractiveRetentionPosture(
   const entry: PostureEntry = {
     zdrIntent: result.zdrIntent,
     entitled: result.entitled,
+    effectiveZdr: result.effectiveZdr,
+    lapsed: result.lapsed,
     resolvedAt: now,
   };
   remember(organizationId, entry);
-  if (entry.zdrIntent && !entry.entitled) {
+  if (EFFECTIVE_POSTURE_READ) {
+    if (entry.lapsed === true) {
+      warnThrottled(
+        `plan:${organizationId}`,
+        `plan_lapsed_zdr_kept: org=${organizationId}`,
+        now,
+      );
+    }
+  } else if (entry.zdrIntent && !entry.entitled) {
     warnThrottled(
       `plan:${organizationId}`,
       `plan_not_entitled: org=${organizationId} has ZDR switched on but its plan no longer includes it; interactive tokens are issued with zdr=false`,
@@ -611,7 +701,7 @@ export async function resolveOrganizationDirectoryStatus(
   // An id the lookup cannot even ask about is not an organization.
   if (!ORGANIZATION_ID.test(organizationId)) return 'unknown';
 
-  const known = postureCache.get(organizationId);
+  const known = cachedEntry(organizationId);
   if (known && Date.now() - known.resolvedAt < RETENTION_POSTURE_FRESH_TTL_MS) {
     return 'active';
   }
@@ -644,6 +734,8 @@ export async function resolveOrganizationDirectoryStatus(
   remember(organizationId, {
     zdrIntent: result.zdrIntent,
     entitled: result.entitled,
+    effectiveZdr: result.effectiveZdr,
+    lapsed: result.lapsed,
     resolvedAt: Date.now(),
   });
   return 'active';
@@ -673,6 +765,16 @@ export async function assertServiceOrganizationBinding(
     Date.now(),
   );
   throw new ForbiddenException('Service principal is not authorized');
+}
+
+/**
+ * Test-only: re-read AUTH_CORE_ZDR_EFFECTIVE_POSTURE_ENABLED (strict literal
+ * 'true') after a test sets or clears it. Pair with
+ * `resetInteractiveRetentionCacheForTests`.
+ */
+export function resetEffectivePostureReadForTests(): void {
+  EFFECTIVE_POSTURE_READ =
+    process.env.AUTH_CORE_ZDR_EFFECTIVE_POSTURE_ENABLED === 'true';
 }
 
 /** Test-only: clear the process-local posture state between test cases. */

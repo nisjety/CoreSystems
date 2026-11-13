@@ -10,6 +10,7 @@
  * Behind `VITE_CHAT_RUN_LEDGER`, read through `runLedgerEnabled`: off, the Trace is the flat list.
  */
 
+import type { ChatTurnTiming } from '@/shared/api/chat-client'
 import type { VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 
 /** Only the literal `true` enables the ledger, as for the other chat switches. */
@@ -52,6 +53,19 @@ export type LedgerEventRecord = {
 
 export type LedgerRecord = LedgerCall | LedgerEventRecord
 
+/**
+ * One model round of a turn, from the gateway's `turn_timing` phases that carry the same `round`.
+ * `startMs` and `endMs` are on the gateway's clock, from the turn origin; they span the earliest start
+ * and the latest end of the round's phases.
+ */
+export type LedgerRound = {
+  round: number
+  startMs: number
+  endMs: number
+  /** Keys of the records whose recorded time falls inside the round, in recorded-time order. */
+  recordIds: string[]
+}
+
 export type LedgerTurn = {
   /** The turn the records belong to. Null for the events no turn owns. */
   turnId: string | null
@@ -64,6 +78,13 @@ export type LedgerTurn = {
   receiptIds: string[]
   /** In recorded-time order. */
   records: LedgerRecord[]
+  /**
+   * The turn's model rounds, in round order. Present only when the turn has timing phases that carry a
+   * finite `round`; absent otherwise, and then the turn has its flat record list alone.
+   */
+  rounds?: LedgerRound[]
+  /** With `rounds`: the keys of the records that fall in no round. They are listed, never dropped. */
+  unroundedRecordIds?: string[]
 }
 
 type ToolCallEvent = Extract<VerevonUiEvent, { type: 'tool.call' }>
@@ -239,7 +260,63 @@ function absorb(draft: Draft, event: VerevonUiEvent, index: number): void {
   else draft.records.push({ kind: 'event', key: keyOf(draft, `event/${index}`), event })
 }
 
-function finish(draft: Draft): LedgerTurn {
+/**
+ * The rounds of a turn's timing, or undefined when no phase carries a finite round. A round spans its
+ * phases: the earliest start to the latest end. Phases with a bound that is not a finite, non-negative
+ * number are skipped rather than guessed at.
+ */
+function roundSpans(timing: ChatTurnTiming | undefined): Array<{ round: number; startMs: number; endMs: number }> | undefined {
+  const spans = new Map<number, { round: number; startMs: number; endMs: number }>()
+  for (const phase of timing?.phases ?? []) {
+    const round = phase.round
+    if (typeof round !== 'number' || !Number.isFinite(round)) continue
+    if (!Number.isFinite(phase.startMs) || !Number.isFinite(phase.endMs) || phase.startMs < 0 || phase.endMs < phase.startMs) continue
+    const known = spans.get(round)
+    if (known === undefined) {
+      spans.set(round, { round, startMs: phase.startMs, endMs: phase.endMs })
+      continue
+    }
+    known.startMs = Math.min(known.startMs, phase.startMs)
+    known.endMs = Math.max(known.endMs, phase.endMs)
+  }
+  if (spans.size === 0) return undefined
+  return [...spans.values()].sort((a, b) => compareTimes(a.round, b.round))
+}
+
+/**
+ * Assigns the turn's records to its rounds. The gateway clocks its phases from the turn origin and the
+ * ledger holds browser times, so a record's offset is its recorded time minus the turn's first recorded
+ * time: the two origins are taken as the same moment, which holds to within the stream's connect latency.
+ * A record whose time does not parse, or that falls in no round, is kept in the unrounded list.
+ */
+function assignRounds(
+  records: readonly LedgerRecord[],
+  startAt: string,
+  spans: ReadonlyArray<{ round: number; startMs: number; endMs: number }>,
+): { rounds: LedgerRound[]; unroundedRecordIds: string[] } {
+  const origin = timeOf(startAt)
+  const rounds: LedgerRound[] = spans.map((span) => ({ ...span, recordIds: [] }))
+  const unroundedRecordIds: string[] = []
+  for (const record of records) {
+    const offset = timeOf(recordAt(record)) - origin
+    const owner = Number.isFinite(offset) ? rounds.find((round) => offset >= round.startMs && offset <= round.endMs) : undefined
+    if (owner === undefined) unroundedRecordIds.push(record.key)
+    else owner.recordIds.push(record.key)
+  }
+  return { rounds, unroundedRecordIds }
+}
+
+/** The round number the record belongs to, when the turn has rounds and the record is in one. */
+export function roundNumberOf(turn: Pick<LedgerTurn, 'rounds'>, recordKey: string): number | undefined {
+  return turn.rounds?.find((round) => round.recordIds.includes(recordKey))?.round
+}
+
+function finish(draft: Draft, timing?: ChatTurnTiming): LedgerTurn {
+  const records = draft.records
+    .slice()
+    .sort((a, b) => compareTimes(timeOf(recordAt(a)), timeOf(recordAt(b))))
+  const spans = roundSpans(timing)
+  const grouped = spans === undefined ? undefined : assignRounds(records, draft.startAt, spans)
   return {
     turnId: draft.turnId,
     startAt: draft.startAt,
@@ -248,9 +325,8 @@ function finish(draft: Draft): LedgerTurn {
     runId: draft.runId,
     outcome: draft.turnId === null ? undefined : (draft.outcome ?? 'open'),
     receiptIds: draft.receiptIds,
-    records: draft.records
-      .slice()
-      .sort((a, b) => compareTimes(timeOf(recordAt(a)), timeOf(recordAt(b)))),
+    records,
+    ...(grouped === undefined ? {} : grouped),
   }
 }
 
@@ -258,8 +334,14 @@ function finish(draft: Draft): LedgerTurn {
  * Groups recorded events by turn, then by tool call. Turns come out in the order their first recorded
  * time puts them; each turn's records come out in recorded-time order, with ties kept in arrival order.
  * Every input event lands in exactly one record, either on its own or folded into the call it belongs to.
+ *
+ * With `timings` (the turn's `turn_timing`, by turn id), a turn whose timing carries rounds also gets
+ * `rounds` and `unroundedRecordIds`. Without it the shape is unchanged.
  */
-export function buildLedger(events: readonly VerevonUiEvent[]): LedgerTurn[] {
+export function buildLedger(
+  events: readonly VerevonUiEvent[],
+  timings?: ReadonlyMap<string, ChatTurnTiming>,
+): LedgerTurn[] {
   const drafts = new Map<string, Draft>()
   events.forEach((event, index) => {
     const turnId = turnIdOf(event)
@@ -273,5 +355,56 @@ export function buildLedger(events: readonly VerevonUiEvent[]): LedgerTurn[] {
   })
   return [...drafts.values()]
     .sort((a, b) => compareTimes(a.startTime, b.startTime))
-    .map(finish)
+    .map((draft) => finish(draft, draft.turnId === null ? undefined : timings?.get(draft.turnId)))
+}
+
+/**
+ * One line of the flattened ledger: a turn head, a round sub-header or a record. `round` is the round
+ * the sub-header stands for, or null for the unrounded group of a turn that has rounds.
+ */
+export type LedgerRow =
+  | { kind: 'turn'; key: string; turnKey: string; turn: LedgerTurn }
+  | { kind: 'round'; key: string; turnKey: string; round: LedgerRound | null; recordCount: number }
+  | { kind: 'record'; key: string; turnKey: string; turn: LedgerTurn; record: LedgerRecord }
+
+/**
+ * The rows under a turn head: its records in recorded-time order, or, when the turn has rounds, a
+ * sub-header per round followed by that round's records and then the unrounded records under their own
+ * sub-header. Every record of the turn appears exactly once.
+ */
+export function turnBodyRows(turn: LedgerTurn): LedgerRow[] {
+  const group = turnKey(turn)
+  const rows: LedgerRow[] = []
+  const recordRow = (record: LedgerRecord): LedgerRow => ({ kind: 'record', key: record.key, turnKey: group, turn, record })
+  if (turn.rounds === undefined) {
+    for (const record of turn.records) rows.push(recordRow(record))
+    return rows
+  }
+  const byKey = new Map(turn.records.map((record) => [record.key, record] as const))
+  const push = (header: LedgerRow, keys: readonly string[]) => {
+    rows.push(header)
+    for (const key of keys) {
+      const record = byKey.get(key)
+      if (record !== undefined) rows.push(recordRow(record))
+    }
+  }
+  for (const round of turn.rounds) {
+    push({ kind: 'round', key: `${group}/round/${round.round}`, turnKey: group, round, recordCount: round.recordIds.length }, round.recordIds)
+  }
+  const unrounded = turn.unroundedRecordIds ?? []
+  if (unrounded.length > 0) {
+    push({ kind: 'round', key: `${group}/unrounded`, turnKey: group, round: null, recordCount: unrounded.length }, unrounded)
+  }
+  return rows
+}
+
+/** Every turn head and, for the turns that are not collapsed, the rows under it, in display order. */
+export function flattenLedger(turns: readonly LedgerTurn[], collapsed: ReadonlySet<string>): LedgerRow[] {
+  const rows: LedgerRow[] = []
+  for (const turn of turns) {
+    const group = turnKey(turn)
+    rows.push({ kind: 'turn', key: group, turnKey: group, turn })
+    if (!collapsed.has(group)) rows.push(...turnBodyRows(turn))
+  }
+  return rows
 }

@@ -798,7 +798,6 @@ pub(crate) fn space_context_from_decision(
 
 /// Where a thread lives, as far as THIS caller can see it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code, reason = "consumed by Model Plane WS18 (chat projects), not by a Space route")]
 pub(crate) enum SpaceThreadScope {
     /// The thread belongs to this Space (`space_ref`).
     Space(String),
@@ -815,8 +814,8 @@ pub(crate) enum SpaceThreadScope {
 /// room post owned by someone else is `NotVisible` here, and a ZDR caller is no different because
 /// the read stores nothing. The answer is a routing fact, never an authorization.
 ///
-/// UNVERIFIED shape: the plan names the helper but not its signature (depth file).
-#[allow(dead_code, reason = "consumed by Model Plane WS18 (chat projects), not by a Space route")]
+/// UNVERIFIED shape: the plan names the helper but not its signature (depth file). Called by
+/// `resolve_thread_space_ref` (D2-461) on the chat path, and by the mention planner.
 pub(crate) async fn space_scope_for_thread(
     state: &AppState,
     user: &AuthenticatedUser,

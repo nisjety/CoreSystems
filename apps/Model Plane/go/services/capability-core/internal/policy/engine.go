@@ -51,6 +51,9 @@ const (
 	PolicySourceToolPolicyNever = "tool_policy_never"
 	PolicySourceToolPolicyAsk   = "tool_policy_ask"
 	PolicySourceToolPolicyAllow = "tool_policy_allow"
+	// PolicySourceOrgPermissionRule: an org permission rule (W5-074) tightened the decision. Its reason names the rule
+	// as org_rule:<rule id> and nothing else.
+	PolicySourceOrgPermissionRule = "org_permission_rule"
 )
 
 // Review states of an MCP tool row (capability_tools.review_state). A built-in
@@ -149,6 +152,13 @@ type Result struct {
 	PolicySource string
 	// ToolPolicyChecked is signed into proof only after the store was read.
 	ToolPolicyChecked bool
+	// RulePolicyID is the id of the stored allow that relaxed this decision. It is set only on a
+	// PolicySourceToolPolicyAllow result and is never signed into the decision proof; the server
+	// reads it to write the content-free rule-use audit row (WS13 S7).
+	RulePolicyID string
+	// RuleScope is the scope kind (ToolPolicyScopeOrg or ToolPolicyScopeUser) of that allow; set
+	// together with RulePolicyID.
+	RuleScope string
 }
 
 // ToolBinding is the registry's declaration of one tool, resolved by the
@@ -228,6 +238,26 @@ func ToolPolicyEnforcedFromLookup(lookup func(string) string) bool {
 	return lookup(ToolPolicyEnforcedEnv) == "true"
 }
 
+// ToolPolicyRuleAuditEnv switches the audit of rule-relaxed calls on (WS13 S7, K3-10): while it is on, a call
+// relaxed by a stored allow on a persistent run writes a content-free tool_policy_rule_used row, and a run
+// that does not state a persistent posture counts as retention-bound.
+const ToolPolicyRuleAuditEnv = "TOOL_POLICY_RULE_AUDIT_ENABLED"
+
+// ToolPolicyRuleAuditFromLookup reads ToolPolicyRuleAuditEnv strictly: only the literal "true" enables, with
+// the semantics of ToolPolicyEnforcedFromLookup.
+func ToolPolicyRuleAuditFromLookup(lookup func(string) string) bool {
+	return lookup(ToolPolicyRuleAuditEnv) == "true"
+}
+
+// RetentionBoundFor reports whether a call must be treated as retention-bound, so that a person's stored
+// allow does not relax it (D-WS13-1). An explicit "retention_bound" always keeps a person's rule off the
+// call, whatever the audit switch; an unstated or unknown posture counts as bound only while the audit
+// switch is on, so a caller that does not state it keeps today's behaviour with the switch off. An
+// explicit "persistent" is never bound.
+func RetentionBoundFor(runRetention string, ruleAudit bool) bool {
+	return runRetention == "retention_bound" || (ruleAudit && runRetention != "persistent")
+}
+
 const BrowserAgentPolicyEnforcedEnv = "BROWSER_AGENT_POLICY_ENFORCED"
 
 // BrowserAgentPolicyEnforcedFromLookup opts in only on the literal true.
@@ -247,6 +277,8 @@ const (
 
 // ToolPolicy is one active stored policy on a capability's tools.
 type ToolPolicy struct {
+	// ID is the stored policy's id; it names the rule in the rule-use audit row.
+	ID string
 	// ScopeKind is ToolPolicyScopeOrg or ToolPolicyScopeUser.
 	ScopeKind string
 	// Decision is ToolPolicyAllow, ToolPolicyAsk or ToolPolicyNever.
@@ -306,6 +338,22 @@ const relaxedBudget = "tokens=10000,cost_usd=0.50"
 // on a built-in tool, or on a class it may not relax, is ignored. A denial from
 // Decide (a tool not approved, a gate) is never relaxed.
 func DecideWithPolicies(base *Result, capEntry *models.Capability, binding *ToolBinding, policies []ToolPolicy) *Result {
+	return DecideWithPoliciesFor(base, capEntry, binding, policies, DecideOptions{})
+}
+
+// DecideOptions are the facts about the call that DecideWithPoliciesFor needs beyond the policies.
+type DecideOptions struct {
+	// RetentionBound is true for a call on a run that stores no content (zero-retention or waived, DEC-32),
+	// or that did not state its posture while the rule audit is on. A person's stored allow is not applied
+	// to such a call, because its use could not be audited; an org allow still applies (D-WS13-1).
+	RetentionBound bool
+}
+
+// DecideWithPoliciesFor is DecideWithPolicies for one call: with opts.RetentionBound a user-scope allow is
+// skipped, so the base decision stands (a risk-level ask stays an ask). When a stored allow relaxes the
+// decision, the result names it in RulePolicyID and RuleScope: the first applicable user-scope allow, else
+// the first applicable org-scope allow.
+func DecideWithPoliciesFor(base *Result, capEntry *models.Capability, binding *ToolBinding, policies []ToolPolicy, opts DecideOptions) *Result {
 	result := Decide(base, binding)
 	if result == nil || result.Decision == DecisionDeny || len(policies) == 0 {
 		return result
@@ -313,7 +361,10 @@ func DecideWithPolicies(base *Result, capEntry *models.Capability, binding *Tool
 	relaxable := capEntry != nil && capEntry.Kind == models.KindMCPTool && binding != nil
 	// storedAsk is an explicit request for a pause; ask also covers a stale allow.
 	var never, ask, storedAsk, allow bool
-	for _, p := range policies {
+	// userAllow and orgAllow remember the first applicable allow of each scope, for the rule-use audit.
+	var userAllow, orgAllow *ToolPolicy
+	for i := range policies {
+		p := policies[i]
 		switch p.Decision {
 		case ToolPolicyNever:
 			never = true
@@ -324,11 +375,21 @@ func DecideWithPolicies(base *Result, capEntry *models.Capability, binding *Tool
 			if !relaxable || !CanRelax(p.ScopeKind, binding.SideEffectClass, binding.ApprovalFloor) {
 				continue
 			}
+			// A person's rule never relaxes a retention-bound run: the use could not be audited.
+			if opts.RetentionBound && p.ScopeKind == ToolPolicyScopeUser {
+				continue
+			}
 			if p.PinnedDigest == "" || p.PinnedDigest != binding.ToolDigest || lapsed(p, time.Now()) {
 				ask = true
 				continue
 			}
 			allow = true
+			switch {
+			case p.ScopeKind == ToolPolicyScopeUser && userAllow == nil:
+				userAllow = &policies[i]
+			case p.ScopeKind == ToolPolicyScopeOrg && orgAllow == nil:
+				orgAllow = &policies[i]
+			}
 		default:
 			// A decision outside the vocabulary can only add a pause.
 			ask = true
@@ -349,10 +410,25 @@ func DecideWithPolicies(base *Result, capEntry *models.Capability, binding *Tool
 		}
 	case allow:
 		if result.Decision == DecisionAsk && result.PolicySource == PolicySourceRiskLevel {
-			return &Result{Decision: DecisionAllow, Reason: PolicySourceToolPolicyAllow, BudgetContext: relaxedBudget, PolicySource: PolicySourceToolPolicyAllow}
+			relaxed := &Result{Decision: DecisionAllow, Reason: PolicySourceToolPolicyAllow, BudgetContext: relaxedBudget, PolicySource: PolicySourceToolPolicyAllow}
+			if used := firstNonNil(userAllow, orgAllow); used != nil {
+				relaxed.RulePolicyID = used.ID
+				relaxed.RuleScope = used.ScopeKind
+			}
+			return relaxed
 		}
 	}
 	return result
+}
+
+// firstNonNil returns the first of the policies that is not nil.
+func firstNonNil(policies ...*ToolPolicy) *ToolPolicy {
+	for _, p := range policies {
+		if p != nil {
+			return p
+		}
+	}
+	return nil
 }
 
 // lapsed reports whether a stored allow has passed its expiry (build plan WS13 S7, K3-10). A lapsed
@@ -387,6 +463,24 @@ func (e *Engine) EvaluateCapability(ctx context.Context, capEntry *models.Capabi
 // policies are read after the gate and only when enforced; if they cannot be read
 // the evaluation fails rather than deciding without them.
 func (e *Engine) EvaluateTool(ctx context.Context, capEntry *models.Capability, binding *ToolBinding, userID, runID, agentID, orgID, scope string) (*Result, error) {
+	return e.EvaluateToolFor(ctx, capEntry, binding, ToolCall{UserID: userID, RunID: runID, AgentID: agentID, OrgID: orgID, Scope: scope})
+}
+
+// ToolCall is one tool call to evaluate: who it acts for, which run and agent, the org and scope, and
+// whether the run is retention-bound (see DecideOptions).
+type ToolCall struct {
+	UserID         string
+	RunID          string
+	AgentID        string
+	OrgID          string
+	Scope          string
+	RetentionBound bool
+}
+
+// EvaluateToolFor is EvaluateTool for a call that states whether its run is retention-bound. With
+// RetentionBound a person's stored allow is not applied to the call (DecideWithPoliciesFor).
+func (e *Engine) EvaluateToolFor(ctx context.Context, capEntry *models.Capability, binding *ToolBinding, call ToolCall) (*Result, error) {
+	userID, runID, agentID, orgID, scope := call.UserID, call.RunID, call.AgentID, call.OrgID, call.Scope
 	denial, err := e.gate(ctx, capEntry, runID, agentID, orgID, scope)
 	if err != nil || denial != nil {
 		return denial, err
@@ -410,7 +504,7 @@ func (e *Engine) EvaluateTool(ctx context.Context, capEntry *models.Capability, 
 			return nil, fmt.Errorf("load tool policies: %w", err)
 		}
 	}
-	result := DecideWithPolicies(riskResult(capEntry), capEntry, binding, policies)
+	result := DecideWithPoliciesFor(riskResult(capEntry), capEntry, binding, policies, DecideOptions{RetentionBound: call.RetentionBound})
 	result.ToolPolicyChecked = policyChecked
 	class := capEntry.SideEffectClass
 	if binding != nil {

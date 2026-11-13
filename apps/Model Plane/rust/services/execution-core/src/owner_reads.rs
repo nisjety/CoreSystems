@@ -52,7 +52,55 @@ pub fn permitted(admission_table: bool, retention_bound: bool) -> bool {
 /// the literal `table` admits the owner reads.
 #[must_use]
 pub fn admission_table() -> bool {
+    #[cfg(test)]
+    {
+        if let Some(on) = test_switches::admission_override() {
+            return on;
+        }
+    }
     crate::control_http_client::env_value("MODEL_ACTION_ADMISSION").as_deref() == Some("table")
+}
+
+/// Whether this deployment refuses the listing on a Space-scoped run (`OWNER_LIST_SPACE_REFUSE`).
+/// Strict: only the literal `true` switches it on, so the listing keeps its organisation-wide
+/// reach everywhere else. Dark by default (D2-769). The value is read raw, not through the
+/// trimming `env_value`, so a padded value such as ` true` stays off, as in model-gateway.
+#[must_use]
+pub fn space_refuse_enabled() -> bool {
+    std::env::var("OWNER_LIST_SPACE_REFUSE").ok().as_deref() == Some("true")
+}
+
+/// Whether a call on a run in `space_id` is refused because the run is Space-scoped. The Data Plane
+/// listing takes no Space argument, so it would answer with the whole organisation's titles; a
+/// Space-scoped run therefore gets no listing at all rather than a wider one than its retrieval.
+#[must_use]
+pub fn space_refused(space_id: &str) -> bool {
+    !space_id.trim().is_empty() && space_refuse_enabled()
+}
+
+/// The typed refusal a Space-scoped run receives in place of the listing.
+pub const SPACE_REFUSAL: &str = "knowledge_list_documents is not available in a Space-scoped run";
+
+/// The refusal a call on the listing gets before its arguments are read, or `None` when the call may
+/// go on. `space_refused` is the Space refusal for the call's run (see [`space_refused`]). The Space
+/// refusal is checked first (D2-774): a Space-scoped run is refused whatever `MODEL_ACTION_ADMISSION`
+/// says, because that switch decides only whether the model is offered the listing. The switch and the
+/// retention bar come next (WS24-S8).
+#[must_use]
+pub fn refusal_before_arguments(
+    space_refused: bool,
+    admission_table: bool,
+    retention_bound: bool,
+) -> Option<String> {
+    if space_refused {
+        return Some(SPACE_REFUSAL.to_owned());
+    }
+    if !permitted(admission_table, retention_bound) {
+        return Some(format!(
+            "{TOOL_NAME} is not available on this run: the owner document listing needs MODEL_ACTION_ADMISSION=table and a run that is not retention-bound"
+        ));
+    }
+    None
 }
 
 /// The definition offered to the model.
@@ -174,19 +222,23 @@ fn tool_error(message: String) -> ToolExecution {
     }
 }
 
-/// Runs the Do-loop read. The switch and retention checks come first, then the arguments, the run's
-/// org and the bearer; each refusal is a typed tool error returned before any RPC.
+/// Runs the Do-loop read. The Space refusal comes first (D2-774), then the switch and retention checks,
+/// then the arguments, the run's org and the bearer; each refusal is a typed tool error returned before
+/// any RPC. `space_id` is the run's Space (empty for a run outside one): with
+/// `OWNER_LIST_SPACE_REFUSE=true` a Space-scoped run is refused, fail closed, because the listing
+/// cannot be narrowed to the Space.
 pub async fn execute(
     tool_input: &str,
     org_id: &str,
+    space_id: &str,
     admission_table: bool,
     retention_bound: bool,
     data_plane_bearer: Option<&str>,
 ) -> ToolExecution {
-    if !permitted(admission_table, retention_bound) {
-        return tool_error(format!(
-            "{TOOL_NAME} is not available on this run: the owner document listing needs MODEL_ACTION_ADMISSION=table and a run that is not retention-bound"
-        ));
+    if let Some(refusal) =
+        refusal_before_arguments(space_refused(space_id), admission_table, retention_bound)
+    {
+        return tool_error(refusal);
     }
     let args = match parse_input(tool_input) {
         Ok(args) => args,
@@ -222,6 +274,65 @@ pub async fn execute(
             "{TOOL_NAME} failed: {}",
             status.message()
         ))),
+    }
+}
+
+/// The owner listing's switches for the tests that set them. The Space refusal's switch is a process-wide
+/// environment variable, so [`test_switches::Switches::set`] holds one lock for as long as it is set. The
+/// admission switch is read per thread here: a test sets it for its own thread only, so no other test's
+/// offered tools see it, and each test's switches are put back on drop.
+#[cfg(test)]
+pub(crate) mod test_switches {
+    use std::cell::Cell;
+
+    /// The Space refusal's environment variable.
+    const SPACE_SWITCH: &str = "OWNER_LIST_SPACE_REFUSE";
+    static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    thread_local! {
+        /// This thread's admission switch while a test sets it; `None` reads the environment.
+        static ADMISSION: Cell<Option<bool>> = const { Cell::new(None) };
+    }
+
+    /// The admission switch a test set for this thread, if any.
+    pub(crate) fn admission_override() -> Option<bool> {
+        ADMISSION.with(Cell::get)
+    }
+
+    /// The owner listing's switches, set for one test.
+    pub(crate) struct Switches {
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+        previous_space: Option<String>,
+        previous_admission: Option<bool>,
+    }
+
+    impl Switches {
+        /// `space_refuse` sets `OWNER_LIST_SPACE_REFUSE`, `None` unsetting it. `admission_table` sets this
+        /// thread's admission switch: `Some(true)` offers and admits the listing, `None` reads the environment.
+        pub(crate) async fn set(space_refuse: Option<&str>, admission_table: Option<bool>) -> Self {
+            let lock = LOCK.lock().await;
+            let previous_space = std::env::var(SPACE_SWITCH).ok();
+            match space_refuse {
+                Some(value) => std::env::set_var(SPACE_SWITCH, value),
+                None => std::env::remove_var(SPACE_SWITCH),
+            }
+            let previous_admission = ADMISSION.with(|cell| cell.replace(admission_table));
+            Self {
+                _lock: lock,
+                previous_space,
+                previous_admission,
+            }
+        }
+    }
+
+    impl Drop for Switches {
+        fn drop(&mut self) {
+            match &self.previous_space {
+                Some(value) => std::env::set_var(SPACE_SWITCH, value),
+                None => std::env::remove_var(SPACE_SWITCH),
+            }
+            ADMISSION.with(|cell| cell.set(self.previous_admission));
+        }
     }
 }
 
@@ -338,35 +449,96 @@ mod tests {
 
     #[tokio::test]
     async fn refusals_are_tool_errors_returned_before_any_rpc() {
-        let off = execute("{}", "org-a", false, false, Some("token")).await;
+        let off = execute("{}", "org-a", "", false, false, Some("token")).await;
         assert!(off
             .error
             .as_deref()
             .is_some_and(|error| error.contains("MODEL_ACTION_ADMISSION=table")));
-        assert!(execute("{}", "org-a", true, true, Some("token"))
+        assert!(execute("{}", "org-a", "", true, true, Some("token"))
             .await
             .error
             .is_some());
-        let no_bearer = execute("{}", "org-a", true, false, None).await;
+        let no_bearer = execute("{}", "org-a", "", true, false, None).await;
         assert!(no_bearer
             .error
             .as_deref()
             .is_some_and(|error| error.contains("verified user credential")));
-        let padded = execute("{}", "org-a", true, false, Some(" token")).await;
+        let padded = execute("{}", "org-a", "", true, false, Some(" token")).await;
         assert!(padded
             .error
             .as_deref()
             .is_some_and(|error| error.contains("verified user credential")));
-        let no_org = execute("{}", "  ", true, false, Some("token")).await;
+        let no_org = execute("{}", "  ", "", true, false, Some("token")).await;
         assert!(no_org
             .error
             .as_deref()
             .is_some_and(|error| error.contains("run org_id")));
-        let bad_input = execute(r#"{"limit":99}"#, "org-a", true, false, Some("token")).await;
+        let bad_input =
+            execute(r#"{"limit":99}"#, "org-a", "", true, false, Some("token")).await;
         assert!(bad_input
             .error
             .as_deref()
             .is_some_and(|error| error.contains("between 1 and 25")));
+    }
+
+    #[test]
+    fn a_space_refusal_comes_before_the_admission_and_retention_refusals() {
+        for (admission, retention) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert_eq!(
+                refusal_before_arguments(true, admission, retention).as_deref(),
+                Some(SPACE_REFUSAL),
+                "admission {admission}, retention {retention}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unscoped_run_keeps_the_admission_and_retention_refusals_as_they_were() {
+        let off = refusal_before_arguments(false, false, false).expect("refused");
+        assert!(off.contains("MODEL_ACTION_ADMISSION=table"), "{off}");
+        let retained = refusal_before_arguments(false, true, true).expect("refused");
+        assert!(retained.contains("not retention-bound"), "{retained}");
+        assert_eq!(refusal_before_arguments(false, true, false), None);
+    }
+
+    #[tokio::test]
+    async fn the_space_switch_is_on_only_for_the_literal_true_and_a_named_space() {
+        {
+            let _switches = test_switches::Switches::set(Some("true"), None).await;
+            assert!(space_refused("space-1"));
+            assert!(!space_refused("   "));
+            assert!(!space_refused(""));
+        }
+        {
+            let _switches = test_switches::Switches::set(Some("TRUE"), None).await;
+            assert!(!space_refused("space-1"));
+        }
+        let _switches = test_switches::Switches::set(None, None).await;
+        assert!(!space_refused("space-1"));
+    }
+
+    #[tokio::test]
+    async fn a_space_run_is_refused_before_the_admission_switch_and_the_credential_are_read() {
+        let _switches = test_switches::Switches::set(Some("true"), None).await;
+        let off = execute("{}", "org-a", "space-1", false, false, None).await;
+        assert_eq!(off.error.as_deref(), Some(SPACE_REFUSAL));
+        let on = execute("{}", "org-a", "space-1", true, false, Some("token")).await;
+        assert_eq!(on.error.as_deref(), Some(SPACE_REFUSAL));
+    }
+
+    #[tokio::test]
+    async fn with_the_space_switch_off_a_space_run_meets_the_checks_it_always_did() {
+        let _switches = test_switches::Switches::set(None, None).await;
+        let off = execute("{}", "org-a", "space-1", false, false, Some("token")).await;
+        assert!(off
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("MODEL_ACTION_ADMISSION=table")));
+        let no_bearer = execute("{}", "org-a", "space-1", true, false, None).await;
+        assert!(no_bearer
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("verified user credential")));
     }
 
     // The tests above prove refusal never reaches the network. This one proves the other half: a
@@ -496,5 +668,32 @@ mod tests {
 
             handle.abort();
         }
+    }
+}
+
+/// Section 3.4: `OWNER_LIST_SPACE_REFUSE` is documented strict: only the literal `true` switches it on.
+#[cfg(test)]
+mod space_switch_parse {
+    use super::space_refuse_enabled;
+    use super::test_switches::Switches;
+
+    #[tokio::test]
+    async fn only_the_literal_true_switches_the_space_refusal_on() {
+        let mut wrong = Vec::new();
+        for (raw, on) in [
+            (Some("true"), true),
+            (Some(" true"), false),
+            (Some("true\n"), false),
+            (Some("TRUE"), false),
+            (Some("1"), false),
+            (Some(""), false),
+            (None, false),
+        ] {
+            let _switches = Switches::set(raw, None).await;
+            if space_refuse_enabled() != on {
+                wrong.push(raw);
+            }
+        }
+        assert!(wrong.is_empty(), "values read wrongly: {wrong:?}");
     }
 }

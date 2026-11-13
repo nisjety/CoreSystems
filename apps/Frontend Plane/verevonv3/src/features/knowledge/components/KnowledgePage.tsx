@@ -47,6 +47,8 @@ import {
 } from '@/features/knowledge/components/knowledgeGraphHierarchy'
 import { PrivacyBadge } from '@/features/knowledge/components/PrivacyBadge'
 import { ShareDialog } from '@/features/knowledge/components/ShareDialog'
+import { WikiProposalsReview } from '@/features/knowledge/components/WikiProposalsReview'
+import { wikiProposalsReviewEnabled } from '@/shared/api/wiki-proposals-client'
 import { connectBundlesForSources } from '@/shared/integrations/connect-bundles'
 import {
   knowledgeAddSourceRequested,
@@ -106,7 +108,7 @@ import { VerevonSegmented, VerevonSegmentedButton } from '@/shared/ui/verevon/Ve
 import { VerevonSelect } from '@/shared/ui/verevon/VerevonSelect'
 import { cn } from '@/shared/lib/cn'
 
-type KnowledgeView = 'overview' | 'operating-map' | 'chunks'
+type KnowledgeView = 'overview' | 'operating-map' | 'chunks' | 'wiki-proposals'
 type KnowledgeLayout = 'grid' | 'list'
 type KnowledgeIcon = Component<LucideProps>
 
@@ -1020,6 +1022,10 @@ export default function KnowledgePage() {
             />
           </Show>
         </Show>
+        {/* W5-094-b: reads its own data, so it does not wait for the workspace payload. */}
+        <Show when={wikiProposalsReviewEnabled() && activeView() === 'wiki-proposals'}>
+          <WikiProposalsReview />
+        </Show>
       </div>
 
       <Show when={addSourceOpen()}>
@@ -1216,6 +1222,10 @@ function SegmentedView(props: {
     { id: 'overview', label: i18n.tr('Oversikt', 'Overview'), Icon: Grid2X2 },
     { id: 'operating-map', label: i18n.tr('AI-kart', 'AI Map'), Icon: MapIcon },
     { id: 'chunks', label: i18n.tr('Utdrag', 'Chunks'), Icon: Table2 },
+    // W5-094-b: the wiki proposals view is offered only while its build flag is the literal `true`.
+    ...(wikiProposalsReviewEnabled()
+      ? [{ id: 'wiki-proposals' as const, label: i18n.tr('Wiki-forslag', 'Wiki proposals'), Icon: FileText }]
+      : []),
   ])
 
   return (

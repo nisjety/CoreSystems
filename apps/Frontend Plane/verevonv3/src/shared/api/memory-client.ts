@@ -244,6 +244,7 @@ interface MemoryControlsResponse {
   reason?: string
   use_allowed?: boolean
   generation_allowed?: boolean
+  learning_allowed?: boolean
   org_memory_policy?: string
   hidden_rows?: number
   updated_at?: string | null
@@ -274,6 +275,15 @@ function normalizeControls(raw: MemoryControlsResponse): MemoryControls {
 /** The signed-in user's memory state and the decision taken from it. */
 export async function getMemoryControls(): Promise<MemoryControls> {
   return normalizeControls(await requestJson<MemoryControlsResponse>('/api/v1/memory/controls'))
+}
+
+/**
+ * Whether the owner and the organization allow learning from a conversation (`/learn`, EP-11 S7).
+ * Read from the same endpoint as {@link getMemoryControls}; a missing flag is "not allowed".
+ */
+export async function getLearningAllowed(): Promise<boolean> {
+  const raw = await requestJson<MemoryControlsResponse>('/api/v1/memory/controls')
+  return raw.learning_allowed === true
 }
 
 /** Sets the signed-in user's own memory state; the server refuses a ZDR session. */

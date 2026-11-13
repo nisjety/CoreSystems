@@ -90,7 +90,7 @@ export function DomainsPanel() {
 
   const fail = (err: unknown, fallback: { no: string; en: string }) => {
     if (err instanceof ApiError && err.code === 'invalid_domain') {
-      const reason = typeof err.details?.reason === 'string' ? err.details.reason : ''
+      const reason = !Array.isArray(err.details) && typeof err.details?.reason === 'string' ? err.details.reason : ''
       const copy = ADD_REASON_COPY[reason]
       setProblem(copy ? i18n.tr(copy.no, copy.en) : i18n.tr('Domenet er ikke gyldig.', 'The domain is not valid.'))
       return

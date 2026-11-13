@@ -59,9 +59,15 @@ type RunProofBundle struct {
 	Approvals []*ApprovalProof `protobuf:"bytes,6,rep,name=approvals,proto3" json:"approvals,omitempty"`
 	// Evidence dimensions this bundle does not claim. Always populated for the
 	// cross-plane sections v1 cannot reach.
-	Unavailable   []*UnavailableSection `protobuf:"bytes,7,rep,name=unavailable,proto3" json:"unavailable,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Unavailable []*UnavailableSection `protobuf:"bytes,7,rep,name=unavailable,proto3" json:"unavailable,omitempty"`
+	// The run's browser walkthrough, present only when this bundle assembles it.
+	// Absent when it is omitted; `unavailable` then names the "walkthrough"
+	// section with the reason: the switch is off, the run was zero retention or
+	// waived, or its retention receipt could not be read. A run with no browser
+	// actions carries an empty walkthrough, which is itself a fact.
+	BrowserWalkthrough *BrowserWalkthrough `protobuf:"bytes,8,opt,name=browser_walkthrough,json=browserWalkthrough,proto3" json:"browser_walkthrough,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *RunProofBundle) Reset() {
@@ -139,6 +145,13 @@ func (x *RunProofBundle) GetApprovals() []*ApprovalProof {
 func (x *RunProofBundle) GetUnavailable() []*UnavailableSection {
 	if x != nil {
 		return x.Unavailable
+	}
+	return nil
+}
+
+func (x *RunProofBundle) GetBrowserWalkthrough() *BrowserWalkthrough {
+	if x != nil {
+		return x.BrowserWalkthrough
 	}
 	return nil
 }
@@ -506,7 +519,7 @@ func (x *ContinuationOutcome) GetVerification() *VerificationResult {
 // does not assert.
 type UnavailableSection struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Stable identifier: "known" | "charged" | "retained".
+	// Stable identifier: "known" | "charged" | "retained" | "walkthrough".
 	Section string `protobuf:"bytes,1,opt,name=section,proto3" json:"section,omitempty"`
 	// Plain-language reason, shown to the reader. Never blank.
 	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
@@ -558,6 +571,175 @@ func (x *UnavailableSection) GetReason() string {
 	return ""
 }
 
+// The run's browser walkthrough: its browser actions in dispatch order, each
+// with the page the action left and the screenshot reference of that page.
+// References only, never bytes: a screenshot is fetched through the existing
+// artifact endpoint by its `screenshot_ref`.
+type BrowserWalkthrough struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// One step per browser action, in dispatch order.
+	Steps []*BrowserWalkthroughStep `protobuf:"bytes,1,rep,name=steps,proto3" json:"steps,omitempty"`
+	// True when the walkthrough is incomplete: the run had more steps than the
+	// bundle carries, or the event read stopped short. The steps shown are the
+	// earliest ones; nothing past them is claimed.
+	Truncated     bool `protobuf:"varint,2,opt,name=truncated,proto3" json:"truncated,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BrowserWalkthrough) Reset() {
+	*x = BrowserWalkthrough{}
+	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BrowserWalkthrough) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BrowserWalkthrough) ProtoMessage() {}
+
+func (x *BrowserWalkthrough) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BrowserWalkthrough.ProtoReflect.Descriptor instead.
+func (*BrowserWalkthrough) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_proof_bundle_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *BrowserWalkthrough) GetSteps() []*BrowserWalkthroughStep {
+	if x != nil {
+		return x.Steps
+	}
+	return nil
+}
+
+func (x *BrowserWalkthrough) GetTruncated() bool {
+	if x != nil {
+		return x.Truncated
+	}
+	return false
+}
+
+// One browser action of a walkthrough, joined with the observation recorded
+// after it. The page fields are what the executor reported once the action
+// settled. The URL and title are scrubbed where the executor emits them.
+type BrowserWalkthroughStep struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Per-action id (for example `act_0001`). It is unique within its plan, so
+	// a step is identified by this id together with `plan_id` in its events.
+	ActionId string `protobuf:"bytes,1,opt,name=action_id,json=actionId,proto3" json:"action_id,omitempty"`
+	// Action type slug: goto | click | type | extract | observe | scroll | wait.
+	// Empty when only the observation was recorded.
+	ActionType string `protobuf:"bytes,2,opt,name=action_type,json=actionType,proto3" json:"action_type,omitempty"`
+	// Page URL after the action settled. Empty when no observation exists yet or
+	// the page could not be read.
+	PageUrl string `protobuf:"bytes,3,opt,name=page_url,json=pageUrl,proto3" json:"page_url,omitempty"`
+	// Page title after the action settled. Empty when unavailable.
+	PageTitle string `protobuf:"bytes,4,opt,name=page_title,json=pageTitle,proto3" json:"page_title,omitempty"`
+	// Observation status slug: success | failed | timeout | blocked. Empty while
+	// the action has no observation, so an action still in flight never reads as
+	// a result.
+	Status string `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
+	// Screenshot artifact reference id. Never inlined bytes. Empty when no
+	// screenshot was persisted for this step.
+	ScreenshotRef string `protobuf:"bytes,6,opt,name=screenshot_ref,json=screenshotRef,proto3" json:"screenshot_ref,omitempty"`
+	// When the step's page state was observed. The dispatch time when no
+	// observation exists yet.
+	At            *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=at,proto3" json:"at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BrowserWalkthroughStep) Reset() {
+	*x = BrowserWalkthroughStep{}
+	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BrowserWalkthroughStep) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BrowserWalkthroughStep) ProtoMessage() {}
+
+func (x *BrowserWalkthroughStep) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BrowserWalkthroughStep.ProtoReflect.Descriptor instead.
+func (*BrowserWalkthroughStep) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_proof_bundle_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *BrowserWalkthroughStep) GetActionId() string {
+	if x != nil {
+		return x.ActionId
+	}
+	return ""
+}
+
+func (x *BrowserWalkthroughStep) GetActionType() string {
+	if x != nil {
+		return x.ActionType
+	}
+	return ""
+}
+
+func (x *BrowserWalkthroughStep) GetPageUrl() string {
+	if x != nil {
+		return x.PageUrl
+	}
+	return ""
+}
+
+func (x *BrowserWalkthroughStep) GetPageTitle() string {
+	if x != nil {
+		return x.PageTitle
+	}
+	return ""
+}
+
+func (x *BrowserWalkthroughStep) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *BrowserWalkthroughStep) GetScreenshotRef() string {
+	if x != nil {
+		return x.ScreenshotRef
+	}
+	return ""
+}
+
+func (x *BrowserWalkthroughStep) GetAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.At
+	}
+	return nil
+}
+
 type GetRunProofBundleRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	RunId string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -571,7 +753,7 @@ type GetRunProofBundleRequest struct {
 
 func (x *GetRunProofBundleRequest) Reset() {
 	*x = GetRunProofBundleRequest{}
-	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[6]
+	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -583,7 +765,7 @@ func (x *GetRunProofBundleRequest) String() string {
 func (*GetRunProofBundleRequest) ProtoMessage() {}
 
 func (x *GetRunProofBundleRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[6]
+	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -596,7 +778,7 @@ func (x *GetRunProofBundleRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRunProofBundleRequest.ProtoReflect.Descriptor instead.
 func (*GetRunProofBundleRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_proof_bundle_proto_rawDescGZIP(), []int{6}
+	return file_model_plane_v1_proof_bundle_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *GetRunProofBundleRequest) GetRunId() string {
@@ -622,7 +804,7 @@ type GetRunProofBundleResponse struct {
 
 func (x *GetRunProofBundleResponse) Reset() {
 	*x = GetRunProofBundleResponse{}
-	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[7]
+	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -634,7 +816,7 @@ func (x *GetRunProofBundleResponse) String() string {
 func (*GetRunProofBundleResponse) ProtoMessage() {}
 
 func (x *GetRunProofBundleResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[7]
+	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -647,7 +829,7 @@ func (x *GetRunProofBundleResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetRunProofBundleResponse.ProtoReflect.Descriptor instead.
 func (*GetRunProofBundleResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_proof_bundle_proto_rawDescGZIP(), []int{7}
+	return file_model_plane_v1_proof_bundle_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *GetRunProofBundleResponse) GetBundle() *RunProofBundle {
@@ -734,7 +916,7 @@ type VerificationMetrics struct {
 
 func (x *VerificationMetrics) Reset() {
 	*x = VerificationMetrics{}
-	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[8]
+	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -746,7 +928,7 @@ func (x *VerificationMetrics) String() string {
 func (*VerificationMetrics) ProtoMessage() {}
 
 func (x *VerificationMetrics) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[8]
+	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -759,7 +941,7 @@ func (x *VerificationMetrics) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VerificationMetrics.ProtoReflect.Descriptor instead.
 func (*VerificationMetrics) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_proof_bundle_proto_rawDescGZIP(), []int{8}
+	return file_model_plane_v1_proof_bundle_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *VerificationMetrics) GetOrgId() string {
@@ -908,7 +1090,7 @@ type GetVerificationMetricsRequest struct {
 
 func (x *GetVerificationMetricsRequest) Reset() {
 	*x = GetVerificationMetricsRequest{}
-	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[9]
+	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -920,7 +1102,7 @@ func (x *GetVerificationMetricsRequest) String() string {
 func (*GetVerificationMetricsRequest) ProtoMessage() {}
 
 func (x *GetVerificationMetricsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[9]
+	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -933,7 +1115,7 @@ func (x *GetVerificationMetricsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetVerificationMetricsRequest.ProtoReflect.Descriptor instead.
 func (*GetVerificationMetricsRequest) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_proof_bundle_proto_rawDescGZIP(), []int{9}
+	return file_model_plane_v1_proof_bundle_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *GetVerificationMetricsRequest) GetOrgId() string {
@@ -959,7 +1141,7 @@ type GetVerificationMetricsResponse struct {
 
 func (x *GetVerificationMetricsResponse) Reset() {
 	*x = GetVerificationMetricsResponse{}
-	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[10]
+	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -971,7 +1153,7 @@ func (x *GetVerificationMetricsResponse) String() string {
 func (*GetVerificationMetricsResponse) ProtoMessage() {}
 
 func (x *GetVerificationMetricsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[10]
+	mi := &file_model_plane_v1_proof_bundle_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -984,7 +1166,7 @@ func (x *GetVerificationMetricsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetVerificationMetricsResponse.ProtoReflect.Descriptor instead.
 func (*GetVerificationMetricsResponse) Descriptor() ([]byte, []int) {
-	return file_model_plane_v1_proof_bundle_proto_rawDescGZIP(), []int{10}
+	return file_model_plane_v1_proof_bundle_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *GetVerificationMetricsResponse) GetMetrics() *VerificationMetrics {
@@ -998,7 +1180,7 @@ var File_model_plane_v1_proof_bundle_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_proof_bundle_proto_rawDesc = "" +
 	"\n" +
-	"!model_plane/v1/proof_bundle.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a%model_plane/v1/verified_outcome.proto\"\xd8\x02\n" +
+	"!model_plane/v1/proof_bundle.proto\x12\x0emodel_plane.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a%model_plane/v1/verified_outcome.proto\"\xad\x03\n" +
 	"\x0eRunProofBundle\x12%\n" +
 	"\x0ebundle_version\x18\x01 \x01(\x05R\rbundleVersion\x12\x15\n" +
 	"\x06run_id\x18\x02 \x01(\tR\x05runId\x12\x15\n" +
@@ -1006,7 +1188,8 @@ const file_model_plane_v1_proof_bundle_proto_rawDesc = "" +
 	"\fgenerated_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\vgeneratedAt\x12/\n" +
 	"\x03run\x18\x05 \x01(\v2\x1d.model_plane.v1.RunProvenanceR\x03run\x12;\n" +
 	"\tapprovals\x18\x06 \x03(\v2\x1d.model_plane.v1.ApprovalProofR\tapprovals\x12D\n" +
-	"\vunavailable\x18\a \x03(\v2\".model_plane.v1.UnavailableSectionR\vunavailable\"\x91\x01\n" +
+	"\vunavailable\x18\a \x03(\v2\".model_plane.v1.UnavailableSectionR\vunavailable\x12S\n" +
+	"\x13browser_walkthrough\x18\b \x01(\v2\".model_plane.v1.BrowserWalkthroughR\x12browserWalkthrough\"\x91\x01\n" +
 	"\rRunProvenance\x12\x12\n" +
 	"\x04goal\x18\x01 \x01(\tR\x04goal\x12\x19\n" +
 	"\bagent_id\x18\x02 \x01(\tR\aagentId\x12\x16\n" +
@@ -1045,7 +1228,20 @@ const file_model_plane_v1_proof_bundle_proto_rawDesc = "" +
 	"\fverification\x18\x05 \x01(\v2\".model_plane.v1.VerificationResultR\fverification\"F\n" +
 	"\x12UnavailableSection\x12\x18\n" +
 	"\asection\x18\x01 \x01(\tR\asection\x12\x16\n" +
-	"\x06reason\x18\x02 \x01(\tR\x06reason\"H\n" +
+	"\x06reason\x18\x02 \x01(\tR\x06reason\"p\n" +
+	"\x12BrowserWalkthrough\x12<\n" +
+	"\x05steps\x18\x01 \x03(\v2&.model_plane.v1.BrowserWalkthroughStepR\x05steps\x12\x1c\n" +
+	"\ttruncated\x18\x02 \x01(\bR\ttruncated\"\xfb\x01\n" +
+	"\x16BrowserWalkthroughStep\x12\x1b\n" +
+	"\taction_id\x18\x01 \x01(\tR\bactionId\x12\x1f\n" +
+	"\vaction_type\x18\x02 \x01(\tR\n" +
+	"actionType\x12\x19\n" +
+	"\bpage_url\x18\x03 \x01(\tR\apageUrl\x12\x1d\n" +
+	"\n" +
+	"page_title\x18\x04 \x01(\tR\tpageTitle\x12\x16\n" +
+	"\x06status\x18\x05 \x01(\tR\x06status\x12%\n" +
+	"\x0escreenshot_ref\x18\x06 \x01(\tR\rscreenshotRef\x12*\n" +
+	"\x02at\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\x02at\"H\n" +
 	"\x18GetRunProofBundleRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x15\n" +
 	"\x06org_id\x18\x02 \x01(\tR\x05orgId\"S\n" +
@@ -1091,7 +1287,7 @@ func file_model_plane_v1_proof_bundle_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_proof_bundle_proto_rawDescData
 }
 
-var file_model_plane_v1_proof_bundle_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_model_plane_v1_proof_bundle_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_model_plane_v1_proof_bundle_proto_goTypes = []any{
 	(*RunProofBundle)(nil),                 // 0: model_plane.v1.RunProofBundle
 	(*RunProvenance)(nil),                  // 1: model_plane.v1.RunProvenance
@@ -1099,38 +1295,43 @@ var file_model_plane_v1_proof_bundle_proto_goTypes = []any{
 	(*ContinuationExecution)(nil),          // 3: model_plane.v1.ContinuationExecution
 	(*ContinuationOutcome)(nil),            // 4: model_plane.v1.ContinuationOutcome
 	(*UnavailableSection)(nil),             // 5: model_plane.v1.UnavailableSection
-	(*GetRunProofBundleRequest)(nil),       // 6: model_plane.v1.GetRunProofBundleRequest
-	(*GetRunProofBundleResponse)(nil),      // 7: model_plane.v1.GetRunProofBundleResponse
-	(*VerificationMetrics)(nil),            // 8: model_plane.v1.VerificationMetrics
-	(*GetVerificationMetricsRequest)(nil),  // 9: model_plane.v1.GetVerificationMetricsRequest
-	(*GetVerificationMetricsResponse)(nil), // 10: model_plane.v1.GetVerificationMetricsResponse
-	(*timestamppb.Timestamp)(nil),          // 11: google.protobuf.Timestamp
-	(*VerificationResult)(nil),             // 12: model_plane.v1.VerificationResult
+	(*BrowserWalkthrough)(nil),             // 6: model_plane.v1.BrowserWalkthrough
+	(*BrowserWalkthroughStep)(nil),         // 7: model_plane.v1.BrowserWalkthroughStep
+	(*GetRunProofBundleRequest)(nil),       // 8: model_plane.v1.GetRunProofBundleRequest
+	(*GetRunProofBundleResponse)(nil),      // 9: model_plane.v1.GetRunProofBundleResponse
+	(*VerificationMetrics)(nil),            // 10: model_plane.v1.VerificationMetrics
+	(*GetVerificationMetricsRequest)(nil),  // 11: model_plane.v1.GetVerificationMetricsRequest
+	(*GetVerificationMetricsResponse)(nil), // 12: model_plane.v1.GetVerificationMetricsResponse
+	(*timestamppb.Timestamp)(nil),          // 13: google.protobuf.Timestamp
+	(*VerificationResult)(nil),             // 14: model_plane.v1.VerificationResult
 }
 var file_model_plane_v1_proof_bundle_proto_depIdxs = []int32{
-	11, // 0: model_plane.v1.RunProofBundle.generated_at:type_name -> google.protobuf.Timestamp
+	13, // 0: model_plane.v1.RunProofBundle.generated_at:type_name -> google.protobuf.Timestamp
 	1,  // 1: model_plane.v1.RunProofBundle.run:type_name -> model_plane.v1.RunProvenance
 	2,  // 2: model_plane.v1.RunProofBundle.approvals:type_name -> model_plane.v1.ApprovalProof
 	5,  // 3: model_plane.v1.RunProofBundle.unavailable:type_name -> model_plane.v1.UnavailableSection
-	11, // 4: model_plane.v1.RunProvenance.created_at:type_name -> google.protobuf.Timestamp
-	11, // 5: model_plane.v1.ApprovalProof.requested_at:type_name -> google.protobuf.Timestamp
-	11, // 6: model_plane.v1.ApprovalProof.decided_at:type_name -> google.protobuf.Timestamp
-	3,  // 7: model_plane.v1.ApprovalProof.execution:type_name -> model_plane.v1.ContinuationExecution
-	11, // 8: model_plane.v1.ContinuationExecution.started_at:type_name -> google.protobuf.Timestamp
-	4,  // 9: model_plane.v1.ContinuationExecution.outcome:type_name -> model_plane.v1.ContinuationOutcome
-	11, // 10: model_plane.v1.ContinuationOutcome.finalized_at:type_name -> google.protobuf.Timestamp
-	12, // 11: model_plane.v1.ContinuationOutcome.verification:type_name -> model_plane.v1.VerificationResult
-	0,  // 12: model_plane.v1.GetRunProofBundleResponse.bundle:type_name -> model_plane.v1.RunProofBundle
-	11, // 13: model_plane.v1.VerificationMetrics.since:type_name -> google.protobuf.Timestamp
-	11, // 14: model_plane.v1.VerificationMetrics.generated_at:type_name -> google.protobuf.Timestamp
-	5,  // 15: model_plane.v1.VerificationMetrics.unavailable:type_name -> model_plane.v1.UnavailableSection
-	11, // 16: model_plane.v1.GetVerificationMetricsRequest.since:type_name -> google.protobuf.Timestamp
-	8,  // 17: model_plane.v1.GetVerificationMetricsResponse.metrics:type_name -> model_plane.v1.VerificationMetrics
-	18, // [18:18] is the sub-list for method output_type
-	18, // [18:18] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	6,  // 4: model_plane.v1.RunProofBundle.browser_walkthrough:type_name -> model_plane.v1.BrowserWalkthrough
+	13, // 5: model_plane.v1.RunProvenance.created_at:type_name -> google.protobuf.Timestamp
+	13, // 6: model_plane.v1.ApprovalProof.requested_at:type_name -> google.protobuf.Timestamp
+	13, // 7: model_plane.v1.ApprovalProof.decided_at:type_name -> google.protobuf.Timestamp
+	3,  // 8: model_plane.v1.ApprovalProof.execution:type_name -> model_plane.v1.ContinuationExecution
+	13, // 9: model_plane.v1.ContinuationExecution.started_at:type_name -> google.protobuf.Timestamp
+	4,  // 10: model_plane.v1.ContinuationExecution.outcome:type_name -> model_plane.v1.ContinuationOutcome
+	13, // 11: model_plane.v1.ContinuationOutcome.finalized_at:type_name -> google.protobuf.Timestamp
+	14, // 12: model_plane.v1.ContinuationOutcome.verification:type_name -> model_plane.v1.VerificationResult
+	7,  // 13: model_plane.v1.BrowserWalkthrough.steps:type_name -> model_plane.v1.BrowserWalkthroughStep
+	13, // 14: model_plane.v1.BrowserWalkthroughStep.at:type_name -> google.protobuf.Timestamp
+	0,  // 15: model_plane.v1.GetRunProofBundleResponse.bundle:type_name -> model_plane.v1.RunProofBundle
+	13, // 16: model_plane.v1.VerificationMetrics.since:type_name -> google.protobuf.Timestamp
+	13, // 17: model_plane.v1.VerificationMetrics.generated_at:type_name -> google.protobuf.Timestamp
+	5,  // 18: model_plane.v1.VerificationMetrics.unavailable:type_name -> model_plane.v1.UnavailableSection
+	13, // 19: model_plane.v1.GetVerificationMetricsRequest.since:type_name -> google.protobuf.Timestamp
+	10, // 20: model_plane.v1.GetVerificationMetricsResponse.metrics:type_name -> model_plane.v1.VerificationMetrics
+	21, // [21:21] is the sub-list for method output_type
+	21, // [21:21] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_proof_bundle_proto_init() }
@@ -1145,7 +1346,7 @@ func file_model_plane_v1_proof_bundle_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_proof_bundle_proto_rawDesc), len(file_model_plane_v1_proof_bundle_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

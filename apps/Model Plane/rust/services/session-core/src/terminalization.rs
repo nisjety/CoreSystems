@@ -26,6 +26,11 @@ const RECOVERY_FAILURE_CODE: &str = "outcome_unknown";
 /// Written by recovery only, like [`RECOVERY_FAILURE_CODE`]: a caller may not submit it, so it is not
 /// in [`ALLOWED_FAILURE_CODES`], though the column accepts it (migration 0088).
 const QUESTION_EXPIRED_FAILURE_CODE: &str = "question_expired";
+/// The failure a run ends with when its takeover pause (a `browser_human_assist` approval) timed out
+/// (build plan EP-1 S5). Written by recovery only, like [`QUESTION_EXPIRED_FAILURE_CODE`]: a caller
+/// may not submit it, so it is not in [`ALLOWED_FAILURE_CODES`], though the column accepts it
+/// (migration 0115).
+const BROWSER_HELP_TIMED_OUT_FAILURE_CODE: &str = "browser_help_timed_out";
 const MANAGED_RECOVERY_LEASE_SECS: i64 = 60;
 pub(crate) const MANAGED_DEADLINE_SECS: i64 = 15 * 60;
 const MANAGED_RECOVERY_BATCH: usize = 32;
@@ -34,6 +39,8 @@ const MAX_RUN_ID_BYTES: usize = 128;
 const MAX_START_KEY_BYTES: usize = 128;
 const MAX_GOAL_BYTES: usize = 64 * 1024;
 const MAX_AGENT_ID_BYTES: usize = 256;
+/// The longest `agent_ref` a version pin carries (EP-6 S9).
+const MAX_AGENT_REF_BYTES: usize = 128;
 const MAX_MODE_BYTES: usize = 64;
 const TERMINALIZE_SCOPE: &str = "session:terminalize";
 const HEARTBEAT_SCOPE: &str = "session:heartbeat";
@@ -65,6 +72,8 @@ pub(crate) struct ManagedStartPersistence {
     pub run_started_payload: serde_json::Value,
     pub create_metadata_thread: bool,
     pub create_plan: bool,
+    /// The agent version recorded on `runs.metadata.agent` (EP-6 S9). Never set for a ZDR run.
+    pub agent_version_pin: Option<pb::AgentVersionPin>,
 }
 
 #[must_use]
@@ -82,6 +91,7 @@ pub(crate) fn managed_start_persistence(
             run_started_payload: serde_json::json!({ "zdr": true }),
             create_metadata_thread: true,
             create_plan: false,
+            agent_version_pin: None,
         };
     }
 
@@ -99,6 +109,7 @@ pub(crate) fn managed_start_persistence(
         }),
         create_metadata_thread: false,
         create_plan: true,
+        agent_version_pin: request.agent_version_pin.clone(),
     }
 }
 
@@ -222,7 +233,8 @@ pub(crate) fn is_startable_source(source: pb::ManagedRunSource) -> bool {
 /// code missing here is rejected before any database access; one missing from
 /// the CHECK fails the write instead, so both lists move together.
 /// `outcome_unknown` is deliberately absent: it is set only by reconciliation,
-/// never submitted by a caller.
+/// never submitted by a caller. `question_expired` and `browser_help_timed_out` are absent for
+/// the same reason: recovery writes them, and the CHECK admits them (migrations 0088 and 0115).
 const ALLOWED_FAILURE_CODES: &[&str] = &[
     "browser_failed",
     "browser_permission_denied",
@@ -382,6 +394,28 @@ fn validate_start_key(value: &str) -> Result<(), Status> {
     Ok(())
 }
 
+/// A version pin is ids and a digest only (EP-6 S9): an `agent_ref` of `[A-Za-z0-9_.:-]` at most
+/// 128 bytes, a published version from 1, and a `sha256:` digest of 64 lowercase hex characters.
+#[allow(clippy::result_large_err)]
+fn validate_agent_version_pin(pin: &pb::AgentVersionPin) -> Result<(), Status> {
+    let agent_ref_ok = !pin.agent_ref.is_empty()
+        && pin.agent_ref.len() <= MAX_AGENT_REF_BYTES
+        && pin
+            .agent_ref
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'));
+    let digest_ok = pin.digest.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    });
+    if !agent_ref_ok || pin.version == 0 || !digest_ok {
+        return Err(Status::invalid_argument("invalid_agent_version_pin"));
+    }
+    Ok(())
+}
+
 #[allow(clippy::result_large_err)]
 fn validate_managed_start_request(
     request: &pb::StartManagedRunRequest,
@@ -396,6 +430,10 @@ fn validate_managed_start_request(
         return Err(Status::invalid_argument(
             "unsupported managed terminal source",
         ));
+    }
+    // EP-6 S9: a malformed pin is refused for every caller. A ZDR run never records it.
+    if let Some(pin) = request.agent_version_pin.as_ref() {
+        validate_agent_version_pin(pin)?;
     }
     if zdr {
         if !request.thread_id.is_empty() {
@@ -592,12 +630,27 @@ async fn insert_managed_run_started(
         ),
     )
     .await?;
-    let origin_metadata = match inherited_origin {
+    let mut origin_metadata = match inherited_origin {
         Some(origin) => {
             serde_json::json!({ mp_contracts::run_origin::ORIGIN_METADATA_KEY: origin.as_str() })
         }
         None => serde_json::json!({}),
     };
+    // EP-6 S9: the agent version the run runs under, ids and a digest only, merged into the run's
+    // metadata by this same insert (no migration). `persisted` carries it for a non-ZDR run only.
+    if let (Some(pin), Some(map)) = (
+        persisted.agent_version_pin.as_ref(),
+        origin_metadata.as_object_mut(),
+    ) {
+        map.insert(
+            "agent".to_owned(),
+            serde_json::json!({
+                "ref": &pin.agent_ref,
+                "version": pin.version,
+                "digest": &pin.digest,
+            }),
+        );
+    }
     // The thread was created only after verifying its signed Space decision.
     // Copy that durable, non-secret context here instead of trusting any
     // managed-run caller to restate it. The exact tenant/owner predicate is a
@@ -1841,9 +1894,11 @@ async fn supersede_terminalized_obligations(pool: &PgPool) -> Result<u64, sqlx::
 /// Off: any `requested` or `granted`, unconsumed approval holds the recovery worker back from
 /// its run whatever `expires_at` says, exactly as committed. On: such an approval holds the run
 /// back only until it expires (one with no `expires_at` never does), or while a delivery worker
-/// holds a live lease on it; an expired, never-consumed one no longer does, so the run ends `outcome_unknown` at its deadline and its
-/// fold is purged by the unchanged terminal path. The one answer is bound into both copies of
-/// the clause (`claim_due_recovery` and `has_pending_approval`), so they cannot disagree.
+/// holds a live lease on it; an expired, never-consumed one no longer does, so the run ends
+/// `outcome_unknown` at its deadline and its fold is purged by the unchanged terminal path (a
+/// takeover pause whose approval timed out ends as `browser_help_timed_out` instead, see
+/// [`expired_browser_assist_approval`]). The one answer is bound into both copies of the clause
+/// (`claim_due_recovery` and `has_pending_approval`), so they cannot disagree.
 pub(crate) fn approval_expiry_enabled() -> bool {
     // A test forces the answer for its own thread, so it does not race the tests that set the
     // process environment. Compiled out of the binary.
@@ -2059,9 +2114,11 @@ async fn has_pending_approval(
 }
 
 /// Whether a `resume` question holds the run (build plan WS14 S5): one the owner may still answer, or one
-/// answered whose answer is not yet spent. Like a live approval, it keeps recovery off the run until its
-/// window closes. An unspent answer holds for the resume window of one hour from the answer (DEC-05),
-/// because the spend does not read `expires_at`.
+/// answered or skipped whose answer is not yet spent. Like a live approval, it keeps recovery off the run
+/// until its window closes. An unspent answer (a skip is spendable too) holds for the resume window from
+/// the answer ([`mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS`], DEC-05), because the spend does
+/// not read `expires_at`. The spend reads the same window under the same run row lock, so the hold and
+/// the spend agree on when an answer lapses.
 async fn has_pending_resume_question(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &str,
@@ -2071,19 +2128,21 @@ async fn has_pending_resume_question(
              SELECT 1 FROM run_questions AS q
              WHERE q.run_id = $1 AND q.delivery = 'resume'
                AND ((q.state = 'requested' AND q.expires_at > now())
-                    OR (q.state = 'answered' AND q.consumed_at IS NULL
-                        AND q.answered_at > now() - interval '1 hour'))
+                    OR (q.state IN ('answered', 'skipped') AND q.consumed_at IS NULL
+                        AND q.answered_at > now() - make_interval(secs => $2)))
          )",
     )
     .bind(run_id)
+    .bind(f64::from(mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS))
     .fetch_one(&mut **transaction)
     .await
     .map_err(database_error)
 }
 
-/// Whether a `resume` question of the run lapsed unanswered: its window closed while it was still
-/// requested, or a read has already marked it expired. Such a run ends as question_expired, because
-/// the cause is known, rather than as an unknown outcome.
+/// Whether a `resume` question of the run lapsed: its window closed while it was still requested, a read
+/// has already marked it expired, or it was answered (or skipped) and the answer was never spent within the
+/// resume window. Such a run ends as question_expired, because the cause is known, rather than as an
+/// unknown outcome (D2-1168).
 async fn expired_resume_question(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &str,
@@ -2092,10 +2151,39 @@ async fn expired_resume_question(
         "SELECT EXISTS(
              SELECT 1 FROM run_questions AS q
              WHERE q.run_id = $1 AND q.delivery = 'resume'
-               AND (q.state = 'expired' OR (q.state = 'requested' AND q.expires_at <= now()))
+               AND (q.state = 'expired'
+                    OR (q.state = 'requested' AND q.expires_at <= now())
+                    OR (q.state IN ('answered', 'skipped') AND q.consumed_at IS NULL
+                        AND q.answered_at <= now() - make_interval(secs => $2)))
          )",
     )
     .bind(run_id)
+    .bind(f64::from(mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS))
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(database_error)
+}
+
+/// Whether the run's takeover pause timed out (build plan EP-1 S5): a `browser_human_assist`
+/// approval the person never decided, that is TIMED_OUT or still `requested` past its `expires_at`,
+/// and was never consumed. Such a run ends as browser_help_timed_out, because the cause is known,
+/// rather than as an unknown outcome. The cause is the code the creator stored at
+/// `approvals.metadata.cause.code`.
+async fn expired_browser_assist_approval(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &str,
+) -> Result<bool, Status> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM approvals AS a
+             WHERE a.run_id = $1
+               AND a.metadata #>> '{cause,code}' = $2
+               AND a.consumed_at IS NULL
+               AND (a.status = 'timed_out' OR (a.status = 'requested' AND a.expires_at <= now()))
+         )",
+    )
+    .bind(run_id)
+    .bind(mp_contracts::approval_cause::CauseCode::BrowserHumanAssist.as_str())
     .fetch_one(&mut **transaction)
     .await
     .map_err(database_error)
@@ -2295,8 +2383,17 @@ async fn recover_claimed_terminalization(
     // so the run is applied as failed with that cause; only an unknown outcome needs reconciliation
     // (the outbox CHECK admits `reconciliation_required` with `outcome_unknown` alone).
     let question_expired = expired_resume_question(&mut transaction, &claim.row.run_id).await?;
+    // A takeover pause whose approval timed out ends the same way, as browser_help_timed_out (build
+    // plan EP-1 S5). It is read only behind the approval-expiry switch, so with the switch off the run
+    // ends as it always did, as outcome_unknown.
+    let help_timed_out = !question_expired
+        && approval_expiry_enabled()
+        && expired_browser_assist_approval(&mut transaction, &claim.row.run_id).await?;
+    let known_cause = question_expired || help_timed_out;
     let failure_code = if question_expired {
         QUESTION_EXPIRED_FAILURE_CODE
+    } else if help_timed_out {
+        BROWSER_HELP_TIMED_OUT_FAILURE_CODE
     } else {
         RECOVERY_FAILURE_CODE
     };
@@ -2306,7 +2403,7 @@ async fn recover_claimed_terminalization(
         source,
         step_id,
         ManagedOutcome::Failed(failure_code),
-        !question_expired,
+        !known_cause,
         now,
     )
     .await?;
@@ -2961,6 +3058,7 @@ mod tests {
             user_id: "user-1".to_owned(),
             start_key: "opaque-start-1".to_owned(),
             terminal_source: pb::ManagedRunSource::GatewayDirect as i32,
+            agent_version_pin: None,
         };
 
         let persisted = super::managed_start_persistence(&request, true);
@@ -3203,6 +3301,7 @@ mod resume_question_db_tests {
                 user_id: user.clone(),
                 start_key: format!("rq-{tag}-{sfx}"),
                 terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+                agent_version_pin: None,
             },
             RunRetention::persistent(),
         )
@@ -3336,6 +3435,43 @@ mod resume_question_db_tests {
         assert_eq!(state, "applied", "a known cause is applied, not left for reconciliation");
         assert_eq!(failure.as_deref(), Some(QUESTION_EXPIRED_FAILURE_CODE));
     }
+
+    /// D2-1168, extended (build plan WS14 S5 b1): an answer or a skip that was never spent inside the
+    /// resume window ends its run as question_expired, with a known cause, not as outcome_unknown.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a scratch Postgres whose name contains \"test\""]
+    async fn an_answered_resume_question_never_spent_in_its_window_ends_its_run_as_question_expired() {
+        let Some(pool) = scratch_pool().await else {
+            return;
+        };
+        for (tag, state) in [("lapsedans", "answered"), ("lapsedskip", "skipped")] {
+            let run_id = run_with_resume_question(&pool, tag, chrono::Duration::hours(1)).await;
+            sqlx::query(
+                "UPDATE run_questions
+                    SET state = $4, answers = $2, answers_digest = $3,
+                        answered_at = now() - make_interval(secs => $5)
+                  WHERE run_id = $1",
+            )
+            .bind(&run_id)
+            .bind(serde_json::json!([]))
+            .bind(format!("{:0>64}", "answer"))
+            .bind(state)
+            .bind(f64::from(mp_contracts::user_question::RESUME_ANSWER_WINDOW_SECS) + 60.0)
+            .execute(&pool)
+            .await
+            .expect("answered past the window");
+            isolate(&pool, &run_id).await;
+            assert_eq!(
+                recover_due_terminalizations(&pool).await.expect("pass"),
+                1,
+                "{state}: exactly this run is recovered"
+            );
+            assert_eq!(run_status(&pool, &run_id).await, "failed", "{state}");
+            let (obligation_state, failure) = obligation(&pool, &run_id).await;
+            assert_eq!(obligation_state, "applied", "{state}: a known cause is applied");
+            assert_eq!(failure.as_deref(), Some(QUESTION_EXPIRED_FAILURE_CODE), "{state}");
+        }
+    }
 }
 
 /// Build plan WS03 S7c-A2: the recovery race a spent click would otherwise lose.
@@ -3432,6 +3568,7 @@ mod spent_click_db_tests {
                 user_id: user.clone(),
                 start_key: format!("sc-{tag}-{sfx}"),
                 terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+                agent_version_pin: None,
             },
             RunRetention::persistent(),
         )
@@ -3677,6 +3814,7 @@ mod park_recovery_db_tests {
                 user_id: user.clone(),
                 start_key: format!("pr-{tag}-{sfx}"),
                 terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+                agent_version_pin: None,
             },
             RunRetention::persistent(),
         )
@@ -4055,6 +4193,7 @@ mod park_recovery_db_tests {
                 user_id: user.clone(),
                 start_key: format!("pk-{tag}-{sfx}"),
                 terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+                agent_version_pin: None,
             },
             RunRetention::persistent(),
         )
@@ -4440,6 +4579,7 @@ mod park_recovery_db_tests {
                 user_id: user,
                 start_key: format!("cp-{tag}-{sfx}"),
                 terminal_source: pb::ManagedRunSource::ExecutionAgent as i32,
+                agent_version_pin: None,
             },
             retention,
         )
@@ -4877,3 +5017,13 @@ mod zdr_refusal_tests {
         assert!(validate_managed_start_request(&start(""), true).is_ok());
     }
 }
+
+/// Build plan EP-1 S5: a timed-out takeover pause ends its run as browser_help_timed_out.
+#[cfg(test)]
+#[path = "terminalization_browser_timeout_tests.rs"]
+mod browser_timeout_db_tests;
+
+/// EP-6 S9: the agent version pin on the run row.
+#[cfg(test)]
+#[path = "terminalization_agent_pin_tests.rs"]
+mod agent_pin_tests;

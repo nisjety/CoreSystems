@@ -113,7 +113,7 @@ describe('plane user scope contract', () => {
     '../../../config/plane-service-principals.json',
   );
   (existsSync(principalsPath) ? it : it.skip)(
-    'grants session:memory-controls:read to capability-core for session-core only',
+    'grants session:memory-controls:read to capability-core and orchestrator-core for session-core only',
     () => {
       const registry = JSON.parse(
         readFileSync(principalsPath, 'utf8'),
@@ -122,16 +122,19 @@ describe('plane user scope contract', () => {
         { scopes: string[]; scopesByAudience: Record<string, string[]> }
       >;
       const scope = 'session:memory-controls:read';
-      expect(
-        registry['capability-core'].scopesByAudience['session-core'],
-      ).toContain(scope);
+      const holdersOfScope = ['capability-core', 'orchestrator-core'];
+      for (const principal of holdersOfScope) {
+        expect(
+          registry[principal].scopesByAudience['session-core'],
+        ).toContain(scope);
+      }
       for (const [principal, entry] of Object.entries(registry)) {
         const holders = Object.entries(entry.scopesByAudience ?? {})
           .filter(([, scopes]) => scopes.includes(scope))
           .map(([audience]) => audience);
         expect({ principal, holders }).toEqual({
           principal,
-          holders: principal === 'capability-core' ? ['session-core'] : [],
+          holders: holdersOfScope.includes(principal) ? ['session-core'] : [],
         });
       }
     },

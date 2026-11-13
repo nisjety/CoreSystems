@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +28,15 @@ const (
 	OutcomeAuthorityFailed  = "authority_unavailable"
 )
 
+// The outcomes the wake gate records (W4-F T5). Control is never asked about a fire that ends in either: a closed gate is
+// a refusal, and a payload that cannot be read within the attempts is a refusal too.
+const (
+	// OutcomeWakeGateClosed marks a fire whose webhook payload its trigger's wake filter does not match.
+	OutcomeWakeGateClosed = "wake_gate_closed"
+	// OutcomeWakePayloadUnavailable marks a fire whose webhook payload could not be read within its attempts.
+	OutcomeWakePayloadUnavailable = "wake_payload_unavailable"
+)
+
 // DefaultTriggerFiresPerHour bounds how many fires one trigger may be authorised for in an hour.
 const DefaultTriggerFiresPerHour = 12
 
@@ -39,7 +49,8 @@ const DefaultMaxAuthAttempts = 3
 // fireWindow is the span the budgets count authorised fires over.
 const fireWindow = time.Hour
 
-// Fire is one pending fire, with the trigger fields a decision reads.
+// Fire is one pending fire, with the trigger fields a decision reads. WakeFilter is the trigger's stored wake filter as
+// JSON, or nil for a trigger with none.
 type Fire struct {
 	ID             string
 	TriggerID      string
@@ -50,6 +61,7 @@ type Fire struct {
 	MemberUserID   string
 	TriggerStatus  string
 	Attempts       int
+	WakeFilter     json.RawMessage
 }
 
 // Limits are the budgets a fire is decided against. Each counts authorised fires over fireWindow.
@@ -122,12 +134,27 @@ func refusalFor(fire Fire, counts Counts, limits Limits) string {
 	}
 }
 
-// decide settles one pending fire. A refused fire never reaches Control. An authority error leaves the fire pending
-// for a later sweep until it has used its attempts, and then refuses it, so a Control outage cannot hold a fire open
-// forever. The error is returned for the log: a refusal and an outage look the same from here.
-func decide(ctx context.Context, authority cron.FireAuthorizer, fire Fire, counts Counts, limits Limits) (Settlement, error) {
+// decide settles one pending fire. A refused fire never reaches Control. A fire whose trigger carries a wake filter must
+// also pass the wake gate first: a closed gate refuses it, and a payload that cannot be read leaves it pending, as an
+// authority error does. An authority error leaves the fire pending for a later sweep until it has used its attempts, and
+// then refuses it, so a Control outage cannot hold a fire open forever. The error is returned for the log: a refusal and
+// an outage look the same from here. A nil gate is the switch being off: stored filters are then ignored.
+func decide(ctx context.Context, authority cron.FireAuthorizer, gate wakeGate, fire Fire, counts Counts, limits Limits) (Settlement, error) {
 	if refusal := refusalFor(fire, counts, limits); refusal != "" {
 		return Settlement{Status: StatusRefused, Outcome: refusal, Attempts: fire.Attempts}, nil
+	}
+	if gate != nil && len(fire.WakeFilter) > 0 {
+		open, err := gate.admit(ctx, fire)
+		if err != nil {
+			attempts := fire.Attempts + 1
+			if attempts >= limits.MaxAttempts {
+				return Settlement{Status: StatusRefused, Outcome: OutcomeWakePayloadUnavailable, Attempts: attempts}, err
+			}
+			return Settlement{Status: StatusPending, Attempts: attempts}, err
+		}
+		if !open {
+			return Settlement{Status: StatusRefused, Outcome: OutcomeWakeGateClosed, Attempts: fire.Attempts}, nil
+		}
 	}
 	attempts := fire.Attempts + 1
 	if err := authority.AuthorizeFire(ctx, intentFor(fire)); err != nil {

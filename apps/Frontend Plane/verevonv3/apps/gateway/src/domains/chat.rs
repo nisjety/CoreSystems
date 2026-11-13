@@ -4,14 +4,22 @@ pub(crate) mod documents;
 pub(crate) mod history;
 pub(crate) mod json_handlers;
 mod library;
+mod processes;
 pub(crate) mod shared;
 pub(crate) mod research_runs;
 mod search;
+mod snapshots;
 mod streams;
 pub(crate) mod support;
+mod transcripts;
+#[cfg(test)]
+mod bff_turn_tests;
+#[cfg(test)]
+mod phase_switch_off_tests;
 
 use axum::{
-    routing::{get, post, put},
+    extract::DefaultBodyLimit,
+    routing::{delete, get, post, put},
     Router,
 };
 
@@ -85,6 +93,12 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/chat/threads/{thread_id}/undo-rewind",
             post(json_handlers::undo_rewind_thread),
         )
+        // A side question about this conversation (F-t3-069): one read-only answer from Model Gateway, which keeps
+        // nothing. 404 `side_chat_disabled` from Model Gateway while its switch is off.
+        .route(
+            "/api/v1/chat/threads/{thread_id}/side-chat",
+            post(json_handlers::ask_side_chat),
+        )
         // Artifact revision history and the composer's capability read (Wave 3 EP-3 S3).
         .route(
             "/api/v1/chat/threads/{thread_id}/artifacts",
@@ -125,6 +139,41 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route(
             "/api/v1/chat/threads/{thread_id}/export",
             get(history::export_thread),
+        )
+        // The owner's import of one export file as a new conversation (Wave 3 EP-12 S15): Model Gateway's
+        // answer relayed unchanged. 404 `thread_export_disabled` from Model Gateway while its switch is off.
+        .route(
+            "/api/v1/chat/threads/import",
+            post(history::import_thread).layer(DefaultBodyLimit::max(
+                history::THREAD_IMPORT_BODY_LIMIT_BYTES,
+            )),
+        )
+        // Governed snapshot links (W4-SH-6, F-t3-046): the owner takes, lists and revokes snapshots of a thread and
+        // shares one with named members of the organisation; a granted member reads it. Model Gateway's routes,
+        // relayed under the caller's own bearers. 404 `chat_snapshots_disabled` while CHAT_SNAPSHOTS_ENABLED is off.
+        .route(
+            "/api/v1/chat/threads/{thread_id}/snapshots",
+            post(snapshots::create_snapshot).get(snapshots::list_snapshots),
+        )
+        .route(
+            "/api/v1/chat/snapshots/{snapshot_id}",
+            delete(snapshots::revoke_snapshot),
+        )
+        .route(
+            "/api/v1/chat/snapshots/{snapshot_id}/grants",
+            post(snapshots::grant_snapshot)
+                .delete(snapshots::ungrant_snapshot)
+                .get(snapshots::list_snapshot_grants),
+        )
+        .route(
+            "/api/v1/chat/shared-snapshots/{snapshot_id}",
+            get(snapshots::get_shared_snapshot),
+        )
+        // The owner's read of one background process's output in a run (W4-P3): Model Gateway's page,
+        // read under the room's own sandbox read decision. 404 `process_output_disabled` while its switch is off.
+        .route(
+            "/api/v1/chat/runs/{run_id}/processes/{pid}/output",
+            get(processes::get_run_process_output),
         )
         .route(
             "/api/v1/chat/stream/resume/{request_id}",
@@ -172,6 +221,14 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             post(documents::upload_chat_document),
         )
         .route("/api/v1/chat/documents/extract", post(documents::extract_chat_document))
+        // Transcribe one audio upload into a private Data Plane `media_transcript` document (W5, F-t3-090). The body
+        // limit is the speech route's own. 404 `media_transcripts_disabled` while CHAT_MEDIA_TRANSCRIPTS_ENABLED is off.
+        .route(
+            "/api/v1/chat/transcripts",
+            post(transcripts::create_chat_transcript).layer(DefaultBodyLimit::max(
+                crate::domains::ai::AI_AUDIO_BODY_LIMIT_BYTES,
+            )),
+        )
         // The chat library (F-t3-080): saved artifacts and uploaded text, one filtered Data Plane view. 404 while
         // the artifact-promote switch is off.
         .route("/api/v1/chat/library", get(library::list_chat_library))

@@ -25,13 +25,23 @@ import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
 import {
   DashboardComposer,
+  learnCommandEnabled,
   type DashboardComposerAttachment,
   type DashboardComposerBrowserRegionIntake,
   type DashboardComposerSubmitPayload,
 } from '@/features/dashboard/home/DashboardComposer'
 import type { BrowserRegionAttachment } from '@/features/browser/page-context/region-attach'
 import { withChatWorkPeriod, type ChatWorkPeriod } from '@/shared/actions/chat-work-period'
-import { getComposerCapabilities, getThreadContext } from '@/shared/api/chat-client'
+import type { LearnCommandContext } from '@/shared/api/chat-actions-client'
+import {
+  getComposerCapabilities,
+  getThreadContext,
+  listDeckTemplates,
+  type ChatTurnTiming,
+  type DeckTemplate,
+} from '@/shared/api/chat-client'
+import { serverVersionBadge } from '@/features/chat/lib/chat-versions-server'
+import { getLearningAllowed } from '@/shared/api/memory-client'
 import { importUpload } from '@/shared/api/knowledge-client'
 import { getSession } from '@/shared/session/session-store'
 import {
@@ -59,6 +69,8 @@ import {
   ChatLiveRunPanel,
 } from './ChatLiveRunPanel'
 import { ComposerTrays } from './ComposerTrays'
+import { ConnectionPill } from './ConnectionPill'
+import { DeckTemplateContext, type DeckTemplateActions } from './artifact-renderers'
 import { researchPassFacts } from './ArtifactProvenance'
 import { ChatWideResearchPanel } from './ChatWideResearchPanel'
 import { ChatWorkspaceCanvas } from './ChatWorkspaceCanvas'
@@ -72,13 +84,17 @@ import {
   shouldShowDateDivider,
 } from './chat-media-markdown'
 import { useChatController } from './use-chat-controller'
-import { useChatShortcuts } from '@/features/chat/lib/use-chat-shortcuts'
+import { useChatShortcuts, type UseChatShortcutsOptions } from '@/features/chat/lib/use-chat-shortcuts'
+import { registerChatCommands } from '@/features/command/chat-commands'
+import { commandPaletteEnabled } from '@/features/command/command-registry'
 import { dockedNodesFor, selectDockedTrays } from '../lib/composer-trays'
 import { deriveStreamActivity, streamActivityLabel } from '@/features/chat/lib/stream-activity'
+import { latestAnswerRunId, useSupportRunContext } from '@/features/chat/lib/support-run-context'
 import { chatSurfaceClaimsFocus, isChatSurfaceAvailable, type ChatSurfaceAvailability } from '../lib/chat-surfaces'
 import { isWorkStep } from './chat-normalizers'
 import type { ChatTab } from './chat-types'
 import { useI18n } from '@/shared/i18n'
+import { LocalizedError, translateApiError } from '@/shared/i18n/errors'
 import { speechPlayer } from '@/features/voice/speech-playback'
 import { latestVoiceReply } from '@/features/voice/voice-reply'
 import { pinnedMessagesFull } from '../lib/chat-pinned-messages'
@@ -87,6 +103,7 @@ import { audienceConfirmed, chatProjectsEnabled, readProjectAudience, readProjec
 import { loadEffectiveAgentModeCap } from '@/features/customize/AgentModesSection'
 import { audienceConfirmRequired, chatProjectRefusal, sandboxToolsRefusedNotice, type ChatProjectRefusal } from './use-chat-project'
 import { planTranscriptWindow, resolveTurnHeights, virtualizeTranscript } from '../lib/transcript-window'
+import { runLedgerEnabled } from '../lib/run-ledger'
 import { BrowserDockControls } from '@/features/browser/dock/BrowserDockControls'
 import { InteractiveBrowserPane } from '@/features/browser/dock/InteractiveBrowserPane'
 import { OpenBrowserButton } from '@/features/browser/dock/OpenBrowserButton'
@@ -103,10 +120,11 @@ import {
 import { foldPlan, settledFoldEnabled } from '../lib/settled-fold'
 import { createSettledFoldChoices } from '../lib/settled-fold-choices'
 import { chapterEntries, turnSelector } from '../lib/chapter-toc'
-import { createReaderAppearance, readerPolishEnabled, readerSpacingFor } from '../lib/reader-polish'
+import { createReaderAppearance, readerPolishOn, readerSpacingFor } from '../lib/reader-polish'
 import { createTranscriptDensity, transcriptDensityEnabled } from '../lib/transcript-density'
 import { DensityMenu } from './DensityMenu'
 import { ReaderTools } from './ReaderTools'
+import { SideChatPanel, sideChatEnabled } from './SideChatPanel'
 
 export default function ChatPage() {
   const i18n = useI18n()
@@ -136,6 +154,9 @@ export default function ChatPage() {
     giveBackBrowserRun,
     handleComposerSubmit,
     handleStop,
+    // F-t3-077: the double-Escape stop reads the streaming run at the press and stops only that run.
+    streamingRunId,
+    stopLiveRun,
     copyTurn,
     submitTurnFeedback,
     feedbackNotice,
@@ -152,6 +173,7 @@ export default function ChatPage() {
     rewindOfferFor,
     rewindTo,
     undoRewind,
+    switchServerVersion,
     startNewChat,
     state,
     activeTab,
@@ -167,6 +189,8 @@ export default function ChatPage() {
     setImageMode,
     planMode,
     setPlanMode,
+    speedTier,
+    setSpeedTier,
     approveTurnPlan,
     rejectTurnPlan,
     planApprovalPending,
@@ -214,8 +238,15 @@ export default function ChatPage() {
     saveGoal,
     setGoalPaused,
     clearGoal,
+    markGoalDone,
+    reopenGoal,
     continueGoal,
     goalAutoContinue,
+    goalAway,
+    wideResearchRoute,
+    startWideResearch,
+    retryWideResearchItem,
+    applyDeckTemplate,
   } = useChatController()
 
   // The attachment chip that summoned the canvas stays selected when several
@@ -232,14 +263,38 @@ export default function ChatPage() {
   const [agentModeCap] = createResource(() => loadEffectiveAgentModeCap())
   // EP-3 S4. The gateway's own answer on whether the Output panel may edit an artifact; `artifactEditing` is false until it says otherwise.
   const [composerCapabilities] = createResource(() => getComposerCapabilities())
+  // EP-11 S7, behind `VITE_LEARN_COMMAND`: whether the memory controls let this person learn, read once per page. A failed
+  // read counts as not allowed, so `/learn` stays hidden rather than offered and refused. Nothing is read with the switch off.
+  const [learningAllowed] = createResource(
+    () => (learnCommandEnabled() ? true : false),
+    () => getLearningAllowed().catch(() => false),
+  )
+  // What the composer's `/learn` command reads (EP-11 S7). A temporary chat is zero retention, so it is never offered there;
+  // the composer also checks the organization's zero retention itself.
+  const learnContext = createMemo<LearnCommandContext>(() => {
+    const temporary = temporaryChat() || isActiveThreadTemporary()
+    return {
+      threadId: state.threadId ?? null,
+      temporaryChat: temporary,
+      zeroRetention: temporary,
+      learningAllowed: learningAllowed() === true,
+    }
+  })
   const artifactTemporary = () => temporaryChat() || isActiveThreadTemporary()
+  // The run on screen, for the feedback widget's problem report (VITE_REPORT_PROBLEM). A temporary or zero-retention chat
+  // offers none. With the switch off nothing is read and nothing is published.
+  useSupportRunContext({
+    orgId: () => session.activeOrg?.id ?? null,
+    runId: () => latestAnswerRunId(state.turns),
+    temporary: artifactTemporary,
+  })
   // EP-14 S2, behind `VITE_CHAT_TRANSCRIPT_DENSITY`. The level the transcript shows and the rules it applies. With the
   // switch off the rules change nothing, so the transcript renders as it did.
   const transcriptDensity = createTranscriptDensity()
   // F-t3-098, behind `VITE_CHAT_READER_POLISH`. The text size, the dyslexia-friendly font and the spacing the workspace
   // carries, and the outline of the answers. With the switch off the attributes are empty and no outline is built.
   const readerAppearance = createReaderAppearance()
-  const chapters = createMemo(() => (readerPolishEnabled ? chapterEntries(state.turns) : []))
+  const chapters = createMemo(() => (readerPolishOn() ? chapterEntries(state.turns) : []))
   const projectName = () => {
     if (projectContext.loading) return i18n.tr('laster ...', 'loading ...')
     const context = projectContext()
@@ -252,6 +307,22 @@ export default function ChatPage() {
   const [projectNotice, setProjectNotice] = createSignal('')
   // The notice for a held browser-agent message that was not sent (E3.3-g). Any send clears it.
   const [steerNotice, setSteerNotice] = createSignal('')
+  // The double-Escape stop (F-t3-077) confirms itself on the composer's notice line for a moment. The timer clears
+  // the line only while it still shows that confirmation, so a newer notice is never wiped.
+  const STOPPING_NOTICE_MS = 1500
+  let stoppingNoticeTimer: ReturnType<typeof setTimeout> | undefined
+  const showStoppingNotice = () => {
+    const text = i18n.tr('Stopper…', 'Stopping…')
+    setProjectNotice(text)
+    if (stoppingNoticeTimer !== undefined) clearTimeout(stoppingNoticeTimer)
+    stoppingNoticeTimer = setTimeout(() => {
+      stoppingNoticeTimer = undefined
+      if (projectNotice() === text) setProjectNotice('')
+    }, STOPPING_NOTICE_MS)
+  }
+  onCleanup(() => {
+    if (stoppingNoticeTimer !== undefined) clearTimeout(stoppingNoticeTimer)
+  })
   // The first-send ask for a shared room. The send waits on the answer, and a cancel
   // is a refused send: the composer clears its draft only after a send it saw succeed.
   const [audienceAsk, setAudienceAsk] = createSignal<{
@@ -259,14 +330,19 @@ export default function ChatPage() {
     members: number | null
     settle: (confirmed: boolean) => void
   } | null>(null)
-  const projectRefusalMessage = (refusal: ChatProjectRefusal) => {
+  // The copy of a refused project send, in both languages: a LocalizedError shows it as it is.
+  const projectRefusalCopy = (refusal: ChatProjectRefusal): { no: string; en: string } => {
     if (refusal === 'temporary') {
-      return i18n.tr('Midlertidig samtale kan ikke brukes i et prosjekt.', 'Temporary chat cannot be used in a project.')
+      return { no: 'Midlertidig samtale kan ikke brukes i et prosjekt.', en: 'Temporary chat cannot be used in a project.' }
     }
     if (refusal === 'role_not_allowed') {
-      return i18n.tr('Du kan lese dette rommet, men ikke starte samtaler i det.', 'You can read this room but cannot start conversations in it.')
+      return { no: 'Du kan lese dette rommet, men ikke starte samtaler i det.', en: 'You can read this room but cannot start conversations in it.' }
     }
-    return i18n.tr('Prosjektet er ikke tilgjengelig for nye samtaler.', 'This project is not available for new conversations.')
+    return { no: 'Prosjektet er ikke tilgjengelig for nye samtaler.', en: 'This project is not available for new conversations.' }
+  }
+  const projectRefusalMessage = (refusal: ChatProjectRefusal) => {
+    const copy = projectRefusalCopy(refusal)
+    return i18n.tr(copy.no, copy.en)
   }
   // Re-reads the Space and the caller's role before every project send: the same
   // question Control answers on the turn itself, asked here so a refusal reads as a
@@ -274,7 +350,7 @@ export default function ChatPage() {
   const confirmProjectAudience = async (spaceRef: string, temporary: boolean): Promise<boolean> => {
     const context = await readProjectContext(spaceRef)
     const refusal = chatProjectRefusal({ temporary, role: context?.role, space: context?.space })
-    if (!context || refusal) throw new Error(projectRefusalMessage(refusal ?? 'not_eligible'))
+    if (!context || refusal) throw new LocalizedError(projectRefusalCopy(refusal ?? 'not_eligible'))
     if (!audienceConfirmRequired({ kind: context.space.kind, confirmed: audienceConfirmed(spaceRef) })) return true
     const members = await readProjectAudience(spaceRef)
     return new Promise<boolean>((resolve) => {
@@ -289,18 +365,34 @@ export default function ChatPage() {
       })
     })
   }
-  const submitWithWorkPeriod = async (payload: DashboardComposerSubmitPayload) => {
+  // The deck template the composer's next turn applies (EP-5 S7). The composer's chip sets it, and the send that starts a turn
+  // takes it. A deck draft only offers the chip: a front-end heuristic, and the server checks the template and never infers one.
+  const [composerDeckTemplate, setComposerDeckTemplate] = createSignal<DeckTemplate | null>(null)
+  const deckDraftHint = () => /\b(deck|presentasjon|presentation|lysbilde|slide)/i.test(input())
+  // Templates are offered in a chat that keeps data and that this person may write to: never a temporary or read-only thread.
+  const deckTemplatesAllowed = () => !artifactTemporary() && !isForeignOriginThread()
+  const deckTemplateChipOffered = () => deckDraftHint() && !isStreaming() && deckTemplatesAllowed()
+  // One composer turn through the page's gates (the project audience, the work period). `deckTemplate` is the template it applies.
+  const submitWithWorkPeriod = async (payload: DashboardComposerSubmitPayload, deckTemplate: DeckTemplate | null = null) => {
     setSteerNotice('')
     const submission = {
       ...payload,
       text: withChatWorkPeriod(payload.text, workPeriod(), i18n.locale() === 'no' ? 'no' : 'en'),
     }
     const spaceRef = projectRef()
-    if (!spaceRef) return handleComposerSubmit(submission)
+    if (!spaceRef) return handleComposerSubmit(submission, deckTemplate?.skillId)
     setProjectNotice('')
     const confirmed = await confirmProjectAudience(spaceRef, temporaryChat())
-    if (!confirmed) throw new Error(i18n.tr('Meldingen ble ikke sendt. Utkastet er beholdt.', 'The message was not sent. Your draft is kept.'))
-    return handleComposerSubmit(submission)
+    if (!confirmed) throw new LocalizedError({ no: 'Meldingen ble ikke sendt. Utkastet er beholdt.', en: 'The message was not sent. Your draft is kept.' })
+    return handleComposerSubmit(submission, deckTemplate?.skillId)
+  }
+  // The composer's own send. Its pick is for one turn: a send made while a run streams is queued into that run, and a
+  // zero-retention send never carries a template, so the pick waits for the turn that starts on its own. It clears once the
+  // send has gone out; a send that failed keeps it.
+  const submitFromComposer = async (payload: DashboardComposerSubmitPayload) => {
+    const pick = isStreaming() || payload.zdr || artifactTemporary() ? null : composerDeckTemplate()
+    await submitWithWorkPeriod(payload, pick)
+    if (pick && composerDeckTemplate() === pick) setComposerDeckTemplate(null)
   }
   // The Output panel's "Ask for a change" (EP-3 S6) sends one composer turn that names the selected range. The panel has hashed the quote, so the selected text itself is not sent.
   const askAboutArtifactSelection = (request: ArtifactSelectionRequest) => submitWithWorkPeriod({
@@ -321,13 +413,37 @@ export default function ChatPage() {
       },
     }],
   })
-  // Temporary chat writes no thread, so it cannot be turned on for a project.
+  // Temporary chat writes no thread, so it cannot be turned on for a project. It takes no deck template either, so a pick made
+  // before it is dropped rather than left waiting unseen.
   const setTemporaryFromComposer = (value: boolean) => {
     if (value && projectRef()) {
       setProjectNotice(projectRefusalMessage('temporary'))
       return
     }
+    if (value) setComposerDeckTemplate(null)
     setTemporaryChat(value)
+  }
+  // The deck view's "Bytt mal" (EP-5 S7). A project room asks for its audience first, as a composer send does; the turn itself
+  // is the controller's `applyDeckTemplate`.
+  const applyDeckTemplateTurn = async (template: DeckTemplate | null) => {
+    const spaceRef = projectRef()
+    if (spaceRef) {
+      setProjectNotice('')
+      if (!(await confirmProjectAudience(spaceRef, temporaryChat()))) return
+    }
+    await applyDeckTemplate(template)
+  }
+  // What the deck view's "Bytt mal" may do. Where the templates are not allowed there is no list, and no pick is taken during
+  // a run: the control is disabled then, and a pick that got here anyway is not sent.
+  const deckTemplateActions: DeckTemplateActions = {
+    list: () => (deckTemplatesAllowed() ? listDeckTemplates() : Promise.resolve(null)),
+    apply: (template) => {
+      if (isStreaming() || !deckTemplatesAllowed()) return
+      applyDeckTemplateTurn(template).catch((error: unknown) => {
+        setProjectNotice(translateApiError(error, i18n.tr, { no: 'Kunne ikke bruke malen.', en: 'Could not use the template.' }))
+      })
+    },
+    busy: () => isStreaming(),
   }
 
   // A held message of a browser-agent run (E3.3-g) goes out as an ordinary message once the run has ended, or when the
@@ -498,8 +614,23 @@ export default function ChatPage() {
     setInput(text)
     focusComposer()
   }
+  // The side chat's "Spin off as new chat" (F-t3-069): the new-chat path the Ctrl+Shift+O shortcut takes, with the draft in the
+  // composer. Nothing is sent, so the chat exists on the server only once the person sends it.
+  const spinOffSideChat = (draft: string) => {
+    startNewChat()
+    setActiveTab('chat')
+    setInput(draft)
+    focusComposer()
+  }
+  // A widget's quoted passage (EP-4 W4-IO-2) goes in front of the draft, so the text the person has typed is kept. Like a
+  // follow-up chip, it only sets the draft and does not move the focus.
+  const quoteIntoDraft = (text: string) => {
+    const quote = `> ${text}\n\n`
+    setInput((current) => quote + current)
+  }
 
-  useChatShortcuts({
+  // One set of callbacks for the keydown hook and the command palette (chat-commands), so both run the same action.
+  const chatShortcutActions: UseChatShortcutsOptions = {
     startNewChat,
     // The hook acts on these only while the dock is on; here they also need a live run to show.
     toggleBrowserDock: () => {
@@ -508,7 +639,26 @@ export default function ChatPage() {
     cycleBrowserDock: () => {
       if (liveRunId()) setBrowserDockPosition(nextBrowserDockPosition(browserDock().position))
     },
-  })
+    // The double-Escape stop (F-t3-077). The run is read at the press, and stopLiveRun stops it only while it is still
+    // the streaming answer, so a press cannot stop a newer run. Nothing streaming means nothing stops, and false
+    // hands the Escape back to the ordinary blur.
+    stopRun: () => {
+      const runId = streamingRunId()
+      if (!runId || !stopLiveRun(runId)) return false
+      showStoppingNotice()
+      return true
+    },
+  }
+  useChatShortcuts(chatShortcutActions)
+
+  // Registered while the page is mounted, so its shortcuts appear in the palette and the shortcut sheet only there.
+  createEffect(
+    () => undefined,
+    () => {
+      if (!commandPaletteEnabled()) return undefined
+      return registerChatCommands(chatShortcutActions)
+    },
+  )
 
   // Knowledge import is an explicit, durable action — separate from sending a
   // chat turn. The composer keeps object URLs alive for the current turn; we
@@ -516,17 +666,17 @@ export default function ChatPage() {
   // imports-core enforce its own file policy and ZDR rejection.
   const importAttachmentsToKnowledge = async (attachments: DashboardComposerAttachment[]) => {
     const orgId = session.activeOrg?.id?.trim()
-    if (!orgId) throw new Error('Ingen aktiv organisasjon er tilgjengelig for import.')
-    if (temporaryChat()) throw new Error('Midlertidig chat kan ikke lagre filer i kunnskapsbasen.')
+    if (!orgId) throw new LocalizedError({ no: 'Ingen aktiv organisasjon er tilgjengelig for import.', en: 'No active organization is available for import.' })
+    if (temporaryChat()) throw new LocalizedError({ no: 'Midlertidig chat kan ikke lagre filer i kunnskapsbasen.', en: 'Temporary chat cannot save files to the knowledge base.' })
     const files = await Promise.all(attachments.map(async (attachment) => {
       const response = await fetch(attachment.url)
-      if (!response.ok) throw new Error(`Kunne ikke lese ${attachment.name}.`)
+      if (!response.ok) throw new LocalizedError({ no: `Kunne ikke lese ${attachment.name}.`, en: `Could not read ${attachment.name}.` })
       const blob = await response.blob()
       return new File([blob], attachment.name, {
         type: attachment.type || blob.type || 'application/octet-stream',
       })
     }))
-    if (files.length === 0) throw new Error('Ingen filer er valgt.')
+    if (files.length === 0) throw new LocalizedError({ no: 'Ingen filer er valgt.', en: 'No files are selected.' })
     await importUpload(orgId, files, { zdr: false })
   }
 
@@ -603,6 +753,7 @@ export default function ChatPage() {
           </Show>
         </div>
       </Show>
+      <ConnectionPill />
       <DashboardComposer
         appearance="chat"
         browseWeb={browseWeb()}
@@ -621,12 +772,14 @@ export default function ChatPage() {
         onMessageChange={setInput}
         onPlanModeChange={setPlanMode}
         onStop={handleStop}
-        onSubmit={submitWithWorkPeriod}
+        onSubmit={submitFromComposer}
         onBrowserRegionIntake={(intake) => {
           composerBrowserRegions = intake
         }}
         onTemporaryChatChange={setTemporaryFromComposer}
         planMode={planMode()}
+        speedTier={speedTier()}
+        onSpeedTierChange={setSpeedTier}
         agentModeCap={agentModeCap()}
         // WS14 S2a: the third pill, shown only while an approved plan is waiting to
         // run on this thread. The controller owns whether it is selected.
@@ -645,6 +798,7 @@ export default function ChatPage() {
         // stream and the queued-input arc had no reachable client.
         temporaryChat={temporaryChat()}
         temporaryChatLocked={temporaryChatLocked()}
+        learnContext={learnContext()}
         disabled={isForeignOriginThread()}
         onKnowledgeImport={importAttachmentsToKnowledge}
         voiceReply={voiceReply()}
@@ -866,6 +1020,15 @@ export default function ChatPage() {
   // strip, the stale-tab guard and the auto-open rule all have to agree on what
   // counts as work (audit item 27 -- the header offered "Arbeid 4" for four
   // lifecycle rows). `isWorkStep` in chat-normalizers.ts owns the rule.
+  // The run ledger's rounds come from each turn's `turn_timing`, keyed by the turn id the events carry.
+  const turnTimings = createMemo(() => {
+    const timings = new Map<string, ChatTurnTiming>()
+    if (!runLedgerEnabled) return timings
+    for (const turn of state.turns) {
+      if (turn.timing !== undefined) timings.set(turn.id, turn.timing)
+    }
+    return timings
+  })
   const workStepCount = createMemo(() => state.taskSteps.filter(isWorkStep).length)
   // What the Kilder badge counts. A deep-research turn lists every hit it found
   // but reads a handful, and a badge showing the full list told the reader two
@@ -1191,21 +1354,29 @@ export default function ChatPage() {
           fallback={<ArtifactsPanel items={[]} />}
         >
           <Show when={conversationAttachments().length > 0}>
-            <ChatAttachmentCanvas attachments={conversationAttachments()} selectedId={selectedAttachmentId()} />
+            <ChatAttachmentCanvas
+              attachments={conversationAttachments()}
+              selectedId={selectedAttachmentId()}
+              transcriptThreadId={artifactTemporary() ? undefined : (state.threadId || undefined)}
+            />
           </Show>
           <Show when={artifactItems().length > 0}>
-            <ArtifactsPanel
-              items={artifactItems()}
-              history={{ threadId: state.threadId ?? '', temporary: artifactTemporary() }}
-              editing={{
-                enabled: composerCapabilities()?.artifactEditing === true,
-                threadId: state.threadId ?? '',
-                temporary: artifactTemporary(),
-                spaceThread: spaceScoped(),
-                onSaved: foldSavedArtifactRevision,
-              }}
-              onAskAboutSelection={askAboutArtifactSelection}
-            />
+            {/* The deck view's "Bytt mal" reads its templates from this provider (EP-5 S7). It sits inside the panel, not above
+                the page, so it follows the panel wherever the page draws it. */}
+            <DeckTemplateContext value={deckTemplateActions}>
+              <ArtifactsPanel
+                items={artifactItems()}
+                history={{ threadId: state.threadId ?? '', temporary: artifactTemporary() }}
+                editing={{
+                  enabled: composerCapabilities()?.artifactEditing === true,
+                  threadId: state.threadId ?? '',
+                  temporary: artifactTemporary(),
+                  spaceThread: spaceScoped(),
+                  onSaved: foldSavedArtifactRevision,
+                }}
+                onAskAboutSelection={askAboutArtifactSelection}
+              />
+            </DeckTemplateContext>
           </Show>
         </Show>
       </Match>
@@ -1230,7 +1401,7 @@ export default function ChatPage() {
         />
       </Match>
       <Match when={activeTab() === 'trace'}>
-        <TracePanel runId={liveRunId()} events={uiEvents()} replayTruncated={traceReplayTruncated()} inspectRequest={ledgerInspect()} />
+        <TracePanel runId={liveRunId()} events={uiEvents()} replayTruncated={traceReplayTruncated()} inspectRequest={ledgerInspect()} timings={turnTimings()} />
       </Match>
     </Switch>
   )
@@ -1257,7 +1428,11 @@ export default function ChatPage() {
   // the same reason as `liveRailWorkContent`: the rail reads its prop slot, and
   // each read of an inline JSX prop would build a fresh tree with its own
   // event-stream subscription.
-  const liveRailWideResearch = createMemo(() => <ChatWideResearchPanel runId={liveRunId()} threadId={state.threadId ?? null} />)
+  // The composer's "Bred forskning" entry and the per-item retry (EP-2 S8/S9) are offered only while the gateway serves
+  // wide research and this chat may send a wide-research turn. Read in the props, not in the memo below, so a card
+  // follows the stream without a fresh tree.
+  const wideResearchOffered = () => composerCapabilities()?.wideResearch === true && wideResearchRoute() !== undefined
+  const liveRailWideResearch = createMemo(() => <ChatWideResearchPanel runId={liveRunId()} threadId={state.threadId ?? null} onRetryItem={wideResearchOffered() ? retryWideResearchItem : undefined} />)
   // The layout picker for the live panel's header (WS9.G). A memo, as the panel's other slots are, so
   // the panel reads one element however often it asks. The position is read inside the component.
   const liveRailDockControls = createMemo(() => (
@@ -1381,8 +1556,8 @@ export default function ChatPage() {
         onRerunAsNewTurn={() => void rerunAsNewTurn(row().turn.id)}
         onScheduleThis={() => openScheduleDialogForTurn(row().turn.id)}
         onFeedback={(rating, note) => submitTurnFeedback(row().turn.id, rating, note)}
-        onApprovalDecision={(approvalId, decision) =>
-          void handleApprovalDecision(row().turn.id, approvalId, decision)
+        onApprovalDecision={(approvalId, decision, scope, promote) =>
+          void handleApprovalDecision(row().turn.id, approvalId, decision, scope, promote)
         }
         onApprovalEditedDecision={(approvalId, edit) => handleEditedApprovalDecision(row().turn.id, approvalId, edit)}
         onApprovePlan={(rung, justification, steps) =>
@@ -1397,6 +1572,7 @@ export default function ChatPage() {
         settledFold={row().settledFold}
         settledFoldChoices={settledFoldChoices}
         onSelectFollowUp={setInput}
+        onQuoteSelection={quoteIntoDraft}
         onViewSteps={() => setActiveTab('steps')}
         onViewAttachments={(attachmentId) => {
           setSelectedAttachmentId(attachmentId)
@@ -1408,6 +1584,9 @@ export default function ChatPage() {
         version={row().version}
         isLatest={row().isLatest}
         onSelectVersion={selectExchangeVersion}
+        // The server's version switcher (WS17 S9): shown only for a turn the server reports siblings for.
+        serverVersion={serverVersionBadge(row().turn.version)}
+        onSwitchServerVersion={(messageId) => void switchServerVersion(messageId)}
         // A rewind on a server-versioned thread (WS17 S9): what it would hide, and the undo it leaves under the answer.
         rewindPlan={rewindPlanFor(row().turn.id)}
         onRewind={() => void rewindTo(row().turn.id)}
@@ -1487,12 +1666,19 @@ export default function ChatPage() {
           <Show when={transcriptDensityEnabled}>
             <DensityMenu density={transcriptDensity.level()} onChoose={transcriptDensity.choose} />
           </Show>
-          <Show when={readerPolishEnabled}>
+          <Show when={readerPolishOn()}>
             <ReaderTools
               chapters={chapters()}
               dyslexiaFont={readerAppearance.dyslexiaFont()}
               onDyslexiaFont={readerAppearance.setDyslexiaFont}
               onJump={jumpToChapter}
+            />
+          </Show>
+          <Show when={sideChatEnabled}>
+            <SideChatPanel
+              threadId={state.threadId ?? null}
+              hidden={temporaryChat() || isActiveThreadTemporary() || spaceScoped()}
+              onSpinOff={spinOffSideChat}
             />
           </Show>
         </Show>
@@ -1664,8 +1850,8 @@ export default function ChatPage() {
               */}
               <ComposerTrays
                 trays={dockedTrays()}
-                onApprovalDecision={(turnId, approvalId, decision) =>
-                  void handleApprovalDecision(turnId, approvalId, decision)
+                onApprovalDecision={(turnId, approvalId, decision, scope, promote) =>
+                  void handleApprovalDecision(turnId, approvalId, decision, scope, promote)
                 }
                 onApprovalEditedDecision={(turnId, approvalId, edit) => handleEditedApprovalDecision(turnId, approvalId, edit)}
                 onApprovePlan={(turnId, rung, justification, steps) =>
@@ -1687,8 +1873,19 @@ export default function ChatPage() {
                 onSaveGoal={saveGoal}
                 onContinueGoal={() => void continueGoal()}
                 goalAutoContinue={goalAutoContinue}
+                goalAway={goalAway}
                 onPauseGoal={(paused) => void setGoalPaused(paused)}
                 onClearGoal={() => void clearGoal()}
+                onMarkGoalDone={() => void markGoalDone()}
+                onReopenGoal={() => void reopenGoal()}
+                // EP-2 S8: the "Bred forskning" entry, only while the gateway serves it and the chat may send one.
+                wideResearchEntry={wideResearchOffered()}
+                wideResearchModel={wideResearchRoute()?.model}
+                onStartWideResearch={(choice) => startWideResearch(choice)}
+                // EP-5 S7: the deck template chip, offered while the draft talks about a deck and the composer is idle.
+                deckTemplateEntry={deckTemplateChipOffered()}
+                deckTemplate={composerDeckTemplate()}
+                onDeckTemplateChange={setComposerDeckTemplate}
               />
               <Show when={isStreaming()}>
                 <div class="verevon-chat-stop-wrap">
@@ -1727,6 +1924,10 @@ export default function ChatPage() {
         orgId={session.activeOrg?.id}
         runId={liveRunId()}
         meter={activeRunTurn()?.meter}
+        // EP-1 W4-P4: the computer panel's tabs read this turn's tool calls and the thread's own Space. The Space is read
+        // here, not through the projects switch, so the live process tail works for a Space thread either way.
+        computerCalls={activeRunTurn()?.toolCalls}
+        spaceRef={activeProjectRef() ?? undefined}
         zdr={isActiveThreadTemporary()}
         onRefreshApprovals={(runId) => void refreshApprovalsForRun(runId)}
         onBrowserGiveBack={(runId, note) => void giveBackBrowserRun(runId, note)}

@@ -7,8 +7,12 @@
 //! ([`crate::audit_publisher`]). The subject, the outbox CHECK and the broker grants already admit
 //! it, so this slice changes none of them.
 //!
-//! The envelope names ids and one closed state, never text. A consumer builds whatever it shows from
-//! the state, so no tool name, argument or reason reaches a notification through this event.
+//! The envelope names ids and closed tokens only, never text. A consumer builds whatever it shows from
+//! the tokens, so no tool name, argument or free text reaches a notification through this event.
+//!
+//! A thread goal that stopped (EP-7 S5) is announced too, while thread goals are on. Its item also names
+//! its reason and its goal status, since its state alone does not say what waits: NEEDS_INPUT is a
+//! question's state as well. A pending row names neither.
 //!
 //! Only a persistent run is announced. A zero-retention run's waiting items, and a waived run's
 //! (DEC-32), are never written, so their state stays on the client.
@@ -22,13 +26,13 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use mp_contracts::model_plane::v1::AttentionState;
+use mp_contracts::model_plane::v1::{AttentionReason, AttentionState};
 use mp_events::envelope::Envelope;
 use mp_events::idempotency::derive_idempotency_hash;
 use mp_events::subjects::run_event_subject;
 use sqlx::PgPool;
 
-use crate::attention::{self, Pending, PendingApproval, ThreadFacts};
+use crate::attention::{self, GoalFact, Pending, PendingApproval, ThreadFacts};
 use crate::learning_events::{run_resource_ref, PRODUCER};
 use crate::retention_receipt::RetentionClass;
 
@@ -74,7 +78,8 @@ fn sweep_seconds_from(value: Option<&str>) -> u64 {
 }
 
 /// One item that waits on its owner, reduced to what its envelope names. The run and the owner are the
-/// row's own, and the state is the one the row waits for.
+/// row's own, and the state is the one the row waits for. A goal item's row is the goal, and its run is
+/// the goal's last settled turn's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Waiting {
     pub(crate) org_id: String,
@@ -82,8 +87,20 @@ pub(crate) struct Waiting {
     pub(crate) thread_id: String,
     pub(crate) run_id: String,
     pub(crate) state: AttentionState,
-    /// The row that waits: the approval, the proposed plan or the question.
+    /// The row that waits: the approval, the proposed plan, the question or the goal.
     pub(crate) source_id: String,
+    /// What a goal item names beyond its ids and state. `None` for a pending row, whose state says it all.
+    pub(crate) goal: Option<GoalStop>,
+}
+
+/// What a goal item names beyond its ids and state (EP-7 S5). NEEDS_INPUT is also a question's state and
+/// COMPLETED a finished run's, so the reason and the closed goal status say which goal waits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GoalStop {
+    /// Always `ATTENTION_REASON_GOAL`.
+    pub(crate) reason: AttentionReason,
+    /// The closed status that stopped the goal: `met`, `budget_reached`, `turns_reached` or `blocked`.
+    pub(crate) status: String,
 }
 
 /// The key a waiting item's event is deduplicated by: its run, its state and the row that waits.
@@ -125,17 +142,28 @@ pub(crate) fn build_run_attention_envelope(item: &Waiting, ts: DateTime<Utc>) ->
         org_id: item.org_id.clone(),
         user_id: item.user_id.clone(),
         resource_ref: run_resource_ref(&item.run_id),
-        // Ids and one closed state only. The keys are listed in name order, so the golden text does not
-        // depend on whether the JSON map keeps insertion order.
-        payload: serde_json::json!({
-            "run_id": item.run_id,
-            "source_id": item.source_id,
-            "state": item.state.as_str_name(),
-            "thread_id": item.thread_id,
-        }),
+        // Ids and closed tokens only.
+        payload: payload_of(item),
         zdr: false,
         ..Default::default()
     }
+}
+
+/// The payload of a waiting item. A goal item adds its reason and its goal status, and a pending row keeps
+/// the four keys it has always had. The JSON map keeps its keys sorted, so the golden text does not depend
+/// on the order they are inserted in.
+fn payload_of(item: &Waiting) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "run_id": item.run_id,
+        "source_id": item.source_id,
+        "state": item.state.as_str_name(),
+        "thread_id": item.thread_id,
+    });
+    if let Some(goal) = &item.goal {
+        payload["goal_status"] = goal.status.as_str().into();
+        payload["reason"] = goal.reason.as_str_name().into();
+    }
+    payload
 }
 
 /// Whether a run's waiting items may be announced. Only a persistent run is: a zero-retention run's state
@@ -240,8 +268,140 @@ const QUESTIONS_SQL: &str =
        AND q.requested_at > now() - make_interval(secs => $1)
        AND t.origin = ANY($2)";
 
-/// One sweep: reads the pending items of the three tables, gates them on their run's posture, and writes
-/// one outbox row for each item that has none yet. Returns how many rows this sweep wrote.
+/// A stopped goal of a listed thread, with the latest run of its thread and the run of its last settled turn.
+#[derive(Debug, sqlx::FromRow)]
+struct StoppedGoalRow {
+    org_id: String,
+    user_id: String,
+    thread_id: String,
+    run_id: String,
+    source_id: String,
+    status: String,
+    since: DateTime<Utc>,
+    latest_run_status: Option<String>,
+    latest_run_at: Option<DateTime<Utc>>,
+    retention_class: String,
+    zdr: bool,
+}
+
+/// Goals of a listed thread that stopped inside the window (met, a cap reached or blocked). Only the thread's
+/// latest goal counts, the one the listing reads, and a goal is left out while another row of its thread
+/// waits, since the listing shows that row. Its run is the goal's last settled turn that started one, so a
+/// goal with no such turn names no run and is not announced.
+const GOALS_SQL: &str = "SELECT g.org_id, g.user_id, g.thread_id, last_turn.run_id,
+        g.id AS source_id, g.status, COALESCE(g.closed_at, g.updated_at) AS since,
+        latest.status AS latest_run_status, latest.updated_at AS latest_run_at,
+        r.retention_class, COALESCE(o.zdr, false) AS zdr
+     FROM thread_goals g
+     JOIN threads t ON t.id = g.thread_id
+     JOIN LATERAL (
+        SELECT s.run_id
+        FROM thread_goal_turns s
+        WHERE s.goal_id = g.id AND s.settled_at IS NOT NULL AND s.run_id IS NOT NULL
+        ORDER BY s.turn_no DESC
+        LIMIT 1
+     ) last_turn ON TRUE
+     JOIN runs r ON r.id = last_turn.run_id
+     LEFT JOIN managed_run_terminalization_outbox o ON o.run_id = r.id
+     LEFT JOIN LATERAL (
+        SELECT status, updated_at
+        FROM runs
+        WHERE thread_id = g.thread_id
+        ORDER BY updated_at DESC, created_at DESC, id DESC
+        LIMIT 1
+     ) latest ON TRUE
+     WHERE g.status IN ('met', 'budget_reached', 'turns_reached', 'blocked')
+       AND GREATEST(g.closed_at, g.updated_at) > now() - make_interval(secs => $1)
+       AND t.origin = ANY($2)
+       AND NOT EXISTS (
+           SELECT 1 FROM thread_goals newer
+           WHERE newer.thread_id = g.thread_id
+             AND (newer.updated_at, newer.created_at, newer.id) > (g.updated_at, g.created_at, g.id)
+       )
+       AND NOT EXISTS (
+           SELECT 1 FROM approvals a
+           JOIN runs ar ON ar.id = a.run_id
+           LEFT JOIN plans ap ON ap.id = a.plan_id
+           WHERE ar.thread_id = g.thread_id
+             AND a.status = 'requested'
+             AND (a.expires_at IS NULL OR a.expires_at > now())
+             AND ((a.kind = 'plan' AND ap.status = 'proposed')
+                  OR (a.kind IN ('tool_call', 'permission', 'destructive', 'cost')
+                      AND ar.status NOT IN ('completed', 'failed', 'cancelled')))
+       )
+       AND NOT EXISTS (
+           SELECT 1 FROM plans p
+           WHERE p.thread_id = g.thread_id AND p.status = 'proposed'
+       )
+       AND NOT EXISTS (
+           SELECT 1 FROM run_questions q
+           WHERE q.thread_id = g.thread_id AND q.state = 'requested' AND q.expires_at > now()
+       )";
+
+/// The state and reason a stopped goal raises, or `None` when the listing would not show it. The thread's
+/// latest run must not be working, and a met goal must not sit behind a failed run. The derivation makes
+/// that call, so the sweep and the listing agree on which goal stands.
+fn goal_stop(row: &StoppedGoalRow) -> Option<(AttentionState, AttentionReason)> {
+    let (state, reason) = attention::goal_attention(&row.status)?;
+    let pending = Pending {
+        goal: Some(GoalFact {
+            status: row.status.clone(),
+            since: row.since,
+        }),
+        ..Pending::default()
+    };
+    let facts = ThreadFacts {
+        archived_at: None,
+        latest_run_status: row.latest_run_status.as_deref().unwrap_or(""),
+        latest_run_at: row.latest_run_at,
+    };
+    let derived = attention::derive(&facts, &pending);
+    (derived.state == state && derived.reason == reason).then_some((state, reason))
+}
+
+/// The stopped goals of the listed threads as waiting items, while thread goals are on (EP-7 S5). A goal the
+/// zero-retention posture refuses is counted into `withheld`, as a refused pending row is.
+async fn goal_items(
+    pool: &PgPool,
+    origins: &[String],
+    withheld: &mut u64,
+) -> Result<Vec<Waiting>, sqlx::Error> {
+    if !attention::goals_enabled() {
+        return Ok(Vec::new());
+    }
+    let rows: Vec<StoppedGoalRow> = sqlx::query_as(GOALS_SQL)
+        .bind(SWEEP_WINDOW_SECONDS)
+        .bind(origins)
+        .fetch_all(pool)
+        .await?;
+    let mut items = Vec::new();
+    for row in rows {
+        let Some((state, reason)) = goal_stop(&row) else {
+            continue;
+        };
+        if !enqueue_permitted(row.zdr, &row.retention_class) {
+            *withheld += 1;
+            continue;
+        }
+        items.push(Waiting {
+            org_id: row.org_id,
+            user_id: row.user_id,
+            thread_id: row.thread_id,
+            run_id: row.run_id,
+            state,
+            source_id: row.source_id,
+            goal: Some(GoalStop {
+                reason,
+                status: row.status,
+            }),
+        });
+    }
+    Ok(items)
+}
+
+/// One sweep: reads the pending items of the three tables and the stopped goals, gates them on their run's
+/// posture, and writes one outbox row for each item that has none yet. Returns how many rows this sweep
+/// wrote.
 ///
 /// Each row is its own statement, so a refused row is counted, left for the next sweep, and never holds
 /// back the others. A failed read ends the sweep, and the next one starts again from the tables.
@@ -290,6 +450,7 @@ pub(crate) async fn sweep_once(pool: &PgPool, now: DateTime<Utc>) -> Result<usiz
             run_id: row.run_id,
             state,
             source_id: row.source_id,
+            goal: None,
         });
     }
     for (rows, state) in [
@@ -308,9 +469,11 @@ pub(crate) async fn sweep_once(pool: &PgPool, now: DateTime<Utc>) -> Result<usiz
                 run_id: row.run_id,
                 state,
                 source_id: row.source_id,
+                goal: None,
             });
         }
     }
+    items.extend(goal_items(pool, &origins, &mut withheld).await?);
     if withheld > 0 {
         metrics::counter!("mp_session_attention_events_skipped_zdr_total").increment(withheld);
     }
@@ -389,6 +552,7 @@ mod tests {
             run_id: "run-abc".to_owned(),
             state,
             source_id: source.to_owned(),
+            goal: None,
         }
     }
 
@@ -924,3 +1088,8 @@ mod db_tests {
         assert_eq!(b[0].user_id, user_b);
     }
 }
+
+/// EP-7 S5: the goal item build.
+#[cfg(test)]
+#[path = "attention_events_goal_tests.rs"]
+mod goal_tests;

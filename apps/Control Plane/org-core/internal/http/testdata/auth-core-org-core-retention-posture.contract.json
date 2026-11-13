@@ -18,7 +18,10 @@
     "status": 200,
     "body": {
       "zdrIntent": true,
-      "entitled": true
+      "entitled": true,
+      "effectiveZdr": true,
+      "lapsed": false,
+      "planLapsePolicy": "intent_stays_zdr"
     }
   },
   "notFound": {

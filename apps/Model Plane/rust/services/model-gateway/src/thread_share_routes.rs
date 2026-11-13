@@ -6,36 +6,54 @@
 //! - `GET /v1/threads/:thread_id/snapshots`: the caller's live snapshots of the thread.
 //! - `GET /v1/snapshots/:snapshot_id`: one live snapshot with the copy it holds.
 //! - `DELETE /v1/snapshots/:snapshot_id`: revoke a snapshot; its body is deleted.
+//! - `POST /v1/snapshots/:snapshot_id/grants`, body `{"grantee_user_id"}`: share a live snapshot
+//!   with a member of the owner's organisation (a Control `view` grant) (201).
+//! - `DELETE /v1/snapshots/:snapshot_id/grants`, `?grantee_user_id=` or the same JSON body: stop
+//!   sharing it with that member.
+//! - `GET /v1/snapshots/:snapshot_id/grants`: the members it is shared with.
+//! - `GET /v1/shared-snapshots/:snapshot_id`: a live snapshot the caller owns, or one a member was
+//!   granted a view of (W4-SH-5). The copy is the same static text as the owner's read.
 //!
 //! Session Core's `ThreadShareService` is the authority: it takes the snapshot from the export read
 //! in the transaction that decides whether the thread may leave (EP-12 S9), and it decides who may
 //! read one. The gateway forwards the caller's session bearer only, never an owner from the path.
-//! Reads are owner-only in this version, because Control has no grant decision for
-//! `conversation_snapshot` that Session Core can verify; the gateway writes no grant and never
-//! holds an `authz:*` scope. Snapshots are for people: the route policy refuses a key principal
-//! before these handlers run.
+//! Reads are owner-only, except the shared read (W4-SH-5), where Session Core checks the member's
+//! grant with Control. The grant routes (W4-SH-4) only forward: Session Core proves the caller owns
+//! the snapshot and writes the grant to Control with the owner's own delegated credential, so the
+//! gateway writes no grant and never holds an `authz:*` scope. It forwards the owner's
+//! `x-data-plane-authorization` bearer to Session Core on the grant routes (required) and on revoke
+//! (optional; needed to remove the grants too). The shared read forwards that bearer too, optional:
+//! the owner reads without it, and a member's read needs it for the Control check. Snapshots are
+//! for people: the route policy refuses a key principal before these handlers run, and the grant
+//! routes and the shared read are not on any key list.
 //!
 //! Every route answers 404 `thread_shares_disabled` while `MODEL_GATEWAY_THREAD_SHARES` is not the
-//! literal `true`. Taking a snapshot refuses a zero-retention or waived caller first (feature
-//! `conversation_share`), as the export does; revoking and reading do not, since neither makes a
-//! copy. Errors are the typed envelope `{error:{code,message,details}}` with `details` an object,
-//! except a ZDR refusal, which keeps its catalogue body. A snapshot read is `Cache-Control:
-//! no-store`, because its body is the owner's conversation.
+//! literal `true`; the grant routes and the shared read answer 404 `snapshot_grants_disabled` while
+//! Session Core's `SESSION_SNAPSHOT_GRANTS_ENABLED` is off. Taking a snapshot refuses a
+//! zero-retention or waived caller first (feature `conversation_share`), as the export does;
+//! revoking and reading do not, since neither makes a copy. Errors are the typed envelope
+//! `{error:{code,message,details}}` with `details` an object, except a ZDR refusal, which keeps its
+//! catalogue body. A snapshot read is `Cache-Control: no-store`, because its body is the owner's
+//! conversation.
 
 use axum::{
-    extract::{Path, State},
+    body::Bytes,
+    extract::{Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     Extension, Json,
 };
 use mp_contracts::model_plane::v1::{
-    CreateSnapshotRequest, ExportThreadResponse, ExportedMessage, ExportedRun, GetSnapshotRequest,
-    ListSnapshotsRequest, RevokeSnapshotRequest, ThreadShareSnapshot,
+    CreateSnapshotRequest, ExportThreadResponse, ExportedMessage, ExportedRun,
+    GetSharedSnapshotRequest, GetSnapshotRequest, ListSnapshotGrantsRequest, ListSnapshotsRequest,
+    RevokeSnapshotRequest, ShareSnapshotRequest, SnapshotGrant, ThreadShareSnapshot,
+    UnshareSnapshotRequest,
 };
 use mp_contracts::zdr_refusal::Refusal;
+use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth::{Claims, VerifiedSessionBearer};
+use crate::auth::{Claims, VerifiedDataPlaneBearer, VerifiedSessionBearer};
 use crate::http_routes::{authenticated_session_request, timestamp_to_rfc3339, HttpJsonError};
 use crate::state::AppState;
 
@@ -54,6 +72,11 @@ const DISABLED_MESSAGE: &str = "conversation sharing is not enabled on this depl
 /// The typed codes Session Core puts on its trailers, and the trailers that carry them.
 const NOT_EXPORTABLE: &str = "thread_not_exportable";
 const LIMIT_REACHED: &str = "snapshot_limit_reached";
+const GRANTS_DISABLED: &str = "snapshot_grants_disabled";
+const GRANTS_UNCONFIGURED: &str = "snapshot_grants_unconfigured";
+const GRANTS_UNAVAILABLE: &str = "snapshot_grants_unavailable";
+const GRANTS_CLEANUP_FAILED: &str = "snapshot_grants_cleanup_failed";
+const GRANTEE_NOT_IN_ORGANIZATION: &str = "grantee_not_in_organization";
 const TOO_LARGE: &str = "snapshot_too_large";
 const ERROR_CODE_TRAILER: &str = "x-mp-error-code";
 const ERROR_REASON_TRAILER: &str = "x-mp-error-reason";
@@ -74,6 +97,16 @@ pub(crate) fn router() -> axum::Router<AppState> {
         .route(
             "/v1/snapshots/:snapshot_id",
             axum::routing::get(get_snapshot).delete(revoke_snapshot),
+        )
+        .route(
+            "/v1/snapshots/:snapshot_id/grants",
+            axum::routing::post(share_snapshot)
+                .delete(unshare_snapshot)
+                .get(list_snapshot_grants),
+        )
+        .route(
+            "/v1/shared-snapshots/:snapshot_id",
+            axum::routing::get(get_shared_snapshot),
         )
 }
 
@@ -179,28 +212,257 @@ pub(crate) async fn get_snapshot(
         .into_response())
 }
 
+/// `GET /v1/shared-snapshots/:snapshot_id` (W4-SH-5): a live snapshot the caller owns, or one a
+/// member was granted a view of. The copy is static text; nothing here calls a model, connector or
+/// tool. The owner reads without the delegated credential. A member's read needs it, because
+/// Session Core checks the member's grant with Control; without it the read is not found.
+pub(crate) async fn get_shared_snapshot(
+    State(state): State<AppState>,
+    bearer: VerifiedSessionBearer,
+    data_plane: Option<Extension<VerifiedDataPlaneBearer>>,
+    Path(snapshot_id): Path<String>,
+) -> Result<Response, HttpJsonError> {
+    switch_gate()?;
+    let read = state
+        .thread_share_client
+        .clone()
+        .get_shared_snapshot(delegated_share_request(
+            GetSharedSnapshotRequest {
+                snapshot_id: snapshot_id.trim().to_owned(),
+            },
+            &bearer,
+            data_plane.as_ref().map(|Extension(bearer)| bearer),
+        )?)
+        .await
+        .map_err(|error| share_error(&error, Subject::Snapshot))?
+        .into_inner();
+    let snapshot = read.snapshot.as_ref().ok_or_else(share_failed)?;
+    let body = read.body.as_ref().ok_or_else(share_failed)?;
+    let data = json!({
+        "snapshot": snapshot_json(snapshot),
+        "body": body_json(body)?,
+    });
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({ "data": data })),
+    )
+        .into_response())
+}
+
 /// `DELETE /v1/snapshots/:snapshot_id`. Revoking makes no copy, so a zero-retention owner may
 /// revoke what they shared before.
 pub(crate) async fn revoke_snapshot(
     State(state): State<AppState>,
     bearer: VerifiedSessionBearer,
+    data_plane: Option<Extension<VerifiedDataPlaneBearer>>,
     Path(snapshot_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     switch_gate()?;
+    // The delegated credential is optional here: without it the body is still deleted, and Session
+    // Core reports that the shares could not be removed when sharing is on.
     let revoked = state
         .thread_share_client
         .clone()
-        .revoke_snapshot(authenticated_session_request(
+        .revoke_snapshot(delegated_share_request(
             RevokeSnapshotRequest {
                 snapshot_id: snapshot_id.trim().to_owned(),
             },
             &bearer,
+            data_plane.as_ref().map(|Extension(bearer)| bearer),
         )?)
         .await
         .map_err(|error| share_error(&error, Subject::Snapshot))?
         .into_inner();
     let snapshot = revoked.snapshot.as_ref().ok_or_else(share_failed)?;
     Ok(Json(json!({ "data": { "snapshot": snapshot_json(snapshot) } })))
+}
+
+/// The JSON of a grant route's request: `{"grantee_user_id": "..."}`.
+#[derive(Debug, Default, Deserialize)]
+struct GranteeBody {
+    #[serde(default)]
+    grantee_user_id: String,
+}
+
+/// The query of `DELETE .../grants`: `?grantee_user_id=...`.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct GranteeQuery {
+    #[serde(default)]
+    grantee_user_id: String,
+}
+
+/// `POST /v1/snapshots/:snapshot_id/grants`. Sharing makes a durable grant, so a zero-retention or
+/// waived caller is refused here first, as creating a snapshot is.
+pub(crate) async fn share_snapshot(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedSessionBearer,
+    data_plane: Option<Extension<VerifiedDataPlaneBearer>>,
+    Path(snapshot_id): Path<String>,
+    body: Bytes,
+) -> Result<Response, HttpJsonError> {
+    switch_gate()?;
+    share_gate(&claims)?;
+    let data_plane = require_delegation(data_plane.as_ref())?;
+    let grantee_user_id = grantee_from(None, &body)?;
+    let shared = state
+        .thread_share_client
+        .clone()
+        .share_snapshot(delegated_share_request(
+            ShareSnapshotRequest {
+                snapshot_id: snapshot_id.trim().to_owned(),
+                grantee_user_id,
+            },
+            &bearer,
+            Some(data_plane),
+        )?)
+        .await
+        .map_err(|error| share_error(&error, Subject::Snapshot))?
+        .into_inner();
+    let grant = shared.grant.as_ref().ok_or_else(share_failed)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "data": { "grant": grant_json(grant) } })),
+    )
+        .into_response())
+}
+
+/// `DELETE /v1/snapshots/:snapshot_id/grants`. Removing a grant makes no copy, so a zero-retention
+/// owner may do it.
+pub(crate) async fn unshare_snapshot(
+    State(state): State<AppState>,
+    bearer: VerifiedSessionBearer,
+    data_plane: Option<Extension<VerifiedDataPlaneBearer>>,
+    Path(snapshot_id): Path<String>,
+    Query(query): Query<GranteeQuery>,
+    body: Bytes,
+) -> Result<Json<Value>, HttpJsonError> {
+    switch_gate()?;
+    let data_plane = require_delegation(data_plane.as_ref())?;
+    let grantee_user_id = grantee_from(Some(query.grantee_user_id), &body)?;
+    state
+        .thread_share_client
+        .clone()
+        .unshare_snapshot(delegated_share_request(
+            UnshareSnapshotRequest {
+                snapshot_id: snapshot_id.trim().to_owned(),
+                grantee_user_id,
+            },
+            &bearer,
+            Some(data_plane),
+        )?)
+        .await
+        .map_err(|error| share_error(&error, Subject::Snapshot))?;
+    Ok(Json(json!({ "data": { "removed": true } })))
+}
+
+/// `GET /v1/snapshots/:snapshot_id/grants`: the members the snapshot is shared with.
+pub(crate) async fn list_snapshot_grants(
+    State(state): State<AppState>,
+    bearer: VerifiedSessionBearer,
+    data_plane: Option<Extension<VerifiedDataPlaneBearer>>,
+    Path(snapshot_id): Path<String>,
+) -> Result<Response, HttpJsonError> {
+    switch_gate()?;
+    let data_plane = require_delegation(data_plane.as_ref())?;
+    let listed = state
+        .thread_share_client
+        .clone()
+        .list_snapshot_grants(delegated_share_request(
+            ListSnapshotGrantsRequest {
+                snapshot_id: snapshot_id.trim().to_owned(),
+            },
+            &bearer,
+            Some(data_plane),
+        )?)
+        .await
+        .map_err(|error| share_error(&error, Subject::Snapshot))?
+        .into_inner();
+    let grants: Vec<Value> = listed.grants.iter().map(grant_json).collect();
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({ "data": { "grants": grants } })),
+    )
+        .into_response())
+}
+
+/// The owner's delegated Data Plane bearer, which Session Core needs to act for them in Control. A
+/// grant route without it cannot succeed, so it is refused before any call is made.
+fn require_delegation(
+    data_plane: Option<&Extension<VerifiedDataPlaneBearer>>,
+) -> Result<&VerifiedDataPlaneBearer, HttpJsonError> {
+    data_plane.map(|Extension(bearer)| bearer).ok_or_else(|| {
+        envelope(
+            StatusCode::UNAUTHORIZED,
+            "delegated_credential_required",
+            "sharing needs your delegated credential; sign in again",
+            json!({}),
+        )
+    })
+}
+
+/// The member a grant request names: the query value when it is set, else the JSON body's.
+fn grantee_from(query: Option<String>, body: &[u8]) -> Result<String, HttpJsonError> {
+    let invalid = || {
+        envelope(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "grantee_user_id is required",
+            json!({}),
+        )
+    };
+    let from_query = query.unwrap_or_default().trim().to_owned();
+    if !from_query.is_empty() {
+        return Ok(from_query);
+    }
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Err(invalid());
+    }
+    let parsed: GranteeBody = serde_json::from_slice(body).map_err(|_| invalid())?;
+    let grantee = parsed.grantee_user_id.trim().to_owned();
+    if grantee.is_empty() {
+        return Err(invalid());
+    }
+    Ok(grantee)
+}
+
+/// The session bearer, and the delegated Data Plane bearer when there is one, as gRPC metadata.
+/// Thread delete uses it too, so Session Core can revoke a deleted thread's snapshot grants with the
+/// owner's own credential; without the bearer the request is the plain session request.
+pub(crate) fn delegated_share_request<T>(
+    value: T,
+    bearer: &VerifiedSessionBearer,
+    data_plane: Option<&VerifiedDataPlaneBearer>,
+) -> Result<tonic::Request<T>, HttpJsonError> {
+    let mut request = authenticated_session_request(value, bearer)?;
+    if let Some(data_plane) = data_plane {
+        let forwarded = format!("Bearer {}", data_plane.as_str())
+            .parse()
+            .map_err(|_| {
+                envelope(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "thread_share_failed",
+                    "the delegated credential is not forwardable",
+                    json!({}),
+                )
+            })?;
+        request
+            .metadata_mut()
+            .insert("x-data-plane-authorization", forwarded);
+    }
+    Ok(request)
+}
+
+/// One member grant. An unreadable grant time is `null`.
+fn grant_json(grant: &SnapshotGrant) -> Value {
+    json!({
+        "grantee_user_id": grant.grantee_user_id,
+        "granted_at": grant
+            .granted_at
+            .clone()
+            .map(|at| timestamp_to_rfc3339(Some(at)))
+            .filter(|at| !at.is_empty()),
+    })
 }
 
 /// The switch first: a deployment without the feature answers the same for every caller.
@@ -243,6 +505,40 @@ fn share_error(error: &tonic::Status, subject: Subject) -> HttpJsonError {
     let code = trailer_text(error, ERROR_CODE_TRAILER);
     match error.code() {
         tonic::Code::Unavailable if error.message() == DISABLED => disabled(),
+        tonic::Code::Unavailable if error.message() == GRANTS_DISABLED => envelope(
+            StatusCode::NOT_FOUND,
+            GRANTS_DISABLED,
+            "sharing a conversation with members is not enabled on this deployment",
+            json!({}),
+        ),
+        tonic::Code::Unavailable if code == Some(GRANTS_CLEANUP_FAILED) => envelope(
+            StatusCode::SERVICE_UNAVAILABLE,
+            GRANTS_CLEANUP_FAILED,
+            "the snapshot was revoked, but its shares could not all be removed; revoke it again to retry",
+            json!({}),
+        ),
+        tonic::Code::Unavailable
+            if code == Some(GRANTS_UNCONFIGURED) || code == Some(GRANTS_UNAVAILABLE) =>
+        {
+            envelope(
+                StatusCode::SERVICE_UNAVAILABLE,
+                GRANTS_UNAVAILABLE,
+                "sharing is unavailable right now; try again",
+                json!({}),
+            )
+        }
+        tonic::Code::InvalidArgument if code == Some(GRANTEE_NOT_IN_ORGANIZATION) => envelope(
+            StatusCode::BAD_REQUEST,
+            GRANTEE_NOT_IN_ORGANIZATION,
+            "a conversation can only be shared with members of your organization",
+            json!({}),
+        ),
+        tonic::Code::Unauthenticated => envelope(
+            StatusCode::UNAUTHORIZED,
+            "unauthenticated",
+            "the request could not be authenticated; sign in again",
+            json!({}),
+        ),
         tonic::Code::FailedPrecondition if code == Some(NOT_EXPORTABLE) => {
             let reason = trailer_text(error, ERROR_REASON_TRAILER);
             envelope(

@@ -9,6 +9,14 @@ import {
 } from 'crypto';
 import { readFileSync } from 'fs';
 import type { FreshExecutionRetentionProof, InteractiveRetentionPosture } from './interactive-retention-policy';
+// A value import on purpose: the issuer checks a waiver with `instanceof`. It
+// comes from the dependency-free verified module, because the signer imports
+// this module for its Nest provider and importing the signer here would be a
+// load-order cycle.
+import {
+  RetentionDecisionInvalidError,
+  VerifiedRetentionDecision,
+} from './retention-decision.verified';
 import {
   assertWebPolicyClaimSize,
   BASELINE_WEB_POLICY_CLAIM,
@@ -55,6 +63,11 @@ type ModelPlaneJwtClaims = {
   serviceId?: string;
   reason?: string;
   retentionPosture?: ServiceRetentionPosture | InteractiveRetentionPosture;
+  /**
+   * A verified, session-bound per-connection ZDR waiver decision (ZDR-Z-14b).
+   * Accepted only for a `user` token; see {@link resolveWaiverMint}.
+   */
+  retentionWaiver?: VerifiedRetentionDecision;
   // A fresh password re-check from POST /api/v2/auth/step-up (WS13-S5).
   stepUp?: { at: number; method: 'password' };
   /**
@@ -324,6 +337,115 @@ function tenantTtlCapSeconds(
     : undefined;
 }
 
+/**
+ * Audiences whose user token is never lowered by a waiver (ZDR.md 5.6, D-ZDR-11):
+ * a waived turn never gets a browser or sandbox bearer. Single source of truth
+ * for the exclusion, like `SERVICE_ONLY_PLANE_AUDIENCES`.
+ */
+export const WAIVER_EXCLUDED_AUDIENCES = [
+  'browser-broker',
+  'sandbox-manager',
+] as const satisfies readonly PlaneAudience[];
+
+const waiverExcludedAudienceSet: ReadonlySet<string> = new Set(
+  WAIVER_EXCLUDED_AUDIENCES,
+);
+
+/**
+ * True for every interactive user audience of the model-plane route and the
+ * plane route (`model-gateway` and every `InteractivePlaneAudience`) except
+ * `WAIVER_EXCLUDED_AUDIENCES`. The callers have already validated the slug.
+ */
+export function isWaiverAudience(audience: AuthCoreAudience): boolean {
+  return (
+    !waiverExcludedAudienceSet.has(audience) &&
+    !serviceOnlyPlaneAudienceSet.has(audience)
+  );
+}
+
+/** Longest a token that carries a `zdr_waiver` claim may live, in seconds. */
+export const WAIVER_TOKEN_MAX_TTL_SECONDS = 300;
+
+/**
+ * Waiver contract version in the `zdr_waiver.version` claim. Equal to
+ * `WAIVER_CONTRACT_VERSION` in retention-decision.signer.ts (not imported here,
+ * so this module has no load-order cycle with the signer); the enforcers refuse
+ * any other.
+ */
+const WAIVER_CLAIM_VERSION = 1;
+
+/** The `zdr_waiver` claim as the enforcers read it (version, provider, connection, ack_id). */
+export type ZdrWaiverClaim = {
+  version: number;
+  provider: string;
+  connection: string;
+  ack_id: string;
+  digest: string;
+  decision_jti: string;
+};
+
+type WaiverMint = {
+  zdrWaiver: ZdrWaiverClaim;
+  ttlCapSeconds: number;
+};
+
+/**
+ * The `zdr_waiver` claim and lifetime cap of a token, or `undefined` when the
+ * mint carries no waiver. A waiver is never silently dropped: it must be a
+ * `VerifiedRetentionDecision` (checked with `instanceof`, first). It is then
+ * accepted only for a `user` token on a waiver audience, whose org posture is
+ * ZDR, and whose decision names exactly this user and org. Anything else throws
+ * and nothing is signed. The same decision gives the same claim on every audience.
+ */
+function resolveWaiverMint(
+  audience: AuthCoreAudience,
+  principalType: TokenPrincipalType,
+  claims: RetentionAwareClaims & {
+    userId: string;
+    retentionWaiver?: VerifiedRetentionDecision;
+  },
+): WaiverMint | undefined {
+  const decision = claims.retentionWaiver;
+  if (decision === undefined) return undefined;
+  // First check, before any field is read: a structurally equal object (a spread
+  // copy or a request-shaped object) was never verified by the signer.
+  if (!(decision instanceof VerifiedRetentionDecision)) {
+    throw new RetentionDecisionInvalidError(
+      'A retention waiver must be a decision the signer verified',
+    );
+  }
+  if (principalType !== 'user' || !isWaiverAudience(audience)) {
+    throw new Error(
+      `A retention waiver cannot be carried on a ${principalType} token for ${audience}`,
+    );
+  }
+  if (
+    claims.retentionPosture?.authority !== 'interactive-org-retention-policy' ||
+    claims.retentionPosture.zdr !== true
+  ) {
+    throw new Error('A retention waiver needs a ZDR organization posture');
+  }
+  if (
+    decision.decision !== 'waived' ||
+    decision.orgId !== claims.orgId ||
+    decision.userId !== claims.userId ||
+    decision.expiresAt <= Math.floor(Date.now() / 1000)
+  ) {
+    throw new Error('Retention waiver does not match the token subject');
+  }
+  return {
+    zdrWaiver: {
+      version: WAIVER_CLAIM_VERSION,
+      provider: decision.provider,
+      connection: decision.connection,
+      ack_id: decision.ackId,
+      digest: decision.digest,
+      decision_jti: decision.jti,
+    },
+    ttlCapSeconds: WAIVER_TOKEN_MAX_TTL_SECONDS,
+  };
+}
+
 type PlaneJwtClaims = {
   userId: string;
   orgId: string;
@@ -333,6 +455,12 @@ type PlaneJwtClaims = {
   serviceId?: string;
   reason?: string;
   retentionPosture?: ServiceRetentionPosture | InteractiveRetentionPosture;
+  /**
+   * A verified, session-bound per-connection ZDR waiver decision (ZDR-Z-14b).
+   * Accepted only for a `user` token on a waiver audience; see
+   * {@link resolveWaiverMint}.
+   */
+  retentionWaiver?: VerifiedRetentionDecision;
   executionRetentionProof?: FreshExecutionRetentionProof;
   /**
    * Delegated-identity token exchange (auth-core §1, `verifyPlaneSubjectToken`
@@ -810,9 +938,11 @@ export class ConvexTokenService {
     }
     const apiKeyIdentity =
       principalType === 'api_key' ? apiKeyIdentityClaims(claims) : undefined;
-    const zdr = issuedTokenZdr(principalType, claims);
+    const waiver = resolveWaiverMint('model-gateway', principalType, claims);
+    // A verified waiver is the one path that signs `zdr: false` for a ZDR org.
+    const zdr = waiver ? false : issuedTokenZdr(principalType, claims);
     const tenantTtlCap = tenantTtlCapSeconds(principalType, claims);
-    const ttlSeconds =
+    const baseTtlSeconds =
       apiKeyIdentity !== undefined
         ? apiKeyTtlSeconds(
             this.modelPlaneTtlSeconds,
@@ -821,6 +951,9 @@ export class ConvexTokenService {
         : tenantTtlCap === undefined
           ? this.modelPlaneTtlSeconds
           : Math.min(this.modelPlaneTtlSeconds, tenantTtlCap);
+    const ttlSeconds = waiver
+      ? Math.min(baseTtlSeconds, waiver.ttlCapSeconds)
+      : baseTtlSeconds;
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       iss: this.modelPlaneIssuer,
@@ -848,6 +981,9 @@ export class ConvexTokenService {
       // for a `tenant` principal, from the same organization policy resolved at
       // mint time (the caller stamps it; see `tenantTtlCapSeconds`).
       zdr,
+      // ZDR-Z-14b: the org is ZDR (`org_zdr`) and one connection is waived for
+      // this turn (`zdr_waiver`); both ride only with a verified decision.
+      ...(waiver ? { org_zdr: true, zdr_waiver: waiver.zdrWaiver } : {}),
     };
 
     const encodedHeader = this.encodeSegment({
@@ -936,7 +1072,9 @@ export class ConvexTokenService {
     }
     const apiKeyIdentity =
       principalType === 'api_key' ? apiKeyIdentityClaims(claims) : undefined;
-    const zdr = issuedTokenZdr(principalType, claims);
+    const waiver = resolveWaiverMint(audience, principalType, claims);
+    // A verified waiver is the one path that signs `zdr: false` for a ZDR org.
+    const zdr = waiver ? false : issuedTokenZdr(principalType, claims);
     const webPolicy = issuedWebPolicy(
       audience,
       principalType,
@@ -965,10 +1103,13 @@ export class ConvexTokenService {
           : Math.min(requestedTtlSeconds, tenantTtlCap);
     const webPolicyTtlCap =
       webPolicy === undefined ? undefined : webPolicyTtlCapSeconds();
-    const ttlSeconds =
+    const webPolicyCappedTtlSeconds =
       webPolicyTtlCap === undefined
         ? tenantCappedTtlSeconds
         : Math.min(tenantCappedTtlSeconds, webPolicyTtlCap);
+    const ttlSeconds = waiver
+      ? Math.min(webPolicyCappedTtlSeconds, waiver.ttlCapSeconds)
+      : webPolicyCappedTtlSeconds;
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       iss: this.planeIssuer,
@@ -1002,7 +1143,14 @@ export class ConvexTokenService {
       // Do not infer this claim from `zdr`: legacy user issuance can default
       // that value to false when no posture was provided. Service principal
       // policy and API-key posture are not proof of an interactive org choice.
-      ...(audience === 'execution-core' &&
+      // ZDR-Z-14b: a verified waiver stamps the org as ZDR and names the one
+      // waived connection; it replaces the `org_zdr: false` proof below, which
+      // needs a non-ZDR org and so can never apply beside a waiver.
+      ...(waiver
+        ? { org_zdr: true, zdr_waiver: waiver.zdrWaiver }
+        : {}),
+      ...(!waiver &&
+      audience === 'execution-core' &&
       principalType === 'user' &&
       claims.retentionPosture?.authority ===
         'interactive-org-retention-policy' &&
@@ -1442,6 +1590,16 @@ export class ConvexTokenService {
       planeTokenIssuer: this.planeIssuer,
       keys: [this.publicJwk],
     };
+  }
+
+  /**
+   * SPKI DER of the token signing public key. Exposed only so the dedicated
+   * retention-decision signer can prove its key differs from this one (a leaked
+   * token key must never be able to mint a waiver). It carries no private
+   * material and is not published anywhere that the JWKS does not already.
+   */
+  tokenSigningPublicKeySpki(): Buffer {
+    return this.publicKey.export({ type: 'spki', format: 'der' }) as Buffer;
   }
 
   private loadKeyPair() {

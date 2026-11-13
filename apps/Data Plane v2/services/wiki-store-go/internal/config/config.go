@@ -33,6 +33,14 @@ type Config struct {
 	GDPRSharedNatsURL      string
 	GDPRSharedNatsUser     string
 	GDPRSharedNatsPassword string
+
+	// CreatePageProposalsEnabled is the WIKI_CREATE_PAGE_PROPOSALS_ENABLED
+	// rollout switch (strict literal "true", off by default). On, agents may
+	// file proposals for pages that do not exist yet, and reviewers can list
+	// pending proposals. Off, both routes answer 404. Proposals already filed
+	// stay reviewable. The switch grants nothing: a human accept is still the
+	// only way a page is written.
+	CreatePageProposalsEnabled bool
 }
 
 func Load() *Config {
@@ -57,6 +65,8 @@ func Load() *Config {
 		GDPRSharedNatsURL:      strings.TrimSpace(os.Getenv("WIKISTORE_GDPR_SHARED_NATS_URL")),
 		GDPRSharedNatsUser:     strings.TrimSpace(os.Getenv("WIKISTORE_GDPR_SHARED_NATS_USER")),
 		GDPRSharedNatsPassword: strings.TrimSpace(os.Getenv("WIKISTORE_GDPR_SHARED_NATS_PASSWORD")),
+
+		CreatePageProposalsEnabled: strings.TrimSpace(os.Getenv("WIKI_CREATE_PAGE_PROPOSALS_ENABLED")) == "true",
 	}
 }
 

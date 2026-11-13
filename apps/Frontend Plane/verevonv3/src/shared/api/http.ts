@@ -1,5 +1,6 @@
 import { gatewayBaseUrl } from './config'
 import { ApiError, type ApiErrorHints } from './api-error'
+import { recordFailedResponse } from './support-correlation'
 
 export { ApiError, clientError, hasErrorCode, type ApiErrorHints } from './api-error'
 
@@ -61,16 +62,19 @@ export function extractError(
     }
     if (errorField && typeof errorField === 'object') {
       const e = errorField as Record<string, unknown>
+      // The envelope's details: an object, or a bare array of them (per-row issues from some upstreams), kept whole
+      // for the caller that reads it. The hints below read named keys, which only an object has.
       const details =
-        e.details && typeof e.details === 'object' && !Array.isArray(e.details) ? (e.details as Record<string, unknown>) : null
-      const blockReason = e.blockReason ?? details?.block_reason
+        e.details && typeof e.details === 'object' ? (e.details as Record<string, unknown> | unknown[]) : null
+      const keyed = Array.isArray(details) ? null : details
+      const blockReason = e.blockReason ?? keyed?.block_reason
       return {
         code: typeof e.code === 'string' ? e.code : null,
         message: typeof e.message === 'string' && e.message.trim() ? e.message : `Request failed (${status})`,
         hints: {
           details,
-          retryAfterSeconds: boundedSeconds(e.retryAfterSeconds) ?? boundedSeconds(details?.retry_after_seconds),
-          resumable: e.resumable === true || details?.resumable === true,
+          retryAfterSeconds: boundedSeconds(e.retryAfterSeconds) ?? boundedSeconds(keyed?.retry_after_seconds),
+          resumable: e.resumable === true || keyed?.resumable === true,
           blockReason: typeof blockReason === 'string' ? blockReason : null,
           feature: typeof e.feature === 'string' && e.feature.trim() ? e.feature : null,
         },
@@ -91,10 +95,18 @@ export function extractError(
  * hints, plus the `Retry-After` header (whole seconds) when the body carried no
  * retry hint of its own. One place, so `requestJson`, `requestForm` and the SSE
  * client cannot drift apart on which fields survive.
+ *
+ * The failure is also kept in the support-correlation ring (its `x-request-id`,
+ * status, code and masked route, never the body), so a problem report can name
+ * the requests that failed.
  */
-export function apiErrorFromResponse(body: unknown, response: Pick<Response, 'status' | 'headers'>): ApiError {
+export function apiErrorFromResponse(
+  body: unknown,
+  response: Pick<Response, 'status' | 'headers' | 'url'>,
+): ApiError {
   const { code, message, hints } = extractError(body, response.status)
   const retryAfterSeconds = hints.retryAfterSeconds ?? boundedSeconds(response.headers?.get('Retry-After'))
+  recordFailedResponse(response, code)
   return new ApiError(message, response.status, code, { ...hints, retryAfterSeconds })
 }
 

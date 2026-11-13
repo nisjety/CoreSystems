@@ -82,6 +82,7 @@ impl ProviderRouterDyn for MockProvider {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                     provider_timing: None,
+                    service_tier_used: String::new(),
                 })
                 .await;
         });
@@ -198,6 +199,7 @@ impl ProviderRouterDyn for TimedProvider {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             provider_timing: None,
+            service_tier_used: String::new(),
         };
         let request_id = req.request_id.clone();
         tokio::spawn(async move {
@@ -538,6 +540,10 @@ fn provider_order_accepts_azure_alias_without_duplicate_openai_fallback() {
         codex_subscription_integration_core_url: None,
         codex_subscription_internal_api_key: None,
         codex_subscription_models: vec![],
+        byo_gateway_enabled: false,
+        provider_benching: false,
+        same_tier_fallback: false,
+        customer_gateway_internal_api_key: None,
         azure_openai_endpoint: Some("https://example.openai.azure.com".to_owned()),
         azure_openai_api_key: Some("test-key".to_owned()),
         azure_openai_api_version: "2025-01-01-preview".to_owned(),
@@ -591,6 +597,10 @@ fn azure_anthropic_registers_and_advertises_claude_catalog() {
         codex_subscription_integration_core_url: None,
         codex_subscription_internal_api_key: None,
         codex_subscription_models: vec![],
+        byo_gateway_enabled: false,
+        provider_benching: false,
+        same_tier_fallback: false,
+        customer_gateway_internal_api_key: None,
         azure_openai_endpoint: Some("https://example.openai.azure.com".to_owned()),
         azure_openai_api_key: Some("test-key".to_owned()),
         azure_openai_api_version: "2025-01-01-preview".to_owned(),
@@ -666,6 +676,10 @@ fn cohere_registers_alongside_azure_openai_without_stealing_its_traffic() {
         codex_subscription_integration_core_url: None,
         codex_subscription_internal_api_key: None,
         codex_subscription_models: vec![],
+        byo_gateway_enabled: false,
+        provider_benching: false,
+        same_tier_fallback: false,
+        customer_gateway_internal_api_key: None,
         azure_openai_endpoint: Some("https://example.openai.azure.com".to_owned()),
         azure_openai_api_key: Some("test-key".to_owned()),
         azure_openai_api_version: "2025-01-01-preview".to_owned(),
@@ -776,6 +790,10 @@ fn chain_config(provider_order: &[&str]) -> InferenceConfig {
         codex_subscription_integration_core_url: None,
         codex_subscription_internal_api_key: None,
         codex_subscription_models: vec![],
+        byo_gateway_enabled: false,
+        provider_benching: false,
+        same_tier_fallback: false,
+        customer_gateway_internal_api_key: None,
         azure_openai_endpoint: None,
         azure_openai_api_key: None,
         azure_openai_api_version: "2025-01-01-preview".to_owned(),

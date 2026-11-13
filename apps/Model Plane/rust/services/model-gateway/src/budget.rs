@@ -18,6 +18,11 @@ const DEFAULT_COST_CORE_URL: &str = "http://localhost:8089";
 /// enables it, and it is read per request, so a restart is not needed to turn
 /// it off. Off, the check counts lifetime spend, as it did before.
 const BUDGET_WINDOW_ENV: &str = "MODEL_GATEWAY_BUDGET_WINDOW";
+/// Switch for the per-run cap rule (D2-698). Only the literal `true` enables it.
+/// On, a cap on the request can only tighten the org ceiling: the smaller of the
+/// two applies. Off, a cap on the request replaces the org ceiling, as it did
+/// before. The gate reads it per process through `cap_min_enabled`.
+pub const CAP_MIN_ENV: &str = "MODEL_GATEWAY_CAP_MIN";
 
 #[derive(Debug, Serialize)]
 struct BudgetCheckRequest {
@@ -52,9 +57,10 @@ struct BudgetCheckResponse {
 /// is over budget. Authentication, transport, and parse failures fail closed
 /// with 503 so an unavailable budget authority cannot silently allow spend.
 /// `org_limits` are the ceilings Control Plane has configured for this org
-/// (`org_quota`). A cap supplied on the REQUEST wins over the org default —
-/// a caller may tighten its own run, but the org ceiling still applies to any
-/// dimension the request left unset, so a caller cannot loosen it by omission.
+/// (`org_quota`). With `MODEL_GATEWAY_CAP_MIN` on, a cap supplied on the REQUEST
+/// can only tighten the org ceiling: the smaller of the two applies, and the org
+/// ceiling still applies to any dimension the request left unset. With it off, a
+/// request cap wins over the org default, as it did before.
 pub async fn check_budget(
     http_client: &reqwest::Client,
     org_id: &str,
@@ -63,14 +69,23 @@ pub async fn check_budget(
     normalized: &NormalizedRequest,
     org_limits: crate::org_quota::OrgQuotaLimits,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    let effective_cost = normalized.max_cost_usd.or(org_limits.max_cost_usd);
+    let cap_min = cap_min_enabled(&|key| std::env::var(key).ok());
+    let effective_cost = if cap_min {
+        min_cap(normalized.max_cost_usd, org_limits.max_cost_usd)
+    } else {
+        normalized.max_cost_usd.or(org_limits.max_cost_usd)
+    };
     // The quota column is i64; the wire field is u32. Clamp rather than wrap:
     // a ceiling larger than u32 is effectively "no limit", and wrapping would
     // turn a huge cap into a tiny one and reject everything.
     let org_tokens = org_limits
         .max_tokens
         .map(|tokens| u32::try_from(tokens).unwrap_or(u32::MAX));
-    let effective_tokens = normalized.max_tokens.or(org_tokens);
+    let effective_tokens = if cap_min {
+        min_cap(normalized.max_tokens, org_tokens)
+    } else {
+        normalized.max_tokens.or(org_tokens)
+    };
     if effective_cost.is_none() && effective_tokens.is_none() {
         return Ok(());
     }
@@ -93,6 +108,24 @@ pub async fn check_budget(
         since,
     )
     .await
+}
+
+/// Whether the per-run cap rule switch is on. Only the literal `true` enables it.
+#[must_use]
+pub fn cap_min_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
+    lookup(CAP_MIN_ENV).as_deref() == Some("true")
+}
+
+/// The tighter of a request cap and an org ceiling. When only one is set, that
+/// one applies, so a request cannot loosen the org ceiling and the ceiling still
+/// binds a request that set none. A value that does not compare (NaN) yields the
+/// org ceiling, so an unreadable request cap cannot loosen it.
+#[must_use]
+pub fn min_cap<T: PartialOrd + Copy>(request: Option<T>, org: Option<T>) -> Option<T> {
+    match (request, org) {
+        (Some(request), Some(org)) => Some(if request <= org { request } else { org }),
+        (request, org) => request.or(org),
+    }
 }
 
 fn budget_window_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
@@ -213,6 +246,7 @@ mod tests {
             model: String::new(),
             provider_hint: String::new(),
             subscription_connection_id: String::new(),
+            model_connection_id: String::new(),
             session_key: None,
             thread_id: None,
             space_context: None,

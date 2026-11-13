@@ -24,7 +24,15 @@ async fn main() -> Result<()> {
         "provider chain configured"
     );
 
-    let chain = provider::fallback::FallbackChain::from_config(&cfg);
+    // Both routing rules are dark: INFERENCE_PROVIDER_BENCHING (the failure bench and the user-route guard)
+    // and INFERENCE_SAME_TIER_FALLBACK (the privacy-tier anchor) are the literal `true` only, read once in
+    // the config above.
+    let chain = provider::fallback::FallbackChain::from_config(&cfg)
+        .with_benching(cfg.provider_benching)
+        .with_same_tier_fallback(cfg.same_tier_fallback);
+    // The customer-gateway route (W4-BYO-5) serves only the calls that name a connection, so it is kept
+    // apart from the chain: `None` unless INFERENCE_BYO_GATEWAY_ENABLED is the literal true.
+    let customer_gateway = provider::customer_gateway::CustomerGatewayProvider::from_config(&cfg);
     let speech = provider::speech::SpeechChain::from_env();
     info!(
         providers = speech.provider_count(),
@@ -81,6 +89,7 @@ async fn main() -> Result<()> {
             language,
             realtime,
             video,
+            customer_gateway,
         },
         auth,
         grpc_readiness.clone(),

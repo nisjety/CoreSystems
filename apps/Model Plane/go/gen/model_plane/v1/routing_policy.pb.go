@@ -764,6 +764,201 @@ func (x *PromoteCandidateResponse) GetPolicy() *RoutingPolicyMessage {
 	return nil
 }
 
+// Read one organisation's routing overlay.
+type GetOrgRoutingOverlayRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The organisation whose overlay is read.
+	OrgId         string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetOrgRoutingOverlayRequest) Reset() {
+	*x = GetOrgRoutingOverlayRequest{}
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetOrgRoutingOverlayRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetOrgRoutingOverlayRequest) ProtoMessage() {}
+
+func (x *GetOrgRoutingOverlayRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetOrgRoutingOverlayRequest.ProtoReflect.Descriptor instead.
+func (*GetOrgRoutingOverlayRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_routing_policy_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *GetOrgRoutingOverlayRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+// Replace one organisation's routing overlay.
+type SetOrgRoutingOverlayRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The organisation whose overlay is written. It must be the caller's own.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The overlay as a JSON string: `{"hidden": [], "order": [], "roles": {"<purpose>": ["<model id>"]}}`.
+	// Each role holds one to four candidate ids. A key outside those three is refused,
+	// so the overlay cannot carry an alias or add a model.
+	ConfigJson string `protobuf:"bytes,2,opt,name=config_json,json=configJson,proto3" json:"config_json,omitempty"`
+	// The version the caller read. 0 skips the check. Any other value must equal the
+	// stored version, or the write is ABORTED.
+	ExpectedVersion int64 `protobuf:"varint,3,opt,name=expected_version,json=expectedVersion,proto3" json:"expected_version,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *SetOrgRoutingOverlayRequest) Reset() {
+	*x = SetOrgRoutingOverlayRequest{}
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SetOrgRoutingOverlayRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SetOrgRoutingOverlayRequest) ProtoMessage() {}
+
+func (x *SetOrgRoutingOverlayRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SetOrgRoutingOverlayRequest.ProtoReflect.Descriptor instead.
+func (*SetOrgRoutingOverlayRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_routing_policy_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *SetOrgRoutingOverlayRequest) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *SetOrgRoutingOverlayRequest) GetConfigJson() string {
+	if x != nil {
+		return x.ConfigJson
+	}
+	return ""
+}
+
+func (x *SetOrgRoutingOverlayRequest) GetExpectedVersion() int64 {
+	if x != nil {
+		return x.ExpectedVersion
+	}
+	return 0
+}
+
+// One organisation's routing overlay, as stored. Configuration and identities only.
+type OrgRoutingOverlayMessage struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The organisation the overlay belongs to.
+	OrgId string `protobuf:"bytes,1,opt,name=org_id,json=orgId,proto3" json:"org_id,omitempty"`
+	// The overlay as a JSON string. `{}` until the organisation writes one.
+	ConfigJson string `protobuf:"bytes,2,opt,name=config_json,json=configJson,proto3" json:"config_json,omitempty"`
+	// Monotonic version, incremented on every write. 0 for an organisation that never wrote one.
+	Version int64 `protobuf:"varint,3,opt,name=version,proto3" json:"version,omitempty"`
+	// Identity (user or service id) that last wrote the overlay.
+	UpdatedBy string `protobuf:"bytes,4,opt,name=updated_by,json=updatedBy,proto3" json:"updated_by,omitempty"`
+	// Unix seconds of the last write. 0 for an organisation that never wrote one.
+	UpdatedAt     int64 `protobuf:"varint,5,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OrgRoutingOverlayMessage) Reset() {
+	*x = OrgRoutingOverlayMessage{}
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OrgRoutingOverlayMessage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OrgRoutingOverlayMessage) ProtoMessage() {}
+
+func (x *OrgRoutingOverlayMessage) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_routing_policy_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OrgRoutingOverlayMessage.ProtoReflect.Descriptor instead.
+func (*OrgRoutingOverlayMessage) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_routing_policy_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *OrgRoutingOverlayMessage) GetOrgId() string {
+	if x != nil {
+		return x.OrgId
+	}
+	return ""
+}
+
+func (x *OrgRoutingOverlayMessage) GetConfigJson() string {
+	if x != nil {
+		return x.ConfigJson
+	}
+	return ""
+}
+
+func (x *OrgRoutingOverlayMessage) GetVersion() int64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *OrgRoutingOverlayMessage) GetUpdatedBy() string {
+	if x != nil {
+		return x.UpdatedBy
+	}
+	return ""
+}
+
+func (x *OrgRoutingOverlayMessage) GetUpdatedAt() int64 {
+	if x != nil {
+		return x.UpdatedAt
+	}
+	return 0
+}
+
 var File_model_plane_v1_routing_policy_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_routing_policy_proto_rawDesc = "" +
@@ -829,14 +1024,32 @@ const file_model_plane_v1_routing_policy_proto_rawDesc = "" +
 	"!RecordCandidateEvaluationResponse\x12=\n" +
 	"\tcandidate\x18\x01 \x01(\v2\x1f.model_plane.v1.PolicyCandidateR\tcandidate\"X\n" +
 	"\x18PromoteCandidateResponse\x12<\n" +
-	"\x06policy\x18\x01 \x01(\v2$.model_plane.v1.RoutingPolicyMessageR\x06policy2\xf9\x04\n" +
+	"\x06policy\x18\x01 \x01(\v2$.model_plane.v1.RoutingPolicyMessageR\x06policy\"4\n" +
+	"\x1bGetOrgRoutingOverlayRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\"\x80\x01\n" +
+	"\x1bSetOrgRoutingOverlayRequest\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1f\n" +
+	"\vconfig_json\x18\x02 \x01(\tR\n" +
+	"configJson\x12)\n" +
+	"\x10expected_version\x18\x03 \x01(\x03R\x0fexpectedVersion\"\xaa\x01\n" +
+	"\x18OrgRoutingOverlayMessage\x12\x15\n" +
+	"\x06org_id\x18\x01 \x01(\tR\x05orgId\x12\x1f\n" +
+	"\vconfig_json\x18\x02 \x01(\tR\n" +
+	"configJson\x12\x18\n" +
+	"\aversion\x18\x03 \x01(\x03R\aversion\x12\x1d\n" +
+	"\n" +
+	"updated_by\x18\x04 \x01(\tR\tupdatedBy\x12\x1d\n" +
+	"\n" +
+	"updated_at\x18\x05 \x01(\x03R\tupdatedAt2\xd7\x06\n" +
 	"\rRoutingPolicy\x12Z\n" +
 	"\tGetPolicy\x12'.model_plane.v1.GetRoutingPolicyRequest\x1a$.model_plane.v1.RoutingPolicyMessage\x12Z\n" +
 	"\tSetPolicy\x12'.model_plane.v1.SetRoutingPolicyRequest\x1a$.model_plane.v1.RoutingPolicyMessage\x12e\n" +
 	"\x10ProposeCandidate\x12'.model_plane.v1.ProposeCandidateRequest\x1a(.model_plane.v1.ProposeCandidateResponse\x12\x80\x01\n" +
 	"\x19RecordCandidateEvaluation\x120.model_plane.v1.RecordCandidateEvaluationRequest\x1a1.model_plane.v1.RecordCandidateEvaluationResponse\x12e\n" +
 	"\x10PromoteCandidate\x12'.model_plane.v1.PromoteCandidateRequest\x1a(.model_plane.v1.PromoteCandidateResponse\x12_\n" +
-	"\x0eListCandidates\x12%.model_plane.v1.ListCandidatesRequest\x1a&.model_plane.v1.ListCandidatesResponseB\xba\x01\n" +
+	"\x0eListCandidates\x12%.model_plane.v1.ListCandidatesRequest\x1a&.model_plane.v1.ListCandidatesResponse\x12m\n" +
+	"\x14GetOrgRoutingOverlay\x12+.model_plane.v1.GetOrgRoutingOverlayRequest\x1a(.model_plane.v1.OrgRoutingOverlayMessage\x12m\n" +
+	"\x14SetOrgRoutingOverlay\x12+.model_plane.v1.SetOrgRoutingOverlayRequest\x1a(.model_plane.v1.OrgRoutingOverlayMessageB\xba\x01\n" +
 	"\x12com.model_plane.v1B\x12RoutingPolicyProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -851,7 +1064,7 @@ func file_model_plane_v1_routing_policy_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_routing_policy_proto_rawDescData
 }
 
-var file_model_plane_v1_routing_policy_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_model_plane_v1_routing_policy_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_model_plane_v1_routing_policy_proto_goTypes = []any{
 	(*RoutingPolicyMessage)(nil),              // 0: model_plane.v1.RoutingPolicyMessage
 	(*GetRoutingPolicyRequest)(nil),           // 1: model_plane.v1.GetRoutingPolicyRequest
@@ -865,6 +1078,9 @@ var file_model_plane_v1_routing_policy_proto_goTypes = []any{
 	(*ProposeCandidateResponse)(nil),          // 9: model_plane.v1.ProposeCandidateResponse
 	(*RecordCandidateEvaluationResponse)(nil), // 10: model_plane.v1.RecordCandidateEvaluationResponse
 	(*PromoteCandidateResponse)(nil),          // 11: model_plane.v1.PromoteCandidateResponse
+	(*GetOrgRoutingOverlayRequest)(nil),       // 12: model_plane.v1.GetOrgRoutingOverlayRequest
+	(*SetOrgRoutingOverlayRequest)(nil),       // 13: model_plane.v1.SetOrgRoutingOverlayRequest
+	(*OrgRoutingOverlayMessage)(nil),          // 14: model_plane.v1.OrgRoutingOverlayMessage
 }
 var file_model_plane_v1_routing_policy_proto_depIdxs = []int32{
 	3,  // 0: model_plane.v1.ListCandidatesResponse.candidates:type_name -> model_plane.v1.PolicyCandidate
@@ -877,14 +1093,18 @@ var file_model_plane_v1_routing_policy_proto_depIdxs = []int32{
 	5,  // 7: model_plane.v1.RoutingPolicy.RecordCandidateEvaluation:input_type -> model_plane.v1.RecordCandidateEvaluationRequest
 	6,  // 8: model_plane.v1.RoutingPolicy.PromoteCandidate:input_type -> model_plane.v1.PromoteCandidateRequest
 	7,  // 9: model_plane.v1.RoutingPolicy.ListCandidates:input_type -> model_plane.v1.ListCandidatesRequest
-	0,  // 10: model_plane.v1.RoutingPolicy.GetPolicy:output_type -> model_plane.v1.RoutingPolicyMessage
-	0,  // 11: model_plane.v1.RoutingPolicy.SetPolicy:output_type -> model_plane.v1.RoutingPolicyMessage
-	9,  // 12: model_plane.v1.RoutingPolicy.ProposeCandidate:output_type -> model_plane.v1.ProposeCandidateResponse
-	10, // 13: model_plane.v1.RoutingPolicy.RecordCandidateEvaluation:output_type -> model_plane.v1.RecordCandidateEvaluationResponse
-	11, // 14: model_plane.v1.RoutingPolicy.PromoteCandidate:output_type -> model_plane.v1.PromoteCandidateResponse
-	8,  // 15: model_plane.v1.RoutingPolicy.ListCandidates:output_type -> model_plane.v1.ListCandidatesResponse
-	10, // [10:16] is the sub-list for method output_type
-	4,  // [4:10] is the sub-list for method input_type
+	12, // 10: model_plane.v1.RoutingPolicy.GetOrgRoutingOverlay:input_type -> model_plane.v1.GetOrgRoutingOverlayRequest
+	13, // 11: model_plane.v1.RoutingPolicy.SetOrgRoutingOverlay:input_type -> model_plane.v1.SetOrgRoutingOverlayRequest
+	0,  // 12: model_plane.v1.RoutingPolicy.GetPolicy:output_type -> model_plane.v1.RoutingPolicyMessage
+	0,  // 13: model_plane.v1.RoutingPolicy.SetPolicy:output_type -> model_plane.v1.RoutingPolicyMessage
+	9,  // 14: model_plane.v1.RoutingPolicy.ProposeCandidate:output_type -> model_plane.v1.ProposeCandidateResponse
+	10, // 15: model_plane.v1.RoutingPolicy.RecordCandidateEvaluation:output_type -> model_plane.v1.RecordCandidateEvaluationResponse
+	11, // 16: model_plane.v1.RoutingPolicy.PromoteCandidate:output_type -> model_plane.v1.PromoteCandidateResponse
+	8,  // 17: model_plane.v1.RoutingPolicy.ListCandidates:output_type -> model_plane.v1.ListCandidatesResponse
+	14, // 18: model_plane.v1.RoutingPolicy.GetOrgRoutingOverlay:output_type -> model_plane.v1.OrgRoutingOverlayMessage
+	14, // 19: model_plane.v1.RoutingPolicy.SetOrgRoutingOverlay:output_type -> model_plane.v1.OrgRoutingOverlayMessage
+	12, // [12:20] is the sub-list for method output_type
+	4,  // [4:12] is the sub-list for method input_type
 	4,  // [4:4] is the sub-list for extension type_name
 	4,  // [4:4] is the sub-list for extension extendee
 	0,  // [0:4] is the sub-list for field type_name
@@ -901,7 +1121,7 @@ func file_model_plane_v1_routing_policy_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_routing_policy_proto_rawDesc), len(file_model_plane_v1_routing_policy_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   15,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

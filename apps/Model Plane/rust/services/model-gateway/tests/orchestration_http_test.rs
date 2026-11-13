@@ -280,6 +280,13 @@ impl OrchestrationCoreService for MockOrchestration {
         Err(tonic::Status::unimplemented("get_approval_preview is not served by this double"))
     }
 
+    async fn get_skipped_assist_authority(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetSkippedAssistAuthorityRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetSkippedAssistAuthorityResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("get_skipped_assist_authority is not served by this double"))
+    }
+
     type StreamRunEventsStream = MockEventStream;
 
     async fn list_plans(
@@ -1607,6 +1614,13 @@ impl OrchestrationCoreService for OrgScopedMock {
         _: tonic::Request<mp_contracts::model_plane::v1::GetApprovalPreviewRequest>,
     ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetApprovalPreviewResponse>, tonic::Status> {
         Err(tonic::Status::unimplemented("get_approval_preview is not served by this double"))
+    }
+
+    async fn get_skipped_assist_authority(
+        &self,
+        _: tonic::Request<mp_contracts::model_plane::v1::GetSkippedAssistAuthorityRequest>,
+    ) -> Result<tonic::Response<mp_contracts::model_plane::v1::GetSkippedAssistAuthorityResponse>, tonic::Status> {
+        Err(tonic::Status::unimplemented("get_skipped_assist_authority is not served by this double"))
     }
 
     async fn list_plans(

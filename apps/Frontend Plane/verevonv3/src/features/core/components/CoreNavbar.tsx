@@ -20,6 +20,7 @@ import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'so
 import type { JSX } from '@solidjs/web'
 import { CoreNavbarPanel, type CoreNavbarPanelKind } from '@/features/core/components/CoreNavbarPanels'
 import {
+  readActiveChatThreadId,
   readChatThreadHistory,
   selectChatThread,
   type ChatThreadHistoryItem,
@@ -45,6 +46,9 @@ import { cn } from '@/shared/lib/cn'
 import { ChatAppearancePreview } from '@/features/chat/components/ChatAppearancePreview'
 import { chatAppearanceActive } from '@/features/chat/lib/chat-appearance-preview'
 import { CoreNavbarMore } from './CoreNavbarMore'
+import { clientEnvironment } from '@/shared/build/client-contract'
+import { applyOrgAccent } from '@/shared/theme/accent'
+import './core-navbar-env-pill.css'
 import { homeOverviewLabel, parseHomeOverview } from '@/shared/actions/home-overview'
 import { CommandPalette } from '@/features/command/CommandPalette'
 import { ShortcutSheet } from '@/features/command/ShortcutSheet'
@@ -105,6 +109,20 @@ export function CoreNavbar(props: {
   const labels = createMemo(() => props.breadcrumbOverride ?? ({ ...getNavbarLabels(props.activeRoute, i18n.locale()), ...(homeOverview() !== 'home' ? { tabLabel: homeOverviewLabel(homeOverview(), i18n.tr) } : {}) }))
   const moduleHref = () => !props.breadcrumbOverride && (props.activeRoute.startsWith('/engagement') || props.activeRoute === '/anbud') ? '/engagement' : breadcrumbHref()
   const profileInitial = () => (props.workspace.userName ?? props.workspace.userEmail ?? props.workspace.name).trim().charAt(0).toUpperCase() || props.workspace.initial
+  // F-t3-098: the environment pill. Off unless VITE_ENV_PILL is "true"; production, and no answer from the gateway yet, show nothing.
+  const environmentPillLabel = (): string | null => {
+    if (import.meta.env.VITE_ENV_PILL !== 'true') return null
+    switch (clientEnvironment()) {
+      case 'staging':
+        return i18n.tr('Staging', 'Staging')
+      case 'development':
+        return i18n.tr('Development', 'Development')
+      case 'other':
+        return i18n.tr('Ikke produksjon', 'Non-production')
+      default:
+        return null
+    }
+  }
   const messageUnreadCount = () => props.navbarData?.notifications.messages.filter((message) => !message.read).length ?? 0
   const notificationUnreadCount = () =>
     props.navbarData?.notifications.unreadCount ??
@@ -126,6 +144,8 @@ export function CoreNavbar(props: {
   const [paletteQuery, setPaletteQuery] = createSignal<string | undefined>(undefined)
   const commandContext = (): CommandContext => ({
     spaceRef: spaceRefFromPathname(location.pathname),
+    // W5-077-c: the thread the chat page has open, so the palette can offer its thread flags. Only on /chat.
+    chatThreadId: props.activeRoute === '/chat' ? readActiveChatThreadId() : null,
     offline: offline(),
     navigate: (href) => navigate(href),
     openPalette: (query) => {
@@ -161,6 +181,12 @@ export function CoreNavbar(props: {
         setTheme(remoteTheme.theme)
       }
     },
+  )
+
+  // F-t3-098: the organisation accent. `applyOrgAccent` writes nothing unless VITE_ORG_ACCENT is "true".
+  createEffect(
+    () => props.workspace.accentColor,
+    (accentColor) => applyOrgAccent(accentColor),
   )
 
   createEffect(
@@ -271,6 +297,9 @@ export function CoreNavbar(props: {
               workspaceActive={openPanel() === 'workspace'}
               workspaceClickable={!offline()}
             />
+            <Show when={environmentPillLabel()}>
+              {(label) => <span class="core-navbar__env-pill" role="note">{label()}</span>}
+            </Show>
           </div>
 
           <div class="core-navbar__search">

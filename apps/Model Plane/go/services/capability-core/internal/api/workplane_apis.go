@@ -39,6 +39,12 @@ type MemoryHandler struct {
 	// org policy and zero data retention folded into one verdict). nil means
 	// the decision cannot be asked, and every gated verb fails closed.
 	controls memoryControlsReader
+	// writeCheck asks Session Core's content policy about a user, org or global
+	// memory write before it persists (D2-480). Set only with the controls client.
+	writeCheck memoryWriteChecker
+	// gateWrites is MEMORY_GATE_CAPABILITY_WRITES. Off, writes are exactly what
+	// they were before the content gate: no check is asked.
+	gateWrites bool
 }
 
 // NewMemoryHandler constructs the handler.
@@ -52,8 +58,30 @@ func NewMemoryHandler(pool *pgxpool.Pool, runs mpv1.RunServiceClient) *MemoryHan
 // Session Core applies to every other memory writer and reader.
 func (h *MemoryHandler) WithMemoryControls(client mpv1.MemoryServiceClient) *MemoryHandler {
 	if client != nil {
-		h.controls = sessionCoreMemoryControls{client: client}
+		controls := sessionCoreMemoryControls{client: client}
+		h.controls = controls
+		h.writeCheck = controls
 	}
+	return h
+}
+
+// memoryGateCapabilityWritesEnv names the switch that sends user, org and global
+// memory writes through Session Core's content policy.
+const memoryGateCapabilityWritesEnv = "MEMORY_GATE_CAPABILITY_WRITES"
+
+// MemoryGateCapabilityWritesFromLookup reads MEMORY_GATE_CAPABILITY_WRITES
+// strictly: only the literal "true" turns the content gate on, so a typo or a
+// stray "1" leaves writes exactly as they were.
+func MemoryGateCapabilityWritesFromLookup(lookup func(string) string) bool {
+	return lookup(memoryGateCapabilityWritesEnv) == "true"
+}
+
+// WithContentGate turns the Session Core content gate on or off for user, org
+// and global memory writes (create, and update when the content changes). Delete
+// is never gated. With the gate on and no Session Core client wired, a gated
+// write fails closed with 503.
+func (h *MemoryHandler) WithContentGate(enabled bool) *MemoryHandler {
+	h.gateWrites = enabled
 	return h
 }
 
@@ -93,6 +121,42 @@ func (s sessionCoreMemoryControls) Decision(ctx context.Context, orgID, userID s
 		GenerationAllowed: controls.GetGenerationAllowed(),
 		Reason:            controls.GetReason(),
 	}, nil
+}
+
+// memoryWriteVerdict is Session Core's content policy answer for one write.
+// RefusalCode is the closed rule token (injection_marker, hidden_characters,
+// secret_like, scope_not_permitted, too_long) and is empty when Allowed.
+type memoryWriteVerdict struct {
+	Allowed     bool
+	RefusalCode string
+}
+
+type memoryWriteChecker interface {
+	CheckWrite(ctx context.Context, orgID, userID, content, scope, origin string) (memoryWriteVerdict, error)
+}
+
+// memoryWriteOrigin is what this proxy tells Session Core about who asked: the
+// verified person's own save through the app, the only origin that may write
+// org-wide memory. A model's write never arrives here, it goes through
+// Session Core's IndexMemory with its own origin.
+const memoryWriteOrigin = "user"
+
+// CheckWrite asks Session Core's CheckMemoryWrite. The content travels to the
+// policy and is not logged or kept by either side.
+func (s sessionCoreMemoryControls) CheckWrite(ctx context.Context, orgID, userID, content, scope, origin string) (memoryWriteVerdict, error) {
+	ctx, cancel := context.WithTimeout(ctx, memoryControlsTimeout)
+	defer cancel()
+	resp, err := s.client.CheckMemoryWrite(ctx, &mpv1.CheckMemoryWriteRequest{
+		OrgId:   orgID,
+		UserId:  userID,
+		Content: content,
+		Scope:   scope,
+		Origin:  origin,
+	})
+	if err != nil {
+		return memoryWriteVerdict{}, err
+	}
+	return memoryWriteVerdict{Allowed: resp.GetAllowed(), RefusalCode: resp.GetRefusalCode()}, nil
 }
 
 type memoryReadAccess int
@@ -178,6 +242,49 @@ func (h *MemoryHandler) memoryWriteAllowed(w http.ResponseWriter, request *http.
 	}
 	if !decision.GenerationAllowed {
 		memoryNotEnabled(w, decision)
+		return false
+	}
+	return true
+}
+
+// memoryScopeContentGated reports whether a write to scope passes through the
+// Session Core content policy. The resource-scoped scopes (run, thread,
+// session) keep their ownership path and workspace stays quarantined.
+func memoryScopeContentGated(scope string) bool {
+	switch scope {
+	case "user", "org", "global":
+		return true
+	default:
+		return false
+	}
+}
+
+// memoryContentAllowed asks Session Core's content policy before a gated write
+// persists, and writes the refusal itself. It returns true at once when the gate
+// switch is off or the scope is not a gated one. A refusal is 403 with the closed
+// rule token and never the content; when the policy cannot be asked the answer is
+// 503, never an allow.
+func (h *MemoryHandler) memoryContentAllowed(w http.ResponseWriter, request *http.Request, orgID, actorID, scope, content string) bool {
+	if !h.gateWrites || !memoryScopeContentGated(scope) {
+		return true
+	}
+	if h.writeCheck == nil {
+		jsonErr(w, "memory content policy unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	verdict, err := h.writeCheck.CheckWrite(request.Context(), orgID, actorID, content, scope, memoryWriteOrigin)
+	if err != nil {
+		jsonErr(w, "memory content policy unavailable", http.StatusServiceUnavailable)
+		return false
+	}
+	if !verdict.Allowed {
+		code := verdict.RefusalCode
+		if code == "" {
+			code = "refused"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "memory_policy_refused", "code": code})
 		return false
 	}
 	return true
@@ -509,6 +616,11 @@ func (h *MemoryHandler) listOrCreate(w http.ResponseWriter, r *http.Request) {
 			jsonErr(w, "resource-scoped memory writes require Session Core authorization", http.StatusServiceUnavailable)
 			return
 		}
+		// The content policy every other memory writer passes (D2-480): asked
+		// after the generation gate and the scope checks, before the INSERT.
+		if !h.memoryContentAllowed(w, r, orgID, actorID, e.Scope, e.Content) {
+			return
+		}
 		if e.Kind == "" {
 			e.Kind = "fact"
 		}
@@ -591,6 +703,25 @@ func (h *MemoryHandler) update(w http.ResponseWriter, r *http.Request, id string
 	}
 	if !h.memoryWriteAllowed(w, r, orgID, actorID) {
 		return
+	}
+	if update.Content != nil && h.gateWrites {
+		// The gate needs the stored row's scope. A row the caller cannot see is
+		// a 404, the same answer the UPDATE below gives.
+		var scope string
+		err := h.pool.QueryRow(r.Context(), `
+			SELECT scope FROM agent_memory
+			WHERE id=$1 AND org_id=$2 AND `+memoryVisibilitySQL("$3"), id, orgID, actorID).Scan(&scope)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				jsonErr(w, "not found", http.StatusNotFound)
+			} else {
+				jsonErr(w, "database unavailable", http.StatusServiceUnavailable)
+			}
+			return
+		}
+		if !h.memoryContentAllowed(w, r, orgID, actorID, scope, *update.Content) {
+			return
+		}
 	}
 	content := ""
 	if update.Content != nil {

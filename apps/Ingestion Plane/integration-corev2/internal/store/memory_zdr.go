@@ -173,6 +173,29 @@ func (r *MemoryRepository) RevokeConnectionZDRAcknowledgements(_ context.Context
 	return revoked, nil
 }
 
+func (r *MemoryRepository) RevokeConnectionZDRAcknowledgement(_ context.Context, connectionID, acknowledgementID, reason string, at time.Time) (ConnectionZDRAcknowledgement, error) {
+	if !ValidZDRRevokeReason(reason) {
+		return ConnectionZDRAcknowledgement{}, invalidZDR("revoke reason %q is not one of %s", reason, strings.Join(zdrRevokeReasons, ", "))
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	at = at.UTC()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for index, ack := range r.zdrAcks {
+		if ack.ID != acknowledgementID || ack.ConnectionID != connectionID || ack.RevokedAt != nil {
+			continue
+		}
+		stamp := at
+		ack.RevokedAt = &stamp
+		ack.RevokeReason = reason
+		r.zdrAcks[index] = ack
+		return cloneZDRAcknowledgement(ack), nil
+	}
+	return ConnectionZDRAcknowledgement{}, ErrNotFound
+}
+
 func (r *MemoryRepository) PurgeOrganizationConnectionZDR(_ context.Context, organizationID string) (ConnectionZDRPurgeResult, error) {
 	organizationID = strings.TrimSpace(organizationID)
 	if organizationID == "" {
@@ -197,6 +220,26 @@ func (r *MemoryRepository) PurgeOrganizationConnectionZDR(_ context.Context, org
 	}
 	r.zdrAcks = kept
 	return result, nil
+}
+
+func (r *MemoryRepository) PurgeRevokedConnectionZDRAcknowledgements(_ context.Context, revokedBefore time.Time, limit int) (int, error) {
+	if limit < 1 {
+		return 0, invalidZDR("limit must be at least 1")
+	}
+	revokedBefore = revokedBefore.UTC()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	kept := make([]ConnectionZDRAcknowledgement, 0, len(r.zdrAcks))
+	deleted := 0
+	for _, ack := range r.zdrAcks {
+		if ack.RevokedAt != nil && ack.RevokedAt.Before(revokedBefore) {
+			deleted++
+			continue
+		}
+		kept = append(kept, ack)
+	}
+	r.zdrAcks = kept
+	return deleted, nil
 }
 
 func (r *MemoryRepository) ListOrganizationConnectionZDRAcknowledgements(_ context.Context, organizationID string, limit int) (ConnectionZDRAcknowledgementList, error) {

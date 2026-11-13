@@ -101,9 +101,9 @@ func TestIsOwnableIsTeamShared(t *testing.T) {
 
 // TestConversationSnapshotIsOwnableAndNotTeamShared pins the share model (EP-12
 // D10): a share snapshot is its own ownable type so per-user grants can name it,
-// while the live conversation stays team-shared. The type has no owner service
-// and no Space grant yet, so no grant can be written for it until the snapshot
-// store registers one.
+// while the live conversation stays team-shared. session-core is its one owner
+// service (ADR conversation-share-model, decision 3), and it is never
+// Space-grantable.
 func TestConversationSnapshotIsOwnableAndNotTeamShared(t *testing.T) {
 	got, err := Classify("conversation_snapshot")
 	if err != nil {
@@ -121,8 +121,8 @@ func TestConversationSnapshotIsOwnableAndNotTeamShared(t *testing.T) {
 	if IsOwnable("conversation") {
 		t.Error("conversation should stay team-shared, not ownable")
 	}
-	if owner, ok := OwnerService("conversation_snapshot"); ok {
-		t.Errorf("conversation_snapshot has owner service %q; none is expected until the snapshot store ships", owner)
+	if owner, ok := OwnerService("conversation_snapshot"); !ok || owner != "session-core" {
+		t.Errorf("OwnerService(conversation_snapshot) = %q, %v; want session-core", owner, ok)
 	}
 	if SpaceGrantable("conversation_snapshot") {
 		t.Error("conversation_snapshot should not be Space-grantable")

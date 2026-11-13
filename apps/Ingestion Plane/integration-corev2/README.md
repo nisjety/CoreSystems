@@ -1019,27 +1019,46 @@ A member who uses a connection that cannot give zero data retention (today: the 
 
 | Env | Default | Meaning |
 |---|---|---|
-| `ZDR_ACKNOWLEDGEMENT_ENABLED` | `false` | Switches the acknowledgement routes on. Off, the routes do not exist (404). On, the service checks the wording at boot and stops if it does not match its pins and the capability contract. |
+| `ZDR_ACKNOWLEDGEMENT_ENABLED` | `false` | Switches the acknowledgement routes and the retention sweep on. Only the literal `true` turns it on (`1`, `t` and `TRUE` do not). Off, the routes do not exist (404) and the sweep does not run. On, the service checks the wording at boot and stops if it does not match its pins and the capability contract. |
+| `INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED` | `false` | Only the literal `true`. Makes the org-core client read the organisation's effective ZDR from the organisation record (`GET /internal/orgs/{id}`, scope `org:read:any`, field `retention_posture.effective_zdr`) instead of `/internal/orgs/{id}/retention-posture`. Flip it together with Auth Core's `AUTH_CORE_ZDR_EFFECTIVE_POSTURE_ENABLED`. |
+| `ZDR_ACK_RETENTION_DAYS` | `365` | How long a revoked acknowledgement is kept before the daily sweep deletes it, while `ZDR_ACKNOWLEDGEMENT_ENABLED` is on (with the switch off nothing is deleted). Clamped to 30..3650. |
 
 Routes, all under `/api/v1/model-connections`:
 
 - `GET /:id/zdr`: the assessment, the acknowledgement in force and the text for `locale` (`no` or `en`) and `variant` (`org_zdr_on` by default, `org_zdr_off`, `first_use`).
 - `POST /:id/zdr-acknowledgement`: body `{digest, textVersion, locale, variant, acknowledgedVia}`. `variant` is the text the member was shown (`org_zdr_on` or `first_use`), and that text is the one stored. 201 when created, 200 on a replay. 409 `zdr_assessment_changed` carries the current assessment. 503 `zdr_org_state_unavailable` when org-core cannot say whether ZDR is on: the acknowledgement is refused (fail closed).
 - `DELETE /:id/zdr-acknowledgement`: the owner's revoke (idempotent).
-- `GET /:id/zdr-posture`: what Auth Core reads for a turn. It carries `ackState` (`not_required`, `acknowledged`, `required` or `unassessed`), `ackId`, `digest` and `textVersion`, and nothing else.
+- `GET /:id/zdr-posture`: what Auth Core reads for a turn (edge E2), as the session user, with `Cache-Control: no-store`. It carries `connectionId`, `providerKey`, `capability` (`supported`, `not_supported` or `cannot_verify`; `cannot_verify` while unassessed), `waiverRoute` (whether the capability contract offers a waiver route for the connection; `false` when unassessed or unreadable), `ackState` (`not_required`, `acknowledged`, `required` or `unassessed`), `ackId`, `digest`, `textVersion` and `ackReason`, and nothing else: never the basis, the organisation, a request id or any text. `ackReason` is `""` when `ackState` is `acknowledged` or `not_required`, otherwise one of `none`, `revoked`, `stale_digest` or `text_version_below_minimum`. `ackState` is `acknowledged` only for an active row on the current digest whose text version is at or above the wording's minimum. Refusals keep their codes: 401 `unauthorized`, 403 `forbidden`, 403 `not_connection_owner`, 404 `connection_not_found`, 404 `not_a_model_connection`.
 - `GET /zdr-acknowledgements`: the organisation's owners and admins only. Ids, states and counts, never the text.
 
-Revocation: the owner's revoke (`owner_revoked`); a removed connection, in the same transaction, on every removal path (subscription disconnect, the generic disconnect, GDPR delete) (`connection_removed`); a changed digest (`capability_changed`, Z-12). A user-level GDPR delete revokes and keeps the rows for the audit window. An organisation-wide GDPR delete (no `userId`) erases the organisation's ZDR records and acknowledgements.
+Revocation: the owner's revoke (`owner_revoked`); a removed connection, in the same transaction, on every removal path (subscription disconnect, the generic disconnect, GDPR delete) (`connection_removed`); a changed digest (`capability_changed`, Z-12); an acknowledgement below the minimum version, when the member acknowledges the current text (`text_version_superseded`). A user-level GDPR delete revokes and keeps the revoked rows (decision D-ZDR-16, assumed, owner to confirm under OD-LEGAL). The retention window (`ZDR_ACK_RETENTION_DAYS`) applies only while `ZDR_ACKNOWLEDGEMENT_ENABLED` is on; with the switch off those rows are kept, with no time limit, until it is on again. An organisation-wide GDPR delete (no `userId`) erases the organisation's ZDR records and acknowledgements.
+
+Retention sweep (only while `ZDR_ACKNOWLEDGEMENT_ENABLED` is on): at start and then every 24 hours the service deletes revoked rows whose `revoked_at` is older than `ZDR_ACK_RETENTION_DAYS`, in batches. With the switch off it does not run, so revoked rows are kept until the switch is on again. Active rows are never deleted by it. The log line `connection ZDR acknowledgement retention sweep` carries counts only. The table is small and there is no index on `revoked_at`; if one is ever needed it is a new migration.
+
+Minimum text version: `texts/index.json` may name a `minimum` version (absent means the current one). It must be a version in the index and not above `current`; versions are keys of the form `v<digits>`, compared by the number. An acknowledgement recorded against an older text is not in force, and the posture read answers `required` with `ackReason` `text_version_below_minimum`. `GET /:id/zdr` shows only an acknowledgement in force, so it never shows one below the minimum. Acknowledging the current text takes such a row out of force first, in the same transaction, with reason `text_version_superseded` and its own audit row, so the new acknowledgement is created rather than answered as a replay of the old one.
 
 Wording: `internal/zdr/texts/<version>/<locale>/<key>.<variant>.txt`, each file pinned by `texts/index.json`. A wording change is a new version directory and a new index, never an edit in place. Both locales are drafted. The status is `draft_pending_od_legal` until counsel signs off (OD-LEGAL).
 
 Runbook, before `ZDR_ACKNOWLEDGEMENT_ENABLED=true` in any environment:
 
-1. integration-core's service principal must hold `org:retention:read:any` in the Control Plane registry (CP P1). Without it every acknowledgement is refused with 503.
+1. integration-core's service principal holds `org:read:any` only and is not granted `org:retention:read:any`, so the retention-posture route answers 403 and every acknowledgement (and credential binding) is refused with 503 `zdr_org_state_unavailable`. The acknowledgement API therefore works only once `INTEGRATION_ZDR_EFFECTIVE_POSTURE_ENABLED=true`, which reads the posture from the organisation record, and that switch flips together with Auth Core's `AUTH_CORE_ZDR_EFFECTIVE_POSTURE_ENABLED`. No new scope is granted. An organisation record without a boolean `retention_posture.effective_zdr` is an error and refuses the same way.
 2. OD-LEGAL signs off the text version, or the owner decides to ship the draft.
 3. Waived runs must skip the derived background jobs (memory indexing, dreaming, learning review) before the text that says they are skipped is shown to a user (D-B).
 
-## Unified-service replacement
+### Customer-gateway connections (W4-BYO)
+
+An organisation admin registers their own OpenAI-compatible endpoint. The API key is sealed in this service and never leaves it. The connection is never zero retention (its ZDR assessment is always `not_supported`).
+
+| Env | Default | Meaning |
+|---|---|---|
+| `CUSTOMER_GATEWAY_CONNECTIONS_ENABLED` | `false` | Mounts the customer-gateway routes (only the literal `true` turns it on). Off, none of them exist (404). |
+
+Routes, all under `/api/v1/model-connections/customer-gateway`. They are bearer-only and for an organisation owner or admin (403 `org_admin_required` otherwise); the internal API key cannot reach them:
+
+- `POST`: registers a gateway (`name`, `base_url`, `api_key`, `model_ids`). The key is sealed against the connection id and is not returned.
+- `GET`: the caller's organisation's live gateways. Each item carries `id`, `name`, `model_ids`, `base_url` (the host only, never the path or query) and `created_at`. It never carries the key or any sealed value.
+- `DELETE`: body `{"connection_id": "<id>"}` (1 to 128 characters: letters, digits, `-`, `_`, `.`). Removes the gateway and clears its sealed key in one transaction, ends any live ZDR acknowledgement, and writes one content-free `model_connection.customer_gateway_deleted` audit row (connection id and organisation id). A connection outside the caller's organisation, or one that is not a customer gateway, is a 404.
+
 
 The old unified-service profile and real-time features are split by ownership:
 

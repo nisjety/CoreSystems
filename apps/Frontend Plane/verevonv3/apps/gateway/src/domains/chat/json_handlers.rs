@@ -1,4 +1,5 @@
 use axum::{
+    body::Bytes,
     extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -9,11 +10,13 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use crate::{
+    audience_tokens::ModelServiceAudience,
     config::AppState,
     domains::chat::{
         history::{bad_request, thread_messages_url, ThreadMessagesPageQuery},
         shared,
     },
+    envelope::error,
     middleware::AuthenticatedUser,
 };
 
@@ -75,24 +78,35 @@ async fn invoke_chat_json(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> (StatusCode, Json<Value>) {
-    let token = shared::model_token(&state, &user, &headers).await;
-    let data_plane_token = shared::data_plane_token(&state, &user, &headers).await;
-    let inference_token = match shared::required_inference_token(&state, &user, &headers).await {
-        Ok(token) => token,
-        Err(error) => return shared::delegated_auth_unavailable(error),
+    // ZDR-Z-19b: the turn's retention is decided FIRST, from the raw body, so one answer serves every
+    // bearer below (model-gateway refuses delegated bearers that differ in `zdr` or `zdr_waiver`).
+    // A refusal is answered as the JSON envelope and nothing is sent upstream.
+    let retention =
+        match crate::retention_decision::turn_retention(&state, &user, &headers, &body).await {
+            Ok(retention) => retention,
+            Err(refusal) => return shared::retention_refusal_response(refusal),
+        };
+    let bearers = match shared::mint_turn_bearers(
+        &state,
+        &user,
+        &headers,
+        &retention,
+        shared::TurnSurface::Json,
+    )
+    .await
+    {
+        Ok(bearers) => bearers,
+        Err(refusal) => return refusal,
     };
-    let execution_token = match shared::required_execution_token(&state, &user, &headers).await {
-        Ok(token) => token,
-        Err(error) => return shared::delegated_auth_unavailable(error),
-    };
-    let cost_token = match shared::required_cost_token(&state, &user, &headers).await {
-        Ok(token) => token,
-        Err(error) => return shared::delegated_auth_unavailable(error),
-    };
-    let session_token = match shared::required_session_token(&state, &user, &headers).await {
-        Ok(token) => token,
-        Err(error) => return shared::delegated_auth_unavailable(error),
-    };
+    let shared::TurnBearers {
+        model: token,
+        data_plane: data_plane_token,
+        inference: inference_token,
+        execution: execution_token,
+        cost: cost_token,
+        session: session_token,
+        ..
+    } = bearers;
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     let org_name = crate::domains::auth::resolve_org_name(&state, &user, &org_id).await;
     let url = format!("{}/v1/invoke", state.model_gateway_url);
@@ -101,6 +115,9 @@ async fn invoke_chat_json(
     if let Err(message) = super::history::enforce_support_thread_policy(&mut outbound_body) {
         return shared::invalid_chat_request(message);
     }
+    // EP-6 S10: a client copy of `agent_roles` is removed here too, on every turn. This route composes
+    // no catalogue of its own: only the streaming route carries one.
+    crate::domains::spaces::strip_client_agent_roles(&mut outbound_body);
     // ADR-0003 — must run before `inject_personal_thread_context`, which
     // consumes the Space reference fields this one still needs to peek at.
     if let Err((status, body)) = crate::domains::spaces::inject_authored_instructions(
@@ -120,6 +137,23 @@ async fn invoke_chat_json(
     {
         return (status, body);
     }
+    // D2-461: a follow-up on an existing thread with no `space_ref` gets the thread's Space resolved
+    // server-side first; a no-op unless SPACE_THREAD_SCOPE_RESOLVE is `true`.
+    if let Err((status, body)) = crate::domains::spaces::resolve_thread_space_ref(
+        &state,
+        &user,
+        &headers,
+        &mut outbound_body,
+    )
+    .await
+    {
+        return (status, body);
+    }
+    // ZDR-Z-19b invariant: `turn_retention` resolved the thread's Space before any mint, so a waived
+    // turn never names one here. If it does, refuse before anything goes upstream.
+    if let Some(refusal) = shared::waived_space_refusal(&retention, &outbound_body) {
+        return refusal;
+    }
     if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context(
         &state,
         &user,
@@ -135,7 +169,18 @@ async fn invoke_chat_json(
     let outbound_body = shared::with_locale_context(outbound_body);
     let mut outbound_body =
         shared::with_viewer_locale(outbound_body, state.space_features.chat_locale_hint);
-    shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;
+    // ZDR-Z-19b: a waived turn skips the org raise, and only a waived turn does. This is the one
+    // lowering the BFF ever does, and only because Auth Core signed the decision every bearer of the
+    // turn already carries. It inserts no `zdr: true` and never a `zdr: false`; the body keeps what
+    // the client sent (Auth Core has already refused an explicit ZDR request).
+    let waived = shared::is_waived(&retention);
+    if !waived {
+        shared::apply_org_zdr_posture(&state, &user, &mut outbound_body).await;
+    }
+    // Invariant again, on the body as it will be sent (after the Space context was injected).
+    if let Some(refusal) = shared::waived_space_refusal(&retention, &outbound_body) {
+        return refusal;
+    }
     // QF-8: the same browser context gate as the chat stream, after the ZDR posture is settled.
     // It strips any client copy of the browser fields, so only what the gateway verified reaches
     // Model Gateway from this route.
@@ -152,7 +197,13 @@ async fn invoke_chat_json(
     let request_timeout = chat_invoke_timeout(&outbound_body);
     // After `inject_personal_thread_context`, not with the other bearers above:
     // it is only minted once Control has actually scoped this turn to a Space.
-    let sandbox_token = shared::sandbox_token(&state, &user, &headers, &outbound_body).await;
+    // A waived turn never mints a sandbox bearer (ZDR rule 5; Auth Core also refuses the decision on
+    // that audience).
+    let sandbox_token = if waived {
+        None
+    } else {
+        shared::sandbox_token(&state, &user, &headers, &outbound_body).await
+    };
     // Same rule as the streaming path: mark before dispatch, so a ZDR turn that
     // fails still leaves the thread non-persistable.
     shared::proxy_model_json_with_data_plane_request_timeout(
@@ -178,14 +229,74 @@ pub(crate) async fn cancel_invocation(
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
     Path(request_id): Path<String>,
+    body: Bytes,
 ) -> impl IntoResponse {
-    let token = shared::model_token(&state, &user, &headers).await;
+    // ZDR-Z-19e (D-ZDR-15): a cancel never inherits a waiver. The browser may name the connection of
+    // the run it cancels in an optional JSON body (`subscription_connection_id`, `provider`); only
+    // that, and a fresh decision from Auth Core for it, waives the bearers below. An empty,
+    // unreadable or connection-less body is `Unchanged`, no call, and the cancel is what it was. The
+    // body is never forwarded.
+    let mut named = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+    let connection = crate::retention_decision::take_continuation_connection(&state, &mut named);
+    let retention = match crate::retention_decision::continuation_retention(
+        &state,
+        &user,
+        &headers,
+        connection
+            .as_ref()
+            .map(crate::retention_decision::ContinuationConnection::as_pair),
+    )
+    .await
+    {
+        Ok(retention) => retention,
+        Err(refusal) => return shared::retention_refusal_response(refusal).into_response(),
+    };
     let url = format!(
         "{}/v1/invoke/{}/cancel",
         state.model_gateway_url,
         urlencoding::encode(&request_id),
     );
-    shared::proxy_model_json(&state, Method::POST, &url, None, token.as_deref(), &user).await
+    if let Some(decision) = shared::waived_decision(&retention) {
+        let token = match shared::waived_service_token(
+            &state,
+            &user,
+            &headers,
+            decision,
+            ModelServiceAudience::ModelGateway,
+        )
+        .await
+        {
+            Ok(token) => token,
+            Err(refusal) => return refusal.into_response(),
+        };
+        let session_token = match shared::waived_service_token(
+            &state,
+            &user,
+            &headers,
+            decision,
+            ModelServiceAudience::SessionCore,
+        )
+        .await
+        {
+            Ok(token) => token,
+            Err(refusal) => return refusal.into_response(),
+        };
+        return shared::proxy_model_json_with_session(
+            &state,
+            Method::POST,
+            &url,
+            None,
+            Some(&token),
+            Some(&session_token),
+            &user,
+        )
+        .await
+        .into_response();
+    }
+    let token = shared::model_token(&state, &user, &headers).await;
+    shared::proxy_model_json(&state, Method::POST, &url, None, token.as_deref(), &user)
+        .await
+        .into_response()
 }
 
 /// Deliver a message the user typed mid-stream to the running agent.
@@ -206,6 +317,18 @@ pub(crate) async fn queue_invocation_input(
     let token = shared::model_token(&state, &user, &headers).await;
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     let mut outbound_body = body;
+    // D2-461: same server-side Space resolution as the send path (a no-op unless
+    // SPACE_THREAD_SCOPE_RESOLVE is `true`).
+    if let Err((status, body)) = crate::domains::spaces::resolve_thread_space_ref(
+        &state,
+        &user,
+        &headers,
+        &mut outbound_body,
+    )
+    .await
+    {
+        return (status, body).into_response();
+    }
     if let Err((status, body)) = crate::domains::spaces::inject_personal_thread_context(
         &state,
         &user,
@@ -374,6 +497,148 @@ fn branch_move_body(body: &BranchThreadBody, mode: BranchMove) -> Result<Value, 
         payload["exact"] = json!(true);
     }
     Ok(payload)
+}
+
+/// The body of a side question: one question and, for a thread whose turns were written under a connection (W4-BYO,
+/// DEC-V-R8), the model that connection serves. It cannot choose a posture or another thread: Model Gateway reads the
+/// connection from the stored thread.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SideChatBody {
+    question: String,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// The most characters one side question may carry. Model Gateway refuses a longer one the same way.
+const SIDE_CHAT_QUESTION_MAX_CHARS: usize = 2_000;
+
+/// The longest model id a side question may name. Model Gateway checks the id against the deployment allowlist.
+const SIDE_CHAT_MODEL_MAX_CHARS: usize = 200;
+
+/// A side question about one conversation (F-t3-069): one read-only answer from Model Gateway, which reads the
+/// thread's active path and stores nothing. The answer goes back to the caller alone.
+///
+/// The organisation's zero-retention posture is raised onto the request, as a chat turn's is, and the caller's
+/// `x-zdr` header is honoured the same way. The session and inference credentials are minted from the caller's
+/// own session.
+pub(super) async fn ask_side_chat(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(thread_id): Path<String>,
+    Json(body): Json<SideChatBody>,
+) -> Response {
+    no_store(side_chat_reply(&state, &user, &headers, &thread_id, &body).await)
+}
+
+async fn side_chat_reply(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    thread_id: &str,
+    body: &SideChatBody,
+) -> Response {
+    let thread_id = thread_id.trim();
+    if thread_id.is_empty() {
+        return bad_request("thread_id is required.");
+    }
+    let question = body.question.trim();
+    if question.is_empty() || question.chars().count() > SIDE_CHAT_QUESTION_MAX_CHARS {
+        return bad_request("The side chat question must be 1 to 2000 characters.");
+    }
+    let mut outbound_body = json!({
+        "question": question,
+        "zdr": shared::zdr_flag(headers),
+    });
+    // The model a connection thread is served with (W4-BYO, DEC-V-R8). Model Gateway refuses a connection-thread
+    // side chat that names none and uses the field on no other thread, so a blank one is left out, as if unsent. A
+    // named model is one model id: no whitespace or control character, and at most SIDE_CHAT_MODEL_MAX_CHARS.
+    let model = body.model.as_deref().unwrap_or_default().trim();
+    if model.chars().count() > SIDE_CHAT_MODEL_MAX_CHARS
+        || model.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return bad_request(
+            "The side chat model must be one model id of at most 200 characters, with no spaces or control characters.",
+        );
+    }
+    if !model.is_empty() {
+        outbound_body["model"] = json!(model);
+    }
+    shared::apply_org_zdr_posture(state, user, &mut outbound_body).await;
+    let token = shared::model_token(state, user, headers).await;
+    let session_token = match shared::required_session_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let inference_token = match shared::required_inference_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let url = format!(
+        "{}/v1/threads/{}/side-chat",
+        state.model_gateway_url,
+        urlencoding::encode(thread_id),
+    );
+    let (status, Json(payload)) = shared::proxy_model_json_with_delegations(
+        state,
+        Method::POST,
+        &url,
+        Some(outbound_body),
+        token.as_deref(),
+        None,
+        None,
+        Some(&inference_token),
+        None,
+        None,
+        Some(&session_token),
+        None,
+        None,
+        None,
+        user,
+    )
+    .await;
+    // A refused delegated credential is not the browser's session, so it is answered as unavailable, not as a 401
+    // that would sign the person out. `assistant_navigation` follows the same rule. The one 403 that is relayed is
+    // model-gateway's typed refusal of this side chat (see `is_typed_side_chat_refusal`): a retry would not change
+    // it, and the person should be told why the side chat cannot run.
+    let credential_refused = match status {
+        StatusCode::UNAUTHORIZED => true,
+        StatusCode::FORBIDDEN => !is_typed_side_chat_refusal(&payload),
+        _ => false,
+    };
+    let (status, payload) = if credential_refused {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            error(
+                "delegated_auth_unavailable",
+                "Side chat authentication is temporarily unavailable",
+            ),
+        )
+    } else {
+        (status, payload)
+    };
+    (status, Json(payload)).into_response()
+}
+
+/// Whether a 403 body is model-gateway's typed refusal of a side chat: the model-entitlement refusal
+/// (`model_not_entitled`), or a zero-retention one (`zdr_*`, the credential refusals of a connection route included).
+/// Model Gateway's generic `forbidden` (a Session Core permission refusal: a thread the caller does not own, or a
+/// delegated scope it lacks) is not one, so it keeps the unavailable answer.
+fn is_typed_side_chat_refusal(payload: &Value) -> bool {
+    payload
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .is_some_and(|code| code == "model_not_entitled" || code.starts_with("zdr_"))
+}
+
+/// Marks an answer that must not be kept: the question and the answer are the person's own conversation text.
+fn no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
 }
 
 pub(super) async fn get_thread_messages(

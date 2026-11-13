@@ -29,6 +29,7 @@ import (
 	"github.com/triodelab/model-plane/services/capability-core/internal/cron"
 	"github.com/triodelab/model-plane/services/capability-core/internal/crypto"
 	"github.com/triodelab/model-plane/services/capability-core/internal/decisionkey"
+	"github.com/triodelab/model-plane/services/capability-core/internal/eventtrigger"
 	"github.com/triodelab/model-plane/services/capability-core/internal/lettatools"
 	"github.com/triodelab/model-plane/services/capability-core/internal/notifyclient"
 	"github.com/triodelab/model-plane/services/capability-core/internal/policy"
@@ -180,7 +181,10 @@ func main() {
 	toolPolicyEnforced := policy.ToolPolicyEnforcedFromLookup(os.Getenv)
 	toolPolicies := api.NewToolPoliciesHandler(pool).WithEnforced(toolPolicyEnforced)
 	browserAgentPolicyEnforced := policy.BrowserAgentPolicyEnforcedFromLookup(os.Getenv)
-	slog.Info("tool policies", "enforced", toolPolicyEnforced, "browser_agent_enforced", browserAgentPolicyEnforced)
+	// WS13 S7: audit every use of a stored allow on a persistent run, and keep a run that did not state its
+	// posture off a person's allow. Inert unless TOOL_POLICY_RULE_AUDIT_ENABLED is the literal true.
+	ruleAuditOn := policy.ToolPolicyRuleAuditFromLookup(os.Getenv)
+	slog.Info("tool policies", "enforced", toolPolicyEnforced, "browser_agent_enforced", browserAgentPolicyEnforced, "rule_audit", ruleAuditOn)
 	// WS25-S9: the org's extension allow-list, read from the same agent policy the policy API serves. Inert unless
 	// ORG_EXTENSION_ALLOWLIST is the literal true.
 	orgExtensionsEnforced := policy.OrgExtensionAllowListFromLookup(os.Getenv)
@@ -299,21 +303,33 @@ func main() {
 	}
 	// The four reconcile-emitting registries get the publisher (nil-safe: a nil
 	// recPub makes reconcile.Emit a no-op).
-	api.NewSkillsHandler(pool).WithPublisher(recPub).Register(protectedMux)
+	skillsHandler := api.NewSkillsHandler(pool).WithPublisher(recPub)
+	skillsHandler.Register(protectedMux)
 	api.NewSkillBundlesHandler(pool, api.SkillBundlesAPIFromLookup(os.Getenv)).Register(protectedMux)
 	// Plan 3.4 E4.2 step 3: saved browser recipes. Behind PROCEDURES_API (off by default): every route answers 404 procedures_disabled.
 	api.NewProceduresHandler(pool, api.ProceduresAPIFromLookup(os.Getenv)).Register(protectedMux)
 	api.NewSkillImportHandler(pool, api.SkillImportFromLookup(os.Getenv)).WithPublisher(recPub).Register(protectedMux)
-	api.NewPluginsHandler(pool).WithPublisher(recPub).Register(protectedMux)
 	// Behind ORG_AGENT_POLICY_API (off by default): the handler answers 404 while it is off.
 	api.NewOrgAgentPolicyHandler(pool, api.OrgAgentPolicyAPIFromLookup(os.Getenv)).Register(protectedMux)
 	api.NewOrgHooksHandler(pool).Register(protectedMux)
+	// W5-074-c: the org permission rules admin routes, behind the switch the EvaluatePolicy gate reads
+	// (CAPABILITY_PERMISSION_RULES_ENABLED, literal true). Off, every route answers 404 and the table is not written.
+	api.NewPermissionRulesHandler(pool, api.PermissionRulesEnabledFromLookup(os.Getenv)).Register(protectedMux)
 	// WS05-S5: writes need a person and capability:write; reads are the org's
 	// and the caller's own. Enforcement is the engine's, behind TOOL_POLICY_ENFORCED.
 	toolPolicies.Register(protectedMux)
 	mcpHandler := api.NewMCPHandler(pool).WithPublisher(recPub).WithVault(mcpVault).WithMCPServiceToken(mcpServiceToken).
 		WithOrgExtensionPolicy(api.NewOrgExtensionReader(pool), orgExtensionsEnforced)
 	mcpHandler.Register(protectedMux)
+	// Behind PLUGIN_LOADER_ENABLED (off by default): source pins, the kill list, the enable gate and the
+	// install, uninstall and components routes, which write children through the skills and MCP stores above.
+	// Off is inert CRUD.
+	api.NewPluginsHandler(pool).WithPublisher(recPub).WithSupplyChainPins(api.PluginLoaderFromLookup(os.Getenv)).
+		WithChildStores(skillsHandler, mcpHandler).Register(protectedMux)
+	// Behind the same PLUGIN_LOADER_ENABLED switch (W4-PL-3): the org-curated catalogue and its approvals, and the
+	// kill list. A kill uninstalls every installed copy of the killed digest through the same child stores.
+	api.NewPluginCatalogHandler(pool).WithPublisher(recPub).WithLoaderEnabled(api.PluginLoaderFromLookup(os.Getenv)).
+		WithChildStores(skillsHandler, mcpHandler).Register(protectedMux)
 	// Deliberately on publicMux, not protectedMux: see RegisterInternal's doc
 	// comment — these routes authenticate themselves (X-Mcp-Service-Token) and
 	// must not sit behind the per-user JWT middleware wrapping protectedMux
@@ -344,7 +360,10 @@ func main() {
 	// E3.6-8: the document_pii catalogue key is behind DOCUMENT_PII_POLICY (off by default).
 	api.NewSafetyHandler(pool).WithPublisher(recPub).
 		WithDocumentPIIPolicy(api.DocumentPIIPolicyFromLookup(os.Getenv)).Register(protectedMux)
-	api.NewMemoryHandler(pool, runClient).WithMemoryControls(memoryClient).Register(protectedMux)
+	// D2-480: user, org and global memory writes ask Session Core's content policy before the
+	// INSERT or UPDATE. Off unless MEMORY_GATE_CAPABILITY_WRITES is exactly true.
+	api.NewMemoryHandler(pool, runClient).WithMemoryControls(memoryClient).
+		WithContentGate(api.MemoryGateCapabilityWritesFromLookup(os.Getenv)).Register(protectedMux)
 	// EP-11 S7 /learn: off unless LEARN_COMMAND_ENABLED is exactly true and the learning review is on.
 	// Without a learner (a backend not dialled) the switched-on route answers 503.
 	learnOn := api.LearnCommandAPIFromLookup(os.Getenv) && learningReviewEnabled()
@@ -400,10 +419,29 @@ func main() {
 		}
 	}
 
+	// WS13 S7 (K3-10): one content-free tool_policy_rule_expired audit row per lapsed allow. Runs only while
+	// TOOL_POLICY_RULE_AUDIT_ENABLED is the literal true (ruleAuditOn); off, no sweeper exists.
+	if ruleAuditOn {
+		go api.NewToolPolicyExpirySweeper(pool).Start(ctx)
+		slog.Info("tool policy expiry sweeper started")
+	}
+
 	// EP-7 W4-F T2: the event trigger fire path (the webhook_received consumer and the fire sweeper). Strict
 	// literal true; off by default. It needs the same fresh Control authorizer as the cron sweeper.
 	if os.Getenv("EVENT_TRIGGER_FIRE_ENABLED") == "true" {
 		startEventTriggerFire(ctx, pool, cronAuthorizer, cronAuthErr)
+	}
+
+	// EP-7 W4-F T6: the trigger dry run answers whether one stored webhook event would wake a trigger, without firing.
+	// Strict literal true; off, the route is not mounted and the path answers 404. It reads the payload through the same
+	// integration-corev2 source the wake gate uses, and it records nothing and asks Control nothing.
+	if os.Getenv("EVENT_TRIGGER_WAKE_GATE_ENABLED") == "true" {
+		dryRunSource := eventtrigger.NewIntegrationWebhookSource(os.Getenv("EVENT_TRIGGER_IC_URL"), os.Getenv("EVENT_TRIGGER_IC_API_KEY"))
+		if !dryRunSource.Configured() {
+			slog.Warn("event trigger dry run has no integration-corev2 URL or key; dry runs report the payload unavailable")
+		}
+		api.NewEventTriggerDryRunHandler(pool, dryRunSource).Register(protectedMux)
+		slog.Info("event trigger dry run mounted")
 	}
 
 	// Watch sweeper (S4.3): claims due space_watches, polls each one's source
@@ -513,13 +551,19 @@ func main() {
 		slog.Error("saved procedure store", "error", err)
 		os.Exit(1)
 	}
+	// W5-074: the org permission rules tighten EvaluatePolicy only on the literal "true" of
+	// CAPABILITY_PERMISSION_RULES_ENABLED. Off, no rule is read.
+	permissionRulesOn := api.PermissionRulesEnabledFromLookup(os.Getenv)
+	slog.Info("org permission rules", "enabled", permissionRulesOn)
 	// Attach the durable store so ListCapabilities returns score-ranked results
 	// (nil-safe: WithStore(nil) keeps the in-memory registry ordering).
 	capSrv := capserver.NewServer(reg, modelsCache, pol).WithStore(capStore).
 		WithSkillBundles(skillbundle.NewStore(pool), api.SkillBundlesAPIFromLookup(os.Getenv)).
 		WithProcedures(procedureStore, api.ProceduresAPIFromLookup(os.Getenv)).
 		WithDeckTemplates(skillbundle.DeckTemplatesFromLookup(os.Getenv)).
-		WithSkillBundleRetention(skillbundle.RetentionFromLookup(os.Getenv))
+		WithSkillBundleRetention(skillbundle.RetentionFromLookup(os.Getenv)).
+		WithPermissionRules(api.NewPermissionRuleStore(pool), permissionRulesOn).
+		WithRuleAudit(toolPolicies, ruleAuditOn)
 	if lettaToolSearcher != nil {
 		capSrv.WithLettaToolSearcher(lettaToolSearcher)
 	}

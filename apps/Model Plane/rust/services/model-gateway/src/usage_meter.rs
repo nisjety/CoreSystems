@@ -62,6 +62,10 @@ pub struct CallUsage {
     pub output: i64,
     pub cache_read: i64,
     pub cache_write: i64,
+    /// Served on the priority tier (`InferResponse.service_tier_used`), so a metered price is multiplied
+    /// by the priority-tier multiplier (`pricing::priority_tier_cost_multiplier`). `false` for every call
+    /// the provider did not serve on that tier.
+    pub priority: bool,
 }
 
 impl CallUsage {
@@ -87,13 +91,13 @@ pub struct Snapshot {
     pub cache_read: u64,
     pub cache_write: u64,
     /// The metered calls' cost. `None` when any metered call was unpriced and
-    /// when no metered call has been priced: a subscription-only run has no
-    /// dollar figure, not a zero one.
+    /// when no metered call has been priced: a subscription-only or
+    /// customer-gateway-only run has no dollar figure, not a zero one.
     pub cost_usd: Option<f64>,
     /// Metered calls whose price was unknown.
     pub unpriced_calls: u32,
-    /// `None` before the first call and when metered and subscription calls
-    /// are mixed.
+    /// `None` before the first call and when calls of different bases are
+    /// mixed.
     pub basis: Option<CostBasis>,
     /// The parts of `cost_usd`; present exactly when it is.
     pub by_category: Option<CategoryCost>,
@@ -121,6 +125,8 @@ pub struct UsageMeter {
     metered_priced: u32,
     unpriced_calls: u32,
     subscription_calls: u32,
+    /// Calls the customer's own gateway served: usage, not platform spend (see [`CostBasis::CustomerBilled`]).
+    customer_calls: u32,
     usd: f64,
     by_category: CategoryCost,
 }
@@ -132,8 +138,9 @@ fn count(tokens: i64) -> u64 {
 
 impl UsageMeter {
     /// Record one call priced as `priced` and return the run so far. `priced`
-    /// is ignored for a subscription call, and a metered call counts as priced
-    /// only when it carries both a finite cost and its categories.
+    /// is ignored for a subscription or customer-gateway call, and a metered
+    /// call counts as priced only when it carries both a finite cost and its
+    /// categories.
     pub fn record(&mut self, call: &CallUsage, priced: &Priced) -> Snapshot {
         self.calls = self.calls.saturating_add(1);
         self.input = self.input.saturating_add(count(call.input));
@@ -143,6 +150,9 @@ impl UsageMeter {
         match call.basis {
             CostBasis::Subscription => {
                 self.subscription_calls = self.subscription_calls.saturating_add(1);
+            }
+            CostBasis::CustomerBilled => {
+                self.customer_calls = self.customer_calls.saturating_add(1);
             }
             CostBasis::Metered => match (priced.usd, priced.by_category) {
                 (Some(usd), Some(categories)) if usd.is_finite() => {
@@ -162,9 +172,11 @@ impl UsageMeter {
         let basis = match (
             self.metered_priced > 0 || self.unpriced_calls > 0,
             self.subscription_calls > 0,
+            self.customer_calls > 0,
         ) {
-            (true, false) => Some(CostBasis::Metered),
-            (false, true) => Some(CostBasis::Subscription),
+            (true, false, false) => Some(CostBasis::Metered),
+            (false, true, false) => Some(CostBasis::Subscription),
+            (false, false, true) => Some(CostBasis::CustomerBilled),
             _ => None,
         };
         Snapshot {
@@ -204,6 +216,7 @@ mod tests {
             output,
             cache_read: read,
             cache_write: write,
+            priority: false,
         }
     }
 
@@ -217,6 +230,7 @@ mod tests {
                 output_usd: usd / 2.0,
             }),
             source: PriceSource::Exact,
+            note: None,
         }
     }
 
@@ -225,6 +239,7 @@ mod tests {
             usd: None,
             by_category: None,
             source: PriceSource::Default,
+            note: None,
         }
     }
 
@@ -279,11 +294,13 @@ mod tests {
                 usd: Some(0.1),
                 by_category: None,
                 source: PriceSource::Exact,
+                note: None,
             },
             Priced {
                 usd: Some(f64::NAN),
                 by_category: priced(0.1).by_category,
                 source: PriceSource::Exact,
+                note: None,
             },
         ] {
             let mut meter = UsageMeter::default();
@@ -301,6 +318,7 @@ mod tests {
             usd: Some(0.0),
             by_category: None,
             source: PriceSource::Subscription,
+            note: None,
         };
         let only = meter.record(
             &call(CostBasis::Subscription, 1_800, 120, 1_024, 256),
@@ -338,6 +356,7 @@ mod tests {
                 usd: Some(0.0),
                 by_category: None,
                 source: PriceSource::Subscription,
+                note: None,
             },
         );
         let got = meter.record(&call(CostBasis::Metered, 10, 1, 0, 0), &unpriced());

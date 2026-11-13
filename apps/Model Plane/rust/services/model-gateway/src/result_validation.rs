@@ -625,6 +625,9 @@ where
                     // The accepted candidate's report, so the turn can tell
                     // whether the token counts it releases were reported.
                     provider_timing: response.provider_timing,
+                    // The tier the accepted candidate was served on, so the released answer is priced
+                    // as the unary path prices it.
+                    service_tier_used: response.service_tier_used,
                     ..Default::default()
                 },
                 receipt,

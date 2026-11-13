@@ -42,8 +42,10 @@ import {
   ForbiddenException,
   Get,
   Headers as NestHeaders,
+  Inject,
   Logger,
   NotFoundException,
+  Optional,
   Param,
   Post,
   Req,
@@ -83,6 +85,17 @@ import {
   type CanonicalTokenContext,
 } from './plane-token-membership';
 import { planeScopesForRole } from './plane-token-scopes';
+import { ZDR_WAIVER_ENABLED_TOKEN } from './retention-decision.service';
+import {
+  RETENTION_DECISION_SIGNER,
+  type RetentionDecisionSigner,
+} from './retention-decision.signer';
+import {
+  assertWaiverOrgPosture,
+  auditRetentionWaiverToken,
+  RETENTION_DECISION_HEADER,
+  resolveRetentionWaiver,
+} from './retention-waiver-mint';
 import { webPolicyClaimFor } from './web-policy';
 
 function toWebHeaders(
@@ -155,6 +168,14 @@ export class PlaneTokenController {
   constructor(
     private readonly convexTokenService: ConvexTokenService,
     private readonly directNats: DirectNatsService,
+    // ZDR-Z-14b. Optional so a host that does not provide them fails closed
+    // (a decision header is then answered 503), never open.
+    @Optional()
+    @Inject(RETENTION_DECISION_SIGNER)
+    private readonly retentionSigner?: RetentionDecisionSigner,
+    @Optional()
+    @Inject(ZDR_WAIVER_ENABLED_TOKEN)
+    private readonly waiverEnabled?: boolean,
   ) {}
 
   /**
@@ -250,6 +271,23 @@ export class PlaneTokenController {
       );
     }
 
+    // ZDR-Z-14b: a relayed per-connection waiver decision is verified against
+    // this cookie session before anything is resolved or signed. Absent: the
+    // mint is unchanged. On `browser-broker` and `sandbox-manager` it is
+    // refused (a waived turn never gets those bearers). Any refusal (catalogue
+    // envelope) mints nothing.
+    const retentionWaiver = resolveRetentionWaiver({
+      header: request.headers[RETENTION_DECISION_HEADER],
+      audience,
+      signer: this.retentionSigner,
+      waiverEnabled: this.waiverEnabled === true,
+      session: {
+        userId: session.user.id,
+        sessionId: (session.session as { id?: string } | null | undefined)?.id,
+        orgId: sessionContext.orgId,
+      },
+    });
+
     // User-level scopes preserve ordinary document/wiki workflows, while
     // tenant-wide/admin capabilities remain role-gated. Destructive search
     // rebuild is intentionally absent from every interactive-user token.
@@ -274,15 +312,29 @@ export class PlaneTokenController {
     // token. Let it propagate, like the posture above.
     const webPolicy = await webPolicyClaimFor(audience, sessionContext.orgId);
 
+    if (retentionWaiver) {
+      // A waiver only lowers a ZDR organization; a stale decision mints nothing.
+      assertWaiverOrgPosture(retentionPosture);
+    }
     const bundle = this.convexTokenService.issuePlaneToken(audience, {
       userId: session.user.id,
       orgId: sessionContext.orgId,
       email: session.user.email ?? undefined,
       scopes,
       retentionPosture,
+      ...(retentionWaiver ? { retentionWaiver } : {}),
       executionRetentionProof,
       webPolicy,
     });
+    if (retentionWaiver) {
+      await auditRetentionWaiverToken(this.directNats, this.logger, {
+        orgId: sessionContext.orgId,
+        userId: session.user.id,
+        audience,
+        decision: retentionWaiver,
+        ttlSeconds: bundle.expiresInSeconds,
+      });
+    }
 
     return {
       ...bundle,

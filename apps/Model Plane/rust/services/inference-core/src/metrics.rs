@@ -68,6 +68,17 @@ pub const ZDR_ATTESTATION_REVIEW_BY: &str =
 /// run is a label.
 pub const REQUEST_SNAPSHOT_DROPPED_TOTAL: &str = "inference_request_snapshot_dropped_total";
 
+/// Counter: failed platform provider calls by provider registry id and failure class
+/// (`INFERENCE_PROVIDER_BENCHING`). The class is a [`FailureClass`] label, a closed set. No model, org
+/// or request is a label.
+///
+/// [`FailureClass`]: crate::provider::health::FailureClass
+pub const PROVIDER_FAILURES_TOTAL: &str = "mp_inference_provider_failures_total";
+
+/// Counter: benches started by provider registry id and the failure class that started them
+/// (`INFERENCE_PROVIDER_BENCHING`). Same closed label sets as [`PROVIDER_FAILURES_TOTAL`].
+pub const PROVIDER_BENCHED_TOTAL: &str = "mp_inference_provider_benched_total";
+
 /// Label value for "the call failed before a provider answered, so no model or
 /// provider is known".
 pub const UNKNOWN: &str = "unknown";
@@ -135,6 +146,14 @@ pub fn describe() {
     describe_counter!(
         REQUEST_SNAPSHOT_DROPPED_TOTAL,
         "Request snapshots that were not stored, by reason (queue_full: the capture queue was full; write_failed: session-core refused or was unreachable). The provider call is never affected."
+    );
+    describe_counter!(
+        PROVIDER_FAILURES_TOTAL,
+        "Failed platform provider calls by provider and failure class (auth, quota, rate_limit, context_too_long, malformed_request, refusal, server, timeout, empty). Subscription outcomes are not counted."
+    );
+    describe_counter!(
+        PROVIDER_BENCHED_TOTAL,
+        "Benches started on a platform provider by provider and the failure class that started them."
     );
     describe_gauge!(BUILD_INFO, "Version of the running inference-core binary.");
     describe_gauge!(
@@ -395,6 +414,29 @@ pub fn record_tokens_with_purpose(
         )
         .increment(tokens);
     }
+}
+
+/// Count one failed platform provider call. `provider` is the registry id (bounded here, so a caller
+/// cannot pass a raw value around the cap); `class` is a [`crate::provider::health::FailureClass`]
+/// label.
+pub fn record_provider_failure(provider: &str, class: &'static str) {
+    counter!(
+        PROVIDER_FAILURES_TOTAL,
+        "provider" => labels().providers.admit(provider),
+        "class" => class,
+    )
+    .increment(1);
+}
+
+/// Count one bench started on a platform provider, under the failure class that started it. Same
+/// labels as [`record_provider_failure`].
+pub fn record_provider_benched(provider: &str, class: &'static str) {
+    counter!(
+        PROVIDER_BENCHED_TOTAL,
+        "provider" => labels().providers.admit(provider),
+        "class" => class,
+    )
+    .increment(1);
 }
 
 /// Count one request snapshot that was not stored. `reason` is one of the closed

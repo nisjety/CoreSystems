@@ -54,8 +54,10 @@ aws-credential-types = "1"
 # S4.2 background process host: SIGTERM to the sandboxed command. The
 # workspace forbids unsafe_code, so libc::kill is not an option; nix wraps the
 # same syscall safely and is already in the lock file transitively.
+# "term" gates pty::openpty for the optional pseudo-terminal of process_start
+# (EXECUTION_PROCESS_TTY_ENABLED), again without unsafe code.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["signal"] }
+nix = { version = "0.29", default-features = false, features = ["signal", "term"] }
 
 [dev-dependencies]
 mp-inference-replay = { path = "../../crates/mp-inference-replay" }

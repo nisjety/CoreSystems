@@ -35,13 +35,38 @@ describe('inline assistant', () => {
     await controller.send(payload({ model: 'selected-model', provider: 'openai-codex-subscription', subscriptionConnectionId: 'subscription-connection-123' }))
 
     await vi.waitFor(() => expect(controller.state().status).toBe('error'))
-    expect(controller.state().error).toBe('Subscription route unavailable')
+    expect(controller.state().error).toBe('Could not send the message.')
     expect(stream).toHaveBeenCalledTimes(1)
     expect(stream.mock.calls[0]?.[0]).toMatchObject({
       model: 'selected-model',
       provider: 'openai-codex-subscription',
       subscriptionConnectionId: 'subscription-connection-123',
     })
+  })
+
+  it('shows the copy for a known server code in the chosen language, never the server text', async () => {
+    const stream = vi.fn(async (_body: ChatInvokeRequest, handlers: ChatStreamHandlers) => {
+      handlers.onError?.({ code: 'thread_run_active', message: 'An agent run is already active on this thread' })
+    })
+    const controller = createInlineAssistantController({ scope: () => 'user:org', tr: (noText) => noText, onChange: () => {}, dependencies: { stream, cancelInvocation: vi.fn(), cancelRun: vi.fn() } })
+
+    await controller.send(payload())
+
+    await vi.waitFor(() => expect(controller.state().status).toBe('error'))
+    expect(controller.state().error).toBe('Agenten jobber allerede i denne samtalen. Meldingen er lagt ut. Prøv igjen når den er ferdig.')
+  })
+
+  it('shows the fallback for a code it has no copy for, never the English server text', async () => {
+    const stream = vi.fn(async (_body: ChatInvokeRequest, handlers: ChatStreamHandlers) => {
+      handlers.onError?.({ code: 'model_gateway_exploded', message: 'Model gateway exploded: upstream returned no bytes' })
+    })
+    const controller = createInlineAssistantController({ scope: () => 'user:org', tr: (noText) => noText, onChange: () => {}, dependencies: { stream, cancelInvocation: vi.fn(), cancelRun: vi.fn() } })
+
+    await controller.send(payload())
+
+    await vi.waitFor(() => expect(controller.state().status).toBe('error'))
+    expect(controller.state().error).toBe('Kunne ikke sende meldingen.')
+    expect(controller.state().error).not.toContain('Model gateway')
   })
 
   it('keeps temporary chats in memory and does not send durable message IDs', async () => {

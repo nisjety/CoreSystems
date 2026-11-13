@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/workflow"
 
 	"github.com/triodelab/model-plane/pkg/envelope"
 	"github.com/triodelab/model-plane/pkg/natsx"
@@ -520,10 +521,10 @@ func agentLaneInput(fireKey string) ScheduledRunInput {
 	}
 }
 
-// TestScheduledRun_AgentLaneCompletesWithWithheldEffects verifies that a contract-bearing fire
-// that the start recorded as agent-lane takes one agent step, and that a withheld effect completes
-// the run as needs_review with counts only.
-func TestScheduledRun_AgentLaneCompletesWithWithheldEffects(t *testing.T) {
+// TestScheduledRun_AgentLaneWithheldEffectsFailNeedsReview verifies that a contract-bearing fire
+// that the start recorded as agent-lane takes one agent step, and that a withheld effect fails the
+// run with the closed code scheduled_agent_needs_review (decision D-f10-4), never as completed.
+func TestScheduledRun_AgentLaneWithheldEffectsFailNeedsReview(t *testing.T) {
 	env, _, stub := newTestEnv(t)
 	input := agentLaneInput("fire-agent-withheld")
 	env.OnActivity(
@@ -545,10 +546,13 @@ func TestScheduledRun_AgentLaneCompletesWithWithheldEffects(t *testing.T) {
 	env.ExecuteWorkflow(ScheduledRunSupervision, input)
 
 	require.True(t, env.IsWorkflowCompleted())
-	require.NoError(t, env.GetWorkflowError())
+	require.Error(t, env.GetWorkflowError())
 	_, decoded := decodeOnlyEnvelope(t, stub.Events())
-	assert.Equal(t, "RUN_COMPLETED", decoded.EventType)
-	assert.Contains(t, string(decoded.Payload), "needs_review")
+	assert.Equal(t, "RUN_FAILED", decoded.EventType)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(decoded.Payload, &payload))
+	reason, _ := payload["reason"].(string)
+	assert.Equal(t, "scheduled_agent_needs_review", reason)
 	env.AssertExpectations(t)
 }
 
@@ -582,8 +586,8 @@ func TestScheduledRun_AgentLaneUnknownOutcomeStopsWithoutRetry(t *testing.T) {
 }
 
 // TestScheduledRun_AgentLaneIncompleteStepReportsFailed verifies that an agent-lane step that did
-// not complete (a refused contract, for example) is summarised as failed, even with no effect
-// withheld, and never as completed or needs_review.
+// not complete (a refused contract, for example) fails the run with the closed code
+// scheduled_agent_failed, even with no effect withheld, and never as completed or needs_review.
 func TestScheduledRun_AgentLaneIncompleteStepReportsFailed(t *testing.T) {
 	env, _, stub := newTestEnv(t)
 	input := agentLaneInput("fire-agent-incomplete")
@@ -602,10 +606,52 @@ func TestScheduledRun_AgentLaneIncompleteStepReportsFailed(t *testing.T) {
 	env.ExecuteWorkflow(ScheduledRunSupervision, input)
 
 	require.True(t, env.IsWorkflowCompleted())
-	require.NoError(t, env.GetWorkflowError())
+	require.Error(t, env.GetWorkflowError())
 	_, decoded := decodeOnlyEnvelope(t, stub.Events())
-	assert.Equal(t, "RUN_COMPLETED", decoded.EventType)
-	assert.Contains(t, string(decoded.Payload), "outcome failed")
+	assert.Equal(t, "RUN_FAILED", decoded.EventType)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(decoded.Payload, &payload))
+	reason, _ := payload["reason"].(string)
+	assert.Equal(t, "scheduled_agent_failed", reason)
 	assert.NotContains(t, string(decoded.Payload), "needs_review")
 	env.AssertExpectations(t)
+}
+
+// TestScheduledRunSupervisionAgentOutcomeBehindVersion pins the scheduled-agent-outcome change to
+// workflow.DefaultVersion. A history recorded before the marker existed replays with it absent, so an
+// agent-lane fire whose effect was withheld still completes: RUN_COMPLETED carries the outcome summary
+// the agent lane always recorded, and the fire is not failed as scheduled_agent_needs_review.
+func TestScheduledRunSupervisionAgentOutcomeBehindVersion(t *testing.T) {
+	t.Run("pre-change history completes with the outcome summary", func(t *testing.T) {
+		env, _, stub := newTestEnv(t)
+		input := agentLaneInput("fire-agent-pre-change")
+		env.OnGetVersion(scheduledAgentOutcomeChange, workflow.DefaultVersion, scheduledAgentOutcomeVersion).
+			Return(workflow.DefaultVersion)
+		env.OnActivity(
+			"StartScheduledRunActivity",
+			mock.Anything, input.RunID, input.ThreadID, input.OrgID, input.SpaceRef, input.SubjectID,
+			input.ScheduleID, input.FireKey, input.TemplateDigest, input.IdempotencyKey, input.Goal, "execute",
+			input.ContractJSON, input.ContractDigest, input.ContractExpiresAt,
+		).Return(activities.RunMetadata{
+			RunID: input.RunID, ThreadID: input.ThreadID, OrgID: input.OrgID,
+			UserID: activities.SystemActorID, AgentLane: true,
+		}, nil).Once()
+		env.OnActivity("ExecuteScheduledStepActivity", mock.Anything, mock.Anything).
+			Return(activities.StepResult{
+				StepIndex: 0, ToolName: "scheduled-step", Completed: true,
+				RoundsExecuted: 3, WithheldEffects: 1,
+			}, nil).Once()
+
+		env.ExecuteWorkflow(ScheduledRunSupervision, input)
+
+		require.True(t, env.IsWorkflowCompleted())
+		require.NoError(t, env.GetWorkflowError())
+		_, decoded := decodeOnlyEnvelope(t, stub.Events())
+		assert.Equal(t, "RUN_COMPLETED", decoded.EventType)
+		var payload map[string]any
+		require.NoError(t, json.Unmarshal(decoded.Payload, &payload))
+		want := "scheduled run " + input.RunID + " outcome needs_review: 3 rounds, 1 withheld effects"
+		assert.Equal(t, want, payload["summary"], "the outcome summary the agent lane recorded before the marker")
+		env.AssertExpectations(t)
+	})
 }

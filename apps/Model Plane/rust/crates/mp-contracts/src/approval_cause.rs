@@ -59,13 +59,16 @@ pub enum CauseCode {
     /// The person holds the run's browser, or the agent asked them for help in it (EP-1). The
     /// approval is the hand-back: consuming it lets the held browser call run again.
     BrowserHumanAssist,
+    /// An egress call (a web fetch or a provider action) held for a person after a connected-app
+    /// read came back flagged by screening (WS23-S3). Only `once` is offered.
+    TaintedEgress,
     /// A gate that did not say why, or a code this reader does not know.
     UnclassifiedGate,
 }
 
 impl CauseCode {
     /// Every code, in the order the golden lists them.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::OwnerEffectReserved,
         Self::ConsentToDisclose,
         Self::RiskyEffectUnderAsk,
@@ -76,6 +79,7 @@ impl CauseCode {
         Self::BrowserActionRisk,
         Self::AutoPostureProviderWrite,
         Self::BrowserHumanAssist,
+        Self::TaintedEgress,
         Self::UnclassifiedGate,
     ];
 
@@ -93,6 +97,7 @@ impl CauseCode {
             Self::BrowserActionRisk => "browser_action_risk",
             Self::AutoPostureProviderWrite => "auto_posture_provider_write",
             Self::BrowserHumanAssist => "browser_human_assist",
+            Self::TaintedEgress => "tainted_egress",
             Self::UnclassifiedGate => "unclassified_gate",
         }
     }
@@ -182,14 +187,39 @@ pub fn is_pinned_mcp(cause: &ApprovalCause) -> bool {
 /// Whether a cause may become a standing rule (build plan WS13 S7): it must offer a thread grant,
 /// name a pinned MCP tool, and declare a class a person may relax, which is at most an external
 /// write (capability-core's `CanRelax` for a person). A built-in tool is never offered one.
+///
+/// It also requires the pause to be the high-risk capability check and the cause to carry the
+/// registry capability id the confirm write needs (D-WS13-8). capability-core's user-scope allow
+/// lifts only a risk-level ask, which execution-core shows as `capability_high_risk`; a pause
+/// from execution-core's own permission gate (`risky_effect_under_ask`, `consent_to_disclose`)
+/// reads no tool policy, so a rule confirmed from it would never relax a call while the card told
+/// the person the tool is always allowed. With the `eligible_scopes` rule a high-risk external
+/// write is `once`, so Always is offered in practice for a high-risk read, sandbox_compute or
+/// context_write MCP tool.
 #[must_use]
 pub fn rule_offered(cause: &ApprovalCause) -> bool {
     cause
         .scope_options
         .iter()
         .any(|scope| scope == SCOPE_THREAD)
+        && CauseCode::from_wire(&cause.code) == CauseCode::CapabilityHighRisk
+        && !cause.capability_id.is_empty()
         && is_pinned_mcp(cause)
         && SideEffectClass::from_wire(&cause.effect_class) <= SideEffectClass::ExternalWrite
+}
+
+/// The prefix every MCP capability id carries in the registry.
+const MCP_CAPABILITY_PREFIX: &str = "cap.mcp_tool.";
+
+/// Whether `candidate` has the shape of an MCP capability id as capability-core's
+/// `mcpIdentifier` accepts it: the `cap.mcp_tool.` prefix, at most [`MAX_FIELD_CHARS`] characters
+/// in all, each ASCII alphanumeric or one of `_ . : -`.
+fn is_mcp_capability_id(candidate: &str) -> bool {
+    candidate.starts_with(MCP_CAPABILITY_PREFIX)
+        && candidate.len() <= MAX_FIELD_CHARS
+        && candidate
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'))
 }
 
 /// A sha256 digest as the registry writes it: 64 lowercase hex characters.
@@ -331,6 +361,42 @@ pub fn for_call_with_tool(
     cause
 }
 
+/// The facts of a call that the gate read from the verified capability decision and from its own
+/// registry binding, never from model text. Empty facts leave a cause `once` only.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CallFacts {
+    /// The call's declared side-effect class (`mp-contracts` tool_class), from the verified decision.
+    pub effect_class: String,
+    /// The sha256 of the pinned MCP tool definition, from the registry binding. Empty when unpinned.
+    pub tool_digest: String,
+    /// The registry capability the MCP tool is bound to, from the registry binding. Empty when none.
+    pub capability_id: String,
+}
+
+/// [`for_call_with_tool`] with the call's [`CallFacts`]: also states the capability id (kept only
+/// under the rule `normalized` applies) and recomputes the scope options from the facts.
+#[must_use]
+pub fn for_call_with_facts(
+    code: CauseCode,
+    run_id: &str,
+    tool_name: &str,
+    tool_input: &str,
+    facts: &CallFacts,
+) -> ApprovalCause {
+    let mut cause = for_call_with_tool(
+        code,
+        run_id,
+        tool_name,
+        tool_input,
+        &facts.effect_class,
+        &facts.tool_digest,
+    );
+    cause.capability_id = facts.capability_id.clone();
+    keep_capability_id(&mut cause);
+    cause.scope_options = eligible_scopes(&cause);
+    cause
+}
+
 /// A cause that names only its code, for a gate with no tool call to describe.
 #[must_use]
 pub fn for_code(code: CauseCode) -> ApprovalCause {
@@ -368,8 +434,21 @@ pub fn normalized(mut cause: ApprovalCause) -> (ApprovalCause, bool) {
         cause.tool_digest.clear();
     }
     keep_browser_assist_facts(&mut cause, code);
+    keep_capability_id(&mut cause);
     cause.scope_options = eligible_scopes(&cause);
     (cause, known)
+}
+
+/// The capability id a cause may keep: only a `capability_high_risk` pause on a pinned MCP tool,
+/// and only an id shaped like an MCP capability id. Any other cause keeps none, so a creator
+/// cannot attach an id to a pause that no confirmed rule lifts.
+fn keep_capability_id(cause: &mut ApprovalCause) {
+    let keep = CauseCode::from_wire(&cause.code) == CauseCode::CapabilityHighRisk
+        && is_pinned_mcp(cause)
+        && is_mcp_capability_id(&cause.capability_id);
+    if !keep {
+        cause.capability_id.clear();
+    }
 }
 
 /// `assist_kind` of a pause raised because the person took the browser (EP-1).
@@ -439,6 +518,7 @@ pub fn to_metadata(cause: &ApprovalCause) -> Value {
         ("action_key", &cause.action_key),
         ("call_digest", &cause.call_digest),
         ("tool_digest", &cause.tool_digest),
+        ("capability_id", &cause.capability_id),
         ("assist_kind", &cause.assist_kind),
         ("assist_origin", &cause.assist_origin),
         ("host", &cause.host),
@@ -490,6 +570,7 @@ pub fn from_metadata(metadata: &Value) -> Option<ApprovalCause> {
         action_key: text("action_key"),
         call_digest: text("call_digest"),
         tool_digest: text("tool_digest"),
+        capability_id: text("capability_id"),
         // Write-only (see the proto): a stored cause never carries it.
         host_class: String::new(),
         assist_kind: text("assist_kind"),
@@ -514,6 +595,23 @@ pub fn denial_memory_from(value: Option<&str>) -> bool {
 #[must_use]
 pub fn denial_memory_enabled() -> bool {
     denial_memory_from(std::env::var(DENIAL_MEMORY_ENV).ok().as_deref())
+}
+
+/// Parse the "Always" rule-proposals switch (build plan WS13 S7): `true` in any case and with
+/// surrounding whitespace, and nothing else. The variable is [`crate::shell_rule::RULE_PROPOSALS_ENV`].
+#[must_use]
+pub fn rule_proposals_from(value: Option<&str>) -> bool {
+    switch_from(value)
+}
+
+/// Whether "Always" rule proposals are on in this process.
+#[must_use]
+pub fn rule_proposals_enabled() -> bool {
+    rule_proposals_from(
+        std::env::var(crate::shell_rule::RULE_PROPOSALS_ENV)
+            .ok()
+            .as_deref(),
+    )
 }
 
 /// The environment switch for approval scope grants (build plan WS13 S6). Default off; only the
@@ -586,12 +684,12 @@ mod tests {
             "",
             " provider_write",
             "PROVIDER_WRITE",
-            "tainted_egress",
+            "tainted_egress_retired",
             "nope",
         ] {
             assert_eq!(CauseCode::from_wire(token), CauseCode::UnclassifiedGate);
         }
-        assert!(!CauseCode::is_known("tainted_egress"));
+        assert!(!CauseCode::is_known("tainted_egress_retired"));
     }
 
     #[test]
@@ -660,7 +758,7 @@ mod tests {
     #[test]
     fn normalising_degrades_an_unknown_code_and_fixes_the_scope_options() {
         let (cause, known) = normalized(ApprovalCause {
-            code: "tainted_egress".to_owned(),
+            code: "tainted_egress_retired".to_owned(),
             scope_options: vec!["run".to_owned(), "thread".to_owned()],
             tool: "x".repeat(MAX_FIELD_CHARS + 50),
             ..ApprovalCause::default()
@@ -1000,21 +1098,43 @@ mod tests {
         assert_eq!(scopes(&malformed), ["once"]);
     }
 
+    const CAPABILITY_ID: &str = "cap.mcp_tool.fixture.create_note";
+
+    fn mcp_call_with_capability(code: CauseCode, class: &str, digest: &str) -> ApprovalCause {
+        for_call_with_facts(
+            code,
+            "run_1",
+            "mcp__fixture__create_note",
+            r#"{"title":"x"}"#,
+            &CallFacts {
+                effect_class: class.to_owned(),
+                tool_digest: digest.to_owned(),
+                capability_id: CAPABILITY_ID.to_owned(),
+            },
+        )
+    }
+
     #[test]
     fn a_rule_is_offered_only_for_a_pinned_mcp_tool_the_person_may_relax() {
         let offered = [
-            mcp_call(CauseCode::RiskyEffectUnderAsk, "external_write", PINNED),
-            mcp_call(CauseCode::ConsentToDisclose, "read", PINNED),
-            mcp_call(CauseCode::CapabilityHighRisk, "read", PINNED),
+            mcp_call_with_capability(CauseCode::CapabilityHighRisk, "read", PINNED),
+            mcp_call_with_capability(CauseCode::CapabilityHighRisk, "sandbox_compute", PINNED),
+            mcp_call_with_capability(CauseCode::CapabilityHighRisk, "context_write", PINNED),
         ];
         for cause in &offered {
+            assert_eq!(cause.capability_id, CAPABILITY_ID, "{cause:?}");
             assert!(rule_offered(cause), "{cause:?}");
         }
         let refused = [
+            // The permission gate's pauses are not lifted by a confirmed rule.
+            mcp_call_with_capability(CauseCode::RiskyEffectUnderAsk, "external_write", PINNED),
+            mcp_call_with_capability(CauseCode::ConsentToDisclose, "read", PINNED),
+            // No capability id for the confirm write.
+            mcp_call(CauseCode::CapabilityHighRisk, "read", PINNED),
             mcp_call(CauseCode::RiskyEffectUnderAsk, "destructive", PINNED),
             mcp_call(CauseCode::RiskyEffectUnderAsk, "owner_effect", PINNED),
-            mcp_call(CauseCode::CapabilityHighRisk, "external_write", PINNED),
-            mcp_call(CauseCode::HookAsk, "external_write", PINNED),
+            mcp_call_with_capability(CauseCode::CapabilityHighRisk, "external_write", PINNED),
+            mcp_call_with_capability(CauseCode::HookAsk, "external_write", PINNED),
             mcp_call(CauseCode::RiskyEffectUnderAsk, "external_write", ""),
             for_call_with_tool(
                 CauseCode::RiskyEffectUnderAsk,
@@ -1027,6 +1147,74 @@ mod tests {
         ];
         for cause in &refused {
             assert!(!rule_offered(cause), "{cause:?}");
+        }
+    }
+
+    #[test]
+    fn normalising_drops_a_capability_id_that_no_confirmed_rule_could_use() {
+        let base = mcp_call_with_capability(CauseCode::CapabilityHighRisk, "read", PINNED);
+        let (kept, _) = normalized(base.clone());
+        assert_eq!(kept.capability_id, CAPABILITY_ID);
+        let (permission_gate, _) = normalized(ApprovalCause {
+            code: CauseCode::RiskyEffectUnderAsk.as_str().to_owned(),
+            ..base.clone()
+        });
+        assert!(permission_gate.capability_id.is_empty());
+        let (built_in, _) = normalized(ApprovalCause {
+            tool: "knowledge_search".to_owned(),
+            action_key: "knowledge_search".to_owned(),
+            tool_digest: String::new(),
+            ..base.clone()
+        });
+        assert!(built_in.capability_id.is_empty());
+        let (unpinned, _) = normalized(ApprovalCause {
+            tool_digest: String::new(),
+            ..base.clone()
+        });
+        assert!(unpinned.capability_id.is_empty());
+        let too_long = format!("cap.mcp_tool.{}", "a".repeat(MAX_FIELD_CHARS));
+        for malformed in [
+            "",
+            "cap.builtin.read",
+            "cap.mcp_tool.has space",
+            "cap.mcp_tool.semi;colon",
+            "cap.mcp_tool.\u{e9}",
+            too_long.as_str(),
+        ] {
+            let (cause, _) = normalized(ApprovalCause {
+                capability_id: malformed.to_owned(),
+                ..base.clone()
+            });
+            assert!(cause.capability_id.is_empty(), "{malformed:?}");
+        }
+    }
+
+    #[test]
+    fn a_capability_id_survives_the_stored_shape() {
+        let cause = mcp_call_with_capability(CauseCode::CapabilityHighRisk, "read", PINNED);
+        let metadata = json!({ "cause": to_metadata(&cause) });
+        assert_eq!(
+            metadata["cause"]["capability_id"].as_str(),
+            Some(CAPABILITY_ID)
+        );
+        assert_eq!(from_metadata(&metadata), Some(cause));
+        let without = mcp_call(CauseCode::CapabilityHighRisk, "read", PINNED);
+        assert!(to_metadata(&without).get("capability_id").is_none());
+    }
+
+    #[test]
+    fn the_rule_proposals_switch_is_strict() {
+        assert!(rule_proposals_from(Some("true")));
+        assert!(rule_proposals_from(Some(" TRUE ")));
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("yes"),
+            Some("on"),
+            Some("false"),
+        ] {
+            assert!(!rule_proposals_from(value), "{value:?}");
         }
     }
 

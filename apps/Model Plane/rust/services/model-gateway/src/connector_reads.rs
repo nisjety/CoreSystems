@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
+use mp_contracts::custom_rest;
 use mp_contracts::model_plane::v1::{ToolCall, ToolDefinition};
 use mp_contracts::provider_reads::{self, ProviderRead};
 use serde_json::{json, Map, Value};
@@ -137,6 +138,12 @@ impl ReadPolicy {
 /// whether the org or the person set it. A body that is not the list is unknown.
 #[must_use]
 pub fn policy_of(body: &Value) -> ReadPolicy {
+    policy_for(body, READ_CAPABILITY)
+}
+
+/// The level [`policy_of`] reads, for the capability named. Each capability's rows are read the same way (W4-CC-7).
+#[must_use]
+fn policy_for(body: &Value, capability: &str) -> ReadPolicy {
     let (Some(enforced), Some(policies)) = (
         body.get("enforced").and_then(Value::as_bool),
         body.get("policies").and_then(Value::as_array),
@@ -148,7 +155,7 @@ pub fn policy_of(body: &Value) -> ReadPolicy {
     }
     let mut level = ReadPolicy::Unrestricted;
     for policy in policies {
-        if policy.get("capability_id").and_then(Value::as_str) != Some(READ_CAPABILITY) {
+        if policy.get("capability_id").and_then(Value::as_str) != Some(capability) {
             continue;
         }
         match policy.get("decision").and_then(Value::as_str) {
@@ -560,6 +567,191 @@ pub(super) async fn read_outcome(
     // account's mail and files are personal content, so no model classifier is sent them from here.
     let provenance = ToolProvenance::assess(
         provider_reads::READ_TOOL_NAME,
+        &rendered,
+        &state.screening_semaphore,
+        &state.http_client,
+        &state.capability_core_base_url,
+        capability_bearer,
+    )
+    .await;
+    ToolOutcome {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        output: rendered,
+        error: None,
+        provenance,
+    }
+}
+
+/// The capability whose availability and tool policy govern the custom REST read in the Ask loop (W4-CC-7).
+const CUSTOM_REST_READ_CAPABILITY: &str = "cap.custom_rest.read";
+/// What the Ask loop answers a custom REST read it does not offer on this turn.
+const CUSTOM_REST_NOT_AVAILABLE: &str = "custom_rest.read is not available on this turn";
+
+/// The custom REST read as the Ask loop offers it: the name, description and schema the Do loop offers too (W4-CC-7).
+#[must_use]
+pub fn custom_rest_tool_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: custom_rest::READ_TOOL_NAME.to_owned(),
+        description: custom_rest::READ_TOOL_DESCRIPTION.to_owned(),
+        parameters_json: custom_rest::read_tool_parameters_json(),
+    }
+}
+
+/// One GET to capability-core with the person's own capability bearer, read as JSON. `None` for any failure, so an
+/// answer that cannot be read admits nothing.
+async fn capability_core_json(http: &reqwest::Client, url: String, bearer: &str) -> Option<Value> {
+    let response = http
+        .get(url)
+        .bearer_auth(bearer)
+        .timeout(POLICY_TIMEOUT)
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.json::<Value>().await.ok()
+}
+
+/// Whether the Ask loop may offer `custom_rest.read` on this turn (W4-CC-7). capability-core must report the capability
+/// available, since its seed starts unavailable and only an attestation makes it so, and the person's or the org's tool
+/// policy on it must not hold the read back. Both answers are read with the person's own capability bearer. Without
+/// that bearer, or when either answer cannot be read, nothing is admitted.
+pub async fn custom_rest_read_admitted(state: &AppState, capability_bearer: Option<&str>) -> bool {
+    let Some(bearer) = capability_bearer.filter(|bearer| !bearer.trim().is_empty()) else {
+        return false;
+    };
+    let base_url: &str = &state.capability_core_base_url;
+    let available = capability_core_json(
+        &state.http_client,
+        format!("{base_url}/api/v1/capabilities/{CUSTOM_REST_READ_CAPABILITY}"),
+        bearer,
+    )
+    .await
+    .and_then(|value| {
+        value
+            .get("state")
+            .and_then(Value::as_str)
+            .map(|status| status == "available")
+    })
+    .unwrap_or(false);
+    if !available {
+        return false;
+    }
+    capability_core_json(
+        &state.http_client,
+        format!("{base_url}/api/v1/tool-policies?capability_id={CUSTOM_REST_READ_CAPABILITY}"),
+        bearer,
+    )
+    .await
+    .is_some_and(|value| policy_for(&value, CUSTOM_REST_READ_CAPABILITY).admits_ask_loop())
+}
+
+/// One custom REST read through integration-corev2 (W4-CC-7): `custom_rest.call` with the GET or HEAD method the call
+/// names, rendered for the model. A connection that needs reconnecting, or a missing capability, is a typed answer the
+/// model is told. Any other refusal or failure is an error.
+async fn custom_rest_fetch(
+    http: &reqwest::Client,
+    base_url: &str,
+    bearer: &str,
+    args: &custom_rest::CallArgs,
+) -> Result<String, String> {
+    let request = json!({
+        "operation": custom_rest::OPERATION,
+        "params": args.params(),
+        "body": {},
+    });
+    let response = http
+        .post(format!(
+            "{base_url}/api/v1/connections/{}/actions",
+            args.connection_id
+        ))
+        .bearer_auth(bearer)
+        .timeout(READ_TIMEOUT)
+        .json(&request)
+        .send()
+        .await
+        .map_err(|_| "integration-corev2 custom REST read request failed".to_owned())?;
+    let status = response.status();
+    let value: Value = response.json().await.map_err(|_| {
+        "integration-corev2 custom REST read response could not be decoded".to_owned()
+    })?;
+    if !status.is_success() {
+        return Err(match provider_reads::status_of_refusal(&value) {
+            Some(provider_reads::ReadStatus::ReconnectRequired) => {
+                "reconnect_required: the custom REST connection needs reconnecting".to_owned()
+            }
+            Some(provider_reads::ReadStatus::CapabilityMissing) => {
+                "capability_missing: the custom REST connection does not grant this read".to_owned()
+            }
+            _ => format!("integration-corev2 custom REST read returned {status}"),
+        });
+    }
+    let result = value.pointer("/data/action/result").unwrap_or(&Value::Null);
+    Ok(custom_rest::render_read(
+        &args.connection_id,
+        &args.method,
+        &args.path,
+        result,
+    ))
+}
+
+/// The Ask loop's `custom_rest.read` arm (W4-CC-7). Refusals come first and cost no call: a zero-retention turn is
+/// refused with its typed feature refusal, and the turn must admit the read. The arguments must be a GET or HEAD on a
+/// connection the person selected. The call goes to integration-corev2 with the person's own verified ingestion bearer,
+/// and the connection's binding names its host and credential. The answer is screened as connector content and framed
+/// for the model. It is not withheld, so the model reads the data with the warning beside it.
+pub(super) async fn custom_rest_read_outcome(
+    state: &AppState,
+    turn: Option<&ConnectorTurn>,
+    zdr: bool,
+    space_scoped: bool,
+    ingestion_bearer: Option<&VerifiedIngestionBearer>,
+    capability_bearer: Option<&str>,
+    call: &ToolCall,
+) -> ToolOutcome {
+    if zdr {
+        return err_outcome(
+            call,
+            mp_contracts::zdr_refusal::Refusal::feature_not_supported(custom_rest::ZDR_FEATURE)
+                .message(),
+        );
+    }
+    if !offered(custom_rest::enabled(), zdr, space_scoped, turn) {
+        return err_outcome(call, CUSTOM_REST_NOT_AVAILABLE);
+    }
+    // The dispatch re-checks what the offer checked, so a call the turn was never offered is not made: the capability
+    // must still be available and the policy must still admit the read.
+    if !custom_rest_read_admitted(state, capability_bearer).await {
+        return err_outcome(call, CUSTOM_REST_NOT_AVAILABLE);
+    }
+    let args = match custom_rest::parse_call(&call.arguments_json, true) {
+        Ok(args) => args,
+        Err(message) => return err_outcome(call, message),
+    };
+    if let Some(message) = selection_refusal(turn, &args.connection_id) {
+        return err_outcome(call, message);
+    }
+    let Some(bearer) = ingestion_bearer else {
+        return err_outcome(
+            call,
+            "custom_rest.read requires a verified ingestion bearer",
+        );
+    };
+    let rendered = match custom_rest_fetch(
+        &state.http_client,
+        &integration_base_url(),
+        bearer.as_str(),
+        &args,
+    )
+    .await
+    {
+        Ok(rendered) => rendered,
+        Err(message) => return err_outcome(call, message),
+    };
+    let provenance = ToolProvenance::assess(
+        custom_rest::READ_TOOL_NAME,
         &rendered,
         &state.screening_semaphore,
         &state.http_client,

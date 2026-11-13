@@ -1,0 +1,16 @@
+/* The chat connection pill (F-t3-078), above the composer. It keeps to the surface and border tokens of the chat, and is
+   warm rather than red: the message is safe and a send is never lost silently. It lives beside the component, as the
+   space connectivity banner's stylesheet does. */
+.verevon-chat-connection-pill {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 8px;
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--verevon-border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warning) 7%, var(--verevon-surface));
+  padding: 4px 12px;
+  color: var(--warning-ink);
+  font-size: 12px;
+  line-height: 1.4;
+}

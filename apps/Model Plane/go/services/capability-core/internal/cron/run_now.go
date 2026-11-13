@@ -2,6 +2,7 @@ package cron
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -70,6 +71,29 @@ func runNowRefused(status int, code, message string) *RunNowRefusal {
 	return &RunNowRefusal{HTTPStatus: status, Code: code, Message: message}
 }
 
+// goalBoundTemplate reports whether a schedule's task template names a thread goal (EP-7
+// S6): purpose "goal", or a goal_id that is set. A goal-bound schedule runs only on its own
+// cadence, one driver per goal, so Run now refuses it. A goal_id that is not text still
+// counts, because refusing a manual fire is the safe side. A template that is not a JSON
+// object names no goal.
+func goalBoundTemplate(template json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(template, &fields); err != nil {
+		return false
+	}
+	var purpose string
+	_ = json.Unmarshal(fields["purpose"], &purpose)
+	if purpose == "goal" {
+		return true
+	}
+	raw, named := fields["goal_id"]
+	if !named {
+		return false
+	}
+	var goalID string
+	return json.Unmarshal(raw, &goalID) != nil || goalID != ""
+}
+
 // RunNow makes one manual fire inside one transaction that holds the schedule's row
 // lock, so two presses are serialised and the sweeper skips the row for that tick. A
 // refusal is returned as a RunNowRefusal; an error means the store or the transaction
@@ -78,6 +102,8 @@ func runNowRefused(status int, code, message string) *RunNowRefusal {
 // Only the creator may press it (OD-1): every fire runs under the creator's subject, so
 // anyone else would spend that person's authority at a moment they did not choose. The
 // schedule's next_fire_at and last_fire_at are left alone: the cron slots fire as before.
+// A goal-bound schedule is refused as well (EP-7 S6): its goal's own cadence is its one
+// driver, and a manual fire would add a second.
 func RunNow(ctx context.Context, db RunNowDB, authorizer FireAuthorizer, req RunNowRequest, now time.Time) (RunNowResult, *RunNowRefusal, error) {
 	if !runNowRequestID.MatchString(req.RequestID) {
 		return RunNowResult{}, runNowRefused(http.StatusBadRequest, "invalid_request_id",
@@ -111,6 +137,10 @@ func RunNow(ctx context.Context, db RunNowDB, authorizer FireAuthorizer, req Run
 	if req.ActorID == "" || req.ActorID != d.SubjectID {
 		return RunNowResult{}, runNowRefused(http.StatusForbidden, "run_now_not_creator",
 			"only the schedule's creator can run it now"), nil
+	}
+	if goalBoundTemplate(d.Template) {
+		return RunNowResult{}, runNowRefused(http.StatusConflict, "goal_schedule_run_now_refused",
+			"a goal-bound schedule runs only on its own cadence"), nil
 	}
 	if ApprovalContractLapsed(d.Template, now) {
 		return RunNowResult{}, runNowRefused(http.StatusConflict, "approval_expired",

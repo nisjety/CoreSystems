@@ -1,13 +1,18 @@
 import type { z } from 'zod'
 import {
+  approvalsConfirmRuleInput,
+  approvalsListGrantsInput,
+  approvalsRevokeGrantInput,
+  getActionDescriptor,
   type integrationsConnectorPoliciesOutput,
   integrationsSetConnectorPolicyInput,
   orchestrationDecideApprovalInput,
 } from '@/shared/actions/action-registry'
-import { causeCodeOf, type ApprovalCause } from '../approvals/approval-copy'
+import { causeCodeOf, type ApprovalCause, type CauseCode } from '../approvals/approval-copy'
 import { APPROVAL_EDIT_CODES, type MailSendPatch } from '../approvals/approval-edit-limits'
 import { ApiError, requestJson } from './http'
 import { readSseStream, type SseEvent } from './sse'
+import { waivedContinuationFields, type WaivedRunConnection } from './waived-continuation'
 
 export type { ApprovalCause, CauseCode } from '../approvals/approval-copy'
 
@@ -152,6 +157,8 @@ export function normalizeApprovalCause(raw: unknown): ApprovalCause | undefined 
       ? cause.scope_options.filter((scope): scope is string => typeof scope === 'string')
       : [],
     stepUpRequired: cause.step_up_required === true,
+    // Only an explicit `true` offers "Always"; absent or anything else leaves it undefined.
+    ruleOffered: cause.rule_offered === true ? true : undefined,
     assistKind: str(cause.assist_kind),
     assistOrigin: str(cause.assist_origin),
     host: str(cause.host),
@@ -230,6 +237,7 @@ export async function decideApproval(
   scope: ApprovalScope = 'once',
   promote = false,
   edit?: ApprovalEdit,
+  waived?: WaivedRunConnection,
 ): Promise<Approval | null> {
   const checked = orchestrationDecideApprovalInput.safeParse({
     approvalId,
@@ -262,6 +270,8 @@ export async function decideApproval(
         ...(checked.data.edit
           ? { edit: { patch: checked.data.edit.patch, baseFingerprint: checked.data.edit.baseFingerprint } }
           : {}),
+        // The connection of a waived run (ZDR Z-19e); no keys unless a run was waived and the switch is on.
+        ...waivedContinuationFields(waived),
       }),
       signal,
     },
@@ -317,40 +327,67 @@ export type ApprovalRuleProposal = {
   createdAt: string
 }
 
-/** The lifetime a confirmed rule gets: ninety days, which the server applies to every rule (K3-10). */
-export const RULE_LIFETIME_MS = 90 * 24 * 60 * 60 * 1000
-
 /**
- * The write that confirms a proposed rule (build plan WS13 S7): a user-scope allow pinned to the
- * digest the person reviewed, lapsing ninety days from `now`. Pure, so what a confirm sends is
- * checked without a network.
+ * A rule proposal from the server's snake_case projection (id, tool_name, tool_digest, capability_id,
+ * created_at). A row without an id cannot be confirmed or dismissed, so it is dropped. The capability
+ * and the digest are for showing only: a confirm never sends them.
  */
-export function ruleConfirmationRequest(
-  proposal: ApprovalRuleProposal,
-  now: Date,
-): { capabilityId: string; body: Record<string, unknown> } {
+export function normalizeRuleProposal(raw: unknown): ApprovalRuleProposal | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  const row = raw as Record<string, unknown>
+  const id = str(row.id)
+  if (!id) return null
   return {
-    capabilityId: proposal.capabilityId,
-    body: {
-      scope: 'user',
-      decision: 'allow',
-      pinned_digest: proposal.toolDigest,
-      reason: '',
-      expires_at: new Date(now.getTime() + RULE_LIFETIME_MS).toISOString(),
-    },
+    id,
+    capabilityId: str(row.capability_id) ?? '',
+    toolName: str(row.tool_name) ?? '',
+    toolDigest: str(row.tool_digest) ?? '',
+    createdAt: str(row.created_at) ?? '',
   }
 }
 
-/** Confirm a proposed rule through the tool-policy route. The server checks the digest and the tool. */
-export async function confirmApprovalRule(
-  proposal: ApprovalRuleProposal,
-  now: Date = new Date(),
-  signal?: AbortSignal,
-): Promise<void> {
-  const { capabilityId, body } = ruleConfirmationRequest(proposal, now)
-  await requestJson<unknown>(`/api/v1/tool-policies/${encodeURIComponent(capabilityId)}`, {
-    method: 'PUT',
-    body: JSON.stringify(body),
+/** The proposal id checked against the action contract (it is the only thing a confirm or dismiss names). */
+function checkedProposalId(proposal: ApprovalRuleProposal): string {
+  const checked = approvalsConfirmRuleInput.safeParse({ proposalId: proposal.id })
+  if (!checked.success) {
+    throw new ApiError('Ugyldig regelforslag.', 400, 'invalid_proposal_id')
+  }
+  return checked.data.proposalId
+}
+
+/**
+ * The caller's open rule proposals. The server answers empty for a zero-retention principal, and
+ * keeps answering while its switch is off so open proposals stay visible.
+ */
+export async function listApprovalRuleProposals(signal?: AbortSignal): Promise<ApprovalRuleProposal[]> {
+  // The `{data: {proposals}}` envelope is unwrapped by `requestJson`.
+  const payload = await requestJson<{ proposals?: unknown[] }>('/api/v1/orchestration/rule-proposals', {
+    signal,
+  })
+  const list = Array.isArray(payload?.proposals) ? payload.proposals : []
+  return list.map(normalizeRuleProposal).filter((proposal): proposal is ApprovalRuleProposal => proposal !== null)
+}
+
+/**
+ * Confirm a proposed rule (build plan WS13 S7). The body is empty on purpose: the server writes the
+ * user-scope allow, pinned to the reviewed definition and lapsing after ninety days, from its own
+ * record of the proposal, so the client never chooses the capability, the digest or the expiry.
+ */
+export async function confirmApprovalRule(proposal: ApprovalRuleProposal, signal?: AbortSignal): Promise<void> {
+  const id = checkedProposalId(proposal)
+  await requestJson<unknown>(`/api/v1/orchestration/rule-proposals/${encodeURIComponent(id)}/confirm`, {
+    method: 'POST',
+    body: '{}',
+    signal,
+  })
+}
+
+/** Dismiss a proposed rule. It works with the server switch off, because it only narrows authority. */
+export async function dismissApprovalRule(proposal: ApprovalRuleProposal, signal?: AbortSignal): Promise<void> {
+  const id = checkedProposalId(proposal)
+  await requestJson<unknown>(`/api/v1/orchestration/rule-proposals/${encodeURIComponent(id)}/dismiss`, {
+    method: 'POST',
+    body: '{}',
     signal,
   })
 }
@@ -550,11 +587,103 @@ export async function getApprovalPreview(
   }
 }
 
+/**
+ * A standing approval grant of a thread (WS13-S6, actions `approvals.list_grants` and
+ * `approvals.revoke_grant`). The caller's own, in one thread; it names a tool and an effect class,
+ * never an argument value. A grant is live while `revokedAt` is null and `expiresAt` is ahead.
+ */
+export type ApprovalGrant = {
+  id: string
+  threadId: string
+  runId: string | null
+  scope: 'thread' | 'run'
+  toolName: string
+  effectClass: string
+  causeCode: CauseCode
+  createdAt: string
+  expiresAt: string
+  revokedAt: string | null
+  useCount: number
+  lastUsedAt: string | null
+}
+
+/**
+ * Read a grant row from the server (snake_case). A row without an id or with a scope this build does
+ * not know is dropped, not guessed at; the cause is read through the closed vocabulary.
+ */
+export function normalizeApprovalGrant(raw: unknown): ApprovalGrant | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null
+  const row = raw as Record<string, unknown>
+  const id = str(row.id) ?? str(row.grant_id)
+  if (!id) return null
+  const scope = row.scope === 'thread' || row.scope === 'run' ? row.scope : null
+  if (!scope) return null
+  const count = row.use_count
+  return {
+    id,
+    threadId: str(row.thread_id) ?? '',
+    runId: str(row.run_id) ?? null,
+    scope,
+    toolName: str(row.tool_name) ?? str(row.tool) ?? '',
+    effectClass: str(row.effect_class) ?? '',
+    causeCode: causeCodeOf(row.cause_code),
+    createdAt: str(row.created_at) ?? '',
+    expiresAt: str(row.expires_at) ?? '',
+    revokedAt: str(row.revoked_at) ?? null,
+    useCount: typeof count === 'number' && Number.isInteger(count) && count >= 0 ? count : 0,
+    lastUsedAt: str(row.last_used_at) ?? null,
+  }
+}
+
+/**
+ * The caller's own grants in one thread, live and past. The input is checked against the
+ * `approvals.list_grants` contract before it is sent. The server answers empty for a zero-retention
+ * principal, and keeps answering while the grant switch is off.
+ */
+export async function listApprovalGrants(
+  threadId: string,
+  signal?: AbortSignal,
+): Promise<ApprovalGrant[]> {
+  const checked = approvalsListGrantsInput.safeParse({ threadId })
+  if (!checked.success) {
+    throw new ApiError('Ugyldig tråd.', 400, 'invalid_thread_id')
+  }
+  // The `{data: {grants}}` envelope is unwrapped by `requestJson`.
+  const payload = await requestJson<{ grants?: unknown[] }>(
+    `/api/v1/orchestration/threads/${encodeURIComponent(checked.data.threadId)}/approval-grants`,
+    { signal },
+  )
+  const list = Array.isArray(payload?.grants) ? payload.grants : []
+  return list.map(normalizeApprovalGrant).filter((grant): grant is ApprovalGrant => grant !== null)
+}
+
+/**
+ * Revoke one of the caller's own grants at once. Idempotent, and it works with the grant switch off
+ * because it only narrows authority. The id is checked against the `approvals.revoke_grant`
+ * contract before it is sent. Returns the grant as the server now holds it, or null when the
+ * answer carries none.
+ */
+export async function revokeApprovalGrant(
+  grantId: string,
+  signal?: AbortSignal,
+): Promise<ApprovalGrant | null> {
+  const checked = approvalsRevokeGrantInput.safeParse({ grantId })
+  if (!checked.success) {
+    throw new ApiError('Ugyldig godkjenning.', 400, 'invalid_grant_id')
+  }
+  const payload = await requestJson<{ grant?: unknown }>(
+    `/api/v1/orchestration/approval-grants/${encodeURIComponent(checked.data.grantId)}`,
+    { method: 'DELETE', signal },
+  )
+  return normalizeApprovalGrant(payload?.grant)
+}
+
 /** Resume a run that paused for approval, after the decision is recorded. */
-export async function resumeRun(runId: string, signal?: AbortSignal): Promise<void> {
+export async function resumeRun(runId: string, signal?: AbortSignal, waived?: WaivedRunConnection): Promise<void> {
   await requestJson<unknown>(`/api/v1/orchestration/runs/${encodeURIComponent(runId)}/resume`, {
     method: 'POST',
-    body: '{}',
+    // A run that was not waived sends the empty body it always did; a waived one names its connection (ZDR Z-19e).
+    body: JSON.stringify(waivedContinuationFields(waived)),
     signal,
   })
 }
@@ -589,6 +718,7 @@ export async function continueRun(
   claimToken: string,
   onEvent: (event: SseEvent) => void,
   signal?: AbortSignal,
+  waived?: WaivedRunConnection,
 ): Promise<void> {
   let connError: unknown
 
@@ -596,8 +726,9 @@ export async function continueRun(
     `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/continue`,
     {
       method: 'POST',
-      // Snake_case on the wire: the BFF body rejects unknown fields outright.
-      body: JSON.stringify({ approval_id: approvalId, claim_token: claimToken }),
+      // Snake_case on the wire: the BFF body rejects unknown fields outright. A waived run also names its
+      // connection (ZDR Z-19e); the gateway removes both keys before anything goes upstream.
+      body: JSON.stringify({ approval_id: approvalId, claim_token: claimToken, ...waivedContinuationFields(waived) }),
       signal,
     },
     onEvent,
@@ -628,6 +759,7 @@ export async function continueParkedRun(
   claimToken: string,
   onEvent: (event: SseEvent) => void,
   signal?: AbortSignal,
+  waived?: WaivedRunConnection,
 ): Promise<void> {
   let connError: unknown
 
@@ -637,7 +769,116 @@ export async function continueParkedRun(
       method: 'POST',
       // Snake_case on the wire, and the approval id is present and exactly empty: the BFF body
       // has no absent-key form.
-      body: JSON.stringify({ approval_id: '', claim_token: claimToken }),
+      body: JSON.stringify({ approval_id: '', claim_token: claimToken, ...waivedContinuationFields(waived) }),
+      signal,
+    },
+    onEvent,
+    (err) => {
+      connError = err
+    },
+  )
+
+  if (connError) throw connError
+}
+
+/**
+ * Continue a run whose browser help pause the person DENIED ("Skip this site", EP-1 S2, D3-647).
+ * The approval named is the denial, so nothing is spent: the body is the committed one plus
+ * `skipped: true`, and the gateway relays the continuation as SSE like `continueRun`. The executor
+ * releases the page the run held for the person and continues the run with the paused call answered
+ * as skipped, so the model looks elsewhere. The claim token is checked against the `chat.run.continue`
+ * action contract first, as every continue's is.
+ *
+ * Rejects as `continueRun` does when the gateway refuses before a stream opens (for example 409
+ * `approval_not_resumable` for an approval that is not a denied help pause, or 401 when no browser
+ * credential could be minted). Nothing was spent in any of those cases, so the caller may fall back
+ * to the plain resume; read the frames with `chatRunContinueFrameRefusalOf` and
+ * `chatRunContinueUnflaggedRefusalOf` as for `continueRun`.
+ */
+export async function continueSkippedRun(
+  runId: string,
+  approvalId: string,
+  claimToken: string,
+  onEvent: (event: SseEvent) => void,
+  signal?: AbortSignal,
+  waived?: WaivedRunConnection,
+): Promise<void> {
+  const checked = getActionDescriptor('chat.run.continue')?.inputSchema.safeParse({
+    runId,
+    approvalId,
+    claimToken,
+    skipped: true,
+  })
+  if (!checked?.success) {
+    throw new ApiError('Ugyldig fortsettelse.', 400, 'invalid_run_continue')
+  }
+  let connError: unknown
+
+  await readSseStream(
+    `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/continue`,
+    {
+      method: 'POST',
+      // Snake_case on the wire: the BFF body rejects unknown fields outright.
+      body: JSON.stringify({
+        approval_id: approvalId,
+        claim_token: claimToken,
+        skipped: true,
+        ...waivedContinuationFields(waived),
+      }),
+      signal,
+    },
+    onEvent,
+    (err) => {
+      connError = err
+    },
+  )
+
+  if (connError) throw connError
+}
+
+/**
+ * Continue a run that paused for its owner's answer (WS14 S5): the question form of `chat.run.continue`. The
+ * answer, or the skip, is recorded if the question is still open, and the same run continues with it. No
+ * approval is read or spent: the body carries the empty approval id the park form carries, and names the
+ * question instead. An answer is information, never a grant.
+ *
+ * The gateway relays the continuation as SSE. A refusal or failure of the question is an `error` frame marked
+ * `question_continue: true`, read by `chatRunContinueQuestionRefusalOf` and by no other reader. Only
+ * `question_answer_released` means the client sends the answer once, as the next message. Rejects as
+ * `continueRun` does when the gateway refuses before a stream opens (for example 409
+ * `question_already_answered`, 410 `question_expired`, 422 `invalid_answer`). Nothing here retries: the caller
+ * sends one continue, and after an ambiguous outcome it follows the run by its id.
+ */
+export async function continueQuestionRun(
+  runId: string,
+  questionId: string,
+  response: RunQuestionResponse,
+  claimToken: string,
+  onEvent: (event: SseEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const body =
+    'skip' in response
+      ? { approval_id: '', claim_token: claimToken, question_id: questionId, answers: [], question_skip: true }
+      : {
+          approval_id: '',
+          claim_token: claimToken,
+          question_id: questionId,
+          answers: response.answers.map((answer) => ({
+            item_id: answer.itemId,
+            option_ids: answer.optionIds,
+            text: answer.text,
+          })),
+          question_skip: false,
+        }
+  let connError: unknown
+
+  await readSseStream(
+    `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/continue`,
+    {
+      method: 'POST',
+      // Snake_case on the wire: the BFF body rejects unknown fields outright.
+      body: JSON.stringify(body),
       signal,
     },
     onEvent,
@@ -659,12 +900,17 @@ export type RunCancellation = {
 }
 
 /** Cancel a run (e.g. the user rejects and wants to stop the whole run). */
-export async function cancelRun(runId: string, signal?: AbortSignal): Promise<RunCancellation> {
+export async function cancelRun(
+  runId: string,
+  signal?: AbortSignal,
+  waived?: WaivedRunConnection,
+): Promise<RunCancellation> {
   const payload = await requestJson<Record<string, unknown>>(
     `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/cancel`,
     {
       method: 'POST',
-      body: '{}',
+      // A run that was not waived sends the empty body it always did; a waived one names its connection (ZDR Z-19e).
+      body: JSON.stringify(waivedContinuationFields(waived)),
       signal,
     },
   )
@@ -912,6 +1158,20 @@ export async function getLineageEdges(
   signal?: AbortSignal,
 ): Promise<LineageEdgeSummary[]> {
   return normalizeLineageEdges(await getLineage(threadId, signal))
+}
+
+/**
+ * The child runs a parent run started, read from its thread's lineage (EP-2): every edge whose parent is
+ * `parentRunId`, in the order the lineage holds them. Read-only. An edge's `status` is the edge's own
+ * (`attached`/`detached`); the child run's own status is read with the run, not here.
+ */
+export async function listChildRuns(
+  threadId: string,
+  parentRunId: string,
+  signal?: AbortSignal,
+): Promise<LineageEdgeSummary[]> {
+  const edges = normalizeLineageEdges(await getLineage(threadId, signal))
+  return edges.filter((edge) => edge.parentRunId === parentRunId)
 }
 
 // ── Run questions (build plan WS14 S3) ───────────────────────────────────────

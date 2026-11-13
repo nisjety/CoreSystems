@@ -1,0 +1,82 @@
+/* The problem report mode of the feedback widget (VITE_REPORT_PROBLEM). The friction note keeps its styles in global.css. */
+
+.feedback-widget__panel--report {
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
+}
+
+.feedback-widget__modes {
+  align-self: flex-start;
+}
+
+.feedback-widget__modes .verevon-segmented-button {
+  font-size: 11.5px;
+}
+
+.feedback-widget__attach {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.feedback-widget__attach-title {
+  margin-bottom: 2px;
+  padding: 0;
+  color: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  opacity: 0.8;
+}
+
+.feedback-widget__check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: inherit;
+  font-size: 12px;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.feedback-widget__check input {
+  margin-top: 2px;
+}
+
+.feedback-widget__sent {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 8px;
+  background: var(--verevon-surface-muted);
+  color: inherit;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.dark .feedback-widget__sent {
+  border-color: var(--verevon-dark-border);
+  background: rgb(255 255 255 / 6%);
+}
+
+.feedback-widget__sent-title {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+.feedback-widget__sent-list {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.feedback-widget__sent-list li {
+  overflow-wrap: anywhere;
+}
+
+.feedback-widget__sent-note {
+  margin: 6px 0 0;
+  opacity: 0.68;
+}

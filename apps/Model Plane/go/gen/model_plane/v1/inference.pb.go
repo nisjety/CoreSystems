@@ -393,8 +393,22 @@ type InferRequest struct {
 	// model, then the cheap fallback. Empty names none. It carries no content, so
 	// Zero Data Retention does not change it.
 	RoleFallbackModel string `protobuf:"bytes,23,opt,name=role_fallback_model,json=roleFallbackModel,proto3" json:"role_fallback_model,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// The opaque Integration Core id of a customer-gateway model connection (W4-BYO-5): the
+	// organisation's own OpenAI-compatible endpoint, registered and held in Integration Core. Read only
+	// when INFERENCE_BYO_GATEWAY_ENABLED is the literal true. A call that names a connection is served by
+	// that gateway alone, never by a platform provider, and a call that names one while the switch is off
+	// is refused. Model Plane never receives the gateway's address or key. A customer gateway is never zero
+	// data retention, so a ZDR call that names one is refused. Empty names no connection.
+	ModelConnectionId string `protobuf:"bytes,24,opt,name=model_connection_id,json=modelConnectionId,proto3" json:"model_connection_id,omitempty"`
+	// The speed tier this call asks for: "" (no choice, the default), "standard" or "priority". Read
+	// only when INFERENCE_SPEED_TIER_SPLIT is the literal true, and only by the subscription adapter,
+	// which serves "priority" when the model's record declares it (ModelInfo.priority_tier). Speed is
+	// separate from reasoning effort, so a quick turn never implies priority. A value other than
+	// "priority" does not ask for it, though the legacy prefer_priority_service_tier flag still does.
+	// It carries no content, so Zero Data Retention does not change it.
+	SpeedTier     string `protobuf:"bytes,25,opt,name=speed_tier,json=speedTier,proto3" json:"speed_tier,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *InferRequest) Reset() {
@@ -584,6 +598,20 @@ func (x *InferRequest) GetRunId() string {
 func (x *InferRequest) GetRoleFallbackModel() string {
 	if x != nil {
 		return x.RoleFallbackModel
+	}
+	return ""
+}
+
+func (x *InferRequest) GetModelConnectionId() string {
+	if x != nil {
+		return x.ModelConnectionId
+	}
+	return ""
+}
+
+func (x *InferRequest) GetSpeedTier() string {
+	if x != nil {
+		return x.SpeedTier
 	}
 	return ""
 }
@@ -1061,9 +1089,14 @@ type InferResponse struct {
 	// What the budget did to how this call was routed (WS27-S7), when the intent
 	// layer routed it under a budget posture. Absent for a pinned model or while
 	// INFERENCE_ROUTE_NOTE is off.
-	RouteNote     *RouteNote `protobuf:"bytes,15,opt,name=route_note,json=routeNote,proto3" json:"route_note,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	RouteNote *RouteNote `protobuf:"bytes,15,opt,name=route_note,json=routeNote,proto3" json:"route_note,omitempty"`
+	// The service tier this call was sent to the subscription broker on: "priority" when the priority
+	// tier went upstream, empty when none did or the serving provider does not report one. It states
+	// what was requested of the provider, never a guarantee the provider billed that tier. It carries
+	// no content, so Zero Data Retention does not change it.
+	ServiceTierUsed string `protobuf:"bytes,16,opt,name=service_tier_used,json=serviceTierUsed,proto3" json:"service_tier_used,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *InferResponse) Reset() {
@@ -1201,6 +1234,13 @@ func (x *InferResponse) GetRouteNote() *RouteNote {
 	return nil
 }
 
+func (x *InferResponse) GetServiceTierUsed() string {
+	if x != nil {
+		return x.ServiceTierUsed
+	}
+	return ""
+}
+
 // InferChunk — a single chunk in a streaming inference response.
 type InferChunk struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1256,9 +1296,16 @@ type InferChunk struct {
 	ProviderTiming *ProviderTiming `protobuf:"bytes,15,opt,name=provider_timing,json=providerTiming,proto3" json:"provider_timing,omitempty"`
 	// The route note of the call, on the final chunk only, as provider_timing is
 	// (WS27-S7). Absent for a pinned model or while INFERENCE_ROUTE_NOTE is off.
-	RouteNote     *RouteNote `protobuf:"bytes,16,opt,name=route_note,json=routeNote,proto3" json:"route_note,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	RouteNote *RouteNote `protobuf:"bytes,16,opt,name=route_note,json=routeNote,proto3" json:"route_note,omitempty"`
+	// The service tier the provider actually served this stream on, populated on
+	// the final (usage-bearing) chunk only, as the token counts are. "priority"
+	// when the priority tier went upstream; empty when the provider does not
+	// report one. Same meaning as InferResponse.service_tier_used: it is never
+	// inferred from the request, and it carries no content, so Zero Data
+	// Retention does not change it.
+	ServiceTierUsed string `protobuf:"bytes,17,opt,name=service_tier_used,json=serviceTierUsed,proto3" json:"service_tier_used,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *InferChunk) Reset() {
@@ -1403,6 +1450,13 @@ func (x *InferChunk) GetRouteNote() *RouteNote {
 	return nil
 }
 
+func (x *InferChunk) GetServiceTierUsed() string {
+	if x != nil {
+		return x.ServiceTierUsed
+	}
+	return ""
+}
+
 // ProviderTiming — where inference-core's share of one Infer or InferStream
 // call's wall time went. Durations and counts only: it never carries prompt
 // text, content, tool arguments or tool results, so it is safe to log and to
@@ -1413,6 +1467,7 @@ func (x *InferChunk) GetRouteNote() *RouteNote {
 //   - the handler origin: the gRPC handler's entry, before authorization;
 //   - the attempt origin: the start of the provider attempt that finally
 //     served the call.
+//
 // A caller's transport overhead is its own wall time for the call minus
 // `handler_ms`. inference-core's own overhead is `handler_ms` minus
 // `provider_ms`, `failed_attempts_ms` and `retry_wait_ms`.
@@ -1592,7 +1647,21 @@ type RouteNote struct {
 	// Which step of the `verevon-role` resolution chose the model (EP-13 S4):
 	// "table", "turn_model" or "cheap_fallback". Empty for every call that named
 	// no role.
-	RoleSource    string `protobuf:"bytes,6,opt,name=role_source,json=roleSource,proto3" json:"role_source,omitempty"`
+	RoleSource string `protobuf:"bytes,6,opt,name=role_source,json=roleSource,proto3" json:"role_source,omitempty"`
+	// The Verevon auto mode the intent layer resolved the call under: "budget",
+	// "balance" or "genius". Empty when the intent layer resolved no mode, as for
+	// a call that named a pinned model.
+	VerevonMode string `protobuf:"bytes,7,opt,name=verevon_mode,json=verevonMode,proto3" json:"verevon_mode,omitempty"`
+	// The complexity the intent layer estimated for the call: "simple",
+	// "moderate" or "complex". Empty when the intent layer resolved no mode.
+	Complexity string `protobuf:"bytes,8,opt,name=complexity,proto3" json:"complexity,omitempty"`
+	// Why the intent layer chose the model: "mode_cell" (the policy cell the mode
+	// names, at a healthy budget or under a constrained one that changed no
+	// model), "budget_tier_shift" (a constrained budget moved the call one tier
+	// cheaper), "budget_cheap_fallback" (an exhausted budget forced the cheap
+	// fallback) or "posture_unknown" (no budget posture could be read). Empty
+	// when the intent layer resolved no mode.
+	Reason        string `protobuf:"bytes,9,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1665,6 +1734,27 @@ func (x *RouteNote) GetRole() string {
 func (x *RouteNote) GetRoleSource() string {
 	if x != nil {
 		return x.RoleSource
+	}
+	return ""
+}
+
+func (x *RouteNote) GetVerevonMode() string {
+	if x != nil {
+		return x.VerevonMode
+	}
+	return ""
+}
+
+func (x *RouteNote) GetComplexity() string {
+	if x != nil {
+		return x.Complexity
+	}
+	return ""
+}
+
+func (x *RouteNote) GetReason() string {
+	if x != nil {
+		return x.Reason
 	}
 	return ""
 }
@@ -1945,7 +2035,15 @@ type ModelInfo struct {
 	// What the provider states about how it handles the request data sent to this model
 	// (EP-9 C5). Unset when neither an attested deployment nor a cited source states
 	// anything, which is "not stated", never "no".
-	DataUse       *ProviderDataUse `protobuf:"bytes,12,opt,name=data_use,json=dataUse,proto3" json:"data_use,omitempty"`
+	DataUse *ProviderDataUse `protobuf:"bytes,12,opt,name=data_use,json=dataUse,proto3" json:"data_use,omitempty"`
+	// The model the vendor names as this one's replacement. Set only on a deprecated model
+	// whose cited vendor page names one; empty means no sourced record names a replacement
+	// (F-t3-073). Display only: nothing switches to it, and a thread stays on the model it pinned.
+	Successor string `protobuf:"bytes,13,opt,name=successor,proto3" json:"successor,omitempty"`
+	// Whether this model is served on the priority service tier when a call asks for it with
+	// InferRequest.speed_tier. False when the model's record does not declare the tier, so a caller
+	// must not offer the choice for it. Advertised whatever INFERENCE_SPEED_TIER_SPLIT says.
+	PriorityTier  bool `protobuf:"varint,14,opt,name=priority_tier,json=priorityTier,proto3" json:"priority_tier,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2062,6 +2160,20 @@ func (x *ModelInfo) GetDataUse() *ProviderDataUse {
 		return x.DataUse
 	}
 	return nil
+}
+
+func (x *ModelInfo) GetSuccessor() string {
+	if x != nil {
+		return x.Successor
+	}
+	return ""
+}
+
+func (x *ModelInfo) GetPriorityTier() bool {
+	if x != nil {
+		return x.PriorityTier
+	}
+	return false
 }
 
 // ProviderDataUse — the data-handling statements a provider makes for one model (EP-9 C5).
@@ -4330,9 +4442,15 @@ type GenerateImageRequest struct {
 	// Provider quality hint, e.g. "standard" or "hd".
 	Quality string `protobuf:"bytes,7,opt,name=quality,proto3" json:"quality,omitempty"`
 	// Number of images requested.
-	N             uint32 `protobuf:"varint,8,opt,name=n,proto3" json:"n,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	N uint32 `protobuf:"varint,8,opt,name=n,proto3" json:"n,omitempty"`
+	// When true, the call is served by one provider only: the first configured provider that matches
+	// provider_hint and, when model is set, lists that model as an image model. That provider alone is
+	// tried, and its error comes back as it is, so no other provider answers in its place. A request
+	// that names no such provider is refused as image_model_unavailable before any provider is called.
+	// False walks the ordered provider chain, as before.
+	StrictProvider bool `protobuf:"varint,9,opt,name=strict_provider,json=strictProvider,proto3" json:"strict_provider,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *GenerateImageRequest) Reset() {
@@ -4419,6 +4537,13 @@ func (x *GenerateImageRequest) GetN() uint32 {
 		return x.N
 	}
 	return 0
+}
+
+func (x *GenerateImageRequest) GetStrictProvider() bool {
+	if x != nil {
+		return x.StrictProvider
+	}
+	return false
 }
 
 // GeneratedImage — one generated image artifact.
@@ -6395,7 +6520,7 @@ var File_model_plane_v1_inference_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\n" +
-	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\xb4\b\n" +
+	"\x1emodel_plane/v1/inference.proto\x12\x0emodel_plane.v1\"\x83\t\n" +
 	"\fInferRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -6424,7 +6549,10 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"imageParts\x126\n" +
 	"\apurpose\x18\x15 \x01(\x0e2\x1c.model_plane.v1.InferPurposeR\apurpose\x12\x15\n" +
 	"\x06run_id\x18\x16 \x01(\tR\x05runId\x12.\n" +
-	"\x13role_fallback_model\x18\x17 \x01(\tR\x11roleFallbackModel\"f\n" +
+	"\x13role_fallback_model\x18\x17 \x01(\tR\x11roleFallbackModel\x12.\n" +
+	"\x13model_connection_id\x18\x18 \x01(\tR\x11modelConnectionId\x12\x1d\n" +
+	"\n" +
+	"speed_tier\x18\x19 \x01(\tR\tspeedTier\"f\n" +
 	"\x0eInferImagePart\x12#\n" +
 	"\rmessage_index\x18\x01 \x01(\rR\fmessageIndex\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12\x1b\n" +
@@ -6450,7 +6578,7 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"tokenCount\x12!\n" +
 	"\fmean_logprob\x18\x02 \x01(\x01R\vmeanLogprob\x12*\n" +
 	"\x11claim_token_count\x18\x03 \x01(\rR\x0fclaimTokenCount\x12,\n" +
-	"\x12claim_mean_logprob\x18\x04 \x01(\x01R\x10claimMeanLogprob\"\xc0\x05\n" +
+	"\x12claim_mean_logprob\x18\x04 \x01(\x01R\x10claimMeanLogprob\"\xec\x05\n" +
 	"\rInferResponse\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x18\n" +
@@ -6472,7 +6600,8 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x12compaction_summary\x18\r \x01(\tR\x11compactionSummary\x12G\n" +
 	"\x0fprovider_timing\x18\x0e \x01(\v2\x1e.model_plane.v1.ProviderTimingR\x0eproviderTiming\x128\n" +
 	"\n" +
-	"route_note\x18\x0f \x01(\v2\x19.model_plane.v1.RouteNoteR\trouteNote\"\xbd\x05\n" +
+	"route_note\x18\x0f \x01(\v2\x19.model_plane.v1.RouteNoteR\trouteNote\x12*\n" +
+	"\x11service_tier_used\x18\x10 \x01(\tR\x0fserviceTierUsed\"\xe9\x05\n" +
 	"\n" +
 	"InferChunk\x12\x1d\n" +
 	"\n" +
@@ -6495,7 +6624,8 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x12compaction_summary\x18\x0e \x01(\tR\x11compactionSummary\x12G\n" +
 	"\x0fprovider_timing\x18\x0f \x01(\v2\x1e.model_plane.v1.ProviderTimingR\x0eproviderTiming\x128\n" +
 	"\n" +
-	"route_note\x18\x10 \x01(\v2\x19.model_plane.v1.RouteNoteR\trouteNote\"\x85\x04\n" +
+	"route_note\x18\x10 \x01(\v2\x19.model_plane.v1.RouteNoteR\trouteNote\x12*\n" +
+	"\x11service_tier_used\x18\x11 \x01(\tR\x0fserviceTierUsed\"\x85\x04\n" +
 	"\x0eProviderTiming\x12\x1d\n" +
 	"\n" +
 	"handler_ms\x18\x01 \x01(\x04R\thandlerMs\x12\x1d\n" +
@@ -6515,7 +6645,7 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"upstreamMs\x1a=\n" +
 	"\x0fUpstreamMsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xe5\x01\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\xc0\x02\n" +
 	"\tRouteNote\x12%\n" +
 	"\x0ebudget_posture\x18\x01 \x01(\tR\rbudgetPosture\x12!\n" +
 	"\ftier_shifted\x18\x02 \x01(\bR\vtierShifted\x122\n" +
@@ -6523,7 +6653,12 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x0eapplied_effort\x18\x04 \x01(\tR\rappliedEffort\x12\x12\n" +
 	"\x04role\x18\x05 \x01(\tR\x04role\x12\x1f\n" +
 	"\vrole_source\x18\x06 \x01(\tR\n" +
-	"roleSource\"\xc7\x01\n" +
+	"roleSource\x12!\n" +
+	"\fverevon_mode\x18\a \x01(\tR\vverevonMode\x12\x1e\n" +
+	"\n" +
+	"complexity\x18\b \x01(\tR\n" +
+	"complexity\x12\x16\n" +
+	"\x06reason\x18\t \x01(\tR\x06reason\"\xc7\x01\n" +
 	"\x16CreateEmbeddingRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -6542,7 +6677,7 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\rprovider_used\x18\x04 \x01(\tR\fproviderUsed\"K\n" +
 	"\x11ListModelsRequest\x12\x1a\n" +
 	"\bmodality\x18\x01 \x01(\tR\bmodality\x12\x1a\n" +
-	"\bprovider\x18\x02 \x01(\tR\bprovider\"\xca\x03\n" +
+	"\bprovider\x18\x02 \x01(\tR\bprovider\"\x8d\x04\n" +
 	"\tModelInfo\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bprovider\x18\x02 \x01(\tR\bprovider\x12\x1a\n" +
@@ -6556,7 +6691,9 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\x11max_output_tokens\x18\n" +
 	" \x01(\rR\x0fmaxOutputTokens\x12\x1c\n" +
 	"\tlifecycle\x18\v \x01(\tR\tlifecycle\x12:\n" +
-	"\bdata_use\x18\f \x01(\v2\x1f.model_plane.v1.ProviderDataUseR\adataUse\"\xf2\x01\n" +
+	"\bdata_use\x18\f \x01(\v2\x1f.model_plane.v1.ProviderDataUseR\adataUse\x12\x1c\n" +
+	"\tsuccessor\x18\r \x01(\tR\tsuccessor\x12#\n" +
+	"\rpriority_tier\x18\x0e \x01(\bR\fpriorityTier\"\xf2\x01\n" +
 	"\x0fProviderDataUse\x12-\n" +
 	"\x10trains_on_inputs\x18\x01 \x01(\bH\x00R\x0etrainsOnInputs\x88\x01\x01\x12*\n" +
 	"\x0eretention_days\x18\x02 \x01(\x05H\x01R\rretentionDays\x88\x01\x01\x12&\n" +
@@ -6762,7 +6899,7 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"nativeName\x12\x1c\n" +
 	"\tdirection\x18\x04 \x01(\tR\tdirection\"i\n" +
 	" ListTranslationLanguagesResponse\x12E\n" +
-	"\tlanguages\x18\x01 \x03(\v2'.model_plane.v1.TranslationLanguageInfoR\tlanguages\"\xdb\x01\n" +
+	"\tlanguages\x18\x01 \x03(\v2'.model_plane.v1.TranslationLanguageInfoR\tlanguages\"\x84\x02\n" +
 	"\x14GenerateImageRequest\x12\x1d\n" +
 	"\n" +
 	"request_id\x18\x01 \x01(\tR\trequestId\x12\x15\n" +
@@ -6772,7 +6909,8 @@ const file_model_plane_v1_inference_proto_rawDesc = "" +
 	"\rprovider_hint\x18\x05 \x01(\tR\fproviderHint\x12\x12\n" +
 	"\x04size\x18\x06 \x01(\tR\x04size\x12\x18\n" +
 	"\aquality\x18\a \x01(\tR\aquality\x12\f\n" +
-	"\x01n\x18\b \x01(\rR\x01n\"d\n" +
+	"\x01n\x18\b \x01(\rR\x01n\x12'\n" +
+	"\x0fstrict_provider\x18\t \x01(\bR\x0estrictProvider\"d\n" +
 	"\x0eGeneratedImage\x12\x10\n" +
 	"\x03url\x18\x01 \x01(\tR\x03url\x12\x19\n" +
 	"\bb64_json\x18\x02 \x01(\tR\ab64Json\x12%\n" +

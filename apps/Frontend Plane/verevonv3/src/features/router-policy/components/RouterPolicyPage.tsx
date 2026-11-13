@@ -28,23 +28,34 @@ import {
   ROUTER_POLICY_COMPLEXITY_LABELS,
   ROUTER_POLICY_ROLE_MAX_CANDIDATES,
   ROUTER_POLICY_ROLE_PURPOSES,
+  catalogueOverlayIssues,
+  catalogueOverlayIssuesFrom,
+  catalogueOverlayOf,
   emptyRoutingPolicy,
   moveCandidate,
   parseKeywords,
   roleEntryOf,
   roleIssuesFrom,
   routerPolicyModeRows,
+  withCatalogueOverlay,
   withCheapFallback,
   withComplexityNumber,
   withEnabled,
   withKeywords,
+  withoutAliasCopies,
   withRoleCandidates,
   withTableCell,
   withTopLevelNumber,
+  type CatalogueOverlayIssue,
+  type RouterPolicyCatalogueOverlay,
   type RouterPolicyDocument,
   type RouterPolicyRoleIssue,
   type RouterPolicyRolePurpose,
 } from '@/features/router-policy/lib/router-policy-model'
+import {
+  CatalogueOverlayEditor,
+  catalogueOverlayEnabled,
+} from '@/features/router-policy/components/CatalogueOverlayEditor'
 
 function modelOptions(models: ModelInfo[]): Array<{ value: string; label: string }> {
   return models.map((model) => ({ value: model.id, label: model.name || model.id }))
@@ -235,7 +246,7 @@ export default function RouterPolicyPage() {
 
   // The document is kept with the organisation it was read for: a reload that fails leaves the last value
   // in place, and that value must never be saved into another organisation.
-  const [policyResource] = createResource(
+  const [policyResource, { refetch: refetchPolicy }] = createResource(
     () => orgId() || undefined,
     (id) => getRouterPolicy(id).then((document) => ({ orgId: id, document })),
   )
@@ -243,7 +254,7 @@ export default function RouterPolicyPage() {
     const current = policyResource()
     return current && current.orgId === orgId() ? current.document : undefined
   })
-  const [catalogue] = createResource(() => listModelCatalogue())
+  const [catalogue, { refetch: refetchCatalogue }] = createResource(() => listModelCatalogue())
   const catalogueModels = createMemo(() => catalogue()?.models ?? [])
   const roleRouting = createMemo(() => catalogue()?.roleRouting === true)
 
@@ -253,6 +264,21 @@ export default function RouterPolicyPage() {
   const [error, setError] = createSignal<string | null>(null)
   const [notice, setNotice] = createSignal<string | null>(null)
   const [roleIssues, setRoleIssues] = createSignal<RouterPolicyRoleIssue[]>([])
+
+  // The overlay the draft holds. The listing carries a copy of each alias the server applied, so the copies are taken out
+  // of the models an alias may name. Both the loaded overlay and the draft are read for that, since the listing was read
+  // with the loaded one.
+  const overlay = createMemo(() => catalogueOverlayOf(draft()))
+  const overlayModels = createMemo(() => {
+    const aliases = [...Object.entries(catalogueOverlayOf(loaded() ?? {}).aliases), ...Object.entries(overlay().aliases)]
+    return withoutAliasCopies(catalogueModels(), aliases).filter(isChatModel)
+  })
+  // With no chat listing (it failed to load), the checks that need one are skipped rather than refusing every alias.
+  const overlayIssues = createMemo(() => {
+    const models = overlayModels()
+    return catalogueOverlayIssues(overlay(), models.length > 0 ? models.map((model) => model.id) : undefined)
+  })
+  const [overlayRefusals, setOverlayRefusals] = createSignal<CatalogueOverlayIssue[]>([])
 
   // Seed the draft from the loaded document. Nothing is saved before it arrives: the empty draft
   // above would overwrite the stored policy with zeros.
@@ -276,10 +302,16 @@ export default function RouterPolicyPage() {
       return
     }
     if (!loaded()) return
+    // With the overlay editor shown, its own refusals stop the save here, so the person sees them on their rows first.
+    if (catalogueOverlayEnabled() && overlayIssues().length > 0) {
+      setError(i18n.tr('Rett feilene i katalogoversikten før du lagrer.', 'Fix the catalogue overlay errors before you save.'))
+      return
+    }
     setBusy(true)
     setError(null)
     setNotice(null)
     setRoleIssues([])
+    setOverlayRefusals([])
     try {
       const next = withKeywords(draft(), parseKeywords(keywordsText()))
       const stored = await updateRouterPolicy(id, next)
@@ -287,8 +319,29 @@ export default function RouterPolicyPage() {
       setKeywordsText(stored.complexity.keywords.join(', '))
       setNotice('Router policy saved.')
     } catch (reason) {
-      setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke lagre ruterpolicyen.', en: 'Could not save router policy.' }))
-      setRoleIssues(reason instanceof ApiError ? roleIssuesFrom(reason.details) : [])
+      if (reason instanceof ApiError && reason.status === 409) {
+        // The policy moved on after it was read. Reload it, so the person makes the change again on the current copy.
+        setError(
+          i18n.tr(
+            'Ruterpolicyen er endret siden den ble lastet. Den er lastet på nytt; gjør endringene på nytt.',
+            'The router policy changed after it was loaded. It has been reloaded; make your changes again.',
+          ),
+        )
+        void refetchPolicy()
+        void refetchCatalogue()
+      } else {
+        setError(translateApiError(reason, i18n.tr, { no: 'Kunne ikke lagre ruterpolicyen.', en: 'Could not save router policy.' }))
+      }
+      // Only the role table refusal names rows: its issues sit under the envelope's details (or are the details).
+      setRoleIssues(
+        reason instanceof ApiError && reason.code === 'invalid_role_table' ? roleIssuesFrom(reason.details) : [],
+      )
+      // The overlay refusal likewise names the aliases and models it refuses, and sits under the envelope's details.
+      setOverlayRefusals(
+        reason instanceof ApiError && reason.code === 'invalid_catalogue_overlay'
+          ? catalogueOverlayIssuesFrom(reason.details)
+          : [],
+      )
     } finally {
       setBusy(false)
     }
@@ -297,6 +350,11 @@ export default function RouterPolicyPage() {
   const setRoleCandidates = (purpose: RouterPolicyRolePurpose, candidates: readonly string[]) => {
     setRoleIssues([])
     setDraft((prev) => withRoleCandidates(prev, purpose, candidates))
+  }
+
+  const setOverlay = (next: RouterPolicyCatalogueOverlay) => {
+    setOverlayRefusals([])
+    setDraft((prev) => withCatalogueOverlay(prev, next))
   }
 
   return (
@@ -424,6 +482,15 @@ export default function RouterPolicyPage() {
                 )}
               </For>
             </div>
+
+            <Show when={catalogueOverlayEnabled()}>
+              <CatalogueOverlayEditor
+                overlay={overlay()}
+                models={overlayModels()}
+                issues={[...overlayIssues(), ...overlayRefusals()]}
+                onOverlay={setOverlay}
+              />
+            </Show>
 
             <SectionHeader
               title="Complexity scoring"

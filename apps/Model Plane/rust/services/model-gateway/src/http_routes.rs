@@ -31,7 +31,7 @@ use mp_contracts::model_plane::v1::{
     AcquireLeaseRequest, DeleteThreadWorkspaceRequest, GetThreadWorkspaceRequest,
     AnalyzeDocumentRequest, AnalyzeImageRequest, AnalyzeLanguageRequest, AnswerRunQuestionRequest,
     Approval, ApprovalCause, ApprovalDecisionSource, ApprovalKind, ApprovalProof, ApprovalScope,
-    ApprovalState, BatchTranslateTextRequest,
+    ApprovalState, BatchTranslateTextRequest, BrowserWalkthrough,
     CancelRunRequest, ListRunQuestionsRequest, QuestionAnswerItem, QuestionState, RunQuestion,
     ContinuationExecution, CreateEmbeddingRequest, CreateRealtimeSessionRequest,
     CreateVideoGenerationJobRequest, DecideApprovalRequest, DetectTextLanguageRequest, Event,
@@ -358,6 +358,14 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
             "/v1/internal/mail-task/prepare-thread",
             post(prepare_mail_task_thread_for_gateway_bff),
         )
+        // EP-7 S6: the completion judge of one unattended goal fire, called by orchestrator-core
+        // (`auth::SERVICE_ROUTE_GRANTS` names that caller). 404 while its two switches are off. The path is a
+        // literal so the route lint reads it; `auth::GOAL_JUDGE_TURN_PATH` is the same path, and a test in
+        // zdr_posture holds the two equal.
+        .route(
+            "/internal/v1/goals/:goal_id/judge-turn",
+            post(crate::goal_unattended::judge_goal_turn_route),
+        )
         .route("/v1/threads/:thread_id/messages", get(list_thread_messages))
         // Move a thread's active branch: a version switch or a rewind (build plan WS17 S8).
         .route("/v1/threads/:thread_id/branch", post(branch_thread))
@@ -368,8 +376,18 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         // The research runs of a chat turn: one run, a thread's running run, and cancel (Q4 E4.6, slice 062b); 404
         // `research_runs_disabled` while its switch is off.
         .merge(crate::research_runs::router())
+        // The event trigger routes (Wave 4 EP-7 W4-T7); 404 `event_triggers_disabled` while MODEL_GATEWAY_EVENT_TRIGGERS is off.
+        .merge(crate::event_trigger_routes::router())
         // One read-only review of a text, as a run (F-t3-086); 404 `review_run_disabled` while its switch is off.
         .merge(crate::review_run_routes::router())
+        // A read-only question about one thread's transcript (F-t3-069); 404 `side_chat_disabled` while its switch is off.
+        .merge(crate::side_chat_routes::router())
+        // A reader's translation of one shown text (F-t3-098); 404 `reasoning_translate_disabled` while its switch is off, refused under ZDR.
+        .merge(crate::reasoning_translate_routes::router())
+        // The model council (F-t3-092): one question to two to four models, then a synthesis; 404 `model_council_disabled` while its switch is off.
+        .merge(crate::council_routes::router())
+        // Teach mode (F-t3-081): a disabled skill proposal drafted from one run's takeover steps; 404 `teach_mode_disabled` while its switch is off.
+        .merge(crate::teach_routes::router())
         // The owner's export of one thread (Wave 3 EP-12 S10); 404 `thread_export_disabled` while its switch is off.
         .merge(crate::thread_export_routes::router())
         // The owner's share snapshots (Wave 3 EP-12 S14); 404 `thread_shares_disabled` while its switch is off.
@@ -411,6 +429,12 @@ fn authed_routes_with(agent_api: bool) -> Router<AppState> {
         // verifies it and is the authority.
         .route("/v1/spaces/:space_id/memory/list", post(list_space_memories))
         .route("/v1/spaces/:space_id/memory/delete", post(delete_space_memory_entry))
+        // One named agent's memory in the Space, erased when its binding is revoked (EP-6 P3). The
+        // same decision-in-the-body shape; the agent is the path's `agent_subject_id`.
+        .route(
+            "/v1/spaces/:space_id/agents/:agent_subject_id/memory/erase",
+            post(erase_space_agent_memory),
+        )
         // Learning governance (WS07-S9): the owner's decisions on learned skills and
         // the ledger of what was learned. The user bearer only; the owner is the
         // verified caller on every hop, and session-core re-checks ownership.
@@ -569,6 +593,13 @@ fn orchestration_routes() -> Router<AppState> {
             "/v1/orchestration/threads/:thread_id/lineage",
             get(get_subagent_lineage),
         )
+        // The standing approval grants of a thread, for their owner (build plan WS13 S6). Served
+        // whatever APPROVAL_SCOPE_GRANTS_ENABLED says: a grant made while it was on must stay
+        // visible and revocable after it is turned off.
+        .route(
+            "/v1/orchestration/threads/:thread_id/approval-grants",
+            get(list_approval_grants),
+        )
         // mutations
         .route(
             "/v1/orchestration/plans/:plan_id/approve",
@@ -582,6 +613,23 @@ fn orchestration_routes() -> Router<AppState> {
         .route(
             "/v1/orchestration/approvals/:approval_id/decide",
             post(decide_approval),
+        )
+        // Revokes one standing approval grant: a narrowing delete, served under every switch state.
+        .route(
+            "/v1/orchestration/approval-grants/:grant_id",
+            delete(revoke_approval_grant),
+        )
+        // The "Always allow this tool" proposals of the caller (build plan WS13 S7). The list and
+        // the dismiss are served whatever APPROVAL_RULE_PROPOSALS_ENABLED says, so a proposal made
+        // while it was on can still be seen and removed; only the confirm needs it.
+        .route("/v1/orchestration/rule-proposals", get(list_rule_proposals))
+        .route(
+            "/v1/orchestration/rule-proposals/:proposal_id/confirm",
+            post(confirm_rule_proposal),
+        )
+        .route(
+            "/v1/orchestration/rule-proposals/:proposal_id/dismiss",
+            post(dismiss_rule_proposal),
         )
         .route(
             "/v1/orchestration/questions/:question_id/answer",
@@ -604,6 +652,10 @@ fn proxy_routes() -> Router<AppState> {
     Router::new()
         // Capabilities
         .route("/v1/capabilities", get(list_capabilities_proxy))
+        .route(
+            "/v1/capabilities/owner-actions/admitted",
+            get(admitted_owner_actions_proxy),
+        )
         .route("/v1/capabilities/:id", get(get_capability_proxy))
         // MCP servers — add/list/remove an MCP server (and thus its tools) over
         // HTTP. The gateway exposes registered tools to the model automatically
@@ -622,6 +674,9 @@ fn proxy_routes() -> Router<AppState> {
         // choice is ever asked for. Preferred over the two routes above,
         // which remain for direct/explicit use.
         .route("/v1/mcp/servers/connect", post(mcp_connect))
+        // The read-only probe of a server before it is saved: its auth requirement and tools, nothing
+        // registered and no credential sent (`crate::mcp_probe`). 404 while MODEL_GATEWAY_MCP_PROBE is off.
+        .route("/v1/mcp/servers/probe", post(crate::mcp_probe::post_mcp_probe))
         // What an MCP server's tools are, and a person's review of one whose
         // definition changed (WS05-S2); capability-core decides who may approve.
         .route(
@@ -663,6 +718,16 @@ fn proxy_routes() -> Router<AppState> {
         .route(
             "/v1/org/hooks/:hook_id",
             put(update_org_hook_proxy).delete(delete_org_hook_proxy),
+        )
+        // The org permission rules (W5-074-c): capability-core owns them and decides who may write them from the signed
+        // principal. Off, capability-core answers 404 and this proxy passes that on.
+        .route(
+            "/v1/org/permission-rules",
+            get(list_org_permission_rules_proxy).post(create_org_permission_rule_proxy),
+        )
+        .route(
+            "/v1/org/permission-rules/:rule_id",
+            delete(delete_org_permission_rule_proxy),
         )
         // Tasks
         .route("/v1/tasks", get(list_tasks_proxy).post(create_task_proxy))
@@ -753,6 +818,27 @@ fn proxy_routes() -> Router<AppState> {
                 .patch(patch_plugin_proxy)
                 .delete(delete_plugin_proxy),
         )
+        // W4-PL-3: the org's approved plugin catalogue, its approvals, the kill list, and a plugin's install report,
+        // install and uninstall (W4-PL-2). capability-core mounts them only while PLUGIN_LOADER_ENABLED is on and
+        // answers 404 otherwise; it decides every admin, ZDR and platform check.
+        .route("/v1/plugin-catalog", get(list_plugin_catalog_proxy))
+        .route(
+            "/v1/plugin-catalog/:id/approve",
+            post(approve_plugin_catalog_proxy),
+        )
+        .route(
+            "/v1/plugin-catalog/:id/unapprove",
+            post(unapprove_plugin_catalog_proxy),
+        )
+        .route(
+            "/v1/plugin-kill-list",
+            get(list_plugin_kill_proxy)
+                .post(create_plugin_kill_proxy)
+                .delete(delete_plugin_kill_proxy),
+        )
+        .route("/v1/plugins/:id/components", get(plugin_components_proxy))
+        .route("/v1/plugins/:id/install", post(install_plugin_proxy))
+        .route("/v1/plugins/:id/uninstall", post(uninstall_plugin_proxy))
         // Run watchers (AUTO-2): "notify me when this run finishes". Backed
         // by capability-core's run_watch_subscriptions; org_id/user_id are
         // never in this proxy's control, only the verified capability bearer
@@ -964,14 +1050,54 @@ async fn read_viewer_app(
             "capability registry is unavailable",
         ));
     }
-    let oauth_token = crate::mcp_oauth::resolve_stored_oauth_token(
-        &state.http_client,
-        &state.capability_core_base_url,
-        &state.mcp_oauth_service_token,
-        &claims.org_id,
-        server_id,
-    )
-    .await;
+    // A static-bearer server reads with the credential its binding redeems for this read (W4-CC-5). A waived turn is
+    // refused before the read. A ZDR turn was refused by `app_read_checks` before this point.
+    let static_bearer = match (
+        state.mcp.credential_binding(&claims.org_id, server_id),
+        state.mcp.get_server(&claims.org_id, server_id),
+    ) {
+        (Some(binding_id), Some(server)) => {
+            let posture =
+                crate::zdr_posture::decide_for(claims, &crate::zdr_posture::Route::plain(false))
+                    .map_err(|refusal| crate::zdr_posture::http(&refusal))?;
+            if let Some(refusal) = crate::mcp_credential_ref::turn_refusal(&posture) {
+                return Err(crate::zdr_posture::http(&refusal));
+            }
+            let bearer = crate::mcp_credential_ref::bearer_for(
+                &server.url,
+                &binding_id,
+                &claims.org_id,
+                &new_ulid(),
+                false,
+            )
+            .await
+            .map_err(|error| {
+                run_trace_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "credential_unavailable",
+                    &error.message(),
+                )
+            })?;
+            Some(bearer)
+        }
+        _ => None,
+    };
+    let oauth_token = if static_bearer.is_some() {
+        None
+    } else {
+        crate::mcp_oauth::resolve_stored_oauth_token(
+            &state.http_client,
+            &state.capability_core_base_url,
+            &state.mcp_oauth_service_token,
+            &claims.org_id,
+            server_id,
+        )
+        .await
+    };
+    let token = static_bearer
+        .as_ref()
+        .map(crate::mcp_credential_ref::SecretBearer::expose)
+        .or(oauth_token.as_deref());
     crate::mcp_apps::read_app_resource(
         &state.mcp,
         &state.ownership,
@@ -980,7 +1106,7 @@ async fn read_viewer_app(
         &claims.user_id,
         server_id,
         tool,
-        oauth_token.as_deref(),
+        token,
     )
     .await
     .map_err(|error| run_trace_error(error.status(), error.code(), error.message()))
@@ -1492,6 +1618,147 @@ fn invoke_inference_error(
     }
 }
 
+/// What a failed direct inference call ends its run with, and the answer its caller gets (V2-mg-1-rel1).
+///
+/// On the subscription route a typed zero-retention or model-entitlement refusal from inference-core keeps its own
+/// catalogue code and body, as the side chat's answer does. It is not the route's generic failure, so the run ends
+/// under the refusal's code, and the caller is not told to retry a refusal that cannot succeed. Every other failure
+/// keeps the route's typed reason or generic failure, and off the route nothing changes.
+fn direct_run_inference_failure(
+    error: &tonic::Status,
+    subscription_route: bool,
+) -> (&'static str, InvokeError) {
+    let refusal = if subscription_route {
+        mp_contracts::zdr_refusal::Refusal::from_status(error)
+            .map(|refusal| refusal.code())
+            .or_else(|| {
+                mp_contracts::model_entitlement::Refusal::from_status(error)
+                    .map(|refusal| refusal.code())
+            })
+    } else {
+        None
+    };
+    if let Some(code) = refusal {
+        return (code, grpc_status_to_http(error).into());
+    }
+    let subscription_failure =
+        crate::subscription_failure::on_route_or_generic(error, subscription_route);
+    let terminal_code = subscription_failure
+        .as_ref()
+        .map_or("inference_unavailable", |failure| failure.code);
+    (
+        terminal_code,
+        invoke_inference_error(error, subscription_failure.as_ref()),
+    )
+}
+
+#[cfg(test)]
+mod direct_run_failure_tests {
+    //! V2-mg-1-rel1. On the subscription route a failed direct inference run ends under a typed zero-retention or
+    //! model-entitlement refusal's own code and answers its body, not under the generic `subscription_route_unavailable`,
+    //! which would call the refusal retryable. Off the route, and for every other failure, the answer is unchanged.
+    use super::*;
+    use mp_contracts::model_entitlement::{Reason, Refusal as EntitlementRefusal};
+    use mp_contracts::zdr_refusal::{code as zdr_code, Refusal as ZdrRefusal};
+
+    fn zdr_status() -> tonic::Status {
+        ZdrRefusal::CONNECTION_NOT_ACKNOWLEDGED.grpc_status(tonic::Code::FailedPrecondition)
+    }
+
+    fn entitlement_status() -> tonic::Status {
+        EntitlementRefusal::not_entitled("gpt-x", Reason::NotInAllowList).grpc_status()
+    }
+
+    #[test]
+    fn a_typed_zdr_refusal_on_the_subscription_route_keeps_its_own_code_and_body() {
+        let status = zdr_status();
+        let (terminal, answer) = direct_run_inference_failure(&status, true);
+        let (flat_status, Json(flat)) = grpc_status_to_http(&status);
+        assert_eq!(terminal, zdr_code::CONNECTION_NOT_ACKNOWLEDGED);
+        assert_eq!((answer.status, &answer.body.0), (flat_status, &flat));
+        assert_eq!(
+            answer.body.0["error"]["code"].as_str(),
+            Some(zdr_code::CONNECTION_NOT_ACKNOWLEDGED)
+        );
+        assert_eq!(answer.body.0["error"]["retryable"].as_bool(), Some(false));
+        assert!(answer.body.0["code"].is_null(), "{}", answer.body.0);
+        assert_eq!(answer.retry_after_secs, None);
+    }
+
+    #[test]
+    fn a_typed_model_refusal_on_the_subscription_route_keeps_its_own_code_and_body() {
+        let status = entitlement_status();
+        let (terminal, answer) = direct_run_inference_failure(&status, true);
+        let (flat_status, Json(flat)) = grpc_status_to_http(&status);
+        assert_eq!(
+            terminal,
+            mp_contracts::model_entitlement::code::MODEL_NOT_ENTITLED
+        );
+        assert_eq!((answer.status, &answer.body.0), (flat_status, &flat));
+        assert_eq!(
+            answer.body.0["error"]["code"].as_str(),
+            Some(mp_contracts::model_entitlement::code::MODEL_NOT_ENTITLED)
+        );
+        assert_eq!(answer.body.0["error"]["retryable"].as_bool(), Some(false));
+        assert!(answer.body.0["code"].is_null(), "{}", answer.body.0);
+    }
+
+    #[test]
+    fn off_the_subscription_route_a_refusal_is_answered_as_before() {
+        for status in [zdr_status(), entitlement_status()] {
+            let (terminal, answer) = direct_run_inference_failure(&status, false);
+            let before = invoke_inference_error(&status, None);
+            assert_eq!(terminal, "inference_unavailable");
+            assert_eq!(
+                (answer.status, &answer.body.0),
+                (before.status, &before.body.0)
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_with_no_typed_reason_on_the_subscription_route_is_the_generic_failure() {
+        let status = tonic::Status::unavailable("upstream said: token expired for acct 42");
+        let (terminal, answer) = direct_run_inference_failure(&status, true);
+        assert_eq!(
+            terminal,
+            crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE
+        );
+        assert_eq!(answer.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            answer.body.0["code"].as_str(),
+            Some(crate::subscription_failure::SUBSCRIPTION_ROUTE_UNAVAILABLE)
+        );
+        assert_eq!(answer.body.0["retryable"].as_bool(), Some(true));
+        assert!(
+            !answer.body.0.to_string().contains("acct 42"),
+            "{}",
+            answer.body.0
+        );
+    }
+
+    #[test]
+    fn a_typed_subscription_failure_on_the_subscription_route_keeps_its_reason() {
+        let mut status = tonic::Status::resource_exhausted("upstream said: quota for acct 42");
+        status.metadata_mut().insert(
+            crate::compaction::PROVIDER_ERROR_KIND_TRAILER,
+            crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT
+                .parse()
+                .expect("ascii"),
+        );
+        let (terminal, answer) = direct_run_inference_failure(&status, true);
+        assert_eq!(
+            terminal,
+            crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT
+        );
+        assert_eq!(answer.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            answer.body.0["code"].as_str(),
+            Some(crate::subscription_failure::SUBSCRIPTION_USAGE_LIMIT)
+        );
+    }
+}
+
 /// Attach the separately verified `aud=inference-core` credential to one
 /// downstream RPC. A verified compact JWT uses only metadata-safe characters;
 /// validation happens in the auth middleware before this type can exist.
@@ -1845,13 +2112,15 @@ async fn list_run_questions(
     })))
 }
 
+/// One item of an answer to a question, as the answer route and the question form of `/continue`
+/// (WS14 S5) both read it.
 #[derive(Debug, Deserialize)]
-struct AnswerQuestionItemBody {
-    item_id: String,
+pub(crate) struct AnswerQuestionItemBody {
+    pub(crate) item_id: String,
     #[serde(default)]
-    option_ids: Vec<String>,
+    pub(crate) option_ids: Vec<String>,
     #[serde(default)]
-    text: String,
+    pub(crate) text: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1873,6 +2142,27 @@ async fn answer_run_question(
     Json(body): Json<AnswerQuestionBody>,
 ) -> Result<Json<Value>, HttpJsonError> {
     require_non_zdr_durable_mutation(&claims)?;
+    let question =
+        record_question_answer(&state, &claims, &bearer, question_id, body.answers, body.skip)
+            .await?;
+    Ok(Json(json!({ "question": run_question_value(&question) })))
+}
+
+/// Record the owner's answer to, or skip of, one question through Session Core's `AnswerRunQuestion`
+/// (build plan WS14 S3, S5), and return the question as it now stands. The one writer of an answer:
+/// the answer route and the question form of `/continue` both call it, so the org is always the
+/// verified credential's, the answer is never attributed to a message from here, and every
+/// Session Core refusal takes the same typed map (`question_not_found` 404, `question_expired` 410,
+/// `question_already_answered` 409, `invalid_answer` 422). The caller has already refused a ZDR or
+/// waived credential. The answers are never logged.
+pub(crate) async fn record_question_answer(
+    state: &AppState,
+    claims: &Claims,
+    bearer: &VerifiedModelBearer,
+    question_id: String,
+    answers: Vec<AnswerQuestionItemBody>,
+    skip: bool,
+) -> Result<RunQuestion, HttpJsonError> {
     let response = state
         .orchestration_client
         .clone()
@@ -1880,8 +2170,7 @@ async fn answer_run_question(
             AnswerRunQuestionRequest {
                 question_id,
                 org_id: claims.org_id.clone(),
-                answers: body
-                    .answers
+                answers: answers
                     .into_iter()
                     .map(|answer| QuestionAnswerItem {
                         item_id: answer.item_id,
@@ -1889,20 +2178,19 @@ async fn answer_run_question(
                         text: answer.text,
                     })
                     .collect(),
-                skip: body.skip,
+                skip,
                 // The message that carries an answer is recorded by the server when the answer
                 // arrives on a turn; this route never takes it from the caller.
                 answered_message_id: String::new(),
             },
-            &bearer,
+            bearer,
         )?)
         .await
         .map_err(|e| question_status_to_http(&e))?
         .into_inner();
-    let question = response
+    response
         .question
-        .ok_or_else(|| question_error(StatusCode::NOT_FOUND, "question_not_found", json!({})))?;
-    Ok(Json(json!({ "question": run_question_value(&question) })))
+        .ok_or_else(|| question_error(StatusCode::NOT_FOUND, "question_not_found", json!({})))
 }
 
 /// A typed question error body: `{ "error": { "code", "message", "details" } }`.
@@ -3414,18 +3702,6 @@ fn approval_scope_code(scope: &str) -> i32 {
     }
 }
 
-/// The environment switch for "Always" as a reviewed rule (build plan WS13 S7). Default off; only
-/// the literal `true` enables it, read through the one strict parser the other switches share.
-const RULE_PROPOSALS_ENV: &str = "APPROVAL_RULE_PROPOSALS_ENABLED";
-
-fn rule_proposals_from(value: Option<&str>) -> bool {
-    mp_contracts::loop_fold::switch_from(value)
-}
-
-fn rule_proposals_enabled() -> bool {
-    rule_proposals_from(env::var(RULE_PROPOSALS_ENV).ok().as_deref())
-}
-
 /// Whether a decision is "Always" (build plan WS13 S7): a standing rule proposed from this grant,
 /// for the person to confirm in settings. Returns `true` only for a valid ask under the switch; with
 /// the switch off `promote` is ignored. A rule is proposed from a grant of this thread on an MCP
@@ -3627,7 +3903,7 @@ async fn decide_approval(
         prior_approval
             .as_ref()
             .and_then(|approval| approval.cause.as_ref()),
-        rule_proposals_enabled(),
+        approval_cause::rule_proposals_enabled(),
     )?;
     let step_up_claim = step_up.and_then(|Extension(VerifiedStepUp(claim))| claim);
     if step_up_missing(
@@ -3698,6 +3974,504 @@ async fn decide_approval(
         body["continuation_delivery"] = json!(status);
     }
     Ok(Json(body))
+}
+
+/// The longest thread or grant id the grant routes accept.
+const APPROVAL_GRANT_ID_MAX_LEN: usize = 128;
+
+/// What a list of a thread's approval grants does, decided from the caller's credential alone.
+#[derive(Debug)]
+enum ListPosture {
+    /// A ZDR principal holds no grant, and Session Core would refuse it: answered empty here,
+    /// with no upstream call.
+    Empty,
+    /// Ask Session Core, which enforces the owner binding.
+    Upstream,
+    /// The posture could not be decided; refused, never guessed.
+    Refused(HttpJsonError),
+}
+
+/// The posture of a grants list (build plan WS13 S6). A persistent credential reads its grants. A
+/// waived credential reads its own: a read of durable state sends nothing to a processor, and a
+/// waiver is a route mismatch only because the plain route names no connection. A ZDR credential
+/// holds no grant. Any other refusal is an undecidable posture and is refused.
+fn grants_list_posture(claims: &Claims) -> ListPosture {
+    match crate::zdr_posture::decide_for(claims, &crate::zdr_posture::Route::plain(false)) {
+        Ok(posture) if posture.zdr() => ListPosture::Empty,
+        Ok(_) => ListPosture::Upstream,
+        Err(refusal)
+            if refusal.code() == mp_contracts::zdr_refusal::code::WAIVER_ROUTE_MISMATCH =>
+        {
+            ListPosture::Upstream
+        }
+        Err(refusal) => ListPosture::Refused(crate::zdr_posture::http(&refusal)),
+    }
+}
+
+/// The 400 answer for a malformed id in a grant route path.
+fn invalid_grant_path_id(code: &'static str, message: &str) -> HttpJsonError {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": { "code": code, "message": message } })),
+    )
+}
+
+/// An RFC 3339 timestamp, or null when the timestamp is unset.
+fn optional_timestamp_value(value: Option<&prost_types::Timestamp>) -> Value {
+    let text = timestamp_to_rfc3339(value.cloned());
+    if text.is_empty() {
+        Value::Null
+    } else {
+        Value::String(text)
+    }
+}
+
+/// The part of a standing grant its owner may read. An allowlist: the stored grant also holds the
+/// action key and the call digest, which are for the gate and stay server-side (as
+/// `approval_cause_value` does), and no argument value is ever part of it. The cause code is read
+/// through the closed vocabulary.
+fn approval_grant_value(grant: &mp_contracts::model_plane::v1::ApprovalScopeGrant) -> Value {
+    json!({
+        "id": grant.id,
+        "thread_id": grant.thread_id,
+        "run_id": empty_to_null(&grant.run_id),
+        "scope": match ApprovalScope::try_from(grant.scope) {
+            Ok(ApprovalScope::Thread) => Value::String("thread".to_owned()),
+            Ok(ApprovalScope::Run) => Value::String("run".to_owned()),
+            _ => Value::Null,
+        },
+        "tool_name": grant.tool_name,
+        "effect_class": empty_to_null(&grant.effect_class),
+        "cause_code": CauseCode::from_wire(&grant.cause_code).as_str(),
+        "created_from_approval_id": empty_to_null(&grant.created_from_approval_id),
+        "created_at": optional_timestamp_value(grant.created_at.as_ref()),
+        "expires_at": optional_timestamp_value(grant.expires_at.as_ref()),
+        "revoked_at": optional_timestamp_value(grant.revoked_at.as_ref()),
+        "use_count": grant.use_count,
+        "last_used_at": optional_timestamp_value(grant.last_used_at.as_ref()),
+    })
+}
+
+/// `GET /v1/orchestration/threads/:thread_id/approval-grants`: the caller's own standing grants in
+/// one thread (build plan WS13 S6). Served whatever the grants switch says, so a grant made while
+/// it was on stays visible. The org comes from the claims; Session Core owns the owner binding.
+async fn list_approval_grants(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    session_bearer: VerifiedModelBearer,
+    Path(thread_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    if thread_id.is_empty() || thread_id.chars().count() > APPROVAL_GRANT_ID_MAX_LEN {
+        return Err(invalid_grant_path_id(
+            "invalid_thread_id",
+            "thread_id must be 1 to 128 characters",
+        ));
+    }
+    match grants_list_posture(&claims) {
+        ListPosture::Empty => return Ok(Json(json!({ "data": { "grants": [] } }))),
+        ListPosture::Refused(refusal) => return Err(refusal),
+        ListPosture::Upstream => {}
+    }
+    let response = state
+        .approval_grant_client
+        .clone()
+        .list_approval_scope_grants(authenticated_session_request(
+            mp_contracts::model_plane::v1::ListApprovalScopeGrantsRequest {
+                org_id: claims.org_id.clone(),
+                thread_id,
+            },
+            &session_bearer,
+        )?)
+        .await
+        .map_err(|error| grpc_status_to_http(&error))?
+        .into_inner();
+    let grants: Vec<Value> = response.grants.iter().map(approval_grant_value).collect();
+    Ok(Json(json!({ "data": { "grants": grants } })))
+}
+
+/// `DELETE /v1/orchestration/approval-grants/:grant_id`: revokes one of the caller's live standing
+/// grants. A narrowing delete, so it is allowed under every posture and no gateway posture refusal
+/// stands in front of it; Session Core refuses a ZDR credential and serves a waived owner.
+async fn revoke_approval_grant(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    session_bearer: VerifiedModelBearer,
+    Path(grant_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    if !grant_id.starts_with("apg_") || grant_id.chars().count() > APPROVAL_GRANT_ID_MAX_LEN {
+        return Err(invalid_grant_path_id(
+            "invalid_grant_id",
+            "grant_id must start with apg_ and be at most 128 characters",
+        ));
+    }
+    let response = state
+        .approval_grant_client
+        .clone()
+        .revoke_approval_scope_grant(authenticated_session_request(
+            mp_contracts::model_plane::v1::RevokeApprovalScopeGrantRequest {
+                org_id: claims.org_id.clone(),
+                grant_id,
+            },
+            &session_bearer,
+        )?)
+        .await
+        .map_err(|error| grpc_status_to_http(&error))?
+        .into_inner();
+    let grant = response
+        .grant
+        .ok_or_else(|| not_found("approval grant not found"))?;
+    Ok(Json(
+        json!({ "data": { "grant": approval_grant_value(&grant) } }),
+    ))
+}
+
+/// The longest rule proposal id the proposal routes accept.
+const RULE_PROPOSAL_ID_MAX_LEN: usize = 128;
+
+/// The 400 answer for a rule proposal id that is not one of ours.
+fn invalid_proposal_id() -> HttpJsonError {
+    scope_refusal(
+        StatusCode::BAD_REQUEST,
+        "invalid_proposal_id",
+        "proposal_id must start with arp_ and be at most 128 characters",
+    )
+}
+
+/// A proposal id in a route path starts with `arp_` and is at most 128 characters.
+fn checked_rule_proposal_id(proposal_id: &str) -> Result<(), HttpJsonError> {
+    if proposal_id.starts_with("arp_") && proposal_id.chars().count() <= RULE_PROPOSAL_ID_MAX_LEN {
+        Ok(())
+    } else {
+        Err(invalid_proposal_id())
+    }
+}
+
+/// Whether a request body is the body a proposal action takes: empty, or a JSON object with no
+/// keys. Nothing else is read, so a client can never name the capability, the digest, the scope or
+/// the expiry of the rule a confirm writes (build plan WS13 S7, D-WS13-2).
+fn empty_action_body(body: &[u8]) -> bool {
+    body.is_empty()
+        || matches!(
+            serde_json::from_slice::<Value>(body),
+            Ok(Value::Object(fields)) if fields.is_empty()
+        )
+}
+
+/// The 400 answer for a proposal action whose body is not empty.
+fn require_empty_action_body(body: &[u8]) -> Result<(), HttpJsonError> {
+    if empty_action_body(body) {
+        Ok(())
+    } else {
+        Err(scope_refusal(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "The request body must be empty.",
+        ))
+    }
+}
+
+/// The body of the rule a confirm writes in capability-core: a user-scope allow pinned to the
+/// definition digest the person reviewed. It names nothing else, so the lapse is capability-core's
+/// own default (build plan K3-10).
+fn rule_confirm_body(digest: &str) -> Value {
+    json!({
+        "scope": "user",
+        "decision": "allow",
+        "pinned_digest": digest,
+        "reason": "",
+    })
+}
+
+/// The part of a rule proposal its owner may read: ids, a digest and a closed state word, never an
+/// argument value. A proposal a confirm holds (CONFIRMING) reads as proposed, the claim being
+/// server-internal.
+fn approval_rule_proposal_value(
+    proposal: &mp_contracts::model_plane::v1::ApprovalRuleProposal,
+) -> Value {
+    use mp_contracts::model_plane::v1::ApprovalRuleProposalState as ProposalState;
+    let state = match ProposalState::try_from(proposal.state) {
+        Ok(ProposalState::Confirmed) => "confirmed",
+        Ok(ProposalState::Dismissed) => "dismissed",
+        _ => "proposed",
+    };
+    json!({
+        "id": proposal.id,
+        "tool_name": proposal.tool_name,
+        "tool_digest": proposal.tool_digest,
+        "capability_id": empty_to_null(&proposal.capability_id),
+        "state": state,
+        "created_at": optional_timestamp_value(proposal.created_at.as_ref()),
+        "resolved_at": optional_timestamp_value(proposal.resolved_at.as_ref()),
+    })
+}
+
+/// A rule-proposal gRPC refusal as the HTTP answer: Session Core's closed failed-precondition
+/// messages keep their code (409, or 404 for a disabled switch), a missing proposal is a 404
+/// `rule_proposal_not_found`, and anything else goes through [`grpc_status_to_http`] (a waiver
+/// refusal keeps its typed body).
+fn rule_proposal_status_to_http(error: &tonic::Status) -> HttpJsonError {
+    match (error.code(), error.message()) {
+        (tonic::Code::FailedPrecondition, "rule_proposal_resolved") => scope_refusal(
+            StatusCode::CONFLICT,
+            "rule_proposal_resolved",
+            "The proposal is already resolved.",
+        ),
+        (tonic::Code::FailedPrecondition, "rule_proposal_stale") => scope_refusal(
+            StatusCode::CONFLICT,
+            "rule_proposal_stale",
+            "The proposal names no capability and cannot be confirmed.",
+        ),
+        (tonic::Code::FailedPrecondition, "rule_proposal_busy") => scope_refusal(
+            StatusCode::CONFLICT,
+            "rule_proposal_busy",
+            "A confirm holds the proposal; try again shortly.",
+        ),
+        (tonic::Code::FailedPrecondition, "rule_proposal_not_claimed") => scope_refusal(
+            StatusCode::CONFLICT,
+            "rule_proposal_not_claimed",
+            "The proposal was not claimed by a confirm.",
+        ),
+        (tonic::Code::FailedPrecondition, "rule_proposals_disabled") => rule_proposals_disabled(),
+        (tonic::Code::NotFound, _) => scope_refusal(
+            StatusCode::NOT_FOUND,
+            "rule_proposal_not_found",
+            "Rule proposal not found.",
+        ),
+        _ => grpc_status_to_http(error),
+    }
+}
+
+/// The 404 answer of a confirm while rule proposals are off.
+fn rule_proposals_disabled() -> HttpJsonError {
+    scope_refusal(
+        StatusCode::NOT_FOUND,
+        "rule_proposals_disabled",
+        "Rule proposals are not enabled.",
+    )
+}
+
+/// The 503 answer of a confirm whose rule is written but whose proposal is not yet marked
+/// confirmed. A retry is safe: the claim is re-taken by its owner, the rule is updated in place,
+/// and the resolve then succeeds.
+fn rule_confirm_incomplete(status: StatusCode) -> HttpJsonError {
+    scope_refusal(
+        status,
+        "rule_confirm_incomplete",
+        "The rule was written but the proposal was not marked confirmed; retry the confirm.",
+    )
+}
+
+/// Moves one of the caller's rule proposals to `resolution` in Session Core, with the caller's own
+/// session bearer. `policy_id` is set with a CONFIRMED resolution only.
+async fn resolve_rule_proposal_upstream(
+    state: &AppState,
+    claims: &Claims,
+    session_bearer: &VerifiedModelBearer,
+    proposal_id: &str,
+    resolution: mp_contracts::model_plane::v1::ApprovalRuleProposalState,
+    policy_id: &str,
+) -> Result<mp_contracts::model_plane::v1::ApprovalRuleProposal, HttpJsonError> {
+    let response = state
+        .approval_rule_proposal_client
+        .clone()
+        .resolve_approval_rule_proposal(authenticated_session_request(
+            mp_contracts::model_plane::v1::ResolveApprovalRuleProposalRequest {
+                org_id: claims.org_id.clone(),
+                proposal_id: proposal_id.to_owned(),
+                resolution: resolution as i32,
+                policy_id: policy_id.to_owned(),
+            },
+            session_bearer,
+        )?)
+        .await
+        .map_err(|error| rule_proposal_status_to_http(&error))?
+        .into_inner();
+    response.proposal.ok_or_else(|| {
+        scope_refusal(
+            StatusCode::NOT_FOUND,
+            "rule_proposal_not_found",
+            "Rule proposal not found.",
+        )
+    })
+}
+
+/// `GET /v1/orchestration/rule-proposals`: the caller's own open "Always allow this tool"
+/// proposals (build plan WS13 S7). Served whatever APPROVAL_RULE_PROPOSALS_ENABLED says, so a
+/// proposal made while it was on can still be seen and removed. A ZDR credential holds none and
+/// gets an empty list with no upstream call. The org comes from the claims; Session Core owns the
+/// owner binding.
+async fn list_rule_proposals(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    session_bearer: VerifiedModelBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    match grants_list_posture(&claims) {
+        ListPosture::Empty => return Ok(Json(json!({ "data": { "proposals": [] } }))),
+        ListPosture::Refused(refusal) => return Err(refusal),
+        ListPosture::Upstream => {}
+    }
+    let response = state
+        .approval_rule_proposal_client
+        .clone()
+        .list_approval_rule_proposals(authenticated_session_request(
+            mp_contracts::model_plane::v1::ListApprovalRuleProposalsRequest {
+                org_id: claims.org_id.clone(),
+            },
+            &session_bearer,
+        )?)
+        .await
+        .map_err(|error| rule_proposal_status_to_http(&error))?
+        .into_inner();
+    let proposals: Vec<Value> = response
+        .proposals
+        .iter()
+        .map(approval_rule_proposal_value)
+        .collect();
+    Ok(Json(json!({ "data": { "proposals": proposals } })))
+}
+
+/// `POST /v1/orchestration/rule-proposals/:proposal_id/confirm`: turns a proposal into a standing
+/// allow rule (build plan WS13 S7, D-WS13-2). The gateway runs the confirm because the capability
+/// id and the digest come from the proposal Session Core holds, never from the client: the body
+/// must be empty. A claimed three-step saga, every step idempotent: (a) Session Core claims the
+/// proposal (CONFIRMING) and returns it, a CONFIRMED one being a replay; (b) the rule is written
+/// through Capability Core's tool-policy PUT, which stays the enforcing owner (it refuses unless
+/// the capability still carries the digest the person reviewed); (c) Session Core records the
+/// policy id (CONFIRMED). A ZDR or waived credential is refused first; with the switch off the
+/// route answers 404 before any upstream call.
+async fn confirm_rule_proposal(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    session_bearer: VerifiedModelBearer,
+    capability_bearer: VerifiedCapabilityBearer,
+    Path(proposal_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::ApprovalRuleProposalState as ProposalState;
+    require_non_zdr_durable_mutation(&claims)?;
+    checked_rule_proposal_id(&proposal_id)?;
+    require_empty_action_body(&body)?;
+    if !approval_cause::rule_proposals_enabled() {
+        return Err(rule_proposals_disabled());
+    }
+
+    // (a) Claim the proposal and read the capability id and digest from the server's own record.
+    let proposal = resolve_rule_proposal_upstream(
+        &state,
+        &claims,
+        &session_bearer,
+        &proposal_id,
+        ProposalState::Confirming,
+        "",
+    )
+    .await?;
+    if matches!(
+        ProposalState::try_from(proposal.state),
+        Ok(ProposalState::Confirmed)
+    ) {
+        // A replay: the rule was written and recorded by an earlier confirm.
+        return Ok(Json(json!({ "data": {
+            "proposal": approval_rule_proposal_value(&proposal),
+            "rule": {
+                "policy_id": proposal.policy_id,
+                "capability_id": proposal.capability_id,
+                "expires_at": Value::Null,
+            },
+        } })));
+    }
+    if !is_registry_identifier(&proposal.capability_id) {
+        // Session Core refuses a proposal that names no capability; a malformed one is never put
+        // into a path.
+        return Err(scope_refusal(
+            StatusCode::CONFLICT,
+            "rule_proposal_stale",
+            "The proposal names no capability and cannot be confirmed.",
+        ));
+    }
+
+    // (b) Write the rule. Capability Core's refusals (409 the pinned definition changed, 422 class
+    // not relaxable, 403 ZDR writer) are returned unchanged and the claim stays, so a retry
+    // reclaims it.
+    let written = proxy_to_capability_core(
+        &state,
+        &claims,
+        &capability_bearer,
+        &format!("tool-policies/{}", proposal.capability_id),
+        "PUT",
+        Some(&rule_confirm_body(&proposal.tool_digest)),
+    )
+    .await?;
+    let policy_id = written
+        .0
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| id.starts_with("tpol_"))
+        .map(str::to_owned)
+        .ok_or_else(|| rule_confirm_incomplete(StatusCode::BAD_GATEWAY))?;
+    let expires_at = written
+        .0
+        .get("expires_at")
+        .and_then(Value::as_str)
+        .map_or(Value::Null, |at| Value::String(at.to_owned()));
+
+    // (c) Record the policy id. A failure here leaves a written rule behind a claimed proposal; a
+    // retry is safe and a dismiss cannot land first (Session Core holds it for 60 s).
+    let confirmed = match resolve_rule_proposal_upstream(
+        &state,
+        &claims,
+        &session_bearer,
+        &proposal_id,
+        ProposalState::Confirmed,
+        &policy_id,
+    )
+    .await
+    {
+        Ok(confirmed) => confirmed,
+        Err(refusal) => {
+            warn!(
+                proposal_id = %proposal_id,
+                status = %refusal.0,
+                "rule written but the proposal was not marked confirmed"
+            );
+            return Err(rule_confirm_incomplete(StatusCode::SERVICE_UNAVAILABLE));
+        }
+    };
+    Ok(Json(json!({ "data": {
+        "proposal": approval_rule_proposal_value(&confirmed),
+        "rule": {
+            "policy_id": policy_id,
+            "capability_id": proposal.capability_id,
+            "expires_at": expires_at,
+        },
+    } })))
+}
+
+/// `POST /v1/orchestration/rule-proposals/:proposal_id/dismiss`: removes one of the caller's
+/// proposals (build plan WS13 S7). It narrows authority, so it works with the switch off; Session
+/// Core refuses it while a confirm holds the proposal. A ZDR or waived credential is refused
+/// first, and the body must be empty.
+async fn dismiss_rule_proposal(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    session_bearer: VerifiedModelBearer,
+    Path(proposal_id): Path<String>,
+    body: Bytes,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&claims)?;
+    checked_rule_proposal_id(&proposal_id)?;
+    require_empty_action_body(&body)?;
+    let proposal = resolve_rule_proposal_upstream(
+        &state,
+        &claims,
+        &session_bearer,
+        &proposal_id,
+        mp_contracts::model_plane::v1::ApprovalRuleProposalState::Dismissed,
+        "",
+    )
+    .await?;
+    Ok(Json(
+        json!({ "data": { "proposal": approval_rule_proposal_value(&proposal) } }),
+    ))
 }
 
 /// The one-word `continuation_delivery` of a decided approval, kept for older clients next to the
@@ -3921,11 +4695,34 @@ async fn resume_run(
     Extension(claims): Extension<Claims>,
     execution_bearer: VerifiedExecutionBearer,
     session_bearer: VerifiedModelBearer,
+    capability_bearer: Option<Extension<VerifiedCapabilityBearer>>,
     Path(run_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     // Owner decision 17: resuming a stored run is a continuation. See approve_plan.
     crate::zdr_posture::continuation_gate(&claims)?;
     require_durable_run_owner(&state, &claims, &run_id, &session_bearer).await?;
+    // The org's agent-run pause (F-t3-083, WS25-S9): a paused org resumes no run, and a policy that cannot be read resumes
+    // none either, as a Do turn is refused. A lockdown mode cap refuses the resume too (D2-1114). A bare unblock starts no
+    // model call, so the read-only plan flag the cap would state is ignored here. Read after the owner check and before
+    // the execution is asked to resume.
+    let _plan_mode = crate::org_agent_policy::admit_continuation(
+        crate::org_agent_policy::policy_mode(),
+        crate::org_agent_policy::shared_cache(),
+        &state.http_client,
+        &state.capability_core_base_url,
+        &claims.org_id,
+        capability_bearer
+            .as_deref()
+            .map_or("", VerifiedCapabilityBearer::as_str),
+    )
+    .await
+    .map_err(|code| {
+        let (status, message) = crate::org_agent_policy::refusal_answer(code);
+        (
+            status,
+            Json(json!({ "error": { "code": code, "message": message, "details": {} } })),
+        )
+    })?;
     // Direct, immediate unblock only for a user-paused run. Approval-gated
     // work has no bare-resume path and remains in the descriptor quarantine.
     let resume = state
@@ -4120,6 +4917,9 @@ enum BrowserSuggestionMode {
 }
 
 mod desktop_browser_planner;
+
+#[cfg(test)]
+mod owner_actions_admitted_route_tests;
 
 #[derive(Debug, Deserialize)]
 struct AiSpeechRequest {
@@ -5240,6 +6040,13 @@ struct McpRegisterBody {
     /// all org members). A non-admin can never create an "org" server.
     #[serde(default = "default_mcp_scope")]
     scope: String,
+    /// `static_bearer` registers a server whose token is a stored integration-corev2 credential binding
+    /// (W4-CC-5). Empty is the plain registration, as before.
+    #[serde(default)]
+    auth_kind: String,
+    /// The credential binding (`cb_...`) a `static_bearer` server redeems for each call. Never a token.
+    #[serde(default)]
+    credential_binding_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5311,6 +6118,7 @@ async fn mcp_register(
             Json(json!({ "error": "server_id is assigned by the gateway on create" })),
         ));
     }
+    let credential_binding = static_bearer_binding(&body.auth_kind, &body.credential_binding_id)?;
     register_plain_mcp_server(
         &state,
         &claims,
@@ -5323,8 +6131,43 @@ async fn mcp_register(
         body.tool_allowlist,
         body.enabled,
         body.scope,
+        credential_binding,
     )
     .await
+}
+
+/// The credential binding a registration names (W4-CC-5). An empty `auth_kind` is the plain registration, which names
+/// no binding, and so is `none`. `static_bearer` names one, and only while `MCP_SECRET_REF_AUTH_ENABLED` is the literal
+/// `true`. The binding is an id, never a token: a raw token is still refused by validation.
+fn static_bearer_binding(
+    auth_kind: &str,
+    credential_binding_id: &str,
+) -> Result<Option<String>, HttpJsonError> {
+    let refused = |message: &str| -> HttpJsonError {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": message })))
+    };
+    let auth_kind = auth_kind.trim();
+    let binding_id = credential_binding_id.trim();
+    match auth_kind {
+        "" | "none" if binding_id.is_empty() => Ok(None),
+        "" | "none" => Err(refused(
+            "credential_binding_id needs auth_kind static_bearer",
+        )),
+        crate::mcp_credential_ref::AUTH_KIND_STATIC_BEARER => {
+            if !crate::mcp_credential_ref::enabled() {
+                return Err(refused(
+                    "static_bearer MCP servers are not enabled on this deployment",
+                ));
+            }
+            if !crate::mcp_credential_ref::binding_id_valid(binding_id) {
+                return Err(refused(
+                    "credential_binding_id must name a credential binding",
+                ));
+            }
+            Ok(Some(binding_id.to_owned()))
+        }
+        _ => Err(refused("auth_kind must be static_bearer when it is given")),
+    }
 }
 
 /// Resolve the effective tool allowlist for a new MCP server: if the caller
@@ -5376,6 +6219,7 @@ async fn register_plain_mcp_server(
     tool_allowlist: Vec<String>,
     enabled: bool,
     scope: String,
+    credential_binding_id: Option<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let org_id = claims.org_id.clone();
     let scope = crate::ownership::Scope::from_wire(&scope);
@@ -5389,7 +6233,18 @@ async fn register_plain_mcp_server(
         crate::ownership::Scope::Org => crate::ownership::Ownership::org(),
         crate::ownership::Scope::User => crate::ownership::Ownership::user(claims.user_id.clone()),
     };
-    let tool_allowlist = if transport == "http" {
+    if credential_binding_id.is_some() {
+        // A static-bearer server redeems its token from integration-corev2 over https only, on the default port.
+        if let Err(error) = crate::mcp_credential_ref::validate_server_url(&url) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": error.message() })),
+            ));
+        }
+    }
+    // A static-bearer server's token is not in hand at registration, so its tools are never discovered here: the
+    // allowlist the caller names is the one kept.
+    let tool_allowlist = if transport == "http" && credential_binding_id.is_none() {
         resolve_tool_allowlist(&url, &token, tool_allowlist).await
     } else {
         tool_allowlist
@@ -5423,6 +6278,15 @@ async fn register_plain_mcp_server(
             ownership.clone(),
         );
     }
+    // The credential binding a static-bearer server redeems per call (W4-CC-5). In memory only: the token stays
+    // in integration-corev2, and the record in capability-core names the binding.
+    if let (Some(binding_id), Some(server)) =
+        (credential_binding_id.as_deref(), resp.server.as_ref())
+    {
+        state
+            .mcp
+            .set_credential_binding(&org_id, &server.server_id, binding_id);
+    }
 
     // capability-core is the registry system of record. A create is not
     // successful until the authenticated catalog write succeeds; on failure we
@@ -5444,13 +6308,21 @@ async fn register_plain_mcp_server(
             Json(json!({"error": "capability registry is unavailable"})),
         ));
     }
-    let auth_kind = if registered.token.is_empty() {
-        "none"
+    // A static-bearer server is catalogued as a bearer whose secret reference names its binding (W4-CC-5).
+    let auth_kind = if credential_binding_id.is_some() || !registered.token.is_empty() {
+        crate::mcp_credential_ref::CATALOG_AUTH_KIND
     } else {
-        "bearer"
+        "none"
     };
+    let secret_ref = credential_binding_id
+        .as_deref()
+        .map(crate::mcp_credential_ref::secret_ref_for);
     let payload = crate::runtime_registries::mcp_capability_payload(
-        &org_id, registered, &ownership, auth_kind,
+        &org_id,
+        registered,
+        &ownership,
+        auth_kind,
+        secret_ref.as_deref(),
     );
     let url = format!("{}/api/v1/mcp", state.capability_core_base_url);
     let catalog_result = state
@@ -5911,6 +6783,8 @@ async fn mcp_connect(
                 // servers are registered live, as they always have been.
                 true,
                 body.scope,
+                // The connect flow names no credential binding (W4-CC-5).
+                None,
             )
             .await
         }
@@ -6018,6 +6892,7 @@ async fn mcp_oauth_callback(
         &registered,
         &ownership,
         "oauth",
+        None,
     );
     let catalog_url = format!("{}/api/v1/mcp", state.capability_core_base_url);
     let catalog_response = state
@@ -6257,6 +7132,7 @@ async fn generate_image(
                 size: req.size.unwrap_or_default(),
                 quality: req.quality.unwrap_or_default(),
                 n: req.n.unwrap_or(1),
+                strict_provider: false,
             },
             inference_bearer,
         ))
@@ -7779,6 +8655,26 @@ async fn get_capability_proxy(
     Ok(Json(capability_contract_value(&c)))
 }
 
+/// `GET /v1/capabilities/owner-actions/admitted`: the ids of the owner actions the org's run view
+/// can offer, as capability-core answers them. The caller's capability bearer is forwarded
+/// unchanged; capability-core decides the mode and refuses a ZDR principal, so the gateway adds
+/// no answer of its own (D3-254/D3-257).
+async fn admitted_owner_actions_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(
+        &s,
+        &c,
+        &bearer,
+        "capabilities/owner-actions/admitted",
+        "GET",
+        None,
+    )
+    .await
+}
+
 // ============================================================================
 // Tasks / cron / memory / skills  — proxy to capability-core HTTP API
 // The capability-core service exposes these on :8085 and we forward from the
@@ -7786,7 +8682,7 @@ async fn get_capability_proxy(
 // ============================================================================
 
 /// Proxy GET/POST to capability-core's /api/v1/{path}.
-async fn proxy_to_capability_core(
+pub(crate) async fn proxy_to_capability_core(
     state: &AppState,
     claims: &Claims,
     bearer: &VerifiedCapabilityBearer,
@@ -8176,6 +9072,40 @@ async fn delete_org_hook_proxy(
     require_non_zdr_durable_mutation(&c)?;
     require_registry_identifier(&hook_id, "hook_id")?;
     let path = format!("org-hooks/{hook_id}");
+    proxy_to_capability_core(&s, &c, &bearer, &path, "DELETE", None).await
+}
+
+/// `GET /v1/org/permission-rules` — the org's permission rules and the policy revision they are at. Any member reads them.
+async fn list_org_permission_rules_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "org-permission-rules", "GET", None).await
+}
+
+/// `POST /v1/org/permission-rules` — an org admin adds a deny or ask rule. The body is forwarded as sent, so a field that
+/// capability-core does not know is refused rather than dropped.
+async fn create_org_permission_rule_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    proxy_to_capability_core(&s, &c, &bearer, "org-permission-rules", "POST", Some(&body)).await
+}
+
+/// `DELETE /v1/org/permission-rules/:rule_id` — an org admin removes a rule.
+async fn delete_org_permission_rule_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(rule_id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    require_non_zdr_durable_mutation(&c)?;
+    require_registry_identifier(&rule_id, "rule_id")?;
+    let path = format!("org-permission-rules/{rule_id}");
     proxy_to_capability_core(&s, &c, &bearer, &path, "DELETE", None).await
 }
 
@@ -8610,10 +9540,12 @@ async fn get_thread_workspace(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedSandboxBearer,
+    session: VerifiedModelBearer,
     Path(thread_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let thread_id = require_url_safe_thread_id(&thread_id)?;
     let zdr = crate::zdr_posture::zdr_or_refuse(&claims, &crate::zdr_posture::Route::plain(false))?;
+    require_thread_owner(&state, &claims, &session, &thread_id).await?;
     let mut sandbox = state.sandbox_client.clone();
     let lease = sandbox
         .acquire_lease(authenticated_sandbox_request(
@@ -8665,9 +9597,11 @@ async fn delete_thread_workspace(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedSandboxBearer,
+    session: VerifiedModelBearer,
     Path(thread_id): Path<String>,
 ) -> Result<Json<Value>, HttpJsonError> {
     let thread_id = require_url_safe_thread_id(&thread_id)?;
+    require_thread_owner(&state, &claims, &session, &thread_id).await?;
     let response = state
         .sandbox_client
         .clone()
@@ -8687,6 +9621,55 @@ async fn delete_thread_workspace(
         "files_deleted": response.files_deleted,
         "object_prefix": response.object_prefix,
     })))
+}
+
+/// Asks Session Core whether the caller owns this thread, before any sandbox RPC.
+///
+/// Sandbox-manager keys workspace rows by (org, owner, thread) but its blobs by
+/// (org, thread) alone, so it cannot tell a stranger from the owner by itself.
+/// Session Core owns thread ownership and is asked with the caller's own session
+/// bearer, so the answer is the caller's own. A thread that is not theirs answers
+/// the same 404 as one that does not exist (no existence leak), and a lookup that
+/// cannot be answered fails closed with 503. The request carries ids only.
+async fn require_thread_owner(
+    state: &AppState,
+    claims: &Claims,
+    session: &VerifiedModelBearer,
+    thread_id: &str,
+) -> Result<(), HttpJsonError> {
+    let request = authenticated_session_request(
+        mp_contracts::model_plane::v1::ResolveThreadOwnerRequest {
+            thread_id: thread_id.to_owned(),
+            org_id: claims.org_id.clone(),
+            user_id: claims.user_id.clone(),
+        },
+        session,
+    )
+    .map_err(|_| thread_ownership_unavailable())?;
+    let authorized = match state.run_client.clone().resolve_thread_owner(request).await {
+        Ok(response) => response.into_inner().authorized,
+        Err(status) => {
+            tracing::warn!(
+                code = ?status.code(),
+                "Session Core thread ownership lookup unavailable for the thread workspace"
+            );
+            return Err(thread_ownership_unavailable());
+        }
+    };
+    if !authorized {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "thread not found" })),
+        ));
+    }
+    Ok(())
+}
+
+fn thread_ownership_unavailable() -> HttpJsonError {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "error": "thread ownership could not be checked" })),
+    )
 }
 
 /// A thread id the workspace path accepts: the plain key segment the object store
@@ -9524,6 +10507,133 @@ async fn delete_plugin_proxy(
     proxy_to_capability_core(&s, &c, &bearer, &format!("plugins/{id}"), "DELETE", None).await
 }
 
+/// W4-PL-3: a plugin id as one segment of the capability-core URL. Only the characters an id is made of pass, so a
+/// segment can never climb out of the route it is put in.
+fn plugin_path_segment(id: &str) -> Result<&str, HttpJsonError> {
+    if !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Ok(id);
+    }
+    Err((
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": "invalid plugin id"})),
+    ))
+}
+
+/// W4-PL-3: a manifest digest as capability-core writes it: `sha256:` and 64 lowercase hex digits.
+fn is_plugin_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+/// W4-PL-3: the org's approved plugin catalogue (open to members; capability-core answers from the caller's org).
+async fn list_plugin_catalog_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "plugin-catalog", "GET", None).await
+}
+/// W4-PL-3: list one of the org's packages in the catalogue (capability-core decides the org admin check).
+async fn approve_plugin_catalog_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = format!("plugin-catalog/{}/approve", plugin_path_segment(&id)?);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "POST", None).await
+}
+/// W4-PL-3: take one of the org's packages out of the catalogue (capability-core decides the org admin check).
+async fn unapprove_plugin_catalog_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = format!("plugin-catalog/{}/unapprove", plugin_path_segment(&id)?);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "POST", None).await
+}
+/// W4-PL-4: the org's kill-list entries, its own and the platform's global ones. capability-core answers only an org
+/// admin acting as a person. A read stores nothing, so the shared proxy forwards it for a zero-retention caller too.
+async fn list_plugin_kill_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "plugin-kill-list", "GET", None).await
+}
+/// W4-PL-3: add a kill-list entry. The org is never in the body; capability-core derives it from the caller.
+async fn create_plugin_kill_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    proxy_to_capability_core(&s, &c, &bearer, "plugin-kill-list", "POST", Some(&b)).await
+}
+/// W4-PL-3: remove a kill-list entry. Only the digest and the scope pass, and each is checked before it is put in the
+/// upstream URL; a missing scope means the caller's org.
+async fn delete_plugin_kill_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let digest = q.get("digest").map(String::as_str).unwrap_or_default();
+    let scope = match q.get("scope").map(String::as_str) {
+        None | Some("") => "org",
+        Some(scope) => scope,
+    };
+    if !is_plugin_digest(digest) || !matches!(scope, "org" | "global") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "a digest and a scope of org or global are required"})),
+        ));
+    }
+    let path = format!("plugin-kill-list?digest={digest}&scope={scope}");
+    proxy_to_capability_core(&s, &c, &bearer, &path, "DELETE", None).await
+}
+/// W4-PL-3: a plugin's install report: every component, its digest and whether an install would refuse it.
+async fn plugin_components_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = format!("plugins/{}/components", plugin_path_segment(&id)?);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "GET", None).await
+}
+/// W4-PL-3: install a plugin with the digests the admin consented to (capability-core decides the admin check).
+async fn install_plugin_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = format!("plugins/{}/install", plugin_path_segment(&id)?);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "POST", Some(&b)).await
+}
+/// W4-PL-3: uninstall a plugin (capability-core decides the admin check).
+async fn uninstall_plugin_proxy(
+    State(s): State<AppState>,
+    Extension(c): Extension<Claims>,
+    bearer: VerifiedCapabilityBearer,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpJsonError> {
+    let path = format!("plugins/{}/uninstall", plugin_path_segment(&id)?);
+    proxy_to_capability_core(&s, &c, &bearer, &path, "POST", None).await
+}
+
 pub(crate) fn grpc_status_to_http(error: &tonic::Status) -> HttpJsonError {
     let status = match error.code() {
         tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
@@ -10146,6 +11256,11 @@ fn approval_cause_value(cause: &ApprovalCause) -> Value {
         "host": empty_to_null(&cause.host),
         "scope_options": offered_scope_options(cause),
         "step_up_required": step_up_projected(cause, ApprovalStepUpGate::from_env()),
+        // Always is offered exactly when the decide route would accept `promote` (build plan WS13
+        // S7): both switches on and a pinned MCP pause that a confirmed rule lifts.
+        "rule_offered": approval_cause::rule_proposals_enabled()
+            && approval_cause::scope_grants_enabled()
+            && approval_cause::rule_offered(cause),
     })
 }
 
@@ -10372,6 +11487,7 @@ mod approval_rule_tests {
             action_key: "mcp__fixture__create_note".to_owned(),
             call_digest: "digest-of-the-exact-call".to_owned(),
             tool_digest: PINNED_DIGEST.to_owned(),
+            capability_id: "cap.mcp_tool.fixture.create_note".to_owned(),
             ..ApprovalCause::default()
         })
         .0
@@ -10396,7 +11512,7 @@ mod approval_rule_tests {
 
     #[test]
     fn an_always_choice_before_confirmation_is_a_thread_grant() {
-        let cause = mcp_cause("risky_effect_under_ask", "external_write");
+        let cause = mcp_cause("capability_high_risk", "read");
         let scope = checked_decision_scope_with(
             "thread",
             ApprovalState::Granted,
@@ -10427,7 +11543,7 @@ mod approval_rule_tests {
 
     #[test]
     fn a_rule_is_proposed_only_from_an_mcp_grant_the_person_may_relax() {
-        let grant = mcp_cause("risky_effect_under_ask", "external_write");
+        let grant = mcp_cause("capability_high_risk", "read");
         let mut built_in = grant.clone();
         built_in.tool = "write_file".to_owned();
         assert_eq!(
@@ -10438,6 +11554,11 @@ mod approval_rule_tests {
             ("risky_effect_under_ask", "destructive"),
             ("risky_effect_under_ask", "owner_effect"),
             ("risky_effect_under_ask", ""),
+            // The permission gate's pauses are not lifted by a confirmed rule.
+            ("risky_effect_under_ask", "external_write"),
+            ("consent_to_disclose", "read"),
+            // A high-risk external write is once only.
+            ("capability_high_risk", "external_write"),
             ("hook_ask", "external_write"),
             ("capability_policy_ask", "external_write"),
         ] {
@@ -10471,8 +11592,19 @@ mod approval_rule_tests {
             refusal_code(ask(Some(&grant), SCOPE_THREAD, ApprovalState::Denied)),
             "rule_not_applicable"
         );
-        for class in ["read", "sandbox_compute", "context_write", "external_write"] {
-            let cause = mcp_cause("consent_to_disclose", class);
+        let mut no_capability = grant.clone();
+        no_capability.capability_id.clear();
+        assert_eq!(
+            refusal_code(ask(
+                Some(&no_capability),
+                SCOPE_THREAD,
+                ApprovalState::Granted
+            )),
+            "rule_not_offered",
+            "a rule needs the capability id the confirm write names"
+        );
+        for class in ["read", "sandbox_compute", "context_write"] {
+            let cause = mcp_cause("capability_high_risk", class);
             assert!(
                 ask(Some(&cause), SCOPE_THREAD, ApprovalState::Granted).expect(class),
                 "{class} may be relaxed"
@@ -10499,10 +11631,10 @@ mod approval_rule_tests {
 
     #[test]
     fn promote_is_ignored_while_the_switch_is_off_and_only_the_literal_true_asks() {
-        assert!(!rule_proposals_from(None));
-        assert!(!rule_proposals_from(Some("1")));
-        assert!(!rule_proposals_from(Some("yes")));
-        assert!(rule_proposals_from(Some(" TRUE ")));
+        assert!(!approval_cause::rule_proposals_from(None));
+        assert!(!approval_cause::rule_proposals_from(Some("1")));
+        assert!(!approval_cause::rule_proposals_from(Some("yes")));
+        assert!(approval_cause::rule_proposals_from(Some(" TRUE ")));
         let literal: DecideApprovalBody = serde_json::from_value(json!({
             "decision": "approve",
             "promote": true,
@@ -10873,10 +12005,32 @@ fn proof_bundle_value(bundle: &RunProofBundle) -> Value {
             "created_at": run.created_at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
         })),
         "approvals": bundle.approvals.iter().map(proof_approval_value).collect::<Vec<_>>(),
+        "browser_walkthrough": bundle
+            .browser_walkthrough
+            .as_ref()
+            .map_or(Value::Null, browser_walkthrough_value),
         "unavailable": bundle.unavailable.iter().map(|section| json!({
             "section": section.section,
             "reason": section.reason,
         })).collect::<Vec<_>>(),
+    })
+}
+
+/// Serialize a run's browser walkthrough. References only: a step names its screenshot by
+/// `screenshot_ref` and never carries bytes. A page field stays `null` when the executor recorded
+/// none, so an unread page is never mistaken for an empty one.
+fn browser_walkthrough_value(section: &BrowserWalkthrough) -> Value {
+    json!({
+        "steps": section.steps.iter().map(|step| json!({
+            "action_id": step.action_id,
+            "action_type": empty_to_null(&step.action_type),
+            "page_url": empty_to_null(&step.page_url),
+            "page_title": empty_to_null(&step.page_title),
+            "status": empty_to_null(&step.status),
+            "screenshot_ref": empty_to_null(&step.screenshot_ref),
+            "at": step.at.as_ref().map_or(Value::Null, prost_ts_to_rfc3339),
+        })).collect::<Vec<_>>(),
+        "truncated": section.truncated,
     })
 }
 
@@ -11405,6 +12559,12 @@ pub struct InvokeRequest {
     /// invocation. Browser cookies and OAuth tokens are never accepted here.
     #[serde(default, alias = "subscriptionConnectionId")]
     pub subscription_connection_id: Option<String>,
+    /// Opaque Integration Core id of one of the caller's customer-gateway model connections (W4-BYO-6).
+    /// Honoured only while `MODEL_GATEWAY_BYO_GATEWAY` is the literal `true`, and only for a plain text,
+    /// non-ZDR chat turn; inference-core verifies that the connection belongs to the caller's organisation.
+    /// Blank is absent.
+    #[serde(default, alias = "modelConnectionId")]
+    pub model_connection_id: Option<String>,
     pub session_key: Option<String>,
     pub thread_id: Option<String>,
     /// Server-injected, fresh Control decision for a message appended to an
@@ -11556,6 +12716,12 @@ pub struct InvokeRequest {
     /// a client selects an effort, never a raw budget. See `crate::thinking`.
     #[serde(default)]
     pub effort: Option<String>,
+    /// The speed tier the composer's Fast chip asks for: `standard` or `priority`. Read only while
+    /// `MODEL_GATEWAY_SPEED_TIER` is exactly `true`, and then honoured only as `priority` on a model
+    /// whose catalogue record declares the tier (`sse::speed_tier_for_model`). Any other value, and an
+    /// absent one, is no choice. It carries no content, so zero retention does not change it.
+    #[serde(default)]
+    pub speed: Option<String>,
     /// Opt-in rich SSE event families the client understands (chat-parity §2:
     /// "reasoning", "tools", "citations", "artifacts", "steps", "usage"). EMPTY
     /// → plain stream (connected/chunk/done/error only); protects profile:"chat".
@@ -11603,6 +12769,12 @@ pub struct InvokeRequest {
     /// that grant itself (`sse::approve_then_execute_grant`). It carries no rung.
     #[serde(default, alias = "approvedPlanId")]
     pub approved_plan_id: Option<String>,
+    /// Coordinator mode (`EXECUTION_COORDINATOR_MODE_ENABLED`): asks for the Do run to be a non-editing orchestrator,
+    /// offered only the read tools and the subagent delegation tools, with its effects delegated to subagents. Read only
+    /// while that switch is the literal `true`, forwarded only then, and never on a zero-retention or waived turn or a
+    /// continuation (`sse::coordinator_forwarded`). It grants nothing: execution-core still gates every call.
+    #[serde(default)]
+    pub coordinator: bool,
     /// chat-parity §2 function-calling: tool definitions the model may call.
     /// Empty → no tools. With the `tools` feature opted in, the stream path runs
     /// the tool loop (`tool_call`/`tool_result` events) before the final answer.
@@ -13575,6 +14747,14 @@ struct ModelDescriptor {
     /// `ga`, `preview` or `deprecated`. Left out when no sourced row names the model.
     #[serde(skip_serializing_if = "String::is_empty")]
     lifecycle: String,
+    /// The model the vendor names as this one's replacement, on a deprecated model only. Left
+    /// out when no sourced record names one, so an unknown model serves the JSON it served before.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    successor: String,
+    /// Whether a chat turn may ask for the priority service tier on this model (`speed_tier`).
+    /// Left out while false, so a model without the tier serves the JSON it served before.
+    #[serde(skip_serializing_if = "is_false")]
+    priority_tier: bool,
     /// The catalogue's list price for a chat model, behind
     /// `MODEL_GATEWAY_CATALOGUE_PRICES`. Left out when there is none, so a deploy
     /// with the switch off serves the same JSON as before.
@@ -13716,6 +14896,8 @@ async fn list_models(
                 context_window_tokens: known_tokens(m.context_window_tokens),
                 max_output_tokens: known_tokens(m.max_output_tokens),
                 lifecycle: m.lifecycle,
+                successor: m.successor,
+                priority_tier: m.priority_tier,
                 price,
                 data_use: m.data_use.map(|data_use| DataUseDescriptor {
                     trains_on_inputs: data_use.trains_on_inputs,
@@ -14063,6 +15245,61 @@ struct ListThreadsQuery {
     /// Lists only the owner's starred threads. Session Core applies the filter
     /// inside the owner-bound query, so a starred listing pages like any other.
     starred_only: Option<bool>,
+    /// Lists only the threads one named agent was woken in (EP-6 P3), by its agent subject id:
+    /// 1 to 128 bytes of letters, digits, `_`, `.`, `:` or `-`. Read only while
+    /// `MODEL_GATEWAY_NAMED_AGENT_THREADS` is on; off, the parameter is ignored.
+    agent: Option<String>,
+}
+
+/// The switch that lets a thread listing narrow to one named agent's threads (EP-6 P3). Read at
+/// each call, as the thread switches are; only the literal `true` turns it on.
+const NAMED_AGENT_THREADS_ENV: &str = "MODEL_GATEWAY_NAMED_AGENT_THREADS";
+
+/// Whether the named-agent thread filter is on in this process (EP-6 P3).
+fn named_agent_threads_enabled() -> bool {
+    named_agent_threads_enabled_with(&|key| std::env::var(key).ok())
+}
+
+/// [`named_agent_threads_enabled`] over an injected lookup, so the parsing is testable. Only the
+/// literal `true`, with surrounding whitespace ignored, turns it on.
+fn named_agent_threads_enabled_with(get: &dyn Fn(&str) -> Option<String>) -> bool {
+    get(NAMED_AGENT_THREADS_ENV).is_some_and(|value| value.trim() == "true")
+}
+
+#[cfg(test)]
+mod named_agent_threads_switch_tests {
+    use super::*;
+
+    #[test]
+    fn named_agent_threads_switch_is_only_the_literal_true() {
+        for value in [
+            None,
+            Some(""),
+            Some("1"),
+            Some("yes"),
+            Some("TRUE"),
+            Some("True"),
+        ] {
+            let get = |_: &str| value.map(str::to_owned);
+            assert!(!named_agent_threads_enabled_with(&get), "{value:?}");
+        }
+        let get = |_: &str| Some("true".to_owned());
+        assert!(named_agent_threads_enabled_with(&get));
+    }
+}
+
+/// The longest agent subject id a thread listing filters by (EP-6 P3).
+const NAMED_AGENT_FILTER_MAX_BYTES: usize = 128;
+
+/// Whether `value` may stand as the `agent` filter of a thread listing: 1 to 128 bytes of ASCII
+/// letters, digits, `_`, `.`, `:` or `-`. Anything else is refused rather than cleaned, so the
+/// filter never matches a different agent than the one named.
+fn is_named_agent_filter(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= NAMED_AGENT_FILTER_MAX_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'-'))
 }
 
 /// The wire name of a derived attention state (WS16 S1). `None` for the unspecified value, which
@@ -14094,6 +15331,18 @@ fn attention_reason_name(reason: i32) -> Option<&'static str> {
         AttentionReason::Plan => Some("plan"),
         AttentionReason::Input => Some("input"),
         AttentionReason::Goal => Some("goal"),
+    }
+}
+
+/// The wire form of a thread goal's status (EP-7 S5): one of the six closed tokens, or empty. Session
+/// Core fills the token only while the thread goals and attention switches are both on, and a token
+/// this build does not name reads as no goal, so the listing carries nothing but a closed status word.
+fn goal_status_token(status: &str) -> String {
+    match status {
+        "active" | "paused" | "met" | "budget_reached" | "turns_reached" | "blocked" => {
+            status.to_owned()
+        }
+        _ => String::new(),
     }
 }
 
@@ -14212,6 +15461,12 @@ struct ThreadSummaryResponse {
     last_role: String,
     #[serde(skip_serializing_if = "is_zero_u32")]
     turn_count: u32,
+    /// The status of the thread's latest goal (EP-7 S5), one closed token: `active`, `paused`,
+    /// `met`, `budget_reached`, `turns_reached` or `blocked`. Omitted when the thread has no goal,
+    /// its goal was cleared, or the thread goals or attention switch is off. A status token only,
+    /// never the objective.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    goal_status: String,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -14429,6 +15684,24 @@ async fn list_threads(
             ))
         }
     };
+    // EP-6 P3: the named-agent filter is read only while its switch is on. Off, the parameter is
+    // ignored outright, so the listing is what it was before the parameter existed.
+    let agent_subject_id = if named_agent_threads_enabled() {
+        query
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_owned()
+    } else {
+        String::new()
+    };
+    if !agent_subject_id.is_empty() && !is_named_agent_filter(&agent_subject_id) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "agent must be 1 to 128 letters, digits, or _ . : -" })),
+        ));
+    }
 
     let response = state
         .session_client
@@ -14446,6 +15719,7 @@ async fn list_threads(
                 thread_id: query.thread_id.unwrap_or_default(),
                 archived: archived as i32,
                 starred_only: query.starred_only.unwrap_or(false),
+                agent_subject_id,
             },
             &bearer,
         )?)
@@ -14490,6 +15764,7 @@ async fn list_threads(
             recent_author_subject_ids: thread.recent_author_subject_ids,
             last_role: thread.last_role,
             turn_count: thread.turn_count,
+            goal_status: goal_status_token(&thread.goal_status),
         })
         .collect();
 
@@ -14799,6 +16074,7 @@ async fn delete_thread(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedModelBearer,
+    data_plane: Option<Extension<VerifiedBearer>>,
     Path(thread_id): Path<String>,
 ) -> Result<Json<DeleteThreadResponse>, HttpJsonError> {
     use mp_contracts::model_plane::v1::DeleteThreadRequest;
@@ -14813,12 +16089,15 @@ async fn delete_thread(
     let response = state
         .session_client
         .clone()
-        .delete_thread(authenticated_session_request(
+        .delete_thread(crate::thread_share_routes::delegated_share_request(
             DeleteThreadRequest {
                 org_id: claims.org_id.clone(),
                 thread_id: thread_id.to_owned(),
             },
             &bearer,
+            // The owner's delegation, when the caller holds one, lets Session Core revoke the
+            // thread's shared-snapshot view grants at Control; forwarded to Session Core only.
+            data_plane.as_ref().map(|Extension(bearer)| bearer),
         )?)
         .await
         .map_err(|error| thread_erase_error("session-core delete_thread failed", &error))?
@@ -14837,18 +16116,21 @@ async fn delete_threads(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     bearer: VerifiedModelBearer,
+    data_plane: Option<Extension<VerifiedBearer>>,
 ) -> Result<Json<DeleteThreadsResponse>, HttpJsonError> {
     use mp_contracts::model_plane::v1::DeleteThreadsRequest;
 
     let response = state
         .session_client
         .clone()
-        .delete_threads(authenticated_session_request(
+        .delete_threads(crate::thread_share_routes::delegated_share_request(
             DeleteThreadsRequest {
                 org_id: claims.org_id.clone(),
                 user_id: claims.user_id.clone(),
             },
             &bearer,
+            // Same forwarding as the single delete: the owner's delegation, to Session Core only.
+            data_plane.as_ref().map(|Extension(bearer)| bearer),
         )?)
         .await
         .map_err(|error| thread_erase_error("session-core delete_threads failed", &error))?
@@ -15440,6 +16722,13 @@ async fn branch_thread(
 /// Session Core's refusals of a branch move, as the typed codes the client acts on. A stale
 /// leaf is a conflict to reload from; any other refusal keeps the session error mapping.
 pub(crate) fn branch_thread_error(error: &tonic::Status) -> HttpJsonError {
+    // A typed catalogue refusal from session-core (a zero-retention or waived caller, or a thread
+    // that holds a waived run) keeps its own code and status instead of reading as a branch
+    // refusal: 412 for zdr_feature_not_supported and zdr_durable_mutation_forbidden, 403 for the
+    // credential refusals.
+    if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_status(error) {
+        return crate::zdr_posture::http(&refusal);
+    }
     match error.code() {
         tonic::Code::Aborted => (
             StatusCode::CONFLICT,
@@ -15951,7 +17240,8 @@ const SPACE_MEMORY_MAX_DECISION_REF_BYTES: usize = 512;
 const SPACE_MEMORY_MAX_DECISION_TOKEN_BYTES: usize = 8 * 1024;
 
 /// `POST /v1/spaces/:space_id/memory/{list,delete}` body. The Control `model.space.memory.manage`
-/// decision rides in the body; `memory_id` only on a delete.
+/// decision rides in the body; `memory_id` only on a delete; `agent_subject_id` only on a list that
+/// names one agent (EP-6 P3).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpaceMemoryBody {
@@ -15963,6 +17253,8 @@ struct SpaceMemoryBody {
     memory_id: String,
     #[serde(default)]
     limit: Option<u32>,
+    #[serde(default)]
+    agent_subject_id: String,
 }
 
 /// The decision and ids of a Space memory call, bounded; `None` is a malformed request.
@@ -15980,7 +17272,11 @@ fn space_memory_fields(space_id: &str, body: &SpaceMemoryBody) -> Option<(String
 
 /// Session Core's refusal of a Space memory call in fixed words. A permission refusal is one code
 /// whatever its cause (no decision, another role, a revoked member), so nothing about the Space leaks.
+/// A typed ZDR refusal (`named_agent`, EP-6 P3) keeps its catalogue body, as every gateway route does.
 fn space_memory_error(status: &tonic::Status) -> HttpJsonError {
+    if let Some(refusal) = mp_contracts::zdr_refusal::Refusal::from_status(status) {
+        return crate::zdr_posture::http(&refusal);
+    }
     let (code, http, message) = match status.code() {
         tonic::Code::PermissionDenied | tonic::Code::Unauthenticated => (
             "space_memory_not_authorized",
@@ -16024,9 +17320,10 @@ struct SpaceMemorySummaryResponse {
     withheld_reason: String,
 }
 
-/// The memory of one Space, for its owner or admin (EP-8 S7). Session Core verifies the Control
-/// Space memory decision; this hop checks the shape only. A read: a zero-retention caller is
-/// answered empty by Session Core, as the personal list is.
+/// The memory of one Space, for its owner or admin (EP-8 S7), or one named agent's notes in it when
+/// the body names an `agent_subject_id` (EP-6 P3). Session Core verifies the Control Space memory
+/// decision; this hop checks the shape only. A read: a zero-retention caller is answered empty by
+/// Session Core for the Space list, and refused `named_agent` for an agent's notes.
 async fn list_space_memories(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -16038,6 +17335,12 @@ async fn list_space_memories(
     let (space_id, decision_ref, token) = space_memory_fields(&space_id, &body).ok_or_else(|| {
         space_memory_error(&tonic::Status::invalid_argument("invalid Space memory request"))
     })?;
+    let agent_subject_id = body.agent_subject_id.trim().to_owned();
+    if agent_subject_id.len() > SPACE_MEMORY_MAX_ID_BYTES {
+        return Err(space_memory_error(&tonic::Status::invalid_argument(
+            "invalid Space memory request",
+        )));
+    }
     let response = state
         .memory_client
         .clone()
@@ -16049,6 +17352,7 @@ async fn list_space_memories(
                 space_id,
                 space_control_decision_ref: decision_ref,
                 space_control_decision_token: token,
+                agent_subject_id,
             },
             &bearer,
         )?)
@@ -16120,6 +17424,44 @@ async fn delete_space_memory_entry(
     }))
 }
 
+/// Erases one named agent's memory in a Space, under a Control Space memory decision issued for
+/// that agent (EP-6 P3). Session Core verifies the decision and is the authority; the erase is not
+/// gated by the agent switch, so rows written while it was on go too. Allowed under every posture,
+/// as every delete is, and the answer carries a count only.
+async fn erase_space_agent_memory(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    bearer: VerifiedModelBearer,
+    Path((space_id, agent_subject_id)): Path<(String, String)>,
+    Json(body): Json<SpaceMemoryBody>,
+) -> Result<Json<Value>, HttpJsonError> {
+    use mp_contracts::model_plane::v1::EraseAgentMemoryRequest;
+    let agent_subject_id = agent_subject_id.trim().to_owned();
+    let fields = space_memory_fields(&space_id, &body)
+        .filter(|_| !agent_subject_id.is_empty() && agent_subject_id.len() <= SPACE_MEMORY_MAX_ID_BYTES);
+    let (space_id, decision_ref, token) = fields.ok_or_else(|| {
+        space_memory_error(&tonic::Status::invalid_argument("invalid Space memory request"))
+    })?;
+    let response = state
+        .memory_client
+        .clone()
+        .erase_agent_memory(authenticated_session_request(
+            EraseAgentMemoryRequest {
+                org_id: claims.org_id.clone(),
+                space_id,
+                agent_subject_id,
+                space_control_decision_ref: decision_ref,
+                space_control_decision_token: token,
+                user_id: claims.user_id.clone(),
+            },
+            &bearer,
+        )?)
+        .await
+        .map_err(|status| space_memory_error(&status))?
+        .into_inner();
+    Ok(Json(json!({ "erased": response.erased })))
+}
+
 #[cfg(test)]
 mod space_memory_route_tests {
     use super::*;
@@ -16130,6 +17472,7 @@ mod space_memory_route_tests {
             space_control_decision_token: token.to_owned(),
             memory_id: memory_id.to_owned(),
             limit: None,
+            agent_subject_id: String::new(),
         }
     }
 
@@ -16932,7 +18275,7 @@ async fn invoke(
     // `zdr_posture`). The refusal is typed instead of the generic 502 the connection used to get.
     let route = crate::zdr_posture::Route::named(
         req.provider.as_deref(),
-        req.subscription_connection_id.as_deref(),
+        crate::normalize::connection_named_by(&req),
         req.zdr,
     );
     let posture = match crate::zdr_posture::decide_for(&claims, &route) {
@@ -16941,6 +18284,42 @@ async fn invoke(
     };
     if posture.is_waived() && (req.deep_research || req.generate_image) {
         return Err(crate::zdr_posture::http(&mp_contracts::zdr_refusal::Refusal::WAIVER_ROUTE_MISMATCH).into());
+    }
+
+    // A regenerate or an edit of a turn that was served on one of the caller's customer-gateway connections
+    // is served on it again (W4-BYO, GAP-W4-BYO-1). The thread is read here, without moving anything, for
+    // the connection id the source turn holds; it is set on the request before the request is normalized,
+    // so every rule of a connection turn applies to it, and a request that names a platform provider is
+    // refused typed instead of reaching the platform chain. A zero-retention or waived turn keeps no thread
+    // to read. The plan is applied below, so the thread is read once.
+    let mut posture = posture;
+    let mut version_plan: Option<session_flow::VersionPlan> = None;
+    if let Some(replay_turn) = normalize::version_turn(&req).ok().flatten() {
+        if message_versions_enabled() && !posture.zdr() && !posture.is_waived() {
+            let replay_thread = req.thread_id.as_deref().map(str::trim).unwrap_or_default().to_owned();
+            let plan = session_flow::plan_version_move(
+                &state,
+                &claims.org_id,
+                &replay_thread,
+                &replay_turn,
+                &model_bearer,
+            )
+            .await
+            .map_err(|error| branch_thread_error(&error))?;
+            if normalize::replay_stored_connection(&mut req, &plan.model_connection_id)? {
+                // The turn now names a connection, so the posture is decided again for that route.
+                let replay_route = crate::zdr_posture::Route::named(
+                    req.provider.as_deref(),
+                    crate::normalize::connection_named_by(&req),
+                    req.zdr,
+                );
+                posture = match crate::zdr_posture::decide_for(&claims, &replay_route) {
+                    Ok(posture) => posture,
+                    Err(refusal) => return Err(crate::zdr_posture::http(&refusal).into()),
+                };
+            }
+            version_plan = Some(plan);
+        }
     }
 
     // Normalize and validate the request
@@ -17155,14 +18534,17 @@ async fn invoke(
     let version_thread = match version_turn {
         Some(turn) => {
             let thread_id = normalized.thread_id.clone().unwrap_or_default();
-            let version_move = session_flow::move_active_leaf(
-                &state,
-                &claims.org_id,
-                &thread_id,
-                &turn,
-                &model_bearer,
-            )
-            .await
+            // The thread was read above when the turn could be planned; the move is made from that read.
+            let version_move = match version_plan.as_ref() {
+                Some(plan) => {
+                    session_flow::apply_version_move(&state, &claims.org_id, &thread_id, plan, &model_bearer)
+                        .await
+                }
+                None => {
+                    session_flow::move_active_leaf(&state, &claims.org_id, &thread_id, &turn, &model_bearer)
+                        .await
+                }
+            }
             .map_err(|error| branch_thread_error(&error))?;
             if let Some(goal) = version_move.goal {
                 normalized.content = goal;
@@ -17171,7 +18553,10 @@ async fn invoke(
         }
         None => None,
     };
-    let started = match version_thread.as_ref() {
+    // The user turn the run appends records the connection it is served on: the customer-gateway connection (W4-BYO),
+    // so a later regenerate or edit of it replays on the same connection, and the subscription connection (DEC-V-R8),
+    // so a side question on the thread is answered on it. Nothing is recorded for a ZDR turn.
+    let started = session_flow::with_user_turn_connections(&normalized.model_connection_id, &normalized.subscription_connection_id, effective_zdr, async { match version_thread.as_ref() {
         Some((thread_id, turn)) => {
             session_flow::prepare_version_run_authenticated(
                 &state,
@@ -17212,10 +18597,12 @@ async fn invoke(
                     req.idempotency_key.as_deref(),
                 ),
                 None,
+                // The unary route computes no agent pin: the pin is read on the SSE turn only.
+                None,
             )
             .await
         }
-    };
+    } }).await;
     let session_run = started.map_err(|error| {
         (
             StatusCode::BAD_GATEWAY,
@@ -17312,6 +18699,7 @@ async fn invoke(
                     model: normalized.model.clone(),
                     provider_hint: normalized.provider_hint.clone(),
                     subscription_connection_id: normalized.subscription_connection_id.clone(),
+                    model_connection_id: normalized.model_connection_id.clone(),
                     messages: vec![ChatMessage {
                         compaction_summary: String::new(),
                         role: "user".to_owned(),
@@ -17337,13 +18725,11 @@ async fn invoke(
                 // On the subscription route the reason is typed, an overflow
                 // is `prompt_too_long` (not retried, closed as the request's
                 // own failure), and anything else is the generic route
-                // failure; the run records its code.
+                // failure; a typed refusal keeps its own code and body there
+                // (see `direct_run_inference_failure`). The run records its code.
                 let subscription_route = !normalized.subscription_connection_id.trim().is_empty();
-                let subscription_failure =
-                    crate::subscription_failure::on_route_or_generic(&error, subscription_route);
-                let terminal_code = subscription_failure
-                    .as_ref()
-                    .map_or("inference_unavailable", |failure| failure.code);
+                let (terminal_code, answer) =
+                    direct_run_inference_failure(&error, subscription_route);
                 if let Err(terminal_error) =
                     session_flow::terminalize_direct_inference_run_authenticated(
                         &state,
@@ -17359,7 +18745,7 @@ async fn invoke(
                         Json(serde_json::json!({"error": "session-core terminalization failed"})),
                     ).into());
                 }
-                return Err(invoke_inference_error(&error, subscription_failure.as_ref()));
+                return Err(answer);
             }
         }
     };
@@ -17416,10 +18802,11 @@ async fn invoke(
     info!(run_id = %session_run.run_id, thread_id = %session_run.thread_id, request_id = %request_id, "http invoke completed");
 
     let latency_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-    // A subscription call is never priced from API list prices.
-    let cost_basis = crate::pricing::CostBasis::of_route(
+    // A subscription or customer-gateway call is never priced from API list prices.
+    let cost_basis = crate::pricing::CostBasis::of_request(
         &normalized.provider_hint,
         &normalized.subscription_connection_id,
+        &normalized.model_connection_id,
     )
     .served_by(&infer_resp.provider_used);
     let usage = invoke_usage(
@@ -18082,6 +19469,8 @@ mod capability_contract_tests {
                 enabled: true,
                 server_id: String::new(),
                 scope: "user".to_owned(),
+                auth_kind: String::new(),
+                credential_binding_id: String::new(),
             }),
         )
         .await
@@ -18598,11 +19987,29 @@ mod run_owner_publish_tests {
 
         async fn resolve_thread_owner(
             &self,
-            _: TonicRequest<mp_contracts::model_plane::v1::ResolveThreadOwnerRequest>,
+            request: TonicRequest<mp_contracts::model_plane::v1::ResolveThreadOwnerRequest>,
         ) -> Result<TonicResponse<mp_contracts::model_plane::v1::ResolveThreadOwnerResponse>, Status>
         {
-            Err(Status::unimplemented(
-                "resolve_thread_owner not needed in gateway test",
+            let bearer = request
+                .metadata()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok());
+            if bearer != Some("Bearer test-session-bearer") {
+                return Err(Status::unauthenticated(
+                    "verified session credential required",
+                ));
+            }
+            let request = request.into_inner();
+            // `thread-lookup-fails` stands for Session Core being unreachable.
+            if request.thread_id == "thread-lookup-fails" {
+                return Err(Status::unavailable("session core unavailable"));
+            }
+            Ok(TonicResponse::new(
+                mp_contracts::model_plane::v1::ResolveThreadOwnerResponse {
+                    authorized: request.thread_id.starts_with("thread-owned")
+                        && request.org_id == "org-owner"
+                        && request.user_id == "user-owner",
+                },
             ))
         }
 
@@ -18680,6 +20087,99 @@ mod run_owner_publish_tests {
         (state, publisher)
     }
 
+    /// F-f06-01: a sandbox-manager stand-in that counts connections and drops each one, so any sandbox
+    /// RPC the workspace routes make is visible as a connection.
+    async fn counting_sandbox_manager() -> (
+        tonic::transport::Channel,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind counting sandbox manager");
+        let address = listener.local_addr().expect("counting sandbox manager address");
+        let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = connections.clone();
+        let handle = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        let channel = Endpoint::from_shared(format!("http://{address}"))
+            .expect("sandbox manager endpoint")
+            .connect_lazy();
+        (channel, connections, handle)
+    }
+
+    /// F-f06-01: the thread workspace routes ask Session Core who owns the thread before any sandbox RPC.
+    /// A thread that is not the caller's answers 404 (the same as a missing one), a lookup that cannot be
+    /// answered fails closed with 503, and neither reaches sandbox-manager. The owner reaches it.
+    #[tokio::test]
+    async fn thread_workspace_routes_check_the_owner_before_any_sandbox_rpc() {
+        let (mut state, _) = test_state().await;
+        let (channel, connections, handle) = counting_sandbox_manager().await;
+        state.sandbox_client =
+            mp_contracts::model_plane::v1::sandbox_manager_client::SandboxManagerClient::new(channel);
+        let session = || VerifiedModelBearer::for_test("test-session-bearer");
+        let sandbox = || VerifiedSandboxBearer::for_test("sandbox-token");
+
+        for (thread, org, user, want, body) in [
+            ("thread-of-someone-else", "org-owner", "user-owner", StatusCode::NOT_FOUND, "thread not found"),
+            ("thread-owned-1", "org-owner", "user-stranger", StatusCode::NOT_FOUND, "thread not found"),
+            ("thread-owned-1", "org-other", "user-owner", StatusCode::NOT_FOUND, "thread not found"),
+            (
+                "thread-lookup-fails",
+                "org-owner",
+                "user-owner",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "thread ownership could not be checked",
+            ),
+        ] {
+            let (status, Json(error)) = get_thread_workspace(
+                State(state.clone()),
+                Extension(claims(org, user)),
+                sandbox(),
+                session(),
+                Path(thread.to_owned()),
+            )
+            .await
+            .expect_err("GET is refused");
+            assert_eq!((status, error["error"].as_str()), (want, Some(body)), "GET {thread} {org} {user}");
+            let (status, Json(error)) = delete_thread_workspace(
+                State(state.clone()),
+                Extension(claims(org, user)),
+                sandbox(),
+                session(),
+                Path(thread.to_owned()),
+            )
+            .await
+            .expect_err("DELETE is refused");
+            assert_eq!((status, error["error"].as_str()), (want, Some(body)), "DELETE {thread} {org} {user}");
+        }
+        assert_eq!(
+            connections.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no sandbox RPC follows a refused or unanswered ownership check"
+        );
+
+        // The owner passes the check and reaches sandbox-manager (which this stand-in drops).
+        let owner = delete_thread_workspace(
+            State(state.clone()),
+            Extension(claims("org-owner", "user-owner")),
+            sandbox(),
+            session(),
+            Path("thread-owned-1".to_owned()),
+        )
+        .await;
+        assert!(owner.is_err(), "the dropped connection fails the RPC");
+        assert!(
+            connections.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the owner's request reaches sandbox-manager"
+        );
+        handle.abort();
+    }
+
     fn descriptor(effort_levels: &[&str]) -> ModelDescriptor {
         ModelDescriptor {
             id: "gpt-5-mini".to_owned(),
@@ -18693,6 +20193,8 @@ mod run_owner_publish_tests {
             context_window_tokens: None,
             max_output_tokens: None,
             lifecycle: String::new(),
+            successor: String::new(),
+            priority_tier: false,
             price: None,
             data_use: None,
         }
@@ -19098,6 +20600,7 @@ mod run_owner_publish_tests {
             Extension(foreign_org),
             VerifiedExecutionBearer::for_test("test-execution-bearer"),
             VerifiedSessionBearer::for_test("test-session-bearer"),
+            None,
             Path("run-owned".to_owned()),
         )
         .await;
@@ -21512,6 +23015,13 @@ mod user_profile_route_tests {
             unused()
         }
 
+        async fn check_memory_write(
+            &self,
+            _: TonicRequest<pb::CheckMemoryWriteRequest>,
+        ) -> Result<TonicResponse<pb::CheckMemoryWriteResponse>, Status> {
+            unused()
+        }
+
         async fn get_memory_controls(
             &self,
             _: TonicRequest<pb::GetMemoryControlsRequest>,
@@ -21530,6 +23040,13 @@ mod user_profile_route_tests {
             &self,
             _: TonicRequest<pb::ResetMemoryRequest>,
         ) -> Result<TonicResponse<pb::ResetMemoryResponse>, Status> {
+            unused()
+        }
+
+        async fn erase_agent_memory(
+            &self,
+            _: TonicRequest<pb::EraseAgentMemoryRequest>,
+        ) -> Result<TonicResponse<pb::EraseAgentMemoryResponse>, Status> {
             unused()
         }
 
@@ -22387,6 +23904,14 @@ mod thread_messages_page_tests {
         ));
         assert_eq!(busy.0, StatusCode::CONFLICT);
         assert_eq!(busy.1 .0["error"]["code"], "history_branch_refused");
+
+        let waived = branch_thread_error(
+            &mp_contracts::zdr_refusal::Refusal::feature_not_supported("message_versions")
+                .grpc_status(tonic::Code::FailedPrecondition),
+        );
+        assert_eq!(waived.0, StatusCode::PRECONDITION_FAILED);
+        assert_eq!(waived.1 .0["error"]["code"], "zdr_feature_not_supported");
+        assert_eq!(waived.1 .0["error"]["feature"], "message_versions");
     }
 
     #[test]
@@ -22781,6 +24306,7 @@ mod space_post_wire_tests {
             recent_author_subject_ids: Vec::new(),
             last_role: String::new(),
             turn_count: 0,
+            goal_status: String::new(),
         }
     }
 
@@ -22832,6 +24358,25 @@ mod space_post_wire_tests {
         let only_count = serde_json::to_value(summary(1, "")).expect("serialises");
         assert_eq!(only_count["reply_count"], 1);
         assert!(only_count.get("last_author_subject_id").is_none());
+    }
+
+    /// W3-EP-7-S5-b: a thread listing relays the goal's status as one of the six closed tokens, spelled as
+    /// session-core spells it, and omits the key for no goal or a token this build does not name, so the
+    /// listing never carries anything but a closed status word.
+    #[test]
+    fn thread_summary_relays_a_closed_goal_status_and_omits_anything_else() {
+        for token in ["active", "paused", "met", "budget_reached", "turns_reached", "blocked"] {
+            let mut listed = summary(0, "");
+            listed.goal_status = goal_status_token(token);
+            let json = serde_json::to_value(listed).expect("serialises");
+            assert_eq!(json["goal_status"], token, "{json}");
+        }
+        for other in ["", "ACTIVE", " active", "cleared", "Find three suppliers", "met\n"] {
+            let mut listed = summary(0, "");
+            listed.goal_status = goal_status_token(other);
+            let json = serde_json::to_value(listed).expect("serialises");
+            assert!(json.get("goal_status").is_none(), "{other:?}: {json}");
+        }
     }
 }
 
@@ -24515,5 +26060,90 @@ mod mcp_app_tool_call_route_tests {
         let (status, body) = post_json(app(false, false), "/v1/mcp-apps/tool-call", BODY).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["error"]["code"], "delegated_credential_required");
+    }
+}
+
+/// W2-WS13-S6-gw-grants / W2-WS13-S7-gw-proposals: the owner's read of a standing grant or a rule proposal is a pure
+/// allowlist projection. The gate's own keys (the action key, the call digest) and server-internal fields (the
+/// proposal's policy id, a confirm's claim) never leave the gateway, and unknown enum values read as closed words.
+#[cfg(test)]
+mod approval_projection_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::{
+        ApprovalRuleProposal, ApprovalRuleProposalState, ApprovalScopeGrant,
+    };
+
+    const SECRET_KEY: &str = "execute_provider_action:message.send";
+
+    fn grant(scope: i32) -> ApprovalScopeGrant {
+        ApprovalScopeGrant {
+            id: "grant-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            run_id: String::new(),
+            scope,
+            tool_name: "send_email".to_owned(),
+            action_key: SECRET_KEY.to_owned(),
+            effect_class: "external_write".to_owned(),
+            created_from_approval_id: "appr-1".to_owned(),
+            cause_code: "not_a_known_cause".to_owned(),
+            use_count: 2,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_grant_projection_names_only_its_allowlisted_fields() {
+        let value = approval_grant_value(&grant(ApprovalScope::Thread as i32));
+        let keys: std::collections::BTreeSet<&str> =
+            value.as_object().expect("object").keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "id", "thread_id", "run_id", "scope", "tool_name", "effect_class", "cause_code",
+                "created_from_approval_id", "created_at", "expires_at", "revoked_at", "use_count",
+                "last_used_at",
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert!(!value.to_string().contains(SECRET_KEY), "the action key leaked: {value}");
+        assert_eq!(value["scope"], "thread");
+        assert_eq!(value["run_id"], Value::Null, "an empty id reads as null");
+        assert_ne!(value["cause_code"], "not_a_known_cause", "the cause goes through the closed vocabulary");
+        assert_eq!(approval_grant_value(&grant(ApprovalScope::Run as i32))["scope"], "run");
+        assert_eq!(approval_grant_value(&grant(ApprovalScope::Once as i32))["scope"], Value::Null);
+        assert_eq!(approval_grant_value(&grant(99))["scope"], Value::Null);
+    }
+
+    fn proposal(state: i32) -> ApprovalRuleProposal {
+        ApprovalRuleProposal {
+            id: "prop-1".to_owned(),
+            tool_name: "mcp__fixture__create_note".to_owned(),
+            tool_digest: "sha256:abc".to_owned(),
+            capability_id: String::new(),
+            state,
+            created_from_approval_id: "appr-internal-1".to_owned(),
+            policy_id: "policy-internal-9".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_proposal_projection_hides_the_claim_and_the_policy_id() {
+        let value = approval_rule_proposal_value(&proposal(ApprovalRuleProposalState::Confirming as i32));
+        assert_eq!(value["state"], "proposed", "a confirm's claim is server-internal");
+        assert_eq!(value["capability_id"], Value::Null);
+        let text = value.to_string();
+        assert!(!text.contains("policy-internal-9"), "{text}");
+        assert!(!text.contains("appr-internal-1"), "{text}");
+        for (state, word) in [
+            (ApprovalRuleProposalState::Proposed as i32, "proposed"),
+            (ApprovalRuleProposalState::Confirmed as i32, "confirmed"),
+            (ApprovalRuleProposalState::Dismissed as i32, "dismissed"),
+            (ApprovalRuleProposalState::Unspecified as i32, "proposed"),
+            (77, "proposed"),
+        ] {
+            assert_eq!(approval_rule_proposal_value(&proposal(state))["state"], word, "{state}");
+        }
     }
 }

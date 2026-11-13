@@ -178,6 +178,13 @@ pub(crate) struct AppState {
     /// model-gateway's `EXECUTION_LOOP_PARKING_ENABLED`: on in front of a gateway with parking
     /// off, the park form is answered 400 `continue_incomplete` (reported as `model_error`).
     pub(crate) continue_park_form: bool,
+    /// WS14 S5: whether `POST /api/v1/orchestration/runs/{run_id}/continue` forwards the QUESTION
+    /// form of its body (a `question_id` with the answers or a skip), which continues a run paused
+    /// for its owner's answer. Read once from `VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED` (exactly
+    /// `true`, default off) in `build_state`, never in a handler. Off, a body naming `question_id`
+    /// is the 400 `invalid_request`, and every other body is exactly what it was. Flip it together
+    /// with model-gateway's question-continue switch.
+    pub(crate) continue_question_form: bool,
     /// WS10-S5: whether the org model-entitlement admin routes (`/api/v1/orgs/{id}/model-entitlement`
     /// and its `explain`), the `org.set_model_entitlement` action's write and the ZDR switch
     /// gate's `hidden_count` read are live. Read once from `MODEL_ENTITLEMENT_ADMIN_ENABLED`
@@ -185,6 +192,58 @@ pub(crate) struct AppState {
     /// `{"enabled": false}` so the SPA hides the section, every write and explain is a 404, and
     /// the ZDR gate answers as it did before the policy existed.
     pub(crate) model_entitlement_admin_enabled: bool,
+    /// `GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED` (ZDR Z-03c): whether the one org-posture reader
+    /// (`zdr::org_posture`, `zdr::org_posture_live`) answers from org-core's computed
+    /// `retention_posture.effective_zdr` instead of parsing the stored intent
+    /// (`metadata.interactiveRetention.zdr`) itself. Read once from the environment in
+    /// `build_state` (trimmed, exactly `true` turns it on), never in a handler. Off, the readers
+    /// keep the intent-only rule. On, a record that lacks a boolean `effective_zdr` (org-core older
+    /// than ZDR-Z-03a) is `Unknown`, which every caller already treats as fail closed. A rollout
+    /// control, never an authorization input: org-core computes the posture.
+    pub(crate) zdr_effective_posture_read: bool,
+    /// `ZDR_WAIVER_UI_ENABLED` (ZDR Z-19a): whether the BFF asks Auth Core for a retention decision
+    /// (`retention_decision::turn_retention`) on a subscription chat turn. Read once from the
+    /// environment in `build_state` (trimmed, exactly `true` turns it on), never in a handler. Off,
+    /// `turn_retention` answers `Unchanged` and no call is made. A rollout control, never an
+    /// authorization input: Auth Core decides and signs; the BFF only asks.
+    pub(crate) zdr_waiver_ui_enabled: bool,
+    /// `GATEWAY_RETENTION_DECISION_SERVICE_API_KEY` (ZDR Z-19a): the gateway's own service credential
+    /// for the Auth Core retention-decision policy token (`verevon-gateway-retention-decision`).
+    /// Trimmed; `None` when unset or blank, which makes every decision refuse with
+    /// `zdr_decision_unavailable`. A secret: never logged, never sent to a browser. `AppState` has no
+    /// `Debug` impl, so it cannot be printed through the state either.
+    pub(crate) retention_decision_service_api_key: Option<String>,
+    /// `AGENT_DEFINITION_VERSIONS` (EP-6 S7/S8): the agent builder routes (draft, publish, versions)
+    /// and the draft preview of a chat body (`agent_preview`). Read once from the environment in
+    /// `build_state`, exactly `true` turns it on, never by default in development. Off, the builder
+    /// routes do not exist (the gateway answers 404 as it did before) and a chat body's
+    /// `agent_preview` is left as it came. A rollout control, never an authorization input: the
+    /// builder's own access check and Convex decide who may read or write a draft.
+    pub(crate) agent_definition_versions: bool,
+    /// `CHAT_PROCESS_OUTPUT_READ_ENABLED` (W4-P3): the owner's read of one background process's output,
+    /// `GET /api/v1/chat/runs/{run_id}/processes/{pid}/output`. Read once from the environment in
+    /// `build_state`, exactly `true` turns it on. Off, the route answers 404 `process_output_disabled`.
+    /// A rollout control, never an authorization input: Control's sandbox-manager read decision and
+    /// Model Gateway's run-owner check decide what a caller reads.
+    pub(crate) chat_process_output_enabled: bool,
+    /// `CHAT_SNAPSHOTS_ENABLED` (W4-SH-6): the owner's governed snapshot links, `POST/GET
+    /// /api/v1/chat/threads/{thread_id}/snapshots`, `DELETE /api/v1/chat/snapshots/{id}`, the grant routes
+    /// under `/api/v1/chat/snapshots/{id}/grants` and the member's read `GET /api/v1/chat/shared-snapshots/{id}`.
+    /// Read once from the environment in `build_state`, exactly `true` turns it on. Off, every one of those routes
+    /// answers 404 `chat_snapshots_disabled`. A rollout control, never an authorization input: Session Core proves the
+    /// owner, Control holds the grants, and Model Gateway has its own switch.
+    pub(crate) chat_snapshots_enabled: bool,
+    /// `EVENT_TRIGGERS_UI_ENABLED` (W4-T7): the event trigger routes (`/api/v1/event-triggers` and its dry run). Read
+    /// once from the environment in `build_state`, exactly `true` turns them on. Off, the paths are absent and answer
+    /// the fallback 404. A rollout control, never an authorization input: Model Gateway's own switch and Session Core
+    /// decide what a caller may read or change.
+    pub(crate) event_triggers_enabled: bool,
+    /// `CREDENTIAL_BINDINGS_UI_ENABLED` (W4-CC-8): the org credential-binding routes (`/api/v1/credential-bindings`,
+    /// POST, GET and DELETE `/{id}`) and the custom REST connector route (`/api/v1/connectors/custom-rest`). Read once
+    /// from the environment in `build_state`, exactly `true` turns them on. Off, each of them answers 404
+    /// `credential_bindings_disabled` and nothing is sent to Integration Core. A rollout control, never an authorization
+    /// input: Integration Core admits only an owner or admin and holds the sealed secret.
+    pub(crate) credential_bindings_enabled: bool,
     /// "Forward an email to create a task" inbound pipeline (chat-wave2
     /// mail-task spec, owner ruling 2026-09-28: Postmark inbound,
     /// self-forward only). Empty token = the whole `/internal/mail-task/ingest`
@@ -246,6 +305,14 @@ pub(crate) struct SpaceFeatureFlags {
     /// Read once in `build_state`, and only the literal `true` turns it on: unlike the other Space flags
     /// it never defaults on in development, so every other value leaves the follow-up as it was.
     pub(crate) append_retrieval: bool,
+    /// `SPACE_THREAD_SCOPE_RESOLVE` (D2-461): a chat turn on an existing thread that omits `space_ref`
+    /// resolves the thread's Space from Session Core (owner-bound by-id lookup) and continues the scoped
+    /// decision path, or is refused with a typed error; it never falls through to an organisation-wide
+    /// search. Read once in `build_state`, and only the literal `true` turns it on, never by default in
+    /// development. Off, a turn with no `space_ref` is untouched. A rollout control, never an
+    /// authorization input: Control signs the decision and the Model Plane service enforces it. The
+    /// lookup stores nothing, so Zero Data Retention callers are unaffected.
+    pub(crate) thread_scope_resolve: bool,
     /// `GATEWAY_SPACE_MEMORY_UI` (EP-8 S7): the Space memory routes (`GET /api/v1/spaces/{space_ref}/memory`,
     /// `DELETE .../memory/{memory_id}`). Only the literal `true` turns it on, never by default in development.
     /// Off answers 404 `feature_unavailable`. A rollout control, never an authorization input: Control's
@@ -289,6 +356,13 @@ pub(crate) struct SpaceFeatureFlags {
     /// control, never an authorization input: the edge refuses the override without the org
     /// entitlement and for service principals, and quarry-control audits it before the ack.
     pub(crate) crawl_robots_override: bool,
+    /// `CHAT_MEDIA_TRANSCRIPTS_ENABLED` (W5, F-t3-090): `POST /api/v1/chat/transcripts`, which transcribes one audio
+    /// upload through Model Gateway's speech route and saves the text as a private `media_transcript` document. Only
+    /// the literal `true` turns it on, never by default in development. Off, the route answers 404
+    /// `media_transcripts_disabled`. A rollout control, never an authorization input: the speech route, documents-api
+    /// and the caller's own token decide what is read and written, and a Zero Data Retention caller is refused with
+    /// the typed 412 whatever this says.
+    pub(crate) chat_media_transcripts: bool,
     /// `SPACE_DENIALS_TYPED` (WS03-S5): map Control's typed Space denials to the browser envelope.
     /// Off restores pass-through. A rollout control, never an authorization input.
     pub(crate) denials_typed: bool,
@@ -319,6 +393,12 @@ pub(crate) struct SpaceFeatureFlags {
     /// or query) of each CSP report, for a host inventory. Forced off when `APP_ENV` is
     /// production (see `dev_only_flag`); the counters never carry a URL either way.
     pub(crate) csp_report_log_hosts: bool,
+    /// `CLIENT_ENV_IDENTITY` (F-t3-098): the closed environment label `GET /api/v1/client-config` reports
+    /// as `environment` (`production`, `staging`, `development` or `other`), derived once from `APP_ENV`
+    /// by `client_environment_label`. `None` while the switch is off (the default), and the key is then
+    /// left out. The raw `APP_ENV` value is never stored. A display identity only, never an
+    /// authorization input.
+    pub(crate) client_environment: Option<&'static str>,
     /// `SPACE_CONNECTIVITY_BANNER_UI` (WS01-S5): reported to the SPA as `features.connectivity_banner`
     /// (the offline versus service-down banner). A rollout control, never an authorization input.
     pub(crate) connectivity_banner_ui: bool,
@@ -559,6 +639,7 @@ impl SpaceFeatureFlags {
             mention_records_api: space_flag("SPACE_MENTION_RECORDS_API"),
             approval_scopes: space_flag("SPACE_APPROVAL_SCOPES_ENABLED"),
             append_retrieval: env::var("GATEWAY_SPACE_APPEND_RETRIEVAL").is_ok_and(|value| value == "true"),
+            thread_scope_resolve: env::var("SPACE_THREAD_SCOPE_RESOLVE").is_ok_and(|value| value == "true"),
             memory_ui: env::var("GATEWAY_SPACE_MEMORY_UI").is_ok_and(|value| value == "true"),
             agent_version_pinning: env::var("AGENT_VERSION_PINNING").is_ok_and(|value| value == "true"),
             browser_ai_run_attach_session: env::var("BROWSER_AI_RUN_ATTACH_SESSION")
@@ -573,12 +654,16 @@ impl SpaceFeatureFlags {
                     .ok()
                     .as_deref(),
             ),
+            chat_media_transcripts: chat_media_transcripts_from(
+                env::var("CHAT_MEDIA_TRANSCRIPTS_ENABLED").ok().as_deref(),
+            ),
             denials_typed: space_flag("SPACE_DENIALS_TYPED"),
             dm_api: space_flag("SPACE_DM_API"),
             message_revise_api: space_flag("SPACE_MESSAGE_REVISE_API"),
             reactions_api: space_flag("SPACE_REACTIONS_API"),
             client_policy: crate::client_contract::ClientPolicy::from_env(),
             csp_report_log_hosts: dev_only_flag("CSP_REPORT_LOG_HOSTS"),
+            client_environment: client_environment_identity(),
             connectivity_banner_ui: space_flag("SPACE_CONNECTIVITY_BANNER_UI"),
             human_posts_api: space_flag("SPACE_HUMAN_POSTS_API"),
             membership_writer_api: space_flag("SPACE_MEMBERSHIP_WRITER_API"),
@@ -862,7 +947,25 @@ pub(crate) async fn build_state() -> Result<AppState> {
         allow_dev_actor_headers: dev_only_flag("ALLOW_DEV_ACTOR_HEADERS"),
         allow_dev_auth_bypass: dev_only_flag("ALLOW_DEV_AUTH_BYPASS"),
         continue_park_form: continue_park_form_enabled(),
+        continue_question_form: continue_question_form_enabled(),
         model_entitlement_admin_enabled: model_entitlement_admin_enabled(),
+        zdr_effective_posture_read: zdr_effective_posture_read_from(
+            env::var("GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED")
+                .ok()
+                .as_deref(),
+        ),
+        zdr_waiver_ui_enabled: zdr_waiver_ui_enabled_from(
+            env::var("ZDR_WAIVER_UI_ENABLED").ok().as_deref(),
+        ),
+        retention_decision_service_api_key: Some(optional_env(
+            "GATEWAY_RETENTION_DECISION_SERVICE_API_KEY",
+        ))
+        .filter(|value| !value.is_empty()),
+        agent_definition_versions: agent_definition_versions_enabled(),
+        chat_process_output_enabled: chat_process_output_enabled(),
+        chat_snapshots_enabled: chat_snapshots_enabled(),
+        event_triggers_enabled: event_triggers_ui_enabled(),
+        credential_bindings_enabled: credential_bindings_ui_enabled(),
         mail_task_ingest_service_token: optional_env("MAIL_TASK_INGEST_SERVICE_TOKEN"),
         mail_task_nats_url: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_URL"),
         mail_task_nats_user: optional_env("VEREVON_GATEWAY_MAIL_TASK_NATS_USER"),
@@ -1043,6 +1146,22 @@ fn continue_park_form_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
+/// `VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED`, read once by `build_state` (WS14 S5). Off unless
+/// it is exactly `true`.
+fn continue_question_form_enabled() -> bool {
+    continue_question_form_from(
+        env::var("VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Exactly the word `true`, for the same reason as `continue_park_form_from`: not trimmed, not
+/// case-folded, and none of the other spellings `env_bool` accepts.
+fn continue_question_form_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
 /// `MODEL_ENTITLEMENT_ADMIN_ENABLED`, read once by `build_state` (WS10-S5). Off unless it is
 /// exactly `true`.
 fn model_entitlement_admin_enabled() -> bool {
@@ -1056,10 +1175,113 @@ fn model_entitlement_admin_from(value: Option<&str>) -> bool {
     value == Some("true")
 }
 
+/// `GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED`, read once by `build_state` (ZDR Z-03c). Off unless the
+/// trimmed value is exactly `true`: a stray `1` or `TRUE` must not move the org-posture reader onto
+/// a field an older org-core does not serve.
+fn zdr_effective_posture_read_from(value: Option<&str>) -> bool {
+    value.map(str::trim) == Some("true")
+}
+
+/// `ZDR_WAIVER_UI_ENABLED`, read once by `build_state` (ZDR Z-19a). Off unless the trimmed value is
+/// exactly the literal `true`.
+fn zdr_waiver_ui_enabled_from(value: Option<&str>) -> bool {
+    value.map(str::trim) == Some("true")
+}
+
+/// `AGENT_DEFINITION_VERSIONS`, read once by `build_state` (EP-6 S7/S8). Off unless it is exactly
+/// `true`. The agent builder reads it from `AppState` at router build and per preview turn.
+fn agent_definition_versions_enabled() -> bool {
+    agent_definition_versions_from(env::var("AGENT_DEFINITION_VERSIONS").ok().as_deref())
+}
+
+/// Exactly the word `true`, for the same reason as `continue_park_form_from`: a stray `1` or `TRUE`
+/// would publish agent versions and expose a draft preview before anyone chose to.
+pub(crate) fn agent_definition_versions_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// `CHAT_PROCESS_OUTPUT_READ_ENABLED`, read once by `build_state` (W4-P3). Off unless it is exactly
+/// `true`. The process output route reads it from `AppState`, never from the environment.
+fn chat_process_output_enabled() -> bool {
+    chat_process_output_from(env::var("CHAT_PROCESS_OUTPUT_READ_ENABLED").ok().as_deref())
+}
+
+/// Exactly the word `true`, for the same reason as `continue_park_form_from`: a stray `1` or `TRUE`
+/// would open a route that relays a process's output before anyone chose to.
+fn chat_process_output_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// `CHAT_SNAPSHOTS_ENABLED`, read once by `build_state` (W4-SH-6). Off unless it is exactly `true`. The snapshot
+/// routes read it from `AppState`, never from the environment.
+fn chat_snapshots_enabled() -> bool {
+    chat_snapshots_from(env::var("CHAT_SNAPSHOTS_ENABLED").ok().as_deref())
+}
+
+/// Exactly the word `true`, for the same reason as `continue_park_form_from`: a stray `1` or `TRUE` would open the
+/// routes that copy a conversation and share it before anyone chose to.
+fn chat_snapshots_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// `EVENT_TRIGGERS_UI_ENABLED`, read once by `build_state` (W4-T7). Off unless it is exactly `true`. The trigger routes
+/// read it from `AppState` at router build, never from the environment.
+fn event_triggers_ui_enabled() -> bool {
+    event_triggers_ui_from(env::var("EVENT_TRIGGERS_UI_ENABLED").ok().as_deref())
+}
+
+/// Exactly the word `true`, for the same reason as `continue_park_form_from`: a stray `1` or `TRUE` would open the
+/// routes that list and change a person's event triggers before anyone chose to.
+fn event_triggers_ui_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// `CREDENTIAL_BINDINGS_UI_ENABLED`, read once by `build_state` (W4-CC-8). Off unless it is exactly `true`. The binding
+/// and custom connector routes read it from `AppState` at request time, never from the environment.
+fn credential_bindings_ui_enabled() -> bool {
+    credential_bindings_ui_from(env::var("CREDENTIAL_BINDINGS_UI_ENABLED").ok().as_deref())
+}
+
+/// Exactly the word `true`: a stray `1` would open the routes that store a credential before anyone chose to.
+fn credential_bindings_ui_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
 /// Exactly the word `true` (EP-3 S8): a promote switch that a stray `1` turned on would start
 /// copying thread work product into the knowledge base before anyone chose to.
 fn chat_artifact_promote_from(value: Option<&str>) -> bool {
     value == Some("true")
+}
+
+/// Exactly the word `true` (W5, F-t3-090): a switch that a stray `1` turned on would start saving a recording's text as
+/// durable documents before anyone chose to.
+fn chat_media_transcripts_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// `CLIENT_ENV_IDENTITY` (F-t3-098), read once by `build_state` through `SpaceFeatureFlags::from_env`.
+/// Off unless it is exactly `true`; when on, the closed label of `APP_ENV`.
+fn client_environment_identity() -> Option<&'static str> {
+    client_env_identity_from(env::var("CLIENT_ENV_IDENTITY").ok().as_deref())
+        .then(|| client_environment_label(&env::var("APP_ENV").unwrap_or_default()))
+}
+
+/// Exactly the word `true`, for the same reason as `continue_park_form_from`: a stray `1` would
+/// publish the environment name before anyone chose to.
+fn client_env_identity_from(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// The four words the environment identity publishes, from `APP_ENV`: `production` (or `prod`),
+/// `staging` (or `stage`), `development` (or `dev`), and `other` for anything else, unset included,
+/// so an unrecognised value never reads as production. The raw value never leaves this function.
+fn client_environment_label(app_env: &str) -> &'static str {
+    match app_env.trim().to_ascii_lowercase().as_str() {
+        "production" | "prod" => "production",
+        "staging" | "stage" => "staging",
+        "development" | "dev" => "development",
+        _ => "other",
+    }
 }
 
 fn dev_flags_allowed(app_env: &str) -> bool {
@@ -1193,8 +1415,9 @@ fn canonical_public_origin(value: &str, production_like: bool) -> Result<String>
 mod tests {
     use super::{
         canonical_public_origin, chat_artifact_promote_from, continue_park_form_from,
-        dev_flags_allowed, model_entitlement_admin_from, service_token_is_secure,
-        standard_http_client, validate_service_token_distinctness, SpaceFeatureFlags,
+        continue_question_form_from, dev_flags_allowed, model_entitlement_admin_from,
+        service_token_is_secure, standard_http_client, validate_service_token_distinctness,
+        SpaceFeatureFlags,
     };
 
     #[tokio::test]
@@ -1352,6 +1575,62 @@ mod tests {
         ] {
             assert!(!continue_park_form_from(value), "{value:?}");
         }
+    }
+
+    /// WS14 S5: the question form of `/continue` is off unless the variable is exactly `true`.
+    #[test]
+    fn the_question_form_flag_is_on_only_for_the_exact_word_true() {
+        assert!(continue_question_form_from(Some("true")));
+        for value in [
+            None,
+            Some(""),
+            Some("false"),
+            Some("TRUE"),
+            Some("True"),
+            Some(" true"),
+            Some("true "),
+            Some("1"),
+            Some("yes"),
+            Some("on"),
+            Some("truee"),
+        ] {
+            assert!(!continue_question_form_from(value), "{value:?}");
+        }
+    }
+
+    /// WS14 S5: the question flag is read once, in `build_state`, from the environment, and the
+    /// compose file declares it once, default off.
+    #[test]
+    fn the_question_form_flag_is_read_once_by_build_state_and_declared_once_in_compose() {
+        let config = include_str!("config.rs").replace("
+", "
+");
+        let production = config.split("#[cfg(test)]
+mod tests").next().unwrap_or(&config);
+        assert_eq!(
+            production
+                .matches("\"VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED\"")
+                .count(),
+            1
+        );
+        assert_eq!(
+            production
+                .matches("continue_question_form: continue_question_form_enabled(),")
+                .count(),
+            1
+        );
+        let compose = include_str!("../../../docker-compose.yml").replace("
+", "
+");
+        assert_eq!(
+            compose
+                .matches(
+                    "VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED: ${VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED:-false}
+"
+                )
+                .count(),
+            1
+        );
     }
 
     /// WS10-S5: the model-entitlement admin switch is on only for the exact word `true`, and is
@@ -1849,3 +2128,7 @@ mod human_browse_flag_tests {
         assert!(human_browse_enabled(Some("yes")));
     }
 }
+
+#[cfg(test)]
+#[path = "config_zdr_switch_tests.rs"]
+mod zdr_switch_tests;

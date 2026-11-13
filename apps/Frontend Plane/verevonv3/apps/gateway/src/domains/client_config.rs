@@ -1,13 +1,17 @@
 //! Public client-resilience routes (WS07-S3).
 //!
 //! - `GET  /api/v1/client-config`: the contract pair, the version policy and the running
-//!   revision, so an open tab can tell it is stale (`no-store`).
-//! - `POST /api/v1/client-diagnostics`: a content-free failure beacon
-//!   `{"kind": "render_error|chunk_error|watchdog", "build": "<=12 hex"}`.
+//!   revision, so an open tab can tell it is stale (`no-store`). With `CLIENT_ENV_IDENTITY` on
+//!   (F-t3-098) it also names the environment: `production`, `staging`, `development` or `other`.
+//! - `POST /api/v1/client-diagnostics`: a content-free beacon
+//!   `{"kind": "render_error|chunk_error|watchdog", "build": "<=12 hex"}`, or a `long_task`
+//!   `{"kind": "long_task", "build": "<=12 hex", "bucket": "50_100|100_250|250_1000|1000_plus"}`
+//!   (F-t3-096): one main-thread task of 50 ms or more, in a closed duration bucket.
 //!
 //! Both are public on purpose: a crashed or logged-out app must still reach them. They
 //! sit behind the gateway's IP rate limiter like every other route and store nothing; the
-//! beacon only increments `verevon_client_failures_total{kind, build_match}`. The body is
+//! beacon only increments `verevon_client_failures_total{kind, build_match}`, or for a
+//! `long_task` `verevon_client_long_tasks_total{bucket, build_match}`. The body is
 //! a closed shape (unknown fields are refused), so no free text, URL, message or user id
 //! can enter a metric or a log line, which is what keeps this ZDR-safe.
 //!
@@ -40,8 +44,13 @@ use crate::{
 /// Largest accepted diagnostics body. The real payload is under 80 bytes.
 const DIAGNOSTIC_BODY_LIMIT: usize = 512;
 
-/// The closed set of failure kinds a client may report.
-const DIAGNOSTIC_KINDS: [&str; 3] = ["render_error", "chunk_error", "watchdog"];
+/// The closed set of kinds a client may report: three failures, and `long_task`, the one
+/// performance sample (F-t3-096). Only `long_task` carries a `bucket`.
+const DIAGNOSTIC_KINDS: [&str; 4] = ["render_error", "chunk_error", "watchdog", "long_task"];
+
+/// The closed duration buckets of a `long_task`, in milliseconds: 50 to under 100, 100 to under
+/// 250, 250 to under 1000, and 1000 and up.
+const LONG_TASK_BUCKETS: [&str; 4] = ["50_100", "100_250", "250_1000", "1000_plus"];
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -55,17 +64,19 @@ pub(crate) fn router() -> Router<AppState> {
 
 async fn get_client_config(State(state): State<AppState>) -> Response {
     let policy = &state.space_features.client_policy;
-    (
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(ok(json!({
-            "contract": CLIENT_CONTRACT,
-            "min_contract": policy.min_contract,
-            "policy": policy.policy.as_str(),
-            "revision": policy.revision,
-            "build_date": policy.build_date,
-        }))),
-    )
-        .into_response()
+    let mut data = json!({
+        "contract": CLIENT_CONTRACT,
+        "min_contract": policy.min_contract,
+        "policy": policy.policy.as_str(),
+        "revision": policy.revision,
+        "build_date": policy.build_date,
+    });
+    // F-t3-098: the closed label read from `APP_ENV` once in `build_state`, only when
+    // `CLIENT_ENV_IDENTITY` is on. The key is absent otherwise, so the answer is unchanged.
+    if let Some(environment) = state.space_features.client_environment {
+        data["environment"] = json!(environment);
+    }
+    ([(header::CACHE_CONTROL, "no-store")], Json(ok(data))).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -73,6 +84,9 @@ async fn get_client_config(State(state): State<AppState>) -> Response {
 struct ClientDiagnostic {
     kind: String,
     build: String,
+    /// Required for `long_task` and refused for every other kind. The value is checked against
+    /// [`LONG_TASK_BUCKETS`] in the handler.
+    bucket: Option<String>,
 }
 
 fn invalid_diagnostic() -> Response {
@@ -126,16 +140,43 @@ async fn post_client_diagnostic(State(state): State<AppState>, body: Body) -> Re
     if !valid_build_id(&diagnostic.build) {
         return invalid_diagnostic();
     }
+    // A long_task names a closed duration bucket; every other kind must leave `bucket` out.
+    let bucket = match (kind, diagnostic.bucket.as_deref()) {
+        ("long_task", Some(wanted)) => {
+            let Some(bucket) = LONG_TASK_BUCKETS
+                .iter()
+                .copied()
+                .find(|known| *known == wanted)
+            else {
+                return invalid_diagnostic();
+            };
+            Some(bucket)
+        }
+        ("long_task", None) | (_, Some(_)) => return invalid_diagnostic(),
+        (_, None) => None,
+    };
     let matched = build_match(
         &diagnostic.build,
         &state.space_features.client_policy.revision,
     );
-    metrics::counter!(
-        "verevon_client_failures_total",
-        "kind" => kind,
-        "build_match" => matched,
-    )
-    .increment(1);
+    match bucket {
+        Some(bucket) => {
+            metrics::counter!(
+                "verevon_client_long_tasks_total",
+                "bucket" => bucket,
+                "build_match" => matched,
+            )
+            .increment(1);
+        }
+        None => {
+            metrics::counter!(
+                "verevon_client_failures_total",
+                "kind" => kind,
+                "build_match" => matched,
+            )
+            .increment(1);
+        }
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -512,8 +553,11 @@ mod tests {
     async fn diagnostics_accepts_each_kind_with_a_hex_or_dev_build() {
         for kind in DIAGNOSTIC_KINDS {
             for build in ["a", "abc123", "0123456789ab", "ABCDEF", "dev"] {
-                let (status, raw) =
-                    diagnostic(&state(), &json!({"kind": kind, "build": build}).to_string()).await;
+                let mut body = json!({"kind": kind, "build": build});
+                if kind == "long_task" {
+                    body["bucket"] = json!("50_100");
+                }
+                let (status, raw) = diagnostic(&state(), &body.to_string()).await;
                 assert_eq!(status, 204, "{kind}/{build}: {raw}");
                 assert!(raw.is_empty());
             }

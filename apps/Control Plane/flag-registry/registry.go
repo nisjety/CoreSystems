@@ -60,6 +60,32 @@ const (
 	SourceCode Source = "code"
 )
 
+// Stage is how far a flag has rolled out. Dark means not offered yet, beta means
+// offered to a set the owner picks, and ga means offered to everyone. The registry
+// records the stage and rolls nothing out.
+type Stage string
+
+const (
+	// StageDark is a flag that is not offered yet. An entry that does not say its
+	// stage is dark.
+	StageDark Stage = "dark"
+	// StageBeta is a flag offered to a set the owner picks.
+	StageBeta Stage = "beta"
+	// StageGA is a flag offered to everyone.
+	StageGA Stage = "ga"
+)
+
+// AgentAccess says whether a model-facing tool may read a flag's value.
+type AgentAccess string
+
+const (
+	// AgentAccessNone keeps the value from every model-facing tool. An entry that
+	// does not say gets none.
+	AgentAccessNone AgentAccess = "none"
+	// AgentAccessRead lets a model-facing tool read the value.
+	AgentAccessRead AgentAccess = "read"
+)
+
 // Declaration is one compose environment entry that sets a flag. Env is the
 // container variable; the flag name is the host variable it reads from.
 type Declaration struct {
@@ -89,6 +115,19 @@ type Flag struct {
 	OnDefaultReason string `json:"onDefaultReason,omitempty"`
 	// DevOnly marks a development escape hatch. It must default off.
 	DevOnly bool `json:"devOnly,omitempty"`
+	// Stage is the rollout stage. Empty means dark. See EffectiveStage.
+	Stage Stage `json:"stage,omitempty"`
+	// KillSwitch marks an operator's emergency switch. Only switches carry it. It must
+	// default to the safe value, which for a switch is off, and it is never
+	// orgOverridable.
+	KillSwitch bool `json:"killSwitch,omitempty"`
+	// AgentAccess says whether a model-facing tool may read the value. Empty means
+	// none. See EffectiveAgentAccess.
+	AgentAccess AgentAccess `json:"agentAccess,omitempty"`
+	// OrgOverridable lets an org set its own value. The value may narrow the flag or
+	// enable it, but only within the build or environment ceiling. Only switches and
+	// choices owned by frontend-plane or model-plane may carry it.
+	OrgOverridable bool `json:"orgOverridable,omitempty"`
 }
 
 // File is the document shape of flag-registry.json.
@@ -227,6 +266,30 @@ func validateFlag(f Flag) []error {
 		}
 		seen[key] = true
 	}
+	switch f.Stage {
+	case "", StageDark, StageBeta, StageGA:
+	default:
+		fail("stage %q must be dark, beta or ga", f.Stage)
+	}
+	switch f.AgentAccess {
+	case "", AgentAccessNone, AgentAccessRead:
+	default:
+		fail("agentAccess %q must be none or read", f.AgentAccess)
+	}
+	if f.KillSwitch && f.Kind != KindSwitch {
+		fail("killSwitch applies only to switch flags")
+	}
+	if f.KillSwitch && f.OrgOverridable {
+		fail("a kill switch may not be orgOverridable")
+	}
+	if f.OrgOverridable {
+		if f.Kind != KindSwitch && f.Kind != KindChoice {
+			fail("orgOverridable applies only to switch and choice flags")
+		}
+		if f.Owner != PlaneFrontend && f.Owner != PlaneModel {
+			fail("orgOverridable applies only to frontend-plane and model-plane flags")
+		}
+	}
 	switch f.Kind {
 	case KindSwitch:
 		if len(f.Values) > 0 {
@@ -258,6 +321,9 @@ func validateFlag(f Flag) []error {
 		}
 		if f.DevOnly && on {
 			fail("devOnly flags must default off")
+		}
+		if f.KillSwitch && on {
+			fail("a kill switch must default to the safe value, off")
 		}
 	case KindChoice:
 		if len(f.Values) == 0 {
@@ -318,6 +384,23 @@ func validRepoPath(p string) bool {
 		}
 	}
 	return true
+}
+
+// EffectiveStage is the flag's rollout stage. An entry that does not say is dark.
+func (f Flag) EffectiveStage() Stage {
+	if f.Stage == "" {
+		return StageDark
+	}
+	return f.Stage
+}
+
+// EffectiveAgentAccess is what a model-facing tool may do with the value. An entry
+// that does not say gets none.
+func (f Flag) EffectiveAgentAccess() AgentAccess {
+	if f.AgentAccess == "" {
+		return AgentAccessNone
+	}
+	return f.AgentAccess
 }
 
 // Flags returns every entry, sorted by name.

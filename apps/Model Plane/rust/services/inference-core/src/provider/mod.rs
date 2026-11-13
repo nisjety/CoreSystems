@@ -4,13 +4,16 @@ use tracing::warn;
 
 pub mod anthropic;
 pub mod artifact_ref;
+pub mod catalogue_overlay;
 pub mod codex_subscription;
 mod codex_subscription_tools;
+pub mod customer_gateway;
 pub mod doc_intel;
 pub mod effort;
 pub mod fallback;
 pub mod gemini;
 pub mod gemini_schema;
+pub mod health;
 pub mod intent;
 pub mod language;
 pub mod logprobs;
@@ -165,11 +168,20 @@ pub struct InferRequest {
     /// Optional speed tier for supported subscription models. It does not
     /// select a provider or reduce the requested reasoning effort.
     pub prefer_priority_service_tier: bool,
+    /// The speed tier this call asks for: empty (no choice), `"standard"` or `"priority"`. Read
+    /// only by the Codex adapter, and only behind `INFERENCE_SPEED_TIER_SPLIT`. It is never a
+    /// reasoning effort. A value other than `"priority"` does not ask for the tier, though the
+    /// legacy `prefer_priority_service_tier` flag still does.
+    pub speed_tier: String,
     /// Opaque Integration Core connection id for a user-owned subscription.
     /// This is a routing reference, never a ChatGPT OAuth credential. It is
     /// included in the prompt-cache scope so two connections cannot share a
     /// cached response or bypass the broker's per-connection audit boundary.
     pub subscription_connection_id: String,
+    /// Opaque Integration Core id of a customer-gateway model connection (W4-BYO-5), as the caller names
+    /// it. Non-empty only for a call that the customer-gateway adapter serves, which never routes through the
+    /// platform chain. It is a routing reference, never a credential, and empty names none.
+    pub model_connection_id: String,
     /// How many leading messages are standing (Stable) and authored (Context)
     /// text. The default names none and is the pre-existing behaviour
     /// byte-for-byte. Read only by the Anthropic adapter, behind
@@ -274,8 +286,28 @@ const VISION_DENYLIST_PREFIXES: &[&str] = &["deepseek", "o1-mini", "gpt-3.5"];
 /// Embedding and reranking ids carry no image input whatever their provider says.
 const VISION_DENYLIST_MARKERS: &[&str] = &["embed", "rerank"];
 
-/// True when `model` is on the vision denylist, built-in or `extra`.
-fn vision_denylisted(model: &str, extra: Option<&str>) -> bool {
+/// Parses the comma list of `INFERENCE_VISION_MODEL_DENYLIST_EXTRA` into its entries, each trimmed
+/// and lowercased, with empty entries dropped. An absent or blank list yields none.
+fn parse_vision_denylist_extra(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(|entry| entry.trim().to_ascii_lowercase())
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
+/// The extra denylist, read from the environment and parsed once per process, so a listing that
+/// asks about many models reads the environment once rather than once per model.
+fn vision_denylist_extra() -> &'static [String] {
+    static EXTRA: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    EXTRA.get_or_init(|| {
+        parse_vision_denylist_extra(std::env::var(VISION_DENYLIST_EXTRA_ENV).ok().as_deref())
+    })
+}
+
+/// True when `model` is on the vision denylist, built-in or in `extra`, the entries that
+/// [`parse_vision_denylist_extra`] produced. Pure: it reads no environment.
+fn vision_denylisted(model: &str, extra: &[String]) -> bool {
     let model = model.trim().to_ascii_lowercase();
     if model.is_empty() {
         return false;
@@ -289,15 +321,9 @@ fn vision_denylisted(model: &str, extra: Option<&str>) -> bool {
     {
         return true;
     }
-    extra.is_some_and(|extra| {
-        extra
-            .split(',')
-            .map(|entry| entry.trim().to_ascii_lowercase())
-            .filter(|entry| !entry.is_empty())
-            .any(|entry| match entry.strip_suffix('*') {
-                Some(prefix) => model.starts_with(prefix),
-                None => model == entry,
-            })
+    extra.iter().any(|entry| match entry.strip_suffix('*') {
+        Some(prefix) => model.starts_with(prefix),
+        None => model == entry.as_str(),
     })
 }
 
@@ -306,11 +332,7 @@ fn vision_denylisted(model: &str, extra: Option<&str>) -> bool {
 /// flag alone is per provider, so it over-claims for the families above.
 #[must_use]
 pub fn model_accepts_images(caps: &ProviderCapabilities, model: &str) -> bool {
-    caps.supports_vision
-        && !vision_denylisted(
-            model,
-            std::env::var(VISION_DENYLIST_EXTRA_ENV).ok().as_deref(),
-        )
+    caps.supports_vision && !vision_denylisted(model, vision_denylist_extra())
 }
 
 /// The feature list `list_models` advertises for one model: the provider's
@@ -406,6 +428,9 @@ pub struct InferResponse {
     /// upstream phase durations (see [`ProviderTiming::upstream`]) or a usage
     /// report to pass on, which is all the chain keeps from it.
     pub provider_timing: Option<ProviderTiming>,
+    /// The service tier the call was sent to the subscription broker on: `"priority"` when the
+    /// priority tier went upstream, empty when none did or the serving adapter does not report one.
+    pub service_tier_used: String,
 }
 
 /// A single streaming chunk.
@@ -453,6 +478,11 @@ pub struct InferChunk {
     /// the FINAL chunk only (same rule as the token counts). `None` on every
     /// other chunk.
     pub provider_timing: Option<ProviderTiming>,
+    /// The service tier the call was sent to the provider on, populated on the FINAL chunk only (same
+    /// rule as the token counts): `"priority"` when the priority tier went upstream, empty when none
+    /// did or the serving adapter does not report one. Same source as
+    /// [`InferResponse::service_tier_used`]; never inferred from the request.
+    pub service_tier_used: String,
 }
 
 /// A unified embedding request used internally across providers.
@@ -520,6 +550,12 @@ pub struct ModelInfo {
     pub max_output_tokens: u32,
     /// The vendor lifecycle stage. `None` when no sourced row names the model.
     pub lifecycle: Option<model_record::Lifecycle>,
+    /// The model the vendor names as this one's replacement. `None` unless a sourced row for
+    /// a deprecated model names one. Display only: nothing switches to it.
+    pub successor: Option<&'static str>,
+    /// Whether a call can ask for the priority service tier on this model (`speed_tier`). False
+    /// unless the model's record declares it (see [`model_record::RecordLimits::priority_tier`]).
+    pub priority_tier: bool,
 }
 
 /// Introspectable feature flags for a provider.
@@ -1199,6 +1235,25 @@ pub enum ProviderError {
     /// within its bound, so nothing was sent (fail closed, ZDR included).
     #[error("model entitlement unavailable")]
     EntitlementUnavailable,
+
+    /// The platform catalogue overlay hides the model the caller pinned
+    /// (`INFERENCE_CATALOGUE_OVERLAY`). Refused before any provider was called.
+    /// `model` is the id the caller named, which may be an alias.
+    #[error("model hidden by the platform catalogue: {model}")]
+    ModelHidden { model: String },
+
+    /// A strict image call (`strict_provider`) names a provider or model that no configured image provider
+    /// serves. Refused before any provider was called, and no other provider answers in its place. `model` is
+    /// the model the caller named, empty when it named none.
+    #[error("image model unavailable: {model}")]
+    ImageModelUnavailable { model: String },
+
+    /// Every provider that could serve the request is benched, so none was called.
+    /// `retry_after_ms` is the time until the soonest bench ends, when a provider
+    /// may be tried again. Unlike the ZDR, residency and privacy-tier refusals, this
+    /// is a wait: a caller retries after the delay rather than giving up.
+    #[error("every eligible provider is benched; retry after {retry_after_ms}ms")]
+    ProvidersBenched { retry_after_ms: u64 },
 }
 
 /// Canonical EU Azure regions permitted to serve embeddings under the EU
@@ -1553,13 +1608,23 @@ mod vision_tests {
 
     #[test]
     fn the_extra_denylist_takes_exact_ids_and_trailing_wildcard_prefixes() {
-        let extra = Some(" my-text-model , Llama-*,,");
-        assert!(vision_denylisted("my-text-model", extra));
-        assert!(vision_denylisted("llama-3-70b", extra));
-        assert!(!vision_denylisted("my-text-model-2", extra), "no wildcard, no prefix match");
-        assert!(!vision_denylisted("gpt-4o", extra));
-        assert!(!vision_denylisted("gpt-4o", None));
-        assert!(!vision_denylisted("gpt-4o", Some("")));
+        let extra = parse_vision_denylist_extra(Some(" my-text-model , Llama-*,,"));
+        assert!(vision_denylisted("my-text-model", &extra));
+        assert!(vision_denylisted("llama-3-70b", &extra));
+        assert!(!vision_denylisted("my-text-model-2", &extra), "no wildcard, no prefix match");
+        assert!(!vision_denylisted("gpt-4o", &extra));
+        assert!(!vision_denylisted("gpt-4o", &parse_vision_denylist_extra(None)));
+        assert!(!vision_denylisted("gpt-4o", &parse_vision_denylist_extra(Some(""))));
+    }
+
+    #[test]
+    fn the_extra_list_parses_to_trimmed_lowercase_entries_and_drops_blanks() {
+        assert_eq!(
+            parse_vision_denylist_extra(Some(" My-Model , Llama-*,, ")),
+            vec!["my-model".to_owned(), "llama-*".to_owned()]
+        );
+        assert!(parse_vision_denylist_extra(None).is_empty());
+        assert!(parse_vision_denylist_extra(Some(" , ,")).is_empty());
     }
 
     #[test]

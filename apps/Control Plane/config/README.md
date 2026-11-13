@@ -380,6 +380,23 @@ that user-core registry, not in this file; the launcher mints its token as
 without printing any value, which of these bindings are set and fails when one is
 half-set.
 
+### Goal-judge principal (dark)
+
+`model-gateway-goal-judge` is the credential model-gateway's goal judge presents to
+session-core (EP-7 S3/S6, OD-58). It is its own principal because retention is keyed
+per principal, not per scope: `model-gateway`'s session-core row is `zdr` (heartbeat
+and terminalize only), and session-core refuses a zero-retention credential on goal
+writes, so widening that row is not an option.
+
+| principal | audience | scopes | retention | key published to |
+| --- | --- | --- | --- | --- |
+| `model-gateway-goal-judge` | `session-core` | `session:goal-judge:read`, `session:goal-verdict:write` | `persistent` | `MODEL_GATEWAY_GOAL_JUDGE_SERVICE_API_KEY` (model-gateway) |
+
+It is `persistent` because it writes durable verdict rows. It carries no user
+identity and no waiver; session-core refuses it on any thread that holds a ZDR or
+waived run, so those threads are never judged. Nothing presents it until
+`MODEL_GATEWAY_GOAL_JUDGE_ENABLED` and `SESSION_CORE_THREAD_GOALS_ENABLED` are on.
+
 ### Organization binding (`tenancy`): the production principal model
 
 Auth Core's production loader refuses `allowAnyOrg: true` (a leaked workload

@@ -19,6 +19,7 @@ import {
   type ExchangeVersionState,
 } from '@/features/chat/lib/chat-versions'
 import {
+  activeLeafId,
   rewindPlan,
   type HiddenTurn,
   type RewindPlan,
@@ -58,12 +59,14 @@ import {
 import {
   consumePendingChatLaunchAsync,
 } from '@/features/chat/lib/pending-chat-launch'
+import { discardPendingRole, takePendingRole } from '@/features/chat/lib/pending-role'
+import { rememberMemory } from '@/shared/api/memory-client'
 import { pendingAssistantChatDraft, takeAssistantChatDraft } from '@/features/chat/lib/assistant-chat-draft'
 import {
   bindSupportChatThread,
   isSupportChatThread,
 } from '@/shared/chat/support-chat-thread'
-import { readThreadDeepLink } from '@/features/chat/lib/chat-thread-deep-link'
+import { chatThreadHref, readThreadDeepLink } from '@/features/chat/lib/chat-thread-deep-link'
 import { announceAttentionChanged } from '@/shared/api/attention-client'
 import { clearIntent, readIntent, type ConnectIntent } from '@/shared/integrations/connect-intent'
 import { getActionDescriptor } from '@/shared/actions/action-registry'
@@ -78,7 +81,9 @@ import {
 } from '@/features/dashboard/home/DashboardComposer'
 import {
   cancelRun,
+  continueQuestionRun,
   continueRun,
+  continueSkippedRun,
   decideApproval,
   answerQuestion as answerRunQuestion,
   listApprovals,
@@ -88,7 +93,9 @@ import {
   resumeRun,
   type ApprovalDecision,
   type ApprovalEdit,
+  type ApprovalScope,
   type PlanStepEdit,
+  type RunQuestionResponse,
 } from '@/shared/api/orchestration-client'
 import { runBrowserGiveBack, type BrowserGiveBackOutcome } from '@/features/chat/lib/browser-give-back'
 import {
@@ -101,11 +108,14 @@ import {
   browserRegionSendEnabled,
   type BrowserRegionTurnInput,
 } from '@/features/browser/page-context/region-attach'
+import { answerResumeQuestion, type QuestionResumeOutcome } from '@/features/chat/lib/question-resume'
+import { isSkippableHelpPause, runBrowserSkip } from '@/features/chat/lib/browser-skip'
 import { getRun, listRuns } from '@/shared/api/runs-client'
 import { getRunProofBundle } from '@/shared/api/run-console-client'
 import {
   cancelInvocation,
   cheapDefaultModelId,
+  chatStreamFrameReader,
   describeFeedbackFailure,
   getChatThreadTranscript,
   listChatThreadEvents,
@@ -123,6 +133,7 @@ import {
   saveChatThreadSnapshot,
   streamChat,
   submitFeedback,
+  switchChatVersion,
   undoChatRewind,
   VEREVON_BALANCE_MODE_ID,
   type AutonomyRung,
@@ -136,17 +147,21 @@ import {
   type ChatThreadMessagesPage,
 } from '@/shared/api/chat-client'
 import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
-import { resolveReplaySubscriptionConnectionId } from '@/shared/ai/model-selection'
+import { isZdrWaiverUiEnabled } from '@/shared/api/connection-zdr-client'
+import type { WaivedRunConnection } from '@/shared/api/waived-continuation'
+import { readAiModelSelection, resolveReplaySubscriptionConnectionId } from '@/shared/ai/model-selection'
 import { getSession } from '@/shared/session/session-store'
 import { blobToDataUrl } from '@/shared/lib/blob-data'
 import type {
   ChatQuestionAnswer,
   ChatResearchPlanEvent,
   ChatUserQuestionEvent,
+  DeckTemplate,
   ResearchPlanEdit,
+  WideResearchStart,
 } from '@/shared/api/chat-client'
 import { researchPlanTurnEnabled } from './ResearchPlanCard'
-import { useI18n } from '@/shared/i18n'
+import { translateApiError, useI18n } from '@/shared/i18n'
 import type { VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
 import {
   ApiError,
@@ -158,6 +173,13 @@ import {
   updateThreadGoal,
   type ThreadGoal,
 } from '@/shared/api/thread-goal-client'
+import {
+  createCronSchedule,
+  listCronSchedules,
+  listScheduleFires,
+  type CronSchedule,
+} from '@/shared/api/cron-client'
+import { DEFAULT_SCHEDULE_TIMEZONE, DELEGABLE_SCHEDULE_TOOLS } from '@/shared/api/schedule-from-chat'
 import {
   findArtifactById,
   foldSavedRevision,
@@ -244,11 +266,21 @@ import type {
 } from './chat-types'
 import { addLifecycleNotice } from './chat-types'
 import { applyUsageProgress, applyUsageTotal } from './RunCostMeter'
-import { applyGoalProgress } from './GoalBar'
+import {
+  GOAL_AWAY_MAX_RUNS,
+  applyGoalProgress,
+  goalAwayCron,
+  goalAwayRuns,
+  goalScheduleTemplate,
+  type GoalAwayForm,
+  type GoalAwayRun,
+  type GoalAwayView,
+} from './GoalBar'
 import type { GoalDraft } from './GoalDialog'
 import type { ChatEffectClass } from '@/shared/chat/effect-class'
 import { isEffectfulChatTurn } from '@/shared/chat/effect-class'
 import { planExecuteEnabled } from '@/shared/chat/plan-execute'
+import { noteChatStreamLost, noteChatStreamOk } from '../lib/chat-connectivity'
 import { readPinnedMessages, togglePinnedMessage } from '../lib/chat-pinned-messages'
 import { CHAT_SURFACE_IDS, chatSurfaceSpec, isChatTab } from '../lib/chat-surfaces'
 import { useChatThreadDraft, type ChatDraftOutcome } from '../lib/chat-thread-draft'
@@ -339,6 +371,12 @@ export function frameSequence(id: string | undefined): number | undefined {
 type ServerVersionTarget = Pick<ChatInvokeRequest, 'regenerateOfMessageId' | 'editOfMessageId'>
 
 /**
+ * The question on the card, with the run that asked it when this build knows it (WS14 S5). A resume question
+ * continues that run when it is answered; a next-turn question has no run to continue.
+ */
+type PendingQuestion = ChatUserQuestionEvent & { runId?: string }
+
+/**
  * What the person's answer reads as in the transcript: the chosen labels and their own words, one line per
  * item. The gateway receives the structured answer; this is the words the turn is shown under.
  */
@@ -374,6 +412,17 @@ export function goalContinuationMode(input: {
     if (turn.planMode === true) return 'plan'
   }
   return 'plan'
+}
+
+/**
+ * The goal a schedule's task template names (EP-7 S6), or `null` when the schedule names none. The
+ * "Keep working while away" read groups the schedules of one goal by it.
+ */
+function goalIdOfSchedule(schedule: CronSchedule): string | null {
+  const template = schedule.task_template
+  if (!template || typeof template !== 'object' || Array.isArray(template)) return null
+  const goalId = (template as { goal_id?: unknown }).goal_id
+  return typeof goalId === 'string' && goalId.trim() !== '' ? goalId.trim() : null
 }
 
 export function useChatController() {
@@ -450,6 +499,9 @@ export function useChatController() {
   }
   const [imageMode, setImageMode] = createSignal(false)
   const [planMode, setPlanModeRaw] = createSignal(false)
+  // The Fast chip's speed choice (W5-095-b): `priority` asks for the priority tier on the turns sent while it is on.
+  // Session-only, like the plan toggle, and read at send time, so a later flip cannot change a turn already sent.
+  const [speedTier, setSpeedTier] = createSignal<'standard' | 'priority'>('standard')
   // WS14 S2a, "Run the approved plan". `threadGrant` is the client's pointer to
   // the grant the Model Plane holds for a thread, set when a plan is approved;
   // `executeArmed` says the NEXT send is the turn that runs it. Both are
@@ -658,6 +710,15 @@ export function useChatController() {
       .find((turn) => turn.role === 'assistant')
     return isWorkSurfaceTurn(latestAssistant) ? latestAssistant?.runId ?? null : null
   })
+  /**
+   * The durable run of the answer that is streaming now, Ask turns included. `liveRunId` names a Work run only,
+   * so an ordinary answer has none there. Null unless an answer is still arriving and its run id has come in.
+   */
+  const streamingRunId = (): string | null => {
+    if (state.status !== 'streaming') return null
+    const latestAssistant = [...state.turns].reverse().find((turn) => turn.role === 'assistant')
+    return latestAssistant?.status === 'waiting' ? latestAssistant.runId ?? null : null
+  }
   let serverSnapshotTimer: number | undefined
   let pendingServerSnapshot: {
     preview?: string
@@ -1078,6 +1139,7 @@ export function useChatController() {
             delivery: waiting.delivery,
             expiresAt: waiting.expiresAt,
             items: waiting.items,
+            runId,
           })
         }
       })
@@ -1865,6 +1927,8 @@ export function useChatController() {
       let run: Awaited<ReturnType<typeof getRun>> | undefined
       try {
         run = await getRun(runId, signal)
+        // The service answered, so the connection is back whatever the run's status says (the connection pill, F-t3-078).
+        noteChatStreamOk()
       } catch (error) {
         if (!stillOwned()) return { kind: 'aborted' }
         // A missing or refused run cannot be settled from here; any other
@@ -2113,6 +2177,8 @@ export function useChatController() {
     let transportLost = false
     let replayStarted = false
     let reasoningReplayStarted = false
+    // The first frame of the resumed stream proves the connection is open (the connection pill, F-t3-078): noted once.
+    let connectionOpenNoted = false
     // Snapshotted before the stream opens: `onFrameId` mutates the turn's
     // cursor during replay, so the turn is not a reliable record of what we
     // asked the server to skip.
@@ -2148,6 +2214,11 @@ export function useChatController() {
         // Work feed kept scrolling, because `onUiEvent` alone still fired.
         ...evidence,
         acceptFrame: (id) => {
+          // Every frame passes here, so the first one notes the resumed connection open (once per attempt).
+          if (!connectionOpenNoted) {
+            connectionOpenNoted = true
+            noteChatStreamOk()
+          }
           const sequence = frameSequence(id)
           if (sequence === undefined) return true
           if (appliedThrough !== undefined && sequence <= appliedThrough) return false
@@ -2268,6 +2339,12 @@ export function useChatController() {
     )
 
     if ((transportLost || !settled) && isActiveThread()) {
+      // A lost connection is "reconnecting" to the connection pill (F-t3-078) only while the durable wait below
+      // follows it. A turn settled here without that wait (no run id, a foreign thread) reconnects to nothing.
+      const waitRunId = state.turns.find((candidate) => candidate.id === assistantId)?.runId ?? turn.runId
+      if (transportLost && waitRunId && !isTemporaryThread(threadId) && !isForeignOriginThread(threadId)) {
+        noteChatStreamLost()
+      }
       // No terminal frame reached us: the resume failed, or the stream closed
       // without one (e.g. the buffer was already empty and nothing else
       // arrived). A disconnect is not a cancel, so the run may still be
@@ -2523,6 +2600,8 @@ export function useChatController() {
             modelContent: inlined.length > 0 ? appendInlinedAttachments(pending.text, inlined) : undefined,
             browseWeb: pending.tools?.includes('search') || pending.tools?.includes('research'),
             sourceScope: pending.sourceScope,
+            // The connected-apps picks the composer handed over (WS23 S6); the chat client withholds them on a turn that cannot take them.
+            connectorScope: pending.connectorScope,
             deepResearch: pending.tools?.includes('research'),
             displayAttachments: pending.attachments ?? [],
             effort: pending.effort,
@@ -2532,6 +2611,7 @@ export function useChatController() {
             minPrivacyTier: pending.minPrivacyTier,
             provider: pending.provider,
             subscriptionConnectionId: pending.subscriptionConnectionId,
+            modelConnectionId: pending.modelConnectionId,
             tone: pending.tone,
             zdr: pending.zdr,
           })
@@ -2661,7 +2741,7 @@ export function useChatController() {
    */
   // The question a run put to its owner (WS14 S4), waiting for the person's answer in the composer tray.
   // Session-only: a reload restores it from the run's questions (`hydrateRunQuestions`).
-  const [pendingQuestion, setPendingQuestion] = createSignal<ChatUserQuestionEvent | null>(null)
+  const [pendingQuestion, setPendingQuestion] = createSignal<PendingQuestion | null>(null)
   const [questionPending, setQuestionPending] = createSignal(false)
   const [questionError, setQuestionError] = createSignal<string | null>(null)
   // A deep-research plan waiting for Start (EP-2 S5), with the question and model of the send that asked for
@@ -2691,6 +2771,47 @@ export function useChatController() {
   /** Dismisses the waiting research plan (`chat.research_plan_cancel`). Nothing is sent. */
   const cancelResearchPlan = () => setPendingResearchPlan(null)
 
+  /**
+   * The route a wide-research turn is sent on, or `undefined` when this session may not send one (EP-2 S8/S9).
+   * Refused while a turn streams (a send then queues into that run instead of starting a fan-out), on a zero-retention
+   * or temporary chat, and on the ChatGPT-subscription route. The model is the one the composer sends: its stored choice.
+   */
+  const wideResearchRoute = (): { model: string } | undefined => {
+    if (isStreaming() || temporaryChat() || isTemporaryThread(state.threadId)) return undefined
+    const selection = readAiModelSelection(getSession().activeOrg?.id?.trim() ?? '')
+    if (selection.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER) return undefined
+    return { model: selection.model }
+  }
+
+  /**
+   * Starts a wide-research run from the composer's "Bred forskning" entry (EP-2 S8, `chat.wide_research_start`): one
+   * agentic Do turn carrying the person's choice. The question is the composer's draft or, with no draft, the pasted
+   * items. The server clamps the count to the org's cap and names any item past it in the answer. Answers `false`
+   * when nothing was sent (the route is refused, or there is no question), so the card keeps the choice.
+   */
+  const startWideResearch = (choice: WideResearchStart): boolean => {
+    const route = wideResearchRoute()
+    if (!route) return false
+    const question = input().trim() || (choice.items ?? []).join('\n').trim()
+    if (!question) return false
+    void sendContent(question, route.model, { planModeOverride: true, wideResearch: choice })
+    return true
+  }
+
+  /**
+   * Runs one failed item of a wide-research batch again (EP-2 S9, `chat.wide_research_retry_item`): a one-item Do turn
+   * in the same conversation. The item is never sent from the browser: execution-core reads it back from the child run,
+   * and the new attempt joins the same batch. The turn names the retry, not the item, so the composer's draft stays.
+   */
+  const retryWideResearchItem = async (request: { childRunId: string; batchId: string }) => {
+    const route = wideResearchRoute()
+    if (!route) return
+    await sendContent(i18n.tr('Prøv igjen', 'Try again'), route.model, {
+      planModeOverride: true,
+      wideResearch: { retryOfChildRunId: request.childRunId, batchId: request.batchId },
+    })
+  }
+
   // The thread goal (EP-7 S1): the person's standing objective on the open thread, shown in the goal
   // tray above the composer. Read for a durable thread the person may set one on: never a temporary,
   // foreign, Support or project thread (the server refuses each anyway). The read is repeated whenever
@@ -2707,13 +2828,103 @@ export function useChatController() {
     && !isForeignOriginThread(threadId)
     && !isSupportChatThread(threadId)
     && !scopedThreadRefs.get(threadId ?? '')
+  // "Keep working while away" (EP-7 S6): the goal-bound schedules of the open goal and the runs they made. The server
+  // reports the feature on each goal read and write (`unattendedAvailable`); the schedules are read as the person's
+  // own (`creator=self`). Until the read of this goal has come back the start stays hidden, so no second schedule is
+  // started over one the page has not seen, and a read that fails hides it the same way.
+  type GoalAwayRead = { goalId: string; scheduled: boolean; runs: GoalAwayRun[] }
+  const [goalAwayRead, setGoalAwayRead] = createSignal<GoalAwayRead | null>(null)
+  let goalAwaySequence = 0
+  const goalAwayOrg = (): string => getSession().activeOrg?.id?.trim() ?? ''
+  /**
+   * Whether the goal bar offers "Keep working while away" for this goal: the server reports it on, the goal is
+   * active, and the thread is a durable personal one (never a temporary chat, a Space or a foreign thread).
+   */
+  const goalAwayOffered = (goal: ThreadGoal | null): goal is ThreadGoal =>
+    goal !== null
+    && goal.unattendedAvailable === true
+    && goal.status === 'active'
+    && goalThreadAllowed(state.threadId)
+    && !temporaryChat()
+    && goalAwayOrg() !== ''
+  const refreshGoalAway = async (goal: ThreadGoal): Promise<void> => {
+    const sequence = ++goalAwaySequence
+    const org = goalAwayOrg()
+    try {
+      const { schedules } = await listCronSchedules(org, { creator: 'self' })
+      const own = schedules.filter((schedule) => goalIdOfSchedule(schedule) === goal.id)
+      const fires = await Promise.all(own.map((schedule) => listScheduleFires(org, schedule.id, GOAL_AWAY_MAX_RUNS)))
+      if (sequence !== goalAwaySequence) return
+      const runs = goalAwayRuns(fires.flat().sort((left, right) => right.fired_at.localeCompare(left.fired_at)))
+      setGoalAwayRead({ goalId: goal.id, scheduled: own.some((schedule) => schedule.enabled), runs })
+    } catch {
+      if (sequence !== goalAwaySequence) return
+      setGoalAwayRead({ goalId: goal.id, scheduled: true, runs: [] })
+    }
+  }
+  /** Reads the goal's schedules when the server offers the feature on it; any other goal reads nothing. */
+  const readGoalAway = (goal: ThreadGoal | null): void => {
+    if (goalAwayOffered(goal)) void refreshGoalAway(goal)
+  }
+  const goalAwayErrorText = (error: unknown): string =>
+    translateApiError(error, i18n.tr, {
+      no: 'Kunne ikke starte. Prøv igjen.',
+      en: 'Could not start. Try again.',
+    })
+  /**
+   * Starts "Keep working while away" (EP-7 S6): one goal-bound schedule through the ordinary create, with the
+   * template the goal bar builds from the form. The server checks the switch, the judge, the zero-retention state
+   * and the template again; a refusal keeps the bar and says why. The goal's own turns are never scheduled.
+   */
+  const startGoalAway = (form: GoalAwayForm): void => {
+    const goal = threadGoal()
+    const org = goalAwayOrg()
+    const every = goalAwayCron(form.everyMinutes)
+    const template = goalAwayOffered(goal) ? goalScheduleTemplate(goal, form) : null
+    if (!goal || !org || !every || !template || goalPending()) return
+    setGoalPending(true)
+    setGoalError(null)
+    void createCronSchedule(org, {
+      name: goal.objective.slice(0, 120),
+      schedule_expr: every,
+      timezone: DEFAULT_SCHEDULE_TIMEZONE,
+      enabled: true,
+      task_template: template,
+    })
+      .then(() => refreshGoalAway(goal))
+      .catch((error: unknown) => setGoalError(goalAwayErrorText(error)))
+      .finally(() => setGoalPending(false))
+  }
+  /**
+   * "Keep working while away" on the goal bar (EP-7 S6). Until the goal's schedules are known, `scheduled` reads true,
+   * so no start is offered over a schedule the page has not seen.
+   */
+  const goalAway: GoalAwayView = {
+    available: () => goalAwayOffered(threadGoal()),
+    tools: () => DELEGABLE_SCHEDULE_TOOLS,
+    scheduled: () => {
+      const goal = threadGoal()
+      const read = goalAwayRead()
+      return !goal || !read || read.goalId !== goal.id || read.scheduled
+    },
+    runs: () => {
+      const goal = threadGoal()
+      const read = goalAwayRead()
+      return goal && read && read.goalId === goal.id ? read.runs : []
+    },
+    threadHref: (threadId) => chatThreadHref(threadId),
+    onStart: startGoalAway,
+  }
   let goalReadSequence = 0
   const refreshThreadGoal = async (threadId: string) => {
     const sequence = ++goalReadSequence
     try {
       const goal = await getThreadGoal(threadId)
       setGoalsServed(!threadGoalsUnavailable())
-      if (sequence === goalReadSequence && state.threadId === threadId) setThreadGoalState(goal)
+      if (sequence === goalReadSequence && state.threadId === threadId) {
+        setThreadGoalState(goal)
+        readGoalAway(goal)
+      }
     } catch {
       // A thread the server does not know yet (a first turn still in flight) or a failed read: no tray.
       if (sequence === goalReadSequence) setThreadGoalState(null)
@@ -2761,7 +2972,10 @@ export function useChatController() {
     setGoalError(null)
     try {
       const goal = await write()
-      if (state.threadId === threadId) setThreadGoalState(goal)
+      if (state.threadId === threadId) {
+        setThreadGoalState(goal)
+        readGoalAway(goal)
+      }
       return true
     } catch (error) {
       setGoalError(goalErrorText(error))
@@ -2816,6 +3030,28 @@ export function useChatController() {
       return Promise.resolve(true)
     }
     return runGoalWrite(threadId, () => updateThreadGoal(current, { status: 'cleared' }))
+  }
+
+  /**
+   * Marks the open goal done (`chat.goal_mark_done`): the person's own call over the judge's verdict, under
+   * the compare-and-set on the revision the bar showed (EP-7 S3). The server closes the goal, so no turn is
+   * told it and the goal pump stops.
+   */
+  const markGoalDone = (): Promise<boolean> => {
+    const threadId = state.threadId
+    const current = openGoal()
+    if (!goalThreadAllowed(threadId) || !current) return Promise.resolve(false)
+    return runGoalWrite(threadId, () => updateThreadGoal(current, { status: 'met' }))
+  }
+
+  /** Reopens a met or blocked goal as active (`chat.goal_reopen`), so later turns are told it again (EP-7 S3). */
+  const reopenGoal = (): Promise<boolean> => {
+    const threadId = state.threadId
+    const current = threadGoal()
+    if (!goalThreadAllowed(threadId) || !current || (current.status !== 'met' && current.status !== 'blocked')) {
+      return Promise.resolve(false)
+    }
+    return runGoalWrite(threadId, () => updateThreadGoal(current, { status: 'active' }))
   }
 
   /**
@@ -2986,6 +3222,208 @@ export function useChatController() {
   }
 
   /**
+   * Continues the run a question paused (WS14 S5). The answer, or the skip, goes ONCE to the question form of
+   * `chat.run.continue`, and the run's frames render in the waiting turn as a live turn's do. The outcome then sets
+   * the card: a released answer is sent as the next message (a skip sends nothing), a refused or ambiguous continue
+   * is reported, and the run is followed by its id. Nothing here sends the continue again.
+   */
+  const continueWaitingQuestion = async (
+    question: PendingQuestion,
+    runId: string,
+    response: RunQuestionResponse,
+    answer?: ChatQuestionAnswer,
+  ): Promise<void> => {
+    const threadId = state.threadId ?? ''
+    if (!threadId) return
+    // The newest assistant turn of the run is the one the paused run writes into.
+    let assistantIndex = -1
+    state.turns.forEach((turn, index) => {
+      if (turn.role === 'assistant' && turn.runId === runId) assistantIndex = index
+    })
+    const assistantId = assistantIndex >= 0 ? state.turns[assistantIndex]?.id : undefined
+    const precedingUser = assistantIndex > 0 ? state.turns[assistantIndex - 1] : undefined
+    const turnTitle = createPreview(precedingUser?.role === 'user' ? precedingUser.content : '', 58)
+    const generation = streamGeneration
+    const isActive = () => state.threadId === threadId && streamGeneration === generation
+    const continuation = new AbortController()
+    // A durable wait on this run ends silently (an aborted wait settles nothing): the continuation owns the turn now.
+    abortController?.abort()
+    abortController = continuation
+    let settled = false
+    const unknownDetail = i18n.tr(
+      'Vi vet ikke om kjøringen fortsatte.',
+      'We could not confirm that the run continued.',
+    )
+    const unknownNotice = i18n.tr(
+      'Vi vet ikke om kjøringen fortsatte. Følg kjøringen i tråden.',
+      'We could not confirm that the run continued. Follow the run in the thread.',
+    )
+    const goneNotice = (code: string): string => {
+      if (code === 'continuation_already_consumed') {
+        return i18n.tr('Svaret ditt er allerede brukt.', 'Your answer was already used.')
+      }
+      if (code === 'continue_disabled') {
+        return i18n.tr(
+          'Kjøringen kan ikke fortsette nå. Skriv svaret som en ny melding hvis det fortsatt trengs.',
+          'The run cannot continue right now. Write your answer as a new message if it is still needed.',
+        )
+      }
+      return answer
+        ? i18n.tr('Svaret ble ikke lagret. Prøv igjen.', 'The answer was not saved. Try again.')
+        : i18n.tr('Spørsmålet kunne ikke hoppes over. Prøv igjen.', 'The question could not be skipped. Try again.')
+    }
+    const endTurnStream = (status?: ChatTurn['status']) => {
+      if (!assistantId) return
+      setState((s) => {
+        const turn = s.turns.find((candidate) => candidate.id === assistantId)
+        if (turn) {
+          turn.streaming = false
+          turn.status = status
+        }
+      })
+    }
+    // The frames of the continued run go to the waiting turn, through the handlers a live turn uses.
+    const handlersFor = (turnId: string): ChatStreamHandlers => ({
+      ...createEvidenceHandlers({ assistantId: turnId, turnTitle, threadId }),
+      onUiEvent: (event) => {
+        if (isActive()) appendUiEvent(event, turnId)
+      },
+      onConnected: () => {
+        if (isActive()) noteChatStreamOk()
+      },
+      onMessage: ({ content: delta }) => {
+        if (!isActive()) return
+        upsertTaskStep(createTurnStep(turnId, turnTitle, 'answer', 'Compose response', 'Streaming answer text.', 'active'))
+        setState((s) => {
+          const turn = s.turns.find((candidate) => candidate.id === turnId)
+          if (turn) turn.content = turn.content + delta
+        })
+      },
+      onUserQuestion: (next) => {
+        // A question the continued run asks next is this thread's card, with the same run.
+        if (isActive()) setPendingQuestion({ ...next, runId })
+      },
+      onDone: ({ modelUsed, outputTokens }) => {
+        settled = true
+        if (!isActive()) return
+        setState((s) => {
+          const turn = s.turns.find((candidate) => candidate.id === turnId)
+          if (turn) {
+            if (modelUsed) turn.modelUsed = modelUsed
+            if (outputTokens != null) turn.outputTokens = outputTokens
+            turn.streaming = false
+            turn.status = undefined
+            turn.settledAt ??= new Date().toISOString()
+          }
+        })
+        markOpenSteps('done', 'Completed.', turnId)
+        updateLocalRunHint(threadId, 'completed', runId)
+        setState((s) => { s.status = 'idle' })
+        writeThreadSnapshot(threadId, state.turns)
+      },
+      onStopped: ({ reason }) => {
+        settled = true
+        if (!isActive()) return
+        setState((s) => {
+          const turn = s.turns.find((candidate) => candidate.id === turnId)
+          if (turn) {
+            turn.streaming = false
+            turn.status = 'stopped'
+            turn.settledAt ??= new Date().toISOString()
+          }
+        })
+        markOpenSteps('stopped', reason || 'The run stopped before completion.', turnId)
+        updateLocalRunHint(threadId, 'cancelled', runId)
+        setState((s) => { s.status = 'idle' })
+        writeThreadSnapshot(threadId, state.turns)
+      },
+      onError: (failure) => {
+        settled = true
+        if (!isActive()) return
+        settleServerFailure({ assistantId: turnId, turnTitle, threadId }, failure)
+        writeThreadSnapshot(threadId, state.turns)
+      },
+    })
+    const frames = assistantId ? chatStreamFrameReader(handlersFor(assistantId), continuation.signal) : undefined
+    if (assistantId) {
+      setState((s) => {
+        s.status = 'streaming'
+        const turn = s.turns.find((candidate) => candidate.id === assistantId)
+        if (turn) {
+          turn.streaming = true
+          turn.status = 'waiting'
+        }
+      })
+    }
+    setQuestionPending(true)
+    setQuestionError(null)
+    let outcome: QuestionResumeOutcome = { kind: 'unknown' }
+    try {
+      outcome = await answerResumeQuestion(
+        { runId, questionId: question.questionId, response },
+        {
+          continueQuestionRun: (continuedRunId, questionId, body, claimToken, onEvent) =>
+            continueQuestionRun(continuedRunId, questionId, body, claimToken, onEvent, continuation.signal),
+          // One fresh claim token per press: a press is one continue, and nothing resends it.
+          newClaimToken: () => createId('claim'),
+          onEvent: (event) => frames?.read(event),
+        },
+      )
+    } catch {
+      outcome = { kind: 'unknown' }
+    } finally {
+      frames?.close()
+      setQuestionPending(false)
+    }
+    if (abortController === continuation) abortController = undefined
+    // A thread switch took the conversation: nothing here may write to the thread now on screen.
+    if (!isActive()) return
+
+    const clearAnswered = () => {
+      if (pendingQuestion()?.questionId === question.questionId) setPendingQuestion(null)
+    }
+    switch (outcome.kind) {
+      case 'continued':
+        clearAnswered()
+        break
+      case 'released':
+        clearAnswered()
+        if (answer) {
+          // The run did not take the answer, so it goes out once, as the next message. The run is not followed.
+          showFeedbackNotice(i18n.tr(
+            'Kjøringen kunne ikke fortsette med svaret, så det ble sendt som en ny melding.',
+            'The run could not continue with your answer, so it was sent as a new message.',
+          ))
+          endTurnStream(undefined)
+          setState((s) => { s.status = 'idle' })
+          await sendContent(questionAnswerSummary(question, answer))
+          return
+        }
+        // A skip sends nothing, and the run's state is not known from here: it is followed below.
+        showFeedbackNotice(unknownNotice)
+        break
+      case 'gone':
+        clearAnswered()
+        showFeedbackNotice(goneNotice(outcome.code))
+        break
+      case 'retry':
+        // The card stays so the person can try again. Nothing is sent by this path.
+        setQuestionError(outcome.code === 'invalid_answer'
+          ? i18n.tr('Svaret ble ikke lagret. Prøv igjen.', 'The answer was not saved. Try again.')
+          : i18n.tr('Kjøringen er opptatt. Prøv igjen om litt.', 'The run is busy. Try again in a moment.'))
+        break
+      case 'unknown':
+        clearAnswered()
+        showFeedbackNotice(unknownNotice)
+        break
+    }
+    // What the frames did not settle is read from the run by its id: the run read is the arbiter.
+    if (assistantId && !settled) {
+      void followUnresumableRun(threadId, assistantId, runId, { detail: unknownDetail, markFailed: false }, isActive)
+    }
+  }
+
+  /**
    * Answers the waiting question. The answer is recorded first and then sent as the person's next message, so
    * the run that follows works from an answered question. A refused answer sends nothing: a question that can
    * no longer be answered leaves the tray with the refusal, and any other refusal keeps the card for another try.
@@ -2993,6 +3431,11 @@ export function useChatController() {
   const answerPendingQuestion = async (answer: ChatQuestionAnswer) => {
     const question = pendingQuestion()
     if (!question || questionPending()) return
+    // A question that paused its run continues that run (WS14 S5). Any other question is answered as it always was.
+    if (question.delivery === 'resume' && question.runId) {
+      await continueWaitingQuestion(question, question.runId, { answers: answer.answers }, answer)
+      return
+    }
     setQuestionPending(true)
     setQuestionError(null)
     try {
@@ -3015,6 +3458,10 @@ export function useChatController() {
   const skipPendingQuestion = async () => {
     const question = pendingQuestion()
     if (!question || questionPending()) return
+    if (question.delivery === 'resume' && question.runId) {
+      await continueWaitingQuestion(question, question.runId, { skip: true })
+      return
+    }
     setQuestionPending(true)
     setQuestionError(null)
     try {
@@ -3064,6 +3511,42 @@ export function useChatController() {
     }
   }
 
+  /**
+   * The subscription connection a continuation of a waived run names (ZDR Z-19e, D-ZDR-15). A continuation (an approval
+   * decision, a plan approval or rejection, a resume, a continue, a cancel) never inherits a waiver: the gateway asks
+   * Auth Core afresh for the connection named here, and the run's own receipt decides whether the waiver can advance
+   * it. This only says which connection the thread's last run named: the turn asked for, or the turn that owns `runId`,
+   * or else the newest assistant turn with a run. `undefined` (nothing is named, no field is sent) when the switch is
+   * off or that run was not on the ChatGPT subscription. A refusal comes back typed and renders through the ZDR
+   * refusal copy, never as a raw error.
+   */
+  const waivedRunConnection = (match?: { turnId?: string; runId?: string }): WaivedRunConnection | undefined => {
+    if (!isZdrWaiverUiEnabled()) return undefined
+    const named = (turn: ChatTurn | undefined): WaivedRunConnection | undefined =>
+      turn && turn.provider === OPENAI_CODEX_SUBSCRIPTION_PROVIDER && turn.subscriptionConnectionId
+        ? { subscriptionConnectionId: turn.subscriptionConnectionId, provider: turn.provider }
+        : undefined
+    const byTurn = match?.turnId ? state.turns.find((turn) => turn.id === match.turnId) : undefined
+    if (byTurn) return named(byTurn)
+    const byRun = match?.runId ? state.turns.find((turn) => turn.runId === match.runId) : undefined
+    if (byRun) return named(byRun)
+    for (let index = state.turns.length - 1; index >= 0; index -= 1) {
+      const turn = state.turns[index]
+      if (turn?.role === 'assistant' && turn.runId) return named(turn)
+    }
+    return undefined
+  }
+
+  /**
+   * The words under a plan card for a refused approval or rejection, through translateApiError: a zero-retention
+   * refusal (for example `zdr_durable_mutation_forbidden` on a waived run's continuation) reads from the refusal copy
+   * in the reader's language, a known code from its own copy, a lost session, refusal, rate limit or connection from
+   * its own words, and anything else from `fallback`, which carries both languages. The gateway's text is English
+   * operator wording and is never shown.
+   */
+  const planDecisionErrorText = (error: unknown, fallback: { no: string; en: string }): string =>
+    translateApiError(error, i18n.tr, fallback)
+
   const approveTurnPlan = async (
     turnId: string,
     rung: AutonomyRung,
@@ -3100,6 +3583,7 @@ export function useChatController() {
         justification,
         turnBefore?.proposedPlan?.planId,
         steps,
+        waivedRunConnection({ turnId }),
       )
       setState((s) => {
         const turn = s.turns.find((turn) => turn.id === turnId)
@@ -3157,7 +3641,10 @@ export function useChatController() {
     } catch (error) {
       setPlanApprovalError((prev) => ({
         ...prev,
-        [turnId]: error instanceof Error ? error.message : 'Godkjenningen gikk ikke gjennom.',
+        [turnId]: planDecisionErrorText(error, {
+          no: 'Godkjenningen gikk ikke gjennom.',
+          en: 'The approval did not go through.',
+        }),
       }))
     } finally {
       setPlanApprovalPending(null)
@@ -3196,7 +3683,7 @@ export function useChatController() {
       return next
     })
     try {
-      await rejectPlan(runId, planId, reason)
+      await rejectPlan(runId, planId, reason, waivedRunConnection({ turnId }))
       setState((s) => {
         const turn = s.turns.find((turn) => turn.id === turnId)
         if (turn) turn.planRejected = true
@@ -3205,7 +3692,10 @@ export function useChatController() {
     } catch (error) {
       setPlanApprovalError((prev) => ({
         ...prev,
-        [turnId]: error instanceof Error ? error.message : 'Avvisningen gikk ikke gjennom.',
+        [turnId]: planDecisionErrorText(error, {
+          no: 'Avvisningen gikk ikke gjennom.',
+          en: 'The rejection did not go through.',
+        }),
       }))
     } finally {
       setPlanApprovalPending(null)
@@ -3216,9 +3706,15 @@ export function useChatController() {
     turnId: string,
     approvalId: string,
     decision: ApprovalDecision,
+    scope: ApprovalScope = 'once',
+    promote = false,
   ) => {
     if (isForeignOriginThread(state.threadId)) return
-    const runId = state.turns.find((turn) => turn.id === turnId)?.runId
+    const decidedTurn = state.turns.find((turn) => turn.id === turnId)
+    const runId = decidedTurn?.runId
+    // "Skip this site" (EP-1 S2, D3-647): declining a browser help pause. Read before the card is dropped.
+    const skipsSite = decision === 'reject'
+      && isSkippableHelpPause(decidedTurn?.pendingApprovals?.find((approval) => approval.id === approvalId))
     invalidateApprovalRefresh(turnId)
     // Optimistically drop the decided approval so the card resolves instantly.
     setState((s) => {
@@ -3226,10 +3722,22 @@ export function useChatController() {
       if (turn) turn.pendingApprovals = (turn.pendingApprovals ?? []).filter((approval) => approval.id !== approvalId)
     })
     try {
-      await decideApproval(approvalId, decision)
+      const waived = waivedRunConnection({ turnId })
+      await decideApproval(approvalId, decision, undefined, undefined, scope, promote, undefined, waived)
+      // A skipped site continues the run under chat.run.continue, so the held page is released and
+      // the agent reads that the site was skipped. A denial is never consumed, so a refused continue
+      // spends nothing and falls through to the plain resume below.
+      if (runId && skipsSite) {
+        const continued = await runBrowserSkip(runId, approvalId, {
+          continueSkippedRun: (skippedRunId, skippedApprovalId, claimToken, onEvent) =>
+            continueSkippedRun(skippedRunId, skippedApprovalId, claimToken, onEvent, undefined, waived),
+          newClaimToken: () => createId('claim'),
+        })
+        if (continued) return
+      }
       // Recording the decision unblocks execution-core; resume advances the run
       // (the denial, if any, is recorded so the agent routes around the tool).
-      if (runId) await resumeRun(runId)
+      if (runId) await resumeRun(runId, undefined, waived)
     } catch {
       // Re-sync from the source of truth if the decision/resume call failed.
       void refreshTurnApprovals(turnId)
@@ -3250,13 +3758,14 @@ export function useChatController() {
     if (isForeignOriginThread(state.threadId)) return
     const runId = state.turns.find((turn) => turn.id === turnId)?.runId
     invalidateApprovalRefresh(turnId)
-    await decideApproval(approvalId, 'approve', undefined, undefined, 'once', false, edit)
+    const waived = waivedRunConnection({ turnId })
+    await decideApproval(approvalId, 'approve', undefined, undefined, 'once', false, edit, waived)
     setState((s) => {
       const turn = s.turns.find((t) => t.id === turnId)
       if (turn) turn.pendingApprovals = (turn.pendingApprovals ?? []).filter((approval) => approval.id !== approvalId)
     })
     try {
-      if (runId) await resumeRun(runId)
+      if (runId) await resumeRun(runId, undefined, waived)
     } catch {
       void refreshTurnApprovals(turnId)
     }
@@ -3269,11 +3778,13 @@ export function useChatController() {
    */
   const giveBackBrowserRun = async (runId: string, note: string): Promise<void> => {
     if (isForeignOriginThread(state.threadId)) return
+    const waived = waivedRunConnection({ runId })
     const outcome: BrowserGiveBackOutcome = await runBrowserGiveBack(runId, note, {
       listApprovals,
-      decideApproval: (approvalId, decision, reason) => decideApproval(approvalId, decision, reason),
+      decideApproval: (approvalId, decision, reason) =>
+        decideApproval(approvalId, decision, reason, undefined, 'once', false, undefined, waived),
       continueRun: (continuedRunId, approvalId, claimToken, onEvent) =>
-        continueRun(continuedRunId, approvalId, claimToken, onEvent),
+        continueRun(continuedRunId, approvalId, claimToken, onEvent, undefined, waived),
       newClaimToken: () => createId('claim'),
     }).catch((): BrowserGiveBackOutcome => ({ kind: 'decision_failed' }))
     if (outcome.kind === 'decision_failed') {
@@ -3495,6 +4006,9 @@ export function useChatController() {
       else setExecuteArmed(false)
     }
 
+    // EP-8-S8 (D3-356): a role stated on the empty chat waits for the first send of a personal chat. A zero-retention
+    // or temporary send never keeps it, so it is dropped here, before anything is sent.
+    if (options.zdr || isTemporaryThread(state.threadId)) discardPendingRole()
     let activeThreadId = state.threadId ?? createId('thread')
     const provisionalThreadId = activeThreadId
     // Temporary chat locks in at the first send of a thread: once ANY
@@ -3562,6 +4076,7 @@ export function useChatController() {
           model,
           provider: options.provider,
           subscriptionConnectionId: options.subscriptionConnectionId,
+          modelConnectionId: options.modelConnectionId,
           tools,
           attachments: displayAttachments,
         }
@@ -3590,6 +4105,7 @@ export function useChatController() {
       model,
       provider: options.provider,
       subscriptionConnectionId: options.subscriptionConnectionId,
+      modelConnectionId: options.modelConnectionId,
       tools,
       attachments: [],
     }
@@ -3624,11 +4140,13 @@ export function useChatController() {
         ...buildTaskSteps(content, tools, appendUser ? 'submit' : 'regenerate', assistantId, options.actions ?? []),
       ]
     })
-    // The approve-then-execute turn (WS14 S2) is never typed in the composer, so the person's draft stays.
+    // The approve-then-execute turn (WS14 S2) is never typed in the composer, so the person's draft stays; so is
+    // a wide-research retry (EP-2 S9), which names its item by id and never reads the composer, and a deck template
+    // pick from the deck view (EP-5 S7, `keepDraft`).
     // Any other turn clears the composer, but the text stays stored until the send settles, so a failed send
     // can give it back (see the draft hook).
     let settleDraft: ((outcome: ChatDraftOutcome) => void) | undefined
-    if (!options.approvedPlanId) {
+    if (!options.approvedPlanId && !options.wideResearch?.retryOfChildRunId && !options.keepDraft) {
       settleDraft = chatDraft.beginSend()
       setInput('')
     }
@@ -3721,6 +4239,11 @@ export function useChatController() {
       if (!isTemporaryThread(serverThreadId)) setActiveChatThreadId(serverThreadId)
       writeThreadSnapshot(serverThreadId, state.turns, { preview: content, updatedAt: submittedAt })
       if (runId) updateLocalRunHint(serverThreadId, 'running', runId)
+      // EP-8-S8 (D3-356): the first send of a personal chat saves a role stated on the empty chat, once. A Space
+      // chat keeps the role for a later personal chat; a zero-retention or temporary chat never keeps it.
+      if (isNewThread && !options.zdr && !requestedSpaceRef && !isTemporaryThread(serverThreadId)) {
+        flushPendingRole(serverThreadId)
+      }
     }
 
     // A Stop pressed before `connected` has no request id to cancel, and
@@ -3762,14 +4285,15 @@ export function useChatController() {
       // reconciliation below both reach the thread the server created.
       if (serverThreadId && projection.accepts()) adoptServerThread(serverThreadId)
       if (requestId) {
-        void cancelInvocation(requestId).catch((error: unknown) => recordCancelFailure(assistantId, 'invocation', error))
+        const waivedStop = waivedRunConnection({ turnId: assistantId })
+        void cancelInvocation(requestId, waivedStop).catch((error: unknown) => recordCancelFailure(assistantId, 'invocation', error))
       }
       // Every turn with a durable run, not only Work turns: the run cancel is
       // what the gateway honours across its own paths (it now also stops the
       // live stream), so it is sent whatever surface the turn is shown on.
       if (runId && !isTemporaryThread(activeThreadId)) {
         updateLocalRunHint(activeThreadId, 'cancelled', runId)
-        void cancelRun(runId).catch((error: unknown) => recordCancelFailure(assistantId, 'run', error))
+        void cancelRun(runId, undefined, waivedRunConnection({ turnId: assistantId })).catch((error: unknown) => recordCancelFailure(assistantId, 'run', error))
       }
       controller.abort()
       if (projection.accepts()) void reconcileStoppedTurn(activeThreadId, assistantId, runId)
@@ -3797,6 +4321,7 @@ export function useChatController() {
           model,
           provider: options.provider,
           subscriptionConnectionId: options.subscriptionConnectionId,
+          modelConnectionId: options.modelConnectionId,
           // A scoped first turn lets Session Core mint the durable thread ID.
           // The local provisional ID remains only a UI correlation key until
           // `onConnected` replaces it; sending it as a thread ID would make
@@ -3808,9 +4333,14 @@ export function useChatController() {
           sourceScope: options.sourceScope ?? sourceScope(),
           retrievalScope: options.retrievalScope ?? retrievalScope(),
           connectorScope: options.connectorScope,
+          // Wide research (EP-2 S8/S9): set only by `startWideResearch` and `retryWideResearchItem`; the wire builder
+          // sends it on an agentic turn that keeps data and nothing else.
+          wideResearch: options.wideResearch,
           contextRefs: options.contextRefs,
           browserTabRefs: options.browserTabRefs,
           browserRegions: options.browserRegions,
+          // The deck template (EP-5 S7): a skill id the picker chose; the wire builder drops it on a zero-retention turn.
+          deckTemplate: options.deckTemplate,
           agentMode: options.agentMode,
           deepResearch: options.deepResearch,
           researchPhase: options.researchPhase,
@@ -3831,6 +4361,9 @@ export function useChatController() {
             ? { approvedPlanId: options.approvedPlanId }
             : {}),
           effort: options.effort,
+          // The Fast chip's speed (W5-095-b): `standard` unless the chip sent `priority`. Present only while the
+          // chip flag is on, so a build without it sends the body it always did.
+          ...(import.meta.env.VITE_CHAT_SPEED_TIER === 'true' ? { speed: options.speed ?? 'standard' } : {}),
           verbosity: options.tone,
           zdr: options.zdr,
           regenerated: options.regenerated,
@@ -3854,6 +4387,8 @@ export function useChatController() {
           },
           onConnected: (connected) => {
             settleDraft?.('accepted')
+            // The gateway opened the stream, so the connection pill (F-t3-078) need not say "reconnecting" any longer.
+            noteChatStreamOk()
             if (stopBeforeConnect) {
               cancelOnceConnected(connected)
               return
@@ -3972,7 +4507,8 @@ export function useChatController() {
           onUserQuestion: (question) => {
             // WS14 S4. A temporary chat keeps no question, as it keeps no follow-up chips.
             if (isTemporaryThread(state.threadId ?? activeThreadId)) return
-            setPendingQuestion(question)
+            // WS14 S5. The run that asked it: a resume question continues this turn's run once it is answered.
+            setPendingQuestion({ ...question, runId: state.turns.find((turn) => turn.id === assistantId)?.runId })
           },
           onConnectorSuggestion: (event) => {
             // EP-10 S8: one card per turn. A temporary chat never shows one (the gateway never offers the tool there).
@@ -4292,7 +4828,9 @@ export function useChatController() {
     return sendable
   }
 
-  const handleComposerSubmit = async (payload: DashboardComposerSubmitPayload) => {
+  // `deckTemplate` is the skill id of the deck template this send applies (EP-5 S7). The page takes the pick, so only a
+  // send the page makes carries one; a send without it is unchanged.
+  const handleComposerSubmit = async (payload: DashboardComposerSubmitPayload, deckTemplate?: string) => {
     if (isForeignOriginThread(state.threadId)) return
     // Before the launch motion and before any model-bound step: a refusal throws, the composer keeps the draft.
     const browserRegions = assertComposerRegionsSendable(payload)
@@ -4329,6 +4867,7 @@ export function useChatController() {
       browserTabRefs,
       // QF-9: the composer clears the sent regions once this submit resolves; a refused send keeps them.
       browserRegions,
+      deckTemplate,
       agentMode: payload.agentMode,
       deepResearch: payload.tools.includes('research'),
       // EP-2 S5: with the plan turn on, a composer deep research first asks for the editable plan.
@@ -4341,8 +4880,10 @@ export function useChatController() {
       actions,
       provider: payload.provider,
       subscriptionConnectionId: payload.subscriptionConnectionId,
+      modelConnectionId: payload.modelConnectionId,
       zdr: payload.zdr,
       effort: payload.effort,
+      speed: payload.speed,
       tone: payload.tone,
       // Carried only when the selected catalog model attests a tier; the wire
       // body omits it otherwise (see buildChatWireBody).
@@ -4352,6 +4893,18 @@ export function useChatController() {
       // the awaits above. It is only a request: `sendContent` decides.
       executeGranted: executeArmed(),
     })
+  }
+
+  /**
+   * A deck template pick from the deck view (EP-5 S7, "Bytt mal"): a turn of its own that names the template and carries its
+   * skill id. `null` is Standard, the neutral theme, and carries none. The turn is not typed in the composer, so the draft
+   * stays (`keepDraft`). The page checks the project audience first; the gateway checks the template again.
+   */
+  const applyDeckTemplate = (template: DeckTemplate | null) => {
+    const text = template
+      ? i18n.tr(`Bruk malen ${template.name}`, `Use the template ${template.name}`)
+      : i18n.tr('Bruk standardmalen', 'Use the standard template')
+    return sendContent(text, undefined, { deckTemplate: template?.skillId, keepDraft: true })
   }
 
   /** Materialize composer blob URLs before DashboardComposer revokes them. */
@@ -4408,7 +4961,7 @@ export function useChatController() {
     deferStopUntilConnected = undefined
     if (!deferred) abortController?.abort()
     if (requestId) {
-      void cancelInvocation(requestId).catch((error: unknown) => recordCancelFailure(stoppedTurnId, 'invocation', error))
+      void cancelInvocation(requestId, waivedRunConnection({ turnId: stoppedTurnId, runId: durableRunId ?? undefined })).catch((error: unknown) => recordCancelFailure(stoppedTurnId, 'invocation', error))
     }
     setState((s) => {
       for (const turn of s.turns) {
@@ -4431,7 +4984,7 @@ export function useChatController() {
     if (state.threadId) writeThreadSnapshot(state.threadId, state.turns)
     if (canCancelDurableRun && durableRunId) {
       updateLocalRunHint(durableThreadId ?? '', 'cancelled', durableRunId)
-      void cancelRun(durableRunId)
+      void cancelRun(durableRunId, undefined, waivedRunConnection({ turnId: stoppedTurnId, runId: durableRunId }))
         .then((result) => {
           if (state.threadId !== durableThreadId || isTemporaryThread(state.threadId)) return
           appendUiEvent({
@@ -4454,6 +5007,17 @@ export function useChatController() {
     if (!deferred && stoppedTurnId && durableThreadId) {
       void reconcileStoppedTurn(durableThreadId, stoppedTurnId, stoppedRunId)
     }
+  }
+
+  /**
+   * The keyboard stop (F-t3-077, double Escape). Stops the run the caller names, and only while that run is still
+   * the one streaming, so a press made for an earlier run cannot cancel a later one. It is handleStop, so the run
+   * goes through cancelRun, and a refused cancel is recorded as it is for the Stop button. False when nothing stops.
+   */
+  const stopLiveRun = (expectedRunId: string): boolean => {
+    if (!expectedRunId || isForeignOriginThread(state.threadId) || streamingRunId() !== expectedRunId) return false
+    handleStop()
+    return true
   }
 
   // One place, reactive, so no terminal path can forget it: the moment the
@@ -4585,6 +5149,14 @@ export function useChatController() {
           if (turn) turn.reasoning = (turn.reasoning ?? '') + delta
         })
       },
+      // WS14 S5. The run paused for its owner's answer: the turn learns its run, the thread's hint reads the pause
+      // as active (as an approval pause does), and a card that arrived without its run id takes this one.
+      onAwaitingInput: ({ runId }: Parameters<NonNullable<ChatStreamHandlers['onAwaitingInput']>>[0]) => {
+        setTurnRunId(assistantId, runId)
+        updateLocalRunHint(threadId, 'awaiting_input', runId)
+        const waiting = pendingQuestion()
+        if (waiting && !waiting.runId) setPendingQuestion({ ...waiting, runId })
+      },
       onStep: (event: Parameters<NonNullable<ChatStreamHandlers['onStep']>>[0]) => {
         const step = normalizeStep(event, assistantId, turnTitle)
         if (step) upsertTaskStep(step)
@@ -4670,6 +5242,8 @@ export function useChatController() {
             // Server-stamped or nothing: a usage frame without the stamp
             // leaves the turn without a processing line, never a guessed one.
             turn.servedBy = usage.servedBy
+            // Why the gateway routed the answer where it did (W5-073-b). A frame that states none leaves the turn's own as it was.
+            if (usage.routingDecision) turn.routingDecision = usage.routingDecision
             turn.confidence = usage.confidence
             // The turn's final total: it replaces every running total the progress frames gave.
             turn.meter = applyUsageTotal(turn.meter, usage)
@@ -4681,7 +5255,10 @@ export function useChatController() {
       onUsageProgress: (progress: Parameters<NonNullable<ChatStreamHandlers['onUsageProgress']>>[0]) => {
         setState((s) => {
           const turn = s.turns.find((t) => t.id === assistantId)
-          if (turn) turn.meter = applyUsageProgress(turn.meter, progress)
+          if (!turn) return
+          turn.meter = applyUsageProgress(turn.meter, progress)
+          // The answer's own progress frame may state the route too (W5-073-b); it is the same decision the usage frame states.
+          if (progress.routingDecision) turn.routingDecision = progress.routingDecision
         })
       },
       onTurnTiming: (timing: Parameters<NonNullable<ChatStreamHandlers['onTurnTiming']>>[0]) => {
@@ -4970,6 +5547,22 @@ export function useChatController() {
   })
 
   /**
+   * EP-8-S8 (D3-356): saves the role the person stated on the empty chat as a memory on the thread that the first send
+   * just created. The role is taken once, so a later call finds nothing. A save that fails is said in the feedback notice,
+   * with the same words the card uses; the role is not kept for another try.
+   */
+  const flushPendingRole = (threadId: string) => {
+    const role = takePendingRole()
+    if (!role) return
+    void rememberMemory(threadId, i18n.tr(`Rolle: ${role}`, `Role: ${role}`)).catch(() => {
+      showFeedbackNotice(i18n.tr(
+        'Svarene dine er lagret. Rollen din ble ikke lagret; du kan legge den inn igjen senere.',
+        'Your answers are saved. Your role was not saved; you can add it again later.',
+      ))
+    })
+  }
+
+  /**
    * Rate one turn. The failure path is the point of this function: the POST used
    * to be fired with `.catch(() => undefined)`, so a rejected rating (every
    * rating, until the contract was fixed) left the thumb lit while nothing was
@@ -5217,6 +5810,8 @@ export function useChatController() {
       provider: lastUser.provider,
       // Looked up again for a subscription turn: a reconnect replaces the id.
       subscriptionConnectionId,
+      // A customer-gateway turn stays on its own gateway (W4-BYO-6): kept from the turn, never looked up.
+      modelConnectionId: lastUser.modelConnectionId,
       // Regenerating within an already-temporary thread must keep sending
       // ZDR — the thread-level lock, not the (possibly since-toggled)
       // composer state, decides.
@@ -5345,6 +5940,7 @@ export function useChatController() {
       tools: user.tools,
       provider: route.provider,
       subscriptionConnectionId,
+      modelConnectionId: user.modelConnectionId ?? assistant.modelConnectionId,
       zdr: isTemporaryThread(state.threadId),
     })
   }
@@ -5431,6 +6027,7 @@ export function useChatController() {
       tools: original.tools,
       provider: original.provider,
       subscriptionConnectionId,
+      modelConnectionId: original.modelConnectionId,
       // Same thread-level ZDR lock as `regenerateLatest`.
       zdr: isTemporaryThread(state.threadId),
       // The edit happened in the composer and never reached the server as a
@@ -5604,7 +6201,37 @@ export function useChatController() {
     }
   }
 
-  const updateTaskStep = (id: string, update: (step: AgentTaskStep) => AgentTaskStep) => {
+  /**
+   * Moves a server-versioned thread to another version of a message (WS17 S9). `messageId` is the sibling the
+   * switcher chose. The server picks the new active path, so the thread is read back rather than guessed. A
+   * temporary or Space thread keeps client-only versions and never reaches the server switch.
+   */
+  const switchServerVersion = async (messageId: string) => {
+    const threadId = state.threadId
+    if (isStreaming() || !threadId || !usesServerVersions(threadId)) return
+    const turns = snapshot(state.turns)
+    const shown = turns.find((turn) => turn.version?.siblings.includes(messageId))
+    const index = shown?.version?.siblings.indexOf(messageId) ?? -1
+    if (index < 0) return
+    const leafTurn = turns.find((turn) => turn.id === activeLeafId(turns))
+    const leaf = leafTurn ? serverIdOf(leafTurn) : undefined
+    if (!leaf) {
+      refuseUnsavedVersionTarget()
+      return
+    }
+    try {
+      await switchChatVersion(threadId, messageId, index, leaf)
+    } catch (error) {
+      reportBranchMoveFailure(error, threadId)
+      return
+    }
+    if (state.threadId !== threadId) return
+    // A rewind offer names the old path's leaf, so it ends with the move.
+    setRewindUndoState(null)
+    await loadThread(threadId)
+  }
+
+  const updateTaskStep =(id: string, update: (step: AgentTaskStep) => AgentTaskStep) => {
     setState((s) => {
       s.taskSteps = s.taskSteps.map((step) => (
         step.id === id ? update(step) : step
@@ -5680,6 +6307,9 @@ export function useChatController() {
     giveBackBrowserRun,
     handleComposerSubmit,
     handleStop,
+    // F-t3-077: the double-Escape stop. The page reads the streaming run at the press and stops that run only.
+    streamingRunId,
+    stopLiveRun,
     copyTurn,
     submitTurnFeedback,
     feedbackNotice,
@@ -5696,6 +6326,7 @@ export function useChatController() {
     rewindOfferFor,
     rewindTo,
     undoRewind,
+    switchServerVersion,
     startNewChat,
     state,
     activeTab,
@@ -5710,6 +6341,8 @@ export function useChatController() {
     imageMode,
     setImageMode,
     planMode,
+    speedTier,
+    setSpeedTier,
     approveTurnPlan,
     pendingQuestion,
     parkedTurnId,
@@ -5720,6 +6353,13 @@ export function useChatController() {
     pendingResearchPlan: () => pendingResearchPlan()?.plan,
     startResearchPlan,
     cancelResearchPlan,
+    // EP-2 S8/S9: the composer's "Bred forskning" entry and a wide-research card's retry. `wideResearchRoute` is
+    // undefined while the entry must not be offered (a turn streams, a temporary chat, the subscription route).
+    wideResearchRoute,
+    startWideResearch,
+    retryWideResearchItem,
+    // EP-5 S7: the deck view's template pick (`applyDeckTemplate`).
+    applyDeckTemplate,
     // EP-7 S1: the thread goal tray and its actions. `goalEntryAvailable` offers "Set a goal" only on a
     // thread that may hold one, while the server serves goals.
     threadGoal,
@@ -5729,9 +6369,14 @@ export function useChatController() {
     saveGoal,
     setGoalPaused,
     clearGoal,
+    // EP-7 S3: Mark done and Reopen, the person's own override of the judge.
+    markGoalDone,
+    reopenGoal,
     continueGoal,
     // EP-7 S4: "Keep going" on the goal bar, its countdown and Stop.
     goalAutoContinue,
+    // EP-7 S6: "Keep working while away" on the goal bar: the start, the goal's schedules and their runs.
+    goalAway,
     rejectTurnPlan,
     planApprovalPending,
     planApprovalError,

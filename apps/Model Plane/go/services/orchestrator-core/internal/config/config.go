@@ -58,6 +58,10 @@ type Config struct {
 	// ServicePrincipalKey is that principal's secret (`x-service-api-key`,
 	// ORCHESTRATOR_CORE_SERVICE_API_KEY). Never logged.
 	ServicePrincipalKey string
+	// ModelGatewayURL is model-gateway's HTTP base URL, e.g. http://model-gateway:8080
+	// (MODEL_GATEWAY_URL). The goal judge (EP-7 S6) calls its internal judge route there.
+	// Empty leaves the judge unconfigured.
+	ModelGatewayURL string
 
 	// ControlUserCoreURL is the internal Control endpoint used only by the
 	// scheduled-run activity to obtain a fresh effect-time decision.
@@ -97,6 +101,7 @@ func Load() Config {
 		AuthCoreURL:         strings.TrimSpace(os.Getenv("AUTH_CORE_URL")),
 		ServicePrincipalID:  strings.TrimSpace(os.Getenv("ORCHESTRATOR_CORE_SERVICE_ID")),
 		ServicePrincipalKey: strings.TrimSpace(os.Getenv("ORCHESTRATOR_CORE_SERVICE_API_KEY")),
+		ModelGatewayURL:     strings.TrimSpace(os.Getenv("MODEL_GATEWAY_URL")),
 
 		ControlUserCoreURL:                   strings.TrimSpace(os.Getenv("CONTROL_USER_CORE_URL")),
 		ControlScheduleExecutionServiceToken: strings.TrimSpace(os.Getenv("ORCHESTRATOR_CORE_CONTROL_SCHEDULE_SERVICE_TOKEN")),

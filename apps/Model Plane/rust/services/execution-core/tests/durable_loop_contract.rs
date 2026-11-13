@@ -445,12 +445,15 @@ fn continue_route_violations(gateway_sources: &[(String, String)]) -> Vec<String
     violations
 }
 
-/// The gateway builds one `AgentResume`, in `continue_resume`, and nowhere builds one
-/// another way (`AgentResume::default()`, a second literal).
+/// The gateway builds its `AgentResume` in exactly two builders, one per form of `/continue`: the
+/// approval's and the park's `continue_resume`, and a question's answer `question_resume` (WS14 S5).
+/// Each holds one literal, in sse.rs, and nothing builds one another way (`AgentResume::default()`,
+/// a path call, a third literal, a literal in another file).
 fn single_resume_violations(gateway_sources: &[(String, String)]) -> Vec<String> {
+    const BUILDERS: [&str; 2] = ["continue_resume", "question_resume"];
     let literal = Regex::new(r"\bAgentResume\s*\{").expect("pattern");
     let path_call = Regex::new(r"\bAgentResume\s*::").expect("pattern");
-    let mut literals = Vec::new();
+    let mut built: Vec<&str> = Vec::new();
     let mut violations = Vec::new();
     for (path, source) in gateway_sources {
         let code = Code::new(source).without_tests();
@@ -459,8 +462,18 @@ fn single_resume_violations(gateway_sources: &[(String, String)]) -> Vec<String>
             let before = code.text[..found.start()]
                 .trim_end_matches(|c: char| is_ident(c) || c == ':')
                 .trim_end();
-            if !before.ends_with("->") {
-                literals.push(path.clone());
+            if before.ends_with("->") {
+                continue;
+            }
+            let home = BUILDERS.iter().copied().find(|name| {
+                code.fn_span(name)
+                    .is_some_and(|(open, close)| open < found.start() && found.start() < close)
+            });
+            match home {
+                Some(name) if path.replace('\\', "/").ends_with("/sse.rs") => built.push(name),
+                _ => violations.push(format!(
+                    "{path} builds an AgentResume outside the gateway's two builders (continue_resume and question_resume in sse.rs)"
+                )),
             }
         }
         if path_call.is_match(&code.text) {
@@ -469,16 +482,13 @@ fn single_resume_violations(gateway_sources: &[(String, String)]) -> Vec<String>
             ));
         }
     }
-    if literals.len() != 1 {
-        violations.push(format!(
-            "expected exactly one production AgentResume literal in the gateway, found {}: {literals:?}",
-            literals.len()
-        ));
-    } else if !literals[0].ends_with("sse.rs") {
-        violations.push(format!(
-            "the one AgentResume literal is in {}, not sse.rs",
-            literals[0]
-        ));
+    for name in BUILDERS {
+        let count = built.iter().filter(|builder| **builder == name).count();
+        if count != 1 {
+            violations.push(format!(
+                "expected exactly one production AgentResume literal in `{name}`, found {count}"
+            ));
+        }
     }
     violations
 }
@@ -587,12 +597,21 @@ fn builder_and_validator_violations(
     if validator.contains("segment_no") {
         violations.push("enforce_resume reads segment_no: a gateway that sends none, or an old one that sends 2, would be refused".into());
     }
-    for (name, code) in [("grpc.rs", &grpc), ("agent.rs", &agent)] {
-        if code.text.contains(".segment_no") {
-            violations.push(format!(
-                "{name} reads a client-supplied .segment_no; the executor derives it from the paused step"
-            ));
-        }
+    if grpc.text.contains(".segment_no") {
+        violations.push(
+            "grpc.rs reads a client-supplied .segment_no; the executor derives it from the paused step"
+                .into(),
+        );
+    }
+    // agent.rs reads two segments of its own and no other: the claim response's (`response.segment_no`,
+    // the row the claim took, in `begin_question_continuation`) and the claimed fold's
+    // (`claimed.fold.segment_no`, the segment the resumed loop writes under). Any other read is the client's.
+    let own = Regex::new(r"(?:\bresponse|\bclaimed\s*\.\s*fold)\s*\.\s*segment_no\b").expect("pattern");
+    if agent.text.matches(".segment_no").count() != 2 || own.find_iter(&agent.text).count() != 2 {
+        violations.push(
+            "agent.rs reads a client-supplied .segment_no; the executor derives it from the paused step"
+                .into(),
+        );
     }
     violations
 }
@@ -1267,14 +1286,16 @@ fn in_place_writer_violations(
 /// The executor derives the segment from the step that paused and NEVER reads the client's
 /// `segment_no` (the gateway sends 0 and an old gateway sends 2: both must work).
 ///
-/// The reads the file is allowed are an EXACT whitelist, by expression and by count, not by the
-/// name a receiver happens to have: `fold.segment_no` twice (the fold the claim handed back, in
-/// `check_fold`) and `response.segment_no` once (the claim response, in `restore_in_place_with`).
-/// A client's resume renamed to `fold` or `response` is a fourth or third read and fails the
-/// count. Everything else that names `segment_no` is refused: another receiver, a bare
-/// `segment_no` (destructuring, a binding), an `AgentResume { .. }` pattern or literal, and any
-/// field of the client's resume other than the two the claim needs (`claim_token`,
-/// `action_fingerprint`). `resumed_step_id`'s own parameter is the one bare use.
+/// The reads the file is allowed are an EXACT whitelist, by function and by count, not by the name a
+/// receiver happens to have: `fold.segment_no` once in each of `row_segment_is_the_folds`, `check_fold`
+/// and `restore_input` (the claimed fold's own segment), and `response.segment_no` once in
+/// `restore_in_place_with` (the claim response). A client's resume renamed to `fold` or `response` is
+/// read outside those functions and is refused there. Everything else that names `segment_no` is
+/// refused: another receiver, a bare `segment_no` (destructuring, a binding), an `AgentResume { .. }`
+/// pattern or literal, and any field of the client's resume other than the ones the claim needs
+/// (`claim_token`, `action_fingerprint`), and `question_id` and `answer_json`, which only
+/// `names_question` reads (it classifies a continuation as a question and applies nothing from it).
+/// `resumed_step_id`'s own parameter is the one bare use.
 fn resume_module_segment_violations(executor_resume: &str) -> Vec<String> {
     let code = Code::new(executor_resume).without_tests();
     let mut violations = Vec::new();
@@ -1286,10 +1307,27 @@ fn resume_module_segment_violations(executor_resume: &str) -> Vec<String> {
         violations.push("resume.rs destructures or builds an AgentResume by pattern: it reads the client-supplied segment_no (or could) without a `.segment_no` to find; take only `resume.claim_token` and `resume.action_fingerprint`".into());
     }
 
-    // Every field read of an argument named `resume` (the one name the client's resume has).
+    // Whether a position of the file is inside the body of `name`.
+    let within = |name: &str, at: usize| {
+        code.fn_span(name)
+            .is_some_and(|(open, close)| open < at && at < close)
+    };
+    // Every field read of an argument named `resume` (the one name the client's resume has). The
+    // question form reads `question_id` and `answer_json` in one place only, `names_question`, a shape
+    // check; `is_question_resume` borrows the option (`req.resume.as_ref()`), which reads no field.
     let field = Regex::new(r"\bresume\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)").expect("pattern");
     for captured in field.captures_iter(&code.text) {
-        if !matches!(&captured[1], "claim_token" | "action_fingerprint") {
+        let whole = captured.get(0).expect("the whole match");
+        let allowed = match &captured[1] {
+            "claim_token" | "action_fingerprint" => true,
+            "question_id" | "answer_json" => within("names_question", whole.start()),
+            "as_ref" => {
+                within("is_question_resume", whole.start())
+                    && code.text[whole.end()..].trim_start().starts_with('(')
+            }
+            _ => false,
+        };
+        if !allowed {
             violations.push(format!(
                 "resume.rs reads `resume.{}`: only `claim_token` and `action_fingerprint` are read from the client's resume; the executor derives everything else from the consume",
                 &captured[1]
@@ -1297,15 +1335,15 @@ fn resume_module_segment_violations(executor_resume: &str) -> Vec<String> {
         }
     }
 
-    // Every `segment_no` there is, with the receiver it is read from, if any.
+    // Every `segment_no` there is, with the receiver it is read from, if any, and where it is read.
     let token = Regex::new(r"(?:\b([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*)?\bsegment_no\b")
         .expect("pattern");
-    let (mut folds, mut responses) = (0, 0);
+    let (mut folds, mut responses): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
     for captured in token.captures_iter(&code.text) {
         let whole = captured.get(0).expect("the whole match");
         match captured.get(1).map(|receiver| receiver.as_str()) {
-            Some("fold") => folds += 1,
-            Some("response") => responses += 1,
+            Some("fold") => folds.push(whole.start()),
+            Some("response") => responses.push(whole.start()),
             Some(receiver) => violations.push(format!(
                 "resume.rs reads `{receiver}.segment_no`: only the fold's own and the claim response's may be read; the executor derives the segment from the paused step and never reads the client-supplied AgentResume.segment_no"
             )),
@@ -1321,12 +1359,31 @@ fn resume_module_segment_violations(executor_resume: &str) -> Vec<String> {
             }
         }
     }
-    if folds + responses == 0 {
+    if folds.len() + responses.len() == 0 {
         violations.push("the scan found no fold or response `.segment_no` in resume.rs: it is not reading the file the guard exists for".into());
-    } else if (folds, responses) != (2, 1) {
-        violations.push(format!(
-            "resume.rs reads `fold.segment_no` {folds} times and `response.segment_no` {responses} times; the whitelist is exactly 2 and 1 (check_fold's two reads of the claimed fold, and the claim response in restore_in_place_with): a new read is a read of a client-supplied `.segment_no` until this guard says otherwise"
-        ));
+    }
+    let fold_homes: [&str; 3] = ["row_segment_is_the_folds", "check_fold", "restore_input"];
+    let response_homes: [&str; 1] = ["restore_in_place_with"];
+    for (read, sites, homes) in [
+        ("fold.segment_no", &folds, &fold_homes[..]),
+        ("response.segment_no", &responses, &response_homes[..]),
+    ] {
+        let mut in_home = vec![0_usize; homes.len()];
+        for at in sites {
+            match homes.iter().position(|name| within(*name, *at)) {
+                Some(index) => in_home[index] += 1,
+                None => violations.push(format!(
+                    "resume.rs reads `{read}` outside {homes:?}: only the claimed fold's segment and the claim response's may be read, each where this guard whitelists it; a read of a client-supplied `.segment_no` is refused"
+                )),
+            }
+        }
+        for (name, count) in homes.iter().zip(&in_home) {
+            if *count != 1 {
+                violations.push(format!(
+                    "resume.rs reads `{read}` {count} times in `{name}`; the whitelist is exactly once there: a new read is a read of a client-supplied `.segment_no` until this guard says otherwise"
+                ));
+            }
+        }
     }
     violations
 }
@@ -2934,9 +2991,19 @@ fn spend_gate_violations(gateway_sse: &str) -> Vec<String> {
         stated.push(if spends.len() == 1 { spends[0].clone() } else { format!("{spends:?}") });
     }
     stated.sort();
-    if stated != ["ApprovalSpend::NotSpent", "approval_spend_for(resume_enabled)"] {
+    // An approval continuation spends it: `approval_spend_for(resume_enabled)`. Two continuations spend
+    // nothing and say so, `approval_spend_for(false)`: the skipped site (its denied approval stays as it
+    // is) and the question (it spends no approval; the answer is spent by its own consume).
+    if stated
+        != [
+            "ApprovalSpend::NotSpent",
+            "approval_spend_for(false)",
+            "approval_spend_for(false)",
+            "approval_spend_for(resume_enabled)",
+        ]
+    {
         violations.push(format!(
-            "the callers of agentic_run_stream state their spend as {stated:?}, expected an ordinary turn's `ApprovalSpend::NotSpent` and a continuation's `approval_spend_for(resume_enabled)`"
+            "the callers of agentic_run_stream state their spend as {stated:?}, expected an ordinary turn's `ApprovalSpend::NotSpent`, the skipped site's and the question's `approval_spend_for(false)`, and a continuation's `approval_spend_for(resume_enabled)`"
         ));
     }
 
@@ -3682,7 +3749,9 @@ fn after_answer_frame_violations(gateway_sse: &str, subscription_failure: &str) 
 ///   `begin_continuation`, `restore_continuation`, `run_rounds`, `select_stage`,
 ///   `in_place_scope`, and `Refusal` in resume.rs) is in the list; `Refusal`'s own words are in
 ///   the frame list, and all but the zero-retention one (whose status is the catalogue's) in
-///   the message list. `internal(..)` statuses are not refusals: they classify as unknown;
+///   the message list. A word of the question form (WS14 S5) is in the question form's own lists,
+///   `CONTINUE_QUESTION_FRAME_REFUSALS` and `CONTINUE_QUESTION_EXECUTOR_TOKENS`, and in neither
+///   of the approval's. `internal(..)` statuses are not refusals: they classify as unknown;
 /// * every token of the list is a quoted word in the executor's or session-core's production
 ///   code (`produced_elsewhere`: their comment-free production text, joined);
 /// * the frame list is exactly the message list, the two derived codes
@@ -3792,6 +3861,31 @@ fn continue_vocabulary_violations(
             }
         }
     }
+    // The question form (WS14 S5) has its own closed lists. Its refusals reach the client through them
+    // (`classify_question_dispatch_failure`), never through the approval and park lists, whose frames
+    // the approval's readers take. A question word of `impl Refusal` is named by these, and by nothing else.
+    let question_tokens = const_words(&sse, "CONTINUE_QUESTION_EXECUTOR_TOKENS");
+    let question_frames = const_words(&sse, "CONTINUE_QUESTION_FRAME_REFUSALS");
+    if question_tokens.is_empty() || question_frames.is_empty() {
+        violations.push(
+            "sse.rs has no CONTINUE_QUESTION_EXECUTOR_TOKENS or CONTINUE_QUESTION_FRAME_REFUSALS: re-point this guard"
+                .into(),
+        );
+    }
+    let question_token_set: BTreeSet<&str> = question_tokens.iter().map(String::as_str).collect();
+    let question_frame_set: BTreeSet<&str> = question_frames.iter().map(String::as_str).collect();
+    // The six words only the question form refuses with (WS14 S5): named by its lists, by none of the
+    // approval's and park's. Every other word of `impl Refusal` is one the approval or the park can send
+    // too, so the approval's lists must name it. Some question words are in those lists as well
+    // (`resume_forbidden`): the question list never excuses a word's absence from the approval's.
+    const QUESTION_ONLY: [&str; 6] = [
+        "question_answer_released",
+        "question_resume_unavailable",
+        "question_not_answered",
+        "question_expired",
+        "question_not_found",
+        "question_not_resumable",
+    ];
     match block_span(&resume, r"\bimpl\s+Refusal\s*\{") {
         None => violations.push("resume.rs has no `impl Refusal`".into()),
         Some((open, close)) => {
@@ -3800,15 +3894,30 @@ fn continue_vocabulary_violations(
                 violations.push("resume.rs `impl Refusal` names no token: re-point this guard".into());
             }
             for word in words.iter().filter(|word| !word.is_empty()) {
-                if !frame_set.contains(word.as_str()) {
+                let question_only = QUESTION_ONLY.contains(&word.as_str());
+                if question_only {
+                    if !question_frame_set.contains(word.as_str()) {
+                        violations.push(format!(
+                            "resume.rs Refusal names `{word}`, which CONTINUE_QUESTION_FRAME_REFUSALS does not list"
+                        ));
+                    }
+                } else if !frame_set.contains(word.as_str()) {
                     violations.push(format!(
                         "resume.rs Refusal names `{word}`, which CONTINUE_FRAME_REFUSALS does not list"
                     ));
                 }
-                if word != "durable_mutation_forbidden" && !token_set.contains(word.as_str()) {
-                    violations.push(format!(
-                        "resume.rs Refusal sends `{word}` as a status message, which CONTINUE_EXECUTOR_MESSAGE_TOKENS does not list"
-                    ));
+                if word != "durable_mutation_forbidden" {
+                    if question_only {
+                        if !question_token_set.contains(word.as_str()) {
+                            violations.push(format!(
+                                "resume.rs Refusal sends `{word}` as a status message, which CONTINUE_QUESTION_EXECUTOR_TOKENS does not list"
+                            ));
+                        }
+                    } else if !token_set.contains(word.as_str()) {
+                        violations.push(format!(
+                            "resume.rs Refusal sends `{word}` as a status message, which CONTINUE_EXECUTOR_MESSAGE_TOKENS does not list"
+                        ));
+                    }
                 }
             }
         }
@@ -3927,8 +4036,9 @@ fn resume_pair_violations(executor_sources: &[(String, String)]) -> Vec<String> 
 }
 
 /// The gateway reads the in-place resume switch through `mp_contracts::loop_fold::loop_resume_enabled`
-/// ONCE, in `continue_run`, and through nothing else; and because it reads it, compose sets it
-/// for model-gateway (a `switch_table()` row for the service), as it does for the executor.
+/// once in `continue_run` (a continuation's own read) and once in `ask_resume_on` (the question form's
+/// gate, which takes effect only with the switch on), and through nothing else; and because it reads it,
+/// compose sets it for model-gateway (a `switch_table()` row for the service), as it does for the executor.
 fn gateway_resume_reader_violations(
     gateway_sources: &[(String, String)],
     table: &[(&'static str, String, &'static str)],
@@ -3949,18 +4059,34 @@ fn gateway_resume_reader_violations(
             .expect("pattern")
             .find_iter(&code.text)
         {
-            let in_continue_run = code
-                .fn_span("continue_run")
-                .is_some_and(|(open, close)| open < found.start() && found.start() < close);
-            readers.push((path.clone(), in_continue_run));
+            // Where the read is: `continue_run` (a continuation's own read), `ask_resume_on` (the question
+            // form's gate), or nowhere this guard allows.
+            let within = |name: &str| {
+                code.fn_span(name)
+                    .is_some_and(|(open, close)| open < found.start() && found.start() < close)
+            };
+            let home = if within("continue_run") {
+                "continue_run"
+            } else if within("ask_resume_on") {
+                "ask_resume_on"
+            } else {
+                "elsewhere"
+            };
+            readers.push((path.clone(), home));
         }
     }
-    match readers.as_slice() {
-        [(path, true)] if path.replace('\\', "/").ends_with("/sse.rs") => {}
-        other => violations.push(format!(
-            "the gateway must call loop_resume_enabled() exactly once, inside sse.rs continue_run; it calls it {} times ({other:?})",
-            other.len()
-        )),
+    // Exactly two reads, both in sse.rs: one in `continue_run` and one in `ask_resume_on`. A third
+    // reader, or a read anywhere else, is a second opinion on the switch.
+    let mut homes: Vec<&str> = readers.iter().map(|(_, home)| *home).collect();
+    homes.sort_unstable();
+    let in_sse = readers
+        .iter()
+        .all(|(path, _)| path.replace('\\', "/").ends_with("/sse.rs"));
+    if !(in_sse && homes == ["ask_resume_on", "continue_run"]) {
+        violations.push(format!(
+            "the gateway must call loop_resume_enabled() only in sse.rs continue_run and in ask_resume_on (the question form's gate); it calls it {} times ({readers:?})",
+            readers.len()
+        ));
     }
     if !readers.is_empty() {
         for service in ["model-gateway", "execution-core"] {
@@ -4160,27 +4286,38 @@ fn writer_gate_argument_violations(executor_loop: &str, executor_fold: &str) -> 
                 .iter()
                 .map(|argument| argument.split_whitespace().collect::<String>())
                 .collect();
-            let expected = [
-                ("depth", 3, "ctx.depth", "a delegated child must never write folds"),
+            // The release flag is a release holder's, or a skipped site's (EP-1 S2): that continuation holds
+            // no release, but its fold writer is off the same way, as a resumed segment's is.
+            let expected: [(&str, usize, &[&str], &str); 3] = [
+                ("depth", 3, &["ctx.depth"][..], "a delegated child must never write folds"),
                 (
                     "release flag",
                     4,
-                    "ctx.release.is_some()",
+                    &["ctx.release.is_some()", "ctx.release.is_some()||skipped_site"][..],
                     "a release holder is a resumed segment",
                 ),
-                ("in-place flag", 5, "in_place", "an in-place resume is not a stage-1 segment"),
+                (
+                    "in-place flag",
+                    5,
+                    &["in_place"][..],
+                    "an in-place resume is not a stage-1 segment",
+                ),
             ];
             if arguments.len() != 6 {
                 violations.push(format!(
-                    "run_rounds calls writer_gate with {} arguments, expected (req, &ctx.route, ctx.effect_ledger, ctx.depth, ctx.release.is_some(), in_place)",
+                    "run_rounds calls writer_gate with {} arguments, expected (req, &ctx.route, ctx.effect_ledger, ctx.depth, ctx.release.is_some() || skipped_site, in_place)",
                     arguments.len()
                 ));
             } else {
                 for (name, index, want, why) in expected {
-                    if arguments[index] != want {
+                    if !want.contains(&arguments[index].as_str()) {
                         violations.push(format!(
-                            "run_rounds passes `{}` as the writer gate's {name}, expected `{want}`: {why}",
-                            arguments[index]
+                            "run_rounds passes `{}` as the writer gate's {name}, expected {}: {why}",
+                            arguments[index],
+                            want.iter()
+                                .map(|word| format!("`{word}`"))
+                                .collect::<Vec<_>>()
+                                .join(" or ")
                         ));
                     }
                 }
@@ -4209,48 +4346,55 @@ fn writer_gate_argument_violations(executor_loop: &str, executor_fold: &str) -> 
         .filter(|found| !agent.skel[..found.start()].trim_end().ends_with("fn"))
         .map(|found| found.end() - 1)
         .collect();
-    if every_call.len() != 2 {
+    // Three production calls: run_rounds (the loop's gate), restore_continuation (the in-place resume's)
+    // and begin_question_continuation (the question continuation's): the same resumed gate, built the same
+    // way, for the root run resumed in place, the writer a question continuation seeds.
+    if every_call.len() != 3 {
         violations.push(format!(
-            "agent.rs calls writer_gate( {} times in production code, expected exactly two: run_rounds (the loop's gate) and restore_continuation (the in-place resume's gate)",
+            "agent.rs calls writer_gate( {} times in production code, expected exactly three: run_rounds (the loop's gate), restore_continuation (the in-place resume's gate) and begin_question_continuation (the question continuation's gate)",
             every_call.len()
         ));
     }
-    match every_call.iter().find(|paren| {
-        agent
-            .fn_span("restore_continuation")
-            .is_some_and(|(open, close)| open < **paren && **paren < close)
-    }) {
-        None => violations.push(
-            "restore_continuation no longer calls writer_gate(: the in-place resume's gate moved, re-point this guard"
-                .into(),
-        ),
-        Some(paren) => {
-            let arguments: Vec<String> = call_arguments(&agent, *paren)
-                .iter()
-                .map(|argument| argument.split_whitespace().collect::<String>())
-                .collect();
-            let expected = [
-                ("request", "req"),
-                ("route", "route"),
-                ("effect ledger", "runtime_loop::effect::ledger_enabled()"),
-                ("depth", "0"),
-                ("release flag", "true"),
-                ("in-place flag", "true"),
-            ];
-            if arguments.len() == expected.len() {
-                for (index, (name, want)) in expected.iter().enumerate() {
-                    if arguments[index] != *want {
-                        violations.push(format!(
-                            "restore_continuation passes `{}` as the in-place resume gate's {name}, expected `{want}`: only the root run is resumed, and an in-place resume is the resumed segment but not a stage-1 one",
-                            arguments[index]
-                        ));
+    for (function, what) in [
+        ("restore_continuation", "in-place resume"),
+        ("begin_question_continuation", "question continuation"),
+    ] {
+        match every_call.iter().find(|paren| {
+            agent
+                .fn_span(function)
+                .is_some_and(|(open, close)| open < **paren && **paren < close)
+        }) {
+            None => violations.push(format!(
+                "{function} no longer calls writer_gate(: the {what}'s gate moved, re-point this guard"
+            )),
+            Some(paren) => {
+                let arguments: Vec<String> = call_arguments(&agent, *paren)
+                    .iter()
+                    .map(|argument| argument.split_whitespace().collect::<String>())
+                    .collect();
+                let expected = [
+                    ("request", "req"),
+                    ("route", "route"),
+                    ("effect ledger", "runtime_loop::effect::ledger_enabled()"),
+                    ("depth", "0"),
+                    ("release flag", "true"),
+                    ("in-place flag", "true"),
+                ];
+                if arguments.len() == expected.len() {
+                    for (index, (name, want)) in expected.iter().enumerate() {
+                        if arguments[index] != *want {
+                            violations.push(format!(
+                                "{function} passes `{}` as the {what} gate's {name}, expected `{want}`: only the root run is resumed, and an in-place resume is the resumed segment but not a stage-1 one",
+                                arguments[index]
+                            ));
+                        }
                     }
+                } else {
+                    violations.push(format!(
+                        "{function} calls writer_gate with {} arguments, expected (req, route, runtime_loop::effect::ledger_enabled(), 0, true, true)",
+                        arguments.len()
+                    ));
                 }
-            } else {
-                violations.push(format!(
-                    "restore_continuation calls writer_gate with {} arguments, expected (req, route, runtime_loop::effect::ledger_enabled(), 0, true, true)",
-                    arguments.len()
-                ));
             }
         }
     }
@@ -4877,7 +5021,7 @@ fn the_park_resume_guards_go_red_when_the_code_they_guard_regresses() {
             &mutate_in(
                 &agent,
                 "async fn resume_parked_run(",
-                "    super::park::admit(&req, session_bearer.is_some())?;",
+                "    super::park::admit(&req, caller, session_bearer.is_some())?;",
                 "",
             ),
             &park,
@@ -4889,8 +5033,8 @@ fn the_park_resume_guards_go_red_when_the_code_they_guard_regresses() {
             &mutate_in(
                 &agent,
                 "async fn resume_parked_run(",
-                "    super::park::admit(&req, session_bearer.is_some())?;",
-                "    let _ = super::park::claim_parked(&session_channel, \"\", &req.run_id, \"\").await;\n    super::park::admit(&req, session_bearer.is_some())?;",
+                "    super::park::admit(&req, caller, session_bearer.is_some())?;",
+                "    let _ = super::park::claim_parked(&session_channel, \"\", &req.run_id, \"\").await;\n    super::park::admit(&req, caller, session_bearer.is_some())?;",
             ),
             &park,
         ),
@@ -6437,20 +6581,21 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
         resume_module_segment_violations("fn only() {}"),
         "not reading the file",
     );
-    // The reads that are allowed are exactly the three the file makes, by count and not by the
-    // name of a receiver: the client's resume under the name `fold` or `response` is one more.
+    // The reads that are allowed are exactly the ones the file makes, by function and by count, and not
+    // by the name of a receiver: the client's resume under the name `fold` or `response` is one more,
+    // and it is read outside the functions that may read a segment.
     for (rogue, flagged) in [
         (
             "fn rogue(fold: &pb::AgentResume) -> u32 { fold.segment_no }",
-            "reads `fold.segment_no` 3 times",
+            "reads `fold.segment_no` outside",
         ),
         (
             "fn rogue(response: &pb::AgentResume) -> u32 { response.segment_no }",
-            "`response.segment_no` 2 times",
+            "reads `response.segment_no` outside",
         ),
         (
             "fn rogue(claimed: &ClaimedFold) -> u32 { claimed.fold.segment_no }",
-            "reads `fold.segment_no` 3 times",
+            "reads `fold.segment_no` outside",
         ),
         // Destructuring and every other way to get at the field without `.segment_no`.
         (
@@ -6563,12 +6708,15 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
         ),
         "does not read `!in_place`",
     );
+    // The loop's gate is the multi-line call in `run_rounds`; the question's gate is a one-line call
+    // earlier in the file, so the anchor names the loop's call and the pre-claim one is found in
+    // `restore_continuation` alone.
     must_flag(
         in_place(
             &every,
             &mutate_in(
                 &agent,
-                "let gate = writer_gate(",
+                "let gate = writer_gate(\n        req,\n        &ctx.route,",
                 "        in_place,\n    );",
                 "        false,\n    );",
             ),
@@ -6580,7 +6728,12 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
     must_flag(
         in_place(
             &every,
-            &mutate(&agent, "ledger_enabled(), 0, true, true);", "ledger_enabled(), 0, true, false);"),
+            &mutate_in(
+                &agent,
+                "async fn restore_continuation(",
+                "ledger_enabled(), 0, true, true);",
+                "ledger_enabled(), 0, true, false);",
+            ),
             &fold,
             &resume_rs,
         ),
@@ -7239,14 +7392,16 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
             ),
             &table,
         ),
-        "it calls it 0 times",
+        // The question form's gate still reads the switch, so one read is left, not none.
+        "it calls it 1 times",
     );
     must_flag(
         reader(
             &format!("{sse}\nfn second() -> bool {{ mp_contracts::loop_fold::loop_resume_enabled() }}"),
             &table,
         ),
-        "it calls it 2 times",
+        // The two legitimate reads, and this third one.
+        "it calls it 3 times",
     );
     for service in ["model-gateway", "execution-core"] {
         let without_row: Vec<(&'static str, String, &'static str)> = table
@@ -7379,30 +7534,38 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
     // The writer gate is handed the depth and the release in exactly the shape the guard reads:
     // a literal 0 depth lets a delegated child overwrite the root run's fold.
     assert_green(&writer_gate_argument_violations(&agent, &fold));
+    // Each mutation names the loop's multi-line call (the question's call is a one-line one earlier in
+    // the file, which the anchor must not reach).
+    const LOOP_GATE: &str = "let gate = writer_gate(\n        req,\n        &ctx.route,";
     must_flag(
         writer_gate_argument_violations(
-            &mutate_in(&agent, "let gate = writer_gate(", "ctx.depth,", "0,"),
+            &mutate_in(&agent, LOOP_GATE, "ctx.depth,", "0,"),
             &fold,
         ),
         "passes `0` as the writer gate's depth",
     );
     must_flag(
         writer_gate_argument_violations(
-            &mutate_in(&agent, "let gate = writer_gate(", "ctx.release.is_some(),", "false,"),
+            &mutate_in(
+                &agent,
+                LOOP_GATE,
+                "ctx.release.is_some() || skipped_site,",
+                "false,",
+            ),
             &fold,
         ),
         "as the writer gate's release flag",
     );
     must_flag(
         writer_gate_argument_violations(
-            &mutate_in(&agent, "let gate = writer_gate(", "in_place,", "false,"),
+            &mutate_in(&agent, LOOP_GATE, "in_place,", "false,"),
             &fold,
         ),
         "as the writer gate's in-place flag",
     );
     must_flag(
         writer_gate_argument_violations(
-            &mutate_in(&agent, "let gate = writer_gate(", "        ctx.depth,\n", ""),
+            &mutate_in(&agent, LOOP_GATE, "        ctx.depth,\n", ""),
             &fold,
         ),
         "with 5 arguments",
@@ -7472,7 +7635,7 @@ fn every_guard_goes_red_when_the_code_it_guards_regresses() {
             ),
             &fold,
         ),
-        "calls writer_gate( 3 times in production code",
+        "calls writer_gate( 4 times in production code",
     );
     must_flag(
         writer_gate_argument_violations(
@@ -7719,8 +7882,14 @@ fn edited_restore_violations(executor_resume: &str, session_approvals: &str) -> 
             }
         }
     }
+    // The checked edit reaches the rebuilt round: as a named field, or as `rebuild_round`'s last argument.
     match code.fn_body("reconcile") {
-        Some(body) if body.contains("consumed.tool_input_json.clone()") && body.contains("edit: checked.edit.clone()") => {}
+        Some(body)
+            if body.contains("consumed.tool_input_json.clone()")
+                && (body.contains("edit: checked.edit.clone()")
+                    || Regex::new(r"rebuild_round\([^;]*\bchecked\.edit\.clone\(\)\s*,?\s*\)")
+                        .expect("pattern")
+                        .is_match(&body)) => {}
         _ => violations.push("reconcile does not release the consumed (edited) call with the checked edit".into()),
     }
     let approvals = Code::new(session_approvals).without_tests();

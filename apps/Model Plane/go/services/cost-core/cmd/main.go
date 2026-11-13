@@ -55,6 +55,18 @@ const (
 	maxUsageMessageBytes  = 64 << 10
 )
 
+// imageGenerationKind is the kind model-gateway stamps on the usage payload of an
+// image generation. Only an event of this kind is priced per image.
+const imageGenerationKind = "image_generation"
+
+// servedPriorityTier is the usage payload's service_tier_used value for a call
+// served on the provider's priority tier (model-gateway's SERVICE_TIER_PRIORITY).
+const servedPriorityTier = "priority"
+
+// maxImagesPerUsageEvent bounds the images one image_generation event may report.
+// A count outside 1..maxImagesPerUsageEvent is a malformed event.
+const maxImagesPerUsageEvent = 100
+
 // envelope is a minimal local view of the canonical Model Plane event envelope
 // (pkg/envelope.Envelope). cost-core decodes only the fields it needs so it
 // stays standalone-buildable (no workspace replace directives).
@@ -79,10 +91,10 @@ type envelope struct {
 // predate this field simply omit the JSON keys, which decodes to the correct
 // zero value here -- no version gate needed.
 //
-// CostBasis is model-gateway's pricing::CostBasis ("metered" or
-// "subscription"). A subscription turn is never priced from API list prices
-// (see server.RecordUsage). An older gateway omits the key, which decodes to
-// the unknown basis and is priced as before.
+// CostBasis is model-gateway's pricing::CostBasis ("metered", "subscription"
+// or "customer_connection"). A subscription or customer-gateway turn is never
+// priced from API list prices (see server.RecordUsage). An older gateway omits
+// the key, which decodes to the unknown basis and is priced as before.
 type usagePayload struct {
 	RequestID                string  `json:"request_id"`
 	OrgID                    string  `json:"org_id"`
@@ -96,6 +108,12 @@ type usagePayload struct {
 	CacheReadInputTokens     int64   `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int64   `json:"cache_creation_input_tokens"`
 	CostBasis                string  `json:"cost_basis"`
+	// ServiceTierUsed is the speed tier model-gateway reports the call was
+	// served on: "priority" prices the entry at the priority-tier multiplier
+	// (see server.RecordUsage). The gateway writes the key only for a priority
+	// call, so an older gateway and every other call omit it and are priced as
+	// before.
+	ServiceTierUsed string `json:"service_tier_used"`
 	// CacheMissReason is model-gateway's advisory classification of a turn
 	// that did not read from the prompt cache. Absent from an older gateway
 	// and from any turn it did not classify.
@@ -125,6 +143,54 @@ func costBasisOf(orgID string, p usagePayload) string {
 			"org_id", orgID, "request_id", p.RequestID, "cost_basis_bytes", len(p.CostBasis))
 	}
 	return basis
+}
+
+// imagePayload carries the image fields of an image_generation usage payload.
+// The model is the usage payload's own Model.
+type imagePayload struct {
+	Size    string `json:"size"`
+	Quality string `json:"quality"`
+	N       int    `json:"n"`
+}
+
+// isImageGeneration reports whether a usage payload's kind names an image
+// generation. A payload whose kind is not a string is not one.
+func isImageGeneration(payload json.RawMessage) bool {
+	var kind struct {
+		Kind string `json:"kind"`
+	}
+	if len(payload) == 0 || json.Unmarshal(payload, &kind) != nil {
+		return false
+	}
+	return strings.ToLower(strings.TrimSpace(kind.Kind)) == imageGenerationKind
+}
+
+// imageUsageOf returns the image usage of an image_generation event. It reports
+// false for every other event, and for every event while image pricing is off,
+// so those events are recorded exactly as before. It runs after
+// decodeUsageMessage has authenticated the event, and reads only the image fields.
+func imageUsageOf(data []byte, imagePricing bool) (server.ImageUsage, bool, error) {
+	if !imagePricing {
+		return server.ImageUsage{}, false, nil
+	}
+	var env envelope
+	if err := json.Unmarshal(data, &env); err != nil {
+		return server.ImageUsage{}, false, fmt.Errorf("decode envelope: %w", err)
+	}
+	if !isImageGeneration(env.Payload) {
+		return server.ImageUsage{}, false, nil
+	}
+	var p imagePayload
+	if err := json.Unmarshal(env.Payload, &p); err != nil {
+		return server.ImageUsage{}, false, fmt.Errorf("decode image payload: %w", err)
+	}
+	if p.N < 1 || p.N > maxImagesPerUsageEvent {
+		return server.ImageUsage{}, false, fmt.Errorf("image count must be between 1 and %d", maxImagesPerUsageEvent)
+	}
+	if len(p.Size) > ledger.MaxDimensionBytes || len(p.Quality) > ledger.MaxDimensionBytes {
+		return server.ImageUsage{}, false, fmt.Errorf("image size and quality must be at most %d bytes", ledger.MaxDimensionBytes)
+	}
+	return server.ImageUsage{Size: p.Size, Quality: p.Quality, Count: p.N}, true, nil
 }
 
 func main() {
@@ -227,8 +293,12 @@ func main() {
 		}
 	}()
 
-	// USAGE_ENVELOPE subscriber: record costs as runs execute.
-	go subscribeUsageEnvelopes(ctx, srv)
+	// USAGE_ENVELOPE subscriber: record costs as runs execute. Image pricing is
+	// read once here and is off unless COST_CORE_IMAGE_PRICING_ENABLED is the
+	// literal true.
+	imagePricing := os.Getenv("COST_CORE_IMAGE_PRICING_ENABLED") == "true"
+	slog.Info("image usage pricing", "enabled", imagePricing)
+	go subscribeUsageEnvelopes(ctx, srv, imagePricing)
 
 	// Cross-plane GDPR erasure fan-out: org-core publishes
 	// verevon.gdpr.erasure.requested (explicit hard-delete AND its 30-day
@@ -323,7 +393,7 @@ func buildPricing(ctx context.Context) *pricing.Resolver {
 // subjects (mp.v1.usage.*), recording each USAGE_ENVELOPE event in the ledger.
 // When NATS_URL is unset it falls back to the NATS_FEED_PATH file source if
 // provided, otherwise stays idle until shutdown.
-func subscribeUsageEnvelopes(ctx context.Context, srv *server.Server) {
+func subscribeUsageEnvelopes(ctx context.Context, srv *server.Server, imagePricing bool) {
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
 		slog.Info("NATS_URL not set; USAGE_ENVELOPE NATS subscriber disabled")
@@ -331,7 +401,7 @@ func subscribeUsageEnvelopes(ctx context.Context, srv *server.Server) {
 		return
 	}
 	_ = retryUsageConnection(ctx, 5*time.Second, func() error {
-		return runUsageSubscription(ctx, srv, natsURL)
+		return runUsageSubscription(ctx, srv, natsURL, imagePricing)
 	})
 }
 
@@ -355,7 +425,7 @@ func retryUsageConnection(ctx context.Context, delay time.Duration, attempt func
 	return ctx.Err()
 }
 
-func runUsageSubscription(ctx context.Context, srv *server.Server, natsURL string) error {
+func runUsageSubscription(ctx context.Context, srv *server.Server, natsURL string, imagePricing bool) error {
 
 	nc, err := nats.Connect(natsURL, natsAuthOptions()...)
 	if err != nil {
@@ -378,7 +448,18 @@ func runUsageSubscription(ctx context.Context, srv *server.Server, natsURL strin
 			_ = msg.Term()
 			return
 		}
-		if err := srv.RecordUsage(ctx, entry); err != nil {
+		image, isImage, err := imageUsageOf(msg.Data, imagePricing)
+		if err != nil {
+			slog.Warn("rejected image usage envelope", "error", err)
+			_ = msg.Term()
+			return
+		}
+		if isImage {
+			err = srv.RecordImageUsage(ctx, entry, image)
+		} else {
+			err = srv.RecordUsage(ctx, entry)
+		}
+		if err != nil {
 			if errors.Is(err, ledger.ErrOrgErased) {
 				_ = msg.Ack()
 				return
@@ -502,11 +583,22 @@ func decodeUsageMessage(subject string, data []byte, createdAt time.Time) (ledge
 	if err := json.Unmarshal(data, &env); err != nil {
 		return ledger.Entry{}, fmt.Errorf("decode envelope: %w", err)
 	}
-	if env.EventType != "USAGE_ENVELOPE" {
-		return ledger.Entry{}, fmt.Errorf("unexpected event type")
-	}
-	if env.ZDR {
-		return ledger.Entry{}, fmt.Errorf("ZDR usage must not be persisted")
+	// A ZDR spend row is the one zdr=true kind this service stores (FU-30): it is
+	// admitted by its event type, with only the allowlisted payload fields, and is
+	// stored as a content-free row marked zdr. Every other zdr=true usage envelope
+	// is refused, and a spend row that does not declare zdr is refused too.
+	zdrSpend := env.EventType == zdrSpendEventType
+	if zdrSpend {
+		if !env.ZDR {
+			return ledger.Entry{}, fmt.Errorf("zdr spend must declare zdr")
+		}
+	} else {
+		if env.EventType != "USAGE_ENVELOPE" {
+			return ledger.Entry{}, fmt.Errorf("unexpected event type")
+		}
+		if env.ZDR {
+			return ledger.Entry{}, fmt.Errorf("ZDR usage must not be persisted")
+		}
 	}
 	if !env.Timestamp.IsZero() {
 		if env.Timestamp.After(time.Now().UTC().Add(5 * time.Minute)) {
@@ -528,7 +620,13 @@ func decodeUsageMessage(subject string, data []byte, createdAt time.Time) (ledge
 	}
 
 	var p usagePayload
-	if len(env.Payload) > 0 {
+	if zdrSpend {
+		spend, err := decodeZDRSpendPayload(env.Payload)
+		if err != nil {
+			return ledger.Entry{}, err
+		}
+		p = spend
+	} else if len(env.Payload) > 0 {
 		if err := json.Unmarshal(env.Payload, &p); err != nil {
 			return ledger.Entry{}, fmt.Errorf("decode payload: %w", err)
 		}
@@ -560,6 +658,8 @@ func decodeUsageMessage(subject string, data []byte, createdAt time.Time) (ledge
 		CacheCreationInputTokens: p.CacheCreationInputTokens,
 		CacheMissReason:          cacheMissReasonOf(subjectOrgID, p),
 		CostBasis:                costBasisOf(subjectOrgID, p),
+		PriorityTier:             p.ServiceTierUsed == servedPriorityTier,
+		ZDR:                      zdrSpend,
 	}
 	if err := ledger.ValidateEntry(entry); err != nil {
 		return ledger.Entry{}, err

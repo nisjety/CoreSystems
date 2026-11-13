@@ -34,6 +34,9 @@ pub(crate) const REFUSAL_EXPIRED: &str = "scheduled_contract_expired";
 pub(crate) const REFUSAL_INVALID: &str = "scheduled_contract_invalid";
 /// The run is zero-retention or waived: an unattended loop keeps no durable state for it.
 pub(crate) const REFUSAL_RETENTION: &str = "scheduled_zdr_refused";
+/// The run's retention state is not one the lane knows (both retention flags set at once), so it
+/// is refused rather than guessed at: an unknown state is never read as persistent.
+pub(crate) const REFUSAL_RETENTION_UNKNOWN: &str = "scheduled_retention_unknown";
 
 /// What the scheduled lane changes in the loop it drives. `None` for every other run, whose
 /// loop is unchanged. Its presence also keeps the loop from offering held results and from
@@ -49,8 +52,10 @@ pub(crate) fn enabled() -> bool {
     enabled_from(std::env::var(SWITCH_ENV).ok().as_deref())
 }
 
+/// Exactly `true`: no trimming and no case folding, unlike the durable-loop parser
+/// `mp_contracts::loop_fold::switch_from`, which this lane does not use.
 fn enabled_from(value: Option<&str>) -> bool {
-    mp_contracts::loop_fold::switch_from(value)
+    value == Some("true")
 }
 
 /// Verify the stored contract a step carries before any work: its digest over the exact text,
@@ -81,6 +86,18 @@ pub(crate) fn admit(
 /// durable state to keep its content in, so it refuses rather than persist (DEC-32).
 pub(crate) fn refuses_retention(zdr: bool, waived: bool) -> Option<&'static str> {
     (zdr || waived).then_some(REFUSAL_RETENTION)
+}
+
+/// The retention refusal for a step context, checked first in the lane, before the contract is
+/// admitted. Session Core states the run's retention as two flags: zero-retention, or waived.
+/// A zero-retention or waived run is refused with [`REFUSAL_RETENTION`]; a context that carries
+/// both flags at once is a state Session Core never writes, so it fails closed with
+/// [`REFUSAL_RETENTION_UNKNOWN`]. Only a context with neither flag proceeds.
+pub(crate) fn refuses_step_retention(run: &pb::ScheduledStepContext) -> Option<&'static str> {
+    if run.zdr && run.zdr_waived {
+        return Some(REFUSAL_RETENTION_UNKNOWN);
+    }
+    refuses_retention(run.zdr, run.zdr_waived)
 }
 
 /// The loop scope a verified contract gives its run.
@@ -122,12 +139,14 @@ pub(crate) fn offered_defs(
 }
 
 /// The run request the scheduled lane drives. It is always plan mode at the read-only rung,
-/// carries no caller tools and no subagents, is never zero-retention, and is bounded by the
-/// contract's rounds and the lane's ceiling. The subject is the owner the schedule acts for.
+/// carries no caller tools and no subagents, carries the run's own zero-retention flag (a waived
+/// run is refused before it reaches here, so no waiver travels), and is bounded by the contract's
+/// rounds and the lane's ceiling. The subject is the owner the schedule acts for.
 pub(crate) fn run_request(
     step: &pb::ExecuteScheduledStepRequest,
     goal: &str,
     contract: &ScheduledContract,
+    zdr: bool,
 ) -> pb::RunAgentRequest {
     pb::RunAgentRequest {
         run_id: step.run_id.clone(),
@@ -138,7 +157,7 @@ pub(crate) fn run_request(
         model: MODEL.to_owned(),
         mode: "ask".to_owned(),
         max_rounds: contract.max_rounds.min(MAX_ROUNDS),
-        zdr: false,
+        zdr,
         tools: Vec::new(),
         plan_mode: true,
         autonomy_rung: pb::AutonomyRung::ReadOnly as i32,
@@ -328,7 +347,7 @@ mod tests {
     #[test]
     fn run_request_is_plan_mode_read_only_bounded_and_not_zdr() {
         let contract = ScheduledContract::parse(CONTRACT).unwrap();
-        let request = run_request(&step(), "summarise the week", &contract);
+        let request = run_request(&step(), "summarise the week", &contract, false);
         assert!(request.plan_mode);
         assert_eq!(request.autonomy_rung, pb::AutonomyRung::ReadOnly as i32);
         assert!(!request.zdr);
@@ -343,7 +362,7 @@ mod tests {
     fn run_request_caps_rounds_at_the_lane_ceiling() {
         let mut contract = ScheduledContract::parse(CONTRACT).unwrap();
         contract.max_rounds = MAX_ROUNDS;
-        let request = run_request(&step(), "goal", &contract);
+        let request = run_request(&step(), "goal", &contract, false);
         assert_eq!(request.max_rounds, MAX_ROUNDS);
     }
 
@@ -438,5 +457,60 @@ mod tests {
     fn loop_scope_takes_the_contracts_round_cap() {
         let contract = ScheduledContract::parse(CONTRACT).unwrap();
         assert_eq!(loop_scope(&contract).max_tokens_per_round, 2048);
+    }
+
+    /// F-f10-29 / DEC-M2: the lane's first check reads the run's retention from the step context
+    /// Session Core states. ZDR and waived are refused `scheduled_zdr_refused`; a context carrying both
+    /// flags is a state Session Core never writes and fails closed `scheduled_retention_unknown`; only a
+    /// persistent context proceeds. The thin wrapper `refuses_retention` keeps its table.
+    #[test]
+    fn the_step_context_retention_refusal_is_closed_and_fails_closed_on_both_flags() {
+        let context = |zdr: bool, zdr_waived: bool| pb::ScheduledStepContext {
+            run_id: "run-s".to_owned(),
+            org_id: "org-s".to_owned(),
+            zdr,
+            zdr_waived,
+            ..Default::default()
+        };
+        assert_eq!(
+            refuses_step_retention(&context(true, false)),
+            Some(REFUSAL_RETENTION)
+        );
+        assert_eq!(
+            refuses_step_retention(&context(false, true)),
+            Some(REFUSAL_RETENTION)
+        );
+        assert_eq!(
+            refuses_step_retention(&context(true, true)),
+            Some(REFUSAL_RETENTION_UNKNOWN)
+        );
+        assert_eq!(refuses_step_retention(&context(false, false)), None);
+        assert_eq!(REFUSAL_RETENTION, "scheduled_zdr_refused");
+        assert_eq!(REFUSAL_RETENTION_UNKNOWN, "scheduled_retention_unknown");
+        // The loop's request carries the run's zero retention, so the loop refuses persistence too.
+        let contract = ScheduledContract::parse(CONTRACT).unwrap();
+        assert!(run_request(&step(), "goal", &contract, true).zdr);
+        assert!(!run_request(&step(), "goal", &contract, false).zdr);
+    }
+}
+
+/// 3.4 switch sweep: `EXECUTION_SCHEDULED_AGENT_ENABLED` is documented on [`enabled`] as on for the
+/// literal `true` only. Off, a step with a stored contract keeps the single-inference lane.
+#[cfg(test)]
+mod switch_literal {
+    use super::*;
+
+    #[test]
+    fn only_the_literal_true_switches_the_agent_lane_on() {
+        assert!(enabled_from(Some("true")));
+        assert!(!enabled_from(None));
+        for value in [
+            "", "false", "1", "on", "yes", "TRUE", "True", " true", "true ", "true\n", "\ttrue",
+        ] {
+            assert!(
+                !enabled_from(Some(value)),
+                "{value:?} must leave the scheduled agent lane off"
+            );
+        }
     }
 }

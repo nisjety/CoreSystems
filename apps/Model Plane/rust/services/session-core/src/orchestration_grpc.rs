@@ -19,6 +19,7 @@ use futures::{Stream, StreamExt};
 use mp_contracts::approval_cause::{self, CauseCode};
 use mp_contracts::model_plane::v1::{
     self as proto,
+    approval_rule_proposal_service_server::ApprovalRuleProposalService,
     approval_scope_grant_service_server::ApprovalScopeGrantService,
     run_question_consume_service_server::RunQuestionConsumeService,
     orchestration_core_service_server::{OrchestrationCoreService, OrchestrationCoreServiceServer},
@@ -442,6 +443,22 @@ fn approval_edit_enabled() -> bool {
     mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_EDIT_ENV).ok().as_deref())
 }
 
+/// Refuse an approval create or decide from a waived run's credential (D2-1149, DEC-32). Off by
+/// default: only the literal `true` enables it, and with it off a waived caller creates and decides
+/// approvals exactly as before.
+const APPROVAL_WAIVER_REFUSE_ENV: &str = "APPROVAL_WAIVER_REFUSE";
+
+fn approval_waiver_refuse_enabled() -> bool {
+    mp_contracts::loop_fold::switch_from(std::env::var(APPROVAL_WAIVER_REFUSE_ENV).ok().as_deref())
+}
+
+/// Whether an approval write by `caller` stores no content: the caller is zero-retention, or it is a
+/// waived run's credential with the waiver refusal on. A waived credential has `zdr()` false but
+/// counts as ZDR for every new durable store (DEC-32), so it must not leave approval metadata.
+fn approval_write_is_content_free(caller: &VerifiedIdentity) -> bool {
+    caller.zdr() || (approval_waiver_refuse_enabled() && caller.zdr_waiver().is_some())
+}
+
 /// The largest `patch_json` an edit may carry: the body cap plus room for the recipients and the
 /// subject. A larger patch could never pass the edit contract.
 const MAX_EDIT_PATCH_BYTES: usize = 64 * 1024;
@@ -510,6 +527,110 @@ fn approval_scope_grant_proto(row: &store::ApprovalScopeGrantRow) -> proto::Appr
         revoked_at: row.revoked_at.map(ts),
         use_count: row.use_count,
         last_used_at: row.last_used_at.map(ts),
+    }
+}
+
+/// The enum value of a stored rule-proposal state word. An unknown word reads as UNSPECIFIED.
+fn approval_rule_proposal_state_from_str(name: &str) -> i32 {
+    let state = match name {
+        "proposed" => proto::ApprovalRuleProposalState::Proposed,
+        "confirming" => proto::ApprovalRuleProposalState::Confirming,
+        "confirmed" => proto::ApprovalRuleProposalState::Confirmed,
+        "dismissed" => proto::ApprovalRuleProposalState::Dismissed,
+        _ => proto::ApprovalRuleProposalState::Unspecified,
+    };
+    state as i32
+}
+
+/// The owner's view of one "Always" rule proposal (build plan WS13 S7). Ids, a digest and closed
+/// words, never an argument.
+fn approval_rule_proposal_proto(
+    row: &store::ApprovalRuleProposalRow,
+) -> proto::ApprovalRuleProposal {
+    proto::ApprovalRuleProposal {
+        id: row.id.clone(),
+        tool_name: row.tool_name.clone(),
+        tool_digest: row.tool_digest.clone(),
+        capability_id: row.capability_id.clone(),
+        state: approval_rule_proposal_state_from_str(&row.state),
+        created_from_approval_id: row.created_from_approval_id.clone(),
+        created_at: Some(ts(row.created_at)),
+        resolved_at: row.resolved_at.map(ts),
+        policy_id: row.policy_id.clone(),
+    }
+}
+
+/// Whether `policy_id` is a capability-core tool-policy id: `tpol_` and 1 to 100 characters of
+/// letters, digits and `-`.
+fn is_tool_policy_id(policy_id: &str) -> bool {
+    policy_id.strip_prefix("tpol_").is_some_and(|rest| {
+        (1..=100).contains(&rest.len())
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    })
+}
+
+/// The store resolution a `ResolveApprovalRuleProposal` asks for. Only CONFIRMING, CONFIRMED and
+/// DISMISSED are resolutions. CONFIRMING and DISMISSED carry no policy id, and CONFIRMED carries a
+/// capability-core one.
+#[allow(clippy::result_large_err)]
+fn rule_proposal_resolution(
+    resolution: i32,
+    policy_id: &str,
+) -> Result<store::RuleProposalResolution<'_>, Status> {
+    let state = proto::ApprovalRuleProposalState::try_from(resolution)
+        .map_err(|_| Status::invalid_argument("resolution is not a known state"))?;
+    match state {
+        proto::ApprovalRuleProposalState::Confirming
+        | proto::ApprovalRuleProposalState::Dismissed => {
+            if !policy_id.is_empty() {
+                return Err(Status::invalid_argument(
+                    "policy_id is only allowed with a CONFIRMED resolution",
+                ));
+            }
+            Ok(if state == proto::ApprovalRuleProposalState::Confirming {
+                store::RuleProposalResolution::Claim
+            } else {
+                store::RuleProposalResolution::Dismissed
+            })
+        }
+        proto::ApprovalRuleProposalState::Confirmed => {
+            if !is_tool_policy_id(policy_id) {
+                return Err(Status::invalid_argument(
+                    "policy_id must be a capability-core tool policy id",
+                ));
+            }
+            Ok(store::RuleProposalResolution::Confirmed { policy_id })
+        }
+        proto::ApprovalRuleProposalState::Unspecified
+        | proto::ApprovalRuleProposalState::Proposed => Err(Status::invalid_argument(
+            "resolution must be CONFIRMING, CONFIRMED or DISMISSED",
+        )),
+    }
+}
+
+/// The switch gate of a rule-proposal resolution. A confirm writes a standing allow, so CONFIRMING
+/// and CONFIRMED need the switch; DISMISSED narrows authority and works with it off, so a person
+/// can still remove a proposal made while it was on.
+#[allow(clippy::result_large_err)]
+fn rule_proposal_switch_gate(
+    resolution: store::RuleProposalResolution<'_>,
+    switch_on: bool,
+) -> Result<(), Status> {
+    if !switch_on && !matches!(resolution, store::RuleProposalResolution::Dismissed) {
+        return Err(Status::failed_precondition("rule_proposals_disabled"));
+    }
+    Ok(())
+}
+
+/// A rule-proposal store error as the status it reaches the caller as: a
+/// [`store::RuleProposalRefusal`] is a failed precondition carrying its closed code, anything else
+/// is internal.
+fn rule_proposal_status(error: &anyhow::Error) -> Status {
+    match error.downcast_ref::<store::RuleProposalRefusal>() {
+        Some(refusal) => Status::failed_precondition(refusal.code()),
+        None => Status::internal(error.to_string()),
     }
 }
 
@@ -1026,20 +1147,30 @@ fn approved_authority(offered_json: &str) -> Option<proto::ApprovedAuthority> {
                 .collect()
         })
         .unwrap_or_default();
-    let tools: Vec<proto::ApprovedTool> = value
-        .get("tools")
-        .and_then(JsonValue::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .map(|tool| proto::ApprovedTool {
-                    name: text(tool, "name"),
-                    description: text(tool, "description"),
-                    parameters_json: text(tool, "parameters_json"),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let tools_of = |key: &str| -> Vec<proto::ApprovedTool> {
+        value
+            .get(key)
+            .and_then(JsonValue::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|tool| proto::ApprovedTool {
+                        name: text(tool, "name"),
+                        description: text(tool, "description"),
+                        parameters_json: text(tool, "parameters_json"),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let tools = tools_of("tools");
+    // A coordinator run's complete offer, when its pause kept one (absent for every other run).
+    let coordinator_tools = tools_of("coordinator_tools");
+    let connector_scope = connector_scope_of_offered(&value);
+    // Absent stays absent; a present value that is not a bool reads as marked (the stricter).
+    let connector_taint = value
+        .get("connector_taint")
+        .map(|taint| taint.as_bool().unwrap_or(true));
     Some(proto::ApprovedAuthority {
         mode: text(authority, "mode"),
         plan_mode: authority
@@ -1062,7 +1193,41 @@ fn approved_authority(offered_json: &str) -> Option<proto::ApprovedAuthority> {
         tool_names,
         tools,
         digest: text(authority, "digest"),
+        coordinator_tools,
+        connector_scope,
+        connector_taint,
     })
+}
+
+/// The most connection ids a retained selection may name.
+const MAX_RETAINED_CONNECTOR_SCOPE: usize = 8;
+
+/// The connection ids the paused turn selected, from the descriptor's `offered.connector_scope`.
+/// Empty when the key is absent, not an array, longer than 8, or when ANY entry is not 1..=128
+/// ASCII letters, digits, `_` or `-`: a malformed selection is dropped whole, and a continuation
+/// reads an empty selection as the strictest.
+fn connector_scope_of_offered(offered: &JsonValue) -> Vec<String> {
+    let Some(items) = offered.get("connector_scope").and_then(JsonValue::as_array) else {
+        return Vec::new();
+    };
+    if items.len() > MAX_RETAINED_CONNECTOR_SCOPE {
+        return Vec::new();
+    }
+    let mut ids = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(id) = item.as_str() else {
+            return Vec::new();
+        };
+        let well_formed = (1..=128).contains(&id.len())
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        if !well_formed {
+            return Vec::new();
+        }
+        ids.push(id.to_owned());
+    }
+    ids
 }
 
 /// The wire answer to a consume. A spend-only consume (`omit_call`) carries the
@@ -1523,10 +1688,11 @@ pub(crate) fn approval_from_row(row: &store::ApprovalRow) -> proto::Approval {
 /// stored as `unclassified_gate` (and logged, because it means a creator is newer than
 /// this service), the scope options are the code's own, and every field is bounded. A
 /// zero-retention credential stores none, so nothing of an approval's cause outlives a
-/// ZDR caller; an approval with no stated cause is stored exactly as before.
+/// ZDR caller; an approval with no stated cause is stored exactly as before. `durable_forbidden` is
+/// true for a ZDR caller or a waived one with the waiver refusal on (D2-1149, DEC-32).
 fn new_approval_metadata(
     req: &proto::CreateApprovalRequest,
-    zdr: bool,
+    durable_forbidden: bool,
 ) -> (JsonValue, Option<&'static str>) {
     let mut metadata_map = serde_json::Map::new();
     if !req.reason.is_empty() {
@@ -1536,7 +1702,7 @@ fn new_approval_metadata(
         metadata_map.insert("step_id".to_owned(), JsonValue::String(req.step_id.clone()));
     }
     let mut stored_code = None;
-    if let Some(cause) = req.cause.clone().filter(|_| !zdr) {
+    if let Some(cause) = req.cause.clone().filter(|_| !durable_forbidden) {
         let (cause, known) = approval_cause::normalized(cause);
         if !known {
             warn!(
@@ -1627,15 +1793,87 @@ fn retention_reason(provenance: &store::RunProvenanceRow) -> String {
     }
 }
 
+/// The switch of the browser walkthrough in a run's proof bundle (F-t3-050). Default off; only
+/// the literal `true` turns it on.
+const PROOF_WALKTHROUGH_ENV: &str = "SESSION_PROOF_WALKTHROUGH_ENABLED";
+
+/// Whether a run's proof bundle may carry the browser walkthrough. Read on each call, as the
+/// other orchestration switches are.
+fn proof_walkthrough_enabled() -> bool {
+    proof_walkthrough_switch_from(std::env::var(PROOF_WALKTHROUGH_ENV).ok().as_deref())
+}
+
+/// The strict reading of the switch: the literal `true`, with surrounding space ignored.
+fn proof_walkthrough_switch_from(value: Option<&str>) -> bool {
+    value.is_some_and(|value| value.trim() == "true")
+}
+
+/// Why a run's proof bundle omits its browser walkthrough, or `None` when it may carry one. The
+/// switch is read first. The walkthrough is assembled only for a persistent run, read from the
+/// run's own receipt: a zero-retention or waived run never carries one, and a receipt this plane
+/// cannot read claims nothing.
+fn proof_walkthrough_omission(
+    enabled: bool,
+    provenance: &store::RunProvenanceRow,
+) -> Option<String> {
+    if !enabled {
+        return Some(
+            "The browser walkthrough is not included: it is not enabled on this deployment."
+                .to_string(),
+        );
+    }
+    match retention_receipt::RunRetention::from_storage(
+        &provenance.retention_class,
+        provenance.waiver_ack_id.clone(),
+        provenance.waiver_connection_id.clone(),
+    ) {
+        Ok(retention) if retention.class == retention_receipt::RetentionClass::Persistent => None,
+        Ok(retention) => Some(format!(
+            "Retention at run start was {}, so the run's browser walkthrough is not included.",
+            retention.class.as_str()
+        )),
+        Err(_) => Some(
+            "The run's retention receipt could not be read, so nothing is claimed for its browser \
+             walkthrough."
+                .to_string(),
+        ),
+    }
+}
+
+/// The walkthrough steps on the wire. References only: a step names its screenshot by
+/// `screenshot_ref` and never carries bytes.
+fn browser_walkthrough_proto(section: store::BrowserWalkthroughSteps) -> proto::BrowserWalkthrough {
+    proto::BrowserWalkthrough {
+        steps: section
+            .steps
+            .into_iter()
+            .map(|step| proto::BrowserWalkthroughStep {
+                action_id: step.action_id,
+                action_type: step.action_type,
+                page_url: step.page_url,
+                page_title: step.page_title,
+                status: step.status,
+                screenshot_ref: step.screenshot_ref,
+                at: Some(ts(step.at)),
+            })
+            .collect(),
+        truncated: section.truncated,
+    }
+}
+
 /// Build a run's proof bundle from already-fetched, already-tenant-scoped
 /// rows. Pure so the evidence-shaping rules — especially the ones about never
 /// inventing a stage that did not happen — are unit-testable without Postgres.
+///
+/// `walkthrough` is the browser walkthrough section, or the reason it is omitted. An omitted
+/// section is named in `unavailable`, like every other dimension this bundle does not claim.
 fn build_run_proof_bundle(
     run_id: &str,
     org_id: &str,
     provenance: &store::RunProvenanceRow,
     approvals: &[store::ApprovalRow],
     evidence: &[store::ContinuationEvidenceRow],
+    walkthrough: Result<proto::BrowserWalkthrough, String>,
 ) -> proto::RunProofBundle {
     let approvals = approvals
         .iter()
@@ -1661,6 +1899,18 @@ fn build_run_proof_bundle(
         })
         .collect();
 
+    let mut unavailable = unavailable_proof_sections(provenance);
+    let browser_walkthrough = match walkthrough {
+        Ok(section) => Some(section),
+        Err(reason) => {
+            unavailable.push(proto::UnavailableSection {
+                section: "walkthrough".to_string(),
+                reason,
+            });
+            None
+        }
+    };
+
     proto::RunProofBundle {
         bundle_version: 1,
         run_id: run_id.to_string(),
@@ -1673,7 +1923,8 @@ fn build_run_proof_bundle(
             created_at: Some(ts(provenance.created_at)),
         }),
         approvals,
-        unavailable: unavailable_proof_sections(provenance),
+        browser_walkthrough,
+        unavailable,
     }
 }
 
@@ -2485,6 +2736,27 @@ fn refuse_zdr_or_waived_question_caller(caller: &VerifiedIdentity) -> Result<(),
     Ok(())
 }
 
+/// The waiver gate of `CreateApproval`. A ZDR credential still creates its approval (the pause must
+/// work, and its metadata carries no cause), so only a waived credential is refused here, and only
+/// with `APPROVAL_WAIVER_REFUSE` on. Decided before any lookup, so a refused call reads and writes
+/// nothing.
+#[allow(clippy::result_large_err)]
+fn refuse_waived_approval_caller(caller: &VerifiedIdentity) -> Result<(), Status> {
+    if approval_waiver_refuse_enabled() && caller.zdr_waiver().is_some() {
+        return Err(Refusal::WAIVER_ROUTE_MISMATCH.grpc_status(tonic::Code::PermissionDenied));
+    }
+    Ok(())
+}
+
+/// The ZDR and waiver gate of `DecideApproval`. A decision writes `metadata.decision` and its audit
+/// row, so a ZDR credential never reaches it, and a waived one does not either with
+/// `APPROVAL_WAIVER_REFUSE` on (DEC-32). Decided before any lookup or write.
+#[allow(clippy::result_large_err)]
+fn refuse_zdr_or_waived_approval_caller(caller: &VerifiedIdentity) -> Result<(), Status> {
+    retention_receipt::refuse_zdr_continuation(caller)?;
+    refuse_waived_approval_caller(caller)
+}
+
 /// The wire form of an approval preview (EP-10-S1). The revision is always 0: an edit grants in
 /// its own transaction (EP-10-S4), so a pending approval, the only kind previewed, is never revised.
 fn approval_preview_to_proto(
@@ -2671,15 +2943,85 @@ struct PreparedQuestion {
     spec: JsonValue,
 }
 
+/// The environment switch for storing a question that pauses its run for an answer in that same
+/// run (build plan WS14 S5). The same name execution-core reads. Read strictly: only the literal
+/// `true` enables it.
+const ASK_RESUME_ENV: &str = "AGENT_ASK_USER_RESUME_ENABLED";
+
+#[cfg(test)]
+thread_local! {
+    /// A test's override of the resume question switch (see [`AskResumeSwitch`]).
+    static TEST_ASK_RESUME: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Holds the resume question switch at a fixed value for the current test thread, then restores it.
+#[cfg(test)]
+pub(crate) struct AskResumeSwitch;
+
+#[cfg(test)]
+impl AskResumeSwitch {
+    pub(crate) fn set(on: bool) -> Self {
+        TEST_ASK_RESUME.with(|cell| cell.set(Some(on)));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for AskResumeSwitch {
+    fn drop(&mut self) {
+        TEST_ASK_RESUME.with(|cell| cell.set(None));
+    }
+}
+
+/// Whether `value` of [`ASK_RESUME_ENV`] turns the switch on: only the literal `true`; `1`, `yes`,
+/// `TRUE`, an empty value and an unset one are all off.
+fn ask_resume_switch(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
+/// Whether `CreateRunQuestion` stores a `resume` question. Read once per process from
+/// [`ASK_RESUME_ENV`]; off, a resume question is refused `question_delivery_unavailable` as before.
+fn ask_resume_store_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(forced) = TEST_ASK_RESUME.with(std::cell::Cell::get) {
+        return forced;
+    }
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| ask_resume_switch(std::env::var(ASK_RESUME_ENV).ok().as_deref()))
+}
+
+/// Check that a resume question names its input pause: the step is set and the idempotency key is
+/// the namespaced input reference of this run and step. An approval pause's reference
+/// (`{run_id}:{step_id}`) and a `next_turn` key never match, so a resume question can be tied only to
+/// an input pause fold. Pure.
+#[allow(clippy::result_large_err)]
+fn require_input_pause_ref(
+    req: &proto::CreateRunQuestionRequest,
+    origin: &str,
+) -> Result<(), Status> {
+    let expected = user_question::input_pause_ref(&req.run_id, &req.step_id, origin);
+    if req.step_id.is_empty()
+        || req.idempotency_key != expected
+        || !user_question::is_input_pause_ref(&req.idempotency_key)
+    {
+        return Err(Status::invalid_argument("question_pause_ref_mismatch"));
+    }
+    Ok(())
+}
+
 /// Validate a create request's own fields and shape them for the store. Pure, so every refusal is
 /// tested without a database.
 ///
-/// `resume` is a delivery the schema holds but nothing serves yet, so it is refused here rather
-/// than stored as a question that no later step would pick up.
+/// `resume` is accepted only while `AGENT_ASK_USER_RESUME_ENABLED` is on (`ask_resume_store_enabled`);
+/// with it off it is refused here rather than stored as a question that no later step would pick up.
+/// The handler then ties an accepted resume question to its paused input fold.
 #[allow(clippy::result_large_err)]
 fn prepare_question(req: &proto::CreateRunQuestionRequest) -> Result<PreparedQuestion, Status> {
     let delivery = match req.delivery.as_str() {
         "" | user_question::DELIVERY_NEXT_TURN => user_question::DELIVERY_NEXT_TURN,
+        user_question::DELIVERY_RESUME if ask_resume_store_enabled() => {
+            user_question::DELIVERY_RESUME
+        }
         user_question::DELIVERY_RESUME => {
             return Err(Status::invalid_argument("question_delivery_unavailable"));
         }
@@ -2802,6 +3144,9 @@ fn consume_question_response(
         store::ConsumedRunQuestion::Expired => {
             return Err(Status::failed_precondition("question_expired"));
         }
+        store::ConsumedRunQuestion::RunEnded => {
+            return Err(Status::failed_precondition("question_run_ended"));
+        }
         store::ConsumedRunQuestion::NotFound => {
             return Err(Status::not_found("question_not_found"));
         }
@@ -2893,8 +3238,24 @@ impl ApprovalScopeGrantService for OrchestrationGrpc {
                     "tool_name and action_key are required",
                 ));
             }
+            // The definition digest is empty (a built-in tool) or a sha256 in lowercase hex.
+            if !req.tool_digest.is_empty()
+                && !(req.tool_digest.len() == 64
+                    && req
+                        .tool_digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+            {
+                return Err(Status::invalid_argument("tool_digest is malformed"));
+            }
             // A release is never granted while the switch is off, whatever the caller sent.
             if !approval_cause::scope_grants_enabled() {
+                return Ok(Response::new(proto::UseApprovalScopeGrantResponse {
+                    grant_id: String::new(),
+                }));
+            }
+            // An unpinned MCP tool is never released by a grant: no digest, no match (D2-1123).
+            if req.tool_name.trim().starts_with("mcp__") && req.tool_digest.is_empty() {
                 return Ok(Response::new(proto::UseApprovalScopeGrantResponse {
                     grant_id: String::new(),
                 }));
@@ -2911,6 +3272,7 @@ impl ApprovalScopeGrantService for OrchestrationGrpc {
                     tool_name: req.tool_name.trim(),
                     action_key: &req.action_key,
                     effect_class: &req.effect_class,
+                    tool_digest: &req.tool_digest,
                 },
             )
             .await
@@ -2974,6 +3336,99 @@ impl ApprovalScopeGrantService for OrchestrationGrpc {
         }
         .await;
         record_metrics("revoke_approval_scope_grant", started, result.is_ok());
+        result
+    }
+}
+
+/// The owner's "Always" rule proposals (build plan WS13 S7). Session-core owns the proposals;
+/// model-gateway orchestrates a confirm and hands back the capability-core policy id. Every call
+/// acts for the verified owner and the org, and none is model-executable.
+#[tonic::async_trait]
+impl ApprovalRuleProposalService for OrchestrationGrpc {
+    async fn list_approval_rule_proposals(
+        &self,
+        request: Request<proto::ListApprovalRuleProposalsRequest>,
+    ) -> Result<Response<proto::ListApprovalRuleProposalsResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ListApprovalRuleProposalsResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "approval:grant_manage")?;
+            let req = request.into_inner();
+            let owner = grant_owner(&caller, &req.org_id)?;
+            let rows = store::list_open_rule_proposals(&self.pool, &req.org_id, &owner)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?;
+            Ok(Response::new(proto::ListApprovalRuleProposalsResponse {
+                proposals: rows.iter().map(approval_rule_proposal_proto).collect(),
+            }))
+        }
+        .await;
+        record_metrics("list_approval_rule_proposals", started, result.is_ok());
+        result
+    }
+
+    async fn get_approval_rule_proposal(
+        &self,
+        request: Request<proto::GetApprovalRuleProposalRequest>,
+    ) -> Result<Response<proto::GetApprovalRuleProposalResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::GetApprovalRuleProposalResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "approval:grant_manage")?;
+            let req = request.into_inner();
+            let owner = grant_owner(&caller, &req.org_id)?;
+            if req.proposal_id.is_empty() {
+                return Err(Status::invalid_argument("proposal_id is required"));
+            }
+            let row = store::get_rule_proposal(&self.pool, &req.org_id, &owner, &req.proposal_id)
+                .await
+                .map_err(|error| Status::internal(error.to_string()))?
+                .ok_or_else(|| Status::not_found("rule_proposal_not_found"))?;
+            Ok(Response::new(proto::GetApprovalRuleProposalResponse {
+                proposal: Some(approval_rule_proposal_proto(&row)),
+            }))
+        }
+        .await;
+        record_metrics("get_approval_rule_proposal", started, result.is_ok());
+        result
+    }
+
+    async fn resolve_approval_rule_proposal(
+        &self,
+        request: Request<proto::ResolveApprovalRuleProposalRequest>,
+    ) -> Result<Response<proto::ResolveApprovalRuleProposalResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::ResolveApprovalRuleProposalResponse>, Status> = async {
+            let caller = identity(&request)?;
+            // A resolution is a durable write, so a ZDR credential never reaches it and a waived
+            // one does not either (DEC-32). Decided before anything is read.
+            refuse_zdr_or_waived_question_caller(&caller)?;
+            authorize_operation(&caller, "approval:grant_manage")?;
+            let req = request.into_inner();
+            let owner = grant_owner(&caller, &req.org_id)?;
+            if req.proposal_id.is_empty() {
+                return Err(Status::invalid_argument("proposal_id is required"));
+            }
+            let resolution = rule_proposal_resolution(req.resolution, &req.policy_id)?;
+            rule_proposal_switch_gate(resolution, approval_cause::rule_proposals_enabled())?;
+            let row = store::resolve_rule_proposal(
+                &self.pool,
+                &req.org_id,
+                &owner,
+                &req.proposal_id,
+                resolution,
+            )
+            .await
+            .map_err(|error| rule_proposal_status(&error))?
+            .ok_or_else(|| Status::not_found("rule_proposal_not_found"))?;
+            Ok(Response::new(proto::ResolveApprovalRuleProposalResponse {
+                proposal: Some(approval_rule_proposal_proto(&row)),
+            }))
+        }
+        .await;
+        record_metrics("resolve_approval_rule_proposal", started, result.is_ok());
         result
     }
 }
@@ -3572,12 +4027,32 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     .await
                     .map_err(|e| Status::internal(e.to_string()))?;
 
+            // The walkthrough is read only when the switch is on and the run's own receipt is
+            // persistent. Otherwise the bundle names the section it leaves out, and the store is
+            // not read at all.
+            let omission = proof_walkthrough_omission(proof_walkthrough_enabled(), &provenance);
+            let walkthrough = match omission {
+                Some(reason) => Err(reason),
+                None => {
+                    let steps = store::list_browser_walkthrough_for_run(
+                        &self.pool,
+                        &req.run_id,
+                        &req.org_id,
+                        store::BROWSER_WALKTHROUGH_STEP_CAP,
+                    )
+                    .await
+                    .map_err(|e| Status::internal(e.to_string()))?;
+                    Ok(browser_walkthrough_proto(steps))
+                }
+            };
+
             let bundle = build_run_proof_bundle(
                 &req.run_id,
                 &req.org_id,
                 &provenance,
                 &approvals,
                 &evidence,
+                walkthrough,
             );
             Ok(Response::new(proto::GetRunProofBundleResponse {
                 bundle: Some(bundle),
@@ -3796,6 +4271,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         let result: Result<Response<proto::CreateApprovalResponse>, Status> = async {
             let caller = identity(&request)?;
             authorize_operation(&caller, "orchestration:write")?;
+            refuse_waived_approval_caller(&caller)?;
             let mut req = request.into_inner();
             if req.run_id.is_empty() {
                 return Err(Status::invalid_argument("run_id is required"));
@@ -3835,7 +4311,8 @@ impl OrchestrationCoreService for OrchestrationGrpc {
             } else {
                 None
             };
-            let (mut metadata, cause_code) = new_approval_metadata(&req, caller.zdr());
+            let (mut metadata, cause_code) =
+                new_approval_metadata(&req, approval_write_is_content_free(&caller));
             // The typed card (build plan WS10 S1): checked here, never trusted. The resume class is
             // the server's own: a descriptor makes it an action continuation, nothing else can.
             if let Some(card) = crate::space::approvals::card_from_request(
@@ -4094,6 +4571,12 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 &retention_receipt::stored_run_retention(&self.pool, &req.run_id).await?,
             )?;
             let prepared = prepare_question(&req)?;
+            // A resume question is stored only behind its paused input fold, named by the
+            // namespaced input reference, which an approval fold's reference never equals.
+            let require_paused_fold = prepared.delivery == user_question::DELIVERY_RESUME;
+            if require_paused_fold {
+                require_input_pause_ref(&req, origin)?;
+            }
 
             let id = format!("q_{}", mp_ids::new_ulid());
             let created = store::create_run_question(
@@ -4113,6 +4596,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                     // `question_origin` refused a label on a model question, so this is empty
                     // there and the server's checked name otherwise.
                     origin_label: &req.origin_label,
+                    require_paused_fold,
                 },
                 user_question::MAX_QUESTIONS_PER_RUN,
             )
@@ -4131,6 +4615,9 @@ impl OrchestrationCoreService for OrchestrationGrpc {
                 }
                 store::CreatedRunQuestion::KeyInUse => {
                     return Err(Status::already_exists("question_key_in_use"));
+                }
+                store::CreatedRunQuestion::PauseMissing => {
+                    return Err(Status::failed_precondition("question_pause_missing"));
                 }
             };
             Ok(Response::new(proto::CreateRunQuestionResponse {
@@ -4528,7 +5015,7 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         let started = Instant::now();
         let result: Result<Response<proto::DecideApprovalResponse>, Status> = async {
             let caller = identity(&request)?;
-            retention_receipt::refuse_zdr_continuation(&caller)?;
+            refuse_zdr_or_waived_approval_caller(&caller)?;
             authorize_operation(&caller, "approval:decide")?;
             let mut req = request.into_inner();
             if req.approval_id.is_empty() {
@@ -4728,6 +5215,77 @@ impl OrchestrationCoreService for OrchestrationGrpc {
         }
         .await;
         record_metrics("decide_approval", started, result.is_ok());
+        result
+    }
+
+    // "Skip this site" (EP-1 S2): the tools and authority a DENIED `browser_human_assist` pause
+    // retained, for the continuation of the skipped site. Read-only: the denied approval is not
+    // consumed, claimed or changed, nothing is stored, and the descriptor is decrypted here and only
+    // the snapshot leaves, in the shape a consume returns. Gated exactly as `consume_approval` is,
+    // before any lookup. Closed wording only: nothing about the call or the person's reason.
+    async fn get_skipped_assist_authority(
+        &self,
+        request: Request<proto::GetSkippedAssistAuthorityRequest>,
+    ) -> Result<Response<proto::GetSkippedAssistAuthorityResponse>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<proto::GetSkippedAssistAuthorityResponse>, Status> = async {
+            let caller = identity(&request)?;
+            retention_receipt::refuse_zdr_continuation(&caller)?;
+            authorize_operation(&caller, "orchestration:write")?;
+            let req = request.into_inner();
+            if req.approval_id.is_empty()
+                || req.run_id.is_empty()
+                || req.org_id.is_empty()
+                || req.claim_token.is_empty()
+            {
+                return Err(Status::invalid_argument(
+                    "approval_id, run_id, org_id and claim_token are required",
+                ));
+            }
+            caller.authorize_org(&req.org_id)?;
+            let user_id = caller
+                .user_id()
+                .ok_or_else(|| Status::permission_denied("user-bound approval credential required"))?
+                .to_owned();
+            authorize_run_owner(&self.pool, &caller, &req.run_id, OwnerIntent::Mutate).await?;
+            let offered = store::read_skipped_assist_authority(
+                &self.pool,
+                &req.approval_id,
+                &req.org_id,
+                &req.run_id,
+                &user_id,
+                &req.step_id,
+            )
+            .await
+            .map_err(|_| Status::internal("skipped assist authority unavailable"))?;
+            match offered {
+                Ok(offered_json) => {
+                    let authority = approved_authority(&offered_json)
+                        .ok_or_else(|| Status::failed_precondition("approval_not_resumable"))?;
+                    Ok(Response::new(proto::GetSkippedAssistAuthorityResponse {
+                        authority: Some(authority),
+                    }))
+                }
+                Err(store::SkippedAssistRefusal::NotFound) => {
+                    Err(Status::not_found("approval not found for this run"))
+                }
+                Err(store::SkippedAssistRefusal::NotKeptState) => Err(
+                    Refusal::DURABLE_MUTATION_FORBIDDEN
+                        .grpc_status(tonic::Code::FailedPrecondition),
+                ),
+                Err(store::SkippedAssistRefusal::NotSkipped) => {
+                    Err(Status::failed_precondition("approval_not_skipped"))
+                }
+                Err(store::SkippedAssistRefusal::ActionMismatch) => {
+                    Err(Status::failed_precondition("approval_action_mismatch"))
+                }
+                Err(store::SkippedAssistRefusal::NotResumable) => {
+                    Err(Status::failed_precondition("approval_not_resumable"))
+                }
+            }
+        }
+        .await;
+        record_metrics("get_skipped_assist_authority", started, result.is_ok());
         result
     }
 
@@ -6156,7 +6714,7 @@ mod tests {
 
     #[test]
     fn an_unknown_cause_code_is_stored_as_unclassified_gate() {
-        let mut req = create_with_cause("tainted_egress");
+        let mut req = create_with_cause("tainted_egress_retired");
         req.cause.as_mut().expect("cause").scope_options = vec!["run".to_owned()];
         let (metadata, code) = new_approval_metadata(&req, false);
         assert_eq!(code, Some("unclassified_gate"));
@@ -7639,6 +8197,7 @@ mod tests {
             (store::ConsumedRunQuestion::NotAnswered, "question_not_answered"),
             (store::ConsumedRunQuestion::NotResumable, "question_not_resumable"),
             (store::ConsumedRunQuestion::Expired, "question_expired"),
+            (store::ConsumedRunQuestion::RunEnded, "question_run_ended"),
         ] {
             let refused = consume_question_response(outcome).expect_err("refused");
             assert_eq!(refused.message(), code);
@@ -7736,12 +8295,19 @@ mod tests {
     #[test]
     fn proof_bundle_retained_section_cites_the_run_receipt() {
         let retained_reason = |provenance: &store::RunProvenanceRow| {
-            build_run_proof_bundle("run_1", "org-1", provenance, &[], &[])
-                .unavailable
-                .into_iter()
-                .find(|section| section.section == "retained")
-                .expect("retained section is always declared")
-                .reason
+            build_run_proof_bundle(
+                "run_1",
+                "org-1",
+                provenance,
+                &[],
+                &[],
+                Ok(proto::BrowserWalkthrough::default()),
+            )
+            .unavailable
+            .into_iter()
+            .find(|section| section.section == "retained")
+            .expect("retained section is always declared")
+            .reason
         };
 
         let mut waived = test_provenance();
@@ -7810,7 +8376,14 @@ mod tests {
 
     #[test]
     fn proof_bundle_always_declares_the_sections_it_cannot_prove() {
-        let bundle = build_run_proof_bundle("run_1", "org-1", &test_provenance(), &[], &[]);
+        let bundle = build_run_proof_bundle(
+            "run_1",
+            "org-1",
+            &test_provenance(),
+            &[],
+            &[],
+            Ok(proto::BrowserWalkthrough::default()),
+        );
 
         assert_eq!(bundle.bundle_version, 1);
         assert_eq!(bundle.run_id, "run_1");
@@ -7841,6 +8414,7 @@ mod tests {
             &test_provenance(),
             &[test_approval("appr_1")],
             &[],
+            Ok(proto::BrowserWalkthrough::default()),
         );
 
         let proof = &bundle.approvals[0];
@@ -7861,6 +8435,7 @@ mod tests {
             &test_provenance(),
             &[test_approval("appr_1")],
             &[test_evidence("appr_1")],
+            Ok(proto::BrowserWalkthrough::default()),
         );
 
         let execution = bundle.approvals[0]
@@ -7892,6 +8467,7 @@ mod tests {
             &test_provenance(),
             &[test_approval("appr_1")],
             &[evidence],
+            Ok(proto::BrowserWalkthrough::default()),
         );
 
         let outcome = bundle.approvals[0]
@@ -7929,6 +8505,7 @@ mod tests {
             &test_provenance(),
             &[test_approval("appr_1")],
             &[evidence],
+            Ok(proto::BrowserWalkthrough::default()),
         );
 
         let outcome = bundle.approvals[0]
@@ -7963,6 +8540,7 @@ mod tests {
             &[test_approval("appr_1"), test_approval("appr_2")],
             // Evidence belongs to appr_2 only.
             &[test_evidence("appr_2")],
+            Ok(proto::BrowserWalkthrough::default()),
         );
 
         assert!(
@@ -10365,7 +10943,9 @@ mod approval_edit_tests {
         let edit_gate = body.find("refuse_zdr_or_waived_question_caller(&caller)?;").expect("gate");
         let member = body.find("authorize_member_decide(").expect("member lookup");
         assert!(edit_gate < member, "the waived refusal comes before the member lookup");
-        let zdr = body.find("refuse_zdr_continuation(&caller)?;").expect("zdr gate");
+        let zdr = body
+            .find("refuse_zdr_or_waived_approval_caller(&caller)?;")
+            .expect("zdr gate");
         assert!(zdr < edit_gate);
     }
 
@@ -10421,3 +11001,8 @@ mod approval_edit_tests {
         assert!(fields.is_empty());
     }
 }
+
+/// Owed rule-proposal edge tests (verification plan 3.2).
+#[cfg(test)]
+#[path = "orchestration_grpc_owed_tests.rs"]
+mod owed_tests;

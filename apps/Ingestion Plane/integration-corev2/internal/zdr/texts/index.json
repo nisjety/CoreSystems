@@ -1,6 +1,7 @@
 {
   "format": "zdr-acknowledgement-wording/1",
   "current": "v1",
+  "minimum": "v1",
   "versions": {
     "v1": {
       "status": "draft_pending_od_legal",

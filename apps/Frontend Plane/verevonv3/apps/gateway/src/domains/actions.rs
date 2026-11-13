@@ -1,6 +1,7 @@
 pub(crate) mod dispatchers;
 mod browser_omnibox;
 mod dispatchers_browser_policy;
+mod dispatchers_client_routed;
 mod dispatchers_spaces;
 mod handlers;
 mod shared;

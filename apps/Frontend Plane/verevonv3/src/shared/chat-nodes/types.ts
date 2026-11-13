@@ -42,7 +42,7 @@ import type {
   LifecycleNotice,
   StreamFailureAction,
 } from '@/features/chat/components/chat-types'
-import type { Approval, ApprovalDecision, ApprovalEdit } from '@/shared/api/orchestration-client'
+import type { Approval, ApprovalDecision, ApprovalEdit, ApprovalScope } from '@/shared/api/orchestration-client'
 import type { RecalledMemory } from '@/shared/api/chat-client'
 import type { StreamActivity } from '@/features/chat/lib/stream-activity'
 
@@ -83,9 +83,19 @@ export type AnswerState =
    * answer text that streamed before a failure the server saved nothing for:
    * shown only behind an explicit "not saved" disclosure, never as the answer.
    * `action` is what the reader can do (absent = retry); with `wait`,
-   * `retryAt` is the instant the retry control is enabled again.
+   * `retryAt` is the instant the retry control is enabled again. `connectionId` is the
+   * ChatGPT-subscription connection the failed turn ran on (an opaque Integration Core id), set
+   * only on a ChatGPT-subscription turn, so a refusal that asks the reader to review the
+   * connection (`open_integrations`) can open that connection's acknowledgement.
    */
-  | { state: 'failed'; message: string; unsaved?: string; action?: StreamFailureAction; retryAt?: string }
+  | {
+      state: 'failed'
+      message: string
+      unsaved?: string
+      action?: StreamFailureAction
+      retryAt?: string
+      connectionId?: string
+    }
   /** Real content (possibly still streaming, possibly stopped early). */
   | { state: 'content'; content: string; streaming: boolean; stopped: boolean }
 
@@ -186,7 +196,16 @@ export type ConversationNodeContext = {
   onViewSteps: () => void
   /** Open the contextual attachment canvas without replacing the transcript. */
   onViewAttachments?: (attachmentId: string) => void
-  onApprovalDecision: (approvalId: string, decision: ApprovalDecision) => void
+  /**
+   * Sends the person's decision. `scope` is the grant they chose (absent means 'once') and
+   * `promote` is "Always" on a thread grant; both only ever come from what the server offered.
+   */
+  onApprovalDecision: (
+    approvalId: string,
+    decision: ApprovalDecision,
+    scope?: ApprovalScope,
+    promote?: boolean,
+  ) => void
   /** Sends an approval with the person's edits (EP-10-S6). Absent: the card offers no edit mode. */
   onApprovalEditedDecision?: (approvalId: string, edit: ApprovalEdit) => Promise<void>
   /**

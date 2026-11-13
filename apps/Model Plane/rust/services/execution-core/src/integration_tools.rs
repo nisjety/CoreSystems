@@ -734,6 +734,10 @@ impl IntegrationActionsClient {
         if connection_id.trim().is_empty() {
             return Err("execute_provider_action requires connection_id".to_owned());
         }
+        // The id is spliced into the gateway path below, so it takes the read paths' guard.
+        if !is_connection_id(connection_id) {
+            return Err("execute_provider_action requires a valid connection_id".to_owned());
+        }
         if operation.trim().is_empty() {
             return Err("execute_provider_action requires operation".to_owned());
         }
@@ -902,6 +906,35 @@ impl IntegrationActionsClient {
             ));
         }
         Ok(value)
+    }
+
+    /// One read of a custom REST connection's endpoint (W4-CC-7): `custom_rest.call` with the GET or
+    /// HEAD method the call names, on the `integration:read` token, rendered for the model and capped
+    /// like every tool result. The host and the credential are the connection's own, from its binding
+    /// in integration-corev2, so the call names neither; integration-corev2 refuses any other method
+    /// on this token.
+    pub async fn read_custom_rest(
+        &self,
+        org_id: &str,
+        call: &mp_contracts::custom_rest::CallArgs,
+        session_bearer: Option<&str>,
+    ) -> Result<String, String> {
+        let value = self
+            .read_action_json(
+                org_id,
+                &call.connection_id,
+                mp_contracts::custom_rest::OPERATION,
+                call.params(),
+                session_bearer,
+            )
+            .await?;
+        let result = value.pointer("/data/action/result").unwrap_or(&Value::Null);
+        Ok(truncate(&mp_contracts::custom_rest::render_read(
+            &call.connection_id,
+            &call.method,
+            &call.path,
+            result,
+        )))
     }
 
     /// POST one read request with an `integration:read` token and return the gateway's status
@@ -1199,6 +1232,19 @@ pub fn read_provider_action_offered(
     connector_scope: &[String],
 ) -> bool {
     switched_on && !zdr && !space_scoped && !connector_scope.is_empty()
+}
+
+/// Whether a run is offered the custom REST tools (W4-CC-7): the switch, a run that is neither
+/// zero-retention nor Space-scoped, and a connection the person selected. The switch is read on
+/// every offer, so a restart is not needed to turn it off.
+#[must_use]
+pub fn custom_rest_offered(zdr: bool, space_scoped: bool, connector_scope: &[String]) -> bool {
+    mp_contracts::custom_rest::offered(
+        mp_contracts::custom_rest::enabled(),
+        zdr,
+        space_scoped,
+        connector_scope,
+    )
 }
 
 /// A connection id is spliced into the gateway path, so only the characters an id is made of may
@@ -3122,5 +3168,96 @@ mod tests {
                 "cross-contamination: {other} leaked into a call scoped to {expected_connection}"
             );
         }
+    }
+
+    /// W2-WS23-S3-b: the connection id is spliced into the gateway path, so `execute_action` holds it
+    /// to the read paths' guard. A value that could leave the connection path is refused before any
+    /// credential is minted or any action is sent; a well-formed id still reaches the gateway.
+    #[tokio::test]
+    async fn execute_action_refuses_a_connection_id_that_could_leave_the_path_with_no_call() {
+        let auth_core = MockServer::start().await;
+        let integration = MockServer::start().await;
+        let client = test_client(&auth_core.uri(), &integration.uri());
+        for hostile in [
+            "../x",
+            "a/b",
+            "conn?x=1",
+            "conn#frag",
+            "..",
+            "a b",
+            &"c".repeat(129),
+        ] {
+            for approval in [None, Some("approval-1")] {
+                let refused = client
+                    .execute_action(
+                        "org-1",
+                        hostile,
+                        "mail.send",
+                        serde_json::json!({}),
+                        serde_json::json!({}),
+                        "user-1",
+                        approval,
+                        None,
+                    )
+                    .await;
+                let Err(error) = refused else {
+                    panic!("{hostile:?} {approval:?}: a hostile connection id is refused");
+                };
+                assert_eq!(
+                    error, "execute_provider_action requires a valid connection_id",
+                    "{hostile:?} {approval:?}"
+                );
+            }
+        }
+        assert!(
+            auth_core
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "no credential is minted for a refused id"
+        );
+        assert!(
+            integration
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "no action is sent for a refused id"
+        );
+
+        // The positive control: a well-formed id passes the guard and reaches the gateway path.
+        Mock::given(method("POST"))
+            .and(path("/api/ingestion/internal-token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"token": "org-scoped-token"})),
+            )
+            .expect(1)
+            .mount(&auth_core)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/connections/conn-1/actions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": {"ok": true}})),
+            )
+            .expect(1)
+            .mount(&integration)
+            .await;
+        let _ = client
+            .execute_action(
+                "org-1",
+                "conn-1",
+                "mail.messages",
+                serde_json::json!({}),
+                serde_json::json!({}),
+                "user-1",
+                None,
+                None,
+            )
+            .await;
+        let sent = integration.received_requests().await.unwrap_or_default();
+        assert_eq!(sent.len(), 1, "a well-formed id reaches the gateway");
+        assert_eq!(sent[0].url.path(), "/api/v1/connections/conn-1/actions");
     }
 }

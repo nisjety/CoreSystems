@@ -30,9 +30,12 @@
 //! (`space::mentions::check_wake_facts`). So the agent writes only on its own run
 //! ([`index_agent_memory`]) and recalls only on a run addressed to it ([`recall_agent_memory`]),
 //! as quoted text in the lowest memory bucket: a note never becomes an instruction or a grant.
+//! The Space's owner or admin lists one agent's notes through [`list_agent_memory`] (EP-6 P3), under
+//! the Space's memory decision; a ZDR or waived caller is refused `named_agent` there.
 
 use crate::dreaming::DreamMemoryCandidate;
 use crate::write_policy;
+use chrono::{DateTime, Utc};
 use mp_ids::new_ulid;
 use sqlx::{PgPool, Postgres, Transaction};
 
@@ -582,6 +585,10 @@ pub(crate) const SOURCE_AGENT_MEMORY: &str = "agent_memory";
 /// The memory bucket a recalled agent note lands in: the episodic one, below org, workspace,
 /// agent-definition and user text, so a note cannot sit where instructions are read (D12).
 pub(crate) const AGENT_RECALL_TOPIC: &str = "MEMORY";
+/// The feature a ZDR or waived caller is refused listing one agent's notes under (EP-6 P3, EP-6 §5).
+pub(crate) const AGENT_ZDR_FEATURE: &str = "named_agent";
+/// The topic an agent note is listed under in its Space's memory (`dreaming::memory_topic`, scope `agent`).
+const AGENT_LIST_TOPIC: &str = "AGENT";
 
 /// The run statuses after which a run is no longer the agent's live turn.
 const RUN_LIVE_SQL: &str = "r.status NOT IN ('completed', 'failed', 'cancelled')";
@@ -880,9 +887,7 @@ pub(crate) async fn recall_agent_memory(
 /// Erases one binding's notes when the binding is revoked (EP-8 S10). Space deletion erases every
 /// binding's notes already (EP-8 S7, by the `<space_id>:` prefix). Agent rows have no Letta copy,
 /// so the durable delete is the whole erasure. Returns how many rows went.
-// Not yet reachable: the revocation RPC that calls it needs a memory.proto number the integration
-// reports do not reserve (see the slice report). Kept here, tested, so the RPC is a thin wrapper.
-#[allow(dead_code)]
+/// Reached through `MemoryService.EraseAgentMemory` (EP-6 P3), under a Control Space memory decision.
 pub(crate) async fn erase_agent_memory(
     pool: &PgPool,
     org_id: &str,
@@ -903,6 +908,65 @@ pub(crate) async fn erase_agent_memory(
             .increment(erased);
     }
     Ok(erased)
+}
+
+/// The notes one named agent keeps in one Space, for the Space's owner or admin (EP-6 P3, EP-8 S10):
+/// the accepted, current `agent` rows of `scope_id` (see [`agent_scope_id`]). Each row is marked
+/// withheld when the room's current audience does not recall it, as the Space list marks its rows
+/// (D5). The caller has verified the Control Space memory decision and refused a ZDR or waived
+/// credential; this reads rows and writes none.
+pub(crate) async fn list_agent_memory(
+    pool: &PgPool,
+    org_id: &str,
+    scope_id: &str,
+    current_audience_hash: &str,
+    limit: i64,
+) -> Result<Vec<crate::dreaming::SpaceMemoryRow>, sqlx::Error> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<String>,
+            DateTime<Utc>,
+            Vec<String>,
+            Option<String>,
+        ),
+    >(
+        "SELECT id, content, source_label, updated_at, source_links, audience_hash \
+         FROM agent_memory \
+         WHERE org_id = $1 \
+           AND scope = 'agent' \
+           AND scope_id = $2 \
+           AND review_state = 'accepted' \
+           AND is_latest = true \
+           AND (expires_at IS NULL OR expires_at > now()) \
+         ORDER BY updated_at DESC \
+         LIMIT $3",
+    )
+    .bind(org_id)
+    .bind(scope_id)
+    .bind(limit.clamp(1, 200))
+    .fetch_all(pool)
+    .await?;
+    let current = current_audience_hash.trim();
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, content, source_label, updated_at, source_links, audience_hash)| {
+                crate::dreaming::SpaceMemoryRow {
+                    id,
+                    thread_id: crate::dreaming::space_row_thread(&source_links).unwrap_or_default(),
+                    topic: AGENT_LIST_TOPIC.to_owned(),
+                    content,
+                    source_label: source_label.unwrap_or_default(),
+                    provenance: crate::dreaming::MemoryProvenance::classify(&source_links),
+                    updated_at,
+                    withheld: current.is_empty() || audience_hash.as_deref() != Some(current),
+                }
+            },
+        )
+        .collect())
 }
 
 #[cfg(test)]

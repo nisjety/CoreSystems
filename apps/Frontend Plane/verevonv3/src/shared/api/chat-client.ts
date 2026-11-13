@@ -1,4 +1,4 @@
-import { ApiError, apiErrorFromResponse, requestJson, signalSessionExpiry } from './http'
+import { ApiError, apiErrorFromResponse, clientError, requestJson, signalSessionExpiry } from './http'
 import { gatewayBaseUrl } from './config'
 import {
   normalizePlan,
@@ -23,7 +23,7 @@ import {
   type PrivacyTier,
 } from './privacy-tier'
 import { createSelectedAgentToolSpecs } from '@/shared/actions/agent-tools'
-import { parseChatHistoryAction, threadExportInput } from '@/shared/actions/chat-history'
+import { parseChatHistoryAction, threadExportInput, threadImportInput, threadSideChatAction } from '@/shared/actions/chat-history'
 import { isSupportChatThread } from '@/shared/chat/support-chat-thread'
 import { isLocale, localeIntl, localeStorageKey, type Locale } from '@/shared/i18n/locales'
 import { isAgUiEventName, toVerevonUiEvent, type VerevonUiEvent } from '@/shared/chat/verevon-ui-events'
@@ -34,7 +34,26 @@ import {
 } from '@/features/chat/lib/chat-retention'
 import { runParkedFrameOf, type RunParkedFrame } from '@/features/chat/lib/run-park'
 import { BROWSER_REGIONS_PER_TURN_MAX } from '@/features/browser/page-context/region-attach'
+import { chatLibraryKindOf } from '@/features/chat/lib/chat-library-origins'
+import { blobToDataUrl, parseDataUrl } from '@/shared/lib/blob-data'
+import {
+  TRANSCRIPT_MAX_RECORDING_BYTES,
+  TRANSCRIPT_MAX_TITLE_CHARS,
+  parseChatTranscriptCreate,
+  transcriptAudioType,
+} from '@/shared/actions/chat-transcript'
+import {
+  REVIEW_TARGETS,
+  parseReviewRunInput,
+  type ReviewRunInput,
+  type ReviewTarget,
+} from '@/shared/actions/chat-review'
+import {
+  parseReasoningTranslateInput,
+  type ReasoningTranslateLocale,
+} from '@/shared/actions/chat-reasoning-translate'
 import type { ThreadGoalStatus } from './thread-goal-client'
+import { waivedContinuationFields, type WaivedRunConnection } from './waived-continuation'
 
 // ── Wide research (EP-2 S8) ─────────────────────────────────────────────────
 
@@ -110,6 +129,27 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
     : []
+}
+
+/**
+ * A persisted deep-research plan (`research_plan`, EP-2 S5) back to the card's shape, or `undefined` when it
+ * is not an object or holds no sub-query. Read by name: the record's version and any other key are dropped.
+ * The cap is the record's own `caps.max_sub_queries` when it has one (the BFF transcript relays none), never
+ * below the stored sub-query count.
+ */
+export function normalizeStoredResearchPlan(value: unknown): ChatResearchPlanEvent | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const subQueries = stringList(record.sub_queries)
+  if (subQueries.length === 0) return undefined
+  const caps = record.caps && typeof record.caps === 'object' ? (record.caps as Record<string, unknown>) : undefined
+  const stored = caps?.max_sub_queries
+  const cap = typeof stored === 'number' && Number.isInteger(stored) && stored > 0 ? stored : RESEARCH_PLAN_DEFAULT_MAX_SUB_QUERIES
+  return {
+    subQueries,
+    questions: stringList(record.questions).slice(0, 3),
+    maxSubQueries: Math.max(cap, subQueries.length),
+  }
 }
 
 function wideResearchWire(
@@ -285,6 +325,8 @@ export type ChatInvokeRequest = {
   provider?: string
   /** Opaque Integration Core connection id; never a ChatGPT token. */
   subscriptionConnectionId?: string
+  /** Opaque Integration Core id of one of the person's customer gateways (W4-BYO-6). Never zero retention. */
+  modelConnectionId?: string
   threadId?: string
   /** The requested personal Space for a new durable chat thread. The BFF
    * exchanges this selection for a Control-signed, effect-bound decision. */
@@ -312,6 +354,13 @@ export type ChatInvokeRequest = {
    * browser only names the post.
    */
   wake?: { messageId: string; clientWakeId: string }
+  /**
+   * A builder preview (EP-6 S8): one question answered by the saved draft of this agent, as a temporary
+   * turn with no thread, Space or mention. Sent as `agent_preview: {agent_ref}` only when set, and the
+   * turn is built zero-retention (`asAgentPreview` drops the thread and Space fields). The gateway checks
+   * the builder's access and the draft, runs the turn read-only, drops the client's tools, and stores nothing.
+   */
+  agentPreview?: { agentRef: string }
   sessionKey?: string
   features?: string[]
   generateImage?: boolean
@@ -365,6 +414,12 @@ export type ChatInvokeRequest = {
    * model's catalogue entry lists (`modelEffortLevels`) is ever sent.
    */
   effort?: EffortProfile | EffortLevel
+  /**
+   * The Fast chip's speed choice (W5-095-b): `priority` asks the gateway for the priority service tier on this
+   * turn, which it honours only on a model that declares the tier (`priorityTier`). `standard` is no choice.
+   * Sent only when the composer carries one, so a body without it is byte-identical to before.
+   */
+  speed?: 'standard' | 'priority'
   /**
    * Response-style dial, orthogonal to `effort`: how much prose the answer
    * spends, not how hard the model thinks.
@@ -812,6 +867,23 @@ export type ChatAttachmentEvent = {
  */
 export type ChatCostBasis = 'metered' | 'subscription'
 
+/**
+ * Why the gateway routed an answer to the model it did (W5-073-b): the Verevon mode, the estimated complexity and the
+ * reason, each a closed token, and the role for a side task. A token this build does not know is shown as nothing, so a
+ * newer gateway never prints a raw code. Carried on the usage frames and the answer's stored metadata, only where the
+ * gateway's routing-decision switch is on.
+ */
+export type ChatRoutingDecision = {
+  /** The Verevon mode the call ran under: `budget`, `balance` or `genius`. */
+  mode?: string
+  /** The estimated complexity: `simple`, `moderate` or `complex`. */
+  complexity?: string
+  /** Why the model was chosen: `mode_cell`, `budget_tier_shift`, `budget_cheap_fallback` or `posture_unknown`. */
+  reason?: string
+  /** The role-table purpose of a side task, such as `title`; absent for the answer itself. */
+  role?: string
+}
+
 export type ChatUsageEvent = {
   inputTokens?: number
   outputTokens?: number
@@ -834,6 +906,8 @@ export type ChatUsageEvent = {
    * fills the gap from a model name.
    */
   servedBy?: AnswerServedBy
+  /** Why the gateway routed the answer where it did (W5-073-b). Absent unless the gateway's routing-decision switch is on. */
+  routingDecision?: ChatRoutingDecision
 }
 
 export type ChatCostByCategory = {
@@ -879,6 +953,8 @@ export type ChatUsageProgressEvent = {
   warning?: 'run_ceiling_80' | 'run_ceiling_reached'
   /** How the budget moved this call's route (WS27-S7), stated only on a call it moved. */
   routing?: 'tier_shifted' | 'cheap_fallback'
+  /** The answer's routing decision (W5-073-b), stated only on the answer's own progress frame. */
+  routingDecision?: ChatRoutingDecision
 }
 
 function costBasisValue(value: unknown): ChatCostBasis | undefined {
@@ -930,6 +1006,7 @@ function usageProgressFrame(payload: Record<string, unknown>): ChatUsageProgress
     fraction: num(payload.fraction),
     warning: runCeilingWarningValue(payload.warning),
     routing: routingValue(payload.routing),
+    ...routingDecisionField(payload.routing_decision),
   }
 }
 
@@ -937,6 +1014,21 @@ function usageProgressFrame(payload: Record<string, unknown>): ChatUsageProgress
 function servedByField(payload: Record<string, unknown>): { servedBy?: AnswerServedBy } {
   const servedBy = normalizeAnswerServedBy(payload)
   return servedBy ? { servedBy } : {}
+}
+
+/**
+ * The `routingDecision` key of a usage frame, or of a stored answer's metadata, read by its closed keys and nothing else
+ * (W5-073-b). A decision that names none of them is no decision, so the key is left out rather than set empty.
+ */
+function routingDecisionField(value: unknown): { routingDecision?: ChatRoutingDecision } {
+  const record = objectValue(value)
+  if (!record) return {}
+  const decision: ChatRoutingDecision = {}
+  for (const key of ['mode', 'complexity', 'reason', 'role'] as const) {
+    const token = str(record[key])
+    if (token) decision[key] = token
+  }
+  return Object.keys(decision).length > 0 ? { routingDecision: decision } : {}
 }
 
 export type TurnTimingOutcome = 'completed' | 'failed' | 'cancelled' | 'timeout'
@@ -1253,6 +1345,13 @@ export type ChatQuestionAnswer = {
 }
 
 /**
+ * The run paused for its owner's answer (WS14 S5): the `awaiting_input` frame, ids only. `questionId` is absent
+ * when the server could not read the question (the frame then carries an empty id), and the card then comes from
+ * the run's own question list.
+ */
+export type ChatAwaitingInputEvent = { runId: string; requestId?: string; questionId?: string }
+
+/**
  * Read the recalled-memory list off the wire.
  *
  * Unknown `origin`/`role` values degrade rather than being dropped — the
@@ -1314,6 +1413,11 @@ export type ChatStreamHandlers = {
   onPlanProposed?: (event: ChatPlanProposedEvent) => void
   /** See `ChatUserQuestionEvent`. Ungated: the card is the only way to answer the question. */
   onUserQuestion?: (event: ChatUserQuestionEvent) => void
+  /**
+   * The run paused for its owner's answer (WS14 S5). See `ChatAwaitingInputEvent`. A frame without its run id is
+   * not read.
+   */
+  onAwaitingInput?: (event: ChatAwaitingInputEvent) => void
   /** The connected-app suggestion card (EP-10 S8). Ungated control event. */
   onConnectorSuggestion?: (event: { suggestionId?: string; provider?: string; reason?: string; requestId?: string }) => void
   /** See `ChatResearchPlanEvent`. Ungated: the plan card is the plan turn's whole answer. */
@@ -1401,6 +1505,10 @@ export type ChatMessage = {
   retrievalScope?: import('@/shared/actions/chat-source-scope').RetrievalScope
   /** The context chips a user turn was sent with (EP-3 S5), from `metadata.context_refs`: kind, id and label only. */
   contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[]
+  /** The plan an assistant plan turn ended with (EP-2 S5), from `metadata.research_plan`: sub-queries and questions only. */
+  researchPlan?: ChatResearchPlanEvent
+  /** Why the gateway routed this answer where it did (W5-073-b), from `metadata.routing_decision`. Absent for a turn recorded without one. */
+  routingDecision?: ChatRoutingDecision
   id: string
   role: 'user' | 'assistant'
   content: string
@@ -1506,6 +1614,12 @@ export type ChatThreadSession = {
   attentionSince?: string
   /** Whether the thread holds an unread reply. Present only with an attention state. */
   attentionUnseen?: boolean
+  /**
+   * The status of the thread's goal (EP-7 S5): one closed token (`active`, `paused`, `met`,
+   * `budget_reached`, `turns_reached` or `blocked`). Absent when the thread has no goal, or the server's
+   * thread goals or attention switch is off. A status word only, never the objective.
+   */
+  goalStatus?: string
 }
 
 export type ChatThreadTranscriptSnapshot = {
@@ -1679,6 +1793,11 @@ export type ModelInfo = {
    */
   effortLevels?: EffortLevel[]
   /**
+   * The model's record declares the priority service tier (`priority_tier` on `/v1/models`). The composer offers the
+   * Fast chip only for such a model. `undefined` when the record declares none.
+   */
+  priorityTier?: boolean
+  /**
    * Context window in tokens (`context_window_tokens` on `/v1/models`). `undefined` when the
    * catalogue has no sourced record for the model, so no window is claimed.
    */
@@ -1687,6 +1806,12 @@ export type ModelInfo = {
   maxOutputTokens?: number
   /** Vendor lifecycle stage (`lifecycle`). `undefined` when the catalogue names none. */
   lifecycle?: ModelLifecycle
+  /**
+   * The model the vendor names as this one's replacement (`successor` on `/v1/models`), set on
+   * a deprecated model only. The picker names it; nothing switches to it. `undefined` when the
+   * catalogue names none.
+   */
+  successor?: string
   /**
    * The catalogue's list price for a chat model (`price` on `/v1/models`). Present only when
    * the gateway's list-price switch is on and the catalogue names a price.
@@ -2061,7 +2186,28 @@ function storedUiLocale(): Locale | undefined {
   }
 }
 
-export function buildChatWireBody(request: ChatInvokeRequest): Record<string, unknown> {
+/**
+ * A builder preview (EP-6 S8) is a temporary, zero-retention turn outside any thread, Space or mention.
+ * The gateway refuses those fields on it, so they are dropped, and zero retention is forced, before the
+ * body is built from the request. Any other request passes through unchanged.
+ */
+function asAgentPreview(request: ChatInvokeRequest): ChatInvokeRequest {
+  if (!request.agentPreview) return request
+  return {
+    ...request,
+    threadId: undefined,
+    spaceRef: undefined,
+    mentionedAgentRef: undefined,
+    wake: undefined,
+    pinnedMessageIds: undefined,
+    regenerateOfMessageId: undefined,
+    editOfMessageId: undefined,
+    zdr: true,
+  }
+}
+
+export function buildChatWireBody(input: ChatInvokeRequest): Record<string, unknown> {
+  const request = asAgentPreview(input)
   const conversationOnly = request.sourceScope === 'conversation'
   // Per-turn retrieval-source filter (chat-wave2 scope spec): conversation
   // always wins — that mode already excludes both source families outright,
@@ -2077,7 +2223,10 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
       : 'auto'
   const threadId = request.threadId?.trim() || undefined
   const supportReadOnly = isSupportChatThread(threadId)
+  // A customer-gateway turn is text-only, as a subscription route is (W4-BYO-6): the gateway refuses tools,
+  // images, research, attachments and plan mode, so it takes the same suppressions below.
   const subscriptionBacked = request.provider === 'openai-codex-subscription'
+    || Boolean(request.modelConnectionId?.trim())
   if (subscriptionBacked && (request.attachments ?? []).length > 0) throw new AttachmentsNotSentError()
   const tools = supportReadOnly || subscriptionBacked ? [] : buildToolSpecs(request)
   const features = new Set(request.features ?? DEFAULT_FEATURES)
@@ -2200,6 +2349,7 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     model: request.model,
     provider: request.provider,
     subscription_connection_id: request.subscriptionConnectionId,
+    model_connection_id: request.modelConnectionId?.trim() || undefined,
     profile: request.profile ?? 'chat',
     thread_id: threadId,
     session_key: request.sessionKey?.trim() || threadId,
@@ -2213,6 +2363,8 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     client_utc_offset_minutes: clientUtcOffsetMinutes(new Date()),
     ...(uiLocale ? { ui_locale: uiLocale } : {}),
     mentioned_agent_ref: request.mentionedAgentRef?.trim() || undefined,
+    // Present only on a builder preview (EP-6 S8), so every other body is byte-identical to what it was.
+    ...(request.agentPreview ? { agent_preview: { agent_ref: request.agentPreview.agentRef.trim() } } : {}),
     // Present only on a wake, so every other body is byte-identical to what it was.
     ...(request.wake ? { wake: { message_id: request.wake.messageId, client_wake_id: request.wake.clientWakeId } } : {}),
     // Explicit skill picks. The KEY is absent when none — not `undefined`, not
@@ -2277,6 +2429,9 @@ export function buildChatWireBody(request: ChatInvokeRequest): Record<string, un
     ...(request.effort && request.effort !== 'standard'
       ? { effort: request.effort }
       : {}),
+    // The Fast chip's speed choice (W5-095-b): present only when the composer carries one (the chip flag on),
+    // so every other body is byte-identical to what it was before the field existed.
+    ...(request.speed ? { speed: request.speed } : {}),
     // Same shape as `effort` above, and for the same reason: the gateway reads
     // an absent verbosity as "no directive", so `balanced` is omitted rather
     // than sent as a no-op on every turn.
@@ -2571,6 +2726,7 @@ function dispatchAgUiEvent(
             unpricedCalls: num(value.unpriced_calls),
             costByCategory: costByCategoryValue(value.cost_by_category),
             ...servedByField(value),
+            ...routingDecisionField(value.routing_decision),
           })
           break
         case 'usage_progress':
@@ -2844,6 +3000,7 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
         unpricedCalls: num(usage.unpriced_calls),
         costByCategory: costByCategoryValue(usage.cost_by_category),
         ...servedByField(payload),
+        ...routingDecisionField(usage.routing_decision),
       })
       break
     }
@@ -2922,6 +3079,18 @@ function dispatchEvent(event: SseEvent, handlers: ChatStreamHandlers): void {
           items,
           requestId: str(payload.request_id),
           ...questionOrigin(payload),
+        })
+      }
+      break
+    }
+    case 'awaiting_input': {
+      // The run paused for its owner's answer (WS14 S5). Ids only: a frame without its run id is not read.
+      const runId = str(payload.run_id)
+      if (runId) {
+        handlers.onAwaitingInput?.({
+          runId,
+          requestId: str(payload.request_id),
+          questionId: str(payload.question_id) || undefined,
         })
       }
       break
@@ -3108,6 +3277,26 @@ function streamConnectionFailure(err: unknown, fallback: string): ChatErrorEvent
       ...(err.feature ? { feature: err.feature } : {}),
     }
   }
+  // The organisation's agent-run pause (F-t3-083) is the org's policy refusing the run, not a sign-in problem:
+  // it keeps its code, and a 403 for it is not a lost session. The words come from the code
+  // (streamFailurePresentation), so the event carries a fixed sentence and never the server's text.
+  if (err instanceof ApiError && err.code === 'org_agents_paused') {
+    return {
+      code: err.code,
+      message: 'Organisasjonen har satt agentkjøringer på pause. Vanlig chat fungerer som før. Ingenting ble kjørt.',
+      retryable: false,
+    }
+  }
+  // The organisation's agent policy cannot be read (C-14-mg-rel1), a 503 refused before the run started. It is not a lost
+  // connection: that would reattach into the same refusal, and read the English server text. It keeps its code, so the
+  // turn reads the words of the code (streamFailurePresentation) and offers a retry; the server says it may clear.
+  if (err instanceof ApiError && err.code === 'org_policy_unavailable') {
+    return {
+      code: err.code,
+      message: 'Organisasjonens agentpolicy kan ikke leses akkurat nå, så agenten startet ikke. Ingenting ble kjørt.',
+      retryable: true,
+    }
+  }
   // A typed Space denial (a policy, entitlement, role or ZDR refusal) is the
   // server's answer about the room, not a sign-in problem: keep its code and
   // details so the room can say why. An untyped 403 still reads as lost access.
@@ -3115,7 +3304,7 @@ function streamConnectionFailure(err: unknown, fallback: string): ChatErrorEvent
     return {
       code: err.code ?? 'forbidden',
       message: err.message,
-      ...(err.details ? { details: err.details } : {}),
+      ...(err.details && !Array.isArray(err.details) ? { details: err.details } : {}),
     }
   }
   if (err instanceof ApiError && err.status === 401) {
@@ -3237,9 +3426,29 @@ export async function resumeStream(
   }
 }
 
-export async function cancelInvocation(requestId: string): Promise<void> {
+/**
+ * The frame reader of a chat stream this module does not open itself. The question form of `chat.run.continue`
+ * (WS14 S5) streams through `continueQuestionRun`, and its frames reach a turn's handlers through this, in the
+ * order, batching and dispatch that `streamChat` and `resumeStream` use. `close` flushes the text still waiting in
+ * the batch once that stream has ended.
+ */
+export function chatStreamFrameReader(
+  handlers: ChatStreamHandlers,
+  signal?: AbortSignal,
+): { read: (event: SseEvent) => void; close: () => void } {
+  const batch = frameBatchFor(handlers, signal)
+  return {
+    read: (event) => dispatchFrame(event, handlers, batch),
+    close: () => batch?.deltas.close(),
+  }
+}
+
+export async function cancelInvocation(requestId: string, waived?: WaivedRunConnection): Promise<void> {
+  const named = waivedContinuationFields(waived)
   await requestJson(`/api/v1/chat/invocations/${encodeURIComponent(requestId)}/cancel`, {
     method: 'POST',
+    // A turn that was not waived sends no body, as it always did; a waived one names its connection (ZDR Z-19e).
+    ...(Object.keys(named).length > 0 ? { body: JSON.stringify(named) } : {}),
   })
 }
 
@@ -3308,6 +3517,7 @@ export async function approvePlan(
   justification: string,
   planId?: string,
   editedSteps?: PlanStepEdit[],
+  waived?: WaivedRunConnection,
 ): Promise<PlanApprovalResult> {
   const raw = await requestJson<Record<string, unknown>>(
     `/api/v1/agents/runs/${encodeURIComponent(runId)}/plan-approval`,
@@ -3319,6 +3529,8 @@ export async function approvePlan(
         justification,
         plan_id: planId ?? '',
         edited_steps: (editedSteps ?? []).map(planStepEditToWire),
+        // The connection of a waived run (ZDR Z-19e); no keys unless a run was waived and the switch is on.
+        ...waivedContinuationFields(waived),
       }),
     },
   )
@@ -3350,6 +3562,7 @@ export async function rejectPlan(
   runId: string,
   planId: string,
   reason: string,
+  waived?: WaivedRunConnection,
 ): Promise<{ plan?: Plan }> {
   const raw = await requestJson<Record<string, unknown>>(
     `/api/v1/agents/runs/${encodeURIComponent(runId)}/plan-approval`,
@@ -3360,6 +3573,7 @@ export async function rejectPlan(
         justification: reason,
         plan_id: planId,
         edited_steps: [],
+        ...waivedContinuationFields(waived),
       }),
     },
   )
@@ -3583,7 +3797,7 @@ export type ChatLibraryItem = {
   contentBytes: number
   createdAt: string
   updatedAt: string
-  /** The thread a generated copy was saved from, from its source trace. Absent for an upload. */
+  /** The thread a generated copy was saved from, or a transcript was made in. Absent for other uploads. */
   threadId?: string
 }
 
@@ -3597,12 +3811,14 @@ function chatLibraryItem(value: unknown): ChatLibraryItem | null {
   const record = objectValue(value)
   if (!record || typeof record.document_id !== 'string' || !record.document_id) return null
   const metadata = objectValue(record.metadata)
-  const threadValue = objectValue(metadata?.source_ref)?.thread_id
+  // A generated copy names its thread in `source_ref`; a transcript names it at the top of `metadata` (W5-090-b).
+  const threadValue = objectValue(metadata?.source_ref)?.thread_id ?? metadata?.thread_id
   const threadId = typeof threadValue === 'string' && threadValue ? threadValue : undefined
   return {
     documentId: record.document_id,
     title: typeof record.title === 'string' ? record.title : '',
-    kind: metadata?.origin === 'chat-artifact' ? 'generated' : 'uploaded',
+    // An origin the library does not list reads as uploaded, as it always has.
+    kind: chatLibraryKindOf(metadata?.origin) ?? 'uploaded',
     ownerId: typeof record.owner_id === 'string' ? record.owner_id : '',
     visibility: typeof record.visibility === 'string' ? record.visibility : '',
     contentBytes: typeof record.content_bytes === 'number' ? record.content_bytes : 0,
@@ -3639,6 +3855,213 @@ export async function readChatLibraryText(documentId: string): Promise<string> {
   const raw = await requestJson<unknown>(`/api/v1/knowledge/documents/${encodeURIComponent(documentId)}`)
   const content = objectValue(raw)?.content
   return typeof content === 'string' ? content : ''
+}
+
+/**
+ * Whether "Transcribe to document" is offered on an audio attachment at all (W5-090-b): only when
+ * `VITE_CHAT_MEDIA_TRANSCRIPTS` is exactly `true`. Read at call time so a test can stub it.
+ */
+export function mediaTranscriptsEnabled(): boolean {
+  return import.meta.env.VITE_CHAT_MEDIA_TRANSCRIPTS === 'true'
+}
+
+/** A saved transcript: the id of its document. The transcript's text is never carried back (W5-090-b). */
+export type ChatTranscript = { documentId: string }
+
+/**
+ * Turn one audio recording into a private transcript document (W5-090-b, F-t3-090).
+ *
+ * The recording is read as base64 and sent once to `POST /api/v1/chat/transcripts`. The gateway transcribes it through
+ * the speech route and saves the text as a `media_transcript` document, owned by the caller and private, with
+ * `metadata.origin` set to `chat-transcript`. The audio is never stored, here or on the server. The title is cut to the
+ * gateway's 120 characters.
+ *
+ * A recording over 1.4 MB is refused before it is read, with an `ApiError` whose code is `transcript_recording_too_large`,
+ * and a type the gateway does not take is refused with `transcript_type_unsupported`. Both are thrown without sending
+ * anything. A zero-retention caller is refused by the gateway with a `zdr_` code; a temporary chat is never offered this.
+ */
+export async function transcribeToDocument(input: {
+  file: Blob
+  title: string
+  threadId?: string
+}): Promise<ChatTranscript> {
+  const audioType = transcriptAudioType(input.file.type)
+  if (!audioType) throw clientError(415, 'transcript_type_unsupported')
+  if (input.file.size > TRANSCRIPT_MAX_RECORDING_BYTES) throw clientError(413, 'transcript_recording_too_large')
+  const parsed = parseDataUrl(await blobToDataUrl(input.file))
+  const body = parseChatTranscriptCreate({
+    audio_base64: parsed?.base64 ?? '',
+    mime: audioType,
+    title: Array.from(input.title.trim()).slice(0, TRANSCRIPT_MAX_TITLE_CHARS).join(''),
+    ...(input.threadId ? { thread_id: input.threadId } : {}),
+  })
+  const raw = await requestJson<unknown>('/api/v1/chat/transcripts', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+  const documentId = objectValue(raw)?.document_id
+  if (typeof documentId !== 'string' || !documentId) throw clientError(503, 'transcript_not_saved')
+  return { documentId }
+}
+
+/** The severities a review finding may carry, most severe first (F-t3-086). */
+const REVIEW_SEVERITIES = ['P0', 'P1', 'P2', 'P3'] as const
+const REVIEW_STATUSES = ['completed', 'unreadable'] as const
+const REVIEW_VERDICTS = ['clean', 'findings', 'unverified', 'unreadable'] as const
+/** The deterministic checks the gateway runs on a model's reply, and the outcomes a check can report. */
+const REVIEW_CHECKS = ['reply_contract', 'line_locations', 'quoted_text'] as const
+const REVIEW_OUTCOMES = ['passed', 'failed', 'not_run'] as const
+
+/** One finding the gateway kept (F-t3-086): its line span lies in the text, and its quote is in those lines. */
+export type ReviewFinding = {
+  severity: (typeof REVIEW_SEVERITIES)[number]
+  title: string
+  body: string
+  suggestion: string
+  lineStart: number
+  lineEnd: number
+  quote: string
+}
+
+/** One deterministic check the gateway ran on a model's reply. It is not a model finding (F-t3-086). */
+export type ReviewSourceCheck = {
+  check: (typeof REVIEW_CHECKS)[number]
+  outcome: (typeof REVIEW_OUTCOMES)[number]
+  /** The model's findings this check removed. */
+  dropped: number
+}
+
+/**
+ * A review card (F-t3-086), as Model Gateway's `card_json` writes it. The model's findings and the gateway's checks are
+ * separate arrays, so a reader can tell what the model said from what the gateway verified. `usage.costUsd` is null on
+ * a zero-retention review, which is not priced.
+ */
+export type ReviewCard = {
+  runId: string
+  target: ReviewTarget
+  label: string
+  status: (typeof REVIEW_STATUSES)[number]
+  verdict: (typeof REVIEW_VERDICTS)[number]
+  findings: ReviewFinding[]
+  sourceChecks: ReviewSourceCheck[]
+  /** More findings were checked and kept than the card holds. The most severe are the ones it keeps. */
+  limitReached: boolean
+  reviewed: { contentHash: string; lines: number; bytes: number }
+  modelUsed: string
+  usage: { inputTokens: number; outputTokens: number; costUsd: number | null; latencyMs: number }
+}
+
+/** The wire value when it is one of `values`, or `undefined` for anything else. */
+function oneOf<T extends string>(values: readonly T[], value: unknown): T | undefined {
+  return typeof value === 'string' && (values as readonly string[]).includes(value) ? (value as T) : undefined
+}
+
+function reviewFinding(value: unknown): ReviewFinding | null {
+  const record = objectValue(value)
+  const severity = oneOf(REVIEW_SEVERITIES, record?.severity)
+  const title = str(record?.title)
+  const body = str(record?.body)
+  const lineStart = num(record?.lineStart)
+  const lineEnd = num(record?.lineEnd)
+  const quote = str(record?.quote)
+  if (!severity || title === undefined || body === undefined) return null
+  if (lineStart === undefined || lineEnd === undefined || quote === undefined) return null
+  return { severity, title, body, suggestion: str(record?.suggestion) ?? '', lineStart, lineEnd, quote }
+}
+
+function reviewSourceCheck(value: unknown): ReviewSourceCheck | null {
+  const record = objectValue(value)
+  const check = oneOf(REVIEW_CHECKS, record?.check)
+  const outcome = oneOf(REVIEW_OUTCOMES, record?.outcome)
+  if (!check || !outcome) return null
+  return { check, outcome, dropped: frameCount(record?.dropped) }
+}
+
+/** A card read defensively: a card with no run id, target, status or verdict is not a card, and the caller refuses it. */
+function normalizeReviewCard(value: unknown): ReviewCard | null {
+  const record = objectValue(value)
+  const runId = str(record?.runId)
+  const target = oneOf(REVIEW_TARGETS, record?.target)
+  const status = oneOf(REVIEW_STATUSES, record?.status)
+  const verdict = oneOf(REVIEW_VERDICTS, record?.verdict)
+  if (!runId || !target || !status || !verdict) return null
+  const rawFindings = record?.findings
+  const rawChecks = record?.sourceChecks
+  const reviewed = objectValue(record?.reviewed)
+  const usage = objectValue(record?.usage)
+  return {
+    runId,
+    target,
+    label: str(record?.label) ?? '',
+    status,
+    verdict,
+    findings: (Array.isArray(rawFindings) ? rawFindings : []).flatMap((item: unknown) => reviewFinding(item) ?? []),
+    sourceChecks: (Array.isArray(rawChecks) ? rawChecks : []).flatMap((item: unknown) => reviewSourceCheck(item) ?? []),
+    limitReached: record?.limitReached === true,
+    reviewed: {
+      contentHash: str(reviewed?.contentHash) ?? '',
+      lines: frameCount(reviewed?.lines),
+      bytes: frameCount(reviewed?.bytes),
+    },
+    modelUsed: str(record?.modelUsed) ?? '',
+    usage: {
+      inputTokens: frameCount(usage?.inputTokens),
+      outputTokens: frameCount(usage?.outputTokens),
+      costUsd: num(usage?.costUsd) ?? null,
+      latencyMs: frameCount(usage?.latencyMs),
+    },
+  }
+}
+
+/**
+ * Runs one read-only review of a text (F-t3-086) and returns its card. The request is checked against the action
+ * contract before anything is sent, and the card goes back to the caller only: nothing is stored. Resolves to `null`
+ * while the gateway's review switch is off (404 `review_run_disabled`). Other refusals reject with the server's typed
+ * `ApiError`: a text the gateway will not take (a `review_` code on 400 or 413), a zero-retention refusal, and
+ * `delegated_auth_unavailable` while the model's credentials are unavailable. A request the contract refuses rejects
+ * with a `ReviewRunContractError`, and nothing is sent.
+ */
+export async function runReview(input: ReviewRunInput): Promise<ReviewCard | null> {
+  const request = parseReviewRunInput(input)
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>('/api/v1/ai/review', {
+      method: 'POST',
+      body: JSON.stringify(request),
+    })
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404 && error.code === 'review_run_disabled') return null
+    throw error
+  }
+  const card = normalizeReviewCard(objectValue(objectValue(raw)?.data)?.run)
+  if (!card) throw new ApiError('The review did not return a card.', 502, 'review_no_card')
+  return card
+}
+
+/**
+ * Translates one shown text into the reader's language (F-t3-098, W5-098-c): `POST /api/v1/ai/translate`. The text and
+ * the target are checked against the action contract before anything is sent, and a request the contract refuses rejects
+ * with a `ReasoningTranslateContractError`, with nothing sent. The answer is for the reader's screen only: nothing is
+ * stored, and the caller holds it in a component signal, never in the turn, a history cache or a composer. Resolves to
+ * `null` while the gateway's reasoning-translation switch is off (404) and for a zero-retention turn (412). Other refusals
+ * reject with the server's typed `ApiError`, such as `delegated_auth_unavailable` while the model's credentials are down.
+ */
+export async function translateText(text: string, targetLocale: ReasoningTranslateLocale): Promise<string | null> {
+  const request = parseReasoningTranslateInput({ text, targetLocale })
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>('/api/v1/ai/translate', {
+      method: 'POST',
+      body: JSON.stringify({ text: request.text, target_locale: request.targetLocale }),
+    })
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 404 || error.status === 412)) return null
+    throw error
+  }
+  // `requestJson` has already unwrapped the gateway's `{ data }` envelope, so the translation is read from `raw` itself.
+  const translated = str(objectValue(raw)?.text)?.trim()
+  if (!translated) throw new ApiError('The translation did not return text.', 502, 'reasoning_translate_no_output')
+  return translated
 }
 
 export async function getThreadContext(
@@ -3964,6 +4387,37 @@ function downloadNameOf(disposition: string | null): string | null {
   return disposition?.match(/filename="([^"]+)"/)?.[1] ?? null
 }
 
+/** What an import made (EP-12 S15): the new thread, how many turns it kept, and how many things the file held that it left out. */
+export type ChatThreadImport = {
+  threadId: string
+  importedMessages: number
+  dropped: number
+}
+
+/**
+ * Make a new thread of one of the owner's conversation export files (EP-12 S15). The file's text is checked against
+ * the action contract before anything is sent: at most 2 MiB. Resolves to the new thread and the two counts. Rejects
+ * with the server's typed refusal: `thread_import_disabled` (or `thread_export_disabled`) while importing is off, the
+ * zero-retention code for a zero-retention caller, and `thread_import_invalid` (with `details.reason`) for a file
+ * this deployment cannot read as an export.
+ */
+export async function importThread(exportJson: string, title?: string): Promise<ChatThreadImport> {
+  const request = threadImportInput.parse({ exportJson, ...(title ? { title } : {}) })
+  const raw = objectValue(
+    await requestJson<unknown>('/api/v1/chat/threads/import', {
+      method: 'POST',
+      body: JSON.stringify({ export_json: request.exportJson, title: request.title ?? '' }),
+    }),
+  )
+  const threadId = str(raw?.thread_id)
+  if (!threadId) throw new ApiError('The import did not name a conversation.', 502, 'thread_import_failed')
+  return {
+    threadId,
+    importedMessages: frameCount(raw?.imported_messages),
+    dropped: frameCount(raw?.dropped),
+  }
+}
+
 /** Where a branch move landed: the new active leaf, and the path up to it (WS17 S9). */
 export type ChatBranchMove = {
   activeLeafMessageId: string
@@ -4030,6 +4484,58 @@ async function postChatBranchMove(
 }
 
 /**
+ * One answer to a side question (F-t3-069). `costUsd` is null on a zero-retention turn, which is not priced.
+ */
+export type SideChatAnswer = {
+  answer: string
+  modelUsed: string
+  usage: {
+    inputTokens: number
+    outputTokens: number
+    costUsd: number | null
+  }
+}
+
+/**
+ * Ask one read-only question about the open conversation (F-t3-069). Model Gateway answers from a snapshot of the
+ * thread's active path and keeps nothing, so the answer exists only where the caller holds it. Resolves to `null`
+ * while the gateway's side-chat switch is off (404 `side_chat_disabled`). Other refusals reject with the server's
+ * typed `ApiError`, such as `scope_not_available_in_space` for a Space thread and `delegated_auth_unavailable` while
+ * the model's credentials are unavailable. The question is checked against the action contract before it is sent.
+ */
+export async function askSideChat(threadId: string, question: string): Promise<SideChatAnswer | null> {
+  const request = threadSideChatAction.parse({ type: 'thread.side_chat', threadId, question })
+  let raw: unknown
+  try {
+    raw = await requestJson<unknown>(
+      `/api/v1/chat/threads/${encodeURIComponent(request.threadId)}/side-chat`,
+      { method: 'POST', body: JSON.stringify({ question: request.question }) },
+    )
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404 && error.code === 'side_chat_disabled') return null
+    throw error
+  }
+  return normalizeSideChatAnswer(raw)
+}
+
+/** The gateway's answer, read defensively: an answer with no text is a failed answer, not an empty one. */
+function normalizeSideChatAnswer(raw: unknown): SideChatAnswer {
+  const record = objectValue(raw)
+  const answer = str(record?.answer)?.trim()
+  if (!answer) throw new ApiError('The side chat did not return an answer.', 502, 'side_chat_no_answer')
+  const usage = objectValue(record?.usage)
+  return {
+    answer,
+    modelUsed: str(record?.model_used) ?? '',
+    usage: {
+      inputTokens: frameCount(usage?.input_tokens),
+      outputTokens: frameCount(usage?.output_tokens),
+      costUsd: num(usage?.cost_usd) ?? null,
+    },
+  }
+}
+
+/**
  * A revision the person wrote in the Output panel (EP-3 S4), as the edit and restore routes return it.
  * `editorKind` is `user` for an edit and `restore` for a restore; `restoredFromVersion` names the copied version.
  */
@@ -4086,7 +4592,7 @@ export async function restoreArtifactRevision(input: {
 /** The head another tab or turn moved the artifact to, when `error` is the edit routes' `revision_mismatch`. */
 export function artifactConflictHeadVersion(error: unknown): number | null {
   if (!(error instanceof ApiError) || error.status !== 409 || error.code !== 'revision_mismatch') return null
-  const head = error.details?.head_version
+  const head = Array.isArray(error.details) ? undefined : error.details?.head_version
   return typeof head === 'number' && Number.isInteger(head) && head > 0 ? head : null
 }
 
@@ -4257,6 +4763,10 @@ export type ComposerCapabilities = {
   selectionEdit: boolean
   /** Save an artifact revision to knowledge (EP-3 S8): the BFF's own switch, added to the gateway's answer. */
   artifactPromote: boolean
+  /** Deep research over the organization's knowledge (EP-2 S7): the gateway's switch, off for a ZDR caller. */
+  deepResearchKnowledge: boolean
+  /** The composer's "Bred forskning" entry (EP-2 S8): the gateway's switch, off for a ZDR caller. */
+  wideResearch: boolean
 }
 
 export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
@@ -4266,6 +4776,8 @@ export const NO_COMPOSER_CAPABILITIES: ComposerCapabilities = {
   threadReferences: false,
   selectionEdit: false,
   artifactPromote: false,
+  deepResearchKnowledge: false,
+  wideResearch: false,
 }
 
 /**
@@ -4287,6 +4799,8 @@ export async function getComposerCapabilities(): Promise<ComposerCapabilities> {
     threadReferences: record?.thread_references === true,
     selectionEdit: record?.selection_edit === true,
     artifactPromote: record?.artifact_promote === true,
+    deepResearchKnowledge: record?.deep_research_knowledge === true,
+    wideResearch: record?.wide_research === true,
   }
 }
 
@@ -4366,8 +4880,15 @@ export async function listDeckTemplates(): Promise<DeckTemplate[] | null> {
 export type McpAppResource = {
   uri: string
   html: string
-  /** The app declared network origins; the frame's CSP still allows none (D12). */
+  /** The app declared network origins; the frame's CSP allows none unless the client takes `csp` (D12, W4-M2). */
   needsNetwork: boolean
+  /**
+   * The frame's policy the server built from the origins the app declares and the org allows (W4-M2). Present only
+   * while the server's `MCP_APPS_NETWORK_ENABLED` is on; the frame takes it only once `validatedAppCsp` accepts it.
+   */
+  csp?: string
+  /** The origins `csp` names, as the server lists them. The frame reads the policy itself, not this list. */
+  networkOrigins?: string[]
 }
 
 /**
@@ -4390,7 +4911,19 @@ export async function getMcpAppResource(serverId: string, tool: string): Promise
   const uri = str(record?.uri)
   const html = typeof record?.html === 'string' ? record.html : ''
   if (!uri?.startsWith('ui://') || !html.trim()) return null
-  return { uri, html, needsNetwork: record?.needs_network === true }
+  // Only the server's network switch adds these two; without it the document reads as it always did.
+  const csp = str(record?.csp)
+  const origins = record?.network_origins
+  const networkOrigins = Array.isArray(origins)
+    ? origins.filter((origin): origin is string => typeof origin === 'string')
+    : undefined
+  return {
+    uri,
+    html,
+    needsNetwork: record?.needs_network === true,
+    ...(csp === undefined ? {} : { csp }),
+    ...(networkOrigins === undefined ? {} : { networkOrigins }),
+  }
 }
 
 /** One call an MCP App asks its host to make on the app's own server (EP-4 S10). */
@@ -4596,6 +5129,10 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       // The chips the turn was sent with (EP-3 S5), read by name and normalized like the wire: a turn
       // recorded before references existed has no key at all.
       ...contextRefsField(objectValue(item.metadata)?.context_refs),
+      // The plan an assistant plan turn ended with (EP-2 S5), read by name like the chips above.
+      ...researchPlanField(objectValue(item.metadata)?.research_plan ?? item.research_plan),
+      // The route the answer was served on (W5-073-b), read by name like the plan above; absent on a turn recorded before it.
+      ...routingDecisionField(objectValue(item.metadata)?.routing_decision ?? item.routing_decision),
       // Turn metadata the backend flattens onto the message. Present only for
       // assistant turns recorded since the score became durable, so a missing
       // field means "not recorded" — never a score of zero.
@@ -4609,6 +5146,12 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
 function contextRefsField(value: unknown): { contextRefs?: import('@/shared/actions/chat-context-refs').ChatContextRef[] } {
   const refs = normalizeContextRefs(value)
   return refs.length > 0 ? { contextRefs: refs } : {}
+}
+
+/** The `researchPlan` key for a turn that stored a plan, and no key at all for one that did not. */
+function researchPlanField(value: unknown): { researchPlan?: ChatResearchPlanEvent } {
+  const plan = normalizeStoredResearchPlan(value)
+  return plan ? { researchPlan: plan } : {}
 }
 
 /** A turn's place in a versioned thread, read by name. A malformed place is dropped, never guessed. */
@@ -4706,6 +5249,7 @@ function normalizeChatThreadSession(raw: unknown): ChatThreadSession | null {
     ...(attentionState ? { attentionState } : {}),
     ...(attentionState && attentionSince ? { attentionSince } : {}),
     ...(attentionState ? { attentionUnseen: item.attentionUnseen === true } : {}),
+    ...(str(item.goalStatus) ? { goalStatus: str(item.goalStatus) } : {}),
     ...(archivedAt ? { archivedAt } : {}),
   }
 }
@@ -5130,9 +5674,11 @@ export async function listModelCatalogue(): Promise<ModelCatalogue> {
         residency: str(item.residency),
         cheap: readBool(item.cheap) ?? readBool(item.is_cheap),
         effortLevels: normalizeEffortLevels(item.effort_levels ?? item.effortLevels),
+        priorityTier: readBool(item.priority_tier) ?? readBool(item.priorityTier),
         contextWindowTokens: normalizeTokenCount(item.context_window_tokens),
         maxOutputTokens: normalizeTokenCount(item.max_output_tokens),
         lifecycle: normalizeLifecycle(item.lifecycle),
+        successor: str(item.successor) || undefined,
         price: normalizeModelPrice(item.price),
         dataUse: normalizeModelDataUse(item.data_use),
       }
@@ -5309,6 +5855,20 @@ export function isChatModel(model: ModelInfo): boolean {
   if (model.modality) return CHAT_MODALITIES.has(model.modality)
   const haystack = `${model.id} ${model.name}`
   return !NON_CHAT_NAME_PATTERNS.some((re) => re.test(haystack))
+}
+
+/**
+ * The model a deprecated catalogue entry names as its replacement, with the name the catalogue
+ * gives it (its id when the catalogue does not list it). `undefined` for any other entry, and for
+ * a deprecated entry whose catalogue names none. Display only: nothing switches to the replacement.
+ */
+export function modelReplacement(
+  catalogue: readonly ModelInfo[],
+  model: ModelInfo,
+): { id: string; name: string } | undefined {
+  const id = model.successor
+  if (model.lifecycle !== 'deprecated' || !id) return undefined
+  return { id, name: catalogue.find((entry) => entry.id === id)?.name ?? id }
 }
 
 /** True for models a user should select deliberately (opus/sonnet/gpt-5.x …). */

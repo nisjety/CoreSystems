@@ -13,7 +13,8 @@
  *   - extra viewers registered at runtime, drawn by the panel's Dynamic slot.
  */
 import type { JSX } from '@solidjs/web'
-import type { Component } from 'solid-js'
+import { createContext, type Component } from 'solid-js'
+import type { DeckTemplate } from '@/shared/api/chat-client'
 import type { ChatArtifact, GeneratedFile } from './chat-types'
 
 /**
@@ -74,3 +75,20 @@ export function createArtifactRendererRegistry<Id extends string = string>(): Ar
 
 /** Extra viewers for artifact kinds the built-ins do not draw. Empty unless something registers. */
 export const extraArtifactRenderers = createArtifactRendererRegistry()
+
+/**
+ * What a deck viewer may do with the brand deck templates (EP-5 S7). The chat page provides it around its artifacts panel,
+ * so the viewer gets it without widening `ArtifactRendererProps`. Outside that provider the viewer offers no template control.
+ */
+export type DeckTemplateActions = {
+  /** The templates to offer, or `null` while they are off or the thread is temporary (the gateway refuses a template there). */
+  list: () => Promise<DeckTemplate[] | null>
+  /** Sends a pick as a turn of its own. `null` is Standard, the neutral theme, and carries no template. */
+  apply: (template: DeckTemplate | null) => void
+  /** True while a run streams. A pick waits for the run to end, so a template is never queued into a run. */
+  busy: () => boolean
+}
+
+// The default is `null`, not `undefined`: Solid 2 throws when a context reads as `undefined` and no provider is above it.
+// Outside the chat page's provider the deck viewer reads `null` and offers no template control.
+export const DeckTemplateContext = createContext<DeckTemplateActions | null>(null)

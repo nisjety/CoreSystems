@@ -117,6 +117,11 @@ export type ChatRunWatchState = {
   activity: ChatRunActivityEntry[]
   /** The Quarry run the turn's browser runs on and who holds it (EP-1 S1); absent until bound. */
   browserControl?: ChatRunBrowserControl
+  /**
+   * The closed failure code the run ended with, when its durable replay carried one (EP-1 S5), e.g.
+   * `browser_help_timed_out`. The panel words it in `browser-terminal-copy.ts`; this state keeps the code only.
+   */
+  terminalFailure?: string | null
 }
 
 /**
@@ -265,6 +270,9 @@ function payloadString(payload: Record<string, unknown>, ...keys: string[]): str
   return undefined
 }
 
+/** The shape of a closed failure code (session-core's vocabulary). Anything else is never kept. */
+const CLOSED_FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/
+
 /**
  * Reduce one persisted browser event into the same state machine used by live
  * SSE. The durable route only returns this allowlisted reference/metadata
@@ -345,6 +353,16 @@ export function applyDurableRunEvent(state: ChatRunWatchState, event: DurableRun
         status: payloadString(payload, 'verification_status', 'verificationStatus'),
         title: 'Verifisert fortsettelse',
       })
+    case 'EVENT_TYPE_RUN_FAILED': {
+      // Only the watched run's own terminal failure ends the watch. The code is kept only in its closed shape.
+      if (runId !== state.runId || payload.terminal !== true) return state
+      const code = payloadString(payload, 'failure_code')
+      return {
+        ...state,
+        live: false,
+        terminalFailure: code !== undefined && CLOSED_FAILURE_CODE.test(code) ? code : null,
+      }
+    }
     default:
       return state
   }
@@ -452,6 +470,12 @@ export function browserSessionFromChatRun(
   const latest = latestBrowserStep(state)
   const framed = [...state.steps].reverse().find((step) => step.screenshotUrl && !step.screenshotFailed)
   const timeline: BrowserTimelineViewEntry[] = state.steps.map((step) => ({
+    action: {
+      id: step.actionId,
+      observed: step.observed,
+      status: step.status ?? '',
+      type: step.actionType ?? '',
+    },
     observedAt: step.at,
     screenshotArtifactId: step.screenshotRef ?? null,
     screenshotUrl: step.screenshotUrl ?? null,

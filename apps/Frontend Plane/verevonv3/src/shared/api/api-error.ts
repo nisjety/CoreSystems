@@ -10,8 +10,11 @@
 export class ApiError extends Error {
   readonly status: number
   readonly code: string | null
-  /** The typed `details` object of the envelope, when the body had one. Never rendered. */
-  readonly details: Record<string, unknown> | null
+  /**
+   * The typed `details` of the envelope, when the body had one: an object, or a bare array of them (kept whole
+   * for the caller that reads it). Never rendered.
+   */
+  readonly details: Record<string, unknown> | unknown[] | null
   /** When to try again, in whole seconds (1..3600), from the envelope or the `Retry-After` header. */
   readonly retryAfterSeconds: number | null
   /** The failed run can be resumed (`resumable` in the envelope or its details). */
@@ -39,7 +42,7 @@ export class ApiError extends Error {
 
 /** The machine-readable parts of an error body beyond `code` and `message`. */
 export type ApiErrorHints = {
-  details?: Record<string, unknown> | null
+  details?: Record<string, unknown> | unknown[] | null
   retryAfterSeconds?: number | null
   resumable?: boolean
   blockReason?: string | null

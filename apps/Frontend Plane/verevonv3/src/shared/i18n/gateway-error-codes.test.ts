@@ -1,15 +1,18 @@
 import { readdirSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { isModelEntitlementCode } from '@/shared/api/model-entitlement-refusals'
+import { isZdrRefusalCode } from '@/shared/api/zdr-refusals'
 import { BLOCK_REASON_COPY, ERROR_COPY, describeApiError, translateApiError } from './errors'
 
 // Every error code the Verevon gateway can send to the SPA has end-user copy in
 // `errors.ts`, or a reasoned entry below saying why it needs none. The scan reads
-// every Rust file under `apps/gateway/src` (domains, middleware, upstream proxy,
-// onboarding), so a code added in ANY of them, in one of the shapes listed below,
-// fails here until it is given copy or an explicit exemption. A code a helper builds
-// from a variable has no shape to scan: those are pinned one by one in HELPER_EMITTED.
+// every production Rust file under `apps/gateway/src` (domains, middleware, upstream
+// proxy, onboarding). A test module that a `#[cfg(test)]` declaration names is not
+// production code, so it is not read. A code added in ANY production file, in one of
+// the shapes listed below, fails here until it is given copy or an explicit exemption.
+// A code a helper builds from a variable has no shape to scan: those are pinned one by
+// one in HELPER_EMITTED.
 // List of the codes and where each one comes from:
 // `wf-V3-spa-errors-codes.md` in the side-session notes.
 
@@ -47,7 +50,41 @@ function productionCode(path: string): string {
   return kept.join('\n')
 }
 
-const sources = new Map(rustFiles(gatewaySrc).map((path) => [path.slice(gatewaySrc.length + 1), productionCode(path)]))
+/**
+ * The files a `#[cfg(test)] mod name;` declaration names, with or without a `#[path = ".."]`. They are
+ * compiled only for the tests, so they are not production code, whatever they are called (`*_tests.rs`,
+ * `tests.rs` or another name). Each path is resolved as rustc resolves it: a `#[path]` from the folder of
+ * the declaring file; otherwise `name.rs` or `name/mod.rs` in the folder named after the declaring file
+ * (the folder itself for a `mod.rs` or a crate root).
+ */
+function testOnlyFiles(files: string[]): Set<string> {
+  const known = new Set(files.map((file) => resolve(file)))
+  const testOnly = new Set<string>()
+  for (const file of files) {
+    const text = readFileSync(file, 'utf8').replace(/\r\n/g, '\n')
+    const declaringDir = dirname(resolve(file))
+    const name = basename(file)
+    const childDir = name === 'mod.rs' || name === 'main.rs' ? declaringDir : join(declaringDir, basename(file, '.rs'))
+    for (const match of text.matchAll(/^#\[cfg\(test\)\]\n((?:#\[[^\n]*\]\n)*)(?:pub(?:\([a-z]+\))? )?mod ([a-z_0-9]+);$/gm)) {
+      const explicit = /^#\[path = "([^"]+)"\]$/m.exec(match[1] ?? '')
+      const moduleName = match[2] ?? ''
+      const candidates = explicit
+        ? [join(declaringDir, explicit[1] ?? '')]
+        : [join(childDir, `${moduleName}.rs`), join(childDir, moduleName, 'mod.rs')]
+      const found = candidates.map((candidate) => resolve(candidate)).find((candidate) => known.has(candidate))
+      if (found) testOnly.add(found)
+    }
+  }
+  return testOnly
+}
+
+const gatewayFiles = rustFiles(gatewaySrc)
+const testOnly = testOnlyFiles(gatewayFiles)
+const sources = new Map(
+  gatewayFiles
+    .filter((path) => !testOnly.has(resolve(path)))
+    .map((path) => [path.slice(gatewaySrc.length + 1), productionCode(path)]),
+)
 
 /** Every `const|static NAME: &[&str] = &[ .. ];` of a source text, with the text between the brackets. */
 function stringTables(source: string): { name: string; body: string }[] {
@@ -154,7 +191,6 @@ const CALLER_WORDS_IT: Record<string, string> = {
 
 // Strings the scan meets that are not error codes at all.
 const NOT_AN_ERROR_CODE: Record<string, string> = {
-  authorization: 'header name in the Rust tests of the Algolia and Marketing proxies (`("authorization", "Bearer ..")` pairs), not an error code',
   minio: 'name of a dependency in the knowledge diagnostics readiness list, not an error',
   qdrant: 'name of a dependency in the knowledge diagnostics readiness list, not an error',
   quickwit: 'name of a dependency in the knowledge diagnostics readiness list, not an error',
@@ -237,9 +273,10 @@ const INTERNAL_ONLY: Record<string, string> = {
 }
 
 // A model-entitlement refusal reads its copy from the model-entitlement catalogue, which
-// `translateApiError` checks before ERROR_COPY, so that catalogue counts as copy here.
+// `translateApiError` checks before ERROR_COPY, so that catalogue counts as copy here. A
+// zero-retention refusal reads its copy from the zero-retention catalogue the same way.
 function hasCopy(code: string): boolean {
-  return Boolean(ERROR_COPY[code] ?? BLOCK_REASON_COPY[code] ?? isModelEntitlementCode(code))
+  return Boolean(ERROR_COPY[code] ?? BLOCK_REASON_COPY[code]) || isModelEntitlementCode(code) || isZdrRefusalCode(code)
 }
 
 describe('every code the gateway emits', () => {
@@ -263,6 +300,15 @@ describe('every code the gateway emits', () => {
     ] as const) {
       expect(emittedBy.get(code), `the scan found ${code}`).toContain(file)
     }
+  })
+
+  it('reads the test modules a #[cfg(test)] declaration names as tests, not as production code', () => {
+    // The `#[path]` form (zdr.rs) and the plain form (domains/chat.rs names domains/chat/bff_turn_tests.rs).
+    for (const file of ['zdr_posture_matrix_tests.rs', 'domains/chat/bff_turn_tests.rs']) {
+      expect(testOnly.has(resolve(gatewaySrc, file)), `${file} is declared under cfg(test)`).toBe(true)
+      expect(sources.has(file), `${file} is not production code`).toBe(false)
+    }
+    expect(sources.has('zdr.rs'), 'the production file that declares a test module is still scanned').toBe(true)
   })
 
   it('classifies every string table of the gateway: read for codes, or listed as not holding codes', () => {

@@ -170,6 +170,15 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/knowledge/wiki/pages/{id}/backlinks",
             get(wiki::wiki_page_backlinks),
         )
+        // W5-094-b: the wiki proposals a person reviews. The list is read-only; the review writes only on accept.
+        .route(
+            "/api/v1/knowledge/wiki/proposals",
+            get(wiki::list_wiki_proposals),
+        )
+        .route(
+            "/api/v1/knowledge/wiki/proposals/{id}/review",
+            post(wiki::review_wiki_proposal),
+        )
         // Legacy aliases kept for existing callers.
         .route("/api/v1/wiki/pages/by-path", get(wiki::wiki_page_by_path))
         .route("/api/v1/wiki/pages", get(wiki::list_wiki_pages))

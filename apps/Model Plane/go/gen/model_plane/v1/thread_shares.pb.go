@@ -491,6 +491,449 @@ func (x *RevokeSnapshotResponse) GetSnapshot() *ThreadShareSnapshot {
 	return nil
 }
 
+// W4-SH-4. One member a live snapshot is shared with, as Control lists the grant.
+type SnapshotGrant struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The member's user id; always a member of the snapshot's organisation.
+	GranteeUserId string `protobuf:"bytes,1,opt,name=grantee_user_id,json=granteeUserId,proto3" json:"grantee_user_id,omitempty"`
+	// When Control recorded the grant; unset when Control's timestamp was unreadable.
+	GrantedAt     *timestamppb.Timestamp `protobuf:"bytes,2,opt,name=granted_at,json=grantedAt,proto3" json:"granted_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotGrant) Reset() {
+	*x = SnapshotGrant{}
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotGrant) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotGrant) ProtoMessage() {}
+
+func (x *SnapshotGrant) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotGrant.ProtoReflect.Descriptor instead.
+func (*SnapshotGrant) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_shares_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *SnapshotGrant) GetGranteeUserId() string {
+	if x != nil {
+		return x.GranteeUserId
+	}
+	return ""
+}
+
+func (x *SnapshotGrant) GetGrantedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.GrantedAt
+	}
+	return nil
+}
+
+// W4-SH-4. Share one of the caller's live snapshots with an organisation member.
+type ShareSnapshotRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The snapshot to share; another person's or a revoked one is not found.
+	SnapshotId string `protobuf:"bytes,1,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	// The member to share with. Control refuses a user who is not a member of the
+	// caller's organisation. The role is always `view`.
+	GranteeUserId string `protobuf:"bytes,2,opt,name=grantee_user_id,json=granteeUserId,proto3" json:"grantee_user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShareSnapshotRequest) Reset() {
+	*x = ShareSnapshotRequest{}
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShareSnapshotRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShareSnapshotRequest) ProtoMessage() {}
+
+func (x *ShareSnapshotRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShareSnapshotRequest.ProtoReflect.Descriptor instead.
+func (*ShareSnapshotRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_shares_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ShareSnapshotRequest) GetSnapshotId() string {
+	if x != nil {
+		return x.SnapshotId
+	}
+	return ""
+}
+
+func (x *ShareSnapshotRequest) GetGranteeUserId() string {
+	if x != nil {
+		return x.GranteeUserId
+	}
+	return ""
+}
+
+// W4-SH-4. The grant Control recorded; sharing twice with the same member is idempotent.
+type ShareSnapshotResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The member's grant on the snapshot.
+	Grant         *SnapshotGrant `protobuf:"bytes,1,opt,name=grant,proto3" json:"grant,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShareSnapshotResponse) Reset() {
+	*x = ShareSnapshotResponse{}
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShareSnapshotResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShareSnapshotResponse) ProtoMessage() {}
+
+func (x *ShareSnapshotResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShareSnapshotResponse.ProtoReflect.Descriptor instead.
+func (*ShareSnapshotResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_shares_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ShareSnapshotResponse) GetGrant() *SnapshotGrant {
+	if x != nil {
+		return x.Grant
+	}
+	return nil
+}
+
+// W4-SH-4. Stop sharing one of the caller's live snapshots with one member.
+type UnshareSnapshotRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The snapshot to stop sharing; another person's or a revoked one is not found.
+	SnapshotId string `protobuf:"bytes,1,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	// The member whose grant to remove.
+	GranteeUserId string `protobuf:"bytes,2,opt,name=grantee_user_id,json=granteeUserId,proto3" json:"grantee_user_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UnshareSnapshotRequest) Reset() {
+	*x = UnshareSnapshotRequest{}
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UnshareSnapshotRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UnshareSnapshotRequest) ProtoMessage() {}
+
+func (x *UnshareSnapshotRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UnshareSnapshotRequest.ProtoReflect.Descriptor instead.
+func (*UnshareSnapshotRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_shares_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *UnshareSnapshotRequest) GetSnapshotId() string {
+	if x != nil {
+		return x.SnapshotId
+	}
+	return ""
+}
+
+func (x *UnshareSnapshotRequest) GetGranteeUserId() string {
+	if x != nil {
+		return x.GranteeUserId
+	}
+	return ""
+}
+
+// W4-SH-4. Nothing to report: removing an absent grant also succeeds.
+type UnshareSnapshotResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UnshareSnapshotResponse) Reset() {
+	*x = UnshareSnapshotResponse{}
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UnshareSnapshotResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UnshareSnapshotResponse) ProtoMessage() {}
+
+func (x *UnshareSnapshotResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UnshareSnapshotResponse.ProtoReflect.Descriptor instead.
+func (*UnshareSnapshotResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_shares_proto_rawDescGZIP(), []int{13}
+}
+
+// W4-SH-4. List the members one of the caller's live snapshots is shared with.
+type ListSnapshotGrantsRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The snapshot whose grants to list; another person's or a revoked one is not found.
+	SnapshotId    string `protobuf:"bytes,1,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSnapshotGrantsRequest) Reset() {
+	*x = ListSnapshotGrantsRequest{}
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSnapshotGrantsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSnapshotGrantsRequest) ProtoMessage() {}
+
+func (x *ListSnapshotGrantsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSnapshotGrantsRequest.ProtoReflect.Descriptor instead.
+func (*ListSnapshotGrantsRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_shares_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ListSnapshotGrantsRequest) GetSnapshotId() string {
+	if x != nil {
+		return x.SnapshotId
+	}
+	return ""
+}
+
+// W4-SH-4. Every member grant Control holds on the snapshot.
+type ListSnapshotGrantsResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The grants, as Control lists them; Space subjects are left out.
+	Grants        []*SnapshotGrant `protobuf:"bytes,1,rep,name=grants,proto3" json:"grants,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ListSnapshotGrantsResponse) Reset() {
+	*x = ListSnapshotGrantsResponse{}
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ListSnapshotGrantsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ListSnapshotGrantsResponse) ProtoMessage() {}
+
+func (x *ListSnapshotGrantsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ListSnapshotGrantsResponse.ProtoReflect.Descriptor instead.
+func (*ListSnapshotGrantsResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_shares_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ListSnapshotGrantsResponse) GetGrants() []*SnapshotGrant {
+	if x != nil {
+		return x.Grants
+	}
+	return nil
+}
+
+// W4-SH-5. Read one live snapshot as its owner, or as a member Control holds a `view` grant for.
+type GetSharedSnapshotRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The snapshot to read. Another organisation's, a revoked one, or one the caller neither owns
+	// nor holds a grant on is not found.
+	SnapshotId    string `protobuf:"bytes,1,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSharedSnapshotRequest) Reset() {
+	*x = GetSharedSnapshotRequest{}
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSharedSnapshotRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSharedSnapshotRequest) ProtoMessage() {}
+
+func (x *GetSharedSnapshotRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSharedSnapshotRequest.ProtoReflect.Descriptor instead.
+func (*GetSharedSnapshotRequest) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_shares_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *GetSharedSnapshotRequest) GetSnapshotId() string {
+	if x != nil {
+		return x.SnapshotId
+	}
+	return ""
+}
+
+// W4-SH-5. The snapshot and the copy it holds, as the owner's own read gives them.
+type GetSharedSnapshotResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The snapshot, without its body.
+	Snapshot *ThreadShareSnapshot `protobuf:"bytes,1,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
+	// The redacted export the snapshot froze, exactly as it was taken.
+	Body          *ExportThreadResponse `protobuf:"bytes,2,opt,name=body,proto3" json:"body,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetSharedSnapshotResponse) Reset() {
+	*x = GetSharedSnapshotResponse{}
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetSharedSnapshotResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetSharedSnapshotResponse) ProtoMessage() {}
+
+func (x *GetSharedSnapshotResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_model_plane_v1_thread_shares_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetSharedSnapshotResponse.ProtoReflect.Descriptor instead.
+func (*GetSharedSnapshotResponse) Descriptor() ([]byte, []int) {
+	return file_model_plane_v1_thread_shares_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *GetSharedSnapshotResponse) GetSnapshot() *ThreadShareSnapshot {
+	if x != nil {
+		return x.Snapshot
+	}
+	return nil
+}
+
+func (x *GetSharedSnapshotResponse) GetBody() *ExportThreadResponse {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
 var File_model_plane_v1_thread_shares_proto protoreflect.FileDescriptor
 
 const file_model_plane_v1_thread_shares_proto_rawDesc = "" +
@@ -525,12 +968,42 @@ const file_model_plane_v1_thread_shares_proto_rawDesc = "" +
 	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
 	"snapshotId\"Y\n" +
 	"\x16RevokeSnapshotResponse\x12?\n" +
-	"\bsnapshot\x18\x01 \x01(\v2#.model_plane.v1.ThreadShareSnapshotR\bsnapshot2\x8c\x03\n" +
+	"\bsnapshot\x18\x01 \x01(\v2#.model_plane.v1.ThreadShareSnapshotR\bsnapshot\"r\n" +
+	"\rSnapshotGrant\x12&\n" +
+	"\x0fgrantee_user_id\x18\x01 \x01(\tR\rgranteeUserId\x129\n" +
+	"\n" +
+	"granted_at\x18\x02 \x01(\v2\x1a.google.protobuf.TimestampR\tgrantedAt\"_\n" +
+	"\x14ShareSnapshotRequest\x12\x1f\n" +
+	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
+	"snapshotId\x12&\n" +
+	"\x0fgrantee_user_id\x18\x02 \x01(\tR\rgranteeUserId\"L\n" +
+	"\x15ShareSnapshotResponse\x123\n" +
+	"\x05grant\x18\x01 \x01(\v2\x1d.model_plane.v1.SnapshotGrantR\x05grant\"a\n" +
+	"\x16UnshareSnapshotRequest\x12\x1f\n" +
+	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
+	"snapshotId\x12&\n" +
+	"\x0fgrantee_user_id\x18\x02 \x01(\tR\rgranteeUserId\"\x19\n" +
+	"\x17UnshareSnapshotResponse\"<\n" +
+	"\x19ListSnapshotGrantsRequest\x12\x1f\n" +
+	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
+	"snapshotId\"S\n" +
+	"\x1aListSnapshotGrantsResponse\x125\n" +
+	"\x06grants\x18\x01 \x03(\v2\x1d.model_plane.v1.SnapshotGrantR\x06grants\";\n" +
+	"\x18GetSharedSnapshotRequest\x12\x1f\n" +
+	"\vsnapshot_id\x18\x01 \x01(\tR\n" +
+	"snapshotId\"\x96\x01\n" +
+	"\x19GetSharedSnapshotResponse\x12?\n" +
+	"\bsnapshot\x18\x01 \x01(\v2#.model_plane.v1.ThreadShareSnapshotR\bsnapshot\x128\n" +
+	"\x04body\x18\x02 \x01(\v2$.model_plane.v1.ExportThreadResponseR\x04body2\xa5\x06\n" +
 	"\x12ThreadShareService\x12_\n" +
 	"\x0eCreateSnapshot\x12%.model_plane.v1.CreateSnapshotRequest\x1a&.model_plane.v1.CreateSnapshotResponse\x12\\\n" +
 	"\rListSnapshots\x12$.model_plane.v1.ListSnapshotsRequest\x1a%.model_plane.v1.ListSnapshotsResponse\x12V\n" +
 	"\vGetSnapshot\x12\".model_plane.v1.GetSnapshotRequest\x1a#.model_plane.v1.GetSnapshotResponse\x12_\n" +
-	"\x0eRevokeSnapshot\x12%.model_plane.v1.RevokeSnapshotRequest\x1a&.model_plane.v1.RevokeSnapshotResponseB\xb9\x01\n" +
+	"\x0eRevokeSnapshot\x12%.model_plane.v1.RevokeSnapshotRequest\x1a&.model_plane.v1.RevokeSnapshotResponse\x12\\\n" +
+	"\rShareSnapshot\x12$.model_plane.v1.ShareSnapshotRequest\x1a%.model_plane.v1.ShareSnapshotResponse\x12b\n" +
+	"\x0fUnshareSnapshot\x12&.model_plane.v1.UnshareSnapshotRequest\x1a'.model_plane.v1.UnshareSnapshotResponse\x12k\n" +
+	"\x12ListSnapshotGrants\x12).model_plane.v1.ListSnapshotGrantsRequest\x1a*.model_plane.v1.ListSnapshotGrantsResponse\x12h\n" +
+	"\x11GetSharedSnapshot\x12(.model_plane.v1.GetSharedSnapshotRequest\x1a).model_plane.v1.GetSharedSnapshotResponseB\xb9\x01\n" +
 	"\x12com.model_plane.v1B\x11ThreadSharesProtoP\x01Z;github.com/triodelab/model-plane/gen/go/model_plane/v1;mpv1\xa2\x02\x03MXX\xaa\x02\rModelPlane.V1\xca\x02\rModelPlane\\V1\xe2\x02\x19ModelPlane\\V1\\GPBMetadata\xea\x02\x0eModelPlane::V1b\x06proto3"
 
 var (
@@ -545,41 +1018,63 @@ func file_model_plane_v1_thread_shares_proto_rawDescGZIP() []byte {
 	return file_model_plane_v1_thread_shares_proto_rawDescData
 }
 
-var file_model_plane_v1_thread_shares_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_model_plane_v1_thread_shares_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_model_plane_v1_thread_shares_proto_goTypes = []any{
-	(*ThreadShareSnapshot)(nil),    // 0: model_plane.v1.ThreadShareSnapshot
-	(*CreateSnapshotRequest)(nil),  // 1: model_plane.v1.CreateSnapshotRequest
-	(*CreateSnapshotResponse)(nil), // 2: model_plane.v1.CreateSnapshotResponse
-	(*ListSnapshotsRequest)(nil),   // 3: model_plane.v1.ListSnapshotsRequest
-	(*ListSnapshotsResponse)(nil),  // 4: model_plane.v1.ListSnapshotsResponse
-	(*GetSnapshotRequest)(nil),     // 5: model_plane.v1.GetSnapshotRequest
-	(*GetSnapshotResponse)(nil),    // 6: model_plane.v1.GetSnapshotResponse
-	(*RevokeSnapshotRequest)(nil),  // 7: model_plane.v1.RevokeSnapshotRequest
-	(*RevokeSnapshotResponse)(nil), // 8: model_plane.v1.RevokeSnapshotResponse
-	(*timestamppb.Timestamp)(nil),  // 9: google.protobuf.Timestamp
-	(*ExportThreadResponse)(nil),   // 10: model_plane.v1.ExportThreadResponse
+	(*ThreadShareSnapshot)(nil),        // 0: model_plane.v1.ThreadShareSnapshot
+	(*CreateSnapshotRequest)(nil),      // 1: model_plane.v1.CreateSnapshotRequest
+	(*CreateSnapshotResponse)(nil),     // 2: model_plane.v1.CreateSnapshotResponse
+	(*ListSnapshotsRequest)(nil),       // 3: model_plane.v1.ListSnapshotsRequest
+	(*ListSnapshotsResponse)(nil),      // 4: model_plane.v1.ListSnapshotsResponse
+	(*GetSnapshotRequest)(nil),         // 5: model_plane.v1.GetSnapshotRequest
+	(*GetSnapshotResponse)(nil),        // 6: model_plane.v1.GetSnapshotResponse
+	(*RevokeSnapshotRequest)(nil),      // 7: model_plane.v1.RevokeSnapshotRequest
+	(*RevokeSnapshotResponse)(nil),     // 8: model_plane.v1.RevokeSnapshotResponse
+	(*SnapshotGrant)(nil),              // 9: model_plane.v1.SnapshotGrant
+	(*ShareSnapshotRequest)(nil),       // 10: model_plane.v1.ShareSnapshotRequest
+	(*ShareSnapshotResponse)(nil),      // 11: model_plane.v1.ShareSnapshotResponse
+	(*UnshareSnapshotRequest)(nil),     // 12: model_plane.v1.UnshareSnapshotRequest
+	(*UnshareSnapshotResponse)(nil),    // 13: model_plane.v1.UnshareSnapshotResponse
+	(*ListSnapshotGrantsRequest)(nil),  // 14: model_plane.v1.ListSnapshotGrantsRequest
+	(*ListSnapshotGrantsResponse)(nil), // 15: model_plane.v1.ListSnapshotGrantsResponse
+	(*GetSharedSnapshotRequest)(nil),   // 16: model_plane.v1.GetSharedSnapshotRequest
+	(*GetSharedSnapshotResponse)(nil),  // 17: model_plane.v1.GetSharedSnapshotResponse
+	(*timestamppb.Timestamp)(nil),      // 18: google.protobuf.Timestamp
+	(*ExportThreadResponse)(nil),       // 19: model_plane.v1.ExportThreadResponse
 }
 var file_model_plane_v1_thread_shares_proto_depIdxs = []int32{
-	9,  // 0: model_plane.v1.ThreadShareSnapshot.created_at:type_name -> google.protobuf.Timestamp
-	9,  // 1: model_plane.v1.ThreadShareSnapshot.revoked_at:type_name -> google.protobuf.Timestamp
+	18, // 0: model_plane.v1.ThreadShareSnapshot.created_at:type_name -> google.protobuf.Timestamp
+	18, // 1: model_plane.v1.ThreadShareSnapshot.revoked_at:type_name -> google.protobuf.Timestamp
 	0,  // 2: model_plane.v1.CreateSnapshotResponse.snapshot:type_name -> model_plane.v1.ThreadShareSnapshot
 	0,  // 3: model_plane.v1.ListSnapshotsResponse.snapshots:type_name -> model_plane.v1.ThreadShareSnapshot
 	0,  // 4: model_plane.v1.GetSnapshotResponse.snapshot:type_name -> model_plane.v1.ThreadShareSnapshot
-	10, // 5: model_plane.v1.GetSnapshotResponse.body:type_name -> model_plane.v1.ExportThreadResponse
+	19, // 5: model_plane.v1.GetSnapshotResponse.body:type_name -> model_plane.v1.ExportThreadResponse
 	0,  // 6: model_plane.v1.RevokeSnapshotResponse.snapshot:type_name -> model_plane.v1.ThreadShareSnapshot
-	1,  // 7: model_plane.v1.ThreadShareService.CreateSnapshot:input_type -> model_plane.v1.CreateSnapshotRequest
-	3,  // 8: model_plane.v1.ThreadShareService.ListSnapshots:input_type -> model_plane.v1.ListSnapshotsRequest
-	5,  // 9: model_plane.v1.ThreadShareService.GetSnapshot:input_type -> model_plane.v1.GetSnapshotRequest
-	7,  // 10: model_plane.v1.ThreadShareService.RevokeSnapshot:input_type -> model_plane.v1.RevokeSnapshotRequest
-	2,  // 11: model_plane.v1.ThreadShareService.CreateSnapshot:output_type -> model_plane.v1.CreateSnapshotResponse
-	4,  // 12: model_plane.v1.ThreadShareService.ListSnapshots:output_type -> model_plane.v1.ListSnapshotsResponse
-	6,  // 13: model_plane.v1.ThreadShareService.GetSnapshot:output_type -> model_plane.v1.GetSnapshotResponse
-	8,  // 14: model_plane.v1.ThreadShareService.RevokeSnapshot:output_type -> model_plane.v1.RevokeSnapshotResponse
-	11, // [11:15] is the sub-list for method output_type
-	7,  // [7:11] is the sub-list for method input_type
-	7,  // [7:7] is the sub-list for extension type_name
-	7,  // [7:7] is the sub-list for extension extendee
-	0,  // [0:7] is the sub-list for field type_name
+	18, // 7: model_plane.v1.SnapshotGrant.granted_at:type_name -> google.protobuf.Timestamp
+	9,  // 8: model_plane.v1.ShareSnapshotResponse.grant:type_name -> model_plane.v1.SnapshotGrant
+	9,  // 9: model_plane.v1.ListSnapshotGrantsResponse.grants:type_name -> model_plane.v1.SnapshotGrant
+	0,  // 10: model_plane.v1.GetSharedSnapshotResponse.snapshot:type_name -> model_plane.v1.ThreadShareSnapshot
+	19, // 11: model_plane.v1.GetSharedSnapshotResponse.body:type_name -> model_plane.v1.ExportThreadResponse
+	1,  // 12: model_plane.v1.ThreadShareService.CreateSnapshot:input_type -> model_plane.v1.CreateSnapshotRequest
+	3,  // 13: model_plane.v1.ThreadShareService.ListSnapshots:input_type -> model_plane.v1.ListSnapshotsRequest
+	5,  // 14: model_plane.v1.ThreadShareService.GetSnapshot:input_type -> model_plane.v1.GetSnapshotRequest
+	7,  // 15: model_plane.v1.ThreadShareService.RevokeSnapshot:input_type -> model_plane.v1.RevokeSnapshotRequest
+	10, // 16: model_plane.v1.ThreadShareService.ShareSnapshot:input_type -> model_plane.v1.ShareSnapshotRequest
+	12, // 17: model_plane.v1.ThreadShareService.UnshareSnapshot:input_type -> model_plane.v1.UnshareSnapshotRequest
+	14, // 18: model_plane.v1.ThreadShareService.ListSnapshotGrants:input_type -> model_plane.v1.ListSnapshotGrantsRequest
+	16, // 19: model_plane.v1.ThreadShareService.GetSharedSnapshot:input_type -> model_plane.v1.GetSharedSnapshotRequest
+	2,  // 20: model_plane.v1.ThreadShareService.CreateSnapshot:output_type -> model_plane.v1.CreateSnapshotResponse
+	4,  // 21: model_plane.v1.ThreadShareService.ListSnapshots:output_type -> model_plane.v1.ListSnapshotsResponse
+	6,  // 22: model_plane.v1.ThreadShareService.GetSnapshot:output_type -> model_plane.v1.GetSnapshotResponse
+	8,  // 23: model_plane.v1.ThreadShareService.RevokeSnapshot:output_type -> model_plane.v1.RevokeSnapshotResponse
+	11, // 24: model_plane.v1.ThreadShareService.ShareSnapshot:output_type -> model_plane.v1.ShareSnapshotResponse
+	13, // 25: model_plane.v1.ThreadShareService.UnshareSnapshot:output_type -> model_plane.v1.UnshareSnapshotResponse
+	15, // 26: model_plane.v1.ThreadShareService.ListSnapshotGrants:output_type -> model_plane.v1.ListSnapshotGrantsResponse
+	17, // 27: model_plane.v1.ThreadShareService.GetSharedSnapshot:output_type -> model_plane.v1.GetSharedSnapshotResponse
+	20, // [20:28] is the sub-list for method output_type
+	12, // [12:20] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_model_plane_v1_thread_shares_proto_init() }
@@ -594,7 +1089,7 @@ func file_model_plane_v1_thread_shares_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_model_plane_v1_thread_shares_proto_rawDesc), len(file_model_plane_v1_thread_shares_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   9,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

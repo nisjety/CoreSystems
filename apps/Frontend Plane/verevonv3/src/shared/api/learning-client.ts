@@ -191,6 +191,43 @@ export async function undoLearningEntry(entryId: string): Promise<UndoLearningRe
   }
 }
 
+/** The skill proposal a taught run filed: its id, and the review state it starts in (`proposed`). */
+export interface TaughtSkillProposal {
+  skillId: string
+  reviewState: string
+}
+
+export interface TeachSkillOptions {
+  /** The skill's name: lowercase letters and digits joined by single hyphens, at most 64 characters. */
+  name: string
+  /** An optional hint for the draft, at most 500 characters. */
+  goalHint?: string
+}
+
+interface TeachSkillResponse {
+  skill_id?: string
+  review_state?: string
+}
+
+/**
+ * Turns one run the person drove or took over into a disabled skill proposal in their learning
+ * inbox (F-t3-081). Nothing is used until the owner accepts it there. The owner is the signed-in
+ * session; a zero-retention turn is refused by the server.
+ */
+export async function teachSkillFromRun(
+  runId: string,
+  options: TeachSkillOptions,
+): Promise<TaughtSkillProposal> {
+  const response = await requestJson<TeachSkillResponse>('/api/v1/learning/teach', {
+    method: 'POST',
+    body: JSON.stringify({ run_id: runId, name: options.name, goal_hint: options.goalHint ?? '' }),
+  })
+  return {
+    skillId: response.skill_id ?? '',
+    reviewState: response.review_state ?? '',
+  }
+}
+
 /**
  * The `content` of one snapshot, or `null` when there is no snapshot or it cannot be
  * read. A malformed snapshot is shown as absent rather than guessed at.

@@ -61,10 +61,22 @@ func main() {
 	// streaming, approvals) forwards the caller's own credential and keeps
 	// working, so refusing to boot would take down working functionality to
 	// punish an unconfigured one.
+	// MEMORY_GATE_ORCHESTRATOR_WRITES (default off, strict literal true) sends
+	// consolidated-memory writes through Session Core's content policy. The
+	// policy question needs one extra session-core scope, requested only while the
+	// switch is on so an unchanged deployment mints exactly the tokens it always did.
+	memoryContentGate := activities.MemoryGateOrchestratorWritesFromLookup(os.Getenv)
+	var scopesByAudience map[string][]string
+	if memoryContentGate {
+		scopesByAudience = map[string][]string{
+			servicecred.AudienceSessionCore: servicecred.SessionCoreScopesWithMemoryGate(),
+		}
+	}
 	minters, merr := servicecred.NewMinters(servicecred.Options{
-		AuthCoreURL: cfg.AuthCoreURL,
-		ServiceID:   cfg.ServicePrincipalID,
-		Credential:  cfg.ServicePrincipalKey,
+		AuthCoreURL:      cfg.AuthCoreURL,
+		ServiceID:        cfg.ServicePrincipalID,
+		Credential:       cfg.ServicePrincipalKey,
+		ScopesByAudience: scopesByAudience,
 	}, logger)
 	if merr != nil {
 		slog.Warn("outbound service tokens unavailable; workflow activities "+
@@ -83,6 +95,7 @@ func main() {
 		SandboxManagerAddr: cfg.SandboxManagerAddr,
 		BrowserBrokerAddr:  cfg.BrowserBrokerAddr,
 		LettaBridgeAddr:    cfg.LettaBridgeAddr,
+		ModelGatewayURL:    cfg.ModelGatewayURL,
 		Minters:            minters,
 		Logger:             logger,
 	})
@@ -118,6 +131,7 @@ func main() {
 	defer c.Close()
 
 	a := activities.NewActivities(logger, clients)
+	a.SetMemoryContentGate(memoryContentGate)
 	executionAuthorizer, aerr := activities.NewControlScheduledRunExecutionAuthorizer(
 		cfg.ControlUserCoreURL,
 		cfg.ControlScheduleExecutionServiceToken,
@@ -166,6 +180,9 @@ func main() {
 	w.RegisterActivity(a.ExecuteStepLoopActivity)
 	w.RegisterActivity(a.ExecuteStepActivity)
 	w.RegisterActivity(a.CompleteRunActivity)
+	// JudgeGoalTurnActivity runs only for a goal-bound fire, behind ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED
+	// (EP-7 S6); it is registered unconditionally so histories that recorded it replay.
+	w.RegisterActivity(a.JudgeGoalTurnActivity)
 	w.RegisterActivity(a.FailRunActivity)
 	w.RegisterActivity(a.QueryMemoryEntriesActivity)
 	w.RegisterActivity(a.SummarizeMemoryActivity)

@@ -6,7 +6,7 @@
 //! connection id from the authenticated inference request.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -154,7 +154,12 @@ impl CodexSubscriptionProvider {
             output_schema,
             max_tokens: req.max_tokens,
             reasoning_effort: codex_reasoning_effort(resolved),
-            service_tier: codex_service_tier(&req.model, resolved, req.prefer_priority_service_tier),
+            service_tier: codex_service_tier(
+                &req.model,
+                resolved,
+                req.prefer_priority_service_tier,
+                &req.speed_tier,
+            ),
         })
     }
 
@@ -192,26 +197,48 @@ fn codex_reasoning_effort(resolved: Option<Resolved>) -> &'static str {
     resolved.map_or("low", |resolved| resolved.applied.as_str())
 }
 
+/// Switch that makes the speed tier a choice of its own. With it on, a request takes the priority
+/// tier with `speed_tier`, and only where the model's record declares the tier, so Quick no longer
+/// implies priority. Off unless the literal `true`, read once for the process as the Codex effort
+/// switches are.
+const SPEED_TIER_SPLIT_ENV: &str = "INFERENCE_SPEED_TIER_SPLIT";
+
+/// Whether the speed tier is split from Quick for this process.
+fn speed_tier_split_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let raw = std::env::var(SPEED_TIER_SPLIT_ENV).ok();
+        raw.as_deref().map(str::trim) == Some("true")
+    })
+}
+
 /// Quick opts into priority through its profile, which resolves to low. A
 /// request that asked for no effort stays low without priority. A source
 /// reviewer may also request priority explicitly while retaining high
 /// reasoning effort. Both paths stay on the same subscription connection and
 /// allowed model.
+///
+/// With `INFERENCE_SPEED_TIER_SPLIT` on, the speed tier decides instead of
+/// Quick: priority is chosen when the request asks for it, by `speed_tier` or by
+/// the legacy `prefer_priority` flag, and the model's record declares the tier.
+/// The resolved effort plays no part.
 fn codex_service_tier(
     model: &str,
     resolved: Option<Resolved>,
     prefer_priority: bool,
+    speed_tier: &str,
 ) -> Option<&'static str> {
+    if speed_tier_split_enabled() {
+        let asked = speed_tier == "priority" || prefer_priority;
+        let aliases = effort::ModelAliases::default();
+        let record = model_record::advertised(Family::Codex, &aliases, model, 0, 0);
+        return (asked && record.priority_tier).then_some("priority");
+    }
     let quick = resolved.is_some_and(|resolved| resolved.applied == Level::Low);
     if !quick && !prefer_priority {
         return None;
     }
-    match model {
-        "gpt-6-astra" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" | "gpt-5.5" => {
-            Some("priority")
-        }
-        _ => None,
-    }
+    model_record::priority_tier_listed(Family::Codex, model).then_some("priority")
 }
 
 #[derive(Debug, Serialize)]
@@ -489,6 +516,7 @@ fn delta_chunk(request_id: &str, delta: String) -> InferChunk {
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         provider_timing: None,
+        service_tier_used: String::new(),
     }
 }
 
@@ -498,6 +526,7 @@ fn done_chunk(
     model: &str,
     event: &BrokerStreamEvent,
     ready: Option<Duration>,
+    service_tier_used: &str,
 ) -> InferChunk {
     let tokens = event.usage.map(BrokerUsage::counts).unwrap_or_default();
     InferChunk {
@@ -525,6 +554,8 @@ fn done_chunk(
         cache_read_input_tokens: tokens.cache_read,
         cache_creation_input_tokens: tokens.cache_write,
         provider_timing: Some(broker_timing(event.usage, &event.phases_ms, ready)),
+        // The tier this call went upstream on, the same value `infer` echoes as `service_tier_used`.
+        service_tier_used: service_tier_used.to_owned(),
     }
 }
 
@@ -551,6 +582,7 @@ fn failed_chunk(
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
         provider_timing: Some(broker_timing(None, &BTreeMap::new(), ready)),
+        service_tier_used: String::new(),
     }
 }
 
@@ -666,6 +698,8 @@ impl ProviderRouter for CodexSubscriptionProvider {
             ));
         }
         let body = self.request_body(req)?;
+        // The tier this call is sent upstream on, echoed back as `service_tier_used`.
+        let service_tier_used = body.service_tier.unwrap_or_default().to_owned();
         let response = self
             .client
             .post(self.url())
@@ -738,6 +772,7 @@ impl ProviderRouter for CodexSubscriptionProvider {
             cache_read_input_tokens: tokens.cache_read,
             cache_creation_input_tokens: tokens.cache_write,
             provider_timing: Some(broker_timing(result.usage, &result.phases_ms, None)),
+            service_tier_used,
             ..InferResponse::default()
         })
     }
@@ -757,6 +792,8 @@ impl ProviderRouter for CodexSubscriptionProvider {
             ));
         }
         let body = self.request_body(req)?;
+        // The tier this stream is sent upstream on, reported on the final chunk like `infer` does.
+        let service_tier_used = body.service_tier.unwrap_or_default().to_owned();
         let started = Instant::now();
         let response = self
             .client
@@ -818,7 +855,9 @@ impl ProviderRouter for CodexSubscriptionProvider {
                     "delta" if !event.delta.is_empty() => {
                         break delta_chunk(&request_id, event.delta);
                     }
-                    "done" => break done_chunk(&request_id, &model, &event, ready),
+                    "done" => {
+                        break done_chunk(&request_id, &model, &event, ready, &service_tier_used)
+                    }
                     "error" => {
                         let code = code_token(&event.code);
                         warn!(code = %code, "subscription broker stream failed before its first token");
@@ -870,7 +909,9 @@ impl ProviderRouter for CodexSubscriptionProvider {
                         }
                     }
                     "done" => {
-                        let _ = tx.send(done_chunk(&request_id, &model, &event, ready)).await;
+                        let _ = tx
+                            .send(done_chunk(&request_id, &model, &event, ready, &service_tier_used))
+                            .await;
                         return;
                     }
                     "error" => {
@@ -918,8 +959,9 @@ impl CodexSubscriptionProvider {
         self.models
             .iter()
             .map(|model| {
-                // The subscription declares no ceiling and no row names a Codex model, so
-                // every model here is advertised with an unknown record.
+                // The subscription declares no ceiling and no row names a Codex model, so the
+                // limits stay unknown. The record still declares the priority tier for the
+                // models the priority list names.
                 let record = model_record::advertised(
                     Family::Codex,
                     &effort::ModelAliases::default(),
@@ -940,6 +982,8 @@ impl CodexSubscriptionProvider {
                     context_window_tokens: record.context_window_tokens,
                     max_output_tokens: record.max_output_tokens,
                     lifecycle: record.lifecycle,
+                    successor: record.successor,
+                    priority_tier: record.priority_tier,
                 }
             })
             .collect()
@@ -1119,7 +1163,7 @@ mod tests {
             let resolved = resolved_for_budget("gpt-6-astra", budget);
             assert_eq!(codex_reasoning_effort(resolved), wire, "budget {budget}");
             assert_eq!(
-                codex_service_tier("gpt-6-astra", resolved, false),
+                codex_service_tier("gpt-6-astra", resolved, false, ""),
                 tier,
                 "budget {budget}"
             );
@@ -1140,10 +1184,10 @@ mod tests {
     fn quick_keeps_priority_tier_only_on_the_five_models() {
         for model in ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"] {
             let quick = resolved_for_level(model, Level::Low);
-            assert_eq!(codex_service_tier(model, quick, false), Some("priority"), "{model}");
+            assert_eq!(codex_service_tier(model, quick, false, ""), Some("priority"), "{model}");
         }
         let quick = resolved_for_level("gpt-5.3-codex-spark", Level::Low);
-        assert_eq!(codex_service_tier("gpt-5.3-codex-spark", quick, false), None);
+        assert_eq!(codex_service_tier("gpt-5.3-codex-spark", quick, false, ""), None);
     }
 
     #[test]
@@ -1151,19 +1195,19 @@ mod tests {
         let standard = resolved_for_budget("gpt-6-astra", 0);
         assert!(standard.is_none());
         assert_eq!(codex_reasoning_effort(standard), "low");
-        assert_eq!(codex_service_tier("gpt-6-astra", standard, false), None);
+        assert_eq!(codex_service_tier("gpt-6-astra", standard, false, ""), None);
     }
 
     #[test]
     fn enables_priority_only_when_requested_on_compatible_models() {
         let quick = resolved_for_level("gpt-6-astra", Level::Low);
         let deep = resolved_for_level("gpt-5.6-terra", Level::High);
-        assert_eq!(codex_service_tier("gpt-6-astra", quick, false), Some("priority"));
-        assert_eq!(codex_service_tier("gpt-5.6-luna", quick, false), Some("priority"));
-        assert_eq!(codex_service_tier("gpt-5.6-terra", deep, true), Some("priority"));
-        assert_eq!(codex_service_tier("gpt-6-astra", None, false), None);
-        assert_eq!(codex_service_tier("gpt-6-astra", deep, false), None);
-        assert_eq!(codex_service_tier("gpt-5.3-codex-spark", quick, true), None);
+        assert_eq!(codex_service_tier("gpt-6-astra", quick, false, ""), Some("priority"));
+        assert_eq!(codex_service_tier("gpt-5.6-luna", quick, false, ""), Some("priority"));
+        assert_eq!(codex_service_tier("gpt-5.6-terra", deep, true, ""), Some("priority"));
+        assert_eq!(codex_service_tier("gpt-6-astra", None, false, ""), None);
+        assert_eq!(codex_service_tier("gpt-6-astra", deep, false, ""), None);
+        assert_eq!(codex_service_tier("gpt-5.3-codex-spark", quick, true, ""), None);
     }
 
     #[test]

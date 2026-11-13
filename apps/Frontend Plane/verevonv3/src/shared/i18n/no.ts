@@ -100,4 +100,62 @@ export const no = {
       browser_site_mode: 'Modus for nettsider',
     },
   },
+  // Bekreftelse for null datalagring (ZDR) på en modelltilkobling som ikke kan gi ZDR (ZDR Z-20, Z-21, Z-21b).
+  // UTKAST TIL FORMULERING, VENTER PÅ JURIST (OD-LEGAL, D-ZDR-09): eier og jurist bekrefter hver setning før den
+  // tas i bruk. Dialogen bruker IKKE denne teksten til selve bekreftelsen: Integration Core skriver og lagrer
+  // teksten, og dialogen viser den slik den er servert. Disse nøklene er rammen rundt: chipen, svarlinjen og
+  // administratorlisten. Ingen av dem hevder ZDR for en chat med fravik, og de som beskriver dataene sier at
+  // organisasjonens kunnskap og verktøyresultater som brukes i chatten, sendes til leverandøren.
+  zdr: {
+    waiver: {
+      chip: 'Ikke ZDR i denne chatten',
+      chip_title:
+        'Denne chatten kjører på din egen tilkobling, som ikke kan gi null datalagring. Det du sender, også organisasjonens kunnskap og verktøyresultater som brukes i chatten, sendes til leverandøren, og chatten lagres som en vanlig chat.',
+      answer_line:
+        'Svaret ble laget på medlemmets egen tilkobling og lagres som en vanlig chat.',
+      answer_line_title:
+        'Ikke null datalagring. Organisasjonens kunnskap og verktøyresultater som ble brukt i denne chatten, ble sendt til leverandøren.',
+      dialog: {
+        loading: 'Laster ...',
+        close: 'Lukk',
+        saving: 'Lagrer ...',
+        retry: 'Prøv igjen',
+        loadFailed: 'Teksten kunne ikke lastes. Prøv igjen.',
+        saveFailed: 'Bekreftelsen kunne ikke lagres. Prøv igjen.',
+        changed: 'Teksten ble endret mens den var åpen. Les den nye teksten før du fortsetter.',
+        unavailable: 'Denne tilkoblingen har ingen tekst å bekrefte akkurat nå.',
+      },
+      review: 'Se over null datalagring',
+      revoke: 'Trekk tilbake bekreftelsen',
+      revoke_confirm:
+        'Trekke tilbake bekreftelsen din? Så lenge organisasjonen har null datalagring på, brukes ikke denne tilkoblingen før du bekrefter på nytt.',
+      revoke_yes: 'Trekk tilbake',
+      revoke_no: 'Behold',
+      revoked: 'Bekreftelsen din er trukket tilbake.',
+      revoke_failed: 'Bekreftelsen kunne ikke trekkes tilbake. Prøv igjen.',
+      confirmed: 'Bekreftet.',
+      send_again: 'Bekreftet. Du kan sende meldingen på nytt.',
+      chat_review: 'Se over og bekreft',
+      admin: {
+        title: 'Bekreftelser',
+        intro:
+          'Hvilke medlemmer som har bekreftet at en tilkobling de eier ikke kan gi null datalagring. Listen viser hvem, hvilken leverandør og hvilken tekstversjon, aldri selve teksten.',
+        loading: 'Laster ...',
+        empty: 'Ingen bekreftelser ennå.',
+        load_failed: 'Bekreftelsene kunne ikke lastes.',
+        truncated: 'Bare de nyeste radene vises.',
+        counts: (active: number, revoked: number) => `${active} aktive, ${revoked} trukket tilbake`,
+        member: 'Medlem',
+        provider: 'Leverandør',
+        capability: 'Egenskap',
+        text_version: 'Tekstversjon',
+        locale: 'Språk',
+        status: 'Status',
+        acknowledged_at: 'Bekreftet',
+        revoked_at: 'Trukket tilbake',
+        status_active: 'Aktiv',
+        status_revoked: 'Trukket tilbake',
+      },
+    },
+  },
 } as const

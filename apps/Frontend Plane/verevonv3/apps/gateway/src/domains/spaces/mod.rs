@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
     Json, Router,
@@ -50,7 +50,7 @@ pub(crate) mod run_live;
 pub(crate) mod sidebar;
 mod schedule_template;
 mod stream;
-mod memory;
+pub(crate) mod memory;
 
 static THREAD_SCOPE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -80,6 +80,88 @@ const FORGED_SPACE_AUTHORITY_FIELDS: &[&str] = &[
 /// from [`FORGED_SPACE_AUTHORITY_FIELDS`] because that list also cleans action inputs, where
 /// `participants` is a real field (`spaces.open_dm`).
 const FORGED_WAKE_FIELDS: &[&str] = &["wake", "wake_context", "turn_origin", "participants"];
+
+/// D2-461: a follow-up turn on an existing thread that omits `space_ref` gets the thread's Space
+/// resolved here, server-side, so [`inject_personal_thread_context`] mints the scoped decision instead
+/// of the turn retrieving organisation-wide. Must run immediately before
+/// [`inject_personal_thread_context`] / [`inject_personal_thread_context_for_wake`], which is the call
+/// that consumes the `space_ref` this sets (it takes no `HeaderMap`, so the Session Core lookup lives
+/// in this separate step). Gated by `SPACE_THREAD_SCOPE_RESOLVE` (`SpaceFeatureFlags::thread_scope_resolve`,
+/// default off): off, or with a `space_ref` / `spaceRef` already in the body, or with no `thread_id`,
+/// the body is left untouched. The browser's own selection always wins and is never replaced.
+///
+/// A thread in a Space sets `space_ref` to that Space; a thread with no Space is unchanged. A thread the
+/// caller cannot see answers 403 `space_thread_not_visible` and a failed lookup 503
+/// `space_thread_scope_unavailable`: neither ever falls through to an organisation-wide search. The
+/// lookup stores nothing (a Zero Data Retention caller is no different) and only the `thread_id` is
+/// logged, never content. The answer is a routing fact, never an authorization: Control still signs the
+/// decision and the Model Plane service enforces it.
+pub(crate) async fn resolve_thread_space_ref(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    body: &mut Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if !state.space_features.thread_scope_resolve {
+        return Ok(());
+    }
+    let Some(object) = body.as_object_mut() else {
+        return Ok(());
+    };
+    let has_selection = |object: &Map<String, Value>, key: &str| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
+    };
+    if has_selection(object, "space_ref") || has_selection(object, "spaceRef") {
+        return Ok(());
+    }
+    let Some(thread_id) = object
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|thread_id| !thread_id.is_empty())
+        .map(str::to_owned)
+    else {
+        return Ok(());
+    };
+    match human_posts::space_scope_for_thread(state, user, headers, &thread_id).await {
+        Ok(human_posts::SpaceThreadScope::Space(space_ref)) => {
+            // An empty or malformed browser spelling is dropped by the injector either way; replace
+            // both so the resolved value is the only selection it sees.
+            object.remove("spaceRef");
+            object.insert("space_ref".to_owned(), Value::String(space_ref));
+            Ok(())
+        }
+        Ok(human_posts::SpaceThreadScope::NoSpace) => Ok(()),
+        Ok(human_posts::SpaceThreadScope::NotVisible) => {
+            tracing::warn!(thread_id = %thread_id, "thread space scope: thread not visible to caller");
+            Err((
+                StatusCode::FORBIDDEN,
+                Json(error(
+                    "space_thread_not_visible",
+                    "This conversation is not available to you.",
+                )),
+            ))
+        }
+        Err((status, _)) => {
+            tracing::warn!(
+                thread_id = %thread_id,
+                upstream_status = status.as_u16(),
+                "thread space scope: lookup failed"
+            );
+            Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(error(
+                    "space_thread_scope_unavailable",
+                    "The conversation's Space could not be determined. Try again.",
+                )),
+            ))
+        }
+    }
+}
 
 /// Turns an untrusted personal-Space selection into a Control-issued thread
 /// creation/append context. The browser may choose only `space_ref`; all
@@ -1040,6 +1122,9 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             get(personal_space_deletion_receipt),
         )
         .merge(module_routes())
+        // EP-6 S9: the agent version pin. Registered only behind `AGENT_VERSION_PINNING` (read once in
+        // `build_state`), so with the switch off the path is not in the route table at all.
+        .merge(agent_policy::routes(state.space_features.agent_version_pinning))
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
@@ -1643,7 +1728,7 @@ async fn agent_work_offer(state: &AppState, user: &AuthenticatedUser) -> Value {
 /// `service_audience` values Control will sign a thread-read decision for.
 /// Empty means Session Core, which is what every caller before S4.2 asked for
 /// implicitly and what the runs section still asks for.
-const READ_AUDIENCE_SANDBOX_MANAGER: &str = "model-plane-sandbox-manager";
+pub(crate) const READ_AUDIENCE_SANDBOX_MANAGER: &str = "model-plane-sandbox-manager";
 
 async fn shared_thread_read_decision(
     state: &AppState,
@@ -1662,7 +1747,7 @@ async fn shared_thread_read_decision(
 /// point — a token leaked from one path cannot be replayed against the other —
 /// and the cost is one extra Control call on a page that already makes
 /// several.
-async fn shared_thread_read_decision_for_typed(
+pub(crate) async fn shared_thread_read_decision_for_typed(
     state: &AppState,
     user: &AuthenticatedUser,
     org_id: &str,
@@ -3962,6 +4047,7 @@ pub(crate) async fn remove_space_member(
 async fn apply_space_agent_state(
     state: &AppState,
     user: &AuthenticatedUser,
+    headers: Option<&axum::http::HeaderMap>,
     space_ref: &str,
     binding_ref: &str,
     status: &str,
@@ -4018,6 +4104,24 @@ async fn apply_space_agent_state(
         );
     };
 
+    // EP-6 P3 and EP-8 S10: a revoked agent's notes in this room go with its binding. Best-effort
+    // and after the revocation has landed, so it never changes the answer below; repeating a revoke
+    // repeats it, which is how a missed erase is retried. Pause and resume keep the notes. Dark
+    // behind GATEWAY_SPACE_MEMORY_UI (`SpaceFeatureFlags::memory_ui`, default off), like the Space
+    // memory routes.
+    if status == "revoked" && state.space_features.memory_ui {
+        if let Some(headers) = headers {
+            let subject_id = updated
+                .get("subjectId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            memory::erase_agent_memory_after_revocation(
+                state, user, headers, &org_id, space_ref, subject_id,
+            )
+            .await;
+        }
+    }
+
     // Only revocation changes who is in the room, so only revocation needs
     // Control to converge. Pausing keeps the agent a member that may not be
     // invoked, which the gateway's own invocation path already enforces.
@@ -4067,7 +4171,7 @@ pub(crate) async fn set_space_agent_state(
             )),
         );
     }
-    apply_space_agent_state(&state, &user, &space_ref, &binding_ref, status).await
+    apply_space_agent_state(&state, &user, None, &space_ref, &binding_ref, status).await
 }
 
 /// `DELETE /api/v1/spaces/{space_ref}/agents/{binding_ref}` — revoke.
@@ -4079,9 +4183,11 @@ pub(crate) async fn set_space_agent_state(
 pub(crate) async fn revoke_space_agent(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
+    headers: axum::http::HeaderMap,
     Path((space_ref, binding_ref)): Path<(String, String)>,
 ) -> (StatusCode, Json<Value>) {
-    apply_space_agent_state(&state, &user, &space_ref, &binding_ref, "revoked").await
+    apply_space_agent_state(&state, &user, Some(&headers), &space_ref, &binding_ref, "revoked")
+        .await
 }
 
 /// Who may grant a new agent (created or bound) a place in this room: the
@@ -4769,6 +4875,172 @@ fn agent_version_unavailable() -> (StatusCode, Json<Value>) {
             "This agent's version could not be read right now.",
         )),
     )
+}
+
+/// The agent role catalogue a Do turn carries to the model gateway (EP-6 S10). A client copy is
+/// removed on every turn, whatever `AGENT_VERSION_PINNING` says, so the only catalogue that can reach
+/// the gateway is the one [`inject_space_agent_roles`] composes from the Space's own bindings.
+const AGENT_ROLES_FIELDS: [&str; 2] = ["agent_roles", "agentRoles"];
+
+/// The most agents of one Space that become roles of one Do turn (EP-6 S10). The model gateway keeps
+/// at most this many as well.
+const MAX_SPACE_AGENT_ROLES: usize = 8;
+
+/// A role's instructions are cut to this many bytes, on a character boundary (EP-6 S10). The model
+/// gateway applies the same cut.
+const MAX_SPACE_AGENT_ROLE_INSTRUCTIONS_BYTES: usize = 4_096;
+
+/// Removes every client-supplied `agent_roles` from a chat turn, on every turn and whatever the
+/// switches say. Each chat path calls it before its injectors run, so no later step sees a forged
+/// catalogue.
+pub(crate) fn strip_client_agent_roles(body: &mut Value) {
+    if let Some(object) = body.as_object_mut() {
+        for field in AGENT_ROLES_FIELDS {
+            object.remove(field);
+        }
+    }
+}
+
+/// EP-6 S10: the agent role catalogue of a Do turn in a Space, composed by the BFF from the Space's
+/// bindings and never taken from the browser. It is composed only with `AGENT_VERSION_PINNING` on,
+/// for a Do turn (the agentic run or an execute grant) that names a Space the caller may use, and
+/// never for a zero-retention turn. Each active agent Control authorizes in that Space, up to
+/// `MAX_SPACE_AGENT_ROLES`, contributes the version it runs now: its pin, else the published one. An
+/// agent whose version cannot be read is left out. A Space the caller cannot read gets no catalogue,
+/// and Control refuses the turn itself further down. The catalogue grants nothing: the model gateway
+/// and execution-core only narrow a delegated child's tools.
+///
+/// Must run before `inject_personal_thread_context_for_wake`, which consumes the `space_ref` this
+/// reads, and after the mention injector, so a mention turn that lost its `agentic` run to its binding
+/// policy is not a Do turn here.
+pub(crate) async fn inject_space_agent_roles(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    org_id: &str,
+    body: &mut Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let object = body.as_object_mut().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(error(
+                "invalid_chat_request",
+                "Chat request must be an object.",
+            )),
+        )
+    })?;
+    if !state.space_features.agent_version_pinning || !is_do_turn(object) {
+        return Ok(());
+    }
+    let Some(space_ref) = peek_space_ref(object) else {
+        return Ok(());
+    };
+    let org_id = org_id.trim();
+    // The body's own flag, then the organisation's posture: `apply_org_zdr_posture` folds the
+    // organisation's in only later, and its lookup fails closed, so an outage here reads as ZDR too.
+    let zdr = object.get("zdr").and_then(Value::as_bool).unwrap_or(false);
+    if org_id.is_empty() || zdr || crate::zdr::org_zdr_enabled(state, user).await {
+        return Ok(());
+    }
+    // The same roster the mention path resolves against: Control's members, joined with the binding.
+    let Ok(agents) = compose_space_agents(state, user, org_id, &space_ref).await else {
+        return Ok(());
+    };
+    let bound = agents
+        .iter()
+        .filter(|agent| agent.get("status").and_then(Value::as_str) == Some("active"))
+        // A binding that blocks invocation in this Space is no role either.
+        .filter(|agent| agent.get("approval_mode").and_then(Value::as_str) != Some("blocked"))
+        .filter_map(|agent| {
+            let agent_ref = agent.get("agent_ref").and_then(Value::as_str)?;
+            (!agent_ref.is_empty()).then_some((agent, agent_ref))
+        })
+        .take(MAX_SPACE_AGENT_ROLES);
+    let mut roles = Vec::new();
+    for (agent, agent_ref) in bound {
+        let pinned_version = agent.get("pinned_version").and_then(Value::as_u64);
+        let Some(persona) =
+            fetch_agent_version_persona(state, user, org_id, agent_ref, pinned_version).await
+        else {
+            continue;
+        };
+        if let Some(role) = space_agent_role(agent, agent_ref, &persona) {
+            roles.push(role);
+        }
+    }
+    if !roles.is_empty() {
+        object.insert("agent_roles".to_owned(), Value::Array(roles));
+    }
+    Ok(())
+}
+
+/// Whether a turn is a Do turn (EP-6 S10): the agentic run, or an execute grant. Read after the mention
+/// injector, which strips both from a mention turn that its binding does not let run unattended.
+fn is_do_turn(object: &Map<String, Value>) -> bool {
+    let agentic = object
+        .get("features")
+        .and_then(Value::as_array)
+        .is_some_and(|features| {
+            features
+                .iter()
+                .any(|feature| feature.as_str() == Some("agentic"))
+        });
+    let granted = |field: &str| object.get(field).and_then(Value::as_bool) == Some(true);
+    agentic || granted("execute_granted") || granted("executeGranted")
+}
+
+/// One Do-turn role (EP-6 S10) in the shape the model gateway reads (`AgentRoleInput`): the version a
+/// Space agent runs, with its digest, instructions, tool allowlist and autonomy cap. `None` when that
+/// version has no number, no digest or no closed autonomy cap, since a role that cannot say what it
+/// runs is left out.
+fn space_agent_role(agent: &Value, agent_ref: &str, persona: &Value) -> Option<Value> {
+    let version = persona
+        .get("version")
+        .and_then(Value::as_u64)
+        .filter(|version| (1..=u64::from(u32::MAX)).contains(version))?;
+    let digest = persona
+        .get("digest")
+        .and_then(Value::as_str)
+        .filter(|digest| !digest.is_empty())?;
+    let autonomy_cap = persona
+        .get("autonomyCap")
+        .and_then(Value::as_str)
+        .filter(|cap| matches!(*cap, "read_only" | "ask_first" | "auto"))?;
+    let instructions = persona
+        .get("systemPrompt")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let tool_capability_ids: Vec<&str> = persona
+        .get("toolCapabilityIds")
+        .and_then(Value::as_array)
+        .map(|ids| ids.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let name = agent
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| agent.get("subject_id").and_then(Value::as_str))
+        .unwrap_or(agent_ref);
+    Some(json!({
+        "agent_ref": agent_ref,
+        "version": version,
+        "digest": digest,
+        "name": name,
+        "instructions": within_bytes(instructions, MAX_SPACE_AGENT_ROLE_INSTRUCTIONS_BYTES),
+        "tool_capability_ids": tool_capability_ids,
+        "autonomy_cap": autonomy_cap,
+    }))
+}
+
+/// The longest prefix of `text` within `max_bytes`, cut on a character boundary.
+fn within_bytes(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// Read (never consume) whichever spelling of the Space reference the request

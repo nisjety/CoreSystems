@@ -1,0 +1,260 @@
+/*
+ * The side chat (F-t3-069). The trigger sits in the row under the chat header and takes the density menu's pill shape.
+ * The drawer is a fixed panel beside the transcript, mounted through a portal, so the transcript keeps its layout. On a
+ * phone it takes the full width. Every colour is a token, so light and dark both follow the theme. The page mounts the
+ * panel only with `VITE_CHAT_SIDE_CHAT` on, so with the switch off none of these rules matches anything.
+ */
+
+.verevon-side-chat {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 8px;
+}
+
+.verevon-side-chat__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-j-text-soft);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.verevon-side-chat__trigger:hover,
+.verevon-side-chat__trigger[aria-expanded='true'] {
+  color: var(--verevon-j-text);
+}
+
+.verevon-side-chat__trigger svg {
+  flex-shrink: 0;
+  opacity: 0.55;
+}
+
+.verevon-side-chat__drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-sizing: border-box;
+  width: min(420px, 100vw);
+  max-width: 100vw;
+  padding: 16px;
+  border-left: 1px solid var(--verevon-border);
+  background: var(--verevon-surface);
+  color: var(--verevon-j-text);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .verevon-side-chat__drawer {
+    animation: verevon-side-chat-in 160ms ease-out;
+  }
+}
+
+@keyframes verevon-side-chat-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.verevon-side-chat__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.verevon-side-chat__title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.verevon-side-chat__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--verevon-j-text-soft);
+  cursor: pointer;
+}
+
+.verevon-side-chat__close:hover {
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-j-text);
+}
+
+.verevon-side-chat__note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--verevon-e-muted);
+}
+
+.verevon-side-chat__body {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.verevon-side-chat__entry {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-bg);
+}
+
+.verevon-side-chat__question {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--verevon-j-text-soft);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.verevon-side-chat__answer {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--verevon-j-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.verevon-side-chat__chip {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 999px;
+  background: var(--verevon-surface);
+  color: var(--verevon-j-text-soft);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.verevon-side-chat__chip:hover {
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-j-text);
+}
+
+.verevon-side-chat__status,
+.verevon-side-chat__error {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--verevon-e-muted);
+}
+
+.verevon-side-chat__error {
+  color: var(--verevon-j-text);
+  font-weight: 600;
+}
+
+.verevon-side-chat__ask {
+  display: grid;
+  gap: 8px;
+}
+
+.verevon-side-chat__label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--verevon-j-text-soft);
+}
+
+.verevon-side-chat__input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 64px;
+  max-height: 40vh;
+  padding: 10px 12px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 10px;
+  background: var(--verevon-bg);
+  color: var(--verevon-j-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.verevon-side-chat__send {
+  justify-self: end;
+  min-height: 36px;
+  padding: 8px 18px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--verevon-j-text);
+  color: var(--verevon-surface);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.verevon-side-chat__send:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.verevon-side-chat__trigger:focus-visible,
+.verevon-side-chat__close:focus-visible,
+.verevon-side-chat__chip:focus-visible,
+.verevon-side-chat__input:focus-visible,
+.verevon-side-chat__send:focus-visible {
+  outline: 2px solid var(--verevon-chat-fjord, var(--verevon-j-text));
+  outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .verevon-side-chat__drawer {
+    width: 100vw;
+    padding: 16px;
+  }
+
+  .verevon-side-chat__input {
+    font-size: 16px;
+  }
+}

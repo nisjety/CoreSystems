@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -39,8 +40,10 @@ var wordingLocales = []string{"no", "en"}
 var ErrNoWording = errors.New("no acknowledgement text for this key, variant and locale")
 
 type wordingIndex struct {
-	Format   string                    `json:"format"`
-	Current  string                    `json:"current"`
+	Format  string `json:"format"`
+	Current string `json:"current"`
+	// Minimum is the oldest text version whose acknowledgement still counts. Absent means equal to Current.
+	Minimum  string                    `json:"minimum,omitempty"`
 	Versions map[string]wordingVersion `json:"versions"`
 }
 
@@ -68,12 +71,49 @@ type Text struct {
 // Wording is the loaded, verified set of texts of one version. It is immutable after load.
 type Wording struct {
 	version string
+	minimum string
 	status  string
 	texts   map[string]Text
 }
 
 // Version is the version the texts belong to, the value an acknowledgement records as its text version.
 func (w *Wording) Version() string { return w.version }
+
+// MinimumVersion is the oldest text version whose acknowledgement still counts. An acknowledgement
+// recorded against an older text is treated as not given. It equals Version when the index sets no minimum.
+func (w *Wording) MinimumVersion() string { return w.minimum }
+
+// TextVersionAtLeast reports whether a text version (for example "v2") is at or above a minimum, comparing
+// the integer after the leading "v". A version or minimum not of the form v<digits> is never at or above anything.
+func TextVersionAtLeast(version, minimum string) bool {
+	have, ok := wordingVersionNumber(version)
+	if !ok {
+		return false
+	}
+	want, ok := wordingVersionNumber(minimum)
+	if !ok {
+		return false
+	}
+	return have >= want
+}
+
+// wordingVersionNumber parses a version key of the form v<digits>.
+func wordingVersionNumber(version string) (int, bool) {
+	digits := strings.TrimPrefix(version, "v")
+	if digits == version || digits == "" {
+		return 0, false
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return 0, false
+		}
+	}
+	number, err := strconv.Atoi(digits)
+	if err != nil {
+		return 0, false
+	}
+	return number, true
+}
 
 // Status is the review state of the version, for example draft_pending_od_legal until counsel signs off.
 func (w *Wording) Status() string { return w.status }
@@ -112,6 +152,12 @@ func DefaultWording() (*Wording, error) {
 	return wordingDefault, wordingErr
 }
 
+// LoadWording verifies and parses the wording under texts/ in fsys against assessor's contract. The service
+// uses DefaultWording; this is for a caller that supplies its own wording, such as a test with several versions.
+func LoadWording(fsys fs.FS, assessor *Assessor) (*Wording, error) {
+	return loadWordingFrom(fsys, assessor)
+}
+
 // loadWordingFrom verifies and parses the wording under texts/ in fsys against assessor's contract.
 func loadWordingFrom(fsys fs.FS, assessor *Assessor) (*Wording, error) {
 	raw, err := fs.ReadFile(fsys, wordingIndexPath)
@@ -133,6 +179,21 @@ func loadWordingFrom(fsys fs.FS, assessor *Assessor) (*Wording, error) {
 	}
 	if strings.TrimSpace(version.Status) == "" {
 		return nil, fmt.Errorf("acknowledgement wording %s has no review status", index.Current)
+	}
+	for key := range index.Versions {
+		if _, ok := wordingVersionNumber(key); !ok {
+			return nil, fmt.Errorf("acknowledgement wording version %q is not of the form v<digits>", key)
+		}
+	}
+	minimum := index.Minimum
+	if minimum == "" {
+		minimum = index.Current
+	}
+	if _, ok := index.Versions[minimum]; !ok {
+		return nil, fmt.Errorf("acknowledgement wording: minimum version %q is not in the index", minimum)
+	}
+	if !TextVersionAtLeast(index.Current, minimum) {
+		return nil, fmt.Errorf("acknowledgement wording: minimum version %q is above current version %q", minimum, index.Current)
 	}
 
 	// Every listed file exists and matches its pinned digest. Line endings are normalised to LF
@@ -191,7 +252,7 @@ func loadWordingFrom(fsys fs.FS, assessor *Assessor) (*Wording, error) {
 			}
 		}
 	}
-	return &Wording{version: index.Current, status: version.Status, texts: texts}, nil
+	return &Wording{version: index.Current, minimum: minimum, status: version.Status, texts: texts}, nil
 }
 
 // parseWordingEntry reads one text file, named <version>/<locale>/<key>.<variant>.txt, and checks

@@ -21,6 +21,8 @@
 
 use serde::Deserialize;
 
+pub mod shadow_reviewer;
+
 /// The reason a malformed, non-empty context is denied while `HOOKS_FAIL_CLOSED` is on.
 const MALFORMED_CONTEXT_REASON: &str = "hook_context_malformed";
 

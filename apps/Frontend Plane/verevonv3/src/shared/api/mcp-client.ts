@@ -78,6 +78,41 @@ export function connectMcpServer(
   })
 }
 
+/** What a server needs before it answers a tool listing: none, an OAuth login, or a static bearer token. */
+export type McpProbeAuth = 'none' | 'oauth' | 'bearer_required'
+
+/**
+ * One tool a probe reports. The hints are the server's own claims, shown for a person to judge; a hint is
+ * null when the server gave none.
+ */
+export interface McpProbedTool {
+  name: string
+  description: string
+  read_only_hint: boolean | null
+  destructive_hint: boolean | null
+}
+
+/**
+ * What `probeMcpServer` resolves to. `tools` is empty unless `auth` is `none`: a server's tools are listed
+ * only when it needs no credential, and the probe never sends one.
+ */
+export interface McpProbeResult {
+  auth: McpProbeAuth
+  tools: McpProbedTool[]
+}
+
+/**
+ * Ask what an MCP server needs before anyone saves it: its auth requirement and, when it needs no
+ * credential, up to 64 of its tools. Nothing is registered, and the body is the address alone, so a
+ * credential has no field to travel in.
+ */
+export function probeMcpServer(url: string): Promise<McpProbeResult> {
+  return requestJson<McpProbeResult>('/api/v1/mcp/servers/probe', {
+    method: 'POST',
+    body: JSON.stringify({ url }),
+  })
+}
+
 export function deleteMcpServer(orgId: string, serverId: string): Promise<void> {
   return requestJson<void>(`/api/v1/mcp/servers/${encodeURIComponent(serverId)}`, {
     method: 'DELETE',

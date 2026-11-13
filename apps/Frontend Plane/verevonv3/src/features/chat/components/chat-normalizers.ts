@@ -1,5 +1,12 @@
 import { ATTACHMENT_MAX_TOTAL_BYTES } from '@/features/chat/lib/attachment-policy'
 import {
+  chatLimitNoticesEnabled,
+  isLimitCode,
+  type LimitAction,
+  type LimitCode,
+  limitNotice,
+} from '@/features/chat/lib/limit-notices'
+import {
   type ChatThreadTranscriptStep,
   type ChatThreadTranscriptTurn,
 } from '@/features/chat/lib/chat-thread-history'
@@ -11,9 +18,11 @@ import {
   type ChatMessage,
   type CitationLocator,
   getAttachmentPolicy,
+  normalizeStoredResearchPlan,
   type RecalledMemory,
   type ResearchProvenance,
 } from '@/shared/api/chat-client'
+import { normalizeContextRefs } from '@/shared/actions/chat-context-refs'
 import {
   isModelEntitlementCode,
   type ModelEntitlementCode,
@@ -37,8 +46,10 @@ import {
   readClientValue,
   writeClientValue,
 } from '@/shared/session/client-storage'
+import { getSession } from '@/shared/session/session-store'
 import { supportQuestionFromPrompt } from '@/shared/chat/support-context-envelope'
 import { en as enStrings } from '@/shared/i18n/en'
+import { LocalizedError, ORG_POLICY_UNAVAILABLE_COPY } from '@/shared/i18n/errors'
 import { localeIntl, type Locale } from '@/shared/i18n/locales'
 import { no as noStrings } from '@/shared/i18n/no'
 import type { RunDetail } from '@/shared/api/runs-client'
@@ -94,6 +105,9 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
     sourceScope: msg.sourceScope,
     retrievalScope: msg.retrievalScope,
     contextRefs: msg.contextRefs,
+    researchPlan: msg.researchPlan,
+    // The route the stored answer was served on (W5-073-b), when the server kept one; no key for a turn that kept none.
+    ...(msg.routingDecision ? { routingDecision: msg.routingDecision } : {}),
     content: visibleTurnContent(msg.role, msg.content),
     // Keep an absent server timestamp EMPTY instead of fabricating "now":
     // session-core messages carry no timestamps, so stamping the fetch time
@@ -139,7 +153,7 @@ export function cancelledRunTurn(threadId: string, latestRunId: string, message:
 }
 
 /** Run states Session Core still owns: the run has not terminalised yet. */
-export const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set(['queued', 'running', 'awaiting_approval'])
+export const ACTIVE_RUN_STATUSES: ReadonlySet<string> = new Set(['queued', 'running', 'awaiting_approval', 'awaiting_input'])
 
 /**
  * What a failed run's recorded `error` means for the reader.
@@ -430,6 +444,40 @@ function modelEntitlementStreamPresentation(
 }
 
 /**
+ * An organisation that has paused agent runs (F-t3-083) refused the Do turn before any model ran, so nothing was run or
+ * saved and what streamed is not the answer. A refusal, not an outage. The same turn would be refused the same way until
+ * an administrator resumes agent runs, so no retry is offered and the words say that plain chat still works. The words
+ * are the SPA's own, in the reader's language; the server's text is English and is never shown.
+ */
+function agentsPausedStreamPresentation(tr: Translate): StreamFailurePresentation {
+  return {
+    message: tr(
+      'Organisasjonen har satt agentkjøringer på pause. Vanlig chat fungerer som før. Ingenting ble kjørt.',
+      'Your organisation has paused agent runs. Plain chat works as before. Nothing was run.',
+    ),
+    unsaved: true,
+    unavailable: false,
+    action: 'none',
+  }
+}
+
+/**
+ * The organisation's agent policy cannot be read inside its bound (C-14-mg-rel1): a Do turn refused before any model
+ * ran, so nothing was run or saved. Unlike the pause, this clears when the policy can be read again, and the server
+ * says the same request may succeed then, so the reader is offered a retry. It is a refusal, not an outage of the
+ * model service, so it is not `unavailable`. The words are the copy of errors.ts, shared with a continuation refused
+ * over HTTP, which offers no retry; the server's English text is never shown.
+ */
+function orgPolicyUnavailableStreamPresentation(tr: Translate): StreamFailurePresentation {
+  return {
+    message: tr(ORG_POLICY_UNAVAILABLE_COPY.no, ORG_POLICY_UNAVAILABLE_COPY.en),
+    unsaved: true,
+    unavailable: false,
+    action: 'retry',
+  }
+}
+
+/**
  * The words for a refusal by the server's attachment contract. Nothing was sent
  * to a model, so each says what to change, not to retry.
  */
@@ -465,6 +513,48 @@ function attachmentRefusalMessage(code: string, tr: Translate): string {
         'Vedlegget ble ikke sendt: filen kunne ikke leses. Legg det ved på nytt. Ingenting ble sendt.',
         'The attachment was not sent: the file could not be read. Attach it again. Nothing was sent.',
       )
+  }
+}
+
+/**
+ * The reader's control for a limit notice. A wait or a retry is a control. `contact_admin` and `open_billing` name a
+ * person or a page in the words, and a stream has no billing control to offer, so neither is a button.
+ */
+function limitStreamAction(action: LimitAction): StreamFailureAction {
+  if (action === 'wait' || action === 'retry') return action
+  return 'none'
+}
+
+/**
+ * A limit refusal under VITE_CHAT_LIMIT_NOTICES (F-t3-078), worded by `limitNotice` for the reader's role. The server's
+ * own text is never shown: a `budget_exceeded` message repeats the organisation's spend and cap. Nothing was saved, so
+ * what streamed is not the answer. Only a rate limit offers a retry; when the server gives a Retry-After, that is a wait.
+ */
+function limitStreamPresentation(
+  code: LimitCode,
+  details: StreamFailureDetails,
+  now: number,
+  tr: (noText: string, enText: string) => string,
+): StreamFailurePresentation {
+  const delay = details.retryAfterMs
+  const retryAfterSec = delay !== undefined && Number.isFinite(delay) && delay > 0
+    ? Math.max(1, Math.ceil(delay / 1000))
+    : undefined
+  const notice = limitNotice(code, getSession().activeOrg?.role, { retryAfterSec }, { tr })
+  const action = limitStreamAction(notice.action)
+  if (code !== 'rate_limited') {
+    return { message: notice.message, unsaved: true, unavailable: false, action }
+  }
+  // The stream reports `rate_limited` only from the ChatGPT subscription route, which never answers with another
+  // model, so the reader is told that as well.
+  const retryAt = notice.retryAfterSec === undefined ? undefined : instantAfter(notice.retryAfterSec * 1000, now)
+  return {
+    message: `${notice.message} ${tr('Ingen annen modell ble brukt.', 'No other model was used.')}`,
+    unsaved: true,
+    unavailable: true,
+    serviceTitle: subscriptionServiceTitle(tr),
+    action,
+    ...(retryAt !== undefined ? { retryAt } : {}),
   }
 }
 
@@ -505,9 +595,15 @@ function attachmentRefusalMessage(code: string, tr: Translate): string {
  * the refusals of the turn that runs an approved plan (WS14 S2a): the server holds
  * no live grant for the thread, or the capability is switched off on this
  * deployment. Nothing ran, a retry cannot help, so each says so in words and
- * offers none. `prompt_too_long`,
- * `inference_stream_error` and `model_plane_unavailable` are translated too;
+ * offers none. `org_agents_paused` is the organisation's agent-run pause
+ * (F-t3-083): a Do turn refused before any model ran, so nothing was run, the
+ * words say plain chat still works, and no retry is offered. `org_policy_unavailable`
+ * (C-14-mg-rel1) is a Do turn refused before any model ran while the organisation's agent
+ * policy cannot be read: nothing ran, and a retry is offered, since the policy may be readable
+ * again. `prompt_too_long`, `inference_stream_error` and `model_plane_unavailable` are translated too;
  * the last one's server text is raw transport detail and is never shown.
+ * With VITE_CHAT_LIMIT_NOTICES on, `budget_exceeded`, `quota_exceeded`, `run_ceiling_reached` and `rate_limited` are
+ * worded for the reader's role by `limitNotice` instead, and the server's text is not shown for them.
  */
 export function streamFailurePresentation(
   code: string | undefined,
@@ -519,8 +615,13 @@ export function streamFailurePresentation(
   // server's text for them is English operator wording, never shown.
   if (code !== undefined && isZdrCode(code)) return zdrStreamPresentation(code, tr, details.feature)
   if (isModelEntitlementCode(code)) return modelEntitlementStreamPresentation(code, tr)
+  // The organisation's agent-run pause (F-t3-083): a refusal before any model ran, typed on the stream's error frame.
+  if (code === 'org_agents_paused') return agentsPausedStreamPresentation(tr)
+  // The organisation's agent policy cannot be read inside its bound (C-14-mg-rel1): a Do turn refused before any model ran.
+  if (code === 'org_policy_unavailable') return orgPolicyUnavailableStreamPresentation(tr)
   const server = serverMessage.trim()
   const now = details.now ?? Date.now()
+  if (isLimitCode(code) && chatLimitNoticesEnabled()) return limitStreamPresentation(code, details, now, tr)
   switch (code) {
     case 'subscription_usage_limit':
       return usageLimitPresentation(tr, details, now)
@@ -946,6 +1047,8 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     role: turn.role,
     sourceScope: turn.sourceScope === 'conversation' ? 'conversation' : 'workspace',
     retrievalScope: turn.retrievalScope === 'knowledge_only' || turn.retrievalScope === 'web_only' ? turn.retrievalScope : undefined,
+    ...restoredContextRefsField(turn.contextRefs),
+    ...restoredResearchPlanField(turn.researchPlan),
     content: visibleTurnContent(turn.role, turn.content),
     createdAt: turn.createdAt,
     streaming: false,
@@ -982,6 +1085,21 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     connectorSuggestion: restoredConnectorSuggestion(turn.connectorSuggestion),
     attachments: attachments.length ? attachments : messageToTurn({ id: turn.id, role: turn.role, content: turn.content, createdAt: turn.createdAt }).attachments,
   }
+}
+
+/** The `contextRefs` key for a transcript turn that carries chips, and no key at all for one that does not. */
+function restoredContextRefsField(value: unknown): Pick<ChatTurn, 'contextRefs'> {
+  const refs = normalizeContextRefs(value)
+  return refs.length > 0 ? { contextRefs: refs } : {}
+}
+
+/**
+ * The `researchPlan` key for a transcript turn that carries a persisted plan (EP-2 S5), and no key for
+ * one that does not. The BFF relays sub-queries and questions only, so the card gets the default cap.
+ */
+function restoredResearchPlanField(value: unknown): Pick<ChatTurn, 'researchPlan'> {
+  const plan = normalizeStoredResearchPlan(value)
+  return plan ? { researchPlan: plan } : {}
 }
 
 /**
@@ -1170,6 +1288,12 @@ export function mergeServerTurnsWithCachedMetadata(
       memoryRecallCount: serverTurn.memoryRecallCount ?? cachedTurn.memoryRecallCount,
       recalledMemories: metadataArray(serverTurn.recalledMemories, cachedTurn.recalledMemories),
       stopReason: serverTurn.stopReason ?? cachedTurn.stopReason,
+      // The chips and the plan come from the BFF transcript (the cached side here), which flattens them off
+      // the message metadata; the messages read may carry the chips too, and wins when it does.
+      contextRefs: serverTurn.contextRefs ?? cachedTurn.contextRefs,
+      researchPlan: serverTurn.researchPlan ?? cachedTurn.researchPlan,
+      // The route is stated by the usage frame while the turn streams and by the stored metadata after a reload; either keeps it.
+      routingDecision: serverTurn.routingDecision ?? cachedTurn.routingDecision,
       // Stream-only too: the server's message never carries the suggestion card.
       connectorSuggestion: serverTurn.connectorSuggestion ?? restoredConnectorSuggestion(cachedTurn.connectorSuggestion),
       tools: serverTurn.tools.length > 0 ? serverTurn.tools : cachedTurn.tools,
@@ -1534,7 +1658,10 @@ export async function inlineTextAttachments(
       total += content.length
       out.push({ name: attachment.name?.trim() || 'vedlegg.txt', content })
     } catch {
-      throw new Error(`Kunne ikke lese hele «${attachment.name}». Utkastet er beholdt; prøv igjen med et lesbart, mindre vedlegg.`)
+      throw new LocalizedError({
+        no: `Kunne ikke lese hele «${attachment.name}». Utkastet er beholdt; prøv igjen med et lesbart, mindre vedlegg.`,
+        en: `Could not read all of “${attachment.name}”. Your draft has been kept; try again with a readable, smaller attachment.`,
+      })
     }
   }
   return out
@@ -1578,7 +1705,10 @@ export async function toStreamAttachments(
   const spend = (base64: string, name: string) => {
     used += base64ByteLength(base64)
     if (used > budget) {
-      throw new Error(`Vedleggene er for store til å sendes i én melding («${name}» passerte grensen). Fjern noen og prøv igjen.`)
+      throw new LocalizedError({
+        no: `Vedleggene er for store til å sendes i én melding («${name}» passerte grensen). Fjern noen og prøv igjen.`,
+        en: `The attachments are too large to send in one message (“${name}” went over the limit). Remove some and try again.`,
+      })
     }
   }
   for (const attachment of attachments) {
@@ -1603,7 +1733,10 @@ export async function toStreamAttachments(
       parsed = parseDataUrl(dataUrl)
       if (!parsed || !parsed.base64) throw new Error('invalid image encoding')
     } catch {
-      throw new Error(`Kunne ikke lese bildet «${attachment.name}». Prøv igjen eller fjern bildet.`)
+      throw new LocalizedError({
+        no: `Kunne ikke lese bildet «${attachment.name}». Prøv igjen eller fjern bildet.`,
+        en: `Could not read the image “${attachment.name}”. Try again or remove the image.`,
+      })
     }
     spend(parsed.base64, attachment.name)
     out.push({ kind: 'image', data_base64: parsed.base64, mime_type: parsed.mime || attachment.type })
@@ -1631,7 +1764,10 @@ async function toStreamFile(
       mime_type: attachment.type || parsed.mime || 'application/octet-stream',
     }
   } catch {
-    throw new Error(`Kunne ikke lese «${attachment.name}». Prøv igjen eller fjern filen.`)
+    throw new LocalizedError({
+      no: `Kunne ikke lese «${attachment.name}». Prøv igjen eller fjern filen.`,
+      en: `Could not read “${attachment.name}”. Try again or remove the file.`,
+    })
   }
 }
 

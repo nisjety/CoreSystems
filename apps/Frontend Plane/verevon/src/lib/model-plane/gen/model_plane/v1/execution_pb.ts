@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file model_plane/v1/execution.proto.
  */
 export const file_model_plane_v1_execution: GenFile = /*@__PURE__*/
-  fileDesc("Ch5tb2RlbF9wbGFuZS92MS9leGVjdXRpb24ucHJvdG8SDm1vZGVsX3BsYW5lLnYxIjEKH0Jyb3dzZXJBZ2VudENhcGFiaWxpdGllc1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJIkQKIEJyb3dzZXJBZ2VudENhcGFiaWxpdGllc1Jlc3BvbnNlEiAKGGF0dGFjaGVkX3BvbGljeV9wcm90b2NvbBgBIAEoDSKrAgobRXhlY3V0ZVNjaGVkdWxlZFN0ZXBSZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSDgoGb3JnX2lkGAMgASgJEhAKCHNwYWNlX2lkGAQgASgJEhIKCnN1YmplY3RfaWQYBSABKAkSEwoLc2NoZWR1bGVfaWQYBiABKAkSEAoIZmlyZV9rZXkYByABKAkSFwoPdGVtcGxhdGVfZGlnZXN0GAggASgJEg8KB3N0ZXBfaWQYCSABKAkSEgoKc3RlcF9pbmRleBgKIAEoDRIVCg1wb2xpY3lfZGlnZXN0GAsgASgJEhcKD2lkZW1wb3RlbmN5X2tleRgMIAEoCRIeChZjb250cm9sX2RlY2lzaW9uX3Rva2VuGA0gASgJIv8BChxFeGVjdXRlU2NoZWR1bGVkU3RlcFJlc3BvbnNlEg8KB3N0ZXBfaWQYASABKAkSDgoGc3RhdHVzGAIgASgJEhIKCnJlY2VpcHRfaWQYAyABKAkSDgoGb3V0cHV0GAQgASgJEg0KBWVycm9yGAUgASgJEhcKD3Vua25vd25fb3V0Y29tZRgGIAEoCBIXCg9yb3VuZHNfZXhlY3V0ZWQYByABKA0SGAoQd2l0aGhlbGRfZWZmZWN0cxgIIAEoDRISCgp0b29sX2NhbGxzGAkgASgNEhQKDGlucHV0X3Rva2VucxgKIAEoDRIVCg1vdXRwdXRfdG9rZW5zGAsgASgNIsIGCg9SdW5BZ2VudFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIMCgRnb2FsGAMgASgJEg4KBm9yZ19pZBgEIAEoCRIPCgd1c2VyX2lkGAUgASgJEg0KBW1vZGVsGAYgASgJEgwKBG1vZGUYByABKAkSEgoKbWF4X3JvdW5kcxgIIAEoDRILCgN6ZHIYCSABKAgSLQoFdG9vbHMYCiADKAsyHi5tb2RlbF9wbGFuZS52MS5Ub29sRGVmaW5pdGlvbhI1ChBtaW5fcHJpdmFjeV90aWVyGAsgASgOMhsubW9kZWxfcGxhbmUudjEuUHJpdmFjeVRpZXISEQoJcGxhbl9tb2RlGA0gASgIEjMKDWF1dG9ub215X3J1bmcYDCABKA4yHC5tb2RlbF9wbGFuZS52MS5BdXRvbm9teVJ1bmcSEAoIc3BhY2VfaWQYDiABKAkSFQoNbWF4X3N1YmFnZW50cxgPIAEoDRIVCg1wcm92aWRlcl9oaW50GBAgASgJEiIKGnN1YnNjcmlwdGlvbl9jb25uZWN0aW9uX2lkGBEgASgJEi8KC3J1bl9jb250ZXh0GBIgASgLMhoubW9kZWxfcGxhbmUudjEuUnVuQ29udGV4dBIrCgZyZXN1bWUYEyABKAsyGy5tb2RlbF9wbGFuZS52MS5BZ2VudFJlc3VtZRIyCgthdHRhY2htZW50cxgUIAMoCzIdLm1vZGVsX3BsYW5lLnYxLlJ1bkF0dGFjaG1lbnQSOQoQcmVhc29uaW5nX2VmZm9ydBgVIAEoDjIfLm1vZGVsX3BsYW5lLnYxLlJlYXNvbmluZ0VmZm9ydBIVCg1tYXhfcXVlc3Rpb25zGBYgASgNEjcKD2Nvbm5lY3Rvcl9zY29wZRgXIAEoCzIeLm1vZGVsX3BsYW5lLnYxLkNvbm5lY3RvclNjb3BlEjQKCm9yZ19wb2xpY3kYGCABKAsyIC5tb2RlbF9wbGFuZS52MS5PcmdQb2xpY3lDb250ZXh0EjoKDXdpZGVfcmVzZWFyY2gYGSABKAsyIy5tb2RlbF9wbGFuZS52MS5XaWRlUmVzZWFyY2hSZXF1ZXN0ImcKE1dpZGVSZXNlYXJjaFJlcXVlc3QSEAoIaXRlbV9jYXAYASABKA0SDQoFaXRlbXMYAiADKAkSEAoIYmF0Y2hfaWQYAyABKAkSHQoVcmV0cnlfb2ZfY2hpbGRfcnVuX2lkGAQgASgJIocBChBPcmdQb2xpY3lDb250ZXh0EhQKDGhvb2tfY29udGV4dBgBIAEoCRIXCg9wb2xpY3lfcmV2aXNpb24YAiABKAMSFQoNcG9saWN5X2RpZ2VzdBgDIAEoCRItCgN3ZWIYBCABKAsyIC5tb2RlbF9wbGFuZS52MS5XZWJQb2xpY3lDb250ZXh0ImgKEFdlYlBvbGljeUNvbnRleHQSDAoEbW9kZRgBIAEoCRIWCg5wYWlkX3Byb3ZpZGVycxgCIAEoCBIQCghyZXZpc2lvbhgDIAEoAxIcChRzaXRlX3BvbGljeV9yZXZpc2lvbhgEIAEoAyIoCg5Db25uZWN0b3JTY29wZRIWCg5jb25uZWN0aW9uX2lkcxgBIAMoCSLYAQoLQWdlbnRSZXN1bWUSDAoEbW9kZRgBIAEoCRITCgthcHByb3ZhbF9pZBgCIAEoCRIPCgdzdGVwX2lkGAMgASgJEhEKCXRvb2xfbmFtZRgEIAEoCRIaChJhY3Rpb25fZmluZ2VycHJpbnQYBSABKAkSDQoFYnJpZWYYBiABKAkSEwoLY2xhaW1fdG9rZW4YByABKAkSEgoKc2VnbWVudF9ubxgIIAEoDRITCgtxdWVzdGlvbl9pZBgKIAEoCRITCgthbnN3ZXJfanNvbhgLIAEoCUoECAkQCiKEAgoKUnVuQ29udGV4dBIdChVhdXRob3JlZF9pbnN0cnVjdGlvbnMYASABKAkSLAoHaGlzdG9yeRgCIAMoCzIbLm1vZGVsX3BsYW5lLnYxLkNoYXRNZXNzYWdlEhQKDG1lbW9yeV9ibG9jaxgDIAEoCRIwCgZzdGF0dXMYBCABKAsyIC5tb2RlbF9wbGFuZS52MS5SdW5Db250ZXh0U3RhdHVzEhQKDHVzZXJfcHJvZmlsZRgHIAEoCRIyCgthZ2VudF9yb2xlcxgIIAMoCzIdLm1vZGVsX3BsYW5lLnYxLkFnZW50Um9sZVNwZWMSFwoPZ29hbF9yZWNpdGF0aW9uGAkgASgJIpoBCg1BZ2VudFJvbGVTcGVjEhEKCWFnZW50X3JlZhgBIAEoCRIPCgd2ZXJzaW9uGAIgASgNEg4KBmRpZ2VzdBgDIAEoCRIMCgRuYW1lGAQgASgJEhQKDGluc3RydWN0aW9ucxgFIAEoCRIbChN0b29sX2NhcGFiaWxpdHlfaWRzGAYgAygJEhQKDGF1dG9ub215X2NhcBgHIAEoCSLjAgoQUnVuQWdlbnRSZXNwb25zZRIOCgZzdGF0dXMYASABKAkSFAoMZmluYWxfb3V0cHV0GAIgASgJEhcKD3JvdW5kc19leGVjdXRlZBgDIAEoDRIQCghncm91bmRlZBgEIAEoCBIcChRjb21wYWN0aW9uX3RyaWdnZXJlZBgFIAEoCBIUCgxmYWlsdXJlX2NvZGUYBiABKAkSGwoOcmV0cnlfYWZ0ZXJfbXMYByABKARIAIgBARIRCglyZXNldHNfYXQYCCABKAkSEwoLcGFya19yZWFzb24YCyABKAkSFgoObG9vcF9zdG9wX2NvZGUYCiABKAkSJwoFdXNhZ2UYCSABKAsyGC5tb2RlbF9wbGFuZS52MS5SdW5Vc2FnZRIxCgxyb3VuZF90aW1pbmcYDCADKAsyGy5tb2RlbF9wbGFuZS52MS5Sb3VuZFRpbWluZ0IRCg9fcmV0cnlfYWZ0ZXJfbXMifwoLUm91bmRUaW1pbmcSDQoFcm91bmQYASABKA0SGgoSaW5mZXJlbmNlX3N0YXJ0X21zGAIgASgEEhgKEGluZmVyZW5jZV9lbmRfbXMYAyABKAQSFwoPZGlzcGF0Y2hfZW5kX21zGAQgASgEEhIKCnRvb2xfY291bnQYBSABKA0i7QEKCFJ1blVzYWdlEhQKDGlucHV0X3Rva2VucxgBIAEoBBIVCg1vdXRwdXRfdG9rZW5zGAIgASgEEh8KF2NhY2hlX3JlYWRfaW5wdXRfdG9rZW5zGAMgASgEEiMKG2NhY2hlX2NyZWF0aW9uX2lucHV0X3Rva2VucxgEIAEoBBIYChBpbmZlcmVuY2Vfcm91bmRzGAUgASgNEhUKDXByb3ZpZGVyX3VzZWQYBiABKAkSEgoKbW9kZWxfdXNlZBgHIAEoCRIpCgRsZWdzGAggAygLMhsubW9kZWxfcGxhbmUudjEuUnVuVXNhZ2VMZWcixQEKC1J1blVzYWdlTGVnEhUKDXByb3ZpZGVyX3VzZWQYASABKAkSEgoKbW9kZWxfdXNlZBgCIAEoCRIUCgxpbnB1dF90b2tlbnMYAyABKAQSFQoNb3V0cHV0X3Rva2VucxgEIAEoBBIfChdjYWNoZV9yZWFkX2lucHV0X3Rva2VucxgFIAEoBBIjChtjYWNoZV9jcmVhdGlvbl9pbnB1dF90b2tlbnMYBiABKAQSGAoQaW5mZXJlbmNlX3JvdW5kcxgHIAEoDSK0AwoSRXhlY3V0ZVN0ZXBSZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIPCgdzdGVwX2lkGAIgASgJEhEKCXRvb2xfbmFtZRgDIAEoCRISCgp0b29sX2lucHV0GAQgASgJEhcKD3Blcm1pc3Npb25fbW9kZRgFIAEoCRIUCgxob29rX2NvbnRleHQYBiABKAkSDgoGb3JnX2lkGAcgASgJEg8KB3VzZXJfaWQYCCABKAkSCwoDemRyGAkgASgIEjUKEG1pbl9wcml2YWN5X3RpZXIYCiABKA4yGy5tb2RlbF9wbGFuZS52MS5Qcml2YWN5VGllchIQCghzcGFjZV9pZBgLIAEoCRIyCgthdHRhY2htZW50cxgMIAMoCzIdLm1vZGVsX3BsYW5lLnYxLlJ1bkF0dGFjaG1lbnQSEQoJdGhyZWFkX2lkGA0gASgJEjAKDHNraWxsX21vdW50cxgOIAMoCzIaLm1vZGVsX3BsYW5lLnYxLlNraWxsTW91bnQSNwoPY29ubmVjdG9yX3Njb3BlGA8gASgLMh4ubW9kZWxfcGxhbmUudjEuQ29ubmVjdG9yU2NvcGUinQEKDVJ1bkF0dGFjaG1lbnQSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgRtaW1lGAMgASgJEhIKCnNpemVfYnl0ZXMYBCABKAQSDgoGc2hhMjU2GAUgASgJEg8KB2NvbnRlbnQYBiABKAwSLwoEa2luZBgHIAEoDjIhLm1vZGVsX3BsYW5lLnYxLlJ1bkF0dGFjaG1lbnRLaW5kIkUKClNraWxsTW91bnQSEAoIc2tpbGxfaWQYASABKAkSDAoEbmFtZRgCIAEoCRIXCg9tYW5pZmVzdF9zaGEyNTYYAyABKAkicwoTRXhlY3V0ZVN0ZXBSZXNwb25zZRIPCgdzdGVwX2lkGAEgASgJEg4KBnN0YXR1cxgCIAEoCRIOCgZvdXRwdXQYAyABKAkSDQoFZXJyb3IYBCABKAkSHAoUY29tcGFjdGlvbl90cmlnZ2VyZWQYBSABKAgicgoQUmVzdW1lUnVuUmVxdWVzdBIOCgZydW5faWQYASABKAkSFQoNY2hlY2twb2ludF9pZBgCIAEoCRIOCgZvcmdfaWQYAyABKAkSEwoLYXBwcm92YWxfaWQYBCABKAkSEgoKc3RlZXJfdGV4dBgFIAEoCSI4ChFSZXN1bWVSdW5SZXNwb25zZRIPCgdyZXN1bWVkGAEgASgIEhIKCnN0ZXBfaW5kZXgYAiABKA0iRQoPUGF1c2VSdW5SZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIOCgZvcmdfaWQYAiABKAkSEgoKc3RlZXJfdGV4dBgDIAEoCSIiChBQYXVzZVJ1blJlc3BvbnNlEg4KBnBhdXNlZBgBIAEoCCp1ChFSdW5BdHRhY2htZW50S2luZBIjCh9SVU5fQVRUQUNITUVOVF9LSU5EX1VOU1BFQ0lGSUVEEAASHAoYUlVOX0FUVEFDSE1FTlRfS0lORF9GSUxFEAESHQoZUlVOX0FUVEFDSE1FTlRfS0lORF9JTUFHRRACMoQGCg1FeGVjdXRpb25Db3JlEn0KGEJyb3dzZXJBZ2VudENhcGFiaWxpdGllcxIvLm1vZGVsX3BsYW5lLnYxLkJyb3dzZXJBZ2VudENhcGFiaWxpdGllc1JlcXVlc3QaMC5tb2RlbF9wbGFuZS52MS5Ccm93c2VyQWdlbnRDYXBhYmlsaXRpZXNSZXNwb25zZRJnChxFeGVjdXRlUmVzdHJpY3RlZEJyb3dzZXJTdGVwEiIubW9kZWxfcGxhbmUudjEuRXhlY3V0ZVN0ZXBSZXF1ZXN0GiMubW9kZWxfcGxhbmUudjEuRXhlY3V0ZVN0ZXBSZXNwb25zZRJWCgtFeGVjdXRlU3RlcBIiLm1vZGVsX3BsYW5lLnYxLkV4ZWN1dGVTdGVwUmVxdWVzdBojLm1vZGVsX3BsYW5lLnYxLkV4ZWN1dGVTdGVwUmVzcG9uc2USUAoJUmVzdW1lUnVuEiAubW9kZWxfcGxhbmUudjEuUmVzdW1lUnVuUmVxdWVzdBohLm1vZGVsX3BsYW5lLnYxLlJlc3VtZVJ1blJlc3BvbnNlElAKCUNhbmNlbFJ1bhIgLm1vZGVsX3BsYW5lLnYxLkNhbmNlbFJ1blJlcXVlc3QaIS5tb2RlbF9wbGFuZS52MS5DYW5jZWxSdW5SZXNwb25zZRJNCghQYXVzZVJ1bhIfLm1vZGVsX3BsYW5lLnYxLlBhdXNlUnVuUmVxdWVzdBogLm1vZGVsX3BsYW5lLnYxLlBhdXNlUnVuUmVzcG9uc2USTQoIUnVuQWdlbnQSHy5tb2RlbF9wbGFuZS52MS5SdW5BZ2VudFJlcXVlc3QaIC5tb2RlbF9wbGFuZS52MS5SdW5BZ2VudFJlc3BvbnNlEnEKFEV4ZWN1dGVTY2hlZHVsZWRTdGVwEisubW9kZWxfcGxhbmUudjEuRXhlY3V0ZVNjaGVkdWxlZFN0ZXBSZXF1ZXN0GiwubW9kZWxfcGxhbmUudjEuRXhlY3V0ZVNjaGVkdWxlZFN0ZXBSZXNwb25zZUK2AQoSY29tLm1vZGVsX3BsYW5lLnYxQg5FeGVjdXRpb25Qcm90b1ABWjtnaXRodWIuY29tL3RyaW9kZWxhYi9tb2RlbC1wbGFuZS9nZW4vZ28vbW9kZWxfcGxhbmUvdjE7bXB2MaICA01YWKoCDU1vZGVsUGxhbmUuVjHKAg1Nb2RlbFBsYW5lXFYx4gIZTW9kZWxQbGFuZVxWMVxHUEJNZXRhZGF0YeoCDk1vZGVsUGxhbmU6OlYxYgZwcm90bzM", [file_model_plane_v1_runs, file_model_plane_v1_inference]);
+  fileDesc("Ch5tb2RlbF9wbGFuZS92MS9leGVjdXRpb24ucHJvdG8SDm1vZGVsX3BsYW5lLnYxIjEKH0Jyb3dzZXJBZ2VudENhcGFiaWxpdGllc1JlcXVlc3QSDgoGb3JnX2lkGAEgASgJIkQKIEJyb3dzZXJBZ2VudENhcGFiaWxpdGllc1Jlc3BvbnNlEiAKGGF0dGFjaGVkX3BvbGljeV9wcm90b2NvbBgBIAEoDSKrAgobRXhlY3V0ZVNjaGVkdWxlZFN0ZXBSZXF1ZXN0Eg4KBnJ1bl9pZBgBIAEoCRIRCgl0aHJlYWRfaWQYAiABKAkSDgoGb3JnX2lkGAMgASgJEhAKCHNwYWNlX2lkGAQgASgJEhIKCnN1YmplY3RfaWQYBSABKAkSEwoLc2NoZWR1bGVfaWQYBiABKAkSEAoIZmlyZV9rZXkYByABKAkSFwoPdGVtcGxhdGVfZGlnZXN0GAggASgJEg8KB3N0ZXBfaWQYCSABKAkSEgoKc3RlcF9pbmRleBgKIAEoDRIVCg1wb2xpY3lfZGlnZXN0GAsgASgJEhcKD2lkZW1wb3RlbmN5X2tleRgMIAEoCRIeChZjb250cm9sX2RlY2lzaW9uX3Rva2VuGA0gASgJIv8BChxFeGVjdXRlU2NoZWR1bGVkU3RlcFJlc3BvbnNlEg8KB3N0ZXBfaWQYASABKAkSDgoGc3RhdHVzGAIgASgJEhIKCnJlY2VpcHRfaWQYAyABKAkSDgoGb3V0cHV0GAQgASgJEg0KBWVycm9yGAUgASgJEhcKD3Vua25vd25fb3V0Y29tZRgGIAEoCBIXCg9yb3VuZHNfZXhlY3V0ZWQYByABKA0SGAoQd2l0aGhlbGRfZWZmZWN0cxgIIAEoDRISCgp0b29sX2NhbGxzGAkgASgNEhQKDGlucHV0X3Rva2VucxgKIAEoDRIVCg1vdXRwdXRfdG9rZW5zGAsgASgNIpkHCg9SdW5BZ2VudFJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhEKCXRocmVhZF9pZBgCIAEoCRIMCgRnb2FsGAMgASgJEg4KBm9yZ19pZBgEIAEoCRIPCgd1c2VyX2lkGAUgASgJEg0KBW1vZGVsGAYgASgJEgwKBG1vZGUYByABKAkSEgoKbWF4X3JvdW5kcxgIIAEoDRILCgN6ZHIYCSABKAgSLQoFdG9vbHMYCiADKAsyHi5tb2RlbF9wbGFuZS52MS5Ub29sRGVmaW5pdGlvbhI1ChBtaW5fcHJpdmFjeV90aWVyGAsgASgOMhsubW9kZWxfcGxhbmUudjEuUHJpdmFjeVRpZXISEQoJcGxhbl9tb2RlGA0gASgIEjMKDWF1dG9ub215X3J1bmcYDCABKA4yHC5tb2RlbF9wbGFuZS52MS5BdXRvbm9teVJ1bmcSEAoIc3BhY2VfaWQYDiABKAkSFQoNbWF4X3N1YmFnZW50cxgPIAEoDRIVCg1wcm92aWRlcl9oaW50GBAgASgJEiIKGnN1YnNjcmlwdGlvbl9jb25uZWN0aW9uX2lkGBEgASgJEi8KC3J1bl9jb250ZXh0GBIgASgLMhoubW9kZWxfcGxhbmUudjEuUnVuQ29udGV4dBIrCgZyZXN1bWUYEyABKAsyGy5tb2RlbF9wbGFuZS52MS5BZ2VudFJlc3VtZRIyCgthdHRhY2htZW50cxgUIAMoCzIdLm1vZGVsX3BsYW5lLnYxLlJ1bkF0dGFjaG1lbnQSOQoQcmVhc29uaW5nX2VmZm9ydBgVIAEoDjIfLm1vZGVsX3BsYW5lLnYxLlJlYXNvbmluZ0VmZm9ydBIVCg1tYXhfcXVlc3Rpb25zGBYgASgNEjcKD2Nvbm5lY3Rvcl9zY29wZRgXIAEoCzIeLm1vZGVsX3BsYW5lLnYxLkNvbm5lY3RvclNjb3BlEjQKCm9yZ19wb2xpY3kYGCABKAsyIC5tb2RlbF9wbGFuZS52MS5PcmdQb2xpY3lDb250ZXh0EjoKDXdpZGVfcmVzZWFyY2gYGSABKAsyIy5tb2RlbF9wbGFuZS52MS5XaWRlUmVzZWFyY2hSZXF1ZXN0EkAKFGFnZW50X3Rvb2xfYWxsb3dsaXN0GBogASgLMiIubW9kZWxfcGxhbmUudjEuQWdlbnRUb29sQWxsb3dsaXN0EhMKC2Nvb3JkaW5hdG9yGBsgASgIImcKE1dpZGVSZXNlYXJjaFJlcXVlc3QSEAoIaXRlbV9jYXAYASABKA0SDQoFaXRlbXMYAiADKAkSEAoIYmF0Y2hfaWQYAyABKAkSHQoVcmV0cnlfb2ZfY2hpbGRfcnVuX2lkGAQgASgJIocBChBPcmdQb2xpY3lDb250ZXh0EhQKDGhvb2tfY29udGV4dBgBIAEoCRIXCg9wb2xpY3lfcmV2aXNpb24YAiABKAMSFQoNcG9saWN5X2RpZ2VzdBgDIAEoCRItCgN3ZWIYBCABKAsyIC5tb2RlbF9wbGFuZS52MS5XZWJQb2xpY3lDb250ZXh0ImgKEFdlYlBvbGljeUNvbnRleHQSDAoEbW9kZRgBIAEoCRIWCg5wYWlkX3Byb3ZpZGVycxgCIAEoCBIQCghyZXZpc2lvbhgDIAEoAxIcChRzaXRlX3BvbGljeV9yZXZpc2lvbhgEIAEoAyIoCg5Db25uZWN0b3JTY29wZRIWCg5jb25uZWN0aW9uX2lkcxgBIAMoCSLYAQoLQWdlbnRSZXN1bWUSDAoEbW9kZRgBIAEoCRITCgthcHByb3ZhbF9pZBgCIAEoCRIPCgdzdGVwX2lkGAMgASgJEhEKCXRvb2xfbmFtZRgEIAEoCRIaChJhY3Rpb25fZmluZ2VycHJpbnQYBSABKAkSDQoFYnJpZWYYBiABKAkSEwoLY2xhaW1fdG9rZW4YByABKAkSEgoKc2VnbWVudF9ubxgIIAEoDRITCgtxdWVzdGlvbl9pZBgKIAEoCRITCgthbnN3ZXJfanNvbhgLIAEoCUoECAkQCiKEAgoKUnVuQ29udGV4dBIdChVhdXRob3JlZF9pbnN0cnVjdGlvbnMYASABKAkSLAoHaGlzdG9yeRgCIAMoCzIbLm1vZGVsX3BsYW5lLnYxLkNoYXRNZXNzYWdlEhQKDG1lbW9yeV9ibG9jaxgDIAEoCRIwCgZzdGF0dXMYBCABKAsyIC5tb2RlbF9wbGFuZS52MS5SdW5Db250ZXh0U3RhdHVzEhQKDHVzZXJfcHJvZmlsZRgHIAEoCRIyCgthZ2VudF9yb2xlcxgIIAMoCzIdLm1vZGVsX3BsYW5lLnYxLkFnZW50Um9sZVNwZWMSFwoPZ29hbF9yZWNpdGF0aW9uGAkgASgJIpoBCg1BZ2VudFJvbGVTcGVjEhEKCWFnZW50X3JlZhgBIAEoCRIPCgd2ZXJzaW9uGAIgASgNEg4KBmRpZ2VzdBgDIAEoCRIMCgRuYW1lGAQgASgJEhQKDGluc3RydWN0aW9ucxgFIAEoCRIbChN0b29sX2NhcGFiaWxpdHlfaWRzGAYgAygJEhQKDGF1dG9ub215X2NhcBgHIAEoCSJQChJBZ2VudFRvb2xBbGxvd2xpc3QSEQoJYWdlbnRfcmVmGAEgASgJEg8KB3ZlcnNpb24YAiABKA0SFgoOY2FwYWJpbGl0eV9pZHMYAyADKAki4wIKEFJ1bkFnZW50UmVzcG9uc2USDgoGc3RhdHVzGAEgASgJEhQKDGZpbmFsX291dHB1dBgCIAEoCRIXCg9yb3VuZHNfZXhlY3V0ZWQYAyABKA0SEAoIZ3JvdW5kZWQYBCABKAgSHAoUY29tcGFjdGlvbl90cmlnZ2VyZWQYBSABKAgSFAoMZmFpbHVyZV9jb2RlGAYgASgJEhsKDnJldHJ5X2FmdGVyX21zGAcgASgESACIAQESEQoJcmVzZXRzX2F0GAggASgJEhMKC3BhcmtfcmVhc29uGAsgASgJEhYKDmxvb3Bfc3RvcF9jb2RlGAogASgJEicKBXVzYWdlGAkgASgLMhgubW9kZWxfcGxhbmUudjEuUnVuVXNhZ2USMQoMcm91bmRfdGltaW5nGAwgAygLMhsubW9kZWxfcGxhbmUudjEuUm91bmRUaW1pbmdCEQoPX3JldHJ5X2FmdGVyX21zIn8KC1JvdW5kVGltaW5nEg0KBXJvdW5kGAEgASgNEhoKEmluZmVyZW5jZV9zdGFydF9tcxgCIAEoBBIYChBpbmZlcmVuY2VfZW5kX21zGAMgASgEEhcKD2Rpc3BhdGNoX2VuZF9tcxgEIAEoBBISCgp0b29sX2NvdW50GAUgASgNIu0BCghSdW5Vc2FnZRIUCgxpbnB1dF90b2tlbnMYASABKAQSFQoNb3V0cHV0X3Rva2VucxgCIAEoBBIfChdjYWNoZV9yZWFkX2lucHV0X3Rva2VucxgDIAEoBBIjChtjYWNoZV9jcmVhdGlvbl9pbnB1dF90b2tlbnMYBCABKAQSGAoQaW5mZXJlbmNlX3JvdW5kcxgFIAEoDRIVCg1wcm92aWRlcl91c2VkGAYgASgJEhIKCm1vZGVsX3VzZWQYByABKAkSKQoEbGVncxgIIAMoCzIbLm1vZGVsX3BsYW5lLnYxLlJ1blVzYWdlTGVnIsUBCgtSdW5Vc2FnZUxlZxIVCg1wcm92aWRlcl91c2VkGAEgASgJEhIKCm1vZGVsX3VzZWQYAiABKAkSFAoMaW5wdXRfdG9rZW5zGAMgASgEEhUKDW91dHB1dF90b2tlbnMYBCABKAQSHwoXY2FjaGVfcmVhZF9pbnB1dF90b2tlbnMYBSABKAQSIwobY2FjaGVfY3JlYXRpb25faW5wdXRfdG9rZW5zGAYgASgEEhgKEGluZmVyZW5jZV9yb3VuZHMYByABKA0itAMKEkV4ZWN1dGVTdGVwUmVxdWVzdBIOCgZydW5faWQYASABKAkSDwoHc3RlcF9pZBgCIAEoCRIRCgl0b29sX25hbWUYAyABKAkSEgoKdG9vbF9pbnB1dBgEIAEoCRIXCg9wZXJtaXNzaW9uX21vZGUYBSABKAkSFAoMaG9va19jb250ZXh0GAYgASgJEg4KBm9yZ19pZBgHIAEoCRIPCgd1c2VyX2lkGAggASgJEgsKA3pkchgJIAEoCBI1ChBtaW5fcHJpdmFjeV90aWVyGAogASgOMhsubW9kZWxfcGxhbmUudjEuUHJpdmFjeVRpZXISEAoIc3BhY2VfaWQYCyABKAkSMgoLYXR0YWNobWVudHMYDCADKAsyHS5tb2RlbF9wbGFuZS52MS5SdW5BdHRhY2htZW50EhEKCXRocmVhZF9pZBgNIAEoCRIwCgxza2lsbF9tb3VudHMYDiADKAsyGi5tb2RlbF9wbGFuZS52MS5Ta2lsbE1vdW50EjcKD2Nvbm5lY3Rvcl9zY29wZRgPIAEoCzIeLm1vZGVsX3BsYW5lLnYxLkNvbm5lY3RvclNjb3BlIp0BCg1SdW5BdHRhY2htZW50EgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAkSDAoEbWltZRgDIAEoCRISCgpzaXplX2J5dGVzGAQgASgEEg4KBnNoYTI1NhgFIAEoCRIPCgdjb250ZW50GAYgASgMEi8KBGtpbmQYByABKA4yIS5tb2RlbF9wbGFuZS52MS5SdW5BdHRhY2htZW50S2luZCJFCgpTa2lsbE1vdW50EhAKCHNraWxsX2lkGAEgASgJEgwKBG5hbWUYAiABKAkSFwoPbWFuaWZlc3Rfc2hhMjU2GAMgASgJInMKE0V4ZWN1dGVTdGVwUmVzcG9uc2USDwoHc3RlcF9pZBgBIAEoCRIOCgZzdGF0dXMYAiABKAkSDgoGb3V0cHV0GAMgASgJEg0KBWVycm9yGAQgASgJEhwKFGNvbXBhY3Rpb25fdHJpZ2dlcmVkGAUgASgIInIKEFJlc3VtZVJ1blJlcXVlc3QSDgoGcnVuX2lkGAEgASgJEhUKDWNoZWNrcG9pbnRfaWQYAiABKAkSDgoGb3JnX2lkGAMgASgJEhMKC2FwcHJvdmFsX2lkGAQgASgJEhIKCnN0ZWVyX3RleHQYBSABKAkiOAoRUmVzdW1lUnVuUmVzcG9uc2USDwoHcmVzdW1lZBgBIAEoCBISCgpzdGVwX2luZGV4GAIgASgNIkUKD1BhdXNlUnVuUmVxdWVzdBIOCgZydW5faWQYASABKAkSDgoGb3JnX2lkGAIgASgJEhIKCnN0ZWVyX3RleHQYAyABKAkiIgoQUGF1c2VSdW5SZXNwb25zZRIOCgZwYXVzZWQYASABKAgqdQoRUnVuQXR0YWNobWVudEtpbmQSIwofUlVOX0FUVEFDSE1FTlRfS0lORF9VTlNQRUNJRklFRBAAEhwKGFJVTl9BVFRBQ0hNRU5UX0tJTkRfRklMRRABEh0KGVJVTl9BVFRBQ0hNRU5UX0tJTkRfSU1BR0UQAjKEBgoNRXhlY3V0aW9uQ29yZRJ9ChhCcm93c2VyQWdlbnRDYXBhYmlsaXRpZXMSLy5tb2RlbF9wbGFuZS52MS5Ccm93c2VyQWdlbnRDYXBhYmlsaXRpZXNSZXF1ZXN0GjAubW9kZWxfcGxhbmUudjEuQnJvd3NlckFnZW50Q2FwYWJpbGl0aWVzUmVzcG9uc2USZwocRXhlY3V0ZVJlc3RyaWN0ZWRCcm93c2VyU3RlcBIiLm1vZGVsX3BsYW5lLnYxLkV4ZWN1dGVTdGVwUmVxdWVzdBojLm1vZGVsX3BsYW5lLnYxLkV4ZWN1dGVTdGVwUmVzcG9uc2USVgoLRXhlY3V0ZVN0ZXASIi5tb2RlbF9wbGFuZS52MS5FeGVjdXRlU3RlcFJlcXVlc3QaIy5tb2RlbF9wbGFuZS52MS5FeGVjdXRlU3RlcFJlc3BvbnNlElAKCVJlc3VtZVJ1bhIgLm1vZGVsX3BsYW5lLnYxLlJlc3VtZVJ1blJlcXVlc3QaIS5tb2RlbF9wbGFuZS52MS5SZXN1bWVSdW5SZXNwb25zZRJQCglDYW5jZWxSdW4SIC5tb2RlbF9wbGFuZS52MS5DYW5jZWxSdW5SZXF1ZXN0GiEubW9kZWxfcGxhbmUudjEuQ2FuY2VsUnVuUmVzcG9uc2USTQoIUGF1c2VSdW4SHy5tb2RlbF9wbGFuZS52MS5QYXVzZVJ1blJlcXVlc3QaIC5tb2RlbF9wbGFuZS52MS5QYXVzZVJ1blJlc3BvbnNlEk0KCFJ1bkFnZW50Eh8ubW9kZWxfcGxhbmUudjEuUnVuQWdlbnRSZXF1ZXN0GiAubW9kZWxfcGxhbmUudjEuUnVuQWdlbnRSZXNwb25zZRJxChRFeGVjdXRlU2NoZWR1bGVkU3RlcBIrLm1vZGVsX3BsYW5lLnYxLkV4ZWN1dGVTY2hlZHVsZWRTdGVwUmVxdWVzdBosLm1vZGVsX3BsYW5lLnYxLkV4ZWN1dGVTY2hlZHVsZWRTdGVwUmVzcG9uc2VCtgEKEmNvbS5tb2RlbF9wbGFuZS52MUIORXhlY3V0aW9uUHJvdG9QAVo7Z2l0aHViLmNvbS90cmlvZGVsYWIvbW9kZWwtcGxhbmUvZ2VuL2dvL21vZGVsX3BsYW5lL3YxO21wdjGiAgNNWFiqAg1Nb2RlbFBsYW5lLlYxygINTW9kZWxQbGFuZVxWMeICGU1vZGVsUGxhbmVcVjFcR1BCTWV0YWRhdGHqAg5Nb2RlbFBsYW5lOjpWMWIGcHJvdG8z", [file_model_plane_v1_runs, file_model_plane_v1_inference]);
 
 /**
  * BrowserAgentCapabilitiesRequest asks which execution protocol this deployment implements.
@@ -524,6 +524,31 @@ export type RunAgentRequest = Message<"model_plane.v1.RunAgentRequest"> & {
    * @generated from field: model_plane.v1.WideResearchRequest wide_research = 25;
    */
   wideResearch?: WideResearchRequest | undefined;
+
+  /**
+   * The tool allowlist of the agent version this Do run is pinned to (Wave 3 EP-6 S9; additive). Absent =
+   * no narrowing, exactly as before the field existed. The gateway sets it only for a Do or execute turn whose
+   * mentioned agent version states an allowlist, while MODEL_GATEWAY_AGENT_TOOL_ALLOWLIST is on; a
+   * zero-retention turn never starts a Do run, so it never carries one. execution-core then offers and admits
+   * only the tools whose governed capability is listed, and never adds a tool. A continuation carries none: its
+   * tools are the snapshot its pause retained, which was already narrowed. Field 26 is reserved for this message
+   * by the Wave 3 integration round A.
+   *
+   * @generated from field: model_plane.v1.AgentToolAllowlist agent_tool_allowlist = 26;
+   */
+  agentToolAllowlist?: AgentToolAllowlist | undefined;
+
+  /**
+   * Coordinator mode: this Do run is a non-editing orchestrator. Execution-core offers it only the read tools and the
+   * subagent delegation tools, and refuses any other call, so its effects are delegated to subagents, which keep their
+   * normal catalogue under their normal gates. Absent or false = an ordinary run, exactly as before the field existed.
+   * The gateway sets it only while EXECUTION_COORDINATOR_MODE_ENABLED is the literal `true`, and never on a
+   * zero-retention or waived turn or a continuation. Execution-core applies it only while the same switch is on.
+   * Field 27 is the next free number on this message.
+   *
+   * @generated from field: bool coordinator = 27;
+   */
+  coordinator: boolean;
 };
 
 /**
@@ -935,16 +960,57 @@ export const AgentRoleSpecSchema: GenMessage<AgentRoleSpec> = /*@__PURE__*/
   messageDesc(file_model_plane_v1_execution, 11);
 
 /**
+ * AgentToolAllowlist is the tool allowlist of the agent version a Do run is pinned to (Wave 3 EP-6 S9). It
+ * holds capability ids and the version they were read from, never the agent's instructions. It only narrows:
+ * execution-core offers and admits a tool only when that tool's governed capability is listed here, and a tool
+ * with no governed capability (every MCP tool, for one) is never admitted.
+ *
+ * @generated from message model_plane.v1.AgentToolAllowlist
+ */
+export type AgentToolAllowlist = Message<"model_plane.v1.AgentToolAllowlist"> & {
+  /**
+   * The agent definition's stable id, the `agent_ref` the invoke pin named.
+   *
+   * @generated from field: string agent_ref = 1;
+   */
+  agentRef: string;
+
+  /**
+   * The published version the allowlist was read from (immutable, from 1).
+   *
+   * @generated from field: uint32 version = 2;
+   */
+  version: number;
+
+  /**
+   * Capability ids (WS05 registry) the run may use. A tool is offered only when its capability is listed.
+   *
+   * @generated from field: repeated string capability_ids = 3;
+   */
+  capabilityIds: string[];
+};
+
+/**
+ * Describes the message model_plane.v1.AgentToolAllowlist.
+ * Use `create(AgentToolAllowlistSchema)` to create a new message.
+ */
+export const AgentToolAllowlistSchema: GenMessage<AgentToolAllowlist> = /*@__PURE__*/
+  messageDesc(file_model_plane_v1_execution, 12);
+
+/**
  * RunAgentResponse — terminal outcome of a driven agent run.
  *
  * @generated from message model_plane.v1.RunAgentResponse
  */
 export type RunAgentResponse = Message<"model_plane.v1.RunAgentResponse"> & {
   /**
-   * Outcome status: "completed" or "failed" (terminal), "awaiting_approval" or
-   * "parked" (the run stays open). "parked" means the loop saved a durable park
-   * fold at a round boundary and returned without finalizing: no assistant
-   * message was appended, no receipt written; `park_reason` says why.
+   * Outcome status: "completed" or "failed" (terminal), "awaiting_approval",
+   * "awaiting_input" or "parked" (the run stays open). "parked" means the loop
+   * saved a durable park fold at a round boundary and returned without
+   * finalizing: no assistant message was appended, no receipt written;
+   * `park_reason` says why. "awaiting_input" means the run waits for its
+   * owner's answer to a resume question: non-terminal, nothing appended, no
+   * receipt.
    *
    * @generated from field: string status = 1;
    */
@@ -1080,7 +1146,7 @@ export type RunAgentResponse = Message<"model_plane.v1.RunAgentResponse"> & {
  * Use `create(RunAgentResponseSchema)` to create a new message.
  */
 export const RunAgentResponseSchema: GenMessage<RunAgentResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 12);
+  messageDesc(file_model_plane_v1_execution, 13);
 
 /**
  * RoundTiming - one inference round of a Do run's loop (EP-14 S5). Offsets are
@@ -1133,7 +1199,7 @@ export type RoundTiming = Message<"model_plane.v1.RoundTiming"> & {
  * Use `create(RoundTimingSchema)` to create a new message.
  */
 export const RoundTimingSchema: GenMessage<RoundTiming> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 13);
+  messageDesc(file_model_plane_v1_execution, 14);
 
 /**
  * RunUsage - the inference a run's loop spent in one invocation.
@@ -1212,7 +1278,7 @@ export type RunUsage = Message<"model_plane.v1.RunUsage"> & {
  * Use `create(RunUsageSchema)` to create a new message.
  */
 export const RunUsageSchema: GenMessage<RunUsage> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 14);
+  messageDesc(file_model_plane_v1_execution, 15);
 
 /**
  * RunUsageLeg - what one provider and model served within a run's invocation.
@@ -1277,7 +1343,7 @@ export type RunUsageLeg = Message<"model_plane.v1.RunUsageLeg"> & {
  * Use `create(RunUsageLegSchema)` to create a new message.
  */
 export const RunUsageLegSchema: GenMessage<RunUsageLeg> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 15);
+  messageDesc(file_model_plane_v1_execution, 16);
 
 /**
  * ExecuteStepRequest — request to execute one step in the agent loop.
@@ -1430,7 +1496,7 @@ export type ExecuteStepRequest = Message<"model_plane.v1.ExecuteStepRequest"> & 
  * Use `create(ExecuteStepRequestSchema)` to create a new message.
  */
 export const ExecuteStepRequestSchema: GenMessage<ExecuteStepRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 16);
+  messageDesc(file_model_plane_v1_execution, 17);
 
 /**
  * RunAttachment — one attached input, carried by value for one call. The bytes
@@ -1497,7 +1563,7 @@ export type RunAttachment = Message<"model_plane.v1.RunAttachment"> & {
  * Use `create(RunAttachmentSchema)` to create a new message.
  */
 export const RunAttachmentSchema: GenMessage<RunAttachment> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 17);
+  messageDesc(file_model_plane_v1_execution, 18);
 
 /**
  * SkillMount — one skill bundle to mount read-only for one call (WS19-S8). The
@@ -1536,7 +1602,7 @@ export type SkillMount = Message<"model_plane.v1.SkillMount"> & {
  * Use `create(SkillMountSchema)` to create a new message.
  */
 export const SkillMountSchema: GenMessage<SkillMount> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 18);
+  messageDesc(file_model_plane_v1_execution, 19);
 
 /**
  * ExecuteStepResponse — result of a single step execution.
@@ -1585,7 +1651,7 @@ export type ExecuteStepResponse = Message<"model_plane.v1.ExecuteStepResponse"> 
  * Use `create(ExecuteStepResponseSchema)` to create a new message.
  */
 export const ExecuteStepResponseSchema: GenMessage<ExecuteStepResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 19);
+  messageDesc(file_model_plane_v1_execution, 20);
 
 /**
  * ResumeRunRequest — resume a paused or checkpointed run.
@@ -1640,7 +1706,7 @@ export type ResumeRunRequest = Message<"model_plane.v1.ResumeRunRequest"> & {
  * Use `create(ResumeRunRequestSchema)` to create a new message.
  */
 export const ResumeRunRequestSchema: GenMessage<ResumeRunRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 20);
+  messageDesc(file_model_plane_v1_execution, 21);
 
 /**
  * ResumeRunResponse — acknowledgement that the run has been resumed.
@@ -1668,7 +1734,7 @@ export type ResumeRunResponse = Message<"model_plane.v1.ResumeRunResponse"> & {
  * Use `create(ResumeRunResponseSchema)` to create a new message.
  */
 export const ResumeRunResponseSchema: GenMessage<ResumeRunResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 21);
+  messageDesc(file_model_plane_v1_execution, 22);
 
 /**
  * PauseRunRequest — pause an active run (Phase 2 B5).
@@ -1704,7 +1770,7 @@ export type PauseRunRequest = Message<"model_plane.v1.PauseRunRequest"> & {
  * Use `create(PauseRunRequestSchema)` to create a new message.
  */
 export const PauseRunRequestSchema: GenMessage<PauseRunRequest> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 22);
+  messageDesc(file_model_plane_v1_execution, 23);
 
 /**
  * PauseRunResponse — acknowledgement that the run has been paused.
@@ -1725,7 +1791,7 @@ export type PauseRunResponse = Message<"model_plane.v1.PauseRunResponse"> & {
  * Use `create(PauseRunResponseSchema)` to create a new message.
  */
 export const PauseRunResponseSchema: GenMessage<PauseRunResponse> = /*@__PURE__*/
-  messageDesc(file_model_plane_v1_execution, 23);
+  messageDesc(file_model_plane_v1_execution, 24);
 
 /**
  * RunAttachmentKind — what a staged run input is.

@@ -1,0 +1,161 @@
+/* Shell toast stack (F-t3-078). Mounted by ToastHost in CoreShell behind VITE_SHELL_TOASTS=true.
+   Every colour is a design token, so the stack follows the light and dark themes. */
+
+.shell-toasts {
+  position: fixed;
+  right: 20px;
+  /* Stands above the feedback pill (bottom: --feedback-widget-bottom) so the two never overlap. */
+  bottom: calc(var(--feedback-widget-bottom, 24.5px) + 56px);
+  z-index: var(--verevon-z-tooltip);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(380px, calc(100vw - 40px));
+  pointer-events: none;
+}
+
+/* Phone width: the stack drops to the top, under the navbar. */
+@media (max-width: 767px) {
+  .shell-toasts {
+    top: calc(var(--dashboard-navbar-height, 56px) + 8px);
+    right: 12px;
+    bottom: auto;
+    left: 12px;
+    width: auto;
+  }
+}
+
+.shell-toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 10px 12px 12px;
+  border: 1px solid var(--verevon-border);
+  border-left: 3px solid var(--shell-toast-tone, var(--verevon-border-strong));
+  border-radius: var(--radius);
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+  box-shadow: var(--shadow-md);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  pointer-events: auto;
+  animation: shell-toast-in var(--dur-base) var(--ease-out) both;
+}
+
+.shell-toast--info {
+  --shell-toast-tone: var(--info);
+}
+
+.shell-toast--success {
+  --shell-toast-tone: var(--success);
+}
+
+.shell-toast--warning {
+  --shell-toast-tone: var(--warning);
+}
+
+.shell-toast--error {
+  --shell-toast-tone: var(--destructive);
+}
+
+.shell-toast__icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--shell-toast-tone, var(--verevon-text-muted));
+}
+
+.shell-toast__body {
+  min-width: 0;
+  flex: 1 1 auto;
+  padding-top: 1px;
+  overflow-wrap: anywhere;
+}
+
+.shell-toast__action {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--verevon-accent-ink);
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.shell-toast__action:hover {
+  background: var(--verevon-surface-soft);
+}
+
+.shell-toast__close {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: -6px -4px -6px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+}
+
+.shell-toast__close:hover {
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text);
+}
+
+/* Touch targets grow to the 44px token on phone width; the negative margins keep the toast the same height. */
+@media (max-width: 767px) {
+  .shell-toast__close {
+    width: var(--verevon-touch-target, 44px);
+    height: var(--verevon-touch-target, 44px);
+    margin: -12px -8px -12px 0;
+  }
+}
+
+/* Dark theme: the card is lifted by surface contrast rather than a shadow. */
+.dark .shell-toast {
+  border-color: var(--verevon-dark-border);
+  border-left-color: var(--shell-toast-tone, var(--verevon-dark-border));
+  background: var(--verevon-dark-surface-soft);
+  color: var(--verevon-surface-soft);
+  box-shadow: none;
+}
+
+.dark .shell-toast__action {
+  color: var(--verevon-surface-soft);
+  text-decoration: underline;
+}
+
+.dark .shell-toast__close {
+  color: var(--verevon-surface-soft);
+}
+
+.dark .shell-toast__action:hover,
+.dark .shell-toast__close:hover {
+  background: var(--verevon-dark-surface);
+}
+
+@keyframes shell-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell-toast {
+    animation: none;
+  }
+}

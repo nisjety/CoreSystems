@@ -58,7 +58,7 @@ const PAUSES: &[(&str, &str, &str)] = &[
     (
         "runtime_loop/agent.rs",
         "run_rounds",
-        "cause: Some(CauseCode::RiskyEffectUnderAsk)",
+        "cause: Some(CauseCode::TaintedEgress)",
     ),
     (
         "runtime_loop/agent.rs",
@@ -93,6 +93,7 @@ fn variant_and_token(code: CauseCode) -> (&'static str, &'static str) {
             ("AutoPostureProviderWrite", "auto_posture_provider_write")
         }
         CauseCode::BrowserHumanAssist => ("BrowserHumanAssist", "browser_human_assist"),
+        CauseCode::TaintedEgress => ("TaintedEgress", "tainted_egress"),
         CauseCode::UnclassifiedGate => ("UnclassifiedGate", "unclassified_gate"),
     }
 }
@@ -228,19 +229,19 @@ fn every_awaiting_approval_site_is_inventoried_and_states_its_cause() {
 /// `approval_cause_not_persisted_under_zdr`: a zero-retention caller's pause stores no cause. The
 /// stored metadata drops the cause for a zero-retention caller, and `create_approval` builds that
 /// metadata from the caller's own posture. Behavioural proof: session-core's
-/// `a_zero_retention_caller_stores_no_cause`. A waiver's credential has `zdr` false, so this covers
-/// a zero-retention caller only; a waived run still stores its cause (open, WS13 S8 depth finding).
+/// `a_zero_retention_caller_stores_no_cause`. The filter reads `durable_forbidden`, which is a
+/// zero-retention caller or a waived one while the waiver refusal is on, so a waived caller is covered too.
 #[test]
 fn approval_cause_not_persisted_under_zdr() {
     let grpc = production("../session-core/src/orchestration_grpc.rs");
     let metadata = body_of(&grpc, "fn new_approval_metadata(");
     assert!(
-        metadata.contains(".filter(|_| !zdr)"),
-        "new_approval_metadata must drop the cause for a zero-retention caller"
+        metadata.contains(".filter(|_| !durable_forbidden)"),
+        "new_approval_metadata must drop the cause for a zero-retention or waived caller (durable_forbidden)"
     );
     let create = body_of(&grpc, "fn create_approval(");
     assert!(
-        create.contains("new_approval_metadata(&req, caller.zdr())"),
+        create.contains("new_approval_metadata(&req, approval_write_is_content_free(&caller))"),
         "create_approval must build the stored metadata from the caller's posture"
     );
 }
@@ -254,7 +255,7 @@ fn approval_audit_not_emitted_under_zdr() {
     let grpc = production("../session-core/src/orchestration_grpc.rs");
     assert_before(
         body_of(&grpc, "fn decide_approval("),
-        "refuse_zdr_continuation(&caller)?;",
+        "refuse_zdr_or_waived_approval_caller(&caller)?;",
         "store::decide_approval_recorded(",
         "a zero-retention decision is refused before the decision row and its audit row are written",
     );
@@ -290,7 +291,7 @@ fn approval_scope_grant_under_zdr_refused() {
     let grpc = production("../session-core/src/orchestration_grpc.rs");
     assert_before(
         body_of(&grpc, "fn decide_approval("),
-        "refuse_zdr_continuation(&caller)?;",
+        "refuse_zdr_or_waived_approval_caller(&caller)?;",
         "store::decide_approval_recorded(",
         "session-core refuses a zero-retention decision before the grant is written",
     );

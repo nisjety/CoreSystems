@@ -8,10 +8,11 @@ use mp_contracts::model_entitlement::Reason;
 use tokio::sync::mpsc;
 use tracing::{info, warn, Instrument};
 
+use super::catalogue_overlay::{self, OrgOverlay};
 use super::gemini::GeminiProvider;
 use super::policy_client::PolicyClient;
 use super::role::{self, RoleCall};
-use super::routing_policy::RoutingPolicy;
+use super::routing_policy::{RolePurpose, RoutingPolicy};
 use super::timing::{CallClock, StreamClock};
 use super::{
     anthropic::AnthropicProvider, codex_subscription::CodexSubscriptionProvider,
@@ -111,6 +112,12 @@ pub struct FallbackChain {
     /// `MODEL_ENTITLEMENT_MODE` says otherwise; the handlers ask it, and the
     /// chain applies the answer a request carries.
     entitlement: Arc<EntitlementGate>,
+    /// Failure bench and user-route guard (`INFERENCE_PROVIDER_BENCHING`). `None` when the switch is off:
+    /// the walk then neither benches nor guards and is unchanged.
+    bench: Option<Arc<super::health::BenchBoard>>,
+    /// Whether every fallback hop stays at or above the privacy tier of the first eligible provider
+    /// (`INFERENCE_SAME_TIER_FALLBACK`). Off, a hop may land on a lower tier, as it does today.
+    same_tier: bool,
 }
 
 /// Switch for the route note (WS27-S7): what the budget did to a Verevon call, carried on the wire. Off
@@ -143,6 +150,15 @@ pub struct RouteNote {
     pub applied_effort: Option<effort::Level>,
     /// The role table's decision, for a `verevon-role` call (EP-13 S4). `None` for every other call.
     pub role: Option<role::RoleDecision>,
+    /// The Verevon mode the intent layer resolved the call under. `None` when it resolved no mode,
+    /// as for a call that named a pinned model.
+    pub mode: Option<intent::VerevonMode>,
+    /// The complexity the intent layer estimated for the call, alongside `mode`. `None` when it
+    /// resolved no mode.
+    pub complexity: Option<intent::Complexity>,
+    /// Why the intent layer chose the model (see [`intent::Decision::reason`]). Empty when it
+    /// resolved no mode.
+    pub reason: &'static str,
 }
 
 impl RouteNote {
@@ -155,6 +171,9 @@ impl RouteNote {
             cheap_fallback_forced: false,
             applied_effort: None,
             role: None,
+            mode: None,
+            complexity: None,
+            reason: "",
         }
     }
 }
@@ -192,6 +211,9 @@ fn budget_route_note(
         cheap_fallback_forced: decision.posture == intent::BudgetPosture::Exhausted,
         applied_effort,
         role: None,
+        mode: Some(decision.mode),
+        complexity: Some(decision.complexity),
+        reason: decision.reason(),
     }
 }
 
@@ -217,6 +239,13 @@ impl From<RouteNote> for mp_contracts::model_plane::v1::RouteNote {
             role_source: note
                 .role
                 .map_or_else(String::new, |decision| decision.source.as_str().to_owned()),
+            verevon_mode: note
+                .mode
+                .map_or_else(String::new, |mode| mode.as_str().to_owned()),
+            complexity: note
+                .complexity
+                .map_or_else(String::new, |complexity| complexity.as_str().to_owned()),
+            reason: note.reason.to_owned(),
         }
     }
 }
@@ -359,6 +388,22 @@ pub(crate) fn is_unspecified_model(model: &str) -> bool {
     m.is_empty() || m == "default" || intent::parse_mode(model).is_some()
 }
 
+/// The model a request naming `model` is served as once `with_current_model` has run: the
+/// successor of a retired Claude id, and `model` itself otherwise. The catalogue overlay checks
+/// this id too, so a hidden successor cannot be reached by naming the retired id.
+fn served_model(model: &str) -> &str {
+    super::model_record::retired_successor(super::effort::Family::Anthropic, model).unwrap_or(model)
+}
+
+/// Whether the caller's organisation overlay hides `model`, or the model that would serve it (the successor of a
+/// retired Claude id). An unspecified id names no model, so it is not judged here: a walk judges the provider
+/// default it resolves to, on the model that provider would really serve.
+fn org_hides(org: Option<&OrgOverlay>, model: &str) -> bool {
+    org.is_some_and(|org| {
+        !is_unspecified_model(model) && (org.is_hidden(model) || org.is_hidden(served_model(model)))
+    })
+}
+
 /// True for an Anthropic-family model id (the only models the Anthropic-shaped
 /// providers can serve). Used to keep `claude-*` requests off the OpenAI/Azure
 /// chat-completions surface (which would 404 the deployment) and vice-versa.
@@ -487,9 +532,38 @@ struct ThrottleState {
     /// ends the walk as `vision_unsupported`, ahead of the privacy, retention
     /// and residency refusals, which a candidate that reached this gate passed.
     vision_skipped: bool,
+    /// A candidate the platform catalogue overlay or the caller's organisation overlay hides, skipped before any
+    /// provider was asked. A named model is refused at admission, so only a model the intent layer, the role table,
+    /// the tool ladder or an automatic provider default chose reaches the walk hidden. With no attempt made it ends
+    /// the walk as `model_hidden`, ahead of the posture refusals.
+    hidden_skipped: bool,
+    /// The privacy tier of the first provider this call found eligible, set only under
+    /// `INFERENCE_SAME_TIER_FALLBACK`. It holds for the whole call: every rung of the ladder and both
+    /// passes, so a pass reset keeps it ([`ThrottleState::next_pass`]).
+    anchor_tier: Option<PrivacyTier>,
+    /// The earliest end of a bench this pass skipped a provider for, set only under
+    /// `INFERENCE_PROVIDER_BENCHING`. Only a provider that passed every gate is counted here, so with no
+    /// attempt made it ends the walk as `providers_benched` (retry later), ahead of the posture refusals.
+    /// Unlike `anchor_tier` it is reset with the pass.
+    benched_until: Option<tokio::time::Instant>,
 }
 
 impl ThrottleState {
+    /// Notes that a provider was skipped for a bench ending at `until`, keeping the earliest end.
+    fn note_benched(&mut self, until: tokio::time::Instant) {
+        self.benched_until = Some(match self.benched_until {
+            Some(current) => current.min(until),
+            None => until,
+        });
+    }
+
+    /// Clears what one pass learned before the second pass, and keeps the call's tier anchor.
+    fn next_pass(&mut self) {
+        let anchor = self.anchor_tier;
+        *self = Self::default();
+        self.anchor_tier = anchor;
+    }
+
     fn record_refusal(&mut self, refusal: ProviderError) {
         if self.refused.is_none() {
             self.refused = Some(refusal);
@@ -1116,6 +1190,8 @@ impl FallbackChain {
             deployed,
             catalogs,
             entitlement: Arc::new(EntitlementGate::new(&EntitlementConfig::from_env())),
+            bench: None,
+            same_tier: false,
         }
     }
 
@@ -1159,6 +1235,8 @@ impl FallbackChain {
             // the ladder is walked as written.
             deployed: DeployedModels::default(),
             entitlement: Arc::new(EntitlementGate::off()),
+            bench: None,
+            same_tier: false,
         }
     }
 
@@ -1168,6 +1246,170 @@ impl FallbackChain {
     pub fn with_entitlement(mut self, gate: EntitlementGate) -> Self {
         self.entitlement = Arc::new(gate);
         self
+    }
+
+    /// Turn the failure bench and the user-route guard on or off (`INFERENCE_PROVIDER_BENCHING`).
+    /// Off leaves every walk as it is today.
+    #[must_use]
+    pub fn with_benching(mut self, on: bool) -> Self {
+        self.bench = on.then(|| Arc::new(super::health::BenchBoard::default()));
+        self
+    }
+
+    /// Turn the same-tier fallback anchor on or off (`INFERENCE_SAME_TIER_FALLBACK`). Off leaves every
+    /// walk as it is today.
+    #[must_use]
+    pub fn with_same_tier_fallback(mut self, on: bool) -> Self {
+        self.same_tier = on;
+        self
+    }
+
+    /// The route rules that run after every other gate of a chat walk: the user-route guard, then the
+    /// same-tier anchor. `true` means the provider is skipped. A skipped-by-guard provider is not
+    /// eligible, so it neither sets the anchor nor counts as an attempt. Logs name the provider and the
+    /// tier labels, never content.
+    fn route_rules_skip(
+        &self,
+        req: &InferRequest,
+        name: &str,
+        caps: &ProviderCapabilities,
+        throttle: &mut ThrottleState,
+    ) -> bool {
+        if self.bench.is_some()
+            && (caps.provider_id == mp_contracts::agentic_subscription::PROVIDER_ID
+                || name == mp_contracts::agentic_subscription::PROVIDER_ID)
+        {
+            // A platform call never moves onto the user's subscription route (ownership-matrix rule 17):
+            // only a request that names it and carries a connection may reach it.
+            let named = !req.provider_hint.trim().is_empty()
+                && Self::hint_matches(&req.provider_hint, name, &caps.aliases);
+            if !(named && !req.subscription_connection_id.trim().is_empty()) {
+                warn!(
+                    provider = %name,
+                    request_id = %req.request_id,
+                    "provider skipped: a platform call is never moved onto the user subscription route"
+                );
+                return true;
+            }
+        }
+        if self.same_tier {
+            let tier = PrivacyTier::classify(caps);
+            match throttle.anchor_tier {
+                None => throttle.anchor_tier = Some(tier),
+                Some(anchor) if tier < anchor => {
+                    warn!(
+                        provider = %name,
+                        request_id = %req.request_id,
+                        anchor_tier = anchor.label(),
+                        provider_tier = tier.label(),
+                        "provider skipped: privacy tier below the first eligible provider of this call"
+                    );
+                    return true;
+                }
+                Some(_) => {}
+            }
+        }
+        false
+    }
+
+    /// Whether a provider is the user's subscription route. It is never benched and never records an
+    /// outcome on the board.
+    fn is_subscription_route(name: &str, caps: &ProviderCapabilities) -> bool {
+        caps.provider_id == mp_contracts::agentic_subscription::PROVIDER_ID
+            || name == mp_contracts::agentic_subscription::PROVIDER_ID
+    }
+
+    /// Whether a benched platform provider is skipped for `model` (`INFERENCE_PROVIDER_BENCHING`). Runs
+    /// after every other gate and the route rules, so a provider counted here was otherwise eligible. The
+    /// earliest bench end is kept in `throttle`. Logs name the provider and model, never content.
+    fn bench_skip(
+        &self,
+        req: &InferRequest,
+        name: &str,
+        model: &str,
+        caps: &ProviderCapabilities,
+        throttle: &mut ThrottleState,
+    ) -> bool {
+        let Some(bench) = &self.bench else {
+            return false;
+        };
+        if Self::is_subscription_route(name, caps) {
+            return false;
+        }
+        let Some(until) = bench.benched_until(name, model, tokio::time::Instant::now()) else {
+            return false;
+        };
+        throttle.note_benched(until);
+        warn!(
+            provider = %name,
+            model = %model,
+            request_id = %req.request_id,
+            "provider skipped: benched after repeated failures"
+        );
+        true
+    }
+
+    /// Records one attempt outcome of a platform provider on the bench board
+    /// (`INFERENCE_PROVIDER_BENCHING`). A success clears the pair's run; a classified failure is counted
+    /// and may start a bench. Returns `true` when this failure started a bench, so the caller stops
+    /// retrying the provider. A subscription route, and a subscription outcome from any provider, records
+    /// nothing. Logs and metrics carry the provider, model and class only.
+    fn bench_record(
+        &self,
+        req: &InferRequest,
+        name: &str,
+        model: &str,
+        caps: &ProviderCapabilities,
+        failure: Option<&ProviderError>,
+    ) -> bool {
+        let Some(bench) = &self.bench else {
+            return false;
+        };
+        if Self::is_subscription_route(name, caps) {
+            return false;
+        }
+        let now = tokio::time::Instant::now();
+        let Some(error) = failure else {
+            bench.record_success(name, model);
+            return false;
+        };
+        if matches!(
+            error,
+            ProviderError::SubscriptionRefused { .. } | ProviderError::SubscriptionFailed(_)
+        ) {
+            return false;
+        }
+        let Some(class) = super::health::classify(error) else {
+            return false;
+        };
+        crate::metrics::record_provider_failure(name, class.as_str());
+        let retry_after = match error {
+            ProviderError::RateLimited { retry_after_ms } if *retry_after_ms > 0 => {
+                Some(Duration::from_millis(*retry_after_ms))
+            }
+            _ => None,
+        };
+        let Some(until) = bench.record_failure(name, model, &req.org_id, class, retry_after, now)
+        else {
+            return false;
+        };
+        crate::metrics::record_provider_benched(name, class.as_str());
+        warn!(
+            provider = %name,
+            model = %model,
+            class = class.as_str(),
+            bench_ms = until.saturating_duration_since(now).as_millis(),
+            "provider benched after repeated failures"
+        );
+        true
+    }
+
+    /// The `providers_benched` answer for a walk that made no attempt because every provider that
+    /// passed the gates was benched: the wait until the earliest bench ends, at least 1 ms.
+    fn providers_benched_error(until: tokio::time::Instant) -> ProviderError {
+        let wait = until.saturating_duration_since(tokio::time::Instant::now());
+        let retry_after_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX).max(1);
+        ProviderError::ProvidersBenched { retry_after_ms }
     }
 
     /// The gate the handlers resolve a caller's entitlement through.
@@ -1293,6 +1535,7 @@ impl FallbackChain {
         &self,
         req: &InferRequest,
         role: Option<&RoleCall>,
+        org: Option<&OrgOverlay>,
     ) -> Result<Option<(InferRequest, role::RoleDecision)>, ProviderError> {
         if !req.model.trim().eq_ignore_ascii_case(role::ROLE_MODEL_ID) {
             return Ok(None);
@@ -1307,10 +1550,14 @@ impl FallbackChain {
             })?;
         let fallback_model = role.map_or("", |call| call.fallback_model.as_str());
         let catalogue = self.list_models("chat", &req.provider_hint);
+        // The caller's organisation's own candidates for the purpose, tried before the platform table's
+        // (INFERENCE_ORG_OVERLAY).
+        let org_candidates = self.org_role_candidates(org, purpose, &catalogue);
         let policy = self.policy.load();
-        let choice = role::choose(&policy, purpose, fallback_model, |model| {
-            self.role_candidate_admitted(req, &catalogue, model)
-        });
+        let choice =
+            role::choose_with_org(&policy, &org_candidates, purpose, fallback_model, |model| {
+                self.role_candidate_admitted(req, &catalogue, org, model)
+            });
         let mut resolved = req.clone();
         resolved.model.clone_from(&choice.model);
         // The table's effort is the role's default, so it applies only when the caller names no effort.
@@ -1329,14 +1576,46 @@ impl FallbackChain {
         Ok(Some((resolved, choice.decision)))
     }
 
+    /// The organisation's role candidates for `purpose` (W4-BYO-3): the ids its overlay names that the platform
+    /// catalogue lists, minus any the platform overlay hides. Empty when the call has no organisation overlay (`org`
+    /// is `None`, see [`Self::org_overlay_for`]). Each candidate is still asked of [`Self::role_candidate_admitted`],
+    /// so the entitlement, ZDR, privacy-tier and residency floors apply to it.
+    fn org_role_candidates(
+        &self,
+        org: Option<&OrgOverlay>,
+        purpose: RolePurpose,
+        catalogue: &[ModelInfo],
+    ) -> Vec<String> {
+        let Some(overlay) = org else {
+            return Vec::new();
+        };
+        let mut candidates = overlay.role_candidates(purpose, catalogue);
+        if catalogue_overlay::catalogue_overlay_enabled() {
+            let policy = self.policy.load();
+            candidates.retain(|id| !policy.catalogue_overlay.is_hidden(id));
+        }
+        candidates
+    }
+
     /// Whether a role candidate may serve this call (EP-13 S4). A candidate the chain does not list is
     /// refused. A listed one must be served by a provider the call's hint allows, and that provider must
     /// clear the call's ZDR, privacy-tier, residency, image and entitlement gates, the gates
     /// `infer_one_model` applies, so the walk never has to refuse a candidate the table chose. An intent
-    /// id is admitted, because the intent layer resolves it and the walk gates the result.
-    fn role_candidate_admitted(&self, req: &InferRequest, catalogue: &[ModelInfo], model: &str) -> bool {
+    /// id is admitted, because the intent layer resolves it and the walk gates the result. A model the platform
+    /// overlay or the caller's organisation overlay hides is refused, as a named one is refused at admission, so the
+    /// next candidate is chosen.
+    fn role_candidate_admitted(
+        &self,
+        req: &InferRequest,
+        catalogue: &[ModelInfo],
+        org: Option<&OrgOverlay>,
+        model: &str,
+    ) -> bool {
         if intent::parse_mode(model).is_some() {
             return true;
+        }
+        if self.platform_hides(model) || org_hides(org, model) {
+            return false;
         }
         if !catalogue.iter().any(|known| known.id.eq_ignore_ascii_case(model)) {
             return false;
@@ -1480,7 +1759,7 @@ impl FallbackChain {
     }
 
     /// The ordered tool-capable models to try after `resolved`, bounded by
-    /// [`MAX_TOOL_LADDER_STEPS`] and pruned of rungs this resource cannot serve.
+    /// [`MAX_TOOL_LADDER_STEPS`] and pruned of rungs this resource cannot serve or the platform overlay hides.
     ///
     /// Callers must only pass a model the intent layer resolved from a
     /// `verevon-*` mode. Substituting under a caller who pinned a model would
@@ -1490,12 +1769,14 @@ impl FallbackChain {
     /// For a caller whose organisation restricts models, a rung the policy
     /// refuses is dropped before the step bound is counted, so a denied rung
     /// never uses up one of the [`MAX_TOOL_LADDER_STEPS`] a permitted one could
-    /// have had.
+    /// have had. A rung the platform or the caller's organisation overlay hides
+    /// is dropped the same way.
     fn tool_ladder(
         &self,
         resolved: &str,
         access: Option<&RequestAccess>,
         hint: &str,
+        org: Option<&OrgOverlay>,
     ) -> Vec<String> {
         let policy = self.policy.load();
         let mut ladder: Vec<String> = Vec::new();
@@ -1505,7 +1786,11 @@ impl FallbackChain {
             }
             let already_queued = candidate.eq_ignore_ascii_case(resolved)
                 || ladder.iter().any(|m| m.eq_ignore_ascii_case(candidate));
-            if already_queued || !self.is_deployed(candidate) {
+            if already_queued
+                || !self.is_deployed(candidate)
+                || self.platform_hides(candidate)
+                || org_hides(org, candidate)
+            {
                 continue;
             }
             if access.is_some_and(|access| self.entitlement_refusal(access, candidate, hint).is_some()) {
@@ -1544,6 +1829,100 @@ impl FallbackChain {
             }
         }
         first
+    }
+
+    /// Whether the platform catalogue overlay hides the model a call would be served as, while
+    /// `INFERENCE_CATALOGUE_OVERLAY` is on. Off, nothing is hidden and every route is as it was. A retired
+    /// Claude id is served as its successor, so the successor is checked too. The routes the caller does not
+    /// name (the intent layer, the role table, the tool ladder) pick a model with no admission check of their
+    /// own, so each consults this where it picks. A walk consults it before any provider is asked, on the model
+    /// that provider would really serve: its default for an automatic call, which names no model.
+    fn platform_hides(&self, model: &str) -> bool {
+        if !catalogue_overlay::catalogue_overlay_enabled() {
+            return false;
+        }
+        let policy = self.policy.load();
+        let overlay = &policy.catalogue_overlay;
+        overlay.is_hidden(model) || overlay.is_hidden(served_model(model))
+    }
+
+    /// The caller's organisation overlay for one call (W4-BYO-3), read once at the top of the call so that the
+    /// admission, the role table, the tool ladder, the cache and every rung of the walk judge the same overlay.
+    /// `None` while `INFERENCE_ORG_OVERLAY` is off, when no policy store is wired or the organisation id is blank, so
+    /// nothing below changes. The client caches each organisation's overlay, so the read is cheap after the first.
+    async fn org_overlay_for(&self, org_id: &str) -> Option<Arc<OrgOverlay>> {
+        if !catalogue_overlay::org_overlay_enabled() || org_id.trim().is_empty() {
+            return None;
+        }
+        let client = self.policy_client.as_ref()?;
+        Some(client.org_overlay(org_id).await)
+    }
+
+    /// The catalogue overlay at admission, while `INFERENCE_CATALOGUE_OVERLAY` is on.
+    /// An alias is answered as the model it stands for, and a hidden model is refused
+    /// before any provider is called or the entitlement check names it. `None` leaves
+    /// the request as it was: the overlay is off or empty, or the request names no
+    /// concrete model (an automatic, `verevon-*` or role id), which the routing layer
+    /// answers for itself.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError::ModelHidden`] when the model the caller named, the model its
+    /// alias stands for, or the model that serves it (the successor of a retired Claude
+    /// id) is hidden by the platform overlay, or (while `INFERENCE_ORG_OVERLAY` is on) by
+    /// the caller's own organisation overlay. Nothing has been sent anywhere.
+    fn overlay_admission(
+        &self,
+        req: &InferRequest,
+        org: Option<&OrgOverlay>,
+    ) -> Result<Option<InferRequest>, ProviderError> {
+        if catalogue_overlay::is_reserved_id(&req.model) {
+            return Ok(None);
+        }
+        // The platform overlay.
+        let mut mapped: Option<InferRequest> = None;
+        if catalogue_overlay::catalogue_overlay_enabled() {
+            let policy = self.policy.load();
+            let overlay = &policy.catalogue_overlay;
+            if !overlay.is_empty() {
+                let target = overlay.alias_target(&req.model);
+                let named = target.unwrap_or(req.model.as_str());
+                // A retired Claude id is served as its successor, so the successor is checked
+                // too: the check is by the id that would really be served.
+                if overlay.is_hidden(named) || overlay.is_hidden(served_model(named)) {
+                    return Err(ProviderError::ModelHidden {
+                        model: req.model.clone(),
+                    });
+                }
+                if let Some(target) = target {
+                    info!(
+                        request_id = %req.request_id,
+                        alias = %req.model,
+                        resolved_model = %target,
+                        "catalogue alias resolved"
+                    );
+                    let mut aliased = req.clone();
+                    aliased.model = target.to_owned();
+                    mapped = Some(aliased);
+                }
+            }
+        }
+        // The caller's organisation overlay (W4-BYO-3), by the resolved id, so an alias that stands for a model the
+        // organisation hides is refused too. As on the platform overlay, the model served is checked as well: a
+        // retired id is answered by its successor.
+        let resolved = mapped
+            .as_ref()
+            .map_or(req.model.as_str(), |m| m.model.as_str());
+        if org_hides(org, resolved) {
+            info!(
+                request_id = %req.request_id,
+                "model refused: hidden by the organisation overlay"
+            );
+            return Err(ProviderError::ModelHidden {
+                model: req.model.clone(),
+            });
+        }
+        Ok(mapped)
     }
 
     /// The model the caller named, after checking it against their entitlement:
@@ -1646,13 +2025,24 @@ impl FallbackChain {
         cache_response: bool,
     ) -> Result<(InferResponse, Option<RouteNote>), ProviderError> {
         let mut clock = CallClock::start();
+        // The id the caller sent, before the role table and the intent layer resolve it: a walk that refuses
+        // for a hidden model names it.
+        let named = req.model.as_str();
+        // The caller's organisation overlay, read once for the whole call, so the admission, the role table, the
+        // tool ladder, the cache and every rung of the walk judge the same overlay (W4-BYO-3).
+        let org_overlay = self.org_overlay_for(&req.org_id).await;
+        let org = org_overlay.as_deref();
+        // The catalogue overlay answers an alias as its target and refuses a hidden
+        // model, before the retired-id, role and entitlement checks name it.
+        let aliased = self.overlay_admission(req, org)?;
+        let req: &InferRequest = aliased.as_ref().unwrap_or(req);
         // A retired Claude id is answered by its successor, so the entitlement check,
         // the cache key and every rung of the ladder all name the model that serves.
         let current = super::anthropic::with_current_model(req);
         let req: &InferRequest = current.as_ref().unwrap_or(req);
         // A `verevon-role` call is resolved to a concrete model before anything else reads it, so the
         // name never reaches the entitlement check, the intent layer or a provider (EP-13 S4).
-        let roled = self.resolve_role_call(req, role)?;
+        let roled = self.resolve_role_call(req, role, org)?;
         let role_decision = roled.as_ref().map(|(_, decision)| *decision);
         let req: &InferRequest = roled.as_ref().map_or(req, |(resolved, _)| resolved);
         // A model the caller named is checked against their organisation's
@@ -1670,7 +2060,12 @@ impl FallbackChain {
         // The ladder exists only for a model WE chose. `intent_req.is_some()` is
         // exactly that condition — see `attempt_models`.
         let ladder = intent_req.as_ref().map_or_else(Vec::new, |resolved| {
-            self.tool_ladder(&resolved.model, resolved.access.as_deref(), &resolved.provider_hint)
+            self.tool_ladder(
+                &resolved.model,
+                resolved.access.as_deref(),
+                &resolved.provider_hint,
+                org,
+            )
         });
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
         // The org's effort ceiling bounds the request before the cache is read,
@@ -1681,15 +2076,23 @@ impl FallbackChain {
         // An image is part of the question but not of the cache key, and a
         // stored answer about one image must never answer another: a request
         // with images neither reads nor fills the response cache.
-        let cache_response = cache_response && req.image_parts.is_empty();
+        // A model the platform or the organisation overlay hides is neither answered from the cache nor stored in
+        // it: the walk refuses it, and a stored answer must not outlive the hiding.
+        let cache_response = cache_response
+            && req.image_parts.is_empty()
+            && !self.platform_hides(&req.model)
+            && !org_hides(org, &req.model);
 
         // Check cache first
         if cache_response {
-            if let Some(mut cached) = self
-                .cache
-                .get(req)
-                .filter(|cached| self.entitled_hit(req, &cached.model_used, &cached.provider_used))
-            {
+            if let Some(mut cached) = self.cache.get(req).filter(|cached| {
+                // The key names the model the call asked for and does not carry the overlays, so a stored answer
+                // from a model the platform or the organisation overlay now hides is not served (as a revoked
+                // entitlement is not).
+                self.entitled_hit(req, &cached.model_used, &cached.provider_used)
+                    && !self.platform_hides(&cached.model_used)
+                    && !org_hides(org, &cached.model_used)
+            }) {
                 info!(request_id = %req.request_id, "cache hit");
                 // The stored copy may carry the timing of the call that filled
                 // the cache; this call reached no provider at all.
@@ -1719,7 +2122,7 @@ impl FallbackChain {
                 let wait_began = tokio::time::Instant::now();
                 tokio::time::sleep(wait).await;
                 clock.waited(wait_began);
-                throttle = ThrottleState::default();
+                throttle.next_pass();
             }
 
             for model in Self::attempt_models(&req.model, &ladder) {
@@ -1732,7 +2135,14 @@ impl FallbackChain {
                     );
                 }
                 if let Some(response) = self
-                    .infer_one_model(req, model, &mut total_attempts, &mut throttle, &mut clock)
+                    .infer_one_model(
+                        req,
+                        model,
+                        &mut total_attempts,
+                        &mut throttle,
+                        &mut clock,
+                        org,
+                    )
                     .await
                 {
                     if cache_response { self.cache.put(req, &response); }
@@ -1751,8 +2161,19 @@ impl FallbackChain {
             }
         }
 
-        if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
+        let benched = throttle
+            .benched_until
+            .filter(|_| self.bench.is_some() && total_attempts == 0);
+        if let Some(until) = benched {
+            // Every provider that passed the gates was benched: retry later, not a terminal posture
+            // refusal.
+            Err(Self::providers_benched_error(until))
+        } else if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
             Err(refusal)
+        } else if throttle.hidden_skipped && total_attempts == 0 {
+            Err(ProviderError::ModelHidden {
+                model: named.to_owned(),
+            })
         } else if throttle.vision_skipped && total_attempts == 0 {
             Err(vision_unsupported_error())
         } else if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
@@ -1801,7 +2222,15 @@ impl FallbackChain {
         total_attempts: &mut u32,
         throttle: &mut ThrottleState,
         clock: &mut CallClock,
+        org: Option<&OrgOverlay>,
     ) -> Option<InferResponse> {
+        // The platform overlay or the caller's organisation overlay hides this model: nothing is sent and the walk
+        // moves on. A named model was refused at admission, so this is a model the intent layer, the role table, the
+        // ladder or an automatic default chose.
+        if self.platform_hides(model) || org_hides(org, model) {
+            throttle.hidden_skipped = true;
+            return None;
+        }
         for (name, provider) in &self.providers {
             // One capabilities() read per provider, reused by all three gates
             // below: it allocates, and the ZDR gate already paid for it.
@@ -1851,6 +2280,12 @@ impl FallbackChain {
                 continue;
             }
             let call_req = self.request_for(req, model, name);
+            // The model this provider would really serve is checked against the overlays before anything is sent. For
+            // an automatic call that is the provider default, which the top-of-walk check cannot see.
+            if self.platform_hides(&call_req.model) || org_hides(org, &call_req.model) {
+                throttle.hidden_skipped = true;
+                continue;
+            }
             // The caller's entitlement, judged on the model this provider would
             // really serve (its own default for an unspecified one).
             if let Some(reason) = req
@@ -1872,6 +2307,12 @@ impl FallbackChain {
                     "provider skipped: the request carries images and this model does not accept them"
                 );
                 throttle.vision_skipped = true;
+                continue;
+            }
+            if self.route_rules_skip(req, name, &caps, throttle) {
+                continue;
+            }
+            if self.bench_skip(req, name, &call_req.model, &caps, throttle) {
                 continue;
             }
             for attempt in 1..=self.max_retries {
@@ -1897,6 +2338,13 @@ impl FallbackChain {
                     clock.attempt_failed(began);
                 }
                 let _enter = span.enter();
+                let benched_now = self.bench_record(
+                    req,
+                    name,
+                    &call_req.model,
+                    &caps,
+                    outcome.as_ref().err(),
+                );
 
                 match outcome {
                     Ok(mut response) => {
@@ -1992,6 +2440,9 @@ impl FallbackChain {
                             error = %e,
                             "provider attempt failed"
                         );
+                        if benched_now {
+                            break; // This failure benched the provider: no more attempts on it.
+                        }
                     }
                 }
             }
@@ -2137,11 +2588,20 @@ impl FallbackChain {
         role: Option<&RoleCall>,
     ) -> Result<(mpsc::Receiver<InferChunk>, Option<RouteNote>), ProviderError> {
         let mut clock = CallClock::start();
+        // The id the caller sent, as on the unary path: a walk that refuses for a hidden model names it.
+        let named = req.model.as_str();
+        // The caller's organisation overlay, read once for the whole call, as on the unary path.
+        let org_overlay = self.org_overlay_for(&req.org_id).await;
+        let org = org_overlay.as_deref();
+        // The catalogue overlay answers an alias as its target and refuses a hidden
+        // model, as on the unary path.
+        let aliased = self.overlay_admission(req, org)?;
+        let req: &InferRequest = aliased.as_ref().unwrap_or(req);
         // A retired Claude id is answered by its successor, as on the unary path.
         let current = super::anthropic::with_current_model(req);
         let req: &InferRequest = current.as_ref().unwrap_or(req);
         // A `verevon-role` call is resolved first, as on the unary path.
-        let roled = self.resolve_role_call(req, role)?;
+        let roled = self.resolve_role_call(req, role, org)?;
         let role_decision = roled.as_ref().map(|(_, decision)| *decision);
         let req: &InferRequest = roled.as_ref().map_or(req, |(resolved, _)| resolved);
         // Entitlement of a pinned model first, as on the unary path.
@@ -2153,7 +2613,12 @@ impl FallbackChain {
             .map_or((None, None), |(resolved, note)| (Some(resolved), note));
         let route_note = attach_role(route_note, role_decision);
         let ladder = intent_req.as_ref().map_or_else(Vec::new, |resolved| {
-            self.tool_ladder(&resolved.model, resolved.access.as_deref(), &resolved.provider_hint)
+            self.tool_ladder(
+                &resolved.model,
+                resolved.access.as_deref(),
+                &resolved.provider_hint,
+                org,
+            )
         });
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
         let ceiled = Self::apply_effort_ceiling(req);
@@ -2179,7 +2644,7 @@ impl FallbackChain {
                 let wait_began = tokio::time::Instant::now();
                 tokio::time::sleep(wait).await;
                 clock.waited(wait_began);
-                throttle = ThrottleState::default();
+                throttle.next_pass();
             }
 
             for model in Self::attempt_models(&req.model, &ladder) {
@@ -2192,7 +2657,14 @@ impl FallbackChain {
                     );
                 }
                 if let Some(rx) = self
-                    .stream_one_model(req, model, &mut total_attempts, &mut throttle, &mut clock)
+                    .stream_one_model(
+                        req,
+                        model,
+                        &mut total_attempts,
+                        &mut throttle,
+                        &mut clock,
+                        org,
+                    )
                     .await
                 {
                     return Ok((rx, route_note));
@@ -2207,8 +2679,19 @@ impl FallbackChain {
             }
         }
 
-        if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
+        let benched = throttle
+            .benched_until
+            .filter(|_| self.bench.is_some() && total_attempts == 0);
+        if let Some(until) = benched {
+            // Every provider that passed the gates was benched: retry later, not a terminal posture
+            // refusal.
+            Err(Self::providers_benched_error(until))
+        } else if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
             Err(refusal)
+        } else if throttle.hidden_skipped && total_attempts == 0 {
+            Err(ProviderError::ModelHidden {
+                model: named.to_owned(),
+            })
         } else if throttle.vision_skipped && total_attempts == 0 {
             Err(vision_unsupported_error())
         } else if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
@@ -2235,7 +2718,14 @@ impl FallbackChain {
         total_attempts: &mut u32,
         throttle: &mut ThrottleState,
         clock: &mut CallClock,
+        org: Option<&OrgOverlay>,
     ) -> Option<mpsc::Receiver<InferChunk>> {
+        // The platform or the organisation overlay hides this model: nothing is opened and the walk moves on, as on
+        // the unary path.
+        if self.platform_hides(model) || org_hides(org, model) {
+            throttle.hidden_skipped = true;
+            return None;
+        }
         for (name, provider) in &self.providers {
             let caps = provider.capabilities_dyn();
             if !Self::hint_matches(&req.provider_hint, name, &caps.aliases) {
@@ -2277,6 +2767,11 @@ impl FallbackChain {
                 continue;
             }
             let call_req = self.request_for(req, model, name);
+            // As on the unary path: the model this provider would really serve is checked before any stream is opened.
+            if self.platform_hides(&call_req.model) || org_hides(org, &call_req.model) {
+                throttle.hidden_skipped = true;
+                continue;
+            }
             if let Some(reason) = req
                 .access
                 .as_ref()
@@ -2298,6 +2793,12 @@ impl FallbackChain {
                 throttle.vision_skipped = true;
                 continue;
             }
+            if self.route_rules_skip(req, name, &caps, throttle) {
+                continue;
+            }
+            if self.bench_skip(req, name, &call_req.model, &caps, throttle) {
+                continue;
+            }
             for attempt in 1..=self.max_retries {
                 *total_attempts += 1;
                 let span = tracing::info_span!(
@@ -2317,6 +2818,13 @@ impl FallbackChain {
                     clock.attempt_failed(began);
                 }
                 let _enter = span.enter();
+                let benched_now = self.bench_record(
+                    req,
+                    name,
+                    &call_req.model,
+                    &caps,
+                    outcome.as_ref().err(),
+                );
 
                 match outcome {
                     Ok(rx) => {
@@ -2411,6 +2919,9 @@ impl FallbackChain {
                             error = %e,
                             "provider stream attempt failed"
                         );
+                        if benched_now {
+                            break; // This failure benched the provider: no more attempts on it.
+                        }
                     }
                 }
             }
@@ -2974,6 +3485,7 @@ mod resolution_tests {
             mode: intent::VerevonMode::Balance,
             complexity: intent::Complexity::Simple,
             posture: intent::BudgetPosture::Constrained,
+            tier_shifted: true,
             effort_cap: None,
         };
         let note = budget_route_note(&policy, &decision, None);
@@ -2994,6 +3506,7 @@ mod resolution_tests {
             mode: intent::VerevonMode::Budget,
             complexity: intent::Complexity::Simple,
             posture: intent::BudgetPosture::Constrained,
+            tier_shifted: false,
             effort_cap: None,
         };
         assert!(!budget_route_note(&policy, &floor, None).tier_shifted);
@@ -3007,6 +3520,7 @@ mod resolution_tests {
             mode: intent::VerevonMode::Genius,
             complexity: intent::Complexity::Complex,
             posture: intent::BudgetPosture::Exhausted,
+            tier_shifted: false,
             effort_cap: Some(effort::Level::Low),
         };
         let note = budget_route_note(&policy, &decision, Some(effort::Level::Low));
@@ -3023,6 +3537,9 @@ mod resolution_tests {
             cheap_fallback_forced: false,
             applied_effort: None,
             role: None,
+            mode: Some(intent::VerevonMode::Balance),
+            complexity: Some(intent::Complexity::Simple),
+            reason: "budget_tier_shift",
         };
         // A call that is not a role call keeps its note exactly as the budget left it.
         assert_eq!(attach_role(Some(budget), None), Some(budget));
@@ -4121,6 +4638,7 @@ mod resolution_tests {
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
                 provider_timing: None,
+                service_tier_used: String::new(),
             };
             tokio::spawn(async move {
                 let _ = tx.send(chunk).await;
@@ -5033,6 +5551,7 @@ mod resolution_tests {
                         cache_read_input_tokens: 0,
                         cache_creation_input_tokens: 0,
                         provider_timing: None,
+                        service_tier_used: String::new(),
                     })
                     .await;
                 let _ = tx
@@ -5052,6 +5571,7 @@ mod resolution_tests {
                         cache_read_input_tokens: 0,
                         cache_creation_input_tokens: 0,
                         provider_timing: None,
+                        service_tier_used: String::new(),
                     })
                     .await;
             });
@@ -5586,7 +6106,7 @@ mod resolution_tests {
         let mut chain = ladder_chain(&asked, vec![], vec![]);
 
         // Unknown catalogs prune nothing, but the step bound still holds.
-        let unpruned = chain.tool_ladder("claude-sonnet-4-6", None, "");
+        let unpruned = chain.tool_ladder("claude-sonnet-4-6", None, "", None);
         assert!(unpruned.len() <= MAX_TOOL_LADDER_STEPS);
         assert!(!unpruned.iter().any(|m| m == "claude-sonnet-4-6"));
 
@@ -5600,9 +6120,68 @@ mod resolution_tests {
             openai: Some(vec!["gpt-4o-mini".to_owned()]),
         };
         assert_eq!(
-            chain.tool_ladder("claude-sonnet-4-6", None, ""),
+            chain.tool_ladder("claude-sonnet-4-6", None, "", None),
             ["claude-haiku-4-5", "gpt-4o-mini"]
         );
+    }
+
+    #[test]
+    fn the_ladder_drops_the_rungs_the_organisation_hides() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let mut chain = ladder_chain(&asked, vec![], vec![]);
+        chain.deployed = DeployedModels {
+            anthropic: Some(vec![
+                "claude-sonnet-4-6".to_owned(),
+                "claude-haiku-4-5".to_owned(),
+            ]),
+            openai: Some(vec!["gpt-4o-mini".to_owned()]),
+        };
+        let org = OrgOverlay {
+            hidden: vec!["claude-haiku-4-5".to_owned()],
+            ..OrgOverlay::default()
+        };
+        assert_eq!(
+            chain.tool_ladder("claude-sonnet-4-6", None, "", Some(&org)),
+            ["gpt-4o-mini"]
+        );
+    }
+
+    #[test]
+    fn the_org_overlay_hides_by_id_or_successor_not_by_an_unspecified_id() {
+        let org = OrgOverlay {
+            hidden: vec!["gpt-4o-mini".to_owned()],
+            ..OrgOverlay::default()
+        };
+        assert!(org_hides(Some(&org), "gpt-4o-mini"));
+        assert!(org_hides(Some(&org), "GPT-4o-Mini"));
+        assert!(!org_hides(Some(&org), "gpt-4o"));
+        // An automatic call names no model: the walk judges the provider default it resolves to instead.
+        assert!(!org_hides(Some(&org), ""));
+        assert!(!org_hides(None, "gpt-4o-mini"));
+
+        // A retired Claude id is served as its successor, so hiding the successor hides the retired id too.
+        let successor = OrgOverlay {
+            hidden: vec!["claude-sonnet-5-5".to_owned()],
+            ..OrgOverlay::default()
+        };
+        assert!(org_hides(Some(&successor), "claude-sonnet-4-20250514"));
+    }
+
+    #[test]
+    fn the_organisation_overlay_refuses_a_role_candidate_it_hides() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let chain = ladder_chain(&asked, vec![], vec![]);
+        let req = route_request("role-org", "");
+        let catalogue = [ModelInfo {
+            id: "gpt-4o-mini".to_owned(),
+            ..ModelInfo::default()
+        }];
+        let org = OrgOverlay {
+            hidden: vec!["gpt-4o-mini".to_owned()],
+            ..OrgOverlay::default()
+        };
+        assert!(chain.role_candidate_admitted(&req, &catalogue, None, "gpt-4o-mini"));
+        assert!(!chain.role_candidate_admitted(&req, &catalogue, Some(&org), "gpt-4o-mini"));
     }
 
     #[tokio::test]
@@ -5737,4 +6316,239 @@ mod resolution_tests {
         chain.infer(&text_only).await.unwrap();
         assert_eq!(seen.lock().unwrap().as_deref(), Some("gpt-4o"));
     }
+
+    /// A routing double for the same-tier anchor and the user-route guard: it declares its own id,
+    /// family and residency, counts its calls, and either serves or fails them.
+    struct RouteStub {
+        provider_id: &'static str,
+        family: ModelFamily,
+        residency: Residency,
+        fails: bool,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl RouteStub {
+        fn boxed(
+            provider_id: &'static str,
+            family: ModelFamily,
+            residency: Residency,
+            fails: bool,
+        ) -> (BoxedProvider, Arc<std::sync::atomic::AtomicUsize>) {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let provider: BoxedProvider = Arc::new(Self {
+                provider_id,
+                family,
+                residency,
+                fails,
+                calls: calls.clone(),
+            });
+            (provider, calls)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderRouter for RouteStub {
+        fn capabilities(&self) -> crate::provider::ProviderCapabilities {
+            crate::provider::ProviderCapabilities {
+                provider_id: self.provider_id.to_owned(),
+                model_family: self.family,
+                residency: self.residency,
+                ..crate::provider::ProviderCapabilities::default()
+            }
+        }
+
+        async fn infer(&self, req: &InferRequest) -> Result<InferResponse, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fails {
+                return Err(ProviderError::Http("500 Internal Server Error: upstream".to_owned()));
+            }
+            Ok(InferResponse {
+                request_id: req.request_id.clone(),
+                content: "ok".to_owned(),
+                model_used: req.model.clone(),
+                stop_reason: "stop".to_owned(),
+                ..InferResponse::default()
+            })
+        }
+
+        async fn infer_stream(
+            &self,
+            _req: &InferRequest,
+        ) -> Result<mpsc::Receiver<InferChunk>, ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ProviderError::Unavailable("route stub".to_owned()))
+        }
+    }
+
+    fn route_request(id: &str, model: &str) -> InferRequest {
+        InferRequest {
+            request_id: id.to_owned(),
+            model: model.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    /// Both switches off: a failed EU first hop is followed by the GLOBAL provider, as before.
+    #[tokio::test]
+    async fn route_rules_off_walk_is_unchanged() {
+        use std::sync::atomic::Ordering;
+        let (eu, eu_calls) =
+            RouteStub::boxed("azure-openai", ModelFamily::OpenAiCompatible, Residency::Eu, true);
+        let (global, global_calls) =
+            RouteStub::boxed("openai", ModelFamily::OpenAiCompatible, Residency::Global, false);
+        let chain = FallbackChain::new_with_providers(
+            vec![("azure-openai".to_owned(), eu), ("openai".to_owned(), global)],
+            1,
+        )
+        .with_benching(false)
+        .with_same_tier_fallback(false);
+
+        chain.infer(&route_request("off-1", "gpt-4o-mini")).await.expect("GLOBAL serves");
+        assert_eq!(eu_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(global_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Same-tier on: a GLOBAL provider is never tried after an EU_RESIDENT first hop failed.
+    #[tokio::test]
+    async fn same_tier_never_falls_to_a_lower_tier_within_one_rung() {
+        use std::sync::atomic::Ordering;
+        let (eu, eu_calls) =
+            RouteStub::boxed("azure-openai", ModelFamily::OpenAiCompatible, Residency::Eu, true);
+        let (global, global_calls) =
+            RouteStub::boxed("openai", ModelFamily::OpenAiCompatible, Residency::Global, false);
+        let chain = FallbackChain::new_with_providers(
+            vec![("azure-openai".to_owned(), eu), ("openai".to_owned(), global)],
+            1,
+        )
+        .with_same_tier_fallback(true);
+
+        let outcome = chain.infer(&route_request("tier-1", "gpt-4o-mini")).await;
+        // A failed eligible provider is exhaustion, not a tier refusal, and nothing is downgraded.
+        assert!(outcome.is_err(), "the only provider at the anchor tier failed");
+        assert_eq!(eu_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(global_calls.load(Ordering::SeqCst), 0, "GLOBAL is never tried");
+    }
+
+    /// The anchor holds on a later rung of the ladder and across the pass reset: the first model fails
+    /// on the EU provider, the second model is served only by a GLOBAL provider, and the call never
+    /// reaches it. With the switch off the same walk does reach it.
+    #[tokio::test]
+    async fn same_tier_anchor_holds_on_a_later_rung_and_across_the_pass_reset() {
+        use std::sync::atomic::Ordering;
+        for same_tier in [true, false] {
+            let (eu, eu_calls) = RouteStub::boxed(
+                "azure-openai",
+                ModelFamily::OpenAiCompatible,
+                Residency::Eu,
+                true,
+            );
+            let (global, global_calls) =
+                RouteStub::boxed("anthropic", ModelFamily::Anthropic, Residency::Global, false);
+            let chain = FallbackChain::new_with_providers(
+                vec![("azure-openai".to_owned(), eu), ("anthropic".to_owned(), global)],
+                1,
+            )
+            .with_same_tier_fallback(same_tier);
+            let req = route_request("tier-2", "gpt-4o-mini");
+            let mut attempts = 0u32;
+            let mut throttle = ThrottleState::default();
+            let mut clock = CallClock::start();
+
+            let first = chain
+                .infer_one_model(
+                    &req,
+                    "gpt-4o-mini",
+                    &mut attempts,
+                    &mut throttle,
+                    &mut clock,
+                    None,
+                )
+                .await;
+            assert!(first.is_none(), "the EU provider fails the first rung");
+            throttle.next_pass();
+            let second = chain
+                .infer_one_model(
+                    &req,
+                    "claude-sonnet-4",
+                    &mut attempts,
+                    &mut throttle,
+                    &mut clock,
+                    None,
+                )
+                .await;
+
+            assert_eq!(eu_calls.load(Ordering::SeqCst), 1);
+            if same_tier {
+                assert_eq!(throttle.anchor_tier, Some(PrivacyTier::EuResident));
+                assert!(second.is_none(), "the GLOBAL provider is below the anchor");
+                assert_eq!(global_calls.load(Ordering::SeqCst), 0);
+            } else {
+                assert_eq!(throttle.anchor_tier, None);
+                assert!(second.is_some(), "without the anchor the later rung is served");
+                assert_eq!(global_calls.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    /// Benching on: a request with no hint and no connection never reaches the subscription provider
+    /// and makes no attempt on it; the platform provider after it serves.
+    #[tokio::test]
+    async fn benching_keeps_an_unhinted_request_off_the_subscription_route() {
+        use std::sync::atomic::Ordering;
+        let id = mp_contracts::agentic_subscription::PROVIDER_ID;
+        let (subscription, subscription_calls) =
+            RouteStub::boxed(id, ModelFamily::OpenAiCompatible, Residency::Eu, false);
+        let (platform, platform_calls) =
+            RouteStub::boxed("azure-openai", ModelFamily::OpenAiCompatible, Residency::Eu, false);
+        let providers = || {
+            vec![
+                (id.to_owned(), subscription.clone()),
+                ("azure-openai".to_owned(), platform.clone()),
+            ]
+        };
+
+        let guarded = FallbackChain::new_with_providers(providers(), 1).with_benching(true);
+        guarded.infer(&route_request("bench-1", "gpt-4o-mini")).await.expect("platform serves");
+        assert_eq!(subscription_calls.load(Ordering::SeqCst), 0, "no attempt on the subscription");
+        assert_eq!(platform_calls.load(Ordering::SeqCst), 1);
+
+        // Off, the walk is byte-identical to today: the subscription provider is asked first.
+        let unguarded = FallbackChain::new_with_providers(providers(), 1);
+        unguarded.infer(&route_request("bench-2", "gpt-4o-mini")).await.expect("served");
+        assert_eq!(subscription_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Benching on: a request that names the subscription provider and carries a connection still
+    /// reaches it; naming it without a connection does not, and moves nowhere else.
+    #[tokio::test]
+    async fn benching_lets_a_hinted_subscription_request_with_a_connection_through() {
+        use std::sync::atomic::Ordering;
+        let id = mp_contracts::agentic_subscription::PROVIDER_ID;
+        let (subscription, subscription_calls) =
+            RouteStub::boxed(id, ModelFamily::OpenAiCompatible, Residency::Eu, false);
+        let (platform, platform_calls) =
+            RouteStub::boxed("azure-openai", ModelFamily::OpenAiCompatible, Residency::Eu, false);
+        let chain = FallbackChain::new_with_providers(
+            vec![(id.to_owned(), subscription), ("azure-openai".to_owned(), platform)],
+            1,
+        )
+        .with_benching(true);
+
+        let mut pinned = route_request("bench-3", "gpt-4o-mini");
+        pinned.provider_hint = id.to_owned();
+        pinned.subscription_connection_id = "connection".to_owned();
+        chain.infer(&pinned).await.expect("the pinned subscription request is served");
+        assert_eq!(subscription_calls.load(Ordering::SeqCst), 1);
+
+        let mut no_connection = route_request("bench-4", "gpt-4o-mini");
+        no_connection.provider_hint = id.to_owned();
+        assert!(chain.infer(&no_connection).await.is_err());
+        assert_eq!(subscription_calls.load(Ordering::SeqCst), 1, "not asked without a connection");
+        assert_eq!(platform_calls.load(Ordering::SeqCst), 0, "never moved onto a platform route");
+    }
 }
+
+/// Chain benching under `INFERENCE_PROVIDER_BENCHING` (R2-OD-40-b3).
+#[cfg(test)]
+#[path = "fallback_bench_tests.rs"]
+mod bench_tests;

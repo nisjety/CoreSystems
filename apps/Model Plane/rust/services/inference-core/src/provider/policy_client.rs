@@ -9,6 +9,7 @@
 //! transport/parse failure (or an empty/`{}` store) yields `None` so the caller
 //! keeps its in-memory default. Only the explicit write path surfaces errors.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,8 +18,12 @@ use tokio::sync::Mutex;
 use tonic::transport::{Channel, Endpoint};
 
 use mp_contracts::model_plane::v1::routing_policy_client::RoutingPolicyClient;
-use mp_contracts::model_plane::v1::{GetRoutingPolicyRequest, SetRoutingPolicyRequest};
+use mp_contracts::model_plane::v1::{
+    GetOrgRoutingOverlayRequest, GetRoutingPolicyRequest, PolicyCandidate, PromoteCandidateRequest,
+    ProposeCandidateRequest, SetRoutingPolicyRequest,
+};
 
+use super::catalogue_overlay::OrgOverlay;
 use super::routing_policy::RoutingPolicy;
 
 /// Service identity inference-core presents to auth-core to mint a session-core
@@ -123,11 +128,119 @@ impl PolicyAuth {
     }
 }
 
+/// Why a candidate call failed (EP-14 S10). The gRPC code is kept so the HTTP edge can tell a superseded candidate
+/// (`ABORTED`), an unevaluated one or a switched-off store (`FAILED_PRECONDITION`) and an unknown id (`NOT_FOUND`)
+/// apart. A failure that never reached session-core (a serialization or parse error) is `Internal`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CandidateError {
+    /// The gRPC status code session-core answered with.
+    pub code: tonic::Code,
+    /// The status message, or the local failure.
+    pub message: String,
+}
+
+impl CandidateError {
+    fn local(message: String) -> Self {
+        Self {
+            code: tonic::Code::Internal,
+            message,
+        }
+    }
+
+    fn from_status(operation: &str, status: &tonic::Status) -> Self {
+        Self {
+            code: status.code(),
+            message: format!("session-core {operation}: {}", status.message()),
+        }
+    }
+}
+
+impl std::fmt::Display for CandidateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {}", self.code, self.message)
+    }
+}
+
+/// Why a routing-policy write failed (W4-BYO-3). A version conflict is kept apart from every other failure, so the
+/// HTTP edge answers it as a 409 and every other failure keeps its 502.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyWriteError {
+    /// session-core refused the write (`ABORTED`): the live version is no longer the one the caller read.
+    VersionConflict,
+    /// Any other failure: a serialization or parse error, or session-core's refusal, with its message.
+    Failed(String),
+}
+
+/// How long an organisation's overlay is trusted before it is read again (W4-BYO-3).
+const ORG_OVERLAY_TTL: Duration = Duration::from_secs(120);
+
+/// How long a read that failed is not retried. The caller serves the last overlay it held, or none, meanwhile,
+/// so session-core being down or its switch being off costs one read per organisation per window, not one per
+/// request.
+const ORG_OVERLAY_RETRY: Duration = Duration::from_secs(15);
+
+/// The most organisations whose overlay is held at once. At the cap the entry that expires soonest makes room.
+const ORG_OVERLAY_MAX_ORGS: usize = 1000;
+
+/// One organisation's overlay as last read, and when the read stops being trusted.
+struct CachedOrgOverlay {
+    overlay: Arc<OrgOverlay>,
+    expires_at: Instant,
+}
+
+/// The per-organisation overlay cache (W4-BYO-3): at most [`ORG_OVERLAY_MAX_ORGS`] organisations, each for
+/// [`ORG_OVERLAY_TTL`]. It holds model ids and nothing else, and lives in memory for the process.
+#[derive(Default)]
+struct OrgOverlayCache {
+    entries: std::sync::Mutex<HashMap<String, CachedOrgOverlay>>,
+}
+
+impl OrgOverlayCache {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, CachedOrgOverlay>> {
+        // A panic while holding the lock leaves a map that is still valid, so a poisoned lock is used as it is.
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The overlay held for `org_id` and whether it is still trusted at `now`.
+    fn get(&self, org_id: &str, now: Instant) -> Option<(Arc<OrgOverlay>, bool)> {
+        self.lock()
+            .get(org_id)
+            .map(|entry| (entry.overlay.clone(), entry.expires_at > now))
+    }
+
+    /// Hold `overlay` for `org_id` until `now + ttl`, making room first when the cache is full.
+    fn put(&self, org_id: &str, overlay: Arc<OrgOverlay>, now: Instant, ttl: Duration) {
+        let mut entries = self.lock();
+        if entries.len() >= ORG_OVERLAY_MAX_ORGS && !entries.contains_key(org_id) {
+            entries.retain(|_, entry| entry.expires_at > now);
+            if entries.len() >= ORG_OVERLAY_MAX_ORGS {
+                let soonest = entries
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.expires_at)
+                    .map(|(key, _)| key.clone());
+                if let Some(key) = soonest {
+                    entries.remove(&key);
+                }
+            }
+        }
+        entries.insert(
+            org_id.to_owned(),
+            CachedOrgOverlay {
+                overlay,
+                expires_at: now + ttl,
+            },
+        );
+    }
+}
+
 /// Lazily-connected client for session-core's `RoutingPolicy` gRPC service.
 #[derive(Clone)]
 pub struct PolicyClient {
     channel: Channel,
     auth: Option<Arc<PolicyAuth>>,
+    org_overlays: Arc<OrgOverlayCache>,
 }
 
 impl PolicyClient {
@@ -145,6 +258,7 @@ impl PolicyClient {
         Some(Self {
             channel,
             auth: PolicyAuth::from_env(),
+            org_overlays: Arc::new(OrgOverlayCache::default()),
         })
     }
 
@@ -180,35 +294,176 @@ impl PolicyClient {
         parse_config_json(&resp.config_json)
     }
 
+    /// The organisation's routing overlay (W4-BYO-3), from the cache while it is fresh (120 seconds, 1000
+    /// organisations) and from session-core otherwise. Fail-soft: a read that fails serves the last overlay held
+    /// for the organisation, or the empty overlay, and is not retried for 15 seconds. An empty overlay changes
+    /// nothing, so a failure never narrows what the platform serves and never widens it either. A blank
+    /// organisation id has no overlay.
+    pub async fn org_overlay(&self, org_id: &str) -> Arc<OrgOverlay> {
+        let org_id = org_id.trim();
+        if org_id.is_empty() {
+            return Arc::new(OrgOverlay::default());
+        }
+        let now = Instant::now();
+        let held = self.org_overlays.get(org_id, now);
+        if let Some((overlay, true)) = &held {
+            return overlay.clone();
+        }
+        match self.fetch_org_overlay(org_id).await {
+            Some(overlay) => {
+                let overlay = Arc::new(overlay);
+                self.org_overlays
+                    .put(org_id, overlay.clone(), Instant::now(), ORG_OVERLAY_TTL);
+                overlay
+            }
+            None => {
+                let overlay =
+                    held.map_or_else(|| Arc::new(OrgOverlay::default()), |(held, _)| held);
+                self.org_overlays
+                    .put(org_id, overlay.clone(), Instant::now(), ORG_OVERLAY_RETRY);
+                overlay
+            }
+        }
+    }
+
+    /// Read one organisation's overlay from session-core. `None` on any failure, including session-core
+    /// answering UNAVAILABLE because its `SESSION_ORG_ROUTING_OVERLAY` switch is off.
+    async fn fetch_org_overlay(&self, org_id: &str) -> Option<OrgOverlay> {
+        let mut client = RoutingPolicyClient::new(self.channel.clone());
+        let request = self
+            .authed_request(GetOrgRoutingOverlayRequest {
+                org_id: org_id.to_owned(),
+            })
+            .await;
+        match client.get_org_routing_overlay(request).await {
+            Ok(response) => Some(OrgOverlay::from_json(&response.into_inner().config_json)),
+            Err(error) => {
+                tracing::warn!(%error, "org routing overlay fetch failed; keeping what is held");
+                None
+            }
+        }
+    }
+
     /// Persist `policy` to session-core, returning the stored policy as
-    /// session-core echoes it back. Errors are surfaced as `Err(String)` for
-    /// the explicit write path (the HTTP PUT handler).
+    /// session-core echoes it back. `expected_version` is the live version the
+    /// caller read: `None` sends 0, which session-core takes as an unchecked
+    /// write, and any other value must equal the live version or the write is
+    /// refused (W4-BYO-3). Errors are surfaced for the explicit write path (the
+    /// HTTP PUT handler).
     ///
     /// # Errors
     ///
-    /// Returns `Err` when serialization fails or session-core rejects/cannot
-    /// store the policy.
+    /// Returns [`PolicyWriteError::VersionConflict`] when the live version is no
+    /// longer `expected_version`, and [`PolicyWriteError::Failed`] when
+    /// serialization fails or session-core rejects or cannot store the policy.
     pub async fn set(
         &self,
         policy: &RoutingPolicy,
+        expected_version: Option<i64>,
         updated_by: &str,
-    ) -> Result<RoutingPolicy, String> {
-        let config_json =
-            serde_json::to_string(policy).map_err(|e| format!("serialize policy: {e}"))?;
+    ) -> Result<RoutingPolicy, PolicyWriteError> {
+        let config_json = serde_json::to_string(policy)
+            .map_err(|e| PolicyWriteError::Failed(format!("serialize policy: {e}")))?;
         let mut client = RoutingPolicyClient::new(self.channel.clone());
         let request = self
             .authed_request(SetRoutingPolicyRequest {
                 config_json,
                 updated_by: updated_by.to_owned(),
-                expected_version: 0,
+                expected_version: expected_version.unwrap_or(0),
             })
             .await;
         let resp = client
             .set_policy(request)
             .await
-            .map_err(|status| format!("session-core set_policy: {status}"))?
+            .map_err(|status| {
+                if status.code() == tonic::Code::Aborted {
+                    PolicyWriteError::VersionConflict
+                } else {
+                    PolicyWriteError::Failed(format!("session-core set_policy: {status}"))
+                }
+            })?
             .into_inner();
-        serde_json::from_str(&resp.config_json).map_err(|e| format!("parse stored policy: {e}"))
+        serde_json::from_str(&resp.config_json)
+            .map_err(|e| PolicyWriteError::Failed(format!("parse stored policy: {e}")))
+    }
+
+    /// The live policy's version as session-core holds it now. The conflict answer uses it to tell the admin how far
+    /// the policy has moved (W4-BYO-3). Fail-soft: `None` when the read fails.
+    pub async fn live_version(&self) -> Option<i64> {
+        let mut client = RoutingPolicyClient::new(self.channel.clone());
+        let request = self.authed_request(GetRoutingPolicyRequest {}).await;
+        match client.get_policy(request).await {
+            Ok(response) => Some(response.into_inner().version),
+            Err(error) => {
+                tracing::warn!(%error, "routing-policy version read failed after a conflict");
+                None
+            }
+        }
+    }
+
+    /// Record `policy` as a candidate in session-core instead of writing it live (EP-14 S10). `diff_json` is the
+    /// offline routing diff computed by inference-core. The live policy is untouched: the candidate goes live only
+    /// through [`Self::promote_candidate`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CandidateError`] when serialization fails or session-core refuses the proposal (including
+    /// `FAILED_PRECONDITION` when its candidate switch is off).
+    pub async fn propose_candidate(
+        &self,
+        policy: &RoutingPolicy,
+        proposed_by: &str,
+        diff_json: String,
+    ) -> Result<PolicyCandidate, CandidateError> {
+        let config_json = serde_json::to_string(policy)
+            .map_err(|e| CandidateError::local(format!("serialize policy: {e}")))?;
+        let mut client = RoutingPolicyClient::new(self.channel.clone());
+        let request = self
+            .authed_request(ProposeCandidateRequest {
+                config_json,
+                proposed_by: proposed_by.to_owned(),
+                diff_json,
+            })
+            .await;
+        let resp = client
+            .propose_candidate(request)
+            .await
+            .map_err(|status| CandidateError::from_status("propose_candidate", &status))?
+            .into_inner();
+        resp.candidate.ok_or_else(|| {
+            CandidateError::local("session-core propose_candidate returned no candidate".to_owned())
+        })
+    }
+
+    /// Make an evaluated candidate the live policy, returning the policy session-core wrote. The caller hot-swaps
+    /// its live copy with the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CandidateError`] carrying session-core's code: `ABORTED` when the live policy moved past the
+    /// candidate, `FAILED_PRECONDITION` when it is not evaluated (or the switch is off), `NOT_FOUND` for an unknown id.
+    pub async fn promote_candidate(
+        &self,
+        candidate_id: &str,
+        decided_by: &str,
+    ) -> Result<RoutingPolicy, CandidateError> {
+        let mut client = RoutingPolicyClient::new(self.channel.clone());
+        let request = self
+            .authed_request(PromoteCandidateRequest {
+                candidate_id: candidate_id.to_owned(),
+                decided_by: decided_by.to_owned(),
+            })
+            .await;
+        let resp = client
+            .promote_candidate(request)
+            .await
+            .map_err(|status| CandidateError::from_status("promote_candidate", &status))?
+            .into_inner();
+        let message = resp.policy.ok_or_else(|| {
+            CandidateError::local("session-core promote_candidate returned no policy".to_owned())
+        })?;
+        serde_json::from_str(&message.config_json)
+            .map_err(|e| CandidateError::local(format!("parse promoted policy: {e}")))
     }
 }
 

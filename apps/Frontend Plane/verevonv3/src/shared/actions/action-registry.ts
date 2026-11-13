@@ -1,7 +1,31 @@
 import { z } from 'zod'
 import type { ActionDescriptor } from '@/shared/actions/types'
 import { spaceActions } from '@/shared/actions/domains/spaces'
-import { threadExportInput } from '@/shared/actions/chat-history'
+import {
+  threadArchiveAction,
+  threadExportInput,
+  threadImportInput,
+  threadGrantSnapshotInput,
+  threadMarkUnreadAction,
+  threadRevokeSnapshotInput,
+  threadShareSnapshotInput,
+  threadStarAction,
+} from '@/shared/actions/chat-history'
+import {
+  chatLibraryListInput,
+  chatLibraryOpenOriginInput,
+  chatLibraryReadTextInput,
+  chatLibraryShareInput,
+} from '@/shared/actions/chat-library'
+import { reviewRunInput } from '@/shared/actions/chat-review'
+import {
+  connectionZdrAcknowledgeInput,
+  connectionZdrAcknowledgeOutput,
+  connectionZdrReadInput,
+  connectionZdrReadOutput,
+  connectionZdrRevokeInput,
+  connectionZdrRevokeOutput,
+} from '@/shared/actions/connection-zdr'
 import { checkMailEditLimits } from '@/shared/approvals/approval-edit-limits'
 
 const sourceInput = z.object({
@@ -724,6 +748,21 @@ const learningLearnFromThreadInput = z.object({
   note: z.string().trim().max(500).optional(),
 })
 
+// Teach mode (F-t3-081): one run the person drove or took over in the browser, the skill's name, and an
+// optional hint of at most 500 characters that the draft reads as data. The run id is bounded as the
+// gateway bounds it; whose run it is comes from the verified session, never from here.
+const learningTeachFromRunInput = z.object({
+  runId: z.string().trim().min(1).max(64),
+  name: z.string().trim().min(1).max(64),
+  goalHint: z.string().trim().max(500).optional(),
+})
+
+// The answer to a teach: the proposal's id and the review state it starts in (`proposed`).
+const learningTeachFromRunOutput = z.object({
+  skill_id: z.string().min(1),
+  review_state: z.string(),
+})
+
 // A skill the person saves from one of their own answers (EP-11 S1). The name, description and
 // content are bounded as the server bounds them, and the owner and the organisation come from the
 // verified session, never from here.
@@ -915,6 +954,28 @@ const mcpDeleteServerInput = z.object({
 const mcpShareServerInput = z.object({
   serverId: z.string().min(1),
   userIds: z.array(z.string().min(1)),
+})
+
+// The probe of an MCP server before it is saved (`POST /api/v1/mcp/servers/probe`, W4-CC-2). It takes the address
+// alone, so a credential has no field to travel in, and it answers the server's auth requirement and, when the server
+// needs no credential, its tools with the server's own hints. It registers nothing and is not a connect: connecting is
+// still the one entry point above. Served to the settings page only; the model is never offered it.
+const mcpProbeServerInput = z
+  .object({
+    url: z.string().trim().min(1).max(2048),
+  })
+  .strict()
+
+const mcpProbeServerOutput = z.object({
+  auth: z.enum(['none', 'oauth', 'bearer_required']),
+  tools: z.array(
+    z.object({
+      name: z.string(),
+      description: z.string(),
+      read_only_hint: z.boolean().nullable(),
+      destructive_hint: z.boolean().nullable(),
+    }),
+  ),
 })
 
 // A tool is approved by naming the digest of the definition the person reviewed,
@@ -1459,7 +1520,8 @@ const chatSetGoalInput = z
   .strict()
 
 // `expectedRevision` is the revision the goal bar showed, the server's compare-and-set. The status a
-// person may write is `active` or `paused` here; `met` and the stop states come only from the server.
+// person may write is `active` or `paused` here; `met` is marked only by `chat.goal_mark_done` (EP-7 S3), and the
+// stop states come only from the server.
 const chatUpdateGoalInput = z
   .object({
     threadId: z.string().min(1).max(128),
@@ -1507,11 +1569,51 @@ const chatGoalAutoToggleInput = z
   })
   .strict()
 
+// The person's own override of the judge (EP-7 S3): mark the open goal done, or reopen a met or blocked one. Only
+// the goal, its thread and the revision the goal bar showed; the server decides which status change is allowed.
+const chatGoalMarkDoneInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+    goalId: z.string().min(1).max(128),
+    expectedRevision: z.number().int().min(1),
+  })
+  .strict()
+
+const chatGoalReopenInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+    goalId: z.string().min(1).max(128),
+    expectedRevision: z.number().int().min(1),
+  })
+  .strict()
+
+// "Keep working while away" (EP-7 S6): the person's own start of a goal-bound schedule. The schedule is the stored
+// consent, so the form names the read tools it may use, the most runs, how often it fires (the four intervals the
+// goal bar offers) and for how many days. No org or user field: the server reads the owner from the session.
+const chatGoalAwayStartInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+    goalId: z.string().min(1).max(128),
+    tools: z.array(z.string().trim().min(1).max(128)).min(1).max(32),
+    maxRuns: z.number().int().min(1).max(20),
+    everyMinutes: z.union([z.literal(30), z.literal(60), z.literal(240), z.literal(1440)]),
+    days: z.number().int().min(1).max(90),
+  })
+  .strict()
+
 // A follow-up an inline widget proposed (EP-4 S3), staged as a chip the person clicks. Only the text: the widget,
 // the answer and the thread are the host's, and the bridge's own limit is 500 characters.
 const chatStageWidgetFollowupInput = z
   .object({
     text: z.string().min(1).max(500),
+  })
+  .strict()
+
+// A passage an inline widget selected (EP-4 W4-IO-2), quoted as a chip the person clicks into the composer. Only the
+// text: the widget, the answer and the thread are the host's, and the bridge's own limit is 2,000 characters.
+const chatStageWidgetSelectionInput = z
+  .object({
+    text: z.string().min(1).max(2000),
   })
   .strict()
 
@@ -1728,6 +1830,8 @@ const orgSetAgentPolicyInput = z
         mode_cap: z.enum(['lockdown', 'read_only', 'ask_first', 'auto']).optional(),
         rung_cap: z.enum(['read_only', 'workspace_write', 'danger_full_access']).optional(),
         lockdown: z.boolean().optional(),
+        // F-t3-083: the organization's agents-paused switch, held by capability-core under `agents.paused`.
+        'agents.paused': z.boolean().optional(),
         'ext.mcp_servers': orgAgentPolicyAllowListInput.optional(),
         mcp_tool_approval: z.enum(['approved_only', 'trust_annotations']).optional(),
       })
@@ -1907,6 +2011,64 @@ const orgHookRevokeOutput = z
   })
   .passthrough()
 
+// The organization's permission rules (W5-074-c, F-t3-074): a deny or ask rule on one tool, for one target. A rule only
+// tightens a call, so there is no allow. Inputs name no organization: the session supplies it. The target kinds are the
+// closed set capability-core stores: a web domain, a mail recipient's domain (never the address), a command prefix, or
+// any target of the tool. Inputs are camelCase like the rest of the registry; the REST bodies and the outputs are
+// capability-core's wire form.
+const orgPermissionRuleTargetKinds = ['domain', 'recipient', 'command_prefix', 'any'] as const
+
+const orgCreatePermissionRuleInput = z
+  .object({
+    toolPattern: z
+      .string()
+      .min(1)
+      .max(200)
+      .regex(/^(\*|[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}\*?)$/),
+    targetKind: z.enum(orgPermissionRuleTargetKinds),
+    targetPattern: z.string().min(1).max(200),
+    decision: z.enum(['deny', 'ask']),
+  })
+  .strict()
+  .refine((input) => input.targetKind !== 'any' || input.targetPattern === '*', {
+    message: 'an any-target rule takes the pattern *',
+    path: ['targetPattern'],
+  })
+
+const orgDeletePermissionRuleInput = z.object({ ruleId: z.string().min(1).max(200) }).strict()
+
+const orgPermissionRuleRecord = z
+  .object({
+    id: z.string(),
+    tool_pattern: z.string(),
+    target_kind: z.enum(orgPermissionRuleTargetKinds),
+    target_pattern: z.string(),
+    decision: z.enum(['deny', 'ask']),
+    created_by: z.string(),
+    created_at: z.string(),
+  })
+  .passthrough()
+
+const orgPermissionRuleListOutput = z
+  .object({
+    org_id: z.string(),
+    revision: z.number().int().min(0),
+    rules: z.array(orgPermissionRuleRecord),
+  })
+  .passthrough()
+
+const orgPermissionRuleWriteOutput = orgPermissionRuleRecord
+  .extend({ revision: z.number().int().min(0) })
+  .passthrough()
+
+const orgPermissionRuleDeleteOutput = z
+  .object({
+    id: z.string(),
+    deleted: z.literal(true),
+    revision: z.number().int().min(0),
+  })
+  .passthrough()
+
 const membershipInviteMemberInput = z.object({
   orgId: z.string().min(1),
   email: z.string().trim().email().max(320),
@@ -1983,19 +2145,6 @@ const chatQueueInvocationInput = z.object({
     .optional(),
 })
 
-// The granted approval named here is the gate for the continuation, so the entry
-// is not approval-gated a second time: the claim token proves the caller holds
-// the pause it resumes. Not model-executable (see model-eligibility.ts).
-//
-// approvalId is absent for the park form (WS03 S8): the continue of a run the executor
-// parked, which has no approval. A present approvalId is never blank; the empty approval
-// id on the wire is the client's to write for the park form, never a caller's input.
-const chatRunContinueInput = z.object({
-  runId: z.string().min(1),
-  approvalId: z.string().min(1).optional(),
-  claimToken: z.string().min(1),
-})
-
 // The person's answer to a question a run put to them (build plan WS14 S3), or a skip. A
 // question is its own store with its own owner-only answer, never an approval: an answer is
 // information and carries no authority, so the entry is low risk and shares nothing with the
@@ -2009,6 +2158,63 @@ const chatAnswerQuestionAnswer = z
     text: z.string().max(2000).optional(),
   })
   .strict()
+
+// The granted approval named here is the gate for the continuation, so the entry
+// is not approval-gated a second time: the claim token proves the caller holds
+// the pause it resumes. Not model-executable (see model-eligibility.ts).
+//
+// approvalId is absent for the park form (WS03 S8): the continue of a run the executor
+// parked, which has no approval. A present approvalId is never blank; the empty approval
+// id on the wire is the client's to write for the park form, never a caller's input.
+//
+// skipped is the skipped-site form ("Skip this site", EP-1 S2, D3-647): the approval named is the
+// person's DENIAL of a browser help pause, which spends nothing, and the run continues with that call
+// answered as skipped. It needs an approvalId, and is never part of the park form.
+//
+// questionId, answers and questionSkip are the QUESTION form (WS14 S5): the continuation of a run
+// paused for its owner's answer (awaiting_input). It names the open question, carries exactly one of
+// the answers (at least one, at most four) or questionSkip, and has no approvalId: no approval is read
+// or spent. It is never the skipped-site form. answers or questionSkip without a questionId are refused.
+const chatRunContinueInput = z
+  .object({
+    runId: z.string().min(1),
+    approvalId: z.string().min(1).optional(),
+    claimToken: z.string().min(1),
+    skipped: z.boolean().optional(),
+    questionId: z.string().min(1).max(64).optional(),
+    answers: z.array(chatAnswerQuestionAnswer).max(4).optional(),
+    questionSkip: z.boolean().optional(),
+  })
+  .refine((input) => input.skipped !== true || input.approvalId !== undefined, {
+    message: 'a skipped site names the denied approval',
+    path: ['approvalId'],
+  })
+  .superRefine((input, ctx) => {
+    const answerCount = (input.answers ?? []).length
+    if (input.questionId === undefined) {
+      if (answerCount > 0 || input.questionSkip !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          message: 'answers and questionSkip belong to the question form, which names a questionId',
+          path: ['questionId'],
+        })
+      }
+      return
+    }
+    if (input.approvalId !== undefined) {
+      ctx.addIssue({ code: 'custom', message: 'the question form names no approval', path: ['approvalId'] })
+    }
+    if (input.skipped === true) {
+      ctx.addIssue({ code: 'custom', message: 'the question form is not the skipped-site form', path: ['skipped'] })
+    }
+    if ((input.questionSkip === true) === (answerCount > 0)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'a question continue carries either answers or questionSkip, exactly one of them',
+        path: ['answers'],
+      })
+    }
+  })
 
 const chatAnswerQuestionInput = z
   .object({
@@ -2051,19 +2257,25 @@ export const approvalEditInput = z
 
 // The decision on a pending approval (build plan WS13 S2). The decider is the verified credential's,
 // never an input, so a field naming one, a decision source or a grant is refused rather than ignored.
-// `scope` is how far the decision reaches; only `once` exists until standing grants do. An `edit`
-// rides an approval only (EP-10-S6): a rejection has nothing to send.
+// `scope` is how far the decision reaches: `once` unless the server offered a standing scope in the
+// approval's scope_options. `promote` is "Always" (WS13 S7): a thread grant of an approval whose
+// cause offers a rule, and nothing else. An `edit` rides an approval only (EP-10-S6): a rejection
+// has nothing to send.
 const approvalsDecideInput = z
   .object({
     approvalId: z.string().min(1),
     decision: z.enum(['approve', 'reject']),
     reason: z.string().max(500).optional(),
-    scope: z.literal('once').optional(),
+    scope: z.enum(['once', 'thread', 'run']).optional(),
+    promote: z.boolean().optional(),
     edit: approvalEditInput.optional(),
   })
   .strict()
   .refine((input) => input.edit === undefined || input.decision === 'approve', {
     message: 'edit_requires_grant',
+  })
+  .refine((input) => !input.promote || (input.decision === 'approve' && input.scope === 'thread'), {
+    message: 'rule_not_offered',
   })
 
 // The full draft behind a pending write approval (EP-10-S1). Only the approval id is an input: the
@@ -2095,6 +2307,74 @@ const approvalsPreviewOutput = z.object({
   canEdit: z.boolean().optional(),
 })
 
+// A standing approval grant as the thread list shows it (WS13-S6). No argument value and no other
+// person's grant ever rides here: the list is the caller's own, in one thread.
+const approvalGrantOutput = z.object({
+  id: z.string(),
+  threadId: z.string(),
+  runId: z.string().nullable(),
+  scope: z.enum(['thread', 'run']),
+  toolName: z.string(),
+  effectClass: z.string(),
+  causeCode: z.string(),
+  createdAt: z.string(),
+  expiresAt: z.string(),
+  revokedAt: z.string().nullable(),
+  useCount: z.number().int().nonnegative(),
+  lastUsedAt: z.string().nullable(),
+})
+
+// The caller's own grants in one thread (WS13-S6). Only the thread id is an input: the org and the
+// owner are the verified credential's.
+export const approvalsListGrantsInput = z
+  .object({
+    threadId: z.string().min(1).max(128),
+  })
+  .strict()
+
+const approvalsListGrantsOutput = z.object({
+  grants: z.array(approvalGrantOutput),
+})
+
+// Revoking one of the caller's own grants (WS13-S6). The id is the grant's `apg_` id, never a thread
+// or a tool, so one revoke narrows exactly one standing authority.
+export const approvalsRevokeGrantInput = z
+  .object({
+    grantId: z.string().regex(/^apg_[A-Za-z0-9_-]{1,124}$/),
+  })
+  .strict()
+
+const approvalsRevokeGrantOutput = z.object({
+  grant: approvalGrantOutput.optional(),
+})
+
+// A rule an "Always" approval proposed (WS13-S7), as the projection names it. The capability and the
+// digest are shown, never sent: the server confirms from its own record of the proposal.
+const approvalRuleProposalOutput = z.object({
+  id: z.string(),
+  toolName: z.string(),
+  toolDigest: z.string(),
+  capabilityId: z.string(),
+  createdAt: z.string(),
+})
+
+// The caller's open rule proposals (WS13-S7). No input: the org and the owner are the verified credential's.
+const approvalsListRuleProposalsInput = z.object({}).strict()
+
+const approvalsListRuleProposalsOutput = z.object({
+  proposals: z.array(approvalRuleProposalOutput),
+})
+
+// Confirming or dismissing one proposal (WS13-S7). Only the proposal's `arp_` id is an input: the
+// capability, the digest, the scope and the expiry are the server's own record, never the client's.
+export const approvalsConfirmRuleInput = z
+  .object({
+    proposalId: z.string().regex(/^arp_[A-Za-z0-9_-]{1,124}$/),
+  })
+  .strict()
+
+export const approvalsDismissRuleInput = approvalsConfirmRuleInput
+
 const chatClearThreadsInput = z.object({})
 
 const chatDeleteThreadInput = z.object({
@@ -2117,6 +2397,45 @@ const chatSaveThreadSnapshotInput = z.object({
 const threadExportOutput = z.object({
   contentType: z.string().min(1),
   filename: z.string().min(1),
+})
+
+// The new thread an import made (EP-12 S15): its id, how many turns it kept and how many things the file held that it left out.
+const threadImportOutput = z.object({
+  threadId: z.string().min(1),
+  importedMessages: z.number().int().nonnegative(),
+  dropped: z.number().int().nonnegative(),
+})
+
+// A snapshot as the owner sees it (W4-SH-6): the id a grant names, the thread it copies and when it was taken or revoked.
+// The copy itself is read through the shared-snapshot route, never returned by these writes.
+const threadSnapshotOutput = z.object({
+  id: z.string().min(1),
+  threadId: z.string().min(1),
+  title: z.string(),
+  createdAt: z.string(),
+  revokedAt: z.string().nullable(),
+})
+
+// One member grant on a snapshot (W4-SH-6): the member and when Control recorded the grant.
+const threadSnapshotGrantOutput = z.object({
+  granteeUserId: z.string().min(1),
+  grantedAt: z.string().nullable(),
+})
+
+// The library's answers (F-t3-080): one page of document metadata, never text, and one document's text when it is read.
+const chatLibraryListOutput = z.object({
+  documents: z.array(z.record(z.string(), z.unknown())),
+  total: z.number().int().nonnegative(),
+})
+
+const chatLibraryReadTextOutput = z.object({
+  content: z.string(),
+})
+
+// The review's answer (F-t3-086): one card under `data.run`. The card's fields are read where the client reads them
+// (chat-client.ts), so the registry only checks that the card is there.
+const reviewRunOutput = z.object({
+  data: z.object({ run: z.record(z.string(), z.unknown()) }),
 })
 
 const chatUploadDocumentInput = z.object({
@@ -2469,6 +2788,17 @@ const routerPolicyRoleInput = z.object({
   effort: z.string().optional(),
 })
 
+// The platform catalogue overlay (F-t3-065 phase 1): the models the listing hides, the order it puts first and the alias
+// ids that stand for a listed model. inference-core caps the lists at 200, 200 and 50 entries, and an alias id is one to
+// 64 lower-case letters, digits, `.`, `_` or `-`; it checks the aliases against the catalogue on every write.
+const routerPolicyCatalogueOverlayInput = z.object({
+  hidden: z.array(z.string().min(1)).max(200),
+  order: z.array(z.string().min(1)).max(200),
+  aliases: z
+    .record(z.string().regex(/^[a-z0-9._-]{1,64}$/), z.string().min(1))
+    .refine((aliases) => Object.keys(aliases).length <= 50, 'at most 50 aliases'),
+})
+
 // The owner enforces no admin gate on this write today — only org-scoping.
 // See dispatch_router_policy_update's own comment: the high risk/
 // requires-approval posture here compensates for that at the registry level,
@@ -2504,6 +2834,7 @@ const routerPolicyUpdateInput = z.object({
   }),
   tool_fallback_ladder: z.array(z.string().min(1)).max(8),
   roles: z.partialRecord(z.enum(routerPolicyRolePurposes), routerPolicyRoleInput).optional(),
+  catalogue_overlay: routerPolicyCatalogueOverlayInput.optional(),
 })
 
 const chatSubmitFeedbackInput = z.object({
@@ -2636,6 +2967,49 @@ const auditDeleteSiemDestinationInput = z.object({
   destinationId: z.string().min(1).max(64),
 })
 
+// W4-BYO-6: an organisation's own OpenAI-compatible model gateway. The key is sent once, sealed by
+// Integration Core and never read back. A customer gateway is never zero data retention.
+const modelsCreateCustomerGatewayInput = z
+  .object({
+    name: z.string().trim().min(1).max(120),
+    base_url: z.string().trim().min(1).max(2048),
+    api_key: z.string().min(1).max(4096),
+    model_ids: z.array(z.string().trim().min(1).max(128)).min(1).max(20),
+  })
+  .strict()
+
+const modelsDeleteCustomerGatewayInput = z
+  .object({
+    connection_id: z.string().trim().min(1).max(128),
+  })
+  .strict()
+
+// W4-CC-8: an organisation's stored connector keys and its custom REST connector. The key is sent once and never read
+// back; Integration Core seals it. Strict, so a field the form never sends (an organisation, a host override) is refused.
+const connectorsCreateCredentialBindingInput = z
+  .object({
+    kind: z.enum(['mcp_bearer', 'rest_api_key', 'rest_bearer']),
+    host: z.string().trim().min(1).max(253),
+    header_name: z.enum(['Authorization', 'X-Api-Key', 'Api-Key', 'X-Auth-Token']),
+    allowed_methods: z.array(z.enum(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'])).min(1).max(7),
+    allowed_path_prefixes: z.array(z.string().min(1).max(256)).min(1).max(32),
+    secret: z.string().min(1).max(4096),
+  })
+  .strict()
+
+const connectorsRevokeCredentialBindingInput = z
+  .object({
+    binding_id: z.string().trim().min(1).max(128),
+  })
+  .strict()
+
+const connectorsCreateCustomRestInput = z
+  .object({
+    name: z.string().trim().min(1).max(120),
+    credential_binding_id: z.string().trim().min(1).max(128),
+  })
+  .strict()
+
 const envelopeStatusOutput = z.object({
   status: z.string(),
 })
@@ -2673,6 +3047,90 @@ const scheduleRunNowInput = z
     requestId: z.string().regex(/^[A-Za-z0-9-]{16,64}$/),
   })
   .strict()
+
+// Event triggers (Wave 4 EP-7, F-t3-047, W4-T8): a webhook event on one connection may wake a run of the person's own
+// schedule. The automations hub calls these through event-trigger-client.ts. Strict, camelCase and person-only: a model
+// never creates, changes or dry runs a trigger (MODEL_ACCESS 'none'). Session Core checks the member, the connection,
+// the Space, the schedule's approval and the closed wake filter, so these shapes only bound what the hub sends.
+const eventTriggerWakeFilterInput = z
+  .string()
+  .max(4096)
+  .refine((value) => {
+    if (value.trim() === '') return true
+    try {
+      const parsed: unknown = JSON.parse(value)
+      return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+    } catch {
+      return false
+    }
+  }, 'wakeFilterJson is empty or a JSON object')
+
+const eventTriggerListInput = z
+  .object({
+    spaceRef: z.string().trim().min(1).max(128).optional(),
+  })
+  .strict()
+
+const eventTriggerCreateInput = z
+  .object({
+    spaceRef: z.string().trim().min(1).max(128),
+    connectionId: z.string().trim().min(1).max(128),
+    eventType: z.literal('webhook_received'),
+    name: z.string().trim().min(1).max(120),
+    clockEnabled: z.boolean().optional(),
+    scheduleId: z.string().trim().min(1).max(128).optional(),
+    wakeFilterJson: eventTriggerWakeFilterInput.optional(),
+  })
+  .strict()
+
+const eventTriggerUpdateInput = z
+  .object({
+    triggerId: z.string().trim().min(1).max(128),
+    expectedRevision: z.number().int().min(1),
+    updatePaths: z.array(z.enum(['name', 'clock_enabled', 'status', 'schedule_id', 'wake_filter_json'])).min(1).max(5),
+    name: z.string().trim().min(1).max(120).optional(),
+    clockEnabled: z.boolean().optional(),
+    status: z.enum(['active', 'paused', 'disabled']).optional(),
+    scheduleId: z.string().trim().max(128).optional(),
+    wakeFilterJson: eventTriggerWakeFilterInput.optional(),
+  })
+  .strict()
+
+const eventTriggerDryRunInput = z
+  .object({
+    triggerId: z.string().trim().min(1).max(128),
+    webhookEventId: z.string().trim().min(1).max(128),
+  })
+  .strict()
+
+const eventTriggerRecordOutput = z.object({
+  id: z.string(),
+  spaceRef: z.string(),
+  connectionId: z.string(),
+  eventType: z.string(),
+  name: z.string(),
+  clockEnabled: z.boolean(),
+  status: z.string(),
+  revision: z.number(),
+  scheduleId: z.string().nullable(),
+  wakeFilterJson: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+})
+
+const eventTriggerListOutput = z.object({
+  triggers: z.array(eventTriggerRecordOutput),
+})
+
+const eventTriggerEnvelopeOutput = z.object({
+  trigger: eventTriggerRecordOutput,
+})
+
+const eventTriggerDryRunOutput = z.object({
+  wouldWake: z.boolean(),
+  reason: z.string(),
+  matched: z.array(z.string()),
+})
 
 // The agents landing's read of the org's definitions and the rooms each is installed in (EP-6-S5).
 // Strict and empty: the organisation comes from the session, never from the caller.
@@ -2761,6 +3219,146 @@ const agentVersionsListOutput = z.object({
       published_at: z.number(),
     }),
   ),
+})
+
+// The builder's preview (EP-6-S8): one question answered by an agent's saved draft in a temporary chat.
+// Strict and bounded: it names the agent and the question, and nothing a thread, a Space or a mention
+// would bind it to. The BFF enforces the same refusals and the builder's access check, and stores nothing.
+const agentPreviewInput = z
+  .object({
+    agentRef: z.string().trim().min(1).max(128),
+    content: z.string().trim().min(1).max(32_000),
+  })
+  .strict()
+
+// The owner actions an org's run view can offer (EP-6 S11), read by the agent presets. Strict and
+// empty: the organisation comes from the session. The answer is a mode and action ids, never a schema.
+const agentAdmittedActionsListInput = z.object({}).strict()
+
+const agentAdmittedActionsListOutput = z.object({
+  mode: z.string(),
+  action_ids: z.array(z.string()),
+})
+
+// EP-6 P3-c: the notes one bound agent kept in one Space (`GET /api/v1/spaces/{space_ref}/memory?agent_subject_id=`).
+// The Space comes from the path, and Control decides who may read it (the room's owner or an admin). The notes
+// are quoted context and grant the agent nothing. A Zero Data Retention caller is refused as `named_agent`.
+const spaceAgentMemoryListInput = z.object({
+  spaceRef: z.string().min(1),
+  agentSubjectId: z.string().min(1).max(64),
+})
+
+const spaceAgentMemoryListOutput = z.object({
+  memories: z.array(
+    z.object({
+      memory_id: z.string(),
+      content: z.string(),
+      updated_at: z.string(),
+      provenance: z.string(),
+      source_label: z.string(),
+      thread_id: z.string(),
+      withheld: z.boolean(),
+    }),
+  ),
+  withheld: z.number().int().min(0),
+})
+
+// EP-6 P3-c: one note of one bound agent, removed for every member of the Space through the Space's own delete
+// route. It names the memory id only, and Control decides who may delete (the room's owner or an admin).
+const spaceAgentMemoryDeleteInput = z.object({
+  spaceRef: z.string().min(1),
+  memoryId: z.string().min(1).max(64),
+})
+
+const spaceAgentMemoryDeleteOutput = z.object({
+  memory_id: z.string(),
+  deleted: z.boolean(),
+})
+
+// W4-PL-4: the org's plugin catalogue, and the admin's install, uninstall, catalogue and kill-list writes (F-t3-059).
+// Human only: every row is model access none, so the agent is never offered these. The routes are the gateway's
+// pass-through to capability-core (agent_actions.rs), and capability-core decides every admin, zero-data-retention,
+// consent and kill check. A digest has the shape capability-core writes: sha256 and 64 lower-case hex digits.
+const pluginDigestInput = z.string().regex(/^sha256:[0-9a-f]{64}$/)
+const pluginIdInput = z.string().trim().min(1).max(200)
+
+const pluginsListCatalogInput = z.object({}).strict()
+
+const pluginCatalogOutput = z.object({
+  plugins: z.array(
+    z.object({
+      id: z.string(),
+      name: z.string(),
+      version: z.string(),
+      description: z.string(),
+      risk_level: z.string(),
+      enabled: z.boolean(),
+      rollout_state: z.string(),
+      source_kind: z.string(),
+      source_ref: z.string(),
+      source_pin: z.string(),
+      manifest_digest: z.string(),
+      installed: z.boolean(),
+      components: z.array(z.object({ kind: z.string(), name: z.string(), status: z.string() })),
+    }),
+  ),
+})
+
+const pluginIdOnlyInput = z.object({ pluginId: pluginIdInput }).strict()
+
+const pluginInstallInput = z
+  .object({
+    pluginId: pluginIdInput,
+    consentedDigests: z.array(pluginDigestInput).min(1).max(256),
+  })
+  .strict()
+
+const pluginInstallOutput = z.object({
+  plugin_id: z.string(),
+  installed: z.boolean(),
+  components: z.array(
+    z.object({ kind: z.string(), name: z.string(), digest: z.string(), status: z.string(), report: z.string().optional() }),
+  ),
+  children: z.array(z.object({ kind: z.string(), name: z.string(), id: z.string(), digest: z.string().optional() })),
+})
+
+const pluginCatalogApproveInput = z
+  .object({
+    pluginId: pluginIdInput,
+    approved: z.boolean(),
+  })
+  .strict()
+
+const pluginCatalogApproveOutput = z.object({
+  id: z.string(),
+  catalog_approved: z.boolean(),
+  updated_at: z.string(),
+})
+
+const pluginKillDigestInput = z
+  .object({
+    digest: pluginDigestInput,
+    reason: z.string().trim().min(1).max(500),
+  })
+  .strict()
+
+const pluginKillDigestOutput = z.object({
+  digest: z.string(),
+  scope: z.string(),
+  org_id: z.string(),
+  created: z.boolean(),
+  uninstalled_plugins: z.array(z.string()),
+  children_removed: z.number().int().min(0),
+})
+
+// The admin's lift of an org kill-list entry (W4-PL-4): the digest in, the removal the route answers with out.
+const pluginLiftKillInput = z.object({ digest: pluginDigestInput }).strict()
+
+const pluginKillRemovalOutput = z.object({
+  digest: z.string(),
+  scope: z.string(),
+  org_id: z.string(),
+  removed: z.boolean(),
 })
 
 // Registry entries are the product contract shared by humans and the Model Plane.
@@ -3748,6 +4346,28 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'spaces.agent_memory.list',
+    label: 'List a Space agent\'s notes',
+    description: 'List the notes one bound agent kept in this room, for the room\'s owner or manager. Read only. The notes are quoted context and grant the agent nothing. Refused under Zero Data Retention.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceAgentMemoryListInput,
+    outputSchema: spaceAgentMemoryListOutput,
+  },
+  {
+    id: 'spaces.agent_memory.delete',
+    label: 'Delete a Space agent\'s note',
+    description: 'Delete one note an agent kept in this room. The room stops remembering it for every member. Destructive and non-recoverable; allowed under every retention setting.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: spaceAgentMemoryDeleteInput,
+    outputSchema: spaceAgentMemoryDeleteOutput,
+  },
+  {
     id: 'learning.accept_skill',
     label: 'Accept learned skill',
     description: 'Accept a skill Verevon proposed from the caller\'s own conversation, so it is used in their chats. Only the owner of the proposal can decide it.',
@@ -3790,6 +4410,17 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: learningLearnFromThreadInput,
     outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'learning.teach_skill_from_run',
+    label: 'Save these steps as a skill',
+    description: 'Save the steps the caller took in one browser run, after they gave the browser back, as a disabled skill proposal in the caller\'s learning inbox. The name and the optional hint are the caller\'s text, bounded here as the server bounds them. The owner is the verified session. Nothing is used until they accept it. Hidden and refused in a temporary chat, and refused for an organization that keeps no content (zero data retention). Never model-executable: a model does not decide what Verevon learns.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: learningTeachFromRunInput,
+    outputSchema: learningTeachFromRunOutput,
   },
   {
     id: 'skills.save_from_message',
@@ -4001,6 +4632,17 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'mcp.probe_server',
+    label: 'Probe MCP server',
+    description: 'Ask what an MCP server needs before it is saved: its auth requirement and, when it needs no credential, up to 64 of its tools with the server\'s own hints. Read only. Saves nothing, registers nothing and sends no credential. Refused under zero data retention.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: mcpProbeServerInput,
+    outputSchema: mcpProbeServerOutput,
+  },
+  {
     id: 'mcp.delete_server',
     label: 'Delete MCP server',
     description: 'Delete a connected MCP server.',
@@ -4168,6 +4810,39 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: orgDeleteHookInput,
     outputSchema: orgHookRevokeOutput,
+  },
+  {
+    id: 'org.list_permission_rules',
+    label: 'List organization permission rules',
+    description: 'Read the deny and ask rules that tighten the tool calls of the organization agents, and the policy revision they are at. Any member of the organization may read them. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: z.object({}).strict(),
+    outputSchema: orgPermissionRuleListOutput,
+  },
+  {
+    id: 'org.create_permission_rule',
+    label: 'Add organization permission rule',
+    description: 'Add a rule that denies, or asks first about, one tool call of the organization agents for one target: a web domain, a mail recipient domain (never an address), a command prefix, or any target of the tool. A rule only tightens a call and never allows one. Takes effect only where the deployment has switched permission rules on. An org admin only. Refused typed under zero data retention. Never model-executable: a model does not set the rules it runs under.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgCreatePermissionRuleInput,
+    outputSchema: orgPermissionRuleWriteOutput,
+  },
+  {
+    id: 'org.delete_permission_rule',
+    label: 'Remove organization permission rule',
+    description: 'Remove an organization permission rule, so it no longer tightens the calls it covered. The removal is audited. An org admin only. Refused typed under zero data retention. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: orgDeletePermissionRuleInput,
+    outputSchema: orgPermissionRuleDeleteOutput,
   },
   {
     id: 'monitoring.check_now',
@@ -4876,7 +5551,7 @@ export const actionRegistry = [
   {
     id: 'chat.run.continue',
     label: 'Continue approved run',
-    description: 'Resume a run that paused for a granted approval: the approved call runs once under the authority the pause recorded, then the same run finishes. Streams the continuation. The claim token is single use, and every consumed approval is refused with 409 continuation_already_consumed, the same token included. The closed refusals, and what each says about the spend, live in chat-run-continue-contract.ts. A connected or error frame carrying approval_spent true is final: follow the run and never retry with a new token. After an ambiguous failure (a 502 upstream_unavailable, a 504, a network error, an error frame from the closed set without approval_spent, or a not_resumable, approval_not_found or continue_disabled that a spent approval can also get) do not assume either way: follow the run by its id with the existing run read; the run read is the arbiter. A retry with the same token is answered either with the continuation or with a refusal, and only 409 continuation_already_consumed means the click was spent; not_resumable, approval_not_found and continue_disabled leave the spend unknown. Following the run does not promise that the run is live: after continue_unavailable a run may still be recovered inside the recovery window, about 15 minutes from the consume. The thread\'s approved plan and its grant are not consumed. A PARKED run (one the executor parked at a round boundary) is continued through this same action in its park form: omit approvalId and send only runId and claimToken. No approval is read and nothing is spent, so a failure frame carrying park_continue true never says approval_spent. It uses the closed refusals, including park_not_restorable, park_route_unavailable and park_not_due, and the client follows the run by its id with the existing run read. The run read is the arbiter of whether the run stays parked: not_resumable and park_not_restorable say it does not, continue_outcome_unknown, continue_in_progress and a bare agent_dispatch_unavailable on a park stream leave that unknown, and every other park refusal leaves it parked.',
+    description: 'Resume a run that paused for a granted approval: the approved call runs once under the authority the pause recorded, then the same run finishes. Streams the continuation. The claim token is single use, and every consumed approval is refused with 409 continuation_already_consumed, the same token included. The closed refusals, and what each says about the spend, live in chat-run-continue-contract.ts. A connected or error frame carrying approval_spent true is final: follow the run and never retry with a new token. After an ambiguous failure (a 502 upstream_unavailable, a 504, a network error, an error frame from the closed set without approval_spent, or a not_resumable, approval_not_found or continue_disabled that a spent approval can also get) do not assume either way: follow the run by its id with the existing run read; the run read is the arbiter. A retry with the same token is answered either with the continuation or with a refusal, and only 409 continuation_already_consumed means the click was spent; not_resumable, approval_not_found and continue_disabled leave the spend unknown. Following the run does not promise that the run is live: after continue_unavailable a run may still be recovered inside the recovery window, about 15 minutes from the consume. The thread\'s approved plan and its grant are not consumed. A PARKED run (one the executor parked at a round boundary) is continued through this same action in its park form: omit approvalId and send only runId and claimToken. No approval is read and nothing is spent, so a failure frame carrying park_continue true never says approval_spent. It uses the closed refusals, including park_not_restorable, park_route_unavailable and park_not_due, and the client follows the run by its id with the existing run read. The run read is the arbiter of whether the run stays parked: not_resumable and park_not_restorable say it does not, continue_outcome_unknown, continue_in_progress and a bare agent_dispatch_unavailable on a park stream leave that unknown, and every other park refusal leaves it parked. A run paused for its owner\'s answer (awaiting_input) is continued through this action in its question form (runId, questionId, answers or questionSkip, claimToken); the answer is recorded if still open and the same run continues with it; nothing is approved and no approval is spent. Failure frames carry question_continue true, and only question_answer_released means the client sends the answer once as the next message.',
     ownerPlane: 'model',
     risk: 'high',
     requiresApproval: false,
@@ -4898,7 +5573,7 @@ export const actionRegistry = [
   {
     id: 'approvals.decide',
     label: 'Decide an approval',
-    description: 'Approve or reject one pending approval of a run, for this one call. Only the person the approval is requested of can decide it; the decider is the verified credential, never an input, and a client field naming a decider, a decision source or a grant is refused 400. A scope other than once is refused 422 scope_not_enabled until standing grants exist, so a caller never believes it granted more than it did. A decision is idempotent, and a different second decision is a 412 conflict. Refused typed under zero data retention and for a waived credential, since such a run holds no approval. An approval may carry edit {patch, baseFingerprint}: the person\'s changes to a drafted mail send (to, subject, bodyText only), approved for this one call; an edit with a reject is refused edit_requires_grant, a draft that changed since the person saw it is a 409 approval_changed, and while edits are switched off the server refuses it 403 approval_edit_disabled. Never model-executable: an approval is the person\'s own authority, and a model deciding its own approval would void the gate.',
+    description: 'Approve or reject one pending approval of a run, for this one call. Only the person the approval is requested of can decide it; the decider is the verified credential, never an input, and a client field naming a decider, a decision source or a grant is refused 400. A standing scope (thread or run) is offered only through the approval cause\'s scope_options while standing grants are switched on; otherwise it is refused 422 scope_not_enabled, so a caller never believes it granted more than it did. promote (\'Always\') is accepted only on a thread grant of a cause whose rule is offered (a pinned MCP tool paused only by its high-risk capability check), else 422 rule_not_offered, and it proposes a rule the person must confirm in settings; it does not lift any other pause. A decision is idempotent, and a different second decision is a 412 conflict. Refused typed under zero data retention and for a waived credential, since such a run holds no approval. An approval may carry edit {patch, baseFingerprint}: the person\'s changes to a drafted mail send (to, subject, bodyText only), approved for this one call; an edit with a reject is refused edit_requires_grant, a draft that changed since the person saw it is a 409 approval_changed, and while edits are switched off the server refuses it 403 approval_edit_disabled. Never model-executable: an approval is the person\'s own authority, and a model deciding its own approval would void the gate.',
     ownerPlane: 'model',
     risk: 'high',
     requiresApproval: false,
@@ -4916,6 +5591,61 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: approvalsPreviewInput,
     outputSchema: approvalsPreviewOutput,
+  },
+  {
+    id: 'approvals.list_grants',
+    label: 'List the approval grants of a thread',
+    description: "List the caller's own live and past thread and run approval grants in one thread: the tool, how far it reaches, when it lapses, whether it was revoked and how often it was used. Read-only. Never another person's grant, and never an argument value. Empty for a zero-retention principal, since such a run holds no grant. Served with the grant switch off too, so a grant made while it was on stays visible. Never model-executable: a person's standing authority is shown to that person.",
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: approvalsListGrantsInput,
+    outputSchema: approvalsListGrantsOutput,
+  },
+  {
+    id: 'approvals.revoke_grant',
+    label: 'Revoke an approval grant',
+    description: "Revoke one of the caller's own standing approval grants at once, so the next matching call pauses for approval again. Idempotent: revoking a revoked grant answers the same. Works with the grant switch off (it only narrows authority). Refused by session-core for a zero-retention credential, since a zero-retention principal holds no grant; allowed for a waived credential. Another person's grant and an unknown id answer the same 404. Not reversible: a revoked grant is not restored, the next approval makes a new one. Never model-executable: a person's authority is managed by that person.",
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: approvalsRevokeGrantInput,
+    outputSchema: approvalsRevokeGrantOutput,
+  },
+  {
+    id: 'approvals.list_rule_proposals',
+    label: 'List the rules proposed from approvals',
+    description: "List the caller's own open rule proposals: the tools the person chose \"Always\" for, which are not rules until confirmed. Read-only; it changes nothing and grants nothing. Never another person's proposal, and never an argument value. Empty for a zero-retention principal, since such a run holds no proposal. Served with the server switch off too, so open proposals stay visible. Never model-executable: a person's standing authority is shown to that person.",
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: approvalsListRuleProposalsInput,
+    outputSchema: approvalsListRuleProposalsOutput,
+  },
+  {
+    id: 'approvals.confirm_rule',
+    label: 'Confirm a proposed approval rule',
+    description: "Confirm one of the caller's own rule proposals. The server writes a user-scope allow pinned to the reviewed tool definition, lapsing after 90 days, from its own record of the proposal; the client names the proposal and nothing else (no capability, digest, scope or expiry). A tool that changed since it was approved is refused 409 rule_proposal_stale (or the capability-core digest refusal), and the person approves it again in a conversation. While the server switch is off it answers 404 rule_proposals_disabled. 503 rule_confirm_incomplete means the confirmation did not finish and is safe to retry. Refused typed under zero data retention and for a waived credential, since such a run holds no proposal. The rule lifts only the tool's high-risk capability check (D-WS13-8); every other check, such as the permission mode, still applies. Reversible: the rule can be revoked in tool policies. Never model-executable: a model may propose but never grant its own permission.",
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: approvalsConfirmRuleInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'approvals.dismiss_rule',
+    label: 'Dismiss a proposed approval rule',
+    description: "Dismiss one of the caller's own rule proposals, so it is no longer offered and no rule is written. Works with the server switch off (it only narrows authority). A proposal that is being confirmed right now is refused 409 rule_proposal_busy; try again in a minute. Refused typed under zero data retention and for a waived credential. Never model-executable: a person's authority is managed by that person.",
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: approvalsDismissRuleInput,
+    outputSchema: envelopeStatusOutput,
   },
   {
     id: 'chat.clear_threads',
@@ -4963,6 +5693,39 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'chat.thread.archive',
+    label: 'Archive chat thread',
+    description: 'Hide one of the caller\'s own chat threads from the ordinary list. It stays in the archive and can be restored. Owner only; never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: threadArchiveAction.omit({ type: true }),
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.thread.star',
+    label: 'Star chat thread',
+    description: 'Star or unstar one of the caller\'s own chat threads. A star is the person\'s own mark, so it is never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: threadStarAction.omit({ type: true }),
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.thread.mark_unread',
+    label: 'Mark chat thread unread',
+    description: 'Mark one of the caller\'s own chat threads unread, so it returns to the attention list. Owner only; never model-executable.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: threadMarkUnreadAction.omit({ type: true }),
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'thread.export',
     label: 'Export chat thread',
     description: 'Download one of the caller\'s own chat conversations as a file, JSON (verevon.thread-export.v1) or Markdown, in full or redacted; redacted leaves out tool payloads, connector data and attachment names. Owner only, and read only: nothing is changed or stored. Refused under zero data retention, for a thread with a run kept outside retention, and for a Space conversation; the route answers 404 while the export is off. Never model-executable: a model does not take a copy of a person\'s conversation off the platform.',
@@ -4972,6 +5735,50 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: threadExportInput,
     outputSchema: threadExportOutput,
+  },
+  {
+    id: 'thread.share_snapshot',
+    label: 'Take a conversation snapshot',
+    description: 'Take an immutable, redacted copy of one of the caller\'s own chat conversations so it can be shared with named members of the organisation. There is no public link: the snapshot is read only by its owner and by members the owner then grants a view of. Nothing is shared by taking it. Owner only. Refused under zero data retention, for a waived caller, for a Space conversation and for a thread with a run kept outside retention; at most 20 live snapshots per thread; the route answers 404 while snapshots are off. Never model-executable: a model does not copy a person\'s conversation for others.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: threadShareSnapshotInput,
+    outputSchema: threadSnapshotOutput,
+  },
+  {
+    id: 'thread.revoke_snapshot',
+    label: 'Revoke a conversation snapshot',
+    description: 'Revoke one of the caller\'s own conversation snapshots: its copy is deleted and so is every member grant on it, so nobody can read it again. Owner only. Allowed under zero data retention, since revoking makes no copy. Irreversible: a revoked snapshot is gone, and a new one has to be taken. Never model-executable.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: threadRevokeSnapshotInput,
+    outputSchema: threadSnapshotOutput,
+  },
+  {
+    id: 'thread.grant_snapshot',
+    label: 'Share a snapshot with a member',
+    description: 'Give one member of the caller\'s own organisation a view of a live conversation snapshot, or take that view away (change add or remove). The grant is Control\'s: the member reads the redacted copy as static text, only while they are a member and the snapshot is live, and the role is always view. Owner only. Refused under zero data retention for add, for a member outside the organisation, and for a revoked snapshot; the route answers 404 while snapshots are off. Reversible: remove undoes add. Never model-executable: a model never grants access to a person\'s conversation.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: threadGrantSnapshotInput,
+    outputSchema: threadSnapshotGrantOutput,
+  },
+  {
+    id: 'thread.import',
+    label: 'Import chat thread',
+    description: 'Make a new chat thread the caller owns from one of their own conversation export files (verevon.thread-export.v1, JSON, at most 2 MiB). The file is untrusted input: it is parsed strictly, only the person\'s and the assistant\'s text is kept as quoted text, and what the file holds that a thread does not keep is left out and counted. Owner only. Refused under zero data retention and for a waived caller; the route answers 404 while the import is off. Never model-executable: a model does not write a person\'s conversation into their history.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: threadImportInput,
+    outputSchema: threadImportOutput,
   },
   {
     id: 'chat.save_artifact_revision',
@@ -5016,6 +5823,94 @@ export const actionRegistry = [
     reversible: false,
     inputSchema: chatSaveArtifactToKnowledgeInput,
     outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'library.list',
+    label: 'List chat library',
+    description: "List the person's saved chat files, generated artifact copies, uploaded text, or both, newest first, one page at a time. Read only: nothing is changed. The viewer's own predicate applies (their own files, files shared with them, and org-visible files), Space room files are left out, and a page carries metadata, never text. Off until the gateway's artifact promote switch is on. Never model-executable: a model does not browse the person's saved files.",
+    ownerPlane: 'data',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatLibraryListInput,
+    outputSchema: chatLibraryListOutput,
+  },
+  {
+    id: 'library.read_text',
+    label: 'Read a chat library file',
+    description: "Read the text of one saved chat file by its document id, through the knowledge document route. Read only: nothing is changed or stored, and only a file the viewer may read is returned. Never model-executable: a model does not take the text of the person's saved files.",
+    ownerPlane: 'data',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatLibraryReadTextInput,
+    outputSchema: chatLibraryReadTextOutput,
+  },
+  {
+    id: 'library.open_origin',
+    label: 'Open the chat a library file came from',
+    description: "Open the chat thread a saved copy was made in. Navigation only, in the browser: it selects that chat thread and goes to the chat page. Nothing is read from the server or changed, and the thread opens under the person's own access. Never model-executable.",
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatLibraryOpenOriginInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'library.share',
+    label: 'Share a chat library file',
+    description: "Writes resource grants (an effect): gives org members or groups viewer or editor access to one of the person's own saved chat files. Grant only: there is no public link, and a key the contract does not name is refused. Owner only, and refused under zero data retention. Never model-executable: a model does not decide who may read the person's files.",
+    ownerPlane: 'data',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatLibraryShareInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'review.run',
+    label: 'Review a text as a run',
+    description: "Run one read-only review of a text the person chose: an artifact revision, one turn's diff or an attached file. The model's located P0-P3 findings come back with the gateway's own source checks, kept apart, and each finding is checked against the text before it is kept. Read only: nothing is changed or stored, and the answer is the review card alone. Refused for an unknown target or a text over its limit, and answers 404 review_run_disabled while the review switch is off. Never model-executable: a model does not choose what is reviewed.",
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: reviewRunInput,
+    outputSchema: reviewRunOutput,
+  },
+  {
+    id: 'connection_zdr.read',
+    label: 'Read a model connection\'s zero data retention assessment',
+    description: "Read whether a model connection can give zero data retention, the acknowledgement in force for it and the server-composed wording for a locale and variant. Read only: nothing is changed or stored in the browser. Owner only; the gateway forwards the person's own bearer and Integration Core owns the wording and the record. Off until the zero-data-retention acknowledgement switch is on. Never model-executable: a model does not read the wording a person is asked to accept.",
+    ownerPlane: 'ingestion',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: connectionZdrReadInput,
+    outputSchema: connectionZdrReadOutput,
+  },
+  {
+    id: 'connection_zdr.acknowledge',
+    label: 'Acknowledge a model connection\'s zero data retention limit',
+    description: "Writes the person's acknowledgement (an effect): the owner of a model connection that cannot give zero data retention accepts, once, the exact assessment and wording they were shown, so the connection may be used while their organisation has zero data retention on. Takes the digest and text version from the read; a stale pair is refused with zdr_assessment_changed and nothing is recorded. Needs the person's confirmation on the wording shown. Owner only. Never model-executable: a model never accepts a waiver on a person's behalf.",
+    ownerPlane: 'ingestion',
+    risk: 'high',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: connectionZdrAcknowledgeInput,
+    outputSchema: connectionZdrAcknowledgeOutput,
+  },
+  {
+    id: 'connection_zdr.revoke',
+    label: 'Revoke a model connection\'s zero data retention acknowledgement',
+    description: "Writes the person's revoke (an effect): ends the owner's acknowledgement of a model connection, so the connection is no longer used while their organisation has zero data retention on. Idempotent: revoking again ends nothing. Needs the person's confirmation. Owner only. Never model-executable: a model does not change the person's waivers.",
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: true,
+    reversible: true,
+    inputSchema: connectionZdrRevokeInput,
+    outputSchema: connectionZdrRevokeOutput,
   },
   {
     id: 'chat.submit_feedback',
@@ -5304,6 +6199,39 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'chat.goal_mark_done',
+    label: 'Mark the conversation goal done',
+    description: 'Mark the conversation\'s open goal met, as the person\'s own call over the judge\'s verdict, under a compare-and-set on the revision the goal bar showed. The goal closes, so no later turn is told it and the goal pump stops. Owner only, with the same refusals as an edit. Never model-executable: the person closes a goal, and the model never does.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatGoalMarkDoneInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.goal_reopen',
+    label: 'Reopen the conversation goal',
+    description: 'Reopen the conversation\'s met or blocked goal as active, under a compare-and-set on the revision the goal bar showed, so later turns are told it again and it can continue. Owner only, with the same refusals as an edit. Never model-executable: a goal never reopens itself.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatGoalReopenInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.goal_away_start',
+    label: 'Keep the conversation goal working while away',
+    description: 'Start a schedule that keeps one of the person\'s own goals working while they are away: at most 20 runs, one every 30 minutes, hourly, every four hours or daily, for at most 90 days. Each run is read only and runs as the service under a stored-consent contract that names the read tools; each run answers in its own scheduled thread, and a change it would make is held as a draft. Owner only, on an active goal in a durable personal conversation, and the server reads the switch, the judge and the zero-retention state again. Refused under zero data retention, in a Space conversation and while the feature is off. Never model-executable: the person starts it, and a goal never schedules itself.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatGoalAwayStartInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'chat.stage_widget_followup',
     label: 'Stage a follow-up an inline widget proposed',
     description: 'Show a follow-up question an inline widget in a chat answer proposed as a chip under that widget, labelled as coming from the widget. Nothing is sent: only the person\'s click on the chip puts it through the answer\'s ordinary follow-up handler, the same one the answer\'s suggested follow-ups use. At most one chip per widget at a time, five per answer per minute, and 500 characters; anything over is dropped. Never model-executable: a widget is model output, and the person decides every turn it proposes.',
@@ -5312,6 +6240,17 @@ export const actionRegistry = [
     requiresApproval: false,
     reversible: true,
     inputSchema: chatStageWidgetFollowupInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'chat.stage_widget_selection',
+    label: 'Quote text an inline widget selected',
+    description: 'Show a passage an inline widget in a chat answer selected as a quote under that widget, labelled as selected in the widget. Nothing is sent: only the person\'s click on the quote puts it, quoted, into the composer through the answer\'s ordinary follow-up handler, and the person sends it as an ordinary turn. One quote per widget at a time, five per answer per minute shared with its follow-up chips, and 2,000 characters; line breaks become spaces and other control characters are removed. Never model-executable: a widget is model output, and the person decides what they send.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: chatStageWidgetSelectionInput,
     outputSchema: envelopeStatusOutput,
   },
   {
@@ -5722,6 +6661,61 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'models.create_customer_gateway',
+    label: 'Register customer gateway',
+    description: 'Register the organisation\'s own OpenAI-compatible model gateway. Owners and admins only. Integration Core seals the key and never returns it. A customer gateway is never zero data retention and is the lowest privacy tier.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: modelsCreateCustomerGatewayInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'models.delete_customer_gateway',
+    label: 'Remove customer gateway',
+    description: 'Remove one of the organisation\'s customer gateways. Owners and admins only. Its key is discarded and its models stop being offered.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: modelsDeleteCustomerGatewayInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'connectors.create_credential_binding',
+    label: 'Store connector key',
+    description: 'Store one bearer token or API key for one host, for a custom REST connector or an MCP server. Owners and admins only. The key is sent once; Integration Core seals it and never returns it. Refused for an organization with zero data retention.',
+    ownerPlane: 'ingestion',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: connectorsCreateCredentialBindingInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'connectors.revoke_credential_binding',
+    label: 'Revoke connector key',
+    description: 'Revoke one of the organization\'s stored connector keys. Owners and admins only. Its stored secret is emptied, and a connector that calls with it stops working. Revoking is never refused.',
+    ownerPlane: 'ingestion',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: connectorsRevokeCredentialBindingInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'connectors.create_custom_rest',
+    label: 'Create custom REST connector',
+    description: 'Create a custom REST connector that calls one host through a stored connector key. Owners and admins only. Its host, methods and path prefixes are the key\'s, not the request\'s.',
+    ownerPlane: 'ingestion',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: connectorsCreateCustomRestInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
     id: 'audit.verify_chain',
     label: 'Verify audit log integrity',
     description: 'Recompute the organization\'s audit hash chain and report verified, verified_with_legacy, broken (with the first broken position), partial or key_unavailable. Read-only; owner or admin, human sessions only. The run is itself recorded in the audit log.',
@@ -5865,6 +6859,50 @@ export const actionRegistry = [
     outputSchema: envelopeStatusOutput,
   },
   {
+    id: 'automations.list_event_triggers',
+    label: 'List event triggers',
+    description: 'List the event triggers the signed-in person set up, newest first, or only those in one Space: the connection, the Space, the status and the bound schedule. Read only. Refused under zero data retention.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: eventTriggerListInput,
+    outputSchema: eventTriggerListOutput,
+  },
+  {
+    id: 'automations.create_event_trigger',
+    label: 'Create event trigger',
+    description: 'Set up a trigger that starts a run when a webhook event on one connection matches its wake filter. It is bound to one of the person\'s own schedules in the same Space, which must hold an approval, or to none. The binding grants nothing: every run is authorised again under that schedule\'s approval. The person creates it, never a model. Refused under zero data retention.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: eventTriggerCreateInput,
+    outputSchema: eventTriggerEnvelopeOutput,
+  },
+  {
+    id: 'automations.update_event_trigger',
+    label: 'Change event trigger',
+    description: 'Pause, resume or disable one of the person\'s event triggers, or change its name, schedule or wake filter, under the revision it was read at. Disabling is final: a disabled trigger takes no change. The person changes it, never a model. Refused under zero data retention.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: eventTriggerUpdateInput,
+    outputSchema: eventTriggerEnvelopeOutput,
+  },
+  {
+    id: 'automations.dry_run_event_trigger',
+    label: 'Dry run event trigger',
+    description: 'Ask whether one trigger would wake on one stored webhook event, and which of its filter rules the event meets. Read only: nothing is recorded or started, and no payload or field value is returned. Ten dry runs a minute per trigger. Refused under zero data retention.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: eventTriggerDryRunInput,
+    outputSchema: eventTriggerDryRunOutput,
+  },
+  {
     id: 'agents.installations.list',
     label: 'List agent installations',
     description: 'List the agent definitions in this organization, with the rooms each one is added to and each installation\'s status. Read only: it shows where an agent is installed, not whether the caller may act in that room.',
@@ -5907,6 +6945,94 @@ export const actionRegistry = [
     reversible: true,
     inputSchema: agentRefInput,
     outputSchema: agentVersionsListOutput,
+  },
+  {
+    id: 'agents.preview',
+    label: 'Preview agent draft',
+    description: 'Ask one question of an agent\'s saved draft in a temporary chat, to see how it answers before it is published. The preview runs in read-only mode with zero retention, and stores nothing (no thread, no transcript, no memory). It answers from the saved draft, not from unsaved edits on screen. Org admin, the agent\'s creator, or a manager of the room it was created in.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: agentPreviewInput,
+    outputSchema: envelopeStatusOutput,
+  },
+  {
+    id: 'agents.admitted_actions.list',
+    label: 'List admitted owner actions',
+    description: 'List the owner actions this organization admits for agent runs, so a preset that needs one is offered only where it is admitted. Read only: it shows which actions are admitted, not what an agent may do with them.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: agentAdmittedActionsListInput,
+    outputSchema: agentAdmittedActionsListOutput,
+  },
+  {
+    id: 'plugins.list_catalog',
+    label: 'List the plugin catalogue',
+    description: 'Read the organization\'s plugin catalogue: the packages an admin listed that are still pinned to a source and not on the kill list, with their risk level and component summary. Any member may read it, zero data retention included. Read only; the agent is never offered it.',
+    ownerPlane: 'model',
+    risk: 'low',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: pluginsListCatalogInput,
+    outputSchema: pluginCatalogOutput,
+  },
+  {
+    id: 'plugins.install',
+    label: 'Install a plugin\'s components',
+    description: 'An org admin consents to the exact component digests a plugin\'s install report lists, and the loader creates the skills, remote MCP servers and commands its manifest declares. Hooks, binaries, scripts and stdio servers are reported as not installed and never run. Refused under zero data retention, and the consent must match the manifest exactly. Admin only, acting as a person; the agent is never offered it.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: pluginInstallInput,
+    outputSchema: pluginInstallOutput,
+  },
+  {
+    id: 'plugins.uninstall',
+    label: 'Uninstall a plugin',
+    description: 'Remove every skill and remote MCP server one plugin installed, mark its components removed, and take the plugin out of service (disabled and not installed). Admin only, acting as a person; the agent is never offered it.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: pluginIdOnlyInput,
+    outputSchema: pluginInstallOutput,
+  },
+  {
+    id: 'plugins.approve_catalog',
+    label: 'List or unlist a plugin in the catalogue',
+    description: 'List one of the organization\'s pinned plugin packages in the org catalogue, or take it out again. Listing refuses a package that is not pinned to a source, has no digest, or whose digest is on the kill list. Admin only, acting as a person; the agent is never offered it.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: pluginCatalogApproveInput,
+    outputSchema: pluginCatalogApproveOutput,
+  },
+  {
+    id: 'plugins.kill_digest',
+    label: 'Kill a plugin digest',
+    description: 'Put one manifest digest on the organization\'s kill list. Every installed copy of it is uninstalled and its catalogue listing is cleared, in one transaction. Org scope only: a global kill needs a platform service principal and is not offered here. Not reversible from here, because what the kill removed stays removed. Admin only, acting as a person; the agent is never offered it.',
+    ownerPlane: 'model',
+    risk: 'high',
+    requiresApproval: false,
+    reversible: false,
+    inputSchema: pluginKillDigestInput,
+    outputSchema: pluginKillDigestOutput,
+  },
+  {
+    id: 'plugins.lift_kill',
+    label: 'Lift a plugin kill',
+    description: 'Remove the organization\'s kill-list entry for one manifest digest, so the package can be installed and listed again. It restores nothing: what the kill uninstalled stays removed, and the package must be installed and listed again. Org scope only; a platform-wide kill is shown but not lifted here. Admin only, acting as a person; the removal is audited server-side. The agent is never offered it.',
+    ownerPlane: 'model',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: pluginLiftKillInput,
+    outputSchema: pluginKillRemovalOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]
 

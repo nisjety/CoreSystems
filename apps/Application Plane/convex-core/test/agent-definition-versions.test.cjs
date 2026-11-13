@@ -243,3 +243,210 @@ test('the builder read answers null for another organisation and derives the ori
   assert.match(block, /creatorExternalAuthId: creator\?\.externalAuthId \?\? null/);
   assert.match(block, /originSpaceRef: origin\?\.spaceRef \?\? null/);
 });
+
+// ---------------------------------------------------------------------------
+// W3-EP-6-S7-convex (D3-249, OD-4 b) and W3-EP-6-S9-pin: handlers driven through
+// the in-memory ctx in test/helpers/fake-convex.cjs.
+// ---------------------------------------------------------------------------
+
+const fake = require('./helpers/fake-convex.cjs');
+const agentsModule = require('../convex/agents.ts');
+const { setSpaceAgentBindingPinForGateway } = require('../convex/spaceAgents.ts');
+
+function agentRow(overrides = {}) {
+  return {
+    _id: 'agent-1',
+    orgId: 'org_row',
+    name: 'Legacy name',
+    model: 'legacy-model',
+    systemPrompt: 'Legacy prompt',
+    tools: ['legacy_tool'],
+    knowledgeBindings: { scope: 'all', includeQnA: false },
+    status: 'active',
+    draft: body({ name: '  Published Bot ', model: ' claude-opus-5-5 ' }),
+    ...overrides,
+  };
+}
+
+function publish(ctx, overrides = {}) {
+  return agentsModule.publishForGateway._handler(ctx, {
+    serviceKey: fake.SERVICE_KEY,
+    externalAuthId: fake.AUTH,
+    externalOrgId: fake.ORG,
+    agentId: 'agent-1',
+    ...overrides,
+  });
+}
+
+test('publish mirrors the published name, model and knowledge bindings onto the agent row', async (t) => {
+  fake.withServiceKey(t);
+  const { ctx, tables } = fake.makeCtx(
+    fake.memberTables({ agents: [agentRow()], agentDefinitionVersions: [] }),
+  );
+  const result = await publish(ctx);
+  assert.equal(result.version, 1);
+
+  const agent = tables.agents[0];
+  assert.equal(agent.publishedVersion, 1);
+  // The canonical (trimmed) values of the version, not the raw draft.
+  assert.equal(agent.name, 'Published Bot');
+  assert.equal(agent.model, 'claude-opus-5-5');
+  assert.deepEqual(agent.knowledgeBindings, { scope: 'selected', documentIds: ['doc-1'], includeQnA: true });
+  // systemPrompt and tools are served from the version, never mirrored onto the row.
+  assert.equal(agent.systemPrompt, 'Legacy prompt');
+  assert.deepEqual(agent.tools, ['legacy_tool']);
+
+  const versions = tables.agentDefinitionVersions;
+  assert.equal(versions.length, 1);
+  assert.equal(versions[0].name, agent.name);
+  assert.equal(versions[0].model, agent.model);
+  assert.deepEqual(versions[0].knowledgeBindings, agent.knowledgeBindings);
+});
+
+test('publishing a version without knowledge bindings clears the row binding', async (t) => {
+  fake.withServiceKey(t);
+  const { ctx, tables } = fake.makeCtx(
+    fake.memberTables({
+      agents: [agentRow({ draft: body({ knowledgeBindings: undefined }) })],
+      agentDefinitionVersions: [],
+    }),
+  );
+  await publish(ctx);
+  assert.equal('knowledgeBindings' in tables.agents[0], false, 'the row must follow the version, not keep the old scope');
+});
+
+test('a second publish takes the next number and the row follows the newest version', async (t) => {
+  fake.withServiceKey(t);
+  const { ctx, tables } = fake.makeCtx(
+    fake.memberTables({ agents: [agentRow()], agentDefinitionVersions: [] }),
+  );
+  await publish(ctx);
+  tables.agents[0].draft = body({ name: 'Second Bot', model: 'claude-haiku-5-5' });
+  const second = await publish(ctx);
+  assert.equal(second.version, 2);
+  assert.equal(tables.agents[0].publishedVersion, 2);
+  assert.equal(tables.agents[0].name, 'Second Bot');
+  assert.equal(tables.agents[0].model, 'claude-haiku-5-5');
+  assert.equal(tables.agentDefinitionVersions[0].name, 'Published Bot', 'version 1 is never rewritten');
+});
+
+test('publish refuses an agent of another organisation and writes nothing', async (t) => {
+  fake.withServiceKey(t);
+  const { ctx, tables, log } = fake.makeCtx(
+    fake.memberTables({ agents: [agentRow({ orgId: 'other_org_row' })], agentDefinitionVersions: [] }),
+  );
+  await fake.rejectsWith(publish(ctx), 'Agent not found');
+  assert.equal(log.inserts.length, 0);
+  assert.equal(log.patches.length, 0);
+  assert.equal(tables.agents[0].name, 'Legacy name');
+});
+
+test('publish refuses a wrong service key before any read', async (t) => {
+  fake.withServiceKey(t);
+  const { ctx, log } = fake.makeCtx(
+    fake.memberTables({ agents: [agentRow()], agentDefinitionVersions: [] }),
+  );
+  await assert.rejects(publish(ctx, { serviceKey: 'wrong-key' }));
+  assert.equal(log.inserts.length, 0);
+  assert.equal(log.patches.length, 0);
+});
+
+test('the knowledge-binding and retrieval-config writers are internal mutations (D3-243)', () => {
+  for (const name of ['updateKnowledgeBindings', 'updateRetrievalConfig']) {
+    const fn = agentsModule[name];
+    assert.ok(fn, `${name} is exported`);
+    assert.equal(fn.isMutation, true, `${name} is a mutation`);
+    assert.equal(fn.isInternal, true, `${name} must be internal`);
+    assert.notEqual(fn.isPublic, true, `${name} must not be public`);
+  }
+});
+
+function pinBinding(overrides = {}) {
+  return {
+    _id: 'binding_row',
+    bindingRef: 'sab_1',
+    spaceRef: 'space-a',
+    externalOrgId: fake.ORG,
+    agentId: 'agent-1',
+    subjectId: 'agent-agent-1',
+    status: 'active',
+    projectionVersion: 4,
+    updatedAt: 1000,
+    createdAt: 500,
+    ...overrides,
+  };
+}
+
+function pinCtx(bindingOverrides = {}, versions = [{ agentId: 'agent-1', version: 1, orgId: 'org_row' }]) {
+  return fake.makeCtx(
+    fake.memberTables({
+      spaceAgentBindings: [pinBinding(bindingOverrides)],
+      agentDefinitionVersions: versions,
+    }),
+  );
+}
+
+function setPin(ctx, overrides = {}) {
+  return setSpaceAgentBindingPinForGateway._handler(ctx, {
+    serviceKey: fake.SERVICE_KEY,
+    externalAuthId: fake.AUTH,
+    externalOrgId: fake.ORG,
+    spaceRef: 'space-a',
+    bindingRef: 'sab_1',
+    ...overrides,
+  });
+}
+
+test('pinning an unknown version is refused and the binding is untouched', async (t) => {
+  fake.withServiceKey(t);
+  const { ctx, tables, log } = pinCtx();
+  await fake.rejectsWith(setPin(ctx, { pinnedVersion: 7 }), 'agent_version_not_found');
+  assert.equal(log.patches.length, 0);
+  assert.equal(tables.spaceAgentBindings[0].pinnedVersion, undefined);
+  assert.equal(tables.spaceAgentBindings[0].projectionVersion, 4);
+});
+
+test('pinning a version of a different agent is refused', async (t) => {
+  fake.withServiceKey(t);
+  const { ctx, log } = pinCtx({}, [{ agentId: 'agent-2', version: 1, orgId: 'org_row' }]);
+  await fake.rejectsWith(setPin(ctx, { pinnedVersion: 1 }), 'agent_version_not_found');
+  assert.equal(log.patches.length, 0);
+});
+
+test('pinning an existing version sets the pin and bumps the projection; absent clears it', async (t) => {
+  fake.withServiceKey(t);
+  const { ctx, tables } = pinCtx();
+  const set = await setPin(ctx, { pinnedVersion: 1 });
+  assert.equal(set.changed, true);
+  assert.equal(set.pinnedVersion, 1);
+  assert.equal(set.projectionVersion, 5);
+  assert.equal(tables.spaceAgentBindings[0].pinnedVersion, 1);
+
+  const same = await setPin(ctx, { pinnedVersion: 1 });
+  assert.equal(same.changed, false);
+  assert.equal(tables.spaceAgentBindings[0].projectionVersion, 5);
+
+  const cleared = await setPin(ctx, {});
+  assert.equal(cleared.changed, true);
+  assert.equal(cleared.pinnedVersion, null);
+  assert.equal(cleared.projectionVersion, 6);
+  assert.equal('pinnedVersion' in tables.spaceAgentBindings[0], false);
+});
+
+test('a pin is refused for a binding of another Space, another org or a removed binding', async (t) => {
+  fake.withServiceKey(t);
+  for (const overrides of [{ spaceRef: 'space-b' }, { externalOrgId: 'other_org' }, { status: 'removed' }]) {
+    const { ctx, log } = pinCtx(overrides);
+    await fake.rejectsWith(setPin(ctx, { pinnedVersion: 1 }), 'agent_binding_not_found');
+    assert.equal(log.patches.length, 0, JSON.stringify(overrides));
+  }
+});
+
+test('a pin that is not a positive integer is refused', async (t) => {
+  fake.withServiceKey(t);
+  for (const bad of [0, -1, 1.5, Number.NaN]) {
+    const { ctx, log } = pinCtx();
+    await fake.rejectsWith(setPin(ctx, { pinnedVersion: bad }), 'invalid_policy');
+    assert.equal(log.patches.length, 0);
+  }
+});

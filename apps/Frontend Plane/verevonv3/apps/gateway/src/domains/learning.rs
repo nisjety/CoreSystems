@@ -11,6 +11,10 @@
 //! A learned memory is not undone here. Session-core refuses it with
 //! `memory_undo_via_delete`, and the SPA erases it through `/api/v1/memory/{id}`,
 //! the same path that records the memory as forgotten.
+//!
+//! Teach mode (F-t3-081) adds `/api/v1/learning/teach`: one run the person drove or
+//! took over becomes a disabled skill proposal in the same inbox, drafted by
+//! model-gateway's `/v1/teach/skill-draft`.
 
 use axum::{
     extract::{Path, Query, State},
@@ -24,10 +28,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::{
+    audience_tokens::get_audience_token,
     config::AppState,
     domains::chat::shared::{
-        delegated_auth_unavailable, model_token, proxy_model_json_with_session,
-        proxy_model_json_with_session_and_capability, required_capability_token, session_token,
+        apply_org_zdr_posture, delegated_auth_unavailable, model_token,
+        proxy_model_json_with_delegations, proxy_model_json_with_session,
+        proxy_model_json_with_session_and_capability, required_capability_token,
+        required_inference_token, required_session_token, session_token, zdr_flag,
     },
     middleware::{require_session, AuthenticatedUser},
     rate_limit::rate_limit_middleware,
@@ -42,6 +49,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         .route("/api/v1/learning/ledger/{entry_id}/undo", post(undo_entry))
         .route("/api/v1/learning/learn", post(learn_from_thread))
+        .route("/api/v1/learning/teach", post(teach_skill_from_run))
         // Ordered like memory.rs: `require_session` (written last, outer) runs first
         // and inserts `AuthenticatedUser`, so the rate limit keys by the verified user.
         .route_layer(axum::middleware::from_fn(rate_limit_middleware))
@@ -250,6 +258,165 @@ pub(crate) async fn learn_from_thread(
     )
     .await
     .into_response()
+}
+
+/// The longest goal hint a teach draft carries, in characters, as model-gateway bounds it.
+const TEACH_GOAL_HINT_MAX_CHARS: usize = 500;
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct TeachBody {
+    pub(crate) run_id: String,
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) goal_hint: Option<String>,
+}
+
+/// "Lagre disse stegene som en ferdighet": the owner turns one run they drove or took over into a disabled skill
+/// proposal in their learning inbox (F-t3-081). Only the run, the trimmed name and the trimmed hint cross; the owner
+/// is the session on the far side. Model-gateway reads the run's steps as that owner, with the caller's `aud=quarry`
+/// bearer, so that bearer rides with the session and inference credentials. A zero-retention turn is refused here,
+/// before any call: model-gateway's teach route takes a caller's posture from its token claims and never reads the
+/// body's flag. The answer is relayed unchanged, 200 with the proposal or the typed refusal.
+pub(crate) async fn teach_skill_from_run(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<TeachBody>,
+) -> impl IntoResponse {
+    let run_id = body.run_id.trim();
+    if run_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "code": "invalid_run_id",
+                    "message": "run_id is required",
+                    "details": {},
+                }
+            })),
+        )
+            .into_response();
+    }
+    let name = body.name.trim();
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": {
+                    "code": "teach_name_invalid",
+                    "message": "name is required",
+                    "details": {},
+                }
+            })),
+        )
+            .into_response();
+    }
+    let goal_hint = body.goal_hint.as_deref().map_or("", str::trim);
+    if goal_hint.chars().count() > TEACH_GOAL_HINT_MAX_CHARS {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": {
+                    "code": "teach_goal_hint_too_long",
+                    "message": "goal_hint is longer than 500 characters",
+                    "details": {},
+                }
+            })),
+        )
+            .into_response();
+    }
+    let mut outbound = json!({
+        "run_id": run_id,
+        "name": name,
+        "goal_hint": goal_hint,
+        "zdr": zdr_flag(&headers),
+    });
+    apply_org_zdr_posture(&state, &user, &mut outbound).await;
+    if outbound.get("zdr").and_then(Value::as_bool) == Some(true) {
+        return teach_zdr_refusal().into_response();
+    }
+    let session = match required_session_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let inference = match required_inference_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return delegated_auth_unavailable(error).into_response(),
+    };
+    let Some(quarry) = quarry_token(&state, &user, &headers).await else {
+        return teach_credential_unavailable().into_response();
+    };
+    let token = model_token(&state, &user, &headers).await;
+    let url = format!("{}/v1/teach/skill-draft", state.model_gateway_url);
+    let (status, Json(payload)) = proxy_model_json_with_delegations(
+        &state,
+        Method::POST,
+        &url,
+        Some(outbound),
+        token.as_deref(),
+        None,
+        None,
+        Some(&inference),
+        None,
+        None,
+        Some(&session),
+        None,
+        None,
+        Some(&quarry),
+        &user,
+    )
+    .await;
+    // A 401 is a refused credential, not the browser's session, so it is answered as unavailable rather than as a
+    // sign-out, as `side_chat_reply` answers it.
+    if status == StatusCode::UNAUTHORIZED {
+        return teach_credential_unavailable().into_response();
+    }
+    (status, Json(payload)).into_response()
+}
+
+/// The caller's `aud=quarry` bearer, minted per request for the edge's read of one run's steps (F-t3-081). Absent
+/// when auth-core cannot mint it; the teach then answers unavailable rather than go without it.
+async fn quarry_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+) -> Option<String> {
+    let cookie = headers
+        .get("cookie")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    get_audience_token(state, &user.user_id, cookie, "quarry").await
+}
+
+/// The typed refusal a zero-retention teach gets: the same 412 model-gateway answers for a feature a ZDR caller may not
+/// use, sent here before any call, so nothing is read, sent or kept.
+fn teach_zdr_refusal() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::PRECONDITION_FAILED,
+        Json(json!({
+            "error": {
+                "code": "zdr_feature_not_supported",
+                "message": "This is not supported with zero data retention yet: saving a run's steps as a skill. The request was refused before any model call.",
+                "retryable": false,
+                "action": "turn_off_feature",
+                "feature": "teach_mode",
+            }
+        })),
+    )
+}
+
+/// The answer when a credential a teach needs cannot be had. It is unavailable, never a 401 that would sign the person out.
+fn teach_credential_unavailable() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": {
+                "code": "delegated_auth_unavailable",
+                "message": "Teach authentication is temporarily unavailable",
+                "details": {},
+            }
+        })),
+    )
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 /* eslint-disable */
 // @ts-nocheck
 
-import { AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse, AnswerRunQuestionRequest, AnswerRunQuestionResponse, AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse, ClaimOnceApprovalRequest, ClaimOnceApprovalResponse, ClaimQuarantineReleaseRequest, ClaimQuarantineReleaseResponse, ConsumeApprovalRequest, ConsumeApprovalResponse, ConsumeRunQuestionRequest, ConsumeRunQuestionResponse, CreateApprovalRequest, CreateApprovalResponse, CreateRunQuestionRequest, CreateRunQuestionResponse, DecideApprovalRequest, DecideApprovalResponse, GetApprovalContinuationRequest, GetApprovalContinuationResponse, GetApprovalPreviewRequest, GetApprovalPreviewResponse, GetApprovalRequest, GetApprovalResponse, GetPlanRequest, GetPlanResponse, GetQuarantinePreviewRequest, GetQuarantinePreviewResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, HoldQuarantinedOutputRequest, HoldQuarantinedOutputResponse, ListApprovalScopeGrantsRequest, ListApprovalScopeGrantsResponse, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListRunQuestionsRequest, ListRunQuestionsResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, ProposePlanRequest, ProposePlanResponse, RecordApprovalContinuationOutcomeRequest, RecordApprovalContinuationOutcomeResponse, RecordApprovalContinuationStartedRequest, RecordApprovalContinuationStartedResponse, RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, RerouteApprovalRequest, RerouteApprovalResponse, RevokeApprovalScopeGrantRequest, RevokeApprovalScopeGrantResponse, StartWorkflowRequest, StartWorkflowResponse, StreamRunEventsRequest, TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse, UseApprovalScopeGrantRequest, UseApprovalScopeGrantResponse } from "./orchestration_pbjs";
+import { AcknowledgeApprovalDeliveryRequest, AcknowledgeApprovalDeliveryResponse, AnswerRunQuestionRequest, AnswerRunQuestionResponse, AttachSubagentRequest, AttachSubagentResponse, ClaimApprovalDeliveriesRequest, ClaimApprovalDeliveriesResponse, ClaimOnceApprovalRequest, ClaimOnceApprovalResponse, ClaimQuarantineReleaseRequest, ClaimQuarantineReleaseResponse, ConsumeApprovalRequest, ConsumeApprovalResponse, ConsumeRunQuestionRequest, ConsumeRunQuestionResponse, CreateApprovalRequest, CreateApprovalResponse, CreateRunQuestionRequest, CreateRunQuestionResponse, DecideApprovalRequest, DecideApprovalResponse, GetApprovalContinuationRequest, GetApprovalContinuationResponse, GetApprovalPreviewRequest, GetApprovalPreviewResponse, GetApprovalRequest, GetApprovalResponse, GetApprovalRuleProposalRequest, GetApprovalRuleProposalResponse, GetPlanRequest, GetPlanResponse, GetQuarantinePreviewRequest, GetQuarantinePreviewResponse, GetSkippedAssistAuthorityRequest, GetSkippedAssistAuthorityResponse, GetSubagentLineageRequest, GetSubagentLineageResponse, GetTodoRequest, GetTodoResponse, HoldQuarantinedOutputRequest, HoldQuarantinedOutputResponse, ListApprovalRuleProposalsRequest, ListApprovalRuleProposalsResponse, ListApprovalScopeGrantsRequest, ListApprovalScopeGrantsResponse, ListApprovalsRequest, ListApprovalsResponse, ListPlansRequest, ListPlansResponse, ListRunQuestionsRequest, ListRunQuestionsResponse, ListTodosRequest, ListTodosResponse, OrchestrationEvent, OrgPendingApprovalsRequest, OrgPendingApprovalsResponse, ProposePlanRequest, ProposePlanResponse, RecordApprovalContinuationOutcomeRequest, RecordApprovalContinuationOutcomeResponse, RecordApprovalContinuationStartedRequest, RecordApprovalContinuationStartedResponse, RecordOrchestrationEventRequest, RecordOrchestrationEventResponse, RerouteApprovalRequest, RerouteApprovalResponse, ResolveApprovalRuleProposalRequest, ResolveApprovalRuleProposalResponse, RevokeApprovalScopeGrantRequest, RevokeApprovalScopeGrantResponse, StartWorkflowRequest, StartWorkflowResponse, StreamRunEventsRequest, TransitionPlanRequest, TransitionPlanResponse, TransitionTodoRequest, TransitionTodoResponse, UseApprovalScopeGrantRequest, UseApprovalScopeGrantResponse } from "./orchestration_pbjs";
 import { MethodKind } from "@bufbuild/protobuf";
 import { GetRunProofBundleRequest, GetRunProofBundleResponse, GetVerificationMetricsRequest, GetVerificationMetricsResponse } from "./proof_bundle_pbjs";
 
@@ -190,6 +190,22 @@ export const OrchestrationCoreService = {
       name: "ConsumeApproval",
       I: ConsumeApprovalRequest,
       O: ConsumeApprovalResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Read, without consuming, the tools and authority a DENIED browser_human_assist pause
+     * retained, so a skipped site's continuation runs under the pause's authority and never
+     * under the /continue placeholders. Read-only: it claims, spends and stores nothing, and
+     * the denied approval stays as it is. Same caller scope, run, org and owner checks as
+     * ConsumeApproval. Refused typed for a zero-retention or waived run; any state other than
+     * a denied, unconsumed browser_human_assist approval is FAILED_PRECONDITION.
+     *
+     * @generated from rpc model_plane.v1.OrchestrationCoreService.GetSkippedAssistAuthority
+     */
+    getSkippedAssistAuthority: {
+      name: "GetSkippedAssistAuthority",
+      I: GetSkippedAssistAuthorityRequest,
+      O: GetSkippedAssistAuthorityResponse,
       kind: MethodKind.Unary,
     },
     /**
@@ -550,6 +566,57 @@ export const ApprovalScopeGrantService = {
       name: "RevokeApprovalScopeGrant",
       I: RevokeApprovalScopeGrantRequest,
       O: RevokeApprovalScopeGrantResponse,
+      kind: MethodKind.Unary,
+    },
+  }
+} as const;
+
+/**
+ * The owner's "Always allow this tool" proposals. Served by session-core, which owns the
+ * proposals. It is its own service rather than a method of OrchestrationCoreService, as
+ * ApprovalScopeGrantService is, so the implementations of that service, and their test doubles,
+ * need no change. The RPCs act for the verified owner only and are not model-executable. A confirm
+ * is orchestrated by model-gateway, which writes the rule in capability-core and hands back the
+ * policy id.
+ *
+ * @generated from service model_plane.v1.ApprovalRuleProposalService
+ */
+export const ApprovalRuleProposalService = {
+  typeName: "model_plane.v1.ApprovalRuleProposalService",
+  methods: {
+    /**
+     * The verified caller's own open proposals (proposed, or held by a confirm), oldest first.
+     *
+     * @generated from rpc model_plane.v1.ApprovalRuleProposalService.ListApprovalRuleProposals
+     */
+    listApprovalRuleProposals: {
+      name: "ListApprovalRuleProposals",
+      I: ListApprovalRuleProposalsRequest,
+      O: ListApprovalRuleProposalsResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * One of the verified caller's own proposals, in any state.
+     *
+     * @generated from rpc model_plane.v1.ApprovalRuleProposalService.GetApprovalRuleProposal
+     */
+    getApprovalRuleProposal: {
+      name: "GetApprovalRuleProposal",
+      I: GetApprovalRuleProposalRequest,
+      O: GetApprovalRuleProposalResponse,
+      kind: MethodKind.Unary,
+    },
+    /**
+     * Moves one of the verified caller's proposals to CONFIRMING, CONFIRMED or DISMISSED. CONFIRMING
+     * and CONFIRMED need APPROVAL_RULE_PROPOSALS_ENABLED; DISMISSED always works, so a person can
+     * still remove a proposal made while the switch was on. A ZDR or waived caller is refused.
+     *
+     * @generated from rpc model_plane.v1.ApprovalRuleProposalService.ResolveApprovalRuleProposal
+     */
+    resolveApprovalRuleProposal: {
+      name: "ResolveApprovalRuleProposal",
+      I: ResolveApprovalRuleProposalRequest,
+      O: ResolveApprovalRuleProposalResponse,
       kind: MethodKind.Unary,
     },
   }

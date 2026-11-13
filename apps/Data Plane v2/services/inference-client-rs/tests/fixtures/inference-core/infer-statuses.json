@@ -7,8 +7,11 @@
     "retry_after_ms": "x-mp-retry-after-ms"
   },
   "kinds": [
+    "image_model_unavailable",
     "model_entitlement_unavailable",
+    "model_hidden",
     "model_not_entitled",
+    "providers_benched",
     "rate_limited",
     "residency_unavailable",
     "subscription_bad_request",
@@ -116,6 +119,34 @@
       "trailers": {
         "x-mp-entitlement-reason": "explicitly_denied",
         "x-mp-provider-error": "model_not_entitled"
+      }
+    },
+    {
+      "id": "provider_model_hidden",
+      "source": "ProviderError::ModelHidden",
+      "grpc_code": "NOT_FOUND",
+      "grpc_code_number": 5,
+      "trailers": {
+        "x-mp-provider-error": "model_hidden"
+      }
+    },
+    {
+      "id": "provider_image_model_unavailable",
+      "source": "ProviderError::ImageModelUnavailable",
+      "grpc_code": "NOT_FOUND",
+      "grpc_code_number": 5,
+      "trailers": {
+        "x-mp-provider-error": "image_model_unavailable"
+      }
+    },
+    {
+      "id": "provider_providers_benched",
+      "source": "ProviderError::ProvidersBenched",
+      "grpc_code": "UNAVAILABLE",
+      "grpc_code_number": 14,
+      "trailers": {
+        "x-mp-provider-error": "providers_benched",
+        "x-mp-retry-after-ms": "30000"
       }
     },
     {

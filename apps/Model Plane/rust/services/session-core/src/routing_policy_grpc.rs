@@ -197,9 +197,208 @@ fn list_limit(requested: i32) -> Result<i32, Status> {
     }
 }
 
+/// The switch for the per-organisation overlay RPCs (W4-BYO-3), read once at boot. Only the literal `true`
+/// enables it; off, both RPCs answer UNAVAILABLE and the table is never touched.
+const ORG_OVERLAY_ENV: &str = "SESSION_ORG_ROUTING_OVERLAY";
+
+/// The service scope that lets a service principal write an organisation's overlay. The gateway checks the
+/// organisation-admin role itself, as it does for every other org-admin write, and presents this scope for the
+/// organisation it checked. A user credential carries the `admin` scope instead. Granting it is a registry change,
+/// made apart from this crate.
+pub const ORG_OVERLAY_WRITE_SCOPE: &str = "session:org-routing:write";
+
+/// The scope inference-core already holds for the platform routing read. It also reads an organisation's overlay,
+/// which is configuration only.
+const ORG_OVERLAY_READ_SCOPE: &str = "routing:read";
+
+/// The keys an organisation overlay may hold. There is no `aliases` key and nothing that adds a model.
+const ORG_OVERLAY_KEYS: [&str; 3] = ["hidden", "order", "roles"];
+
+/// The side-task purposes an organisation role table may name: the platform role table's keys.
+const ORG_OVERLAY_PURPOSES: [&str; 4] =
+    ["title", "follow_ups", "verification_judge", "research_plan"];
+
+/// The most ids the `hidden` and `order` lists may hold, as the platform overlay allows.
+const ORG_OVERLAY_MAX_LIST: usize = 200;
+
+/// The most candidates one role may hold, as the platform role table allows.
+const ORG_OVERLAY_MAX_CANDIDATES: usize = 4;
+
+/// The longest model id an overlay may hold, in bytes.
+const ORG_OVERLAY_MAX_ID_LEN: usize = 128;
+
+/// The columns of `org_routing_overlays`, in the order `OrgOverlayRow` reads them.
+const ORG_OVERLAY_COLUMNS: &str = "org_id, config_json, version, updated_by,
+    extract(epoch from updated_at)::bigint AS updated_at";
+
+/// Row shape of an organisation overlay. `updated_at` is projected as Unix seconds, as the policy row's is.
+#[derive(sqlx::FromRow)]
+struct OrgOverlayRow {
+    org_id: String,
+    config_json: serde_json::Value,
+    version: i64,
+    updated_by: String,
+    updated_at: i64,
+}
+
+fn org_overlay_to_pb(row: OrgOverlayRow) -> pb::OrgRoutingOverlayMessage {
+    pb::OrgRoutingOverlayMessage {
+        org_id: row.org_id,
+        config_json: row.config_json.to_string(),
+        version: row.version,
+        updated_by: row.updated_by,
+        updated_at: row.updated_at,
+    }
+}
+
+/// The answer for an organisation that never wrote an overlay: an empty one at version 0.
+fn empty_org_overlay(org_id: &str) -> pb::OrgRoutingOverlayMessage {
+    pb::OrgRoutingOverlayMessage {
+        org_id: org_id.to_owned(),
+        config_json: "{}".to_owned(),
+        version: 0,
+        updated_by: String::new(),
+        updated_at: 0,
+    }
+}
+
+/// The strict reading of `SESSION_ORG_ROUTING_OVERLAY`: only the literal `true` enables it.
+fn org_overlay_enabled_from(raw: Option<&str>) -> bool {
+    raw.is_some_and(|value| value.trim() == "true")
+}
+
+/// With the switch off both overlay RPCs answer UNAVAILABLE, so a deployment that never turns it on behaves as
+/// it did before the RPCs existed.
+fn require_org_overlay(enabled: bool) -> Result<(), Status> {
+    if enabled {
+        return Ok(());
+    }
+    Err(Status::unavailable(
+        "the organisation routing overlay is not enabled (SESSION_ORG_ROUTING_OVERLAY)",
+    ))
+}
+
+/// Who may read an organisation's overlay: a verified identity of that organisation, or a service holding the
+/// platform routing read scope, which is how inference-core reads any organisation's overlay to apply it.
+fn authorize_org_overlay_read(
+    caller: &crate::auth::VerifiedIdentity,
+    org_id: &str,
+) -> Result<(), Status> {
+    if caller.is_service() && caller.has_scope(ORG_OVERLAY_READ_SCOPE) {
+        if org_id.trim().is_empty() {
+            return Err(Status::invalid_argument("org_id is required"));
+        }
+        return Ok(());
+    }
+    caller.authorize_org(org_id)
+}
+
+/// Who may write an organisation's overlay: an admin-scoped user, or a service holding
+/// [`ORG_OVERLAY_WRITE_SCOPE`], and in both cases only for the caller's own organisation. The role itself is the
+/// gateway's check. A Zero Data Retention caller, or one carrying a waiver, is refused: the overlay is a durable
+/// organisation write, and a retention-restricted org stores nothing it did not already hold.
+fn authorize_org_overlay_write(
+    caller: &crate::auth::VerifiedIdentity,
+    org_id: &str,
+) -> Result<(), Status> {
+    if caller.zdr() || caller.zdr_waiver().is_some() {
+        return Err(mp_contracts::zdr_refusal::Refusal::DURABLE_MUTATION_FORBIDDEN
+            .grpc_status(tonic::Code::FailedPrecondition));
+    }
+    caller.authorize_org(org_id)?;
+    let admin = !caller.is_api_key()
+        && (caller.has_scope("admin")
+            || (caller.is_service() && caller.has_scope(ORG_OVERLAY_WRITE_SCOPE)));
+    if !admin {
+        return Err(Status::permission_denied(
+            "changing the organisation routing overlay requires an organisation admin",
+        ));
+    }
+    Ok(())
+}
+
+/// A model id list of an overlay: an array of at most `max` non-blank strings, each within the id length.
+fn org_overlay_id_list(field: &str, value: &serde_json::Value, max: usize) -> Result<(), Status> {
+    let Some(items) = value.as_array() else {
+        return Err(Status::invalid_argument(format!(
+            "{field} must be an array of model ids"
+        )));
+    };
+    if items.len() > max {
+        return Err(Status::invalid_argument(format!(
+            "{field} holds {} entries, the most is {max}",
+            items.len()
+        )));
+    }
+    for item in items {
+        match item.as_str() {
+            Some(id) if !id.trim().is_empty() && id.len() <= ORG_OVERLAY_MAX_ID_LEN => {}
+            _ => {
+                return Err(Status::invalid_argument(format!(
+                    "{field} must hold non-blank model ids of at most {ORG_OVERLAY_MAX_ID_LEN} bytes"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate an organisation overlay document and return it as stored. The shape is `{hidden, order, roles}` and
+/// nothing else: a key outside it (an `aliases` map, a model definition) is refused, so the overlay cannot add a
+/// model. Whether each id is one the platform catalogue lists is inference-core's check; it drops an id the
+/// catalogue does not list when it applies the overlay, so a stored overlay can only narrow. An empty string is
+/// the empty overlay.
+fn parse_org_overlay(raw: &str) -> Result<serde_json::Value, Status> {
+    let value = parse_json("config_json", raw)?;
+    let Some(object) = value.as_object() else {
+        return Err(Status::invalid_argument(
+            "config_json must be a JSON object",
+        ));
+    };
+    if let Some(key) = object
+        .keys()
+        .find(|key| !ORG_OVERLAY_KEYS.contains(&key.as_str()))
+    {
+        return Err(Status::invalid_argument(format!(
+            "config_json holds `{key}`; an organisation overlay holds only hidden, order and roles"
+        )));
+    }
+    for field in ["hidden", "order"] {
+        if let Some(list) = object.get(field) {
+            org_overlay_id_list(field, list, ORG_OVERLAY_MAX_LIST)?;
+        }
+    }
+    if let Some(roles) = object.get("roles") {
+        let Some(table) = roles.as_object() else {
+            return Err(Status::invalid_argument(
+                "roles must be an object keyed by purpose",
+            ));
+        };
+        for (purpose, candidates) in table {
+            if !ORG_OVERLAY_PURPOSES.contains(&purpose.as_str()) {
+                return Err(Status::invalid_argument(format!(
+                    "roles names `{purpose}`, which is not a purpose the role table serves"
+                )));
+            }
+            org_overlay_id_list(
+                &format!("roles.{purpose}"),
+                candidates,
+                ORG_OVERLAY_MAX_CANDIDATES,
+            )?;
+            if candidates.as_array().is_some_and(Vec::is_empty) {
+                return Err(Status::invalid_argument(format!(
+                    "roles.{purpose} must hold at least one candidate"
+                )));
+            }
+        }
+    }
+    Ok(value)
+}
+
 pub struct RoutingPolicyService {
     pool: PgPool,
     candidates_enabled: bool,
+    org_overlay_enabled: bool,
 }
 
 impl RoutingPolicyService {
@@ -209,6 +408,9 @@ impl RoutingPolicyService {
             pool,
             candidates_enabled: candidates_enabled_from(
                 std::env::var(CANDIDATES_ENV).ok().as_deref(),
+            ),
+            org_overlay_enabled: org_overlay_enabled_from(
+                std::env::var(ORG_OVERLAY_ENV).ok().as_deref(),
             ),
         }
     }
@@ -521,6 +723,103 @@ impl RoutingPolicy for RoutingPolicyService {
         record_metrics("list_candidates", started, result.is_ok());
         result
     }
+
+    async fn get_org_routing_overlay(
+        &self,
+        request: Request<pb::GetOrgRoutingOverlayRequest>,
+    ) -> Result<Response<pb::OrgRoutingOverlayMessage>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::OrgRoutingOverlayMessage>, Status> = async {
+            let caller = crate::auth::identity(&request)?;
+            require_org_overlay(self.org_overlay_enabled)?;
+            let org_id = request.get_ref().org_id.clone();
+            authorize_org_overlay_read(&caller, &org_id)?;
+            let row: Option<OrgOverlayRow> = sqlx::query_as(&format!(
+                "SELECT {ORG_OVERLAY_COLUMNS} FROM org_routing_overlays WHERE org_id = $1"
+            ))
+            .bind(&org_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db_error)?;
+            Ok(Response::new(row.map_or_else(
+                || empty_org_overlay(&org_id),
+                org_overlay_to_pb,
+            )))
+        }
+        .await;
+        record_metrics("get_org_routing_overlay", started, result.is_ok());
+        result
+    }
+
+    async fn set_org_routing_overlay(
+        &self,
+        request: Request<pb::SetOrgRoutingOverlayRequest>,
+    ) -> Result<Response<pb::OrgRoutingOverlayMessage>, Status> {
+        let started = Instant::now();
+        let result: Result<Response<pb::OrgRoutingOverlayMessage>, Status> = async {
+            let caller = crate::auth::identity(&request)?;
+            require_org_overlay(self.org_overlay_enabled)?;
+            let req = request.into_inner();
+            authorize_org_overlay_write(&caller, &req.org_id)?;
+            let config = parse_org_overlay(&req.config_json)?;
+            if req.expected_version < 0 {
+                return Err(Status::invalid_argument(
+                    "expected_version must not be negative",
+                ));
+            }
+            let updated_by = caller
+                .owner_id()
+                .unwrap_or_else(|| caller.principal_id())
+                .to_owned();
+            // An expected_version of 0 writes whatever is stored, or creates the row. Any other value updates
+            // only the row at exactly that version, so a stale editor is refused instead of overwriting.
+            let row: Option<OrgOverlayRow> = if req.expected_version == 0 {
+                sqlx::query_as(&format!(
+                    "INSERT INTO org_routing_overlays (org_id, config_json, version, updated_by, updated_at)
+                     VALUES ($1, $2::jsonb, 1, $3, now())
+                     ON CONFLICT (org_id) DO UPDATE SET
+                        config_json = EXCLUDED.config_json,
+                        version = org_routing_overlays.version + 1,
+                        updated_by = EXCLUDED.updated_by,
+                        updated_at = now()
+                     RETURNING {ORG_OVERLAY_COLUMNS}"
+                ))
+                .bind(&req.org_id)
+                .bind(config)
+                .bind(&updated_by)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(db_error)?
+            } else {
+                sqlx::query_as(&format!(
+                    "UPDATE org_routing_overlays SET
+                        config_json = $2::jsonb,
+                        version = version + 1,
+                        updated_by = $3,
+                        updated_at = now()
+                     WHERE org_id = $1 AND version = $4::bigint
+                     RETURNING {ORG_OVERLAY_COLUMNS}"
+                ))
+                .bind(&req.org_id)
+                .bind(config)
+                .bind(&updated_by)
+                .bind(req.expected_version)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(db_error)?
+            };
+            let Some(row) = row else {
+                return Err(Status::aborted(format!(
+                    "the organisation routing overlay changed since version {} was read; reload it and retry",
+                    req.expected_version
+                )));
+            };
+            Ok(Response::new(org_overlay_to_pb(row)))
+        }
+        .await;
+        record_metrics("set_org_routing_overlay", started, result.is_ok());
+        result
+    }
 }
 
 #[cfg(test)]
@@ -665,6 +964,7 @@ mod db_tests {
         RoutingPolicyService {
             pool,
             candidates_enabled,
+            org_overlay_enabled: false,
         }
     }
 

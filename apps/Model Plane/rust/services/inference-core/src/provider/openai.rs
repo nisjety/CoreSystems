@@ -944,6 +944,7 @@ impl ProviderRouter for OpenAiProvider {
             cache_creation_input_tokens,
             // Stamped by the fallback chain, not the raw adapter.
             provider_timing: None,
+            service_tier_used: String::new(),
         })
     }
 
@@ -1037,6 +1038,7 @@ impl ProviderRouter for OpenAiProvider {
                                     cache_read_input_tokens,
                                     cache_creation_input_tokens,
                                     provider_timing: None,
+                                    service_tier_used: String::new(),
                                 })
                                 .await;
                             return;
@@ -1102,6 +1104,7 @@ impl ProviderRouter for OpenAiProvider {
                                     cache_read_input_tokens: 0,
                                     cache_creation_input_tokens: 0,
                                     provider_timing: None,
+                                    service_tier_used: String::new(),
                                 };
                                 if tx.send(chunk).await.is_err() {
                                     return;
@@ -1144,6 +1147,7 @@ impl ProviderRouter for OpenAiProvider {
                     cache_read_input_tokens,
                     cache_creation_input_tokens,
                     provider_timing: None,
+                    service_tier_used: String::new(),
                 })
                 .await;
         });
@@ -1273,6 +1277,8 @@ impl ProviderRouter for OpenAiProvider {
                     context_window_tokens: record.context_window_tokens,
                     max_output_tokens: record.max_output_tokens,
                     lifecycle: record.lifecycle,
+                    successor: record.successor,
+                    priority_tier: record.priority_tier,
                 }
             })
             .chain(self.embedding_models.iter().map(|id| ModelInfo {

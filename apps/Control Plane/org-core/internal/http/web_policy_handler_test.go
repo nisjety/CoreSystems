@@ -751,7 +751,7 @@ func TestInternalRouteFoldsEntitlementsAndAnswersTypedFailures(t *testing.T) {
 	}
 }
 
-func TestRetentionPostureStillOnlyTwoBooleans(t *testing.T) {
+func TestRetentionPostureAnswerHasExactlyFiveFields(t *testing.T) {
 	reader := &fakeRetentionPostureReader{posture: &orgcore.RetentionPosture{ZDRIntent: true, Entitled: true}}
 	t.Setenv(serviceCredentialEnv, webPolicyRegistry())
 	server := NewServer(0, nil, nil, "", "")
@@ -763,8 +763,8 @@ func TestRetentionPostureStillOnlyTwoBooleans(t *testing.T) {
 		t.Fatalf("retention posture: status=%d body=%s", response.Code, response.Body.String())
 	}
 	body := decodeBody(t, response)
-	if len(body) != 2 || body["zdrIntent"] != true || body["entitled"] != true {
-		t.Fatalf("the retention posture answer must stay exactly {zdrIntent, entitled}, got %v", body)
+	if len(body) != 5 || body["zdrIntent"] != true || body["entitled"] != true || body["effectiveZdr"] != true || body["lapsed"] != false || body["planLapsePolicy"] != "intent_stays_zdr" {
+		t.Fatalf("the retention posture answer must stay exactly {zdrIntent, entitled, effectiveZdr, lapsed, planLapsePolicy}, got %v", body)
 	}
 	if _, wrapped := body["data"]; wrapped {
 		t.Fatal("the retention posture contract was wrapped in an envelope")

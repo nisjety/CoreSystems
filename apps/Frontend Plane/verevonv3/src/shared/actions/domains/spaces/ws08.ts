@@ -36,6 +36,27 @@ const spaceSetAgentWakePolicyOutput = z.object({
   changed: z.boolean(),
 })
 
+// EP-6 S9: the version pin of one bound agent. Application (convex-core `spaceAgents`) stores
+// `pinnedVersion` (absent follows the published version) and refuses a version that was never
+// published for the agent. The gateway gates owner or manager (apps/gateway/src/domains/spaces/
+// agent_policy.rs, dispatchers_spaces/ws08.rs). A pin only selects among published versions and
+// grants nothing, but it does decide which definition governs the agent, so the id is not
+// model-executable (model-access.ts closes it): an agent must never pin its own version.
+const spaceSetAgentPinInput = z.object({
+  spaceRef: z.string().min(1),
+  bindingRef: z.string().min(1),
+  // A whole version of this agent that was published, or null to clear the pin (the binding then
+  // follows the published version again).
+  version: z.number().int().min(1).nullable(),
+})
+
+const spaceSetAgentPinOutput = z.object({
+  binding_ref: z.string(),
+  pinned_version: z.number().int().min(1).nullable(),
+  projection_version: z.number().nullable(),
+  changed: z.boolean(),
+})
+
 export const ws08SpaceActions = [
   {
     id: 'spaces.set_agent_wake_policy',
@@ -48,5 +69,17 @@ export const ws08SpaceActions = [
     reversible: true,
     inputSchema: spaceSetAgentWakePolicyInput,
     outputSchema: spaceSetAgentWakePolicyOutput,
+  },
+  {
+    id: 'spaces.agent_binding.pin',
+    label: 'Pin a Space agent version',
+    description:
+      'Pin one bound agent in this room to one published version of its definition, or clear the pin so it follows the published version again. Only the room\'s owner or manager may change it, and it can only select a version that was already published.',
+    ownerPlane: 'application',
+    risk: 'medium',
+    requiresApproval: false,
+    reversible: true,
+    inputSchema: spaceSetAgentPinInput,
+    outputSchema: spaceSetAgentPinOutput,
   },
 ] as const satisfies readonly ActionDescriptor[]

@@ -258,6 +258,34 @@
       "label_en": "saving or editing skills"
     },
     {
+      "key": "named_agent",
+      "label_en": "named agent memory"
+    },
+    {
+      "key": "process_output_spill",
+      "label_en": "saving background process output to files"
+    },
+    {
+      "key": "mcp_secret_ref",
+      "label_en": "MCP servers that use a stored credential"
+    },
+    {
+      "key": "custom_rest",
+      "label_en": "custom REST connectors"
+    },
+    {
+      "key": "teach_mode",
+      "label_en": "saving a run's steps as a skill"
+    },
+    {
+      "key": "reasoning_translation",
+      "label_en": "translating a reasoning text"
+    },
+    {
+      "key": "artifact_output",
+      "label_en": "files and documents the assistant creates"
+    },
+    {
       "key": "durable_crawl",
       "label_en": "durable crawls and batches"
     },

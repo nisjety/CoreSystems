@@ -34,12 +34,118 @@ function allRegistryIds(registrySource, fragmentSources) {
   return ids;
 }
 
+const LEGACY_ALIAS_TABLE = /const LEGACY_ACTION_ALIASES\b/y;
+const CFG_TEST_ATTRIBUTE = /#\[cfg\(test\)\]/y;
+const RAW_STRING_START = /b?r(#*)"/y;
+const CHAR_LITERAL = /'(?:\\u\{[0-9a-fA-F_]*\}|\\x[0-9a-fA-F]{2}|\\.|[^\\'\n])'/y;
+
+function isIdentifierChar(ch) {
+  return ch !== undefined && /[A-Za-z0-9_]/.test(ch);
+}
+
+// The index just past the comment, string or char literal that starts at `index`, or `index` itself.
+// Braces inside these never move an item boundary.
+function rustNoiseEnd(source, index) {
+  const ch = source[index];
+  if (ch === '/' && source[index + 1] === '/') {
+    const newline = source.indexOf('\n', index);
+    return newline === -1 ? source.length : newline;
+  }
+  if (ch === '/' && source[index + 1] === '*') {
+    const close = source.indexOf('*/', index + 2);
+    return close === -1 ? source.length : close + 2;
+  }
+  if (ch === '"') {
+    for (let i = index + 1; i < source.length; i += 1) {
+      if (source[i] === '\\') i += 1;
+      else if (source[i] === '"') return i + 1;
+    }
+    return source.length;
+  }
+  if ((ch === 'r' || ch === 'b') && !isIdentifierChar(source[index - 1])) {
+    RAW_STRING_START.lastIndex = index;
+    const raw = RAW_STRING_START.exec(source);
+    if (raw) {
+      const close = source.indexOf(`"${raw[1]}`, index + raw[0].length);
+      return close === -1 ? source.length : close + 1 + raw[1].length;
+    }
+  }
+  if (ch === "'") {
+    CHAR_LITERAL.lastIndex = index;
+    if (CHAR_LITERAL.test(source)) return CHAR_LITERAL.lastIndex;
+  }
+  return index;
+}
+
+// The index just past the Rust item whose body or tail starts at `from`: the `}` closing its first
+// brace block, or the `;` ending a braceless item. Only a `;` at depth 0 counts, so the `;` inside
+// the `[&str; 4]` type of a const does not end it.
+function rustItemEnd(source, from) {
+  let depth = 0;
+  for (let index = from; index < source.length; ) {
+    const noiseEnd = rustNoiseEnd(source, index);
+    if (noiseEnd > index) {
+      index = noiseEnd;
+      continue;
+    }
+    const ch = source[index];
+    if (ch === '(' || ch === '[' || ch === '{') {
+      depth += 1;
+    } else if (ch === ')' || ch === ']') {
+      depth -= 1;
+    } else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    } else if (ch === ';' && depth === 0) {
+      return index + 1;
+    }
+    index += 1;
+  }
+  return source.length;
+}
+
+// Where the skipped item that begins at `index` continues, or null when no skipped item starts there.
+function skippedItemStart(source, index) {
+  for (const pattern of [CFG_TEST_ATTRIBUTE, LEGACY_ALIAS_TABLE]) {
+    pattern.lastIndex = index;
+    if (pattern.test(source)) return pattern.lastIndex;
+  }
+  return null;
+}
+
+// The Rust source with the legacy web.* alias table and every #[cfg(test)] item removed. An alias key
+// is not a registry contract ID, and a test literal names an ID only to assert on it, so neither is
+// dispatch surface. Everything else is read exactly as before.
+function dispatchSurfaceSource(source) {
+  let kept = '';
+  let copied = 0;
+  for (let index = 0; index < source.length; ) {
+    const noiseEnd = rustNoiseEnd(source, index);
+    if (noiseEnd > index) {
+      index = noiseEnd;
+      continue;
+    }
+    const bodyStart = skippedItemStart(source, index);
+    if (bodyStart !== null) {
+      kept += source.slice(copied, index);
+      index = rustItemEnd(source, bodyStart);
+      copied = index;
+      continue;
+    }
+    index += 1;
+  }
+  return kept + source.slice(copied);
+}
+
 function handlerActionIds(source) {
   // Action IDs only appear as dotted quoted literals in the execute_action
   // match. The legacy brreg underscore alias is deliberately ignored because
-  // it is not a registry contract ID.
+  // it is not a registry contract ID. The legacy web.* table and the
+  // #[cfg(test)] items are not dispatch surface, so they are removed first.
   return new Set(
-    [...source.matchAll(/"([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)"/g)].map((match) => match[1]),
+    [...dispatchSurfaceSource(source).matchAll(/"([a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+)"/g)].map(
+      (match) => match[1],
+    ),
   );
 }
 
@@ -194,5 +300,46 @@ test('the WS10-S4 and WS14-S7 handler arms reach the Space dispatchers', () => {
       new RegExp(`"${quotedId}"[\\s\\S]{0,320}?=>[\\s\\S]{0,160}?${dispatcher}`),
       `${actionId} must reach ${dispatcher}`,
     );
+  }
+});
+
+// The legacy web.* alias table and the #[cfg(test)] items are read past, not as dispatch surface. The
+// synthetic source covers the boundaries the live handlers.rs relies on: a `;` inside a const type, a
+// brace inside a string or char literal, and a raw string holding a quote and a brace.
+test('the legacy alias table and cfg(test) items are skipped, and literals keep item boundaries', () => {
+  const source = `
+const LEGACY_ACTION_ALIASES: [(&str, &str); 1] = [("web.probe_alias", "tickets.create")];
+
+fn execute(action_id: &str) {
+    match action_id {
+        "tickets.create" => dispatch_tickets_create(),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+const TEST_ONLY: [&str; 2] = ["web.semi_probe", "web.semi_probe_two"];
+
+#[cfg(test)]
+mod tests {
+    fn open() -> &'static str { "{" }
+    const CHAR_OPEN: char = '{';
+    const RAW: &str = r#"say "}" now"#;
+    const AFTER_RAW: &str = "web.after_raw";
+}
+
+fn after_tests() {
+    let _ = "plugins.install";
+}
+`;
+  assert.deepEqual([...handlerActionIds(source)].sort(), ['plugins.install', 'tickets.create']);
+});
+
+test('the live handlers.rs declares the legacy alias table once and keeps its keys out of the dispatcher set', () => {
+  const handlerSource = fs.readFileSync(handlerPath, 'utf8');
+  assert.equal([...handlerSource.matchAll(/const LEGACY_ACTION_ALIASES\b/g)].length, 1);
+  const dispatcherIds = handlerActionIds(handlerSource);
+  for (const id of ['web.crawl_site', 'web.job_status', 'web.pause_job', 'web.cancel_job', 'web.resume_job']) {
+    assert.equal(dispatcherIds.has(id), false, `${id} is a legacy alias or test id, not a dispatcher id`);
   }
 });

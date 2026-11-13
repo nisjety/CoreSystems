@@ -278,7 +278,7 @@ impl MailTaskBridgeTokenProvider {
 /// default) on any decode failure, so a malformed token is treated as ZDR
 /// (fails closed to `RetentionMisconfigured` via the caller's
 /// `unwrap_or(true)`), not silently accepted.
-fn decoded_zdr_claim(token: &str) -> Option<bool> {
+pub(crate) fn decoded_zdr_claim(token: &str) -> Option<bool> {
     let payload = token.split('.').nth(1)?;
     use base64::Engine as _;
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD

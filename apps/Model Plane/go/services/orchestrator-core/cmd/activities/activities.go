@@ -311,7 +311,17 @@ type ConsolidationOutput struct {
 	ConsolidatedEntries []MemoryEntry
 	Summary             string
 }
-type WriteMemoryInput struct{ Entries []MemoryEntry }
+
+// WriteMemoryInput is the consolidated memory a workflow asks to be written.
+//
+// Retention is the posture of the caller that started the consolidation. It is
+// read only while MEMORY_GATE_ORCHESTRATOR_WRITES is on, where anything but an
+// attested [RetentionDurable] posture refuses the whole write; the zero value is
+// [RetentionUnspecified], so an input that never carried a posture fails closed.
+type WriteMemoryInput struct {
+	Entries   []MemoryEntry
+	Retention Retention
+}
 type SkillValidationInput struct{ SkillID, OrgID string }
 type SkillValidationOutput struct {
 	Valid  bool
@@ -340,6 +350,14 @@ type Activities struct {
 	feedbackStore                   feedback.Store
 	scheduledRunExecutionAuthorizer ScheduledRunExecutionAuthorizer
 	scheduledStepAuthorizer         ScheduledStepDecisionAuthorizer
+
+	// gateConsolidatedWrites is MEMORY_GATE_ORCHESTRATOR_WRITES. Off, a
+	// consolidated-memory write is exactly what it was before the content gate.
+	gateConsolidatedWrites bool
+
+	// memoryWriteCheck overrides Session Core's MemoryService as the content
+	// policy; nil means the Session Core connection in clients.
+	memoryWriteCheck memoryWriteChecker
 }
 
 func NewActivities(logger *slog.Logger, clients *grpcclient.Clients) *Activities {
@@ -866,8 +884,16 @@ func (a *Activities) WriteConsolidatedMemoryActivity(ctx context.Context, input 
 	if a.clients == nil || a.clients.LettaBridge == nil {
 		return status.Error(codes.Unavailable, "letta-bridge unavailable")
 	}
+	entries := input.Entries
+	if a.gateConsolidatedWrites {
+		allowed, err := a.gateConsolidatedEntries(ctx, input)
+		if err != nil {
+			return err
+		}
+		entries = allowed
+	}
 	client := mpv1.NewMemoryServiceClient(a.clients.LettaBridge)
-	for _, entry := range input.Entries {
+	for _, entry := range entries {
 		_, err := client.IndexMemory(ctx, &mpv1.IndexMemoryRequest{
 			ThreadId: entry.ThreadID,
 			Topic:    "MEMORY",

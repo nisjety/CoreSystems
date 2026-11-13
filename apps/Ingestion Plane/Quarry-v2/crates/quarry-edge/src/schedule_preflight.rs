@@ -6,8 +6,10 @@
 //! at fire time:
 //!
 //! - **ZDR posture**: org-core `GET /internal/orgs/:org/retention-posture`
-//!   (`{zdrIntent, entitled}`; effective ZDR is `zdrIntent && entitled`). One read
-//!   per fire, never cached, 3 s timeout. Effective ZDR answers `skipped_zdr` (and,
+//!   (`{zdrIntent, entitled, effectiveZdr?, lapsed?}`; effective ZDR is
+//!   `zdrIntent && entitled`, or, with `QUARRY_EDGE__ZDR_EFFECTIVE_POSTURE_ENABLED=true`,
+//!   the `effectiveZdr` that org-core computes, where a missing field is unknown).
+//!   One read per fire, never cached, 3 s timeout. Effective ZDR answers `skipped_zdr` (and,
 //!   under `enforce`, asks control to pause the schedule). A read that fails for
 //!   any reason (timeout, 5xx, 404, no credential) answers
 //!   `skipped_posture_unknown`: fail closed, and the next cron fire tries again.
@@ -60,6 +62,9 @@ use crate::state::AppState;
 
 pub const ENV_SCHEDULE_POSTURE: &str = "QUARRY_EDGE__SCHEDULE_POSTURE";
 pub const ENV_ORG_CORE_URL: &str = "QUARRY_EDGE__ORG_CORE_URL";
+/// ZDR-Z-03e: read org-core's `effectiveZdr` instead of `zdrIntent && entitled`.
+/// Dark; only the trimmed literal `true` turns it on. Read once in [`config`].
+pub const ENV_ZDR_EFFECTIVE_POSTURE: &str = "QUARRY_EDGE__ZDR_EFFECTIVE_POSTURE_ENABLED";
 pub const ENV_ORG_CORE_SERVICE_TOKEN: &str = "QUARRY_EDGE__ORG_CORE_SERVICE_TOKEN";
 
 /// The principal org-core knows this edge by (W2-CP-R13-2 registry row).
@@ -125,11 +130,18 @@ pub fn mode_from_env() -> PostureMode {
     })
 }
 
+/// The effective-posture switch: only the trimmed literal `true` turns it on.
+/// Unset, empty, `1`, `TRUE` and every other value keep `zdrIntent && entitled`.
+pub fn zdr_effective_posture_from(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
 fn config() -> &'static PreflightConfig {
     CONFIG.get_or_init(|| {
         let mode = mode_from_env();
         let url = std::env::var(ENV_ORG_CORE_URL).unwrap_or_default();
         let token = std::env::var(ENV_ORG_CORE_SERVICE_TOKEN).unwrap_or_default();
+        let effective_posture = zdr_effective_posture_from(std::env::var(ENV_ZDR_EFFECTIVE_POSTURE).ok().as_deref());
         let posture: Option<Arc<dyn PostureSource>> = if url.trim().is_empty() || token.trim().is_empty() {
             if mode != PostureMode::Off {
                 tracing::warn!(
@@ -140,14 +152,19 @@ fn config() -> &'static PreflightConfig {
             None
         } else {
             match OrgCorePosture::new(url.trim(), token.trim()) {
-                Ok(client) => Some(Arc::new(client)),
+                Ok(client) => Some(Arc::new(client.with_effective_posture(effective_posture))),
                 Err(class) => {
                     tracing::warn!(class, "schedule preflight: org-core client not built; posture reads answer unknown");
                     None
                 }
             }
         };
-        tracing::info!(mode = mode.label(), posture_wired = posture.is_some(), "schedule preflight configured");
+        tracing::info!(
+            mode = mode.label(),
+            posture_wired = posture.is_some(),
+            effective_posture,
+            "schedule preflight configured"
+        );
         PreflightConfig { mode, posture }
     })
 }
@@ -302,15 +319,34 @@ pub fn binding_target(schedule_id: &str) -> String {
 /// One posture read. `Unknown` carries a closed class for the log, never a body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PostureRead {
-    Known { zdr_intent: bool, entitled: bool },
+    Known {
+        zdr_intent: bool,
+        entitled: bool,
+        /// org-core's `effectiveZdr` when the body carried it (ZDR-Z-03e).
+        effective: Option<bool>,
+        /// Whether the effective-posture switch was on when this was read. It is
+        /// carried here so the answer never reads the environment.
+        use_effective: bool,
+    },
     Unknown(&'static str),
 }
 
 impl PostureRead {
-    /// Effective ZDR: intent AND entitlement. `None` when unknown.
+    /// Effective ZDR. Switch off: intent AND entitlement. Switch on: org-core's
+    /// `effectiveZdr`, and `None` (unknown, so the preflight refuses) when the body
+    /// did not carry it. `None` also when the read itself failed.
     pub fn effective_zdr(self) -> Option<bool> {
         match self {
-            Self::Known { zdr_intent, entitled } => Some(zdr_intent && entitled),
+            Self::Known {
+                effective,
+                use_effective: true,
+                ..
+            } => effective,
+            Self::Known {
+                zdr_intent,
+                entitled,
+                ..
+            } => Some(zdr_intent && entitled),
             Self::Unknown(_) => None,
         }
     }
@@ -327,6 +363,12 @@ pub trait PostureSource: Send + Sync {
 struct RetentionPostureDoc {
     zdr_intent: bool,
     entitled: bool,
+    /// org-core's computed effective ZDR (ZDR-Z-03e). Absent on an older org-core.
+    #[serde(default)]
+    effective_zdr: Option<bool>,
+    /// Whether the plan has lapsed (ZDR-Z-03e). Logged as a closed boolean only.
+    #[serde(default)]
+    lapsed: Option<bool>,
 }
 
 /// org-core's `GET /internal/orgs/:orgId/retention-posture`, authenticated with
@@ -336,6 +378,8 @@ pub struct OrgCorePosture {
     client: reqwest::Client,
     base_url: String,
     token: String,
+    /// ZDR-Z-03e switch, read once by [`config`] and set at construction.
+    use_effective: bool,
 }
 
 impl OrgCorePosture {
@@ -350,7 +394,14 @@ impl OrgCorePosture {
             client,
             base_url: base_url.to_string(),
             token: token.to_string(),
+            use_effective: false,
         })
+    }
+
+    /// Sets the ZDR-Z-03e switch (default off) the reads carry.
+    pub fn with_effective_posture(mut self, enabled: bool) -> Self {
+        self.use_effective = enabled;
+        self
     }
 
     fn url_for(&self, org_id: &str) -> Result<reqwest::Url, &'static str> {
@@ -395,10 +446,20 @@ impl PostureSource for OrgCorePosture {
             });
         }
         match response.json::<RetentionPostureDoc>().await {
-            Ok(doc) => PostureRead::Known {
-                zdr_intent: doc.zdr_intent,
-                entitled: doc.entitled,
-            },
+            Ok(doc) => {
+                if self.use_effective && doc.lapsed == Some(true) {
+                    tracing::debug!(
+                        effective_present = doc.effective_zdr.is_some(),
+                        "schedule preflight: org plan lapsed"
+                    );
+                }
+                PostureRead::Known {
+                    zdr_intent: doc.zdr_intent,
+                    entitled: doc.entitled,
+                    effective: doc.effective_zdr,
+                    use_effective: self.use_effective,
+                }
+            }
             Err(_) => PostureRead::Unknown("decode"),
         }
     }
@@ -622,9 +683,12 @@ mod tests {
         }
     }
 
-    const STANDARD: PostureRead = PostureRead::Known { zdr_intent: false, entitled: true };
-    const ZDR: PostureRead = PostureRead::Known { zdr_intent: true, entitled: true };
-    const INTENT_NOT_ENTITLED: PostureRead = PostureRead::Known { zdr_intent: true, entitled: false };
+    const STANDARD: PostureRead =
+        PostureRead::Known { zdr_intent: false, entitled: true, effective: None, use_effective: false };
+    const ZDR: PostureRead =
+        PostureRead::Known { zdr_intent: true, entitled: true, effective: None, use_effective: false };
+    const INTENT_NOT_ENTITLED: PostureRead =
+        PostureRead::Known { zdr_intent: true, entitled: false, effective: None, use_effective: false };
     const UNKNOWN: PostureRead = PostureRead::Unknown("timeout");
 
     fn entitled(crawl: Allowance) -> OrgLimits {
@@ -837,9 +901,56 @@ mod tests {
         let client = OrgCorePosture::new(&server.uri(), "test-token").unwrap();
         for _ in 0..2 {
             let read = client.read("org_1").await;
-            assert_eq!(read, PostureRead::Known { zdr_intent: true, entitled: true });
+            assert_eq!(
+                read,
+                PostureRead::Known { zdr_intent: true, entitled: true, effective: None, use_effective: false }
+            );
         }
         server.verify().await;
+    }
+
+    #[test]
+    fn effective_posture_switch_is_the_strict_trimmed_literal_true() {
+        assert!(zdr_effective_posture_from(Some("true")));
+        assert!(zdr_effective_posture_from(Some(" true ")));
+        assert!(!zdr_effective_posture_from(None));
+        for other in ["", "1", "TRUE", "True", "yes", "on", "false"] {
+            assert!(!zdr_effective_posture_from(Some(other)), "{other:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn org_core_posture_lapsed_plan_reads_org_cores_effective_zdr_only_with_the_switch() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/internal/orgs/org_lapsed/retention-posture"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "zdrIntent": true, "entitled": false, "effectiveZdr": true, "lapsed": true
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/internal/orgs/org_old/retention-posture"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"zdrIntent": true, "entitled": true})),
+            )
+            .mount(&server)
+            .await;
+
+        let on = OrgCorePosture::new(&server.uri(), "test-token")
+            .unwrap()
+            .with_effective_posture(true);
+        let off = OrgCorePosture::new(&server.uri(), "test-token").unwrap();
+
+        assert_eq!(on.read("org_lapsed").await.effective_zdr(), Some(true));
+        assert_eq!(off.read("org_lapsed").await.effective_zdr(), Some(false));
+        // A body without effectiveZdr is unknown with the switch on, never standard.
+        assert_eq!(on.read("org_old").await.effective_zdr(), None);
+        assert_eq!(off.read("org_old").await.effective_zdr(), Some(true));
     }
 
     #[tokio::test]
@@ -872,5 +983,154 @@ mod tests {
         // Nothing listening: unknown, not a panic and not "standard".
         let dead = OrgCorePosture::new("http://127.0.0.1:9", "test-token").unwrap();
         assert!(matches!(dead.read("org_1").await, PostureRead::Unknown(_)));
+    }
+
+    // ZDR-Z-03e through the decision: org-core's effectiveZdr decides only with the switch on, a
+    // lapsed-plan org is refused as ZDR (matrix row o_plan_lapsed_keeps_zdr), and a body that does not
+    // carry effectiveZdr is unknown and refused under enforce, never standard.
+    #[tokio::test]
+    async fn effective_posture_switch_decides_the_preflight_for_a_lapsed_and_an_old_org_core_body()
+    {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let bodies = [
+            (
+                "org_lapsed",
+                serde_json::json!({"zdrIntent": true, "entitled": false, "effectiveZdr": true, "lapsed": true}),
+            ),
+            (
+                "org_old",
+                serde_json::json!({"zdrIntent": false, "entitled": true}),
+            ),
+            (
+                "org_null",
+                serde_json::json!({"zdrIntent": false, "entitled": true, "effectiveZdr": null}),
+            ),
+            (
+                "org_standard",
+                serde_json::json!({"zdrIntent": false, "entitled": true, "effectiveZdr": false, "lapsed": false}),
+            ),
+        ];
+        for (org, body) in &bodies {
+            Mock::given(method("GET"))
+                .and(path(format!("/internal/orgs/{org}/retention-posture")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body.clone()))
+                .mount(&server)
+                .await;
+        }
+        let on = OrgCorePosture::new(&server.uri(), "test-token")
+            .unwrap()
+            .with_effective_posture(true);
+        let off = OrgCorePosture::new(&server.uri(), "test-token").unwrap();
+
+        let run = |org: &'static str| {
+            let mut r = req(Some("crawl"), None);
+            r.org_id = org.into();
+            r
+        };
+
+        // Lapsed plan: ZDR with the switch on (refused), standard with it off (today's answer).
+        let a = decide(
+            PostureMode::Enforce,
+            &run("org_lapsed"),
+            Some(&on),
+            &StaticFloor,
+        )
+        .await;
+        assert!(!a.allow);
+        assert_eq!(
+            (a.reason, a.posture, a.zdr),
+            (Some(SKIPPED_ZDR), POSTURE_ZDR, Some(true))
+        );
+        let a = decide(
+            PostureMode::Enforce,
+            &run("org_lapsed"),
+            Some(&off),
+            &StaticFloor,
+        )
+        .await;
+        assert!(a.allow, "switch off keeps zdrIntent && entitled exactly");
+        assert_eq!((a.posture, a.zdr), (POSTURE_STANDARD, Some(false)));
+
+        // An org-core that does not send effectiveZdr (absent or null): unknown with the switch on.
+        for org in ["org_old", "org_null"] {
+            let a = decide(PostureMode::Enforce, &run(org), Some(&on), &StaticFloor).await;
+            assert!(!a.allow, "{org}: switch on and no effectiveZdr must refuse");
+            assert_eq!(
+                (a.reason, a.posture, a.zdr),
+                (Some(SKIPPED_POSTURE_UNKNOWN), POSTURE_UNKNOWN, None),
+                "{org}"
+            );
+            let a = decide(PostureMode::Enforce, &run(org), Some(&off), &StaticFloor).await;
+            assert!(
+                a.allow,
+                "{org}: switch off reads intent and entitlement as before"
+            );
+            assert_eq!(a.posture, POSTURE_STANDARD, "{org}");
+        }
+
+        // A standard org stays standard either way.
+        for source in [&on, &off] {
+            let a = decide(
+                PostureMode::Enforce,
+                &run("org_standard"),
+                Some(source),
+                &StaticFloor,
+            )
+            .await;
+            assert!(a.allow);
+            assert_eq!(a.zdr, Some(false));
+        }
+    }
+
+    // effectiveZdr is a boolean or absent. Any other value is a body this reader does not understand, so
+    // the read is unknown (fail closed) rather than a guess.
+    #[tokio::test]
+    async fn a_non_boolean_effective_zdr_is_unknown_with_the_switch_on() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/internal/orgs/org_odd/retention-posture"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"zdrIntent": false, "entitled": true, "effectiveZdr": "false"}),
+            ))
+            .mount(&server)
+            .await;
+        let on = OrgCorePosture::new(&server.uri(), "test-token")
+            .unwrap()
+            .with_effective_posture(true);
+        assert_eq!(on.read("org_odd").await.effective_zdr(), None);
+    }
+
+    #[test]
+    fn the_effective_posture_answer_never_reads_the_environment() {
+        // The switch travels inside the read: the same read answers the same way whatever the process
+        // environment says now.
+        let lapsed_on = PostureRead::Known {
+            zdr_intent: true,
+            entitled: false,
+            effective: Some(true),
+            use_effective: true,
+        };
+        let lapsed_off = PostureRead::Known {
+            zdr_intent: true,
+            entitled: false,
+            effective: Some(true),
+            use_effective: false,
+        };
+        assert_eq!(lapsed_on.effective_zdr(), Some(true));
+        assert_eq!(lapsed_off.effective_zdr(), Some(false));
+        let absent_on = PostureRead::Known {
+            zdr_intent: true,
+            entitled: true,
+            effective: None,
+            use_effective: true,
+        };
+        assert_eq!(absent_on.effective_zdr(), None);
+        assert_eq!(PostureRead::Unknown("timeout").effective_zdr(), None);
     }
 }

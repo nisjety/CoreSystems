@@ -31,7 +31,7 @@ pub(crate) async fn extract_chat_document(
 }
 
 /// Non-empty trimmed string field, or `None`.
-fn text_field(payload: &Value, key: &str) -> Option<String> {
+pub(super) fn text_field(payload: &Value, key: &str) -> Option<String> {
     payload
         .get(key)
         .and_then(Value::as_str)
@@ -46,6 +46,10 @@ pub(super) const CHAT_ATTACHMENT_ORIGIN: &str = "chat-attachment";
 pub(super) const CHAT_ARTIFACT_ORIGIN: &str = "chat-artifact";
 /// The Data Plane `type` of a saved artifact revision (F-t3-080). The gateway sets it; a body cannot.
 pub(super) const CHAT_ARTIFACT_TYPE: &str = "chat_artifact";
+/// The `metadata.origin` of a transcript made from an audio upload (W5, F-t3-090). The gateway sets it, with the type below.
+pub(super) const CHAT_TRANSCRIPT_ORIGIN: &str = "chat-transcript";
+/// The Data Plane `type` of a transcript document (W5, F-t3-090). The gateway sets it; a body cannot.
+pub(super) const CHAT_TRANSCRIPT_TYPE: &str = "media_transcript";
 /// Longest thread or artifact id a `source_ref` may carry. Ids are opaque labels, never content.
 const MAX_SOURCE_REF_ID_CHARS: usize = 256;
 /// The composer capabilities are a handful of booleans; anything larger is not that answer.

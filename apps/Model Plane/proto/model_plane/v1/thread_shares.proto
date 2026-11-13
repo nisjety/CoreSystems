@@ -22,12 +22,30 @@ import "model_plane/v1/thread_export.proto";
 // reads as not found to everyone. A snapshot is erased with its thread and
 // with the org purge.
 //
-// Reads are owner-only in this version: Control has no grant decision for the
-// `conversation_snapshot` type that session-core can verify yet, so another
-// member's read is not found. A separate file and service (integration round
-// B, C-B6) so that SessionCore and every implementation or test double of it
-// stay source-compatible. Switch `SESSION_THREAD_SHARES_ENABLED`, default off;
-// while it is off every RPC answers `unavailable` `thread_shares_disabled`.
+// Reads are owner-only through `GetSnapshot`. A member the owner granted a view
+// reads through `GetSharedSnapshot` (W4-SH-5, below); every other read is not
+// found. A separate file and service (integration round B, C-B6) so that
+// SessionCore and every implementation or test double of it stay
+// source-compatible. Switch `SESSION_THREAD_SHARES_ENABLED`, default off; while
+// it is off every RPC answers `unavailable` `thread_shares_disabled`.
+//
+// W4-SH-4: the owner can share a live snapshot with members of the same
+// organisation. Control owns the grant: session-core writes a `view` grant on
+// resource type `conversation_snapshot`, resource id the snapshot id, through
+// user-core's owner-asserted grant surface, with the owner's delegated
+// credential, and never stores a grant itself. The three grant RPCs need the
+// separate switch `SESSION_SNAPSHOT_GRANTS_ENABLED`, default off (`unavailable`
+// `snapshot_grants_disabled`), refuse a zero-retention or waived caller for
+// sharing (`zdr_feature_not_supported`, feature `conversation_share`), and
+// answer not found for a snapshot the caller does not own or that is revoked.
+// Revoking a snapshot also removes every Control grant on it.
+//
+// W4-SH-5: a member Control holds a `view` grant for reads the live snapshot
+// with `GetSharedSnapshot`, behind the same switch as the grant RPCs. Control
+// answers that grant check for the member's own delegated credential at read
+// time, and only a snapshot of the member's own organisation is read. Every
+// refusal, including a Control call that fails, is `not_found`, as a missing
+// snapshot is.
 
 // EP-12 S14. One snapshot as its owner sees it, without its body.
 message ThreadShareSnapshot {
@@ -96,14 +114,84 @@ message RevokeSnapshotResponse {
   ThreadShareSnapshot snapshot = 1;
 }
 
+// W4-SH-4. One member a live snapshot is shared with, as Control lists the grant.
+message SnapshotGrant {
+  // The member's user id; always a member of the snapshot's organisation.
+  string grantee_user_id = 1;
+  // When Control recorded the grant; unset when Control's timestamp was unreadable.
+  google.protobuf.Timestamp granted_at = 2;
+}
+
+// W4-SH-4. Share one of the caller's live snapshots with an organisation member.
+message ShareSnapshotRequest {
+  // The snapshot to share; another person's or a revoked one is not found.
+  string snapshot_id = 1;
+  // The member to share with. Control refuses a user who is not a member of the
+  // caller's organisation. The role is always `view`.
+  string grantee_user_id = 2;
+}
+
+// W4-SH-4. The grant Control recorded; sharing twice with the same member is idempotent.
+message ShareSnapshotResponse {
+  // The member's grant on the snapshot.
+  SnapshotGrant grant = 1;
+}
+
+// W4-SH-4. Stop sharing one of the caller's live snapshots with one member.
+message UnshareSnapshotRequest {
+  // The snapshot to stop sharing; another person's or a revoked one is not found.
+  string snapshot_id = 1;
+  // The member whose grant to remove.
+  string grantee_user_id = 2;
+}
+
+// W4-SH-4. Nothing to report: removing an absent grant also succeeds.
+message UnshareSnapshotResponse {}
+
+// W4-SH-4. List the members one of the caller's live snapshots is shared with.
+message ListSnapshotGrantsRequest {
+  // The snapshot whose grants to list; another person's or a revoked one is not found.
+  string snapshot_id = 1;
+}
+
+// W4-SH-4. Every member grant Control holds on the snapshot.
+message ListSnapshotGrantsResponse {
+  // The grants, as Control lists them; Space subjects are left out.
+  repeated SnapshotGrant grants = 1;
+}
+
+// W4-SH-5. Read one live snapshot as its owner, or as a member Control holds a `view` grant for.
+message GetSharedSnapshotRequest {
+  // The snapshot to read. Another organisation's, a revoked one, or one the caller neither owns
+  // nor holds a grant on is not found.
+  string snapshot_id = 1;
+}
+
+// W4-SH-5. The snapshot and the copy it holds, as the owner's own read gives them.
+message GetSharedSnapshotResponse {
+  // The snapshot, without its body.
+  ThreadShareSnapshot snapshot = 1;
+  // The redacted export the snapshot froze, exactly as it was taken.
+  ExportThreadResponse body = 2;
+}
+
 // EP-12 S14. The snapshot store. See the file comment for every refusal.
 service ThreadShareService {
   // Take an immutable, redacted snapshot of a thread the caller owns.
   rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
   // List the caller's live snapshots of one thread.
   rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
-  // Read one live snapshot with its body; owner-only in this version.
+  // Read one live snapshot with its body, as its owner; a granted member uses GetSharedSnapshot.
   rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
   // Revoke a snapshot: its body and digest are deleted in the same statement.
+  // With `SESSION_SNAPSHOT_GRANTS_ENABLED` on it also removes the snapshot's Control grants.
   rpc RevokeSnapshot(RevokeSnapshotRequest) returns (RevokeSnapshotResponse);
+  // W4-SH-4. Share a live snapshot with an organisation member through a Control `view` grant.
+  rpc ShareSnapshot(ShareSnapshotRequest) returns (ShareSnapshotResponse);
+  // W4-SH-4. Remove one member's Control grant on a live snapshot.
+  rpc UnshareSnapshot(UnshareSnapshotRequest) returns (UnshareSnapshotResponse);
+  // W4-SH-4. List the members a live snapshot is shared with.
+  rpc ListSnapshotGrants(ListSnapshotGrantsRequest) returns (ListSnapshotGrantsResponse);
+  // W4-SH-5. Read a live snapshot as its owner, or as a member with a Control `view` grant on it.
+  rpc GetSharedSnapshot(GetSharedSnapshotRequest) returns (GetSharedSnapshotResponse);
 }

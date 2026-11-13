@@ -29,13 +29,19 @@ pub const MAX_QUESTIONS_PER_RUN: usize = 3;
 
 /// The answer is the owner's next message.
 pub const DELIVERY_NEXT_TURN: &str = "next_turn";
-/// The answer continues the same run. Not offered until the resume slice ships.
+/// The answer continues the same run. Offered only while session-core and execution-core both
+/// read `AGENT_ASK_USER_RESUME_ENABLED` as true.
 pub const DELIVERY_RESUME: &str = "resume";
 
 /// Lifetime ceiling of a `next_turn` question.
 pub const NEXT_TURN_TTL_SECS: u32 = 24 * 60 * 60;
 /// Lifetime ceiling of a `resume` question, which holds a run open.
 pub const RESUME_TTL_SECS: u32 = 60 * 60;
+/// How long, in seconds, an answered or skipped `resume` answer may still be spent after its
+/// `answered_at`. Session-core's consume and its recovery hold both read this one value (the
+/// DEC-05 resume window). SQL callers bind it as `f64::from(RESUME_ANSWER_WINDOW_SECS)`, because
+/// `make_interval(secs => ..)` takes double precision.
+pub const RESUME_ANSWER_WINDOW_SECS: u32 = 60 * 60;
 
 /// The question was authored by the run's own model. An empty origin on the wire means this.
 pub const ORIGIN_MODEL: &str = "model";
@@ -384,6 +390,89 @@ pub fn answers_digest(answers: &[Answer], skip: bool) -> String {
     blake3::hash(body.to_string().as_bytes())
         .to_hex()
         .to_string()
+}
+
+/// The reference of a run's input pause: `{run_id}:{step_id}:input` for a model question (and
+/// an empty origin), `{run_id}:{step_id}:elicit:1` for an MCP elicitation (the first ordinal,
+/// the same key execution-core's elicitation builder derives).
+///
+/// The reference is BOTH the resume question's idempotency key and the pause fold's
+/// `pause_ref`. It never equals the `next_turn` key or an approval `pause_ref` (both
+/// `{run_id}:{step_id}`), so a lost create can never replay into the other delivery, and
+/// session-core can recognise an input pause by its reference alone ([`is_input_pause_ref`]).
+#[must_use]
+pub fn input_pause_ref(run_id: &str, step_id: &str, origin: &str) -> String {
+    if origin == ORIGIN_MCP_ELICITATION {
+        format!("{run_id}:{step_id}:elicit:1")
+    } else {
+        format!("{run_id}:{step_id}:input")
+    }
+}
+
+/// Whether `pause_ref` has the shape of an input pause reference ([`input_pause_ref`]): a
+/// non-empty prefix followed by `:input`, or by `:elicit:` and one to three ASCII digits.
+#[must_use]
+pub fn is_input_pause_ref(pause_ref: &str) -> bool {
+    if let Some(prefix) = pause_ref.strip_suffix(":input") {
+        return !prefix.is_empty();
+    }
+    if let Some((prefix, ordinal)) = pause_ref.rsplit_once(":elicit:") {
+        return !prefix.is_empty()
+            && (1..=3).contains(&ordinal.len())
+            && ordinal.bytes().all(|b| b.is_ascii_digit());
+    }
+    false
+}
+
+/// Most bytes of a resume answer's JSON (`AgentResume.answer_json`).
+pub const MAX_RESUME_ANSWER_BYTES: usize = 8192;
+
+/// The owner's answer as it travels in `AgentResume.answer_json`: the answers, or a skip.
+///
+/// This is an echo for the executor, checked for shape only by [`parse_resume_answer`]. The
+/// answer applied on resume is always session-core's consumed row, never this echo.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeAnswer {
+    /// The answer to each item; empty when the owner skipped.
+    pub answers: Vec<Answer>,
+    /// The owner skipped the question.
+    #[serde(default)]
+    pub skip: bool,
+}
+
+/// The canonical JSON of a resume answer, as carried in `AgentResume.answer_json`.
+#[must_use]
+pub fn encode_resume_answer(answers: &[Answer], skip: bool) -> String {
+    serde_json::to_string(&ResumeAnswer {
+        answers: answers.to_vec(),
+        skip,
+    })
+    .unwrap_or_default()
+}
+
+/// Parse a resume answer's JSON. Shape only: bounded size, no unknown keys, at most
+/// [`MAX_ITEMS`] answers, and exactly one of answers or skip.
+///
+/// # Errors
+/// [`Problem`] with field `answer_json` and reason `too_large`, `malformed`,
+/// `too_many_items`, `skip_with_answers` or `empty`.
+pub fn parse_resume_answer(json: &str) -> Result<ResumeAnswer, Problem> {
+    if json.len() > MAX_RESUME_ANSWER_BYTES {
+        return Err(Problem::at("answer_json", "too_large"));
+    }
+    let parsed: ResumeAnswer =
+        serde_json::from_str(json).map_err(|_| Problem::at("answer_json", "malformed"))?;
+    if parsed.answers.len() > MAX_ITEMS {
+        return Err(Problem::at("answer_json", "too_many_items"));
+    }
+    if parsed.skip && !parsed.answers.is_empty() {
+        return Err(Problem::at("answer_json", "skip_with_answers"));
+    }
+    if !parsed.skip && parsed.answers.is_empty() {
+        return Err(Problem::at("answer_json", "empty"));
+    }
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -763,5 +852,72 @@ mod tests {
         assert_ne!(answers_digest(&one, false), answers_digest(&other, false));
         assert_ne!(answers_digest(&[], true), answers_digest(&[], false));
         assert_eq!(answers_digest(&one, false).len(), 64);
+    }
+
+    #[test]
+    fn the_input_pause_ref_is_namespaced_and_never_the_step_key() {
+        assert_eq!(input_pause_ref("r", "s", ORIGIN_MODEL), "r:s:input");
+        assert_eq!(input_pause_ref("r", "s", ""), "r:s:input");
+        assert_eq!(
+            input_pause_ref("r", "s", ORIGIN_MCP_ELICITATION),
+            "r:s:elicit:1"
+        );
+        for origin in ["", ORIGIN_MODEL, ORIGIN_MCP_ELICITATION] {
+            assert_ne!(input_pause_ref("r", "s", origin), "r:s");
+            assert!(is_input_pause_ref(&input_pause_ref("r", "s", origin)));
+        }
+    }
+
+    #[test]
+    fn an_input_pause_ref_is_told_from_other_references() {
+        assert!(is_input_pause_ref("r:s:input"));
+        assert!(is_input_pause_ref("r:s:elicit:1"));
+        assert!(is_input_pause_ref("r:s:elicit:123"));
+        assert!(!is_input_pause_ref("r:s"));
+        assert!(!is_input_pause_ref(":input"));
+        assert!(!is_input_pause_ref("r:s:elicit:"));
+        assert!(!is_input_pause_ref("r:s:elicit:1234"));
+        assert!(!is_input_pause_ref("r:s:elicit:1a"));
+        assert!(!is_input_pause_ref(":elicit:1"));
+    }
+
+    #[test]
+    fn the_resume_answer_window_is_one_hour() {
+        assert_eq!(RESUME_ANSWER_WINDOW_SECS, 3600);
+    }
+
+    #[test]
+    fn a_resume_answer_round_trips_and_every_refusal_is_named() {
+        let answers = [answer("a", &["x"], ""), answer("b", &[], "t")];
+        let json = encode_resume_answer(&answers, false);
+        let parsed = parse_resume_answer(&json).expect("round trip");
+        assert_eq!(parsed.answers, answers.to_vec());
+        assert!(!parsed.skip);
+        let skipped = parse_resume_answer(&encode_resume_answer(&[], true)).expect("skip");
+        assert!(skipped.skip && skipped.answers.is_empty());
+
+        let reason = |json: &str| parse_resume_answer(json).unwrap_err();
+        assert_eq!(
+            reason(&"x".repeat(MAX_RESUME_ANSWER_BYTES + 1)).reason,
+            "too_large"
+        );
+        assert_eq!(reason("not json").reason, "malformed");
+        assert_eq!(
+            reason(r#"{"answers":[],"skip":true,"extra":1}"#).reason,
+            "malformed"
+        );
+        let five: Vec<Answer> = (0..=MAX_ITEMS)
+            .map(|n| answer(&format!("i{n}"), &[], "t"))
+            .collect();
+        assert_eq!(
+            reason(&encode_resume_answer(&five, false)).reason,
+            "too_many_items"
+        );
+        assert_eq!(
+            reason(&encode_resume_answer(&answers, true)).reason,
+            "skip_with_answers"
+        );
+        assert_eq!(reason(&encode_resume_answer(&[], false)).reason, "empty");
+        assert_eq!(reason("{}").field, "answer_json");
     }
 }

@@ -37,6 +37,7 @@ export function navigationFailureFromError(
     error instanceof ApiError
     && error.code === 'DRIVER_FAILED'
     && error.blockReason === null
+    && !Array.isArray(error.details)
     && error.details?.reason === 'navigation_http_response'
     && error.details.http_status !== 407
   ) {

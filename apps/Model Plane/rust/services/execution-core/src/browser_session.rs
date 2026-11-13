@@ -151,6 +151,13 @@ pub(crate) const HELP_DECLINED: Refusal = Refusal {
     code: "browser_help_declined",
     message: "The person chose not to help with this site, so the browser session was closed. Use another source.",
 };
+/// The person answered a `browser_human_assist` pause with "Skip this site" (EP-1 S2, D3-647), so the
+/// held page was closed. Final for this site: the model looks elsewhere. It never carries the
+/// person's reason.
+pub(crate) const SITE_SKIPPED: Refusal = Refusal {
+    code: "browser_site_skipped",
+    message: "The person skipped this site; use another source.",
+};
 /// The page shows a wall a person can clear by hand (EP-1 S2), one refusal per assist kind so the
 /// loop can tell which wall it was. The model does not read these: the loop pauses the run for the
 /// person, or tells the model [`BLOCKED`] when it cannot pause. The kinds are the closed
@@ -432,6 +439,18 @@ fn take_hold(run_id: &str) -> bool {
     )
 }
 
+/// End `run_id`'s hold only if the person holds the page, and say whether it did. The check and the
+/// removal are one step under one lock, so of two callers that reach one held page exactly one gets
+/// `true` (R2). A wait that ran out ([`Hold::TimedOut`]) stays for [`take_help_timed_out`].
+fn take_person_hold(run_id: &str) -> bool {
+    let mut held = held_runs().lock().unwrap_or_else(PoisonError::into_inner);
+    let person = matches!(held.get(run_id), Some(Hold::Person(_)));
+    if person {
+        held.remove(run_id);
+    }
+    person
+}
+
 /// The Do runs whose page a person has used since the agent last opened one (EP-1 S4). Their
 /// observations leave out the text of entry fields, so a password, one-time code or username the
 /// person typed is not read back to the model. This is defence in depth only: the guarantee is
@@ -463,7 +482,9 @@ fn is_typed_by_person(run_id: &str) -> bool {
         .contains(run_id)
 }
 
-fn is_held_for_person(run_id: &str) -> bool {
+/// Whether `run_id` holds a page for a person right now (a takeover or help pause not yet answered
+/// or released). Read-only; a skipped site's continuation checks it before it asks for anything.
+pub(crate) fn is_held_for_person(run_id: &str) -> bool {
     matches!(
         held_runs()
             .lock()
@@ -752,6 +773,32 @@ pub(crate) async fn decline_help(
         end_session(&session, dispatch, quarry, "the person declined to help").await;
     }
     HELP_DECLINED
+}
+
+/// Releases the page of a run whose person answered a `browser_human_assist` pause with "Skip this
+/// site" (denied, EP-1 S2, D3-647), and returns what the model reads: [`SITE_SKIPPED`].
+///
+/// `None` leaves everything as it was: the help switch is off, or the run does not hold a page for a
+/// person. The check for the hold and its end are one step under one lock, so of two skips that reach
+/// one held page only one gets `Some`; the other finds no hold, as a replay does (R2). Otherwise the
+/// hold ends and the page is closed through the same release the run's end makes (grant revoked,
+/// Quarry run closed), so a skipped site cannot keep a Quarry run open until the grant lapses. The
+/// run's help count stays, so a skipped site does not earn the run more requests than
+/// [`MAX_HELP_REQUESTS_PER_RUN`]. The person's reason is neither read nor logged. It only closes; it
+/// never opens or acts on a page.
+pub(crate) async fn skip_site(
+    dispatch: &BrowserDispatch<'_>,
+    quarry: Option<&QuarryAgentClient>,
+) -> Option<Refusal> {
+    if !human_assist_enabled() || !take_person_hold(dispatch.run_id) {
+        return None;
+    }
+    mark_typed_by_person(dispatch.run_id);
+    take_pending_help(dispatch.run_id);
+    if let Some(session) = dispatch.state.take_browser_session(dispatch.run_id) {
+        end_session(&session, dispatch, quarry, "the person skipped this site").await;
+    }
+    Some(SITE_SKIPPED)
 }
 
 /// The ids of one open page, held in [`StateStore`] for its run. None of them reaches the model.
@@ -2628,7 +2675,7 @@ mod tests {
 
     #[test]
     fn assist_cause_carries_kind_origin_and_host_only() {
-        use mp_contracts::approval_cause::{CauseCode, ASSIST_KINDS};
+        use mp_contracts::approval_cause::{CallFacts, CauseCode, ASSIST_KINDS};
         use crate::runtime_loop::agent::approval_cause_for_pause;
 
         let run = "run-help-cause";
@@ -2646,6 +2693,7 @@ mod tests {
         let takeover = approval_cause_for_pause(
             &state,
             CauseCode::BrowserHumanAssist,
+            &CallFacts::default(),
             run,
             OBSERVE_TOOL,
             "{}",
@@ -2660,6 +2708,7 @@ mod tests {
         let help = approval_cause_for_pause(
             &state,
             CauseCode::BrowserHumanAssist,
+            &CallFacts::default(),
             run,
             OBSERVE_TOOL,
             "{}",
@@ -2670,7 +2719,14 @@ mod tests {
             ("login", "agent", "example.com"),
             "the host is the session's, never a page's"
         );
-        let other = approval_cause_for_pause(&state, CauseCode::ProviderWrite, run, "send_email", "{}");
+        let other = approval_cause_for_pause(
+            &state,
+            CauseCode::ProviderWrite,
+            &CallFacts::default(),
+            run,
+            "send_email",
+            "{}",
+        );
         assert!(other.assist_kind.is_empty() && other.assist_origin.is_empty() && other.host.is_empty());
         forget_help(run);
         for (kind, _) in HELP_NEEDED {
@@ -2939,6 +2995,49 @@ mod tests {
         assert_eq!(state.browser_session("run-held"), Some(session));
         end_hold("run-held");
         assert!(!is_held_for_person("run-held"));
+    }
+
+    /// R2: two skips that reach one held page yield exactly one winner. The check for the hold and
+    /// its release are one step under one lock, so of eight racing skips only the one that takes the
+    /// person's hold continues the run; each other finds no hold, as a replay does, and continues
+    /// nothing.
+    #[test]
+    fn two_skips_of_one_held_page_yield_exactly_one_winner() {
+        let state = StateStore::new();
+        let broker = FakeBroker::default();
+        let run = "run-r2-one-winner";
+        hold_for_person(run);
+        let start = std::sync::Barrier::new(8);
+        let outcomes = std::thread::scope(|scope| {
+            let racers = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        // The help switch is thread-local, so each racer sets its own.
+                        let _on = HumanAssistSwitch::set(true);
+                        let dispatch = BrowserDispatch {
+                            state: &state,
+                            broker: &broker,
+                            bearer: "bearer-1",
+                            org_id: "org-1",
+                            run_id: run,
+                        };
+                        start.wait();
+                        tokio::runtime::Builder::new_current_thread()
+                            .build()
+                            .expect("a runtime for one skip")
+                            .block_on(skip_site(&dispatch, None))
+                    })
+                })
+                .collect::<Vec<_>>();
+            racers
+                .into_iter()
+                .map(|racer| racer.join().expect("a racing skip does not panic"))
+                .collect::<Vec<Option<Refusal>>>()
+        });
+        let winners = outcomes.iter().filter(|outcome| outcome.is_some()).count();
+        assert_eq!(winners, 1, "exactly one skip continues the run");
+        assert!(!is_held_for_person(run), "the page is released");
+        forget_typed_by_person(run);
     }
 
     #[test]

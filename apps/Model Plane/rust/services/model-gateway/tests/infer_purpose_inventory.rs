@@ -22,6 +22,16 @@ const SOURCE_DIRECTORIES: [&str; 3] = ["src", "../execution-core/src", "../sessi
 /// such as `ProviderInferRequest` is not one.
 const REQUEST: &str = "InferRequest";
 
+/// The constructions that name no purpose on purpose, each with its reason. An entry matches one
+/// construction only: the file (relative to this crate) and the whole text of the line that opens
+/// its literal. The test fails if an entry matches no construction, so a stale entry cannot linger.
+const UNNAMED_BY_DESIGN: [(&str, &str, &str); 1] = [(
+    "src/sse.rs",
+    "let judge_route = InferRequest {",
+    "the goal judge's route: it carries the model and the route only, and goal_judge.rs sets \
+     `purpose` to Validation on the request it actually sends",
+)];
+
 /// Words that put `InferRequest {` in a declaration or a pattern rather than a
 /// construction. A return type (`-> InferRequest {`) is handled separately.
 const NOT_A_CONSTRUCTION: [&str; 6] = ["struct", "impl", "enum", "trait", "for", "let"];
@@ -282,17 +292,41 @@ fn every_non_test_infer_request_names_a_purpose() {
 
     let mut found = 0;
     let mut unnamed = Vec::new();
+    let mut exempted = [false; UNNAMED_BY_DESIGN.len()];
     for file in &files {
         let source = std::fs::read_to_string(file).expect("a readable source file");
         let production = production_source(&source);
+        let relative = file
+            .strip_prefix(crate_root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .replace('\\', "/");
         for open in constructions(&production) {
             found += 1;
-            if !names_a_purpose(&production, open) {
-                let line = production[..open].matches('\n').count() + 1;
-                unnamed.push(format!("{}:{line}", file.display()));
+            if names_a_purpose(&production, open) {
+                continue;
+            }
+            let line_start = production[..open].rfind('\n').map_or(0, |newline| newline + 1);
+            let line_end = production[open..]
+                .find('\n')
+                .map_or(production.len(), |offset| open + offset);
+            let line = production[line_start..line_end].trim();
+            let exemption = UNNAMED_BY_DESIGN
+                .iter()
+                .position(|(path, text, _)| *path == relative && *text == line);
+            match exemption {
+                Some(index) => exempted[index] = true,
+                None => {
+                    let number = production[..open].matches('\n').count() + 1;
+                    unnamed.push(format!("{}:{number}", file.display()));
+                }
             }
         }
     }
+    assert!(
+        exempted.iter().all(|&used| used),
+        "an exemption in UNNAMED_BY_DESIGN matches no construction: {UNNAMED_BY_DESIGN:?}"
+    );
     assert!(
         found >= 20,
         "the scan found only {found} production InferRequest literals, so the scanner has gone blind"

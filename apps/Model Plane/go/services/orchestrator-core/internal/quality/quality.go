@@ -184,6 +184,39 @@ func Evaluate(e Evidence) Score {
 	}
 }
 
+// CurrentVersion picks the version that stands for a skill: the highest one with
+// evidence. Version 0 means "no version recorded", so it only wins when nothing
+// numbered exists. Returns 0 for an empty set.
+//
+// Highest rather than newest-by-time because a skill's version only ever
+// increases, and a late rating of an old version must not make that version look
+// current.
+func CurrentVersion(versions []int) int {
+	current := 0
+	for _, v := range versions {
+		if v > current {
+			current = v
+		}
+	}
+	return current
+}
+
+// EvaluateCurrent scores a skill from its per-version evidence, judging ONLY the
+// current version (see [CurrentVersion]). Evidence about older versions is kept
+// by the store but does not count: a v3 that earned a poor record must not
+// quarantine the v4 that fixed it.
+//
+// Returns the version that was judged and its verdict. An empty map scores as no
+// evidence at version 0.
+func EvaluateCurrent(byVersion map[int]Evidence) (version int, score Score) {
+	versions := make([]int, 0, len(byVersion))
+	for v := range byVersion {
+		versions = append(versions, v)
+	}
+	version = CurrentVersion(versions)
+	return version, Evaluate(byVersion[version])
+}
+
 // Decision is what the sweep should do with a skill.
 type Decision string
 

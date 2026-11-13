@@ -12,8 +12,9 @@ import "google/protobuf/timestamp.proto";
 // connector event type that may wake a budgeted run for that member. This service stores the record
 // and nothing fires: a stored trigger is not authority, so every later fire is re-authorised by
 // Control through FireAuthorizer. The record holds ids, a closed event type, a short label, a clock
-// flag and a status. Only its member reads or changes it, a service caller is refused, and a
-// zero-retention or waived credential is refused on every RPC. It is erased with its org.
+// flag, a status, once bound (W4-F T3) the id of one cron schedule, and a wake filter (W4-F T5). Only
+// its member reads or changes it, a service caller is refused, and a zero-retention or waived
+// credential is refused on every RPC. It is erased with its org.
 // The switch is EVENT_TRIGGERS_ENABLED (literal true only); while it is off every RPC answers
 // unavailable with event_triggers_disabled. A separate file and service, as the other Wave 4
 // stores are, so that SessionCore and every implementation of it stay source-compatible.
@@ -45,6 +46,14 @@ message EventTrigger {
   google.protobuf.Timestamp created_at = 11;
   // When the trigger last changed.
   google.protobuf.Timestamp updated_at = 12;
+  // The id of the member's cron schedule this trigger is bound to, or empty for a record-only trigger.
+  // A fire runs under that schedule's consent contract. The binding grants no authority by itself:
+  // Control authorises every fire (W4-F T3).
+  string schedule_id = 13;
+  // The wake filter the trigger's fires must match, as canonical JSON in the closed version 1 schema, or empty for a
+  // trigger with none. Session Core checks the schema and stores it. capability-core reads it before a fire is decided,
+  // and only when EVENT_TRIGGER_WAKE_GATE_ENABLED is on (W4-F T5). The filter grants no authority by itself.
+  string wake_filter_json = 14;
 }
 
 // Create a trigger for the caller, who becomes its member. The new trigger starts "active".
@@ -61,6 +70,13 @@ message CreateEventTriggerRequest {
   string name = 5;
   // Whether the clock arm is enabled. False when unset.
   bool clock_enabled = 6;
+  // The cron schedule to bind, or empty for a record-only trigger. The schedule must be the caller's own
+  // live schedule in the same org and Space and carry an approval contract, or the create is refused with
+  // trigger_schedule_mismatch (W4-F T3).
+  string schedule_id = 7;
+  // The wake filter, as JSON in the closed version 1 schema, or empty for none. A filter the schema does not allow is
+  // refused as invalid_event_trigger (W4-F T5).
+  string wake_filter_json = 8;
 }
 
 // Read one trigger the caller owns.
@@ -94,7 +110,7 @@ message UpdateEventTriggerRequest {
   string trigger_id = 2;
   // The revision the caller saw. A stale one is refused with aborted event_trigger_revision_conflict.
   uint64 expected_revision = 3;
-  // The fields to change: any of "name", "clock_enabled" and "status". Required.
+  // The fields to change: any of "name", "clock_enabled", "status", "schedule_id" and "wake_filter_json". Required.
   repeated string update_paths = 4;
   // The new label. Read when "name" is named.
   string name = 5;
@@ -102,6 +118,12 @@ message UpdateEventTriggerRequest {
   bool clock_enabled = 6;
   // The new status, "active", "paused" or "disabled". Read when "status" is named.
   string status = 7;
+  // The new schedule binding, read when "schedule_id" is named. Empty unbinds the trigger. A non-empty id
+  // is checked as on create (W4-F T3).
+  string schedule_id = 8;
+  // The new wake filter, read when "wake_filter_json" is named. Empty removes the filter. A non-empty filter is checked
+  // as on create (W4-F T5).
+  string wake_filter_json = 9;
 }
 
 // One trigger and whether it was found for the caller.

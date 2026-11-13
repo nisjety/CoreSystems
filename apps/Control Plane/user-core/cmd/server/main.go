@@ -380,6 +380,25 @@ func main() {
 	// Per-user authz facade (ListVisible/Check) is served over HTTP so Data
 	// Plane services (documents-api, retrieval) can resolve grants cross-plane.
 	aclRepo := users.NewAclRepository(db)
+	// Org erasure: delete the purged organisation's resource grants when
+	// org-core fans out verevon.gdpr.erasure.requested (subject_type
+	// organization). Strict literal true; off by default; off = no subscription.
+	// Binds the durable audit-core provisions, over the shared-bus connection.
+	if os.Getenv("USER_CORE_ORG_ERASURE_CONSUMER_ENABLED") == "true" {
+		if sharedPublisher == nil {
+			log.Println("USER_CORE_ORG_ERASURE_CONSUMER_ENABLED is true but the shared NATS connection is not configured; org erasure consumer disabled")
+		} else if sharedJS, jsErr := sharedPublisher.LegacyJetStream(); jsErr != nil {
+			log.Printf("org erasure consumer disabled: shared JetStream context failed: %v", jsErr)
+		} else {
+			orgErasureConsumer := nats.NewOrgErasureConsumer(sharedJS, aclRepo)
+			if startErr := orgErasureConsumer.Start(ctx); startErr != nil {
+				log.Printf("org erasure consumer bind failed (is %s provisioned on the shared bus?): %v", nats.OrgErasureDurable, startErr)
+			} else {
+				defer orgErasureConsumer.Stop()
+				log.Println("Org erasure consumer active")
+			}
+		}
+	}
 	httpServer := httpserver.NewServer(userService, aclRepo, sharedPublisher, redisClient, httpPort)
 	spaceRepo := spaces.NewRepository(db)
 	// WS03-S1: effect-policy changes insert their audit outbox row on the
@@ -407,6 +426,10 @@ func main() {
 	// WS14-S1: shared-Space import decisions (room uploads). Strict literal true;
 	// off by default; a rollout control, never an authorization input.
 	httpServer.SetSharedImportDecisions(os.Getenv("CONTROL_SPACE_SHARED_IMPORT") == "true")
+	// EP-8 S7: Space memory management decisions (owner/admin list and delete of Space
+	// memory). Strict literal true; off by default; a rollout control, never an
+	// authorization input.
+	httpServer.SetSpaceMemoryDecisions(os.Getenv("CONTROL_SPACE_MEMORY_DECISIONS") == "true")
 	// WS03-S3: org-admin Space policy writes. Strict literal true; off by default.
 	httpServer.SetSpacePolicyAdminWrites(os.Getenv("SPACE_POLICY_ADMIN_WRITES") == "true")
 	// WS04-S10: durable membership events (ledger as outbox, PubAck publish,

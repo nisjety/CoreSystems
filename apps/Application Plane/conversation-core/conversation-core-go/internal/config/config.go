@@ -94,6 +94,11 @@ type Config struct {
 	OrgCoreBaseURL          string
 	OrgCoreServicePrincipal string
 	OrgCoreServiceToken     string
+	// ZDREffectivePostureRead switches the org-core reader from the raw
+	// metadata.interactiveRetention.zdr flag to the effective posture org-core
+	// computes (retention_posture.effective_zdr). Off by default; only the
+	// literal "true" enables it. A record without a posture is then an error.
+	ZDREffectivePostureRead bool
 	EmbeddingEngineBaseURL  string
 	// Capability-health reporting is optional in local development. When the
 	// complete block is configured, Conversation Core exchanges its dedicated
@@ -195,6 +200,7 @@ func Load() (*Config, error) {
 		OrgCoreBaseURL:                    strings.TrimSpace(getEnv("ORG_CORE_BASE_URL", "")),
 		OrgCoreServicePrincipal:           strings.TrimSpace(getEnv("ORG_CORE_SERVICE_PRINCIPAL", "conversation-core")),
 		OrgCoreServiceToken:               strings.TrimSpace(getEnv("ORG_CORE_SERVICE_TOKEN", "")),
+		ZDREffectivePostureRead:           strings.TrimSpace(getEnv("CONVERSATION_ZDR_EFFECTIVE_POSTURE_ENABLED", "")) == "true",
 		EmbeddingEngineBaseURL:            strings.TrimSpace(getEnv("EMBEDDING_ENGINE_BASE_URL", "")),
 		CapabilityCoreURL:                 strings.TrimSpace(getEnv("CAPABILITY_CORE_HTTP_URL", "")),
 		CapabilityHealthAuthCoreURL:       strings.TrimSpace(getEnv("CONVERSATION_CAPABILITY_HEALTH_AUTH_CORE_URL", "http://auth-core:3011")),

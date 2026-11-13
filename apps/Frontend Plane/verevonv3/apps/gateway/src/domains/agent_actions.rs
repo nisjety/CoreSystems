@@ -25,6 +25,7 @@ use axum::{
     Json, Router,
 };
 use reqwest::Method;
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::{
@@ -74,6 +75,33 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
             "/api/v1/plugins/{plugin_id}",
             post(update_plugin).delete(delete_plugin),
         )
+        // W4-PL-3: the org's approved plugin catalogue and its approvals, a plugin's install report, install and
+        // uninstall, and the kill list. Pass-through: this router only requires a session. capability-core decides
+        // every admin, ZDR and platform check, and mounts these routes only while PLUGIN_LOADER_ENABLED is on.
+        .route("/api/v1/plugin-catalog", get(list_plugin_catalog))
+        .route(
+            "/api/v1/plugin-catalog/{plugin_id}/approve",
+            post(approve_plugin_catalog),
+        )
+        .route(
+            "/api/v1/plugin-catalog/{plugin_id}/unapprove",
+            post(unapprove_plugin_catalog),
+        )
+        .route(
+            "/api/v1/plugins/{plugin_id}/components",
+            get(plugin_components),
+        )
+        .route("/api/v1/plugins/{plugin_id}/install", post(install_plugin))
+        .route(
+            "/api/v1/plugins/{plugin_id}/uninstall",
+            post(uninstall_plugin),
+        )
+        .route(
+            "/api/v1/plugin-kill-list",
+            get(list_plugin_kill)
+                .post(create_plugin_kill)
+                .delete(delete_plugin_kill),
+        )
         .route("/api/v1/cron", get(list_cron).post(create_cron))
         .route(
             "/api/v1/cron/{cron_id}",
@@ -81,10 +109,16 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         )
         .route("/api/v1/cron/{cron_id}/fires", get(list_cron_fires))
         .route("/api/v1/cron/{cron_id}/run", post(run_cron_now))
-        .route("/api/v1/capabilities", get(list_capabilities));
+        .route("/api/v1/capabilities", get(list_capabilities))
+        // EP-6 S11: the owner actions this org's run view can offer, read by the agent presets. Read-only
+        // config with no switch of its own; the SPA consumer stays behind VITE_PRESET_AGENT_ACTIONS.
+        .route(
+            "/api/v1/agents/admitted-actions",
+            get(list_admitted_owner_actions),
+        );
     // EP-6 S8: with the switch off the builder routes do not exist, so the gateway answers
     // exactly as it did before (the fallback 404).
-    let router = if agent_definition_versions_enabled() {
+    let router = if state.agent_definition_versions {
         router.merge(agent_builder_router())
     } else {
         router
@@ -93,6 +127,13 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
     // SKILL_MEMBER_AUTHORING is on; off, the path answers as it did before (a GET there is a 405).
     let router = if skill_member_authoring_enabled() {
         router.route("/api/v1/skills/authoring", get(skill_authoring))
+    } else {
+        router
+    };
+    // Wave 4 EP-7 W4-T7: the event trigger routes, merged only while EVENT_TRIGGERS_UI_ENABLED is the literal `true`
+    // (AppState::event_triggers_enabled, read once in build_state). Off, the paths are absent and answer the fallback 404.
+    let router = if state.event_triggers_enabled {
+        router.merge(event_trigger_router())
     } else {
         router
     };
@@ -780,6 +821,157 @@ async fn delete_plugin(
     .into_response()
 }
 
+/// Proxies one plugin catalogue, install or kill-list request to model-gateway, which forwards it to
+/// capability-core (W4-PL-3). The caller's model and capability tokens go with it, and the body, when there is
+/// one, goes through unchanged: capability-core reads it strictly and takes the org from the verified token.
+async fn proxy_plugin_request(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> (StatusCode, Json<Value>) {
+    let token = shared::model_token(state, user, headers).await;
+    let capability = match shared::required_capability_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error),
+    };
+    let url = format!("{}/v1/{}", state.model_gateway_url, path);
+    shared::proxy_model_json_with_capability(
+        state,
+        method,
+        &url,
+        body,
+        token.as_deref(),
+        Some(&capability),
+        user,
+    )
+    .await
+}
+
+/// The org's approved plugin catalogue (W4-PL-3). Open to members; capability-core lists the org's approved,
+/// pinned and not killed packages.
+async fn list_plugin_catalog(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    proxy_plugin_request(&state, &user, &headers, Method::GET, "plugin-catalog", None).await
+}
+
+/// Lists one of the org's packages in the catalogue (W4-PL-3). capability-core checks the org admin role.
+async fn approve_plugin_catalog(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(plugin_id): Path<String>,
+) -> impl IntoResponse {
+    let path = format!("plugin-catalog/{}/approve", urlencoding::encode(&plugin_id));
+    proxy_plugin_request(&state, &user, &headers, Method::POST, &path, None).await
+}
+
+/// Takes one of the org's packages out of the catalogue (W4-PL-3). capability-core checks the org admin role.
+async fn unapprove_plugin_catalog(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(plugin_id): Path<String>,
+) -> impl IntoResponse {
+    let path = format!(
+        "plugin-catalog/{}/unapprove",
+        urlencoding::encode(&plugin_id)
+    );
+    proxy_plugin_request(&state, &user, &headers, Method::POST, &path, None).await
+}
+
+/// A plugin's install report: every component, its digest and whether an install would refuse it (W4-PL-3).
+/// capability-core answers only an org admin acting as a person.
+async fn plugin_components(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(plugin_id): Path<String>,
+) -> impl IntoResponse {
+    let path = format!("plugins/{}/components", urlencoding::encode(&plugin_id));
+    proxy_plugin_request(&state, &user, &headers, Method::GET, &path, None).await
+}
+
+/// Installs a plugin with the digests the admin consented to (W4-PL-3). capability-core checks the admin role.
+async fn install_plugin(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(plugin_id): Path<String>,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    let path = format!("plugins/{}/install", urlencoding::encode(&plugin_id));
+    proxy_plugin_request(&state, &user, &headers, Method::POST, &path, Some(body)).await
+}
+
+/// Uninstalls a plugin (W4-PL-3). capability-core checks the admin role.
+async fn uninstall_plugin(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(plugin_id): Path<String>,
+) -> impl IntoResponse {
+    let path = format!("plugins/{}/uninstall", urlencoding::encode(&plugin_id));
+    proxy_plugin_request(&state, &user, &headers, Method::POST, &path, None).await
+}
+
+/// Lists the org's kill-list entries, its own and the platform's global ones (W4-PL-4). capability-core answers only
+/// an org admin acting as a person.
+async fn list_plugin_kill(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    proxy_plugin_request(
+        &state,
+        &user,
+        &headers,
+        Method::GET,
+        "plugin-kill-list",
+        None,
+    )
+    .await
+}
+
+/// Adds a kill-list entry (W4-PL-3). The org is never taken from the body: capability-core derives it from the
+/// verified token, and a global entry needs a platform service principal.
+async fn create_plugin_kill(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    proxy_plugin_request(
+        &state,
+        &user,
+        &headers,
+        Method::POST,
+        "plugin-kill-list",
+        Some(body),
+    )
+    .await
+}
+
+/// Removes a kill-list entry (W4-PL-3). Only the digest and the scope are forwarded, as the query.
+async fn delete_plugin_kill(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let kept: HashMap<String, String> = params
+        .into_iter()
+        .filter(|(key, _)| key == "digest" || key == "scope")
+        .collect();
+    let path = format!("plugin-kill-list{}", build_query(&kept));
+    proxy_plugin_request(&state, &user, &headers, Method::DELETE, &path, None).await
+}
+
 /// List the org's cron schedules (open to members).
 async fn list_cron(
     State(state): State<AppState>,
@@ -915,6 +1107,219 @@ async fn run_cron_now(
         token.as_deref(),
         Some(&capability),
         &user,
+    )
+    .await
+    .into_response()
+}
+
+// Wave 4 EP-7 W4-T7: the event trigger surface (F-t3-047). Model Gateway owns the record and the dry run. This gateway
+// relays the caller's own bearers and forwards only the fields named below, never an org or a user from the body. The
+// routes are merged only while `AppState::event_triggers_enabled` (EVENT_TRIGGERS_UI_ENABLED, read once in build_state)
+// is the literal `true`; off, the paths are absent and answer the fallback 404.
+
+/// The fields of a trigger create the gateway forwards. An org, a user or any other key in the body is dropped.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct EventTriggerCreateBody {
+    #[serde(alias = "spaceRef")]
+    space_ref: String,
+    #[serde(alias = "connectionId")]
+    connection_id: String,
+    #[serde(alias = "eventType")]
+    event_type: String,
+    name: String,
+    #[serde(alias = "clockEnabled")]
+    clock_enabled: bool,
+    #[serde(alias = "scheduleId")]
+    schedule_id: String,
+    #[serde(alias = "wakeFilterJson")]
+    wake_filter_json: String,
+}
+
+/// The fields of a trigger change the gateway forwards: the revision the caller read, the paths it names and their values.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct EventTriggerUpdateBody {
+    #[serde(alias = "expectedRevision")]
+    expected_revision: u64,
+    #[serde(alias = "updatePaths")]
+    update_paths: Vec<String>,
+    name: String,
+    #[serde(alias = "clockEnabled")]
+    clock_enabled: bool,
+    status: String,
+    #[serde(alias = "scheduleId")]
+    schedule_id: String,
+    #[serde(alias = "wakeFilterJson")]
+    wake_filter_json: String,
+}
+
+/// The body of a dry run: the one stored webhook event to dry run against.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct EventTriggerDryRunBody {
+    #[serde(alias = "webhookEventId")]
+    webhook_event_id: String,
+}
+
+/// The event trigger routes (Wave 4 EP-7 W4-T7), merged only while `AppState::event_triggers_enabled` is on.
+fn event_trigger_router() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/v1/event-triggers",
+            get(list_event_triggers).post(create_event_trigger),
+        )
+        .route(
+            "/api/v1/event-triggers/{trigger_id}",
+            get(get_event_trigger).patch(update_event_trigger),
+        )
+        .route(
+            "/api/v1/event-triggers/{trigger_id}/dry-run",
+            post(dry_run_event_trigger),
+        )
+}
+
+/// `GET /api/v1/event-triggers?space_ref=`: the caller's own triggers, optionally of one Space.
+async fn list_event_triggers(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let kept: HashMap<String, String> = params
+        .into_iter()
+        .filter(|(key, _)| key == "space_ref")
+        .collect();
+    let url = format!(
+        "{}/v1/event-triggers{}",
+        state.model_gateway_url,
+        build_query(&kept)
+    );
+    relay_event_trigger_session(&state, &user, &headers, Method::GET, &url, None).await
+}
+
+/// `POST /api/v1/event-triggers`: record a trigger for the caller. Model Gateway answers 201 with it.
+async fn create_event_trigger(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Json(body): Json<EventTriggerCreateBody>,
+) -> impl IntoResponse {
+    let url = format!("{}/v1/event-triggers", state.model_gateway_url);
+    let upstream = json!({
+        "space_ref": body.space_ref,
+        "connection_id": body.connection_id,
+        "event_type": body.event_type,
+        "name": body.name,
+        "clock_enabled": body.clock_enabled,
+        "schedule_id": body.schedule_id,
+        "wake_filter_json": body.wake_filter_json,
+    });
+    relay_event_trigger_session(&state, &user, &headers, Method::POST, &url, Some(upstream)).await
+}
+
+/// `GET /api/v1/event-triggers/{trigger_id}`: one trigger the caller owns.
+async fn get_event_trigger(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(trigger_id): Path<String>,
+) -> impl IntoResponse {
+    let url = event_trigger_url(&state.model_gateway_url, &trigger_id, "");
+    relay_event_trigger_session(&state, &user, &headers, Method::GET, &url, None).await
+}
+
+/// `PATCH /api/v1/event-triggers/{trigger_id}`: changes only the paths the body names, under the revision it read.
+async fn update_event_trigger(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(trigger_id): Path<String>,
+    Json(body): Json<EventTriggerUpdateBody>,
+) -> impl IntoResponse {
+    let url = event_trigger_url(&state.model_gateway_url, &trigger_id, "");
+    let upstream = json!({
+        "expected_revision": body.expected_revision,
+        "update_paths": body.update_paths,
+        "name": body.name,
+        "clock_enabled": body.clock_enabled,
+        "status": body.status,
+        "schedule_id": body.schedule_id,
+        "wake_filter_json": body.wake_filter_json,
+    });
+    relay_event_trigger_session(&state, &user, &headers, Method::PATCH, &url, Some(upstream)).await
+}
+
+/// `POST /api/v1/event-triggers/{trigger_id}/dry-run`: would a fire of this trigger wake on one stored webhook event.
+/// Relayed to capability-core under the caller's capability bearer; nothing is recorded or fired.
+async fn dry_run_event_trigger(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+    Path(trigger_id): Path<String>,
+    Json(body): Json<EventTriggerDryRunBody>,
+) -> impl IntoResponse {
+    let url = event_trigger_url(&state.model_gateway_url, &trigger_id, "/dry-run");
+    let upstream = json!({ "webhook_event_id": body.webhook_event_id });
+    relay_event_trigger_capability(&state, &user, &headers, &url, upstream).await
+}
+
+/// `{base}/v1/event-triggers/{trigger_id}{tail}`, with the id encoded as one path segment.
+fn event_trigger_url(base: &str, trigger_id: &str, tail: &str) -> String {
+    format!(
+        "{base}/v1/event-triggers/{}{tail}",
+        urlencoding::encode(trigger_id)
+    )
+}
+
+/// One call to Model Gateway's trigger routes under the caller's model and session bearers. The answer is relayed as it came.
+async fn relay_event_trigger_session(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    method: Method,
+    url: &str,
+    body: Option<Value>,
+) -> axum::response::Response {
+    let token = shared::model_token(state, user, headers).await;
+    let session = match shared::required_session_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    let (status, Json(payload)) = shared::proxy_model_json_with_session(
+        state,
+        method,
+        url,
+        body,
+        token.as_deref(),
+        Some(&session),
+        user,
+    )
+    .await;
+    (status, Json(payload)).into_response()
+}
+
+/// One call to the dry run under the caller's model and capability bearers. The answer is relayed as it came.
+async fn relay_event_trigger_capability(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    url: &str,
+    body: Value,
+) -> axum::response::Response {
+    let token = shared::model_token(state, user, headers).await;
+    let capability = match shared::required_capability_token(state, user, headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
+    };
+    shared::proxy_model_json_with_capability(
+        state,
+        Method::POST,
+        url,
+        Some(body),
+        token.as_deref(),
+        Some(&capability),
+        user,
     )
     .await
     .into_response()
@@ -1184,16 +1589,42 @@ async fn list_capabilities(
     .await
 }
 
+/// `GET /api/v1/agents/admitted-actions` (EP-6 S11): the owner actions this org's run view can offer,
+/// as model-gateway answers them from capability-core. It mirrors `list_capabilities`: the caller's
+/// model and capability bearers, with the org taken from the verified session and never from a header
+/// the caller sends. Only ids and a mode come back; a ZDR principal is refused upstream, and that
+/// refusal passes through unchanged.
+pub(crate) async fn list_admitted_owner_actions(
+    State(state): State<AppState>,
+    Extension(user): Extension<AuthenticatedUser>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let token = shared::model_token(&state, &user, &headers).await;
+    let capability = match shared::required_capability_token(&state, &user, &headers).await {
+        Ok(token) => token,
+        Err(error) => return shared::delegated_auth_unavailable(error),
+    };
+    let url = format!(
+        "{}/v1/capabilities/owner-actions/admitted",
+        state.model_gateway_url
+    );
+    shared::proxy_model_json_with_capability(
+        &state,
+        Method::GET,
+        &url,
+        None,
+        token.as_deref(),
+        Some(&capability),
+        &user,
+    )
+    .await
+}
+
 // EP-6 S8: the agent builder. Draft, publish and version history over the Convex functions of
 // EP-6 S7, and the draft preview a chat turn asks for. The definition stays in Convex (OD-4 (b));
-// this gateway only decides who may edit it and shapes what crosses.
-
-/// AGENT_DEFINITION_VERSIONS (EP-6 S7/S8). Read strictly: only the literal `true` mounts the
-/// builder routes and honours a preview request; anything else leaves the gateway as it was.
-// Read at router build and per preview turn, not from AppState: the state is not owned by this change.
-fn agent_definition_versions_enabled() -> bool {
-    std::env::var("AGENT_DEFINITION_VERSIONS").is_ok_and(|value| value == "true")
-}
+// this gateway only decides who may edit it and shapes what crosses. The switch is
+// `AppState::agent_definition_versions` (AGENT_DEFINITION_VERSIONS, read once in build_state): only
+// the literal `true` mounts the builder routes and honours a preview request.
 
 fn agent_builder_router() -> Router<AppState> {
     Router::new()
@@ -1782,7 +2213,7 @@ pub(crate) async fn inject_agent_draft_preview(
     org_id: &str,
     body: &mut Value,
 ) -> Result<(), (StatusCode, Json<Value>)> {
-    if !agent_definition_versions_enabled() {
+    if !state.agent_definition_versions {
         return Ok(());
     }
     apply_agent_draft_preview(state, user, org_id, body).await
@@ -2367,13 +2798,9 @@ mod tests {
         let mut state = fires_test_state(&auth, &user_core, &model);
         state.application_convex_url = convex.uri();
         state.application_convex_service_key = "test-convex-service-key".to_owned();
-        match switch {
-            Some(value) => std::env::set_var("AGENT_DEFINITION_VERSIONS", value),
-            None => std::env::remove_var("AGENT_DEFINITION_VERSIONS"),
-        }
-        // The switch is read when the router is built.
+        // The switch is read once, into AppState, by build_state; the same parser decides it here.
+        state.agent_definition_versions = crate::config::agent_definition_versions_from(switch);
         let app = crate::build_router(state);
-        std::env::remove_var("AGENT_DEFINITION_VERSIONS");
         let response = app
             .oneshot(
                 Request::builder()

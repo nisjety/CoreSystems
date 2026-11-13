@@ -1,4 +1,5 @@
-import { requestJson } from './http'
+import { gatewayBaseUrl } from './config'
+import { apiErrorFromResponse, requestJson, signalSessionExpiry } from './http'
 import { readSseStream, type SseEvent } from './sse'
 
 // ── Wire contract ───────────────────────────────────────────────────────────
@@ -999,6 +1000,35 @@ export type ProofRunSummary = {
   createdAt?: string
 }
 
+/**
+ * One browser action of a run's walkthrough, joined with the observation recorded after it (F-t3-050).
+ * A reference only: the screenshot is read through the existing artifact path by `screenshotRef`.
+ */
+export type ProofBrowserWalkthroughStep = {
+  /** Per-action id, unique within its plan (for example `act_0001`). */
+  actionId: string
+  /** Action type slug (goto, click, type, extract, observe, scroll, wait). Absent when only the observation was recorded. */
+  actionType?: string
+  /** Page URL after the action settled, scrubbed where the executor emits it. */
+  pageUrl?: string
+  pageTitle?: string
+  /** Observation status (success, failed, timeout, blocked). Absent while the action has no observation yet. */
+  status?: string
+  /** Screenshot artifact reference id, never bytes. Absent when no screenshot was persisted for the step. */
+  screenshotRef?: string
+  /** When the page state was observed, or the dispatch time when no observation exists yet. */
+  at?: string
+}
+
+/**
+ * A run's browser walkthrough: its browser actions in dispatch order. A run with no browser actions carries
+ * an empty walkthrough. When `truncated`, the steps are the earliest ones and nothing past them is claimed.
+ */
+export type ProofBrowserWalkthrough = {
+  steps: ProofBrowserWalkthroughStep[]
+  truncated: boolean
+}
+
 export type ProofBundle = {
   bundleVersion?: number
   runId?: string
@@ -1009,6 +1039,17 @@ export type ProofBundle = {
   run: ProofRunSummary | null
   approvals: ProofApproval[]
   unavailable: ProofUnavailableSection[]
+  /**
+   * The run's browser walkthrough. Absent when the bundle omits it; its `unavailable` entry for
+   * "walkthrough" then says why.
+   */
+  browserWalkthrough?: ProofBrowserWalkthrough
+  /**
+   * The gateway's `x-request-id` for the read that returned this bundle, set by {@link getRunProofBundle}. A
+   * correlation id for a support reference, not part of the bundle record. Absent when the response echoed no
+   * usable id.
+   */
+  requestId?: string
 }
 
 function num(value: unknown): number | undefined {
@@ -1095,6 +1136,38 @@ function list(value: unknown): unknown[] {
   return Array.isArray(value) ? value : []
 }
 
+/** A step without an action id cannot be told apart from its neighbours, so it is dropped rather than guessed at. */
+function normalizeWalkthroughStep(raw: unknown): ProofBrowserWalkthroughStep | null {
+  const value = record(raw)
+  if (!value) return null
+  const actionId = str(value.action_id) ?? str(value.actionId)
+  if (!actionId) return null
+  return {
+    actionId,
+    actionType: str(value.action_type) ?? str(value.actionType),
+    pageUrl: str(value.page_url) ?? str(value.pageUrl),
+    pageTitle: str(value.page_title) ?? str(value.pageTitle),
+    status: str(value.status),
+    screenshotRef: str(value.screenshot_ref) ?? str(value.screenshotRef),
+    at: normalizeOptionalIsoTimestamp(str(value.at)),
+  }
+}
+
+/**
+ * Malformed steps are dropped. Only an explicit `false` claims the walkthrough is complete; anything else
+ * reads as incomplete.
+ */
+function normalizeBrowserWalkthrough(raw: unknown): ProofBrowserWalkthrough | null {
+  const value = record(raw)
+  if (!value) return null
+  return {
+    steps: list(value.steps)
+      .map(normalizeWalkthroughStep)
+      .filter((item): item is ProofBrowserWalkthroughStep => item !== null),
+    truncated: value.truncated !== false,
+  }
+}
+
 function normalizeBundle(raw: unknown): ProofBundle | null {
   const value = record(raw)
   if (!value) return null
@@ -1111,6 +1184,7 @@ function normalizeBundle(raw: unknown): ProofBundle | null {
     unavailable: list(value.unavailable)
       .map(normalizeUnavailable)
       .filter((item): item is ProofUnavailableSection => item !== null),
+    browserWalkthrough: normalizeBrowserWalkthrough(value.browser_walkthrough ?? value.browserWalkthrough) ?? undefined,
   }
 }
 
@@ -1125,6 +1199,46 @@ function normalizeEffectClass(value: unknown): ProofBundle['effectClass'] {
 }
 
 /**
+ * The gateway echoes `x-request-id` on every response and exposes it to the browser. The id is shown and copied, so a
+ * value outside the gateway's own rule (1 to 128 bytes of `[A-Za-z0-9._:-]`) reads as no id at all.
+ */
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/
+
+function responseRequestId(response: Pick<Response, 'headers'>): string | undefined {
+  const value = response.headers?.get('x-request-id')?.trim() ?? ''
+  return REQUEST_ID_PATTERN.test(value) ? value : undefined
+}
+
+/**
+ * `requestJson`'s GET for one path, also returning the response's request id. It repeats `requestJson`'s headers,
+ * credentials, `{ data }` envelope and typed error, because `requestJson` does not hand the response back.
+ * `applyDevAuth` stays private to http.ts, so the dev-auth header is set here the way `sse.ts` sets it.
+ */
+async function getJsonWithRequestId<T>(
+  path: string,
+  signal?: AbortSignal,
+): Promise<{ body: T | null; requestId?: string }> {
+  const headers = new Headers({ Accept: 'application/json' })
+  if (import.meta.env.VITE_ALLOW_DEV_AUTH_BYPASS === 'true') {
+    headers.set('Authorization', 'Bearer dev-bypass')
+  }
+  const response = await fetch(`${gatewayBaseUrl()}${path}`, {
+    method: 'GET',
+    signal,
+    credentials: 'include',
+    headers,
+  })
+  const reply: unknown = await response.json().catch(() => null)
+  if (!response.ok) {
+    const failure = apiErrorFromResponse(reply, response)
+    signalSessionExpiry(failure, path)
+    throw failure
+  }
+  const body = reply && typeof reply === 'object' && 'data' in reply ? (reply as { data: unknown }).data : reply
+  return { body: body as T | null, requestId: responseRequestId(response) }
+}
+
+/**
  * Fetch a run's Verevon Proof Bundle. Read-only; model-gateway scopes it to
  * the caller's verified org.
  *
@@ -1132,17 +1246,22 @@ function normalizeEffectClass(value: unknown): ProofBundle['effectClass'] {
  * bundle that exists but proves little, which comes back populated with the
  * `null` fields and `unavailable` reasons that say so.
  *
+ * The read's `x-request-id` rides on the bundle as `requestId`, for a support reference. A `null` answer carries none,
+ * since there is no bundle to attach it to.
+ *
  * @param runId  The orchestration run id.
  * @param signal Abort signal, for teardown when the console re-pins.
  */
 export async function getRunProofBundle(runId: string, signal?: AbortSignal): Promise<ProofBundle | null> {
-  const payload = await requestJson<{ bundle?: unknown }>(
+  const { body: payload, requestId } = await getJsonWithRequestId<{ bundle?: unknown }>(
     `/api/v1/orchestration/runs/${encodeURIComponent(runId)}/proof-bundle`,
-    { signal },
+    signal,
   )
   // The gateway forwards model-gateway's `{ bundle }` envelope verbatim;
   // tolerate a bare bundle body too, like the rest of the API layer.
   const envelope = record(payload)
   if (!envelope) return null
-  return normalizeBundle('bundle' in envelope ? envelope.bundle : envelope)
+  const bundle = normalizeBundle('bundle' in envelope ? envelope.bundle : envelope)
+  if (!bundle) return null
+  return requestId ? { ...bundle, requestId } : bundle
 }

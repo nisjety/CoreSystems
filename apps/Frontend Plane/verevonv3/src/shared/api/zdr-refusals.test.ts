@@ -122,6 +122,15 @@ describe('rendering each code', () => {
     expect(shown.next).toBe('Slå av funksjonen og send på nytt.')
   })
 
+  it('names a file-output refusal in Norwegian and English', () => {
+    expect(zdrRefusalPresentation('zdr_feature_not_supported', 'artifact_output', noText).message).toContain(
+      'filer og dokumenter assistenten oppretter',
+    )
+    expect(zdrRefusalPresentation('zdr_feature_not_supported', 'artifact_output', enText).message).toContain(
+      'files and documents the assistant creates',
+    )
+  })
+
   it('names the feature by its stable key, never by the server text', () => {
     const shown = zdrRefusalPresentation('zdr_feature_not_supported', 'agentic', enText)
     expect(shown.message).toBe(

@@ -1,0 +1,294 @@
+/* The review card under an artifact (F-t3-086, W5-086-b). It sits below the preview, so it keeps to the panel's surface,
+   border and text tokens. Verdict and severity colours are the AA ink tokens of each theme, never raw colours. */
+
+.verevon-review-run {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  margin-top: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 12px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.verevon-review-run__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+.verevon-review-run__title {
+  color: var(--verevon-text);
+  font-weight: 650;
+}
+
+.verevon-review-run__label {
+  min-width: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.verevon-review-run__close {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  min-width: var(--verevon-touch-target, 44px);
+  min-height: var(--verevon-touch-target, 44px);
+  margin: -8px -8px -8px auto;
+  padding: 0;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--verevon-text-muted);
+  cursor: pointer;
+}
+
+.verevon-review-run__verdict {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.verevon-review-run__verdict-icon {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text-muted);
+}
+
+.verevon-review-run__verdict--clean .verevon-review-run__verdict-icon {
+  color: var(--verevon-text-soft);
+}
+
+.verevon-review-run__verdict--findings .verevon-review-run__verdict-icon {
+  color: var(--warning-ink);
+}
+
+.verevon-review-run__verdict--unreadable .verevon-review-run__verdict-icon {
+  color: var(--destructive);
+}
+
+.verevon-review-run__summary {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.verevon-review-run__summary strong {
+  color: var(--verevon-text);
+  font-size: 14px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.verevon-review-run__summary p {
+  margin: 0;
+  color: var(--verevon-text-muted);
+}
+
+.verevon-review-run__groups {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.verevon-review-run__group-title {
+  margin: 0 0 6px;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.verevon-review-run__findings {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-review-run__finding {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--verevon-border-soft);
+  border-radius: 10px;
+  background: var(--verevon-surface-soft);
+}
+
+.verevon-review-run__finding-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.verevon-review-run__finding-title {
+  min-width: 0;
+  color: var(--verevon-text);
+  overflow-wrap: anywhere;
+}
+
+/* A severity badge is a token pill. P0 (blocks use) takes the destructive token; P1 and P2 take the ink tokens. */
+.verevon-review-run__severity {
+  display: inline-block;
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border: 1px solid var(--verevon-border);
+  border-radius: 6px;
+  background: var(--verevon-surface);
+  color: var(--verevon-text-soft);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 18px;
+}
+
+.verevon-review-run__group[data-severity='P0'] .verevon-review-run__severity {
+  border-color: var(--destructive);
+  background: var(--destructive);
+  color: var(--destructive-foreground);
+}
+
+.verevon-review-run__group[data-severity='P1'] .verevon-review-run__severity {
+  color: var(--warning-ink);
+}
+
+.verevon-review-run__group[data-severity='P2'] .verevon-review-run__severity {
+  color: var(--verevon-accent-ink);
+}
+
+.verevon-review-run__lines {
+  color: var(--verevon-text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.verevon-review-run__lines--action {
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--verevon-accent-ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.verevon-review-run__body,
+.verevon-review-run__suggestion {
+  margin: 0;
+  color: var(--verevon-text-soft);
+  overflow-wrap: anywhere;
+}
+
+.verevon-review-run__suggestion span {
+  color: var(--verevon-text-muted);
+  font-weight: 650;
+}
+
+.verevon-review-run__quote {
+  margin: 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--verevon-border-strong);
+  background: var(--verevon-surface);
+  color: var(--verevon-text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.verevon-review-run__notice,
+.verevon-review-run__note {
+  margin: 0;
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-review-run__notice {
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--verevon-surface-soft);
+  color: var(--verevon-text-soft);
+}
+
+/* The gateway's own checks sit in a list of their own, under a rule, so they never read as model findings. */
+.verevon-review-run__checks {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--verevon-border-soft);
+}
+
+.verevon-review-run__check-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.verevon-review-run__check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  min-width: 0;
+}
+
+.verevon-review-run__check-name {
+  color: var(--verevon-text);
+}
+
+.verevon-review-run__check strong {
+  font-weight: 650;
+}
+
+.verevon-review-run__check[data-outcome='failed'] strong {
+  color: var(--warning-ink);
+}
+
+.verevon-review-run__check-dropped {
+  color: var(--verevon-text-muted);
+  font-size: 12px;
+}
+
+.verevon-review-run__foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--verevon-text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* The one line a review that produced no card leaves behind, under the preview. */
+.verevon-review-run__failure {
+  margin: 12px 0 0;
+  color: var(--warning-ink);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+/* The lines a review finding points at, shaded in the code view. Only the revision the review read carries them. */
+.verevon-chat-artifact-code__line--focus {
+  background: color-mix(in srgb, var(--verevon-accent-ink) 14%, transparent);
+  box-shadow: inset 3px 0 0 var(--verevon-accent-ink);
+}

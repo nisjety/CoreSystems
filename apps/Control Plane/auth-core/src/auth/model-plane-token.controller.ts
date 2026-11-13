@@ -33,7 +33,9 @@ import {
   ForbiddenException,
   Get,
   Headers as NestHeaders,
+  Inject,
   Logger,
+  Optional,
   Post,
   Req,
   ServiceUnavailableException,
@@ -65,6 +67,17 @@ import {
   resolveCanonicalTokenContext,
 } from './plane-token-membership';
 import { modelGatewayScopesForRole } from './plane-token-scopes';
+import { ZDR_WAIVER_ENABLED_TOKEN } from './retention-decision.service';
+import {
+  RETENTION_DECISION_SIGNER,
+  type RetentionDecisionSigner,
+} from './retention-decision.signer';
+import {
+  assertWaiverOrgPosture,
+  auditRetentionWaiverToken,
+  RETENTION_DECISION_HEADER,
+  resolveRetentionWaiver,
+} from './retention-waiver-mint';
 import { readFreshStepUp } from './step-up.controller';
 
 /**
@@ -121,6 +134,14 @@ export class ModelPlaneTokenController {
   constructor(
     private readonly convexTokenService: ConvexTokenService,
     private readonly directNats: DirectNatsService,
+    // ZDR-Z-14b. Optional so a host that does not provide them fails closed
+    // (a decision header is then answered 503), never open.
+    @Optional()
+    @Inject(RETENTION_DECISION_SIGNER)
+    private readonly retentionSigner?: RetentionDecisionSigner,
+    @Optional()
+    @Inject(ZDR_WAIVER_ENABLED_TOKEN)
+    private readonly waiverEnabled?: boolean,
   ) {}
 
   /**
@@ -171,6 +192,21 @@ export class ModelPlaneTokenController {
       );
     }
 
+    // ZDR-Z-14b: a relayed per-connection waiver decision is verified against
+    // this cookie session before anything is resolved or signed. Absent: the
+    // mint is unchanged. Any refusal (catalogue envelope) mints nothing.
+    const retentionWaiver = resolveRetentionWaiver({
+      header: request.headers[RETENTION_DECISION_HEADER],
+      audience: 'model-gateway',
+      signer: this.retentionSigner,
+      waiverEnabled: this.waiverEnabled === true,
+      session: {
+        userId: session.user.id,
+        sessionId: session.session?.id,
+        orgId: sessionContext.orgId,
+      },
+    });
+
     // Wave 7 (verevon ui-ux-verevon-gap.md §17): owners + admins get the
     // `admin` scope embedded in the JWT. The model-gateway's fine-tune
     // routes (and any other admin-gated surface) check this via
@@ -190,14 +226,28 @@ export class ModelPlaneTokenController {
     // A recent password re-check for this session, if there is one, travels in the token as the
     // `step_up` claim the gateway reads for high-risk approvals (build plan WS13 S5).
     const stepUp = await readFreshStepUp(session.session?.id);
+    if (retentionWaiver) {
+      // A waiver only lowers a ZDR organization; a stale decision mints nothing.
+      assertWaiverOrgPosture(retentionPosture);
+    }
     const bundle = this.convexTokenService.issueModelPlaneToken({
       userId: session.user.id,
       orgId: sessionContext.orgId,
       email: session.user.email ?? undefined,
       scopes: scopes.length > 0 ? scopes : undefined,
       retentionPosture,
+      ...(retentionWaiver ? { retentionWaiver } : {}),
       ...(stepUp ? { stepUp } : {}),
     });
+    if (retentionWaiver) {
+      await auditRetentionWaiverToken(this.directNats, this.logger, {
+        orgId: sessionContext.orgId,
+        userId: session.user.id,
+        audience: 'model-gateway',
+        decision: retentionWaiver,
+        ttlSeconds: bundle.expiresInSeconds,
+      });
+    }
 
     return {
       ...bundle,

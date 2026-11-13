@@ -13,15 +13,24 @@
  */
 
 import type { ChatToolCall, LifecycleNotice } from '@/features/chat/components/chat-types'
-import { toolPresentation, type ToolIntent, type ToolPresentation } from '@/shared/chat-nodes/tool-presentation'
+import {
+  imageRefusalOf,
+  toolPresentation,
+  type ImageRefusalCode,
+  type ToolIntent,
+  type ToolPresentation,
+} from '@/shared/chat-nodes/tool-presentation'
 
 /** The translator the app passes in (`useI18n().tr`), so one sentence is worded in one locale. */
 export type Translator = { tr: (noText: string, enText: string) => string }
 
 export type NarrationState = 'started' | 'done' | 'failed' | 'retrying' | 'awaiting_approval'
 
-/** The verb a sentence uses, and where its object comes from. */
-export type ToolFamily = 'search' | 'read' | 'command' | 'account' | 'change' | 'generic'
+/**
+ * The verb a sentence uses, and where its object comes from. `image` is a picture the image tool made: its object is
+ * the model that made it.
+ */
+export type ToolFamily = 'search' | 'read' | 'command' | 'account' | 'change' | 'generic' | 'image'
 
 type NarrationKey = `${ToolFamily}.${NarrationState}`
 
@@ -71,6 +80,12 @@ export const TEMPLATES: Record<NarrationKey, (i18n: Translator) => string> = {
   'generic.failed': (i18n) => i18n.tr('Brukte {object} - feilet: {outcome}', 'Used {object} - failed: {outcome}'),
   'generic.retrying': (i18n) => i18n.tr('Prøver {object} på nytt ({outcome})', 'Retrying {object} ({outcome})'),
   'generic.awaiting_approval': (i18n) => i18n.tr('Venter på godkjenning før bruk av {object}', 'Waiting for approval to use {object}'),
+
+  'image.started': (i18n) => i18n.tr('Lager et bilde', 'Generating an image'),
+  'image.done': (i18n) => i18n.tr('Laget et bilde med {object}', 'Generated an image with {object}'),
+  'image.failed': (i18n) => i18n.tr('Bildet ble ikke laget: {outcome}', 'No image was made: {outcome}'),
+  'image.retrying': (i18n) => i18n.tr('Prøver bildet på nytt ({outcome})', 'Retrying the image ({outcome})'),
+  'image.awaiting_approval': (i18n) => i18n.tr('Venter på godkjenning før bildet lages', 'Waiting for approval to generate an image'),
 }
 
 /**
@@ -133,6 +148,7 @@ const FAMILY_BY_INTENT: Record<ToolIntent, ToolFamily> = {
   browser: 'generic',
   process: 'command',
   file: 'generic',
+  image: 'image',
 }
 
 export function toolFamily(name: string, intent: ToolIntent): ToolFamily {
@@ -148,8 +164,12 @@ const AWAITING_APPROVAL: ReadonlySet<string> = new Set(['awaiting_approval', 'wa
 /** Still out: no status yet, or `running`. The same test `StepsPill` applies, so the two agree. */
 const isOut = (call: ChatToolCall) => !call.status || call.status === 'running'
 
-/** The failure test the activity line uses, so the strip and the rows agree on what failed. */
-const isFailed = (call: ChatToolCall) => Boolean(call.error) || call.status === 'error' || call.status === 'failed'
+/**
+ * The failure test the activity line uses, so the strip and the rows agree on what failed. An image the tool refused
+ * failed whatever status it came back with.
+ */
+const isFailed = (call: ChatToolCall) =>
+  Boolean(call.error) || call.status === 'error' || call.status === 'failed' || imageRefusalOf(call) !== undefined
 
 /** The retry notice matched to this call, if the gateway retried it. */
 function retryFor(call: ChatToolCall, notices: readonly LifecycleNotice[] | undefined) {
@@ -206,11 +226,13 @@ function fileOf(args: Record<string, unknown> | undefined): string | undefined {
  * The object a family's sentence names, read from the arguments the tool takes. A missing or
  * empty argument reads as no object, never as a guess.
  */
-function objectOf(family: ToolFamily, call: ChatToolCall): string | undefined {
+function objectOf(family: ToolFamily, call: ChatToolCall, presentation: ToolPresentation): string | undefined {
   const args = argsObject(call.args)
   if (family === 'search') return firstText(args, SEARCH_KEYS)
   if (family === 'account') return firstText(args, ACCOUNT_KEYS)
   if (family === 'change') return fileOf(args)
+  // The model that made the picture is in the result, not the arguments, which name only what was asked for.
+  if (family === 'image') return presentation.imageModel
   if (family === 'read') {
     const url = firstText(args, ['url'])
     return (url ? hostOf(url) : undefined) ?? fileOf(args)
@@ -244,6 +266,27 @@ function countPhrase(count: number, i18n: Translator): string {
   return i18n.tr(`${count} resultater`, `${count} results`)
 }
 
+/**
+ * What each typed image refusal says, in the locale `i18n` speaks. The code itself is never shown: the sentence says
+ * why, and stands alone in a card line and after the "no image was made" label in a row.
+ */
+const IMAGE_REFUSAL_COPY: Record<ImageRefusalCode, (i18n: Translator) => string> = {
+  feature_not_supported: (i18n) =>
+    i18n.tr(
+      'Bildegenerering støttes ikke med null datalagring ennå.',
+      'Image generation is not supported with zero data retention yet.',
+    ),
+  image_tool_limit_reached: (i18n) =>
+    i18n.tr('Grensen for bilder i dette svaret er nådd.', 'The image limit for this answer has been reached.'),
+  image_model_unavailable: (i18n) =>
+    i18n.tr('Ingen bildemodell er tilgjengelig akkurat nå.', 'There is no image model available right now.'),
+}
+
+/** The sentence a typed image refusal reads as, in the locale `i18n` speaks. */
+export function imageRefusalText(code: ImageRefusalCode, i18n: Translator): string {
+  return IMAGE_REFUSAL_COPY[code](i18n)
+}
+
 function outcomeOf(
   state: NarrationState,
   family: ToolFamily,
@@ -262,6 +305,8 @@ function outcomeOf(
     return parts.length > 0 ? parts.join(', ') : undefined
   }
   if (state === 'failed') {
+    // A refused image says why in words; the tool's own text is kept for any other failure.
+    if (presentation.imageRefusal !== undefined) return imageRefusalText(presentation.imageRefusal, i18n)
     return capped(call.error?.trim() || i18n.tr('ingen detaljer', 'no details'), MAX_OUTCOME_CHARS)
   }
   if (state === 'retrying') {
@@ -286,11 +331,13 @@ function fill(template: string, slots: { object: string; outcome?: string }): st
 /** One tool call as one sentence, in the locale `i18n` speaks. */
 export function narrate(call: ChatToolCall, i18n: Translator, notices?: readonly LifecycleNotice[]): string {
   const presentation = toolPresentation(call)
-  const family = toolFamily(call.name, presentation.intent)
   const state = narrationState(call, notices)
+  let family = toolFamily(call.name, presentation.intent)
+  // A finished picture that names no model reads as the generic family, so no picture is said to be made by no one.
+  if (family === 'image' && state === 'done' && presentation.imageModel === undefined) family = 'generic'
   const key: NarrationKey = `${family}.${state}`
   return fill(TEMPLATES[key](i18n), {
-    object: capped(objectOf(family, call) ?? '', MAX_OBJECT_CHARS) || toolLabel(call.name),
+    object: capped(objectOf(family, call, presentation) ?? '', MAX_OBJECT_CHARS) || toolLabel(call.name),
     outcome: outcomeOf(state, family, call, presentation, notices, i18n),
   })
 }
