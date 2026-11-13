@@ -8,7 +8,7 @@ use mp_contracts::model_entitlement::Reason;
 use tokio::sync::mpsc;
 use tracing::{info, warn, Instrument};
 
-use super::catalogue_overlay;
+use super::catalogue_overlay::{self, OrgOverlay};
 use super::gemini::GeminiProvider;
 use super::policy_client::PolicyClient;
 use super::role::{self, RoleCall};
@@ -388,6 +388,22 @@ pub(crate) fn is_unspecified_model(model: &str) -> bool {
     m.is_empty() || m == "default" || intent::parse_mode(model).is_some()
 }
 
+/// The model a request naming `model` is served as once `with_current_model` has run: the
+/// successor of a retired Claude id, and `model` itself otherwise. The catalogue overlay checks
+/// this id too, so a hidden successor cannot be reached by naming the retired id.
+fn served_model(model: &str) -> &str {
+    super::model_record::retired_successor(super::effort::Family::Anthropic, model).unwrap_or(model)
+}
+
+/// Whether the caller's organisation overlay hides `model`, or the model that would serve it (the successor of a
+/// retired Claude id). An unspecified id names no model, so it is not judged here: a walk judges the provider
+/// default it resolves to, on the model that provider would really serve.
+fn org_hides(org: Option<&OrgOverlay>, model: &str) -> bool {
+    org.is_some_and(|org| {
+        !is_unspecified_model(model) && (org.is_hidden(model) || org.is_hidden(served_model(model)))
+    })
+}
+
 /// True for an Anthropic-family model id (the only models the Anthropic-shaped
 /// providers can serve). Used to keep `claude-*` requests off the OpenAI/Azure
 /// chat-completions surface (which would 404 the deployment) and vice-versa.
@@ -516,6 +532,11 @@ struct ThrottleState {
     /// ends the walk as `vision_unsupported`, ahead of the privacy, retention
     /// and residency refusals, which a candidate that reached this gate passed.
     vision_skipped: bool,
+    /// A candidate the platform catalogue overlay or the caller's organisation overlay hides, skipped before any
+    /// provider was asked. A named model is refused at admission, so only a model the intent layer, the role table,
+    /// the tool ladder or an automatic provider default chose reaches the walk hidden. With no attempt made it ends
+    /// the walk as `model_hidden`, ahead of the posture refusals.
+    hidden_skipped: bool,
     /// The privacy tier of the first provider this call found eligible, set only under
     /// `INFERENCE_SAME_TIER_FALLBACK`. It holds for the whole call: every rung of the ladder and both
     /// passes, so a pass reset keeps it ([`ThrottleState::next_pass`]).
@@ -1510,10 +1531,11 @@ impl FallbackChain {
     ///
     /// [`ProviderError::RequestRejected`] when the call names no purpose the role table serves. Nothing
     /// has been sent anywhere.
-    async fn resolve_role_call(
+    fn resolve_role_call(
         &self,
         req: &InferRequest,
         role: Option<&RoleCall>,
+        org: Option<&OrgOverlay>,
     ) -> Result<Option<(InferRequest, role::RoleDecision)>, ProviderError> {
         if !req.model.trim().eq_ignore_ascii_case(role::ROLE_MODEL_ID) {
             return Ok(None);
@@ -1529,18 +1551,13 @@ impl FallbackChain {
         let fallback_model = role.map_or("", |call| call.fallback_model.as_str());
         let catalogue = self.list_models("chat", &req.provider_hint);
         // The caller's organisation's own candidates for the purpose, tried before the platform table's
-        // (INFERENCE_ORG_OVERLAY). Read before the policy is loaded, so no guard is held across the await.
-        let org_candidates = self
-            .org_role_candidates(&req.org_id, purpose, &catalogue)
-            .await;
+        // (INFERENCE_ORG_OVERLAY).
+        let org_candidates = self.org_role_candidates(org, purpose, &catalogue);
         let policy = self.policy.load();
-        let choice = role::choose_with_org(
-            &policy,
-            &org_candidates,
-            purpose,
-            fallback_model,
-            |model| self.role_candidate_admitted(req, &catalogue, model),
-        );
+        let choice =
+            role::choose_with_org(&policy, &org_candidates, purpose, fallback_model, |model| {
+                self.role_candidate_admitted(req, &catalogue, org, model)
+            });
         let mut resolved = req.clone();
         resolved.model.clone_from(&choice.model);
         // The table's effort is the role's default, so it applies only when the caller names no effort.
@@ -1560,23 +1577,18 @@ impl FallbackChain {
     }
 
     /// The organisation's role candidates for `purpose` (W4-BYO-3): the ids its overlay names that the platform
-    /// catalogue lists, minus any the platform overlay hides. Empty while `INFERENCE_ORG_OVERLAY` is off, when no
-    /// policy store is wired, when the organisation has no overlay, or when its overlay cannot be read. Each
-    /// candidate is still asked of [`Self::role_candidate_admitted`], so the entitlement, ZDR, privacy-tier and
-    /// residency floors apply to it.
-    async fn org_role_candidates(
+    /// catalogue lists, minus any the platform overlay hides. Empty when the call has no organisation overlay (`org`
+    /// is `None`, see [`Self::org_overlay_for`]). Each candidate is still asked of [`Self::role_candidate_admitted`],
+    /// so the entitlement, ZDR, privacy-tier and residency floors apply to it.
+    fn org_role_candidates(
         &self,
-        org_id: &str,
+        org: Option<&OrgOverlay>,
         purpose: RolePurpose,
         catalogue: &[ModelInfo],
     ) -> Vec<String> {
-        if !catalogue_overlay::org_overlay_enabled() {
-            return Vec::new();
-        }
-        let Some(client) = &self.policy_client else {
+        let Some(overlay) = org else {
             return Vec::new();
         };
-        let overlay = client.org_overlay(org_id).await;
         let mut candidates = overlay.role_candidates(purpose, catalogue);
         if catalogue_overlay::catalogue_overlay_enabled() {
             let policy = self.policy.load();
@@ -1589,10 +1601,21 @@ impl FallbackChain {
     /// refused. A listed one must be served by a provider the call's hint allows, and that provider must
     /// clear the call's ZDR, privacy-tier, residency, image and entitlement gates, the gates
     /// `infer_one_model` applies, so the walk never has to refuse a candidate the table chose. An intent
-    /// id is admitted, because the intent layer resolves it and the walk gates the result.
-    fn role_candidate_admitted(&self, req: &InferRequest, catalogue: &[ModelInfo], model: &str) -> bool {
+    /// id is admitted, because the intent layer resolves it and the walk gates the result. A model the platform
+    /// overlay or the caller's organisation overlay hides is refused, as a named one is refused at admission, so the
+    /// next candidate is chosen.
+    fn role_candidate_admitted(
+        &self,
+        req: &InferRequest,
+        catalogue: &[ModelInfo],
+        org: Option<&OrgOverlay>,
+        model: &str,
+    ) -> bool {
         if intent::parse_mode(model).is_some() {
             return true;
+        }
+        if self.platform_hides(model) || org_hides(org, model) {
+            return false;
         }
         if !catalogue.iter().any(|known| known.id.eq_ignore_ascii_case(model)) {
             return false;
@@ -1736,7 +1759,7 @@ impl FallbackChain {
     }
 
     /// The ordered tool-capable models to try after `resolved`, bounded by
-    /// [`MAX_TOOL_LADDER_STEPS`] and pruned of rungs this resource cannot serve.
+    /// [`MAX_TOOL_LADDER_STEPS`] and pruned of rungs this resource cannot serve or the platform overlay hides.
     ///
     /// Callers must only pass a model the intent layer resolved from a
     /// `verevon-*` mode. Substituting under a caller who pinned a model would
@@ -1746,12 +1769,14 @@ impl FallbackChain {
     /// For a caller whose organisation restricts models, a rung the policy
     /// refuses is dropped before the step bound is counted, so a denied rung
     /// never uses up one of the [`MAX_TOOL_LADDER_STEPS`] a permitted one could
-    /// have had.
+    /// have had. A rung the platform or the caller's organisation overlay hides
+    /// is dropped the same way.
     fn tool_ladder(
         &self,
         resolved: &str,
         access: Option<&RequestAccess>,
         hint: &str,
+        org: Option<&OrgOverlay>,
     ) -> Vec<String> {
         let policy = self.policy.load();
         let mut ladder: Vec<String> = Vec::new();
@@ -1761,7 +1786,11 @@ impl FallbackChain {
             }
             let already_queued = candidate.eq_ignore_ascii_case(resolved)
                 || ladder.iter().any(|m| m.eq_ignore_ascii_case(candidate));
-            if already_queued || !self.is_deployed(candidate) {
+            if already_queued
+                || !self.is_deployed(candidate)
+                || self.platform_hides(candidate)
+                || org_hides(org, candidate)
+            {
                 continue;
             }
             if access.is_some_and(|access| self.entitlement_refusal(access, candidate, hint).is_some()) {
@@ -1802,6 +1831,33 @@ impl FallbackChain {
         first
     }
 
+    /// Whether the platform catalogue overlay hides the model a call would be served as, while
+    /// `INFERENCE_CATALOGUE_OVERLAY` is on. Off, nothing is hidden and every route is as it was. A retired
+    /// Claude id is served as its successor, so the successor is checked too. The routes the caller does not
+    /// name (the intent layer, the role table, the tool ladder) pick a model with no admission check of their
+    /// own, so each consults this where it picks. A walk consults it before any provider is asked, on the model
+    /// that provider would really serve: its default for an automatic call, which names no model.
+    fn platform_hides(&self, model: &str) -> bool {
+        if !catalogue_overlay::catalogue_overlay_enabled() {
+            return false;
+        }
+        let policy = self.policy.load();
+        let overlay = &policy.catalogue_overlay;
+        overlay.is_hidden(model) || overlay.is_hidden(served_model(model))
+    }
+
+    /// The caller's organisation overlay for one call (W4-BYO-3), read once at the top of the call so that the
+    /// admission, the role table, the tool ladder, the cache and every rung of the walk judge the same overlay.
+    /// `None` while `INFERENCE_ORG_OVERLAY` is off, when no policy store is wired or the organisation id is blank, so
+    /// nothing below changes. The client caches each organisation's overlay, so the read is cheap after the first.
+    async fn org_overlay_for(&self, org_id: &str) -> Option<Arc<OrgOverlay>> {
+        if !catalogue_overlay::org_overlay_enabled() || org_id.trim().is_empty() {
+            return None;
+        }
+        let client = self.policy_client.as_ref()?;
+        Some(client.org_overlay(org_id).await)
+    }
+
     /// The catalogue overlay at admission, while `INFERENCE_CATALOGUE_OVERLAY` is on.
     /// An alias is answered as the model it stands for, and a hidden model is refused
     /// before any provider is called or the entitlement check names it. `None` leaves
@@ -1811,26 +1867,29 @@ impl FallbackChain {
     ///
     /// # Errors
     ///
-    /// [`ProviderError::ModelHidden`] when the model the caller named, or the model its
-    /// alias stands for, is hidden by the platform overlay, or (while
-    /// `INFERENCE_ORG_OVERLAY` is on) by the caller's own organisation overlay. Nothing
-    /// has been sent anywhere.
-    async fn overlay_admission(
+    /// [`ProviderError::ModelHidden`] when the model the caller named, the model its
+    /// alias stands for, or the model that serves it (the successor of a retired Claude
+    /// id) is hidden by the platform overlay, or (while `INFERENCE_ORG_OVERLAY` is on) by
+    /// the caller's own organisation overlay. Nothing has been sent anywhere.
+    fn overlay_admission(
         &self,
         req: &InferRequest,
+        org: Option<&OrgOverlay>,
     ) -> Result<Option<InferRequest>, ProviderError> {
         if catalogue_overlay::is_reserved_id(&req.model) {
             return Ok(None);
         }
-        // The platform overlay. The policy guard is dropped before the organisation
-        // overlay is awaited below.
+        // The platform overlay.
         let mut mapped: Option<InferRequest> = None;
         if catalogue_overlay::catalogue_overlay_enabled() {
             let policy = self.policy.load();
             let overlay = &policy.catalogue_overlay;
             if !overlay.is_empty() {
                 let target = overlay.alias_target(&req.model);
-                if overlay.is_hidden(target.unwrap_or(req.model.as_str())) {
+                let named = target.unwrap_or(req.model.as_str());
+                // A retired Claude id is served as its successor, so the successor is checked
+                // too: the check is by the id that would really be served.
+                if overlay.is_hidden(named) || overlay.is_hidden(served_model(named)) {
                     return Err(ProviderError::ModelHidden {
                         model: req.model.clone(),
                     });
@@ -1848,23 +1907,20 @@ impl FallbackChain {
                 }
             }
         }
-        // The caller's organisation overlay (W4-BYO-3), by the resolved id, so an alias
-        // that stands for a model the organisation hides is refused too.
-        if catalogue_overlay::org_overlay_enabled() {
-            if let Some(client) = &self.policy_client {
-                let resolved = mapped.as_ref().map_or(req.model.as_str(), |m| m.model.as_str());
-                if !resolved.trim().is_empty()
-                    && client.org_overlay(&req.org_id).await.is_hidden(resolved)
-                {
-                    info!(
-                        request_id = %req.request_id,
-                        "model refused: hidden by the organisation overlay"
-                    );
-                    return Err(ProviderError::ModelHidden {
-                        model: req.model.clone(),
-                    });
-                }
-            }
+        // The caller's organisation overlay (W4-BYO-3), by the resolved id, so an alias that stands for a model the
+        // organisation hides is refused too. As on the platform overlay, the model served is checked as well: a
+        // retired id is answered by its successor.
+        let resolved = mapped
+            .as_ref()
+            .map_or(req.model.as_str(), |m| m.model.as_str());
+        if org_hides(org, resolved) {
+            info!(
+                request_id = %req.request_id,
+                "model refused: hidden by the organisation overlay"
+            );
+            return Err(ProviderError::ModelHidden {
+                model: req.model.clone(),
+            });
         }
         Ok(mapped)
     }
@@ -1969,9 +2025,16 @@ impl FallbackChain {
         cache_response: bool,
     ) -> Result<(InferResponse, Option<RouteNote>), ProviderError> {
         let mut clock = CallClock::start();
+        // The id the caller sent, before the role table and the intent layer resolve it: a walk that refuses
+        // for a hidden model names it.
+        let named = req.model.as_str();
+        // The caller's organisation overlay, read once for the whole call, so the admission, the role table, the
+        // tool ladder, the cache and every rung of the walk judge the same overlay (W4-BYO-3).
+        let org_overlay = self.org_overlay_for(&req.org_id).await;
+        let org = org_overlay.as_deref();
         // The catalogue overlay answers an alias as its target and refuses a hidden
         // model, before the retired-id, role and entitlement checks name it.
-        let aliased = self.overlay_admission(req).await?;
+        let aliased = self.overlay_admission(req, org)?;
         let req: &InferRequest = aliased.as_ref().unwrap_or(req);
         // A retired Claude id is answered by its successor, so the entitlement check,
         // the cache key and every rung of the ladder all name the model that serves.
@@ -1979,7 +2042,7 @@ impl FallbackChain {
         let req: &InferRequest = current.as_ref().unwrap_or(req);
         // A `verevon-role` call is resolved to a concrete model before anything else reads it, so the
         // name never reaches the entitlement check, the intent layer or a provider (EP-13 S4).
-        let roled = self.resolve_role_call(req, role).await?;
+        let roled = self.resolve_role_call(req, role, org)?;
         let role_decision = roled.as_ref().map(|(_, decision)| *decision);
         let req: &InferRequest = roled.as_ref().map_or(req, |(resolved, _)| resolved);
         // A model the caller named is checked against their organisation's
@@ -1997,7 +2060,12 @@ impl FallbackChain {
         // The ladder exists only for a model WE chose. `intent_req.is_some()` is
         // exactly that condition — see `attempt_models`.
         let ladder = intent_req.as_ref().map_or_else(Vec::new, |resolved| {
-            self.tool_ladder(&resolved.model, resolved.access.as_deref(), &resolved.provider_hint)
+            self.tool_ladder(
+                &resolved.model,
+                resolved.access.as_deref(),
+                &resolved.provider_hint,
+                org,
+            )
         });
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
         // The org's effort ceiling bounds the request before the cache is read,
@@ -2008,15 +2076,23 @@ impl FallbackChain {
         // An image is part of the question but not of the cache key, and a
         // stored answer about one image must never answer another: a request
         // with images neither reads nor fills the response cache.
-        let cache_response = cache_response && req.image_parts.is_empty();
+        // A model the platform or the organisation overlay hides is neither answered from the cache nor stored in
+        // it: the walk refuses it, and a stored answer must not outlive the hiding.
+        let cache_response = cache_response
+            && req.image_parts.is_empty()
+            && !self.platform_hides(&req.model)
+            && !org_hides(org, &req.model);
 
         // Check cache first
         if cache_response {
-            if let Some(mut cached) = self
-                .cache
-                .get(req)
-                .filter(|cached| self.entitled_hit(req, &cached.model_used, &cached.provider_used))
-            {
+            if let Some(mut cached) = self.cache.get(req).filter(|cached| {
+                // The key names the model the call asked for and does not carry the overlays, so a stored answer
+                // from a model the platform or the organisation overlay now hides is not served (as a revoked
+                // entitlement is not).
+                self.entitled_hit(req, &cached.model_used, &cached.provider_used)
+                    && !self.platform_hides(&cached.model_used)
+                    && !org_hides(org, &cached.model_used)
+            }) {
                 info!(request_id = %req.request_id, "cache hit");
                 // The stored copy may carry the timing of the call that filled
                 // the cache; this call reached no provider at all.
@@ -2059,7 +2135,14 @@ impl FallbackChain {
                     );
                 }
                 if let Some(response) = self
-                    .infer_one_model(req, model, &mut total_attempts, &mut throttle, &mut clock)
+                    .infer_one_model(
+                        req,
+                        model,
+                        &mut total_attempts,
+                        &mut throttle,
+                        &mut clock,
+                        org,
+                    )
                     .await
                 {
                     if cache_response { self.cache.put(req, &response); }
@@ -2087,6 +2170,10 @@ impl FallbackChain {
             Err(Self::providers_benched_error(until))
         } else if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
             Err(refusal)
+        } else if throttle.hidden_skipped && total_attempts == 0 {
+            Err(ProviderError::ModelHidden {
+                model: named.to_owned(),
+            })
         } else if throttle.vision_skipped && total_attempts == 0 {
             Err(vision_unsupported_error())
         } else if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
@@ -2135,7 +2222,15 @@ impl FallbackChain {
         total_attempts: &mut u32,
         throttle: &mut ThrottleState,
         clock: &mut CallClock,
+        org: Option<&OrgOverlay>,
     ) -> Option<InferResponse> {
+        // The platform overlay or the caller's organisation overlay hides this model: nothing is sent and the walk
+        // moves on. A named model was refused at admission, so this is a model the intent layer, the role table, the
+        // ladder or an automatic default chose.
+        if self.platform_hides(model) || org_hides(org, model) {
+            throttle.hidden_skipped = true;
+            return None;
+        }
         for (name, provider) in &self.providers {
             // One capabilities() read per provider, reused by all three gates
             // below: it allocates, and the ZDR gate already paid for it.
@@ -2185,6 +2280,12 @@ impl FallbackChain {
                 continue;
             }
             let call_req = self.request_for(req, model, name);
+            // The model this provider would really serve is checked against the overlays before anything is sent. For
+            // an automatic call that is the provider default, which the top-of-walk check cannot see.
+            if self.platform_hides(&call_req.model) || org_hides(org, &call_req.model) {
+                throttle.hidden_skipped = true;
+                continue;
+            }
             // The caller's entitlement, judged on the model this provider would
             // really serve (its own default for an unspecified one).
             if let Some(reason) = req
@@ -2487,15 +2588,20 @@ impl FallbackChain {
         role: Option<&RoleCall>,
     ) -> Result<(mpsc::Receiver<InferChunk>, Option<RouteNote>), ProviderError> {
         let mut clock = CallClock::start();
+        // The id the caller sent, as on the unary path: a walk that refuses for a hidden model names it.
+        let named = req.model.as_str();
+        // The caller's organisation overlay, read once for the whole call, as on the unary path.
+        let org_overlay = self.org_overlay_for(&req.org_id).await;
+        let org = org_overlay.as_deref();
         // The catalogue overlay answers an alias as its target and refuses a hidden
         // model, as on the unary path.
-        let aliased = self.overlay_admission(req).await?;
+        let aliased = self.overlay_admission(req, org)?;
         let req: &InferRequest = aliased.as_ref().unwrap_or(req);
         // A retired Claude id is answered by its successor, as on the unary path.
         let current = super::anthropic::with_current_model(req);
         let req: &InferRequest = current.as_ref().unwrap_or(req);
         // A `verevon-role` call is resolved first, as on the unary path.
-        let roled = self.resolve_role_call(req, role).await?;
+        let roled = self.resolve_role_call(req, role, org)?;
         let role_decision = roled.as_ref().map(|(_, decision)| *decision);
         let req: &InferRequest = roled.as_ref().map_or(req, |(resolved, _)| resolved);
         // Entitlement of a pinned model first, as on the unary path.
@@ -2507,7 +2613,12 @@ impl FallbackChain {
             .map_or((None, None), |(resolved, note)| (Some(resolved), note));
         let route_note = attach_role(route_note, role_decision);
         let ladder = intent_req.as_ref().map_or_else(Vec::new, |resolved| {
-            self.tool_ladder(&resolved.model, resolved.access.as_deref(), &resolved.provider_hint)
+            self.tool_ladder(
+                &resolved.model,
+                resolved.access.as_deref(),
+                &resolved.provider_hint,
+                org,
+            )
         });
         let req: &InferRequest = intent_req.as_ref().unwrap_or(req);
         let ceiled = Self::apply_effort_ceiling(req);
@@ -2546,7 +2657,14 @@ impl FallbackChain {
                     );
                 }
                 if let Some(rx) = self
-                    .stream_one_model(req, model, &mut total_attempts, &mut throttle, &mut clock)
+                    .stream_one_model(
+                        req,
+                        model,
+                        &mut total_attempts,
+                        &mut throttle,
+                        &mut clock,
+                        org,
+                    )
                     .await
                 {
                     return Ok((rx, route_note));
@@ -2570,6 +2688,10 @@ impl FallbackChain {
             Err(Self::providers_benched_error(until))
         } else if let Some(refusal) = Self::entitlement_exhaustion(req, &throttle, total_attempts, pinned) {
             Err(refusal)
+        } else if throttle.hidden_skipped && total_attempts == 0 {
+            Err(ProviderError::ModelHidden {
+                model: named.to_owned(),
+            })
         } else if throttle.vision_skipped && total_attempts == 0 {
             Err(vision_unsupported_error())
         } else if req.min_privacy_tier > PrivacyTier::Unspecified && total_attempts == 0 {
@@ -2596,7 +2718,14 @@ impl FallbackChain {
         total_attempts: &mut u32,
         throttle: &mut ThrottleState,
         clock: &mut CallClock,
+        org: Option<&OrgOverlay>,
     ) -> Option<mpsc::Receiver<InferChunk>> {
+        // The platform or the organisation overlay hides this model: nothing is opened and the walk moves on, as on
+        // the unary path.
+        if self.platform_hides(model) || org_hides(org, model) {
+            throttle.hidden_skipped = true;
+            return None;
+        }
         for (name, provider) in &self.providers {
             let caps = provider.capabilities_dyn();
             if !Self::hint_matches(&req.provider_hint, name, &caps.aliases) {
@@ -2638,6 +2767,11 @@ impl FallbackChain {
                 continue;
             }
             let call_req = self.request_for(req, model, name);
+            // As on the unary path: the model this provider would really serve is checked before any stream is opened.
+            if self.platform_hides(&call_req.model) || org_hides(org, &call_req.model) {
+                throttle.hidden_skipped = true;
+                continue;
+            }
             if let Some(reason) = req
                 .access
                 .as_ref()
@@ -5972,7 +6106,7 @@ mod resolution_tests {
         let mut chain = ladder_chain(&asked, vec![], vec![]);
 
         // Unknown catalogs prune nothing, but the step bound still holds.
-        let unpruned = chain.tool_ladder("claude-sonnet-4-6", None, "");
+        let unpruned = chain.tool_ladder("claude-sonnet-4-6", None, "", None);
         assert!(unpruned.len() <= MAX_TOOL_LADDER_STEPS);
         assert!(!unpruned.iter().any(|m| m == "claude-sonnet-4-6"));
 
@@ -5986,9 +6120,68 @@ mod resolution_tests {
             openai: Some(vec!["gpt-4o-mini".to_owned()]),
         };
         assert_eq!(
-            chain.tool_ladder("claude-sonnet-4-6", None, ""),
+            chain.tool_ladder("claude-sonnet-4-6", None, "", None),
             ["claude-haiku-4-5", "gpt-4o-mini"]
         );
+    }
+
+    #[test]
+    fn the_ladder_drops_the_rungs_the_organisation_hides() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let mut chain = ladder_chain(&asked, vec![], vec![]);
+        chain.deployed = DeployedModels {
+            anthropic: Some(vec![
+                "claude-sonnet-4-6".to_owned(),
+                "claude-haiku-4-5".to_owned(),
+            ]),
+            openai: Some(vec!["gpt-4o-mini".to_owned()]),
+        };
+        let org = OrgOverlay {
+            hidden: vec!["claude-haiku-4-5".to_owned()],
+            ..OrgOverlay::default()
+        };
+        assert_eq!(
+            chain.tool_ladder("claude-sonnet-4-6", None, "", Some(&org)),
+            ["gpt-4o-mini"]
+        );
+    }
+
+    #[test]
+    fn the_org_overlay_hides_by_id_or_successor_not_by_an_unspecified_id() {
+        let org = OrgOverlay {
+            hidden: vec!["gpt-4o-mini".to_owned()],
+            ..OrgOverlay::default()
+        };
+        assert!(org_hides(Some(&org), "gpt-4o-mini"));
+        assert!(org_hides(Some(&org), "GPT-4o-Mini"));
+        assert!(!org_hides(Some(&org), "gpt-4o"));
+        // An automatic call names no model: the walk judges the provider default it resolves to instead.
+        assert!(!org_hides(Some(&org), ""));
+        assert!(!org_hides(None, "gpt-4o-mini"));
+
+        // A retired Claude id is served as its successor, so hiding the successor hides the retired id too.
+        let successor = OrgOverlay {
+            hidden: vec!["claude-sonnet-5-5".to_owned()],
+            ..OrgOverlay::default()
+        };
+        assert!(org_hides(Some(&successor), "claude-sonnet-4-20250514"));
+    }
+
+    #[test]
+    fn the_organisation_overlay_refuses_a_role_candidate_it_hides() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let chain = ladder_chain(&asked, vec![], vec![]);
+        let req = route_request("role-org", "");
+        let catalogue = [ModelInfo {
+            id: "gpt-4o-mini".to_owned(),
+            ..ModelInfo::default()
+        }];
+        let org = OrgOverlay {
+            hidden: vec!["gpt-4o-mini".to_owned()],
+            ..OrgOverlay::default()
+        };
+        assert!(chain.role_candidate_admitted(&req, &catalogue, None, "gpt-4o-mini"));
+        assert!(!chain.role_candidate_admitted(&req, &catalogue, Some(&org), "gpt-4o-mini"));
     }
 
     #[tokio::test]
@@ -6262,12 +6455,26 @@ mod resolution_tests {
             let mut clock = CallClock::start();
 
             let first = chain
-                .infer_one_model(&req, "gpt-4o-mini", &mut attempts, &mut throttle, &mut clock)
+                .infer_one_model(
+                    &req,
+                    "gpt-4o-mini",
+                    &mut attempts,
+                    &mut throttle,
+                    &mut clock,
+                    None,
+                )
                 .await;
             assert!(first.is_none(), "the EU provider fails the first rung");
             throttle.next_pass();
             let second = chain
-                .infer_one_model(&req, "claude-sonnet-4", &mut attempts, &mut throttle, &mut clock)
+                .infer_one_model(
+                    &req,
+                    "claude-sonnet-4",
+                    &mut attempts,
+                    &mut throttle,
+                    &mut clock,
+                    None,
+                )
                 .await;
 
             assert_eq!(eu_calls.load(Ordering::SeqCst), 1);
