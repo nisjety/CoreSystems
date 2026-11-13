@@ -2893,13 +2893,14 @@ async fn run_agent_with_route_parkable(
     if let Some(segment) = resumed.as_ref() {
         super::resume::apply_authority(&mut req, &segment.effective);
         // The paused turn's connector selection (D2-540): a `/continue` request carries none, so
-        // the read tool the snapshot offered would be refused after the resume. Set only from the
-        // carried selection, which is never wider than the paused one. Ids are not logged.
-        if !segment.carried.connector_scope.is_empty() {
-            req.connector_scope = Some(pb::ConnectorScope {
-                connection_ids: segment.carried.connector_scope.clone(),
-            });
-        }
+        // the read tool the snapshot offered would be refused after the resume. The request's own
+        // selection never reaches the resumed run: it is replaced by the carried one on every
+        // resume, and an empty carried selection clears it (`None` selects none). So a resume is
+        // never wider than the paused turn, whatever the request names. Ids are not logged.
+        let carried = &segment.carried.connector_scope;
+        req.connector_scope = (!carried.is_empty()).then(|| pb::ConnectorScope {
+            connection_ids: carried.clone(),
+        });
         debug!(
             run_id = %req.run_id,
             taint_restored = segment.carried.taint,
@@ -20733,6 +20734,84 @@ mod tests {
         .await
         .expect_err("a continue into another Space is refused");
         assert_eq!(error.message(), "authority_space_mismatch");
+    }
+
+    /// A resumed run never reads a connection its paused turn did not select, whatever the
+    /// `/continue` request names (D2-540). The paused turn offered `read_provider_action` and
+    /// selected either no connection or another one; the continue request names `conn-x`. The
+    /// model's read of `conn-x` in the resumed segment is refused before any client is built, in
+    /// both cases.
+    #[tokio::test]
+    async fn a_resumed_run_never_reads_a_connection_its_paused_turn_did_not_select() {
+        for paused_selection in [Vec::<&str>::new(), vec!["conn-a"]] {
+            let rec: SharedRecorder = Arc::new(Mutex::new(Recorder::default()));
+            let policy = CountingPolicy::new();
+            let mut paused = snapshot_of(|authority| {
+                authority.tool_names = vec![
+                    "delete_records".to_owned(),
+                    "read_provider_action".to_owned(),
+                ];
+            });
+            paused.tools.push(pb::ApprovedTool {
+                name: "read_provider_action".to_owned(),
+                description: "Read a connected account.".to_owned(),
+                parameters_json: read_provider_action_def().parameters_json,
+            });
+            paused.connector_scope = paused_selection.iter().map(|id| (*id).to_owned()).collect();
+            let observed_messages: ObservedMessages = Arc::new(Mutex::new(Vec::new()));
+            let inference_channel = spawn_inference_channel_with_messages(
+                vec![
+                    one_call(
+                        "read_provider_action",
+                        r#"{"connection_id":"conn-x","operation":"mail.messages"}"#,
+                    ),
+                    Scripted::Answer("done".to_owned()),
+                ],
+                observed_messages.clone(),
+            )
+            .await;
+            let mut req = continue_request(2);
+            req.connector_scope = Some(pb::ConnectorScope {
+                connection_ids: vec!["conn-x".to_owned()],
+            });
+
+            let resp = drive_continue(
+                &rec,
+                req,
+                consume_of("tool_1_del-1", true, false, paused),
+                false,
+                &policy,
+                inference_channel,
+            )
+            .await
+            .expect("the continuation runs");
+
+            assert_eq!(
+                resp.final_output, "done",
+                "paused selection {paused_selection:?}"
+            );
+            let r = rec.lock().unwrap();
+            assert!(
+                r.persisted_step_payloads
+                    .iter()
+                    .any(|(_, output, _)| output.contains("tool=read_provider_action")),
+                "paused selection {paused_selection:?}: the model's read was recorded: {:?}",
+                r.persisted_step_payloads
+            );
+            let seen = observed_messages.lock().unwrap();
+            let told: Vec<String> = seen
+                .iter()
+                .flatten()
+                .filter(|message| message.role != "system")
+                .map(|message| format!("{}: {}", message.role, message.content))
+                .collect();
+            assert!(
+                told.iter()
+                    .any(|text| text.contains("connection_not_in_scope")),
+                "paused selection {paused_selection:?}: the model is not told the unselected \
+                 connection is out of scope: {told:?}"
+            );
+        }
     }
 
     /// Two continuations of one run must not mint the same step id: approvals are
