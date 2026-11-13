@@ -133,7 +133,7 @@ func TestCredentialRefSealKeysMustBeDedicatedPerPrincipal(t *testing.T) {
 		"a placeholder key":          "model-gateway=placeholder-0123456789abcdef0123456789",
 		"one key for both":           "model-gateway=" + gateway + ",execution-core=" + gateway,
 		"an entry without a key":     "model-gateway",
-		"the internal key reused":    "model-gateway=internal-key-0123456789abcdef0123456789",
+		"the internal key reused":    "model-gateway=internal-api-key-dddddddddddddddddddddddd",
 		"an entry with an empty key": "execution-core=",
 	} {
 		t.Run(name, func(t *testing.T) {
