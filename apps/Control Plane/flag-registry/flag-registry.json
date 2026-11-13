@@ -314,6 +314,19 @@
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
+      "name": "CONTROL_SPACE_MEMORY_DECISIONS",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "EP-8 S7: user-core signs model.space.memory.manage decisions for a shared Space's manager or owner; off answers 404. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "user-core", "env": "CONTROL_SPACE_MEMORY_DECISIONS", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
+    },
+    {
       "name": "CONVERSATION_ZDR_EFFECTIVE_POSTURE_ENABLED",
       "kind": "switch",
       "owner": "application-plane",
