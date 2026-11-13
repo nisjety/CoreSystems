@@ -9,14 +9,15 @@ import {
 } from 'crypto';
 import { readFileSync } from 'fs';
 import type { FreshExecutionRetentionProof, InteractiveRetentionPosture } from './interactive-retention-policy';
-// A value import on purpose: the issuer checks a waiver with `instanceof`. It
-// comes from the dependency-free verified module, because the signer imports
-// this module for its Nest provider and importing the signer here would be a
-// load-order cycle.
+// Value imports on purpose: the issuer checks a waiver with the verified brand
+// and refuses it with the typed catalogue refusal. Neither module imports the
+// signer or the decision service. The signer imports this module for its Nest
+// provider, so importing those here would be a load-order cycle.
 import {
-  RetentionDecisionInvalidError,
-  VerifiedRetentionDecision,
+  isVerifiedRetentionDecision,
+  type VerifiedRetentionDecision,
 } from './retention-decision.verified';
+import { RetentionWaiverRefusal } from './retention-decision.refusal';
 import {
   assertWebPolicyClaimSize,
   BASELINE_WEB_POLICY_CLAIM,
@@ -392,10 +393,11 @@ type WaiverMint = {
 /**
  * The `zdr_waiver` claim and lifetime cap of a token, or `undefined` when the
  * mint carries no waiver. A waiver is never silently dropped: it must be a
- * `VerifiedRetentionDecision` (checked with `instanceof`, first). It is then
- * accepted only for a `user` token on a waiver audience, whose org posture is
- * ZDR, and whose decision names exactly this user and org. Anything else throws
- * and nothing is signed. The same decision gives the same claim on every audience.
+ * decision the signer verified (the brand, checked first). It is then accepted
+ * only for a `user` token on a waiver audience, whose org posture is ZDR, and
+ * whose decision names exactly this user and org. Anything else throws a typed
+ * {@link RetentionWaiverRefusal} from the catalogue, never an untyped 500, and
+ * nothing is signed. The same decision gives the same claim on every audience.
  */
 function resolveWaiverMint(
   audience: AuthCoreAudience,
@@ -407,23 +409,20 @@ function resolveWaiverMint(
 ): WaiverMint | undefined {
   const decision = claims.retentionWaiver;
   if (decision === undefined) return undefined;
-  // First check, before any field is read: a structurally equal object (a spread
-  // copy or a request-shaped object) was never verified by the signer.
-  if (!(decision instanceof VerifiedRetentionDecision)) {
-    throw new RetentionDecisionInvalidError(
-      'A retention waiver must be a decision the signer verified',
-    );
+  // First check, before any field is read: a spread copy or a prototype-linked
+  // object was never verified by the signer. It is refused as an unverifiable
+  // decision, the same typed refusal the mint gives a bad header.
+  if (!isVerifiedRetentionDecision(decision)) {
+    throw new RetentionWaiverRefusal('zdr_posture_mismatch');
   }
   if (principalType !== 'user' || !isWaiverAudience(audience)) {
-    throw new Error(
-      `A retention waiver cannot be carried on a ${principalType} token for ${audience}`,
-    );
+    throw new RetentionWaiverRefusal('zdr_waiver_route_mismatch');
   }
   if (
     claims.retentionPosture?.authority !== 'interactive-org-retention-policy' ||
     claims.retentionPosture.zdr !== true
   ) {
-    throw new Error('A retention waiver needs a ZDR organization posture');
+    throw new RetentionWaiverRefusal('zdr_posture_mismatch');
   }
   if (
     decision.decision !== 'waived' ||
@@ -431,7 +430,7 @@ function resolveWaiverMint(
     decision.userId !== claims.userId ||
     decision.expiresAt <= Math.floor(Date.now() / 1000)
   ) {
-    throw new Error('Retention waiver does not match the token subject');
+    throw new RetentionWaiverRefusal('zdr_posture_mismatch');
   }
   return {
     zdrWaiver: {

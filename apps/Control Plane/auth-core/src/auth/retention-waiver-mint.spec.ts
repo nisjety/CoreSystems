@@ -32,10 +32,15 @@ import {
 import { ModelPlaneTokenController } from './model-plane-token.controller';
 import { PlaneTokenController } from './plane-token.controller';
 import {
+  retentionDecisionRefusal,
+  RetentionWaiverRefusal,
+} from './retention-decision.refusal';
+import {
   FileKeyRetentionDecisionSigner,
   UnavailableRetentionDecisionSigner,
   type RetentionDecisionClaims,
 } from './retention-decision.signer';
+import { VerifiedRetentionDecision } from './retention-decision.verified';
 import {
   RETENTION_DECISION_HEADER,
   WAIVER_TOKEN_AUDIT_EVENT,
@@ -118,6 +123,25 @@ async function refusal(
   );
   expect(error).toBeInstanceOf(HttpException);
   const http = error as HttpException;
+  return {
+    status: http.getStatus(),
+    body: http.getResponse() as { error: Record<string, unknown> },
+  };
+}
+
+/** The refusal a synchronous issuer call throws, as the catalogue envelope. */
+function issuerRefusal(issue: () => unknown): {
+  status: number;
+  body: { error: Record<string, unknown> };
+} {
+  let caught: unknown;
+  try {
+    issue();
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(RetentionWaiverRefusal);
+  const http = caught as HttpException;
   return {
     status: http.getStatus(),
     body: http.getResponse() as { error: Record<string, unknown> },
@@ -416,9 +440,9 @@ describe('per-connection waiver mint (ZDR-Z-14b)', () => {
     }
   });
 
-  it('the issuer refuses a waiver on a service token or an excluded audience', () => {
+  it('the issuer refuses a waiver on a service token or an excluded audience with the typed route refusal', () => {
     const verified = signer.verify(signer.sign(CLAIMS).token);
-    expect(() =>
+    const onService = issuerRefusal(() =>
       tokens.issuePlaneToken('session-core', {
         userId: 'service:worker',
         orgId: ORG,
@@ -427,34 +451,92 @@ describe('per-connection waiver mint (ZDR-Z-14b)', () => {
         retentionPosture: { authority: 'service-principal-policy', zdr: true },
         retentionWaiver: verified,
       } as never),
-    ).toThrow();
-    expect(() =>
+    );
+    expect(onService.status).toBe(412);
+    expect(onService.body.error.code).toBe('zdr_waiver_route_mismatch');
+    const onExcluded = issuerRefusal(() =>
       tokens.issuePlaneToken('browser-broker', {
         userId: USER,
         orgId: ORG,
         retentionPosture: ZDR_ORG,
         retentionWaiver: verified,
       }),
-    ).toThrow();
+    );
+    expect(onExcluded.status).toBe(412);
+    expect(onExcluded.body.error.code).toBe('zdr_waiver_route_mismatch');
   });
 
-  it('the issuer refuses a structurally equal waiver that the signer did not verify', () => {
+  it('the issuer refuses a structurally equal waiver that the signer did not verify, with the typed refusal', () => {
     const verified = signer.verify(signer.sign(CLAIMS).token);
     const forged = { ...verified, connection: 'connection-9' };
-    let token: string | undefined;
-    try {
-      token = tokens.issuePlaneToken('session-core', {
+    // A request-shaped object must never become a signed zdr_waiver claim: the
+    // issuer throws the typed refusal and returns no token.
+    const refused = issuerRefusal(() =>
+      tokens.issuePlaneToken('session-core', {
         userId: USER,
         orgId: ORG,
         retentionPosture: ZDR_ORG,
         retentionWaiver: forged as never,
-      }).token;
-    } catch {
-      token = undefined;
-    }
-    // A request-shaped object must never become a signed zdr_waiver claim.
-    expect(
-      token === undefined ? undefined : claimsOf(token).zdr_waiver,
-    ).toBeUndefined();
+      }),
+    );
+    expect(refused.status).toBe(412);
+    expect(refused.body.error.code).toBe('zdr_posture_mismatch');
+  });
+
+  it('the issuer refuses a prototype-linked forgery whose fields match the token subject exactly', () => {
+    const verified = signer.verify(signer.sign(CLAIMS).token);
+    // instanceof passes and every field matches the subject: only the brand
+    // refuses this object.
+    const forged = Object.assign(
+      Object.create(VerifiedRetentionDecision.prototype) as object,
+      { ...verified },
+    );
+    expect(forged).toBeInstanceOf(VerifiedRetentionDecision);
+    const refused = issuerRefusal(() =>
+      tokens.issuePlaneToken('session-core', {
+        userId: USER,
+        orgId: ORG,
+        retentionPosture: ZDR_ORG,
+        retentionWaiver: forged as never,
+      }),
+    );
+    expect(refused.status).toBe(412);
+    expect(refused.body.error.code).toBe('zdr_posture_mismatch');
+  });
+
+  it('a verified waiver for a stale posture or another subject is refused with the catalogue envelope', () => {
+    const verified = signer.verify(signer.sign(CLAIMS).token);
+    const catalogue = retentionDecisionRefusal('zdr_posture_mismatch');
+    const notZdr = issuerRefusal(() =>
+      tokens.issuePlaneToken('session-core', {
+        userId: USER,
+        orgId: ORG,
+        retentionPosture: {
+          zdr: false,
+          authority: 'interactive-org-retention-policy',
+        } as never,
+        retentionWaiver: verified,
+      }),
+    );
+    expect(notZdr.status).toBe(412);
+    expect(notZdr.body.error).toEqual({
+      code: catalogue.code,
+      message: catalogue.message,
+      retryable: catalogue.retryable,
+      action: catalogue.action,
+    });
+    const otherSubject = signer.verify(
+      signer.sign({ ...CLAIMS, userId: 'user-b' }).token,
+    );
+    const mismatch = issuerRefusal(() =>
+      tokens.issuePlaneToken('session-core', {
+        userId: USER,
+        orgId: ORG,
+        retentionPosture: ZDR_ORG,
+        retentionWaiver: otherSubject,
+      }),
+    );
+    expect(mismatch.status).toBe(412);
+    expect(mismatch.body.error.code).toBe('zdr_posture_mismatch');
   });
 });
