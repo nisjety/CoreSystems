@@ -335,6 +335,39 @@ const ratingValidator = v.union(
   v.literal("poor"),
 );
 
+export async function rateHandler(
+  ctx: any,
+  args: {
+    runId: string;
+    externalOrgId: string;
+    rating: "good" | "acceptable" | "poor";
+    note?: string;
+  },
+) {
+  const existing = await ctx.db
+    .query("agentRuns")
+    .withIndex("by_run", (q: any) => q.eq("runId", args.runId))
+    .unique();
+  if (!existing) {
+    throw new Error("Run not found");
+  }
+  const { externalAuthId } = await requireViewerMembership(ctx, existing.externalOrgId);
+  if (existing.externalOrgId !== args.externalOrgId) {
+    throw new Error("Run belongs to a different organization");
+  }
+  const now = Date.now();
+  await ctx.db.patch(existing._id, {
+    rating: args.rating,
+    ratingNote: args.note,
+    ratedAt: now,
+    updatedAt: now,
+  });
+  // The reply is the run row, so it takes the owner-only projection that getByRunId and
+  // listForOrg apply: browserActivity reaches the run's owner and nobody else.
+  const row = await ctx.db.get(existing._id);
+  return row ? projectRunForViewer(row, externalAuthId) : null;
+}
+
 export const rate = mutation({
   args: {
     runId: v.string(),
@@ -342,27 +375,7 @@ export const rate = mutation({
     rating: ratingValidator,
     note: v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
-    const existing = await ctx.db
-      .query("agentRuns")
-      .withIndex("by_run", (q) => q.eq("runId", args.runId))
-      .unique();
-    if (!existing) {
-      throw new Error("Run not found");
-    }
-    await requireViewerMembership(ctx, existing.externalOrgId);
-    if (existing.externalOrgId !== args.externalOrgId) {
-      throw new Error("Run belongs to a different organization");
-    }
-    const now = Date.now();
-    await ctx.db.patch(existing._id, {
-      rating: args.rating,
-      ratingNote: args.note,
-      ratedAt: now,
-      updatedAt: now,
-    });
-    return await ctx.db.get(existing._id);
-  },
+  handler: rateHandler,
 });
 
 /**
