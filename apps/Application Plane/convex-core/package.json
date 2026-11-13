@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint \"convex/**/*.ts\"",
     "generate": "convex codegen",
-    "test": "tsx --test test/*.test.cjs"
+    "test": "tsx --test test/*.test.cjs \"convex/**/*.test.ts\""
   },
   "dependencies": {
     "convex": "^1.18.0",

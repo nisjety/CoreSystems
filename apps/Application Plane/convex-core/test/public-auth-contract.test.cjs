@@ -12,8 +12,10 @@ function publicFunctions(fileName) {
 
 function publicFunctionsInSource(source) {
   const starts = [...source.matchAll(/export\s+const\s+(\w+)\s*=\s*(query|mutation)\s*\(/g)];
-  return starts.map((match, index) => {
-    const block = source.slice(match.index, starts[index + 1]?.index ?? source.length);
+  return starts.map((match) => {
+    // An export's slice is its own `query(...)` or `mutation(...)` call, so a declaration
+    // placed between two exports is not credited to the earlier one.
+    const block = source.slice(match.index, callEnd(source, match.index + match[0].length - 1));
     // `handler: getByRunIdHandler` names a function declared above its export, so the
     // export's own slice cannot contain the authorization call. Check the declaration too.
     const handlerName = /\bhandler:\s*(\w+)\s*[,}]/.exec(block)?.[1];
@@ -25,14 +27,49 @@ function publicFunctionsInSource(source) {
   });
 }
 
-// A top-level `function <name>(` declaration, up to the next top-level statement. A handler
-// not declared in this file is not resolved, so it is judged on its export slice alone.
+// The index just past the `)` that closes the `(` at `open`. Brackets inside string
+// literals and comments do not count.
+function callEnd(source, open) {
+  let depth = 0;
+  for (let i = open; i < source.length; i += 1) {
+    const char = source[i];
+    if (char === '/' && source[i + 1] === '/') {
+      i = source.indexOf('\n', i);
+      if (i < 0) return source.length;
+    } else if (char === '/' && source[i + 1] === '*') {
+      const close = source.indexOf('*/', i + 2);
+      if (close < 0) return source.length;
+      i = close + 1;
+    } else if (char === '"' || char === "'" || char === '`') {
+      i = closingQuote(source, i);
+    } else if (char === '(') {
+      depth += 1;
+    } else if (char === ')') {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return source.length;
+}
+
+// The index of the quote that closes the string literal opened at `start`.
+function closingQuote(source, start) {
+  for (let i = start + 1; i < source.length; i += 1) {
+    if (source[i] === '\\') i += 1;
+    else if (source[i] === source[start]) return i;
+  }
+  return source.length;
+}
+
+// A top-level `function <name>(` declaration, up to the next line that starts with something
+// other than whitespace or a closing `}`, `)` or `]`. A handler not declared in this file is
+// not resolved, so it is judged on its export slice alone.
 function namedHandlerSource(source, name) {
   const declaration = new RegExp(`^(?:export\\s+)?(?:async\\s+)?function\\s+${name}\\s*\\(`, 'm');
   const match = declaration.exec(source);
   if (!match) return '';
   const bodyStart = match.index + match[0].length;
-  const next = source.slice(bodyStart).search(/^(?:export\s|async\s|function\s|const\s|let\s|type\s|\/\*\*)/m);
+  const next = source.slice(bodyStart).search(/\n[^\s})\]]/);
   return source.slice(match.index, next < 0 ? source.length : bodyStart + next);
 }
 
@@ -75,6 +112,58 @@ export const read = query({ args: {}, handler: readHandler });
   assert.equal(authorized.length, 1);
   assert.match(authorized[0].source, authorizationCall);
   assert.doesNotMatch(unauthorized[0].source, authorizationCall);
+});
+
+test('a declaration between two exports is not credited to the earlier export', () => {
+  const [first, second] = publicFunctionsInSource(`
+export const first = query({ args: {}, handler: async (ctx) => ctx.db.query('notes').collect() });
+async function helper(ctx) {
+  await requireViewerMembership(ctx, 'org');
+}
+export const second = query({ args: {}, handler: async (ctx) => ctx.db.query('notes').collect() });
+`);
+  assert.doesNotMatch(first.source, authorizationCall);
+  assert.doesNotMatch(second.source, authorizationCall);
+});
+
+test('a declaration after the last export is not credited to it', () => {
+  const [only] = publicFunctionsInSource(`
+export const only = query({ args: {}, handler: async (ctx) => ctx.db.query('notes').collect() });
+async function helper(ctx) {
+  await requireViewerMembership(ctx, 'org');
+}
+`);
+  assert.doesNotMatch(only.source, authorizationCall);
+});
+
+test('a declaration after a named handler is not credited to it', () => {
+  const [read] = publicFunctionsInSource(`
+export async function readHandler(ctx) {
+  return ctx.db.query('notes').collect();
+}
+class Guard {
+  check(ctx) {
+    return requireViewerMembership(ctx, 'org');
+  }
+}
+export const read = query({ args: {}, handler: readHandler });
+`);
+  assert.doesNotMatch(read.source, authorizationCall);
+});
+
+test('brackets inside strings and comments do not end an export early', () => {
+  const [read] = publicFunctionsInSource(`
+export const read = query({
+  args: {},
+  handler: async (ctx) => {
+    // a stray ) in a comment
+    const label = ')';
+    await requireViewerMembership(ctx, 'org');
+    return label;
+  },
+});
+`);
+  assert.match(read.source, authorizationCall);
 });
 
 test('Control session projection writes are internal-only', () => {
