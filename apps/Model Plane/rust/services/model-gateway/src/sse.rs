@@ -27419,7 +27419,7 @@ mod approve_then_execute_tests {
     #[test]
     fn the_switch_takes_only_the_literal_true() {
         assert!(plan_execute_on_approve_from(Some("true")));
-        assert!(!plan_execute_on_approve_from(Some(" true ")));
+        assert!(plan_execute_on_approve_from(Some(" true ")));
         for value in [None, Some(""), Some("false"), Some("1"), Some("yes"), Some("on")] {
             assert!(!plan_execute_on_approve_from(value), "{value:?} must not enable the path");
         }

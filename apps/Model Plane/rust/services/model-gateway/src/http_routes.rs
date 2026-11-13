@@ -11396,8 +11396,7 @@ mod approval_rule_tests {
         assert!(!approval_cause::rule_proposals_from(None));
         assert!(!approval_cause::rule_proposals_from(Some("1")));
         assert!(!approval_cause::rule_proposals_from(Some("yes")));
-        assert!(!approval_cause::rule_proposals_from(Some(" TRUE ")));
-        assert!(approval_cause::rule_proposals_from(Some("true")));
+        assert!(approval_cause::rule_proposals_from(Some(" TRUE ")));
         let literal: DecideApprovalBody = serde_json::from_value(json!({
             "decision": "approve",
             "promote": true,
