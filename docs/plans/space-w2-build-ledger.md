@@ -170,3 +170,66 @@ Compile fixes made in this pass, not test runs:
   `claim_quarantine_release`, `get_quarantine_preview`, `resolve_approval_authority`, `list_space_timeline`), and the
   literals take `..Default::default()` for the new fields.
 - `SsoPolicyPanel.test.tsx` and `action-registry.test.ts`: typecheck fixes.
+
+## Phase 1: post-merge verification (2026-11-10, branch `space-finish`)
+
+Off main 031e7965d. Logs: `.plan-work/space-finish/logs/`. Status key from the top of this file applies; the
+"tested" and "live-proven" rungs are new here. No slice has been live-proven yet (Docker engine down on this host).
+
+### Defects fixed (commit, subject)
+
+| id | commit | what | evidence |
+|---|---|---|---|
+| W2-P1-01 | ba13bfd17 | `fix(chat,gateway)`: restore the 10 chat files that merge 6a1ae082e reverted and the browser.rs test brace dropped by merge 292ded7ad (cherry-pick of owner commit afcee0802). Gateway crate did not compile on main. | `p1-gw-cargo.log` (compile fail) → `p1-gw-cargo2.log` (compiles) |
+| W2-P1-02 | 522e75699 | `test(audit-core)`: stale ACL fixture missing `MODEL_QUARRY_TRACE_NATS_PASSWORD` | `p1-go.log` FAIL → `p1-audit-fix.log` ok |
+| F6 | cd2845300 | `fix(auth-core)`: restore `init_better_auth.sql` (blob b4e1d53c0, CRLF hash equals the live ledger row); entrypoint refuses to start when a named bootstrap file is missing | `f6-jest.log` 30/30 |
+| W2-P1-03 | 64720be75 | `test(gateway)`: relay-list guard names `space_run_live` as its second caller (WS09-S4) | `p1-gw-cargo2.log` FAILED → `p1-gw-continue.log` 7/7 |
+
+### Suites: result and classification
+
+| suite | result | class of each failure |
+|---|---|---|
+| user-core `go test ./...` | all packages ok | none |
+| org-core `go test ./...` | all packages ok | none |
+| audit-core `go test ./...` | all ok after W2-P1-02 | W2-P1-02 (stale test) |
+| convex-core `tsc --noEmit` | 0 errors | none |
+| auth-core `tsc --noEmit` | 0 errors | none |
+| frontend `pnpm typecheck` | 0 errors after W2-P1-01 and the SDK dist copy | 30 real (merge loss, fixed); 21 env (`@quarry/client` dist missing in the pnpm store, fixed in the store, not in source) |
+| gateway `cargo test --bin` | 1936 passed, 2 failed | 2 `domains::orgs::retention` tests: upstream mock returns 503 `organization_membership_authority_unavailable` where 403/201 is expected. org-core retention (802b59ffb), not Space. Pre-existing, out of scope; not fixed here. |
+| gateway `cargo test --test *` | `continue_error_vocabulary` 7/7 after W2-P1-03; other integration binaries ok in `p1-gw-cargo2.log` | W2-P1-03 (stale guard) |
+| gateway `--bin` stack overflow | default 2 MB test-thread stack overflows in `ingestions_dispatch_tests`; passes with RUST_MIN_STACK=16 MiB | environment (Windows test thread stack) |
+| session-core / model-gateway / execution-core `cargo test --no-fail-fast` | completed: 112 test binaries, 11 failing targets, 23 failing tests (log `p1-mp-cargo2.log`) | see the Model Plane list below |
+| SPA `pnpm test` (full) | 76 failed, 500 passed, 24 files failed | see the SPA table below |
+
+Model Plane failures seen in the first run (`p1-mp-cargo.log`, killed mid-suite, so partial):
+
+- `execution-core` `executor::tests::*` (9 tests): spawn `/bin/sh` and are `#[cfg(unix)]`. Environment: this host is Windows.
+- `execution-core` `browser_planner_hermetic` (`challenge_detected_ends_blocked`, `forbidden_off_domain_is_terminal`, `reply_fixtures_read_as_expected`, `prompt_goldens_match`) and `browser_challenge_rule_contract` (`the_rule_pins_go_red_when_either_side_drifts`): the browser procedure prompt in `src/browser_agent/procedure.rs` was rewritten in 6b538f324 (2026-11-05, "update Verevon and browser agent workflows"); the goldens and rule-pin fixtures (last set in 391417341 and 58b2a9285) were not regenerated. Stale fixtures, not Space. Needs an owner decision on whether to regenerate.
+- `execution-core` `metric_label_guard` (`execution_browser_runs_total` label `planner`, `execution_routing_first_tool_total` label `class`, `mp_exec_screening_taint_total` label `trust`): labels added in 76607197f (WS11.S5) and later without updating the reviewed list. Stale list.
+- `model-gateway` `agent_mode_resolution_test` (`agent_mode_resolves_before_admission_in_the_stream_path`) and `loop_guard_inline_test` (`the_repeat_check_and_the_guard_share_one_query_normaliser`): from ccf9fd4b4 and fb9edf4ff (WS25-S6/S9, 2026-11-01); not Space.
+- `model-gateway` `offline_downstreams_contract` (`every_grpc_client_of_the_offline_state_is_unavailable_at_once`, `the_offline_state_replaces_every_grpc_client_field_of_app_state`): the test expects 22 gRPC client fields on `AppState` and finds 35. The extra fields include Space clients (`space_events_client`, `space_room_read_client`, `space_history_client`, `space_attention_client`). **Space-caused**, from the Wave 2 client additions; depth row D1-527 named this gap. Fix: update the count, helper and `one_call_per_client!` together. Not fixed in this commit.
+- `model-gateway` `orchestration_http_test` (`decide_approval_grant_succeeds_without_a_continuation_dispatcher`): expects `continuation_delivery: "pending"`, gets `"unknown"`. WS10 approval path, so **possibly Space-caused**; not diagnosed.
+- `model-gateway` `tool_retry_contract` (`both_loops_exclude_the_same_permanent_failures`): the two tool loops disagree on the non-retryable list (the left loop lacks `resource limit exceeded`, `refusing unlimited execution`, `requires a sandbox lease`, `sandbox egress is not available`). Not Space; not diagnosed.
+- `execution-core` `runtime_loop::agent::tests::a_fan_out_item_still_waiting_for_a_permit_is_not_started_after_the_deadline`: not diagnosed; not Space.
+
+### Space-touched frontend tests
+
+Space test files in the Wave 2 "merge fixes" list (`space-tab-registry`, `CoreSidebarSpacesPanel`, `SpaceApprovalPanel`,
+`space-approvals`, `action-registry`, `SpaceRoomTimeline`) and all of `features/spaces`, `shared/api/spaces*`, `shared/actions`
+pass in the Space-only run: 99 files, 1473 passed, 2 skipped (`p1-fe-spaces2.log`, exit 0). None of them appeared in the
+full-suite failure list (`p1-fe-vitest-r2.log`, 76 failed across 24 files, none under `features/spaces`).
+
+### Evidence location
+
+The raw logs (`.plan-work/space-finish/logs/*.log`, about 4 MB) are untracked and stay in the worktree. The repo
+ignores `*.log` and the worktree is local. Every result above names its log file, so a reviewer on this machine can
+open it. The run commands are in the matching `*.ps1` beside each log. Nothing in the logs was secret-scanned beyond
+a pattern check for API keys, private keys and DB URLs, which found no matches.
+
+### Not run in Phase 1
+
+- Live proof of any slice (Docker engine down on this host; see `phase1-notes.md`).
+- DB-tier Postgres tests (`TEST_DATABASE_URL`) for user-core, audit-core, session-core: needs a throwaway Postgres, which needs Docker.
+- Playwright (`tests/e2e`).
+- Gateway clippy (`-D warnings`), which the CI gate runs; not run in this pass.
+

@@ -175,7 +175,18 @@ apply_migration() {
 # Bootstrap tables must exist before additive numbered migrations reference
 # Better Auth's user/account/organization/member tables. The explicit order is
 # intentional and covered by deployment-contract tests.
+#
+# The two bootstrap files are named, not globbed, so a missing one is a packaging
+# error, never an optional step. Skipping it silently is how an empty database
+# reached gdpr_hard_delete.sql before the "user" table existed (Space W1 live
+# proof F6): fail before any migration runs instead.
 if [ -d "/app/migrations" ]; then
+  for bootstrap in init_better_auth.sql gdpr_hard_delete.sql; do
+    if [ ! -f "/app/migrations/$bootstrap" ]; then
+      echo "Bootstrap migration $bootstrap is missing from the image" >&2
+      exit 1
+    fi
+  done
   echo "Applying SQL migrations for $DB_NAME"
   for f in \
     /app/migrations/init_better_auth.sql \
