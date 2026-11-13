@@ -920,4 +920,153 @@ mod tests {
         let dead = OrgCorePosture::new("http://127.0.0.1:9", "test-token").unwrap();
         assert!(matches!(dead.read("org_1").await, PostureRead::Unknown(_)));
     }
+
+    // ZDR-Z-03e through the decision: org-core's effectiveZdr decides only with the switch on, a
+    // lapsed-plan org is refused as ZDR (matrix row o_plan_lapsed_keeps_zdr), and a body that does not
+    // carry effectiveZdr is unknown and refused under enforce, never standard.
+    #[tokio::test]
+    async fn effective_posture_switch_decides_the_preflight_for_a_lapsed_and_an_old_org_core_body()
+    {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let bodies = [
+            (
+                "org_lapsed",
+                serde_json::json!({"zdrIntent": true, "entitled": false, "effectiveZdr": true, "lapsed": true}),
+            ),
+            (
+                "org_old",
+                serde_json::json!({"zdrIntent": false, "entitled": true}),
+            ),
+            (
+                "org_null",
+                serde_json::json!({"zdrIntent": false, "entitled": true, "effectiveZdr": null}),
+            ),
+            (
+                "org_standard",
+                serde_json::json!({"zdrIntent": false, "entitled": true, "effectiveZdr": false, "lapsed": false}),
+            ),
+        ];
+        for (org, body) in &bodies {
+            Mock::given(method("GET"))
+                .and(path(format!("/internal/orgs/{org}/retention-posture")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body.clone()))
+                .mount(&server)
+                .await;
+        }
+        let on = OrgCorePosture::new(&server.uri(), "test-token")
+            .unwrap()
+            .with_effective_posture(true);
+        let off = OrgCorePosture::new(&server.uri(), "test-token").unwrap();
+
+        let run = |org: &'static str| {
+            let mut r = req(Some("crawl"), None);
+            r.org_id = org.into();
+            r
+        };
+
+        // Lapsed plan: ZDR with the switch on (refused), standard with it off (today's answer).
+        let a = decide(
+            PostureMode::Enforce,
+            &run("org_lapsed"),
+            Some(&on),
+            &StaticFloor,
+        )
+        .await;
+        assert!(!a.allow);
+        assert_eq!(
+            (a.reason, a.posture, a.zdr),
+            (Some(SKIPPED_ZDR), POSTURE_ZDR, Some(true))
+        );
+        let a = decide(
+            PostureMode::Enforce,
+            &run("org_lapsed"),
+            Some(&off),
+            &StaticFloor,
+        )
+        .await;
+        assert!(a.allow, "switch off keeps zdrIntent && entitled exactly");
+        assert_eq!((a.posture, a.zdr), (POSTURE_STANDARD, Some(false)));
+
+        // An org-core that does not send effectiveZdr (absent or null): unknown with the switch on.
+        for org in ["org_old", "org_null"] {
+            let a = decide(PostureMode::Enforce, &run(org), Some(&on), &StaticFloor).await;
+            assert!(!a.allow, "{org}: switch on and no effectiveZdr must refuse");
+            assert_eq!(
+                (a.reason, a.posture, a.zdr),
+                (Some(SKIPPED_POSTURE_UNKNOWN), POSTURE_UNKNOWN, None),
+                "{org}"
+            );
+            let a = decide(PostureMode::Enforce, &run(org), Some(&off), &StaticFloor).await;
+            assert!(
+                a.allow,
+                "{org}: switch off reads intent and entitlement as before"
+            );
+            assert_eq!(a.posture, POSTURE_STANDARD, "{org}");
+        }
+
+        // A standard org stays standard either way.
+        for source in [&on, &off] {
+            let a = decide(
+                PostureMode::Enforce,
+                &run("org_standard"),
+                Some(source),
+                &StaticFloor,
+            )
+            .await;
+            assert!(a.allow);
+            assert_eq!(a.zdr, Some(false));
+        }
+    }
+
+    // effectiveZdr is a boolean or absent. Any other value is a body this reader does not understand, so
+    // the read is unknown (fail closed) rather than a guess.
+    #[tokio::test]
+    async fn a_non_boolean_effective_zdr_is_unknown_with_the_switch_on() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/internal/orgs/org_odd/retention-posture"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"zdrIntent": false, "entitled": true, "effectiveZdr": "false"}),
+            ))
+            .mount(&server)
+            .await;
+        let on = OrgCorePosture::new(&server.uri(), "test-token")
+            .unwrap()
+            .with_effective_posture(true);
+        assert_eq!(on.read("org_odd").await.effective_zdr(), None);
+    }
+
+    #[test]
+    fn the_effective_posture_answer_never_reads_the_environment() {
+        // The switch travels inside the read: the same read answers the same way whatever the process
+        // environment says now.
+        let lapsed_on = PostureRead::Known {
+            zdr_intent: true,
+            entitled: false,
+            effective: Some(true),
+            use_effective: true,
+        };
+        let lapsed_off = PostureRead::Known {
+            zdr_intent: true,
+            entitled: false,
+            effective: Some(true),
+            use_effective: false,
+        };
+        assert_eq!(lapsed_on.effective_zdr(), Some(true));
+        assert_eq!(lapsed_off.effective_zdr(), Some(false));
+        let absent_on = PostureRead::Known {
+            zdr_intent: true,
+            entitled: true,
+            effective: None,
+            use_effective: true,
+        };
+        assert_eq!(absent_on.effective_zdr(), None);
+        assert_eq!(PostureRead::Unknown("timeout").effective_zdr(), None);
+    }
 }
