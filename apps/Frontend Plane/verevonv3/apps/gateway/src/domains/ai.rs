@@ -201,9 +201,14 @@ pub(crate) async fn assistant_navigation_with_switch(
     )
     .await;
     if !status.is_success() {
-        // Upstream authentication describes a delegated credential, not the
-        // caller's browser session. Do not turn it into a session-expiry 401.
-        let status = if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        // The one 401/403 rule of every model-gateway relay (`shared::hides_credential_refusal`): a typed 403 is relayed
+        // with its status and body. A refused delegated credential is not the caller's browser session, so it is answered
+        // as unavailable and never as a session-expiry 401.
+        let hidden = shared::hides_credential_refusal(status, &response);
+        if status == StatusCode::FORBIDDEN && !hidden {
+            return (status, Json(response));
+        }
+        let status = if hidden {
             StatusCode::SERVICE_UNAVAILABLE
         } else {
             status
@@ -407,20 +412,25 @@ async fn review_run_answer(
             ),
         };
     }
+    // The one 401/403 rule of every model-gateway relay (`shared::hides_credential_refusal`): a refused delegated credential
+    // is not the caller's browser session, so it is answered as unavailable.
+    if shared::hides_credential_refusal(status, &response) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "delegated_auth_unavailable",
+                "Model authentication is temporarily unavailable",
+            )),
+        );
+    }
     let code = response
         .pointer("/error/code")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
     match status {
-        // Upstream authentication describes a delegated credential, not the caller's browser session.
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(error(
-                "delegated_auth_unavailable",
-                "Model authentication is temporarily unavailable",
-            )),
-        ),
+        // A typed 403 (model_not_entitled, or a zero-retention refusal) is relayed with its status and body.
+        StatusCode::FORBIDDEN => (status, Json(response)),
         // The review's own typed refusals (its switch and its input limits) pass through as sent, and so does a typed
         // zero-retention refusal, which tells the caller why the review cannot run.
         StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::PAYLOAD_TOO_LARGE
@@ -529,20 +539,25 @@ async fn reasoning_translate_answer(
             ),
         };
     }
+    // The one 401/403 rule of every model-gateway relay (`shared::hides_credential_refusal`): a refused delegated credential
+    // is not the caller's browser session, so it is answered as unavailable.
+    if shared::hides_credential_refusal(status, &response) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "delegated_auth_unavailable",
+                "Model authentication is temporarily unavailable",
+            )),
+        );
+    }
     let code = response
         .pointer("/error/code")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
     match status {
-        // Upstream authentication describes a delegated credential, not the caller's browser session.
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(error(
-                "delegated_auth_unavailable",
-                "Model authentication is temporarily unavailable",
-            )),
-        ),
+        // A typed 403 (model_not_entitled, or a zero-retention refusal) is relayed with its status and body.
+        StatusCode::FORBIDDEN => (status, Json(response)),
         // The route's own typed refusals (its switch and its input limits) pass through as sent, and so does a typed
         // zero-retention refusal, which tells the caller why nothing was translated.
         StatusCode::BAD_REQUEST | StatusCode::NOT_FOUND | StatusCode::PAYLOAD_TOO_LARGE
@@ -668,6 +683,18 @@ async fn council_answer(
             ),
         };
     }
+    // The one 401/403 rule of every model-gateway relay (`shared::hides_credential_refusal`) comes first: a refused delegated
+    // credential is not the caller's browser session, so it is answered as unavailable. A typed 403 is not hidden, and the
+    // council's own list below relays it.
+    if shared::hides_credential_refusal(status, &response) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "delegated_auth_unavailable",
+                "Model authentication is temporarily unavailable",
+            )),
+        );
+    }
     let code = response
         .pointer("/error/code")
         .and_then(Value::as_str)
@@ -676,23 +703,13 @@ async fn council_answer(
     if council_refusal_passes(status, &code) {
         return (status, Json(response));
     }
-    match status {
-        // Upstream authentication describes a delegated credential, not the caller's browser session.
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(error(
-                "delegated_auth_unavailable",
-                "Model authentication is temporarily unavailable",
-            )),
-        ),
-        _ => (
-            status,
-            Json(error(
-                "council_unavailable",
-                "The model council is temporarily unavailable.",
-            )),
-        ),
-    }
+    (
+        status,
+        Json(error(
+            "council_unavailable",
+            "The model council is temporarily unavailable.",
+        )),
+    )
 }
 
 /// Whether an upstream refusal is the council's own typed answer, which passes through as sent: its switch, its input
@@ -784,6 +801,7 @@ mod tests {
         assistant_navigation_enabled_for, proxy_dictate, proxy_speech, router, routes,
         AI_AUDIO_BODY_LIMIT_BYTES,
     };
+    use crate::domains::chat::shared::tests::{assert_rule_answer, credential_rule_cases};
     use crate::middleware::{AuthenticatedUser, AuthorizedMembership};
 
     fn member_of(org_id: &str) -> AuthenticatedUser {
@@ -1298,5 +1316,133 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// model-gateway answers `status` with `reply` on `route`. Tokens and the org posture are the stand-ins of `upstreams`.
+    async fn answering(
+        route: &str,
+        status: u16,
+        reply: Value,
+    ) -> (MockServer, MockServer, MockServer) {
+        let (auth_core, org_core, _unused) = upstreams().await;
+        let model_gateway = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(status).set_body_json(reply))
+            .mount(&model_gateway)
+            .await;
+        (auth_core, org_core, model_gateway)
+    }
+
+    #[tokio::test]
+    async fn navigation_relays_a_typed_403_and_hides_an_untyped_403_and_a_401() {
+        for (label, status, reply, relayed) in credential_rule_cases() {
+            let (auth, org, model) =
+                answering("/v1/ai/assistant-navigation", status, reply.clone()).await;
+            let state = state_for(&auth, &org, &model);
+            let (answered, body) = super::assistant_navigation_with_switch(
+                state,
+                member_of("org-open"),
+                HeaderMap::new(),
+                super::AssistantNavigationRequest {
+                    prompt: "Finn kunnskap".to_owned(),
+                },
+                true,
+            )
+            .await;
+            assert_rule_answer(
+                label,
+                relayed,
+                &reply,
+                answered,
+                &body.0,
+                "assistant_navigation_unavailable",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn review_relays_a_typed_403_and_hides_an_untyped_403_and_a_401() {
+        for (label, status, reply, relayed) in credential_rule_cases() {
+            let (auth, org, model) = answering("/v1/ai/review", status, reply.clone()).await;
+            let state = state_for(&auth, &org, &model);
+            let (answered, body) = super::review_run_answer(
+                &state,
+                &member_of("org-open"),
+                &HeaderMap::new(),
+                super::ReviewRunRequest {
+                    target: "email".to_owned(),
+                    label: "Utkast".to_owned(),
+                    material: "Hei, her er teksten.".to_owned(),
+                    brief: String::new(),
+                    locale: "nb-NO".to_owned(),
+                },
+            )
+            .await;
+            assert_rule_answer(
+                label,
+                relayed,
+                &reply,
+                answered,
+                &body.0,
+                "delegated_auth_unavailable",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn translate_relays_a_typed_403_and_hides_an_untyped_403_and_a_401() {
+        for (label, status, reply, relayed) in credential_rule_cases() {
+            let (auth, org, model) =
+                answering("/v1/ai/reasoning-translate", status, reply.clone()).await;
+            let state = state_for(&auth, &org, &model);
+            let (answered, body) = super::reasoning_translate_answer(
+                &state,
+                &member_of("org-open"),
+                &HeaderMap::new(),
+                super::ReasoningTranslateRequest {
+                    text: "Hei".to_owned(),
+                    target_locale: "en".to_owned(),
+                },
+            )
+            .await;
+            assert_rule_answer(
+                label,
+                relayed,
+                &reply,
+                answered,
+                &body.0,
+                "delegated_auth_unavailable",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn council_relays_a_typed_403_and_hides_an_untyped_403_and_a_401() {
+        for (label, status, reply, relayed) in credential_rule_cases() {
+            let (auth, org, model) = answering("/v1/ai/council", status, reply.clone()).await;
+            let state = state_for(&auth, &org, &model);
+            let (answered, body) = super::council_answer(
+                &state,
+                &member_of("org-open"),
+                &HeaderMap::new(),
+                super::CouncilRequest {
+                    question: "Hva er forskjellen?".to_owned(),
+                    models: vec!["model-a".to_owned(), "model-b".to_owned()],
+                    synthesizer_model: None,
+                    allow_subscription: false,
+                    estimate_only: false,
+                },
+            )
+            .await;
+            assert_rule_answer(
+                label,
+                relayed,
+                &reply,
+                answered,
+                &body.0,
+                "delegated_auth_unavailable",
+            );
+        }
     }
 }

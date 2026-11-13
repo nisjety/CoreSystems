@@ -63,7 +63,7 @@ pub(crate) fn router(state: AppState) -> Router<AppState> {
         .route_layer(axum::middleware::from_fn_with_state(state, require_session))
 }
 
-async fn stream_agent_ui(
+pub(crate) async fn stream_agent_ui(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -153,6 +153,10 @@ async fn stream_agent_ui(
     let token = shared::model_token(&state, &user, &headers).await;
     let data_plane_token = shared::data_plane_token(&state, &user, &headers).await;
     let ingestion_token = shared::ingestion_token(&state, &user, &headers).await;
+    // The same best-effort `aud=capability-core` bearer a native chat turn mints (F-14,
+    // `mint_turn_bearers` on the stream surface). model-gateway reads the org's agent and PII policy
+    // with it; a failed mint leaves that read to its fail-closed path and never refuses the turn.
+    let capability_token = shared::best_effort_capability_token(&state, &user, &headers).await;
     let inference_token = match shared::required_inference_token(&state, &user, &headers).await {
         Ok(token) => token,
         Err(error) => return shared::delegated_auth_unavailable(error).into_response(),
@@ -196,6 +200,9 @@ async fn stream_agent_ui(
     if let Some(token) = ingestion_token {
         req = req.header("x-ingestion-authorization", format!("Bearer {token}"));
     }
+    if let Some(token) = capability_token {
+        req = req.header("x-capability-authorization", format!("Bearer {token}"));
+    }
     if let Some(token) = sandbox_token {
         req = req.header("x-sandbox-authorization", format!("Bearer {token}"));
     }
@@ -226,9 +233,9 @@ async fn stream_agent_ui(
 
 /// Resume an AG-UI stream from Model Gateway's durable request buffer. The
 /// transformed endpoint deliberately mirrors native `/chat/stream/resume`: it
-/// forwards the cursor and preserves the delegated audience headers, then
-/// applies the same AG-UI projection to replayed native frames.
-async fn resume_agent_ui(
+/// forwards the cursor, the delegated audience headers and the capability
+/// bearer, then applies the same AG-UI projection to replayed native frames.
+pub(crate) async fn resume_agent_ui(
     State(state): State<AppState>,
     Extension(user): Extension<AuthenticatedUser>,
     headers: HeaderMap,
@@ -253,6 +260,8 @@ async fn resume_agent_ui(
     };
     let data_plane_token = shared::data_plane_token(&state, &user, &headers).await;
     let ingestion_token = shared::ingestion_token(&state, &user, &headers).await;
+    // The capability bearer, best effort, as the native resume carries it (chat::streams).
+    let capability_token = shared::best_effort_capability_token(&state, &user, &headers).await;
     let org_id = crate::upstream::authorized_org_id(&state, &user).await;
     let url = format!(
         "{}/v1/invoke/resume/{}",
@@ -281,6 +290,9 @@ async fn resume_agent_ui(
     }
     if let Some(token) = ingestion_token {
         req = req.header("x-ingestion-authorization", format!("Bearer {token}"));
+    }
+    if let Some(token) = capability_token {
+        req = req.header("x-capability-authorization", format!("Bearer {token}"));
     }
     if let Some(last_event_id) = headers.get("last-event-id").and_then(|v| v.to_str().ok()) {
         req = req.header("last-event-id", last_event_id);
