@@ -309,6 +309,15 @@ func TestOrgServiceScopeForRequest(t *testing.T) {
 		{method: http.MethodGet, path: "/orgs/org-1/model-entitlement", want: []string{"org:read:self"}},
 		{method: http.MethodPut, path: "/orgs/org-1/model-entitlement", want: []string{"org:settings:write:self"}},
 		{method: http.MethodGet, path: "/orgs/org-1/model-entitlement/explain", want: []string{"org:read:self"}},
+		// The organisation flag values (W5-079-b). The member read is org:read:self, the one
+		// scope the gateway holds, which is what a signed-in member's read through the gateway
+		// needs. The write is an owner or admin's org:settings:write:self. The internal read
+		// has its own scope, which the gateway can never hold.
+		{method: http.MethodGet, path: "/orgs/org-1/flags", want: []string{"org:read:self"}},
+		{method: http.MethodPut, path: "/orgs/org-1/flags/VITE_CHAT_READER_POLISH", want: []string{"org:settings:write:self"}},
+		{method: http.MethodPost, path: "/orgs/org-1/flags", want: nil},
+		{method: http.MethodGet, path: "/internal/orgs/org-1/flags", want: []string{"org:flags:read:any"}},
+		{method: http.MethodPost, path: "/internal/orgs/org-1/flags", want: nil},
 		{method: http.MethodPatch, path: "/orgs/org-1/model-entitlement", want: nil},
 		{method: http.MethodGet, path: "/orgs//org-1", want: nil},
 		{method: http.MethodPost, path: "/orgs/org-1/members/invite", want: nil},

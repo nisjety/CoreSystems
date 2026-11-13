@@ -106,9 +106,12 @@ var orgServiceScopeAllowlist = map[string]struct{}{
 	"org:retention-policy:read:any": {},
 	// Read-only access to one organisation's flag values, through
 	// GET /internal/orgs/:orgId/flags and nothing else (W5-079-b). Presentation only.
-	// It is granted to no credential in code, so the route answers 403 until a
-	// deployment grants it to the one reader that needs it. Deliberately not
-	// org:read:any, which returns the whole organization record.
+	// It is granted to no credential in code, and verevon-gateway can never hold it:
+	// validateServiceCredential refuses every :any scope for the gateway, so the gateway
+	// is answered 403 here. The gateway's organisation flag read is the member route
+	// GET /orgs/:id/flags (org:read:self), which serves any active member on the
+	// signed-in user's delegation. Deliberately not org:read:any, which returns the whole
+	// organization record.
 	"org:flags:read:any": {},
 }
 
