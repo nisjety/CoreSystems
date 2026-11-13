@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { ApiError } from '@/shared/api/api-error'
 import { type AttachmentPolicy, getAttachmentPolicy } from '@/shared/api/chat-client'
 import { LocalizedError, translateApiError } from '@/shared/i18n/errors'
 
@@ -111,5 +112,34 @@ describe('an image or a file the turn cannot read', () => {
     await expect(toStreamAttachments([pixel('first.png')])).resolves.toEqual([
       { kind: 'image', data_base64: 'aGk=', mime_type: 'image/png' },
     ])
+  })
+})
+
+describe('a typed refusal from a read keeps its own reason', () => {
+  it('passes an ApiError from a document read through unchanged', async () => {
+    const refusal = new ApiError('Zero retention', 403, 'zdr_feature_not_supported')
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(refusal))
+    await expect(inlineTextAttachments([notes])).rejects.toBe(refusal)
+  })
+
+  it('passes an ApiError from an image read through unchanged', async () => {
+    const refusal = new ApiError('Too large', 413, 'too_large')
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(refusal))
+    await expect(toStreamAttachments([chart])).rejects.toBe(refusal)
+  })
+
+  it('passes an ApiError from a staged file read through unchanged', async () => {
+    vi.mocked(getAttachmentPolicy).mockReturnValue(policy({ modes: { vision: true, sandboxFiles: true } }))
+    const refusal = new ApiError('Slow down', 429, null, { retryAfterSeconds: 30 })
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(refusal))
+    await expect(toStreamAttachments([{ ...sales, url: 'blob:sales' }])).rejects.toBe(refusal)
+  })
+
+  it('shows the reader the typed reason, not the read refusal', async () => {
+    const refusal = new ApiError('Zero retention', 403, 'zdr_feature_not_supported')
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(refusal))
+    const caught: unknown = await inlineTextAttachments([notes]).then(() => undefined, (error: unknown) => error)
+    expect(translateApiError(caught, norwegian, FALLBACK)).toBe(translateApiError(refusal, norwegian, FALLBACK))
+    expect(translateApiError(caught, norwegian, FALLBACK)).not.toBe(FALLBACK.no)
   })
 })

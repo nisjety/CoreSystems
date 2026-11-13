@@ -86,46 +86,232 @@ const sources = new Map(
     .map((path) => [path.slice(gatewaySrc.length + 1), productionCode(path)]),
 )
 
-/** Every `const|static NAME: &[&str] = &[ .. ];` of a source text, with the text between the brackets. */
-function stringTables(source: string): { name: string; body: string }[] {
-  const tables: { name: string; body: string }[] = []
-  for (const match of source.matchAll(/\b(?:const|static)\s+([A-Z][A-Z0-9_]*)\s*:\s*&\[&str\]\s*=\s*&\[([\s\S]*?)\];/g)) {
-    tables.push({ name: match[1] ?? '', body: match[2] ?? '' })
+/**
+ * Every `const|static NAME: TYPE = ..;` of a source text whose type is a table of strings: a slice `&[&str]`, a
+ * fixed-size array `[&str; N]`, or a table of tuples led by a string, `&[(&str, u16, &str)]` or `[(&str, &str); N]`.
+ * `tuples` says which one it is; `body` is the text between the brackets, multi-line tables included.
+ */
+function stringTables(source: string): { name: string; body: string; tuples: boolean }[] {
+  const tables: { name: string; body: string; tuples: boolean }[] = []
+  const declaration =
+    /\b(?:const|static)\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(&\[&str\]|\[&str;[^\]]*\]|&\[\(&str[^=]*?\]|\[\(&str[^=]*?;[^\]]*\])\s*=\s*&?\[([\s\S]*?)\];/g
+  for (const match of source.matchAll(declaration)) {
+    tables.push({ name: match[1] ?? '', body: match[3] ?? '', tuples: (match[2] ?? '').includes('(') })
   }
   return tables
 }
 
-// The `&[&str]` tables of the gateway that do NOT hold error codes. Every other
-// string table is read for codes (see emittedCodes), whatever its name.
-const NOT_A_CODE_TABLE: Record<string, string> = {
-  SHAPE_DENY_KEYS: 'cache_admission.rs: JSON keys that keep a response out of the cache',
-  READ_ONLY_BROWSE_OPS: 'domains/integrations/browse.rs: operation names the read-only browse proxy allows',
-  READ_ONLY_CONTENT_OPS: 'domains/integrations/browse.rs: operation names the read-only content proxy allows',
-  FORGED_SPACE_AUTHORITY_FIELDS: 'domains/spaces/mod.rs: request body fields a client may not set',
-  DETAIL_ALLOWLIST: 'domains/spaces/denial.rs: key names of the typed refusal details a Space denial may carry to the browser',
-  RESOLVABLE_BY: 'domains/spaces/denial.rs: values of the resolvable_by hint of a typed Space denial (who can fix it), not error codes',
-  STRING_FIELDS: 'domains/spaces/room_artifacts.rs: JSON field names of an artifact row the room artifacts route keeps',
-  NUMBER_FIELDS: 'domains/spaces/room_artifacts.rs: JSON field names of an artifact row the room artifacts route keeps',
-  RUN_STATES: 'domains/spaces/stream.rs: run state names of a Space stream frame, not error codes',
-  UPDATED_FIELDS: 'domains/spaces/stream.rs: thread field names a thread-updated frame may name, not error codes',
-  CLOSING_CODES: 'domains/spaces/stream.rs: reasons of a stream close frame; the stream client handles them itself and they never come back as an API error response',
-  STRIPPED_HEADERS: 'middleware.rs: header names removed from a proxied request',
-  RENDERABLE_ARTIFACT_TYPES: 'upstream.rs: media types an artifact may be rendered as',
-  SENSITIVE_FIELDS: 'zdr_log.rs: field names the log redaction recognises',
-  ADMIN_ROLES: 'domains/audit_compliance.rs: role names allowed to read the compliance surface',
-  EVENTS_QUERY: 'domains/audit_compliance.rs: query parameter names the audit events route forwards',
-  MANIFEST_QUERY: 'domains/audit_compliance.rs: query parameter names the audit manifest route forwards',
-  NO_QUERY: 'domains/audit_compliance.rs: an empty list of query parameters a route forwards',
-  FORGED_WAKE_FIELDS: 'domains/spaces/mod.rs: request body and frame field names a client may not set on a Space wake, not error codes',
-  VERIFY_BODY: 'domains/audit_compliance.rs: body field names the audit verify route forwards',
+// The string tables of the gateway that do NOT hold error codes, by file (relative to apps/gateway/src) and then by
+// table name, each with its reason. Every other table is read for codes (see emittedCodes), whatever its name, so a
+// new table fails the classification test below until it is listed here or it is one of the code tables it names.
+// A table is keyed by its file as well as its name, so a table of the same name in another file that does hold codes
+// is still read.
+const NOT_A_CODE_TABLE: Record<string, Record<string, string>> = {
+  'cache_admission.rs': {
+    SHAPE_DENY_KEYS: 'JSON keys that keep a response out of the cache, not error codes',
+  },
+  'domains/actions/handlers.rs': {
+    LEGACY_ACTION_ALIASES: 'legacy action names and the current names they map to, not error codes',
+  },
+  'domains/ag_ui.rs': {
+    DEFAULT_FEATURES: 'feature names an AG-UI client may enable, not error codes',
+  },
+  'domains/agent_actions.rs': {
+    PRIVATE_SKILL_FIELDS: 'field names of a private skill body, not error codes',
+    AGENT_AUTONOMY_CAPS: 'autonomy cap names of an agent, not error codes',
+    AGENT_DRAFT_FIELDS: 'field names of an agent draft, not error codes',
+    SPACE_AGENT_EDIT_ROLES: 'Space roles that may edit an agent, not error codes',
+    PREVIEW_REFUSED_FIELDS: 'request field names an agent preview refuses, not error codes',
+  },
+  'domains/ai.rs': {
+    DICTATION_CONTEXTS: 'dictation context names, not error codes',
+  },
+  'domains/audit_compliance.rs': {
+    ADMIN_ROLES: 'role names allowed to read the compliance surface, not error codes',
+    EVENTS_QUERY: 'query parameter names the audit events route forwards, not error codes',
+    MANIFEST_QUERY: 'query parameter names the audit manifest route forwards, not error codes',
+    NO_QUERY: 'an empty list of query parameter names a route forwards',
+    VERIFY_BODY: 'body field names the audit verify route forwards, not error codes',
+  },
+  'domains/browser_evidence.rs': {
+    DEVTOOLS_LEVELS: 'console levels of a devtools filter, not error codes',
+    DEVTOOLS_CATEGORIES: 'event categories of a devtools filter, not error codes',
+  },
+  'domains/browser_sites.rs': {
+    POLICY_MODES: 'policy mode names of a browser site policy, not error codes',
+    RULE_KINDS: 'rule kind names of a browser site policy, not error codes',
+    CHOICE_LEVELS: 'choice level names of a browser site choice, not error codes',
+    POLICY_FIELDS: 'request field names of a browser site policy, not error codes',
+    RULE_FIELDS: 'request field names of a browser site rule, not error codes',
+    CHOICE_FIELDS: 'request field names of a browser site choice, not error codes',
+  },
+  'domains/chat/history.rs': {
+    RELAYED_CONTEXT_REF_KINDS: 'context reference kinds a chat history relays, not error codes',
+  },
+  'domains/chat/transcripts.rs': {
+    ACCEPTED_AUDIO_TYPES: 'audio media types a transcript accepts, not error codes',
+  },
+  'domains/client_config.rs': {
+    DIAGNOSTIC_KINDS: 'kinds of a client diagnostic beacon, not error codes',
+    LONG_TASK_BUCKETS: 'duration buckets of a long-task diagnostic, not error codes',
+    CSP_REPORT_CONTENT_TYPES: 'content types a Content-Security-Policy report may be sent as, not error codes',
+    CSP_DIRECTIVES: 'Content-Security-Policy directive names, not error codes',
+  },
+  'domains/ingestions/jobs.rs': {
+    CONTROLLABLE_KINDS: 'job kinds that may be controlled, not error codes',
+    CONTROL_ACTIONS: 'job control action names, not error codes',
+  },
+  'domains/ingestions/runs.rs': {
+    RUN_KINDS: 'ingestion run kind names, not error codes',
+  },
+  'domains/ingestions/sources.rs': {
+    SOURCE_KINDS: 'ingestion source kind names, not error codes',
+  },
+  'domains/insights.rs': {
+    SURFACES: 'surface names an insights query may name, not error codes',
+  },
+  'domains/integrations/browse.rs': {
+    READ_ONLY_BROWSE_OPS: 'operation names the read-only browse proxy allows, not error codes',
+    READ_ONLY_CONTENT_OPS: 'operation names the read-only content proxy allows, not error codes',
+  },
+  'domains/integrations/credential_bindings.rs': {
+    BINDING_FIELDS: 'request field names of a credential binding, not error codes',
+  },
+  'domains/integrations/model_connections.rs': {
+    ZDR_LOCALES: 'languages of a zero-retention acknowledgement text, not error codes',
+    ZDR_VARIANTS: 'variants of a zero-retention acknowledgement, not error codes',
+    ZDR_ACKNOWLEDGEMENT_FIELDS: 'request field names of a zero-retention acknowledgement, not error codes',
+  },
+  'domains/knowledge/quarry.rs': {
+    PREVIEW_DROPPED_KEYS: 'keys a scrape preview drops from the request, not error codes',
+    PREVIEW_DROPPED_FORMATS: 'formats a scrape preview drops from the request, not error codes',
+    CRAWL_PAGE_FORMATS: 'page formats a crawl may ask for, not error codes',
+  },
+  'domains/mcp.rs': {
+    MCP_APP_TOOL_CALL_KEYS: 'keys of an MCP app tool call body, not error codes',
+  },
+  'domains/org_identity.rs': {
+    ADMIN_ROLES: 'organisation roles that count as admin, not error codes',
+  },
+  'domains/orgs/browser_policy.rs': {
+    DOCUMENT_FIELDS: 'field names of a browser policy document, not error codes',
+  },
+  'domains/orgs/model_entitlement.rs': {
+    PUT_FIELDS: 'field names of a model entitlement save, not error codes',
+    POLICY_FIELDS: 'field names of a model entitlement policy, not error codes',
+    SURFACE_DEFAULT_FIELDS: 'field names of a surface default, not error codes',
+  },
+  'domains/orgs/quotas.rs': {
+    ENFORCED_QUOTA_KEYS: 'quota keys the gateway enforces, not error codes',
+    VALID_RESET_PERIODS: 'quota reset periods, not error codes',
+  },
+  'domains/orgs/retention.rs': {
+    PUT_FIELDS: 'field names of a retention policy save, not error codes',
+    HOLD_FIELDS: 'field names of a legal hold request, not error codes',
+    HOLD_READ_ROLES: 'organisation roles that may read legal holds, not error codes',
+    HOLD_WRITE_ROLES: 'organisation roles that may place legal holds, not error codes',
+  },
+  'domains/orgs/settings.rs': {
+    ZDR_TIERS: 'zero-retention tiers an organisation may choose, not error codes',
+  },
+  'domains/orgs/space_policy.rs': {
+    PUT_FIELDS: 'field names of a Space policy save, not error codes',
+  },
+  'domains/persona.rs': {
+    TONE_PRESETS: 'tone preset names of a persona, not error codes',
+  },
+  'domains/spaces/agent_policy.rs': {
+    ALLOWED_FIELDS: 'field names an agent policy save may set, not error codes',
+    PIN_ALLOWED_FIELDS: 'field names an agent version pin may set, not error codes',
+  },
+  'domains/spaces/attention.rs': {
+    KINDS: 'attention item kinds, not error codes',
+    STATES: 'attention item states, not error codes',
+    FOLLOW_STATES: 'follow states of a Space thread, not error codes',
+    LEVELS: 'notification levels, not error codes',
+    READ_ALL_KINDS: 'attention kinds a read-all clears, not error codes',
+  },
+  'domains/spaces/denial.rs': {
+    DETAIL_ALLOWLIST: 'key names of the typed refusal details a Space denial may carry to the browser',
+    RESOLVABLE_BY: 'values of the resolvable_by hint of a typed Space denial (who can fix it), not error codes',
+  },
+  'domains/spaces/files.rs': {
+    ALLOWED_EXTENSIONS: 'file extensions a Space upload may carry, not error codes',
+  },
+  'domains/spaces/message_lifecycle.rs': {
+    MODERATION_REASONS: 'moderation reasons a person picks, not error codes',
+    REACT_ROLES: 'Space roles that may react to a message, not error codes',
+  },
+  'domains/spaces/mod.rs': {
+    FORGED_SPACE_AUTHORITY_FIELDS: 'request body fields a client may not set',
+    FORGED_WAKE_FIELDS: 'request body and frame field names a client may not set on a Space wake, not error codes',
+    CREATE_AGENT_ROLES: 'Space roles that may create an agent, not error codes',
+    SPACE_INSTRUCTIONS_WRITE_ROLES: 'Space roles that may write the instructions, not error codes',
+    MENTIONED_AGENT_FIELDS: 'field names of a mentioned agent reference, not error codes',
+    AGENT_PIN_FIELDS: 'field names of an agent pin, not error codes',
+    AGENT_ROLES_FIELDS: 'field names of an agent role list, not error codes',
+  },
+  'domains/spaces/pins.rs': {
+    PIN_ROLES: 'Space roles that may pin a post, not error codes',
+  },
+  'domains/spaces/room_admin.rs': {
+    ROOM_ROLES: 'roles a room member may hold, not error codes',
+    DETAILS_ROLES: 'roles that may read room details, not error codes',
+    VISIBILITIES: 'room visibility values, not error codes',
+    JOIN_ROLES: 'roles a joining member may take, not error codes',
+    HISTORY_MODES: 'history modes a joining member may take, not error codes',
+  },
+  'domains/spaces/room_artifacts.rs': {
+    STRING_FIELDS: 'JSON field names of an artifact row the room artifacts route keeps',
+    NUMBER_FIELDS: 'JSON field names of an artifact row the room artifacts route keeps',
+  },
+  'domains/spaces/status.rs': {
+    STATES: 'presence states of a Space member, not error codes',
+  },
+  'domains/spaces/stream.rs': {
+    RUN_STATES: 'run state names of a Space stream frame, not error codes',
+    UPDATED_FIELDS: 'thread field names a thread-updated frame may name, not error codes',
+    CLOSING_CODES: 'reasons of a stream close frame; the stream client handles them itself and they never come back as an API error response',
+  },
+  'domains/spaces/timeline.rs': {
+    SYSTEM_ACTIONS: 'system timeline action names, not error codes',
+    NOTICE_KINDS: 'notice kinds of the timeline, not error codes',
+  },
+  'domains/spaces/tool_policy.rs': {
+    ALLOWED_FIELDS: 'field names a tool policy save may set, not error codes',
+  },
+  'main.rs': {
+    SENSITIVE_CALLBACK_PREFIXES: 'URL path prefixes of the auth callbacks, not error codes',
+  },
+  'middleware.rs': {
+    STRIPPED_HEADERS: 'header names removed from a proxied request',
+  },
+  'retention_decision.rs': {
+    SPACE_SELECTION_KEYS: 'body keys that name a Space or room, not error codes',
+  },
+  'upstream.rs': {
+    RENDERABLE_ARTIFACT_TYPES: 'media types an artifact may be rendered as, not error codes',
+  },
+  'zdr_log.rs': {
+    SENSITIVE_FIELDS: 'field names the log redaction recognises, not error codes',
+    CAPPED_TARGETS: 'log targets with their level caps, not error codes',
+  },
 }
+
+/** `file:NAME` of every table listed in NOT_A_CODE_TABLE. */
+const NOT_A_CODE_TABLE_KEYS: ReadonlySet<string> = new Set(
+  Object.entries(NOT_A_CODE_TABLE).flatMap(([file, tables]) => Object.keys(tables).map((name) => `${file}:${name}`)),
+)
+
+/** A literal a code table holds: a snake_case-like word, as the gateway names its codes. */
+const CODE_SHAPE = /^[A-Za-z][A-Za-z0-9_]+$/
 
 // The shapes a handler names its code in. A code reaches the SPA as
 // `{ error: { code, message } }` built by `error("code", ..)`, as a
 // (StatusCode, "code", "message") or ("code", "message") pair a helper turns into
 // that envelope, as a "code" key of a json! body, as a `code:` field, or through a
 // `let code = if/match ..` that picks one of several.
-function emittedCodes(source: string): Set<string> {
+function emittedCodes(file: string, source: string): Set<string> {
   const codes = new Set<string>()
   for (const match of source.matchAll(/\berror\(\s*"([A-Za-z][A-Za-z0-9_]+)"/g)) codes.add(match[1] ?? '')
   for (const match of source.matchAll(/StatusCode::[A-Z_]+,\s*"([a-z][a-z0-9_]+)",\s*"/g)) codes.add(match[1] ?? '')
@@ -135,21 +321,23 @@ function emittedCodes(source: string): Set<string> {
   for (const block of source.matchAll(/let\s+code\s*=\s*(?:if|match)[\s\S]*?;\n/g)) {
     for (const literal of block[0].matchAll(/"([A-Za-z][A-Za-z0-9_]+)"/g)) codes.add(literal[1] ?? '')
   }
-  // A constant table of codes a function returns verbatim (upstream.rs: the
-  // integration allow-list and the never-plan-gated codes). Every `&[&str]` constant
-  // (const or static, any name) is read as a code table unless NOT_A_CODE_TABLE lists
-  // it, so a table named differently is not skipped: a new one fails the table test
-  // below until it is classified one way or the other.
+  // A constant table of codes a function returns verbatim: the integration allow-list and the never-plan-gated codes
+  // of upstream.rs, the relayed refusals of the BFF (a fixed-size array in retention_decision.rs, tuple tables in
+  // orchestration.rs and run_live.rs), the Space stream's codes. Every string table (a slice, a fixed-size array or a
+  // table of tuples, any name) is read unless NOT_A_CODE_TABLE classifies it, so a table the scan does not know fails
+  // the classification test below. A tuple table's code is its first element; the rest are a status and a message,
+  // or another value, and are never read as codes.
   for (const table of stringTables(source)) {
-    if (table.name in NOT_A_CODE_TABLE) continue
-    for (const literal of table.body.matchAll(/"([A-Za-z][A-Za-z0-9_]+)"/g)) codes.add(literal[1] ?? '')
+    if (NOT_A_CODE_TABLE_KEYS.has(`${file}:${table.name}`)) continue
+    const literals = table.tuples ? table.body.matchAll(/\(\s*"([^"]*)"/g) : table.body.matchAll(/"([^"]*)"/g)
+    for (const literal of literals) if (CODE_SHAPE.test(literal[1] ?? '')) codes.add(literal[1] ?? '')
   }
   return codes
 }
 
 const emittedBy = new Map<string, string[]>()
 for (const [file, source] of sources) {
-  for (const code of emittedCodes(source)) emittedBy.set(code, [...(emittedBy.get(code) ?? []), file])
+  for (const code of emittedCodes(file, source)) emittedBy.set(code, [...(emittedBy.get(code) ?? []), file])
 }
 
 // Codes the scan cannot see because a helper builds them from a variable
@@ -295,6 +483,10 @@ describe('every code the gateway emits', () => {
       ['personal_connection_forbidden', 'upstream.rs'],
       ['personal_connection_no_delegated_user', 'upstream.rs'],
       ['no_sources_registered', 'upstream.rs'],
+      // Read from a fixed-size array (DECISION_REFUSAL_CODES) and from the first element of multi-line tuple tables.
+      ['zdr_waiver_route_mismatch', 'retention_decision.rs'],
+      ['continue_disabled', 'domains/orchestration.rs'],
+      ['too_many_live_views', 'domains/spaces/run_live.rs'],
     ] as const) {
       expect(emittedBy.get(code), `the scan found ${code}`).toContain(file)
     }
@@ -312,20 +504,32 @@ describe('every code the gateway emits', () => {
   it('classifies every string table of the gateway: read for codes, or listed as not holding codes', () => {
     const read: string[] = []
     const seen = new Set<string>()
-    for (const source of sources.values()) {
+    for (const [file, source] of sources) {
       for (const table of stringTables(source)) {
-        seen.add(table.name)
-        if (!(table.name in NOT_A_CODE_TABLE)) read.push(table.name)
+        const key = `${file}:${table.name}`
+        seen.add(key)
+        if (!NOT_A_CODE_TABLE_KEYS.has(key)) read.push(key)
       }
     }
-    // The two tables of upstream.rs and the Space stream's ERROR_CODES are read, so their entries reach the scan; a new
-    // table lands here and has to be added to this list (it holds codes) or to
-    // NOT_A_CODE_TABLE (it does not).
-    expect(read.sort()).toEqual(['ERROR_CODES', 'INTEGRATION_ERROR_CODE_ALLOWLIST', 'NEVER_PLAN_GATED_INTEGRATION_ERROR_CODES'])
-    for (const name of Object.keys(NOT_A_CODE_TABLE)) {
-      expect(seen.has(name), `${name} is no longer a table in the gateway, remove it from NOT_A_CODE_TABLE`).toBe(true)
+    // The code tables: the relayed refusals of the BFF (DECISION_REFUSAL_CODES is a fixed-size array, CONTINUE_RELAYED_ERRORS,
+    // RELAYED and STOP_RELAYED are tables of tuples), the Space stream's codes, the upstream allow-lists and the scrape block
+    // reasons. A new table lands here and has to be added to this list (it holds codes) or to NOT_A_CODE_TABLE (it does not).
+    expect(read.sort()).toEqual([
+      'domains/knowledge/quarry.rs:SCRAPE_BLOCK_REASONS',
+      'domains/orchestration.rs:CONTINUE_RELAYED_ERRORS',
+      'domains/spaces/run_live.rs:RELAYED',
+      'domains/spaces/run_live.rs:STOP_RELAYED',
+      'domains/spaces/stream.rs:ERROR_CODES',
+      'retention_decision.rs:DECISION_REFUSAL_CODES',
+      'upstream.rs:INTEGRATION_ERROR_CODE_ALLOWLIST',
+      'upstream.rs:NEVER_PLAN_GATED_INTEGRATION_ERROR_CODES',
+    ])
+    for (const key of NOT_A_CODE_TABLE_KEYS) {
+      expect(seen.has(key), `${key} is no longer a table in the gateway, remove it from NOT_A_CODE_TABLE`).toBe(true)
     }
-    for (const reason of Object.values(NOT_A_CODE_TABLE)) expect(reason.length).toBeGreaterThan(20)
+    for (const [file, tables] of Object.entries(NOT_A_CODE_TABLE)) {
+      for (const [name, reason] of Object.entries(tables)) expect(reason.length, `${file}:${name} names its reason`).toBeGreaterThan(20)
+    }
   })
 
   it('has copy, or an explicit reason it needs none', () => {
@@ -530,6 +734,26 @@ const ADDED_CODES = [
   'scrape_host_not_found',
   'scrape_unreachable',
   'scrape_tls_failed',
+  // The relayed refusals of an approval or question continuation (CONTINUE_RELAYED_ERRORS) and of a live view (RELAYED).
+  'continue_disabled',
+  'not_resumable',
+  'approval_not_granted',
+  'approval_not_resumable',
+  'continuation_already_consumed',
+  'continue_unavailable',
+  'question_not_found',
+  'question_expired',
+  'question_already_answered',
+  'invalid_answer',
+  'question_not_resumable',
+  'run_stream_expired',
+  'too_many_live_views',
+  'run_live_unavailable',
+  // The chat stream's mode_lockdown (model-gateway's refusal of an agentic turn) and the catalogue's three refusals the BFF relays.
+  'mode_lockdown',
+  'zdr_connection_not_acknowledged',
+  'zdr_posture_mismatch',
+  'zdr_waiver_route_mismatch',
 ] as readonly string[]
 
 // An internal id in a sentence: snake_case or UPPER_SNAKE words, plus the names

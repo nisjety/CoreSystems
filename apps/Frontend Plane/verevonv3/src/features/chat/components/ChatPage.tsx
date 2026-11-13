@@ -120,7 +120,7 @@ import { createReaderAppearance, readerPolishOn, readerSpacingFor } from '../lib
 import { createTranscriptDensity, transcriptDensityEnabled } from '../lib/transcript-density'
 import { DensityMenu } from './DensityMenu'
 import { ReaderTools } from './ReaderTools'
-import { SideChatPanel, sideChatEnabled } from './SideChatPanel'
+import { SideChatPanel, sideChatConnectionModel, sideChatEnabled } from './SideChatPanel'
 
 export default function ChatPage() {
   const i18n = useI18n()
@@ -1602,6 +1602,7 @@ export default function ChatPage() {
             <SideChatPanel
               threadId={state.threadId ?? null}
               hidden={temporaryChat() || isActiveThreadTemporary() || spaceScoped()}
+              connectionModel={sideChatConnectionModel(state.turns)}
               onSpinOff={spinOffSideChat}
             />
           </Show>

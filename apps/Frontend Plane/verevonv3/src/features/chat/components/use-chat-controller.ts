@@ -2581,8 +2581,16 @@ export function useChatController() {
             setState((s) => { s.activeModel = model })
           }
           setBrowseWeb(Boolean(pending.tools?.includes('search') || pending.tools?.includes('research')))
-          const attachments = await toStreamAttachments(pending.attachments ?? [])
-          const inlined = await inlineTextAttachments(pending.attachments ?? [])
+          // A launch whose files cannot be read whole is not sent: the reason is shown, as a failed send shows it.
+          const launchFiles = await Promise.all([
+            toStreamAttachments(pending.attachments ?? []),
+            inlineTextAttachments(pending.attachments ?? []),
+          ]).catch((error: unknown) => {
+            refuseUnsentTurn(error)
+            return null
+          })
+          if (!launchFiles) return
+          const [attachments, inlined] = launchFiles
           triggerLaunchMotion()
           const sending = sendContent(pending.text, pending.model, {
             attachments: attachments.length > 0 ? attachments : undefined,
@@ -5409,6 +5417,23 @@ export function useChatController() {
   })
 
   /**
+   * A send that cannot start because a file of its turn cannot be read whole: a read refusal, or a typed refusal from the
+   * extraction route, which keeps its own words. Nothing is sent. The reason is shown as a failed send shows it: the chat
+   * error while no answer runs, and a notice while one does, since that answer owns the status.
+   */
+  const refuseUnsentTurn = (error: unknown) => {
+    // The composer's own send-failure sentence, translated here so both languages carry the same fallback.
+    const sendFailed = i18n.tr('Kunne ikke sende. Prøv igjen.', 'Could not send. Please retry.')
+    const message = translateApiError(error, i18n.tr, { no: sendFailed, en: sendFailed })
+    if (isStreaming()) {
+      showFeedbackNotice(message)
+      return
+    }
+    setState((s) => { s.error = message })
+    setState((s) => { s.status = 'error' })
+  }
+
+  /**
    * EP-8-S8 (D3-356): saves the role the person stated on the empty chat as a memory on the thread that the first send
    * just created. The role is taken once, so a later call finds nothing. A save that fails is said in the feedback notice,
    * with the same words the card uses; the role is not kept for another try.
@@ -5767,6 +5792,8 @@ export function useChatController() {
       tools: lastUser.tools,
       provider: lastUser.provider,
       subscriptionConnectionId,
+      // A customer-gateway turn continues on its own gateway, as a regenerate does (W4-BYO-6): kept from the turn, never looked up.
+      modelConnectionId: lastUser.modelConnectionId,
       zdr: isTemporaryThread(state.threadId),
       seedContent: partial,
       modelContent: buildContinuationModelContent(lastUser.content, partial),
@@ -5789,10 +5816,15 @@ export function useChatController() {
       provider: user.provider ?? assistant.provider,
       subscriptionConnectionId: user.subscriptionConnectionId ?? assistant.subscriptionConnectionId,
     }
-    const [attachments, subscriptionConnectionId] = await Promise.all([
+    const resend = await Promise.all([
       toStreamAttachments(user.attachments),
       replayConnectionId(route),
-    ])
+    ]).catch((error: unknown) => {
+      refuseUnsentTurn(error)
+      return null
+    })
+    if (!resend) return
+    const [attachments, subscriptionConnectionId] = resend
     await sendContent(user.content, user.model ?? assistant.model, {
       attachments: attachments.length > 0 ? attachments : undefined,
       browseWeb: user.tools.includes('search') || user.tools.includes('research'),
@@ -5857,11 +5889,17 @@ export function useChatController() {
       )
       if (!confirmed) return
     }
-    abortController?.abort()
-    const [attachments, subscriptionConnectionId] = await Promise.all([
+    // The files are read first: a refused edit must not stop the answer that is still running.
+    const resend = await Promise.all([
       toStreamAttachments(original.attachments),
       replayConnectionId(original),
-    ])
+    ]).catch((error: unknown) => {
+      refuseUnsentTurn(error)
+      return null
+    })
+    if (!resend) return
+    abortController?.abort()
+    const [attachments, subscriptionConnectionId] = resend
     if (isFinalExchange) {
       // Editing the FINAL exchange: snapshot it as a version before it's
       // truncated away, same as regenerateLatest. Editing an EARLIER turn

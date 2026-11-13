@@ -58,11 +58,27 @@ export const threadArchiveAction = z.object({ type: z.literal('thread.archive'),
 export const threadStarAction = z.object({ type: z.literal('thread.star'), threadId, starred: z.boolean() })
 export const threadMarkUnreadAction = z.object({ type: z.literal('thread.mark_unread'), threadId })
 
-// A side question (F-t3-069) only reads: Model Gateway answers from a snapshot of the thread and keeps nothing.
+// The most characters a side question's model id takes, as the BFF and Model Gateway bound it (W4-BYO, DEC-V-R8).
+export const SIDE_CHAT_MODEL_MAX_CHARS = 200
+
+// The model a connection's side question is answered on: one model id, at most SIDE_CHAT_MODEL_MAX_CHARS characters, with
+// no whitespace or control character. It is optional, because a platform thread names none.
+const sideChatModel = z
+  .string()
+  .trim()
+  .min(1)
+  .refine((id) => Array.from(id).length <= SIDE_CHAT_MODEL_MAX_CHARS, { message: 'A model id is at most 200 characters.' })
+  .refine((id) => !/[\s\p{Cc}]/u.test(id), { message: 'A model id has no spaces or control characters.' })
+  .optional()
+
+// A side question (F-t3-069) only reads: Model Gateway answers from a snapshot of the thread and keeps nothing. On a thread
+// whose turns were written under a customer gateway or a ChatGPT subscription, the question names the model that connection
+// serves (DEC-V-R8): Model Gateway refuses such a question that names none.
 export const threadSideChatAction = z.object({
   type: z.literal('thread.side_chat'),
   threadId,
   question: z.string().trim().min(1).max(2000),
+  model: sideChatModel,
 })
 
 // A spin-off (F-t3-069) creates nothing server-side. The browser opens a new draft chat with this text in its

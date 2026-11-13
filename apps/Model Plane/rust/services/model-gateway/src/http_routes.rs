@@ -11396,7 +11396,8 @@ mod approval_rule_tests {
         assert!(!approval_cause::rule_proposals_from(None));
         assert!(!approval_cause::rule_proposals_from(Some("1")));
         assert!(!approval_cause::rule_proposals_from(Some("yes")));
-        assert!(approval_cause::rule_proposals_from(Some(" TRUE ")));
+        assert!(!approval_cause::rule_proposals_from(Some(" TRUE ")));
+        assert!(approval_cause::rule_proposals_from(Some("true")));
         let literal: DecideApprovalBody = serde_json::from_value(json!({
             "decision": "approve",
             "promote": true,
@@ -14827,6 +14828,25 @@ struct ThreadMessage {
     /// shape. `content` is already the effective text (empty for a deleted turn).
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     revision: Option<ThreadMessageRevision>,
+    /// The customer-gateway connection this turn was written under (W4-BYO-6), so a reopened thread's regenerate, edit
+    /// and retry replay on it without a local copy of the turn. Named only by `connection_named_on_read`: omitted for a
+    /// platform turn, for a row from before the column existed, on a shared Space read, and while the switch is off.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    model_connection_id: String,
+    /// The ChatGPT subscription connection this turn was written under (DEC-V-R8). The same rules as `model_connection_id`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    subscription_connection_id: String,
+}
+
+/// The connection id a turn carries on the wire, or none. A connection is named only on the owner's own personal read,
+/// never on a shared Space read (another member's connection is not theirs to see), and only while the customer-gateway
+/// switch is on: with it off, the body is what it was before the ids were stored.
+fn connection_named_on_read(connection_id: &str, owner_read: bool, byo_enabled: bool) -> String {
+    if owner_read && byo_enabled {
+        connection_id.to_owned()
+    } else {
+        String::new()
+    }
 }
 
 /// The revision state of a turn as the transcript serialises it (WS12-S6). Ids, closed words and
@@ -16231,6 +16251,10 @@ async fn list_thread_messages(
     // A shared-Space read (it carries a Control decision) sees only the
     // allowlisted metadata keys (WS07-S9a); the owner's Chat read is unchanged.
     let space_read_decision_ref = query.space_read_decision_ref.unwrap_or_default();
+    // The owner's own personal read may name a turn's connection; a shared Space read never does (see connection_named_on_read).
+    let no_space = query.space_id.as_deref().unwrap_or("").trim().is_empty();
+    let owner_read = no_space && space_read_decision_ref.is_empty();
+    let byo_enabled = crate::normalize::byo_gateway_enabled();
     let legacy_metadata_passthrough = crate::room_metadata::legacy_passthrough(
         std::env::var(crate::room_metadata::LEGACY_PASSTHROUGH_ENV)
             .ok()
@@ -16353,6 +16377,16 @@ async fn list_thread_messages(
                     sibling_count: m.sibling_count,
                     on_active_path: m.on_active_path,
                 }),
+                model_connection_id: connection_named_on_read(
+                    &m.model_connection_id,
+                    owner_read,
+                    byo_enabled,
+                ),
+                subscription_connection_id: connection_named_on_read(
+                    &m.subscription_connection_id,
+                    owner_read,
+                    byo_enabled,
+                ),
             })
             .collect();
 
@@ -23576,6 +23610,8 @@ mod thread_messages_page_tests {
                 entry: None,
                 mentions: Vec::new(),
                 revision: None,
+                model_connection_id: String::new(),
+                subscription_connection_id: String::new(),
             }],
             has_more: None,
             omitted_before: None,
@@ -23612,6 +23648,8 @@ mod thread_messages_page_tests {
                 sibling_count: 3,
                 on_active_path: false,
             }),
+            model_connection_id: String::new(),
+            subscription_connection_id: String::new(),
         })
         .expect("the turn serialises");
         assert_eq!(
@@ -24014,6 +24052,8 @@ mod space_post_wire_tests {
             entry: None,
             mentions: Vec::new(),
             revision: None,
+            model_connection_id: String::new(),
+            subscription_connection_id: String::new(),
         }
     }
 
@@ -24078,6 +24118,34 @@ mod space_post_wire_tests {
         assert_eq!(post["post_kind"], "post");
         assert_eq!(post["author_subject_id"], "user-2");
         assert_eq!(post["message_id"], "m-1");
+    }
+
+    #[test]
+    fn a_turn_names_its_connections_only_on_the_owners_read_while_the_switch_is_on() {
+        // The owner's own read with the switch on: the id is named.
+        assert_eq!(connection_named_on_read("conn_gw", true, true), "conn_gw");
+        // A shared Space read never names one, and a deployment with the switch off names none either.
+        assert_eq!(connection_named_on_read("conn_gw", false, true), "");
+        assert_eq!(connection_named_on_read("conn_gw", true, false), "");
+        assert_eq!(connection_named_on_read("", true, true), "");
+    }
+
+    #[test]
+    fn thread_message_json_names_a_connection_only_when_the_turn_has_one() {
+        let mut gateway = message("");
+        gateway.model_connection_id = "conn_gw".to_owned();
+        let named = serde_json::to_value(gateway).expect("serialises");
+        assert_eq!(named["model_connection_id"], "conn_gw");
+        assert!(named.get("subscription_connection_id").is_none(), "{named}");
+        let mut subscription = message("");
+        subscription.subscription_connection_id = "conn_sub".to_owned();
+        let subscribed = serde_json::to_value(subscription).expect("serialises");
+        assert_eq!(subscribed["subscription_connection_id"], "conn_sub");
+        assert!(subscribed.get("model_connection_id").is_none(), "{subscribed}");
+        // A platform turn keeps the shape it always had: neither key.
+        let platform = serde_json::to_value(message("")).expect("serialises");
+        assert!(platform.get("model_connection_id").is_none(), "{platform}");
+        assert!(platform.get("subscription_connection_id").is_none(), "{platform}");
     }
 
     #[test]

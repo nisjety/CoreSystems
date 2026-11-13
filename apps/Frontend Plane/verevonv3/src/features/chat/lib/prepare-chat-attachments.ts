@@ -1,3 +1,4 @@
+import { ApiError } from '@/shared/api/api-error'
 import { extractChatDocument, getAttachmentPolicy } from '@/shared/api/chat-client'
 import { LocalizedError } from '@/shared/i18n/errors'
 import { objectUrlToDataUrl, parseDataUrl } from '@/shared/lib/blob-data'
@@ -38,7 +39,10 @@ export async function prepareChatAttachments(attachments: PendingChatAttachment[
         total += extractedText.length
         if (total > 120_000) throw new Error('too long')
       }
-    } catch {
+    } catch (error) {
+      // A typed refusal from the extraction route (a zero-retention or entitlement code, 413, 429) keeps its own words:
+      // the send site answers it by its code. Only a failure nobody typed becomes the generic read refusal.
+      if (error instanceof ApiError || error instanceof LocalizedError) throw error
       throw new LocalizedError({
         no: `Kunne ikke lese hele «${file.name}». Utkastet er beholdt. Prøv igjen; hvis det fortsatt feiler, velg en lesbar fil under ${formatMegabytes(maxFileBytes, 'nb-NO')} og 60 000 tegn (maks. 120 000 tegn samlet).`,
         en: `Could not read all of “${file.name}”. Your draft has been kept. Try again; if it still fails, choose a readable file under ${formatMegabytes(maxFileBytes, 'en-US')} and 60,000 characters (at most 120,000 characters in total).`,

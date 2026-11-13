@@ -14,18 +14,17 @@
 import { createEffect, createSignal, createUniqueId, For, Show } from 'solid-js'
 import { Portal } from '@solidjs/web'
 import { askSideChat } from '@/shared/api/chat-client'
+import { ApiError } from '@/shared/api/api-error'
+import { REFUSAL_TEXT, isZdrRefusalCode } from '@/shared/api/zdr-refusals'
 import { threadSpinOffAction } from '@/shared/actions/chat-history'
 import { ArrowUpRight, MessageSquare, X } from '@/shared/icons'
 import { useI18n } from '@/shared/i18n'
+import { translateApiError } from '@/shared/i18n/errors'
+import { streamFailurePresentation, type StreamFailureDetails } from './chat-normalizers'
+import type { ChatTurn } from './chat-types'
 import './side-chat.css'
 
-/** Only the literal `true` enables the side chat, as for the other chat switches. */
-export function isSideChatEnabled(raw: string | undefined): boolean {
-  return raw === 'true'
-}
-
-/** Fixed per build, like every `VITE_` switch: read once, at load. */
-export const sideChatEnabled = isSideChatEnabled(import.meta.env.VITE_CHAT_SIDE_CHAT)
+export { isSideChatEnabled, sideChatEnabled } from '../lib/side-chat-switch'
 
 /** The most a question takes, as the `thread.side_chat` action contract bounds it. */
 export const SIDE_CHAT_QUESTION_MAX = 2000
@@ -41,6 +40,117 @@ export function sideChatSpinOffDraft(answer: string, leadIn: string): string {
   return `${leadIn}${Array.from(answer).slice(0, SIDE_CHAT_SPIN_OFF_CHARS).join('')}`
 }
 
+/**
+ * The connection a turn was written under, by its own id: a ChatGPT subscription or a customer gateway. Null for a platform
+ * turn, and for a turn whose connection id is blank.
+ */
+function turnConnection(turn: ChatTurn): string | null {
+  const subscription = turn.subscriptionConnectionId?.trim()
+  if (subscription) return `subscription:${subscription}`
+  const gateway = turn.modelConnectionId?.trim()
+  return gateway ? `gateway:${gateway}` : null
+}
+
+/**
+ * The model a side question names for an open thread (W4-BYO, DEC-V-R8): the model its connection serves. A thread is written
+ * under one connection, so that is the connection of its newest connection turn; the model is that turn's, or else the newest
+ * turn on the same connection that names one. A turn on another connection is never read. Null when no turn names a
+ * connection (a platform thread), or when none of that connection's turns names a model. The turns are the chat page's own,
+ * and they keep their connection across a reload.
+ */
+export function sideChatConnectionModel(turns: readonly ChatTurn[]): string | null {
+  let connection: string | null = null
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index]
+    const written = turn ? turnConnection(turn) : null
+    if (!turn || written === null) continue
+    if (connection === null) connection = written
+    if (written !== connection) continue
+    const model = turn.model?.trim()
+    if (model) return model
+  }
+  return null
+}
+
+/**
+ * The typed refusals a side question cannot get past by asking again (DEC-V-R8): the same question is refused the same way.
+ * The zero-retention refusals are judged by the catalogue, in {@link isPermanentSideChatRefusal}.
+ */
+const SIDE_CHAT_PERMANENT_CODES: ReadonlySet<string> = new Set([
+  'model_not_entitled',
+  'side_chat_model_required',
+  'connection_ambiguous',
+  'side_chat_thread_retention_refused',
+  'scope_not_available_in_space',
+])
+
+/**
+ * The ChatGPT subscription's refusals a side question cannot get past by asking again: the connection must be renewed, the
+ * plan's limit must reset, or the request must change. Model Gateway answers each with its own code and `retryable: false`,
+ * and the panel shows the chat stream's words for it, with no retry line. `prompt_too_long` is the gateway's code for a prompt
+ * still too long after compaction, and the same transcript is too long again. The retryable codes
+ * (`subscription_upstream_unavailable`, `subscription_route_unavailable`) and `rate_limited` are not here: they keep the retry.
+ */
+const SIDE_CHAT_SUBSCRIPTION_PERMANENT_CODES: ReadonlySet<string> = new Set([
+  'subscription_reauth_required',
+  'subscription_usage_limit',
+  'subscription_bad_request',
+  'prompt_too_long',
+])
+
+/**
+ * The side chat's own words for the two refusals the global table does not word. `connection_ambiguous` and
+ * `scope_not_available_in_space` come from other routes too (a chat turn, a Space stream), where "side questions" would be
+ * wrong, so they are worded here and not in ERROR_COPY. Each says that no model was sent to. Null for any other code.
+ */
+function sideChatOwnRefusalWords(code: string, i18n: { tr: (noText: string, enText: string) => string }): string | null {
+  switch (code) {
+    case 'connection_ambiguous':
+      return i18n.tr(
+        'Sidespørsmål er ikke tilgjengelig i en samtale som er skrevet under mer enn én tilkobling. Forespørselen ble ikke sendt til en modell.',
+        'Side questions are not available in a chat written under more than one connection. The request was not sent to a model.',
+      )
+    case 'scope_not_available_in_space':
+      return i18n.tr(
+        'Sidespørsmål er ikke tilgjengelig i en samtale i et delt Space. Forespørselen ble ikke sendt til en modell.',
+        'Side questions are not available in a chat in a shared Space. The request was not sent to a model.',
+      )
+    default:
+      return null
+  }
+}
+
+/**
+ * Whether a side question's failure is permanent: a typed refusal that asking again cannot change, so the panel shows its
+ * words and offers no retry. Every other failure is transient, and keeps the retry.
+ */
+export function isPermanentSideChatRefusal(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.code === null) return false
+  const { code } = error
+  if (SIDE_CHAT_PERMANENT_CODES.has(code) || SIDE_CHAT_SUBSCRIPTION_PERMANENT_CODES.has(code)) return true
+  // A zero-retention refusal is permanent when the catalogue says so. The retryable ones (its settings or its inference could
+  // not be read right now) are transient, and so is a code this SPA does not know: that one has no catalogue words to show,
+  // so the neutral retry line stands in for it.
+  return isZdrRefusalCode(code) && !REFUSAL_TEXT[code].retryable
+}
+
+/**
+ * The words a permanent refusal shows, in the reader's language. A ChatGPT subscription refusal takes the chat stream's own
+ * words, with the reset or wait time when the error carries one (`retryAfterSeconds`); without one, the neutral form stands.
+ * The side chat's own words come next, for the two codes {@link sideChatOwnRefusalWords} words; every other refusal takes
+ * the catalogue's words (`translateApiError`).
+ */
+export function sideChatRefusalMessage(error: ApiError, i18n: { tr: (noText: string, enText: string) => string }): string {
+  const { code } = error
+  if (code !== null && SIDE_CHAT_SUBSCRIPTION_PERMANENT_CODES.has(code)) {
+    const details: StreamFailureDetails = error.retryAfterSeconds === null ? {} : { retryAfterMs: error.retryAfterSeconds * 1000 }
+    return streamFailurePresentation(code, '', i18n.tr, details).message
+  }
+  const own = code === null ? null : sideChatOwnRefusalWords(code, i18n)
+  if (own !== null) return own
+  return translateApiError(error, i18n.tr)
+}
+
 type SideExchange = {
   question: string
   answer: string
@@ -51,6 +161,11 @@ export type SideChatPanelProps = {
   threadId: string | null
   /** True while the page hides the side chat: a temporary (zero-retention) thread, or a Space thread. */
   hidden: boolean
+  /**
+   * The model the open thread's connection serves (W4-BYO, DEC-V-R8), from {@link sideChatConnectionModel}. It goes with the
+   * question only on a connection thread; null (a platform thread, or none named) sends the question alone.
+   */
+  connectionModel: string | null
   /** Opens a new draft chat with this text in its composer. Nothing is sent. */
   onSpinOff: (draft: string) => void
 }
@@ -64,6 +179,8 @@ export function SideChatPanel(props: SideChatPanelProps) {
   const [exchanges, setExchanges] = createSignal<readonly SideExchange[]>([])
   const [pending, setPending] = createSignal(false)
   const [failed, setFailed] = createSignal(false)
+  // A permanent refusal's words. They take the place of the retry line: nothing is offered to retry.
+  const [refusal, setRefusal] = createSignal<string | null>(null)
   // A "not enabled" answer takes the panel away for the rest of this page: the switch is not per thread.
   const [unavailable, setUnavailable] = createSignal(false)
   const shown = () => !props.hidden && !unavailable() && Boolean(props.threadId)
@@ -78,6 +195,7 @@ export function SideChatPanel(props: SideChatPanelProps) {
     generation += 1
     setPending(false)
     setFailed(false)
+    setRefusal(null)
     setQuestion('')
     setExchanges([])
   }
@@ -114,7 +232,8 @@ export function SideChatPanel(props: SideChatPanelProps) {
     { defer: true },
   )
 
-  // Asks one question of the open thread. A failed question keeps its text, so the person can send it again.
+  // Asks one question of the open thread. A failed question keeps its text, so the person can send it again: a transient
+  // failure keeps the retry, and a permanent refusal says why in its own words instead, with no retry.
   const ask = async () => {
     const threadId = props.threadId
     const text = question().trim()
@@ -122,8 +241,10 @@ export function SideChatPanel(props: SideChatPanelProps) {
     const token = generation
     setPending(true)
     setFailed(false)
+    setRefusal(null)
     try {
-      const reply = await askSideChat(threadId, text)
+      // The thread's connection model goes with the question only on a connection thread: null sends none.
+      const reply = await askSideChat(threadId, text, props.connectionModel ?? undefined)
       if (token !== generation) return
       // The gateway's side chat is switched off: the panel goes, with its question.
       if (reply === null) {
@@ -132,8 +253,10 @@ export function SideChatPanel(props: SideChatPanelProps) {
       }
       setExchanges((current) => [...current, { question: text, answer: reply.answer }])
       setQuestion('')
-    } catch {
-      if (token === generation) setFailed(true)
+    } catch (error) {
+      if (token !== generation) return
+      if (error instanceof ApiError && isPermanentSideChatRefusal(error)) setRefusal(sideChatRefusalMessage(error, i18n))
+      else setFailed(true)
     } finally {
       if (token === generation) setPending(false)
     }
@@ -228,6 +351,9 @@ export function SideChatPanel(props: SideChatPanelProps) {
               </For>
               <Show when={pending()}>
                 <p class="verevon-side-chat__status">{i18n.tr('Svarer …', 'Answering …')}</p>
+              </Show>
+              <Show when={refusal() !== null}>
+                <p class="verevon-side-chat__error" role="alert">{refusal()}</p>
               </Show>
               <Show when={failed()}>
                 <p class="verevon-side-chat__error" role="alert">

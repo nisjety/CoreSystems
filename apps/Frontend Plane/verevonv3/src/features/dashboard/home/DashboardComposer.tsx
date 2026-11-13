@@ -6452,7 +6452,14 @@ async function buildComposerFileFromPick(input: {
 		// chip, instead of failing silently at send time.
 		try {
 			extractedText = (await extractChatDocument(name, contentBase64, mimeType)).content;
-		} catch {
+		} catch (error) {
+			// A message the SPA wrote (LocalizedError) is kept, and so is an ApiError with a typed reason: its code, or
+			// a status that has its own copy when no code came (401, 403, 429). Everything else is a read failure.
+			// imports-core's read refusals (400, 413, 415, 422) come as a {detail} body with no code, and a code-less
+			// answer with any other status has no copy of its own, so each gets this file's own line, as does a
+			// failure nobody answered.
+			if (error instanceof LocalizedError) throw error;
+			if (error instanceof ApiError && (error.code !== null || [401, 403, 429].includes(error.status))) throw error;
 			throw new LocalizedError({
 				no: `Kunne ikke lese «${name}». Prøv igjen eller velg en annen fil.`,
 				en: `Could not read "${name}". Try again or choose a different file.`,
