@@ -21,10 +21,16 @@ export function isZdrWaiverUiEnabled(): boolean {
 /** What the capability contract says about the connection's zero data retention. `cannot_verify` is also an unassessed one. */
 export type ConnectionZdrCapability = 'supported' | 'not_supported' | 'cannot_verify'
 
+/**
+ * The state of one acknowledgement row, as Integration Core names it. `superseded` is an active row whose text is below
+ * the minimum version: it is not in force, so it is never the acknowledgement in force.
+ */
+export type ConnectionZdrAcknowledgementState = 'active' | 'superseded' | 'revoked'
+
 /** The acknowledgement in force for a connection, as Integration Core summarises it. */
 export type ConnectionZdrAcknowledgementSummary = {
   id: string
-  state: 'active' | 'revoked'
+  state: ConnectionZdrAcknowledgementState
   digest: string
   textVersion: string
   locale: string
@@ -98,13 +104,16 @@ export type OrgZdrAcknowledgementItem = {
   acknowledgedAt: string
   revokedAt: string | null
   revokeReason: string | null
-  status: 'active' | 'revoked'
+  status: ConnectionZdrAcknowledgementState
 }
 
-/** The admin list: the rows, the counts of active and revoked acknowledgements, and whether the rows were cut short. */
+/**
+ * The admin list: the rows, the counts of acknowledgements in force (`active`), superseded below the minimum and
+ * revoked, and whether the rows were cut short.
+ */
 export type OrgZdrAcknowledgements = {
   items: OrgZdrAcknowledgementItem[]
-  counts: { active: number; revoked: number }
+  counts: { active: number; superseded: number; revoked: number }
   truncated: boolean
 }
 

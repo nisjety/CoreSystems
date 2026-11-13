@@ -12,7 +12,7 @@
 use std::sync::Once;
 
 use inference_core::config::InferenceConfig;
-use inference_core::provider::fallback::FallbackChain;
+use inference_core::provider::fallback::{FallbackChain, HidingOverlay};
 use inference_core::provider::{ChatMessage, InferRequest, ProviderError};
 use mp_contracts::model_plane::v1::routing_policy_server::{RoutingPolicy, RoutingPolicyServer};
 use mp_contracts::model_plane::v1::{
@@ -312,4 +312,22 @@ async fn an_automatic_call_is_still_served_to_an_org_that_hides_nothing() {
     assert_eq!(served.content, "ok");
     assert_eq!(served.model_used, HIDDEN);
     assert_eq!(provider_calls(&azure).await, 1);
+}
+
+/// The access verdict reads the organisation's overlay through `hiding_overlay` (V3-inf-1): the model `org-hides`
+/// hides is reported as hidden in any case, and the organisation that hides nothing is not. An automatic call names no
+/// model, so the verdict leaves it to the walk, which judges the default it resolves to.
+#[tokio::test]
+async fn the_access_verdict_reports_the_model_the_org_hides_and_no_other() {
+    let (chain, _azure) = chain().await;
+    assert_eq!(
+        chain.hiding_overlay("org-hides", HIDDEN).await,
+        Some(HidingOverlay::Organisation)
+    );
+    assert_eq!(
+        chain.hiding_overlay("org-hides", "GPT-4o-Mini").await,
+        Some(HidingOverlay::Organisation)
+    );
+    assert_eq!(chain.hiding_overlay("org-open", HIDDEN).await, None);
+    assert_eq!(chain.hiding_overlay("org-hides", "").await, None);
 }

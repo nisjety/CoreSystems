@@ -3,9 +3,10 @@
  *
  * This module has no imports on purpose. The signer builds a
  * `VerifiedRetentionDecision` here, and the token issuer
- * (convex-token.service.ts) checks one at runtime with `instanceof`. The signer
- * imports ConvexTokenService for its Nest provider, so the type cannot live in
- * the signer without a load-order cycle. Keep this file dependency-free.
+ * (convex-token.service.ts) accepts one only when `isVerifiedRetentionDecision`
+ * recognises it as the factory's own. The signer imports ConvexTokenService for
+ * its Nest provider, so the type cannot live in the signer without a load-order
+ * cycle. Keep this file dependency-free.
  */
 
 /** Raised for a malformed claim set or a token that does not verify. */
@@ -34,12 +35,18 @@ export type VerifiedFields = {
 // Not exported: only this module can build a VerifiedRetentionDecision.
 const VERIFIED_GUARD = Symbol('VerifiedRetentionDecisionGuard');
 
+// The brand. The factory records every decision it builds here; nothing else
+// can add to the set. `instanceof` is not a brand: `Object.create` of the class
+// prototype passes it.
+const issued = new WeakSet<object>();
+
 /**
  * A retention decision that the signer verified. The constructor is private
  * and guarded by a module-private symbol, so no other code can construct one
  * from request data. Callers obtain it from `RetentionDecisionSigner.verify`.
- * The issuer accepts only an `instanceof` this class, so a structurally equal
- * object (a spread copy, a request body) is refused.
+ * The issuer accepts only a decision that `isVerifiedRetentionDecision` brands,
+ * so a structurally equal object (a spread copy, a prototype-linked object, a
+ * request body) is refused.
  */
 export class VerifiedRetentionDecision {
   readonly decision = 'waived' as const;
@@ -90,5 +97,18 @@ export function createVerifiedRetentionDecision(
     guard: symbol,
     fields: VerifiedFields,
   ) => VerifiedRetentionDecision;
-  return new construct(VERIFIED_GUARD, fields);
+  const decision = new construct(VERIFIED_GUARD, fields);
+  issued.add(decision);
+  return decision;
+}
+
+/**
+ * True only for a decision the factory built, which is every decision the
+ * signer verifies. A copy or a prototype-linked object is false. The issuer uses
+ * this check, not `instanceof`.
+ */
+export function isVerifiedRetentionDecision(
+  value: unknown,
+): value is VerifiedRetentionDecision {
+  return typeof value === 'object' && value !== null && issued.has(value);
 }

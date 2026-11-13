@@ -45,6 +45,9 @@
       "default": "false",
       "stage": "dark",
       "purpose": "EP-6 S7/S8: the agent builder routes (draft, publish, versions) and the draft preview of a chat body. Off, the builder routes answer 404 and a chat body's agent_preview is left as it came. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "AGENT_DEFINITION_VERSIONS", "default": "false" }
+      ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
@@ -64,6 +67,9 @@
       "default": "false",
       "devOnly": true,
       "purpose": "Dev actor headers for the BFF. Refused, with a log line, when APP_ENV is production or prod.",
+      "declarations": [
+        { "service": "gateway", "env": "ALLOW_DEV_ACTOR_HEADERS", "default": "false" }
+      ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
@@ -74,6 +80,9 @@
       "default": "false",
       "devOnly": true,
       "purpose": "Dev auth bypass for the BFF. Refused, with a log line, when APP_ENV is production or prod.",
+      "declarations": [
+        { "service": "gateway", "env": "ALLOW_DEV_AUTH_BYPASS", "default": "0" }
+      ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
@@ -86,7 +95,8 @@
       "purpose": "Lets a release build boot with placeholder dev keys. Development only, and APP_ENV does not refuse it. Several planes read this name; Model Plane compose forwards it blank.",
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs",
       "declarations": [
-        { "service": "model-gateway", "env": "ALLOW_INSECURE_DEV_DEFAULTS", "default": "" }
+        { "service": "model-gateway", "env": "ALLOW_INSECURE_DEV_DEFAULTS", "default": "" },
+        { "service": "gateway", "env": "ALLOW_INSECURE_DEV_DEFAULTS", "default": "false" }
       ]
     },
     {
@@ -101,6 +111,18 @@
         { "service": "auth-core", "env": "API_KEY_AGENT_EXCHANGE_ENABLED", "default": "0" }
       ],
       "codePath": "apps/Control Plane/auth-core/src/auth/api-key-metadata.ts"
+    },
+    {
+      "name": "API_KEY_AGENT_RUNS",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "INNH-10 GW-1: the x-api-key ingress for browser agent runs (/api/v1/api-key/agent/runs). Off, the routes are not mounted. Only 1 or the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "API_KEY_AGENT_RUNS", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/api_key_agent.rs"
     },
     {
       "name": "APPROVAL_AUDIT_EVENTS_ENABLED",
@@ -162,6 +184,28 @@
       ]
     },
     {
+      "name": "ASSISTANT_NAVIGATION_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "Kill switch for the assistant navigation model call. Off, the route answers 503 assistant_navigation_unavailable and no model call is made. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "ASSISTANT_NAVIGATION_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/ai.rs"
+    },
+    {
+      "name": "AUDIT_ALLOW_NATS_TOKEN_FALLBACK",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "code",
+      "default": "0",
+      "stage": "dark",
+      "purpose": "Security-relaxing migration switch: audit-core and its extra NATS buses may connect with the shared NATS token instead of a scoped NATS user and password. Off requires the scoped credential. Only the literal 1 turns it on.",
+      "codePath": "apps/Control Plane/audit-core/cmd/server/main.go"
+    },
+    {
       "name": "AUDIT_CHAIN_ENABLED",
       "kind": "switch",
       "owner": "control-plane",
@@ -171,6 +215,19 @@
       "purpose": "Audit hash chain on audit-core ingest (cmd/server). Only the literal 1 turns it on. In production it needs the chain signing keys.",
       "declarations": [
         { "service": "audit-core", "env": "AUDIT_CHAIN_ENABLED", "default": "0" }
+      ],
+      "codePath": "apps/Control Plane/audit-core/cmd/server/main.go"
+    },
+    {
+      "name": "AUDIT_CHAIN_PRUNE_DRYRUN",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "0",
+      "stage": "dark",
+      "purpose": "Dry run of the chained audit purge in audit-core: it verifies and logs the plan, deletes no chained row, and wins over AUDIT_CHAIN_PRUNE_ENABLED. Unchained rows and usage events still age out. Only the literal 1 turns it on.",
+      "declarations": [
+        { "service": "audit-core", "env": "AUDIT_CHAIN_PRUNE_DRYRUN", "default": "0" }
       ],
       "codePath": "apps/Control Plane/audit-core/cmd/server/main.go"
     },
@@ -277,6 +334,78 @@
       ]
     },
     {
+      "name": "BROWSER_DO_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "WS21-S2: mints a browser bearer for a personal, non-ZDR agentic turn. Either this or BROWSER_SITES_ENABLED turns on the browser-site settings routes. Off, neither happens. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "BROWSER_DO_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/chat/shared.rs"
+    },
+    {
+      "name": "BROWSER_LIVE_VIEW_ONLY",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "W3-E3.4-5: serves the owner view-only live route for a browser session. Off, that route answers 404. Quarry honours the scope only with QUARRY_EDGE__LIVE_VIEW_ONLY on. Only 1, true, yes or on turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "BROWSER_LIVE_VIEW_ONLY", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "BROWSER_POLICY_ADMIN_API",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "WS7.H: the organisation browser policy admin routes. Off, or unset, answers 404 browser_policy_admin_disabled. Only 1, true, yes or on (or TRUE, YES, ON) turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "BROWSER_POLICY_ADMIN_API", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/orgs/browser_policy.rs"
+    },
+    {
+      "name": "BROWSER_REGION_ATTACH",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "E3.3-d: the browser region and selection attach route. The gateway re-resolves the tab and region against Quarry before it attaches the crop as browser-scraped evidence. Off, the route is not mounted. Only 1, true, yes or on turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "BROWSER_REGION_ATTACH", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser_evidence.rs"
+    },
+    {
+      "name": "BROWSER_SITES_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "The browser-site settings routes for the assistant (/api/v1/orgs/{id}/browser-sites). Either this or BROWSER_DO_ENABLED turns them on. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "BROWSER_SITES_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser_sites.rs"
+    },
+    {
+      "name": "BROWSER_TAB_MENTIONS",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "E3.3-c: re-resolves @tab mentions in a chat turn against Quarry live tab list before a model sees them. Off, the route is not mounted. Only 1, true, yes or on turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "BROWSER_TAB_MENTIONS", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/browser_context.rs"
+    },
+    {
       "name": "CAPABILITY_PERMISSION_RULES_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -290,6 +419,31 @@
       ]
     },
     {
+      "name": "CHAT_ARTIFACT_PROMOTE_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "EP-3 S8: saves a document artifact version to knowledge from the Output panel. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "CHAT_ARTIFACT_PROMOTE_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "CHAT_LOCALE_HINT",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "true",
+      "purpose": "WS16-S6: stamps the viewer interface language (nb-NO or en-US) on the model-bound body as the locale field. Off removes the field. A framing hint only, never stored. Any value other than 1, true, yes or on turns it off.",
+      "onDefaultReason": "Dev default on through space_flag: an unset value is on outside production. The production overlay sets it false.",
+      "declarations": [
+        { "service": "gateway", "env": "CHAT_LOCALE_HINT", "default": "true" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
       "name": "CHAT_MEDIA_TRANSCRIPTS_ENABLED",
       "kind": "switch",
       "owner": "frontend-plane",
@@ -297,6 +451,9 @@
       "default": "false",
       "stage": "dark",
       "purpose": "W5, F-t3-090: POST /api/v1/chat/transcripts, which transcribes one audio upload and saves the text as a private media_transcript document. Off, the route answers 404 media_transcripts_disabled. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "CHAT_MEDIA_TRANSCRIPTS_ENABLED", "default": "false" }
+      ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
@@ -307,6 +464,9 @@
       "default": "false",
       "stage": "dark",
       "purpose": "W4-P3: the owner's read of one background process's output, GET /api/v1/chat/runs/{run_id}/processes/{pid}/output. Off, the route answers 404 process_output_disabled. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "CHAT_PROCESS_OUTPUT_READ_ENABLED", "default": "false" }
+      ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
@@ -317,6 +477,9 @@
       "default": "false",
       "stage": "dark",
       "purpose": "W4-SH-6: the owner's governed snapshot links and the member's read of a shared snapshot. Off, every snapshot route answers 404 chat_snapshots_disabled. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "CHAT_SNAPSHOTS_ENABLED", "default": "false" }
+      ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
@@ -327,7 +490,35 @@
       "default": "false",
       "stage": "dark",
       "purpose": "F-t3-098: GET /api/v1/client-config reports the closed environment label (production, staging, development or other) derived from APP_ENV. Off, the key is left out. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "CLIENT_ENV_IDENTITY", "default": "false" }
+      ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "CLIENT_MIN_CONTRACT",
+      "kind": "text",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "1",
+      "purpose": "The oldest client contract the gateway still serves (WS07-S3). A higher value moves stale tabs onto the banner. It never goes below the compiled-in floor, and an unparsable value is ignored.",
+      "declarations": [
+        { "service": "gateway", "env": "CLIENT_MIN_CONTRACT", "default": "1" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/client_contract.rs"
+    },
+    {
+      "name": "CLIENT_VERSION_POLICY",
+      "kind": "choice",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "banner",
+      "values": ["off", "banner", "enforce"],
+      "purpose": "WS07-S3: what a stale client does. off shows nothing, banner shows a non-blocking notice, and enforce may reload a tab that holds no unsaved work. Unknown values are banner.",
+      "declarations": [
+        { "service": "gateway", "env": "CLIENT_VERSION_POLICY", "default": "banner" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/client_contract.rs"
     },
     {
       "name": "CODEX_SUBSCRIPTION_ENABLED",
@@ -366,13 +557,40 @@
       ]
     },
     {
+      "name": "CONTROL_ALLOW_INSECURE_SESSION_RUN_AUTHORITY_LOOPBACK",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "code",
+      "default": "false",
+      "stage": "dark",
+      "devOnly": true,
+      "purpose": "Security-relaxing development opt-in: plaintext to session-core's run authority, only at an IP-loopback address. Off keeps TLS. Other spellings of true are refused. Only the literal true turns it on.",
+      "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
+    },
+    {
+      "name": "CONTROL_OWNER_ASSERTED_GRANTS",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "WS14-S2: owner-asserted grant writes on user-core's authz grant surface, admitted only for the registered owner service of a resource type. Off, the surface answers 403 and stays fenced. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "user-core", "env": "CONTROL_OWNER_ASSERTED_GRANTS", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
+    },
+    {
       "name": "CONTROL_PLANE_ENFORCEMENT",
       "kind": "choice",
       "owner": "frontend-plane",
       "source": "code",
-      "default": "off",
+      "default": "strict",
       "values": ["off", "permissive", "strict"],
-      "purpose": "Control-plane enforcement mode for the BFF. Unknown values fall back to off.",
+      "purpose": "Control-plane enforcement mode for the BFF. Unknown values fall back to off. The gateway compose sets strict when the variable is unset; the code reads off when the variable is absent.",
+      "declarations": [
+        { "service": "gateway", "env": "CONTROL_PLANE_ENFORCEMENT", "default": "strict" }
+      ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
@@ -385,6 +603,32 @@
       "purpose": "EP-8 S7: user-core signs model.space.memory.manage decisions for a shared Space's manager or owner; off answers 404. Only the literal true turns it on.",
       "declarations": [
         { "service": "user-core", "env": "CONTROL_SPACE_MEMORY_DECISIONS", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
+    },
+    {
+      "name": "CONTROL_SPACE_SHARED_IMPORT",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "WS14-S1: shared-Space import decisions for room uploads. Off, a shared import answers 404 shared_import_disabled and the personal-only path stays. A rollout control, never an authorization input. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "user-core", "env": "CONTROL_SPACE_SHARED_IMPORT", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
+    },
+    {
+      "name": "CONTROL_SPACE_SUBJECT_GRANTS",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "WS14-S2: Space-subject grants on user-core. Off, file-grant and GET /authz/space-visible answer 404. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "user-core", "env": "CONTROL_SPACE_SUBJECT_GRANTS", "default": "false" }
       ],
       "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
     },
@@ -410,6 +654,19 @@
       ]
     },
     {
+      "name": "CRAWL_APPROVAL_MODE",
+      "kind": "choice",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "observe",
+      "values": ["off", "observe", "enforce"],
+      "purpose": "The knowledge crawl approval gate: off, observe or enforce. Unset or unrecognised means observe. Read once per process, with CRAWL_APPROVAL_PAGES as its threshold.",
+      "declarations": [
+        { "service": "gateway", "env": "CRAWL_APPROVAL_MODE", "default": "observe" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/knowledge.rs"
+    },
+    {
       "name": "CREDENTIAL_BINDINGS_ENABLED",
       "kind": "switch",
       "owner": "ingestion-plane",
@@ -427,6 +684,9 @@
       "default": "false",
       "stage": "dark",
       "purpose": "W4-CC-8: the org credential-binding routes and the custom REST connector route. Off, each answers 404 credential_bindings_disabled and nothing is sent to Integration Core. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "CREDENTIAL_BINDINGS_UI_ENABLED", "default": "false" }
+      ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
@@ -438,6 +698,19 @@
       "purpose": "Background cron sweeper in capability-core. Only the exact value false turns it off.",
       "onDefaultReason": "Background sweeper on by default. No compose line sets it, so only the process environment can opt out.",
       "codePath": "apps/Model Plane/go/services/capability-core/cmd/main.go"
+    },
+    {
+      "name": "CSP_REPORT_LOG_HOSTS",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "devOnly": true,
+      "purpose": "WS07-S6: logs the blocked origin (scheme and host, never a path or query) of each CSP report, for a host inventory. Dev only: forced off when APP_ENV is production. Only 1, true, yes or on turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "CSP_REPORT_LOG_HOSTS", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
       "name": "CUSTOMER_GATEWAY_CONNECTIONS_ENABLED",
@@ -505,6 +778,9 @@
       "default": "false",
       "stage": "dark",
       "purpose": "W4-T7: the event trigger routes (/api/v1/event-triggers and its dry run). Off, the paths are absent and answer the fallback 404. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "EVENT_TRIGGERS_UI_ENABLED", "default": "false" }
+      ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
@@ -755,6 +1031,68 @@
       ]
     },
     {
+      "name": "GATEWAY_AGENT_API_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "EP-12 S8: the public Agent API ingress (/api/agent/v1/*), which exchanges x-api-key at auth-core with the verevon-gateway principal. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "GATEWAY_AGENT_API_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/agent_api.rs"
+    },
+    {
+      "name": "GATEWAY_RATE_CLASSES",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "on",
+      "purpose": "The per-class rate limit layers of the gateway. off, 0, false or no removes them and leaves the default limiter. Unset or any other value keeps them on.",
+      "onDefaultReason": "Per-class rate limits are on by default. Only off, 0, false or no removes the class layers.",
+      "declarations": [
+        { "service": "gateway", "env": "GATEWAY_RATE_CLASSES", "default": "on" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/rate_limit.rs"
+    },
+    {
+      "name": "GATEWAY_RESULT_CACHE_CONTENT",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "on",
+      "purpose": "Whether the gateway result cache may use its two content caches, search results and scrape previews. Read once at connect. off, 0 or false disables them; the identity and posture caches are not affected.",
+      "onDefaultReason": "The two content caches are on by default, as they were before this switch was declared.",
+      "declarations": [
+        { "service": "gateway", "env": "GATEWAY_RESULT_CACHE_CONTENT", "default": "on" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/cache.rs"
+    },
+    {
+      "name": "GATEWAY_SPACE_APPEND_RETRIEVAL",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "WS18-S2: a follow-up turn of a scoped thread fetches its own retrieval decision and carries its token. Only the literal true turns it on; it never defaults on, even in development.",
+      "declarations": [
+        { "service": "gateway", "env": "GATEWAY_SPACE_APPEND_RETRIEVAL", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "GATEWAY_SPACE_MEMORY_UI",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "EP-8 S7: the Space memory routes, which list and delete a room memory. Off, they answer 404 feature_unavailable. Only the literal true turns it on; it never defaults on, even in development.",
+      "declarations": [
+        { "service": "gateway", "env": "GATEWAY_SPACE_MEMORY_UI", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
       "name": "GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED",
       "kind": "switch",
       "owner": "frontend-plane",
@@ -762,7 +1100,23 @@
       "default": "false",
       "stage": "dark",
       "purpose": "ZDR-Z-03c: the BFF's one org-posture reader answers from org-core's effective_zdr instead of parsing the stored intent. Off keeps the intent-only rule. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "GATEWAY_ZDR_EFFECTIVE_POSTURE_ENABLED", "default": "false" }
+      ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "GATEWAY_ZDR_LOG_FILTER",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "on",
+      "purpose": "The sensitive-field filter of the gateway JSON log. Only off, 0 or false (any case) disables it; any other value keeps it on.",
+      "onDefaultReason": "The sensitive-field log filter is part of Zero Data Retention, so it stays on unless an operator sets off, 0 or false.",
+      "declarations": [
+        { "service": "gateway", "env": "GATEWAY_ZDR_LOG_FILTER", "default": "on" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/zdr_log.rs"
     },
     {
       "name": "GRAFANA_ANONYMOUS_ENABLED",
@@ -1007,6 +1361,18 @@
       "declarations": [
         { "service": "session-core", "env": "MEMORY_GROUNDING_ENABLED", "default": "0" }
       ]
+    },
+    {
+      "name": "MODEL_ENTITLEMENT_ADMIN_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "WS10-S5: the model entitlement admin routes (policy read, write and explain). Do not enable before the matcher and model-gateway admission are deployed. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "MODEL_ENTITLEMENT_ADMIN_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
       "name": "MODEL_GATEWAY_BROWSER_PAGE_CONTEXT_ENABLED",
@@ -1372,6 +1738,16 @@
       ]
     },
     {
+      "name": "NATS_ALLOW_TOKEN_FALLBACK",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "code",
+      "default": "0",
+      "stage": "dark",
+      "purpose": "Security-relaxing token fallback: services may use the shared NATS token instead of a scoped user and password. Off requires the scoped credential. Only the literal 1 turns it on; the Control Plane session-core also takes true.",
+      "codePath": "apps/Control Plane/user-core/internal/nats/runtime_auth.go"
+    },
+    {
       "name": "ORCHESTRATOR_GOAL_JUDGE_ACTIVITY_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -1436,6 +1812,19 @@
       "codePath": "apps/Control Plane/org-core/internal/retention/types.go"
     },
     {
+      "name": "ORG_ROLE_CAPABILITIES_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "Member capability route in org-core: GET /orgs/:id/roles/:roleName/capabilities for the signed-in member's own role. Off, it answers 404 and the gateway keeps its 503. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "org-core", "env": "ORG_ROLE_CAPABILITIES_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/org-core/internal/http/member_effective_capabilities_handler.go"
+    },
+    {
       "name": "ORG_SCIM_ENABLED",
       "kind": "switch",
       "owner": "control-plane",
@@ -1475,6 +1864,19 @@
       ]
     },
     {
+      "name": "PERSONAL_SETUP_VISIBLE",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "EP-8-S8: shows the personal first-run card. It hides the card and nothing else: a stored state is still read and written. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "user-core", "env": "PERSONAL_SETUP_VISIBLE", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/user-core/internal/http/handlers.go"
+    },
+    {
       "name": "PLUGIN_LOADER_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -1485,6 +1887,18 @@
         { "service": "capability-core", "env": "PLUGIN_LOADER_ENABLED", "default": "false" },
         { "service": "model-gateway", "env": "PLUGIN_LOADER_ENABLED", "default": "false" }
       ]
+    },
+    {
+      "name": "POLICY_EFFECTIVE_VIEW_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "The effective policy view (/api/v1/policy/effective), which shows each owner value and where it came from. Off, the route is not mounted. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "POLICY_EFFECTIVE_VIEW_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/policy_effective.rs"
     },
     {
       "name": "PROCEDURES_API",
@@ -1594,6 +2008,18 @@
       "codePath": "apps/Ingestion Plane/Quarry-v2/crates/quarry-edge/src/schedule_preflight.rs"
     },
     {
+      "name": "QUARRY_SCHEDULE_CAPABILITIES",
+      "kind": "text",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "",
+      "purpose": "A JSON object naming the schedule capabilities this installation can honour: trigger, backfill, overlap, kinds and needs_activation (WS15.S0). Unset, blank or malformed means all off.",
+      "declarations": [
+        { "service": "gateway", "env": "QUARRY_SCHEDULE_CAPABILITIES", "default": "" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
       "name": "RESEARCH_RUNS_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -1614,6 +2040,33 @@
       "declarations": [
         { "service": "inference-core", "env": "ROUTING_POLICY_PROMOTION_REQUIRED", "default": "false" }
       ]
+    },
+    {
+      "name": "SCHEDULE_CONTRACT_ENABLED",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "WS20-S4: stored-consent schedule contracts. Off, a create request that carries a contract is refused. Blocked by depth-register D0-010: keep it off until step-time re-verification of the contract is built. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "user-core", "env": "SCHEDULE_CONTRACT_ENABLED", "default": "false" },
+        { "service": "capability-core", "env": "SCHEDULE_CONTRACT_ENABLED", "default": "false" },
+        { "service": "gateway", "env": "SCHEDULE_CONTRACT_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
+    },
+    {
+      "name": "SCIM_EDGE_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "WS05-S8: the public SCIM edge (/api/v1/scim/v2/*). It also needs ORG_CORE_SCIM_EDGE_TOKEN set to a secure secret, or it stays off. Only 1, true, yes or on turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "SCIM_EDGE_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
       "name": "SESSION_CORE_GDPR_THREAD_MEMORY_ERASURE",
@@ -1715,6 +2168,123 @@
       ]
     },
     {
+      "name": "SPACE_AGENT_WAKE_POLICY_API",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "true",
+      "purpose": "WS08-S5: the owner or manager writer of an agent respond_to policy (PATCH .../agents/{binding_ref}/policy). Off answers 404 feature_disabled. A rollout control, never an authorization input. Any other value turns it off.",
+      "onDefaultReason": "Dev default on through space_flag: an unset value is on outside production. The production overlay sets it false.",
+      "declarations": [
+        { "service": "gateway", "env": "SPACE_AGENT_WAKE_POLICY_API", "default": "true" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "SPACE_APPROVAL_SCOPES_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "true",
+      "purpose": "The approval-grants and approval-policy routes. Off answers 404 feature_disabled, and a once decision still works. A rollout control, never an authorization input. Any value other than 1, true, yes or on turns it off.",
+      "onDefaultReason": "Dev default on through space_flag: an unset value is on outside production. The production overlay sets it false.",
+      "declarations": [
+        { "service": "gateway", "env": "SPACE_APPROVAL_SCOPES_ENABLED", "default": "true" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "SPACE_AUDIT_DECISION_EVENTS",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "WS05-S5: Space decision denied and issued audit events from user-core. SPACE_AUDIT_DECISION_KINDS picks the kinds. A rollout control, never an authorization input. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "user-core", "env": "SPACE_AUDIT_DECISION_EVENTS", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/user-core/internal/spaces/decision_audit.go"
+    },
+    {
+      "name": "SPACE_DM_REGISTRATION",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "WS12-S1: direct-message registration and the dm-eligibility route. Off, no new DM is registered and the route answers dm_disabled; existing DMs keep resolving. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "user-core", "env": "SPACE_DM_REGISTRATION", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
+    },
+    {
+      "name": "SPACE_HISTORY_WINDOW_CLAIM",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "WS04-S11: a history floor on shared thread-read decisions for since_join rooms. Off, no read decision carries a floor. A presentation rule, never an authorization input. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "user-core", "env": "SPACE_HISTORY_WINDOW_CLAIM", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
+    },
+    {
+      "name": "SPACE_MEMBERSHIP_EVENTS_SWEEPER",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "WS04-S10: durable Space membership events, a ledger outbox with PubAck publish and a 10-minute re-announce. Needs the shared NATS connection. Off, handlers keep their inline publish. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "user-core", "env": "SPACE_MEMBERSHIP_EVENTS_SWEEPER", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
+    },
+    {
+      "name": "SPACE_POLICY_ADMIN_WRITES",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "WS03-S3: org-admin Space policy writes on user-core. Off, a write answers 403 space_policy_admin_writes_disabled and reads and history stay on. Never an authorization input. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "user-core", "env": "SPACE_POLICY_ADMIN_WRITES", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
+    },
+    {
+      "name": "SPACE_ROOM_ARCHIVE_API",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "true",
+      "purpose": "Room archive for a Space. Off answers 404 feature_disabled. A rollout control: Control live owner or manager role decides who may archive. Any value other than 1, true, yes or on turns it off.",
+      "onDefaultReason": "Dev default on through space_flag: an unset value is on outside production. The production overlay sets it false.",
+      "declarations": [
+        { "service": "gateway", "env": "SPACE_ROOM_ARCHIVE_API", "default": "true" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "SPACE_SANDBOX_EGRESS_TIERS",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "EP-9 E2: per-tier sandbox egress on the Space capability decision. Off, the decision keeps the v1 form and the egress ceiling columns are neither read nor written. A rollout control. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "user-core", "env": "SPACE_SANDBOX_EGRESS_TIERS", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
+    },
+    {
       "name": "SPACE_THREAD_SCOPE_RESOLVE",
       "kind": "switch",
       "owner": "frontend-plane",
@@ -1722,6 +2292,22 @@
       "default": "false",
       "stage": "dark",
       "purpose": "D2-461: a follow-up turn on an existing thread without space_ref resolves the thread's Space server-side and mints the scoped decision, or refuses typed; never an org-wide search. Off, unchanged. Only the literal true.",
+      "declarations": [
+        { "service": "gateway", "env": "SPACE_THREAD_SCOPE_RESOLVE", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
+      "name": "SPACE_TOOL_POLICY_EDITOR_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "true",
+      "purpose": "The Space tool policy routes and the Agent tab editor, reported to the SPA as features.tool_policy_editor. Off answers 404 feature_disabled. Enforcement stays in Execution Core. Any value other than 1, true, yes or on turns it off.",
+      "onDefaultReason": "Dev default on through space_flag: an unset value is on outside production. The production overlay sets it false.",
+      "declarations": [
+        { "service": "gateway", "env": "SPACE_TOOL_POLICY_EDITOR_ENABLED", "default": "true" }
+      ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
@@ -1748,6 +2334,19 @@
       ]
     },
     {
+      "name": "TONE_PRESETS_VISIBLE",
+      "kind": "switch",
+      "owner": "control-plane",
+      "source": "compose",
+      "default": "false",
+      "stage": "dark",
+      "purpose": "EP-8-S3: shows the tone selector. It hides the selector and nothing else: a stored tone is still read and written. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "user-core", "env": "TONE_PRESETS_VISIBLE", "default": "false" }
+      ],
+      "codePath": "apps/Control Plane/user-core/internal/http/handlers.go"
+    },
+    {
       "name": "TOOL_POLICY_RULE_AUDIT_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
@@ -1771,6 +2370,30 @@
       "codePath": "apps/Control Plane/user-core/cmd/server/main.go"
     },
     {
+      "name": "VEREVON_GATEWAY_AGENT_WEB_TOOLSET",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "E3.7.10: turns on the gateway arms of the Model-facing agent web toolset for its four web action ids. Read per request. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "VEREVON_GATEWAY_AGENT_WEB_TOOLSET", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/domains/actions/handlers.rs"
+    },
+    {
+      "name": "VEREVON_GATEWAY_CONTINUE_PARK_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "WS03 S8-A: forwards the park form of the continue route (an empty approval_id with a claim token). Only the literal true turns it on; flip it with model-gateway EXECUTION_LOOP_PARKING_ENABLED.",
+      "declarations": [
+        { "service": "gateway", "env": "VEREVON_GATEWAY_CONTINUE_PARK_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
+    },
+    {
       "name": "VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED",
       "kind": "switch",
       "owner": "frontend-plane",
@@ -1778,6 +2401,9 @@
       "default": "false",
       "stage": "dark",
       "purpose": "WS14 S5: the orchestration continue route forwards the question form (a question_id with the answers or a skip) that continues a run paused for its owner's answer. Off, such a body is 400 invalid_request. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "VEREVON_GATEWAY_CONTINUE_QUESTION_ENABLED", "default": "false" }
+      ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     },
     {
@@ -1814,6 +2440,19 @@
       "orgOverridable": true,
       "purpose": "Thumbs and reason chips on a durable run's result, an agent run or a scheduled run, rated by run id. Off, the control renders nothing. Only the literal true turns it on.",
       "codePath": "apps/Frontend Plane/verevonv3/src/features/chat/components/ResultFeedback.tsx"
+    },
+    {
+      "name": "VITE_ALLOW_DEV_AUTH_BYPASS",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "devOnly": true,
+      "purpose": "Dev auth bypass in the SPA: the dev bearer goes on API calls. Only the literal true turns it on. Pair it with ALLOW_DEV_AUTH_BYPASS on the gateway.",
+      "declarations": [
+        { "service": "frontend", "env": "VITE_ALLOW_DEV_AUTH_BYPASS", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/src/shared/api/http.ts"
     },
     {
       "name": "VITE_APPROVAL_RULE_PROPOSALS",
@@ -1859,6 +2498,18 @@
       "codePath": "apps/Frontend Plane/verevonv3/src/features/chat/lib/use-chat-shortcuts.ts"
     },
     {
+      "name": "VITE_CHAT_PROJECTS_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "Chat projects in the SPA: the project picker and its sidebar section. Off, neither is shown. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "frontend", "env": "VITE_CHAT_PROJECTS_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/src/features/chat/lib/chat-projects.ts"
+    },
+    {
       "name": "VITE_CHAT_READER_POLISH",
       "kind": "switch",
       "owner": "frontend-plane",
@@ -1878,6 +2529,42 @@
       "stage": "dark",
       "purpose": "Chat Fast chip: shown only on a model that declares the priority tier, and the turn then asks for speed priority. Off, the composer shows no chip and sends no speed. Only the literal true turns it on.",
       "codePath": "apps/Frontend Plane/verevonv3/src/features/chat/components/use-chat-controller.ts"
+    },
+    {
+      "name": "VITE_CHAT_VISION_AS_PARTS_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "WS08-S4: images ride as parts in a chat turn. Off, the diversion serves any model. Flip it together with the gateway CHAT_VISION_AS_PARTS_ENABLED. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "frontend", "env": "VITE_CHAT_VISION_AS_PARTS_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/src/features/chat/lib/attachment-policy.ts"
+    },
+    {
+      "name": "VITE_EVENT_TRIGGERS",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "W4-T8: the event triggers section under Automations and its calls to the gateway trigger routes. Off, the section is not mounted. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "frontend", "env": "VITE_EVENT_TRIGGERS", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/src/features/automations/components/AutomationsHub.tsx"
+    },
+    {
+      "name": "VITE_PLAN_EXECUTE_ENABLED",
+      "kind": "switch",
+      "owner": "frontend-plane",
+      "source": "code",
+      "default": "false",
+      "purpose": "Plan and execute in the SPA chat, flipped together with the gateway switch. Off, an approval arms and prefills nothing. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "frontend", "env": "VITE_PLAN_EXECUTE_ENABLED", "default": "false" }
+      ],
+      "codePath": "apps/Frontend Plane/verevonv3/src/shared/chat/plan-execute.ts"
     },
     {
       "name": "VITE_SHELL_TOASTS",
@@ -1962,7 +2649,7 @@
       "owner": "model-plane",
       "source": "compose",
       "default": "false",
-      "purpose": "Z-05a: on a ZDR or waived turn, web search and file or artifact writes are typed zdr_feature_not_supported refusals (web_search, artifact_output) before any call, not silent drops. Off, unchanged. Only the literal true.",
+      "purpose": "Z-05a: on a ZDR or waived turn, web search and file or artifact writes are typed zdr_feature_not_supported refusals. V3-mg-1-rel3: a ZDR refusal off the subscription route ends the turn typed, no unary fallback. Only the literal true.",
       "codeDefault": "false",
       "declarations": [
         { "service": "model-gateway", "env": "ZDR_TYPED_REFUSALS_ENABLED", "default": "false" }
@@ -1990,6 +2677,9 @@
       "default": "false",
       "stage": "dark",
       "purpose": "ZDR-Z-19a: the BFF asks Auth Core for a retention decision on a subscription chat turn and mounts the connection ZDR routes. Off, no decision is asked and no route is mounted. Only the literal true turns it on.",
+      "declarations": [
+        { "service": "gateway", "env": "ZDR_WAIVER_UI_ENABLED", "default": "false" }
+      ],
       "codePath": "apps/Frontend Plane/verevonv3/apps/gateway/src/config.rs"
     }
   ],
@@ -2048,7 +2738,6 @@
     "ORG_AGENT_POLICY_MODE",
     "QUARRY_BROWSER_AGENT_PLANNER_MODE",
     "SANDBOX_THREAD_WORKSPACE_ENABLED",
-    "SCHEDULE_CONTRACT_ENABLED",
     "SESSION_AGENT_MEMORY_ENABLED",
     "SESSION_CORE_ARTIFACT_REVISIONS_ENABLED",
     "SESSION_CORE_ATTENTION_ENABLED",

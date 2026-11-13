@@ -1323,7 +1323,7 @@ async fn erase_user_space_memory_sources_gated(
 /// # Errors
 ///
 /// Returns an error if the statement fails; the caller's transaction is then to be rolled back.
-async fn cited_thread_ids_in_tx(
+pub(crate) async fn cited_thread_ids_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     org_id: &str,
     links: &[String],

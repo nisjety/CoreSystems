@@ -72,8 +72,8 @@ use crate::{
     audience_tokens::ModelServiceAudience,
     config::AppState,
     domains::chat::shared::{
-        data_plane_token, delegated_auth_unavailable, invalid_chat_request, model_token,
-        proxy_model_json_with_data_plane, proxy_model_json_with_session,
+        best_effort_capability_token, data_plane_token, delegated_auth_unavailable,
+        invalid_chat_request, model_token, proxy_model_json_with_delegations,
         proxy_model_json_with_session_and_capability, required_capability_token,
         required_execution_token, required_inference_token, required_session_token,
         retention_refusal_response, skipped_site_browser_token, waived_data_plane_token,
@@ -210,6 +210,13 @@ fn requires_execution_delegation(path: &str) -> bool {
     path.ends_with("/decide") || path.ends_with("/resume")
 }
 
+/// Whether a path carries the capability bearer (see [`continuation_capability_token`]): a resume,
+/// which model-gateway reads the org's agent policy for before it resumes the run. A continue route
+/// is not a path of [`mg_proxy_with`]; `continue_run` mints the bearer itself.
+fn requires_capability_delegation(path: &str) -> bool {
+    path.ends_with("/resume")
+}
+
 /// A response worth retrying once: a literal upstream 502 (model-gateway's own
 /// quarantine placeholder for not-yet-durable continuation delivery fires
 /// unconditionally on every first-time approval grant — see
@@ -251,7 +258,8 @@ async fn mg_proxy(
 /// [`mg_proxy`] for a continuation whose retention was asked of Auth Core (ZDR-Z-19e, D-ZDR-15).
 /// `Unchanged` (and `Zdr` and `Persistent`) is today's path exactly. `Waived` mints the model and
 /// session bearers (and the execution bearer where the route needs one) with the fresh decision, each
-/// required, and answers an Auth Core refusal as it came with nothing sent upstream.
+/// required, and answers an Auth Core refusal as it came with nothing sent upstream. A resume also
+/// carries the capability bearer, minted as [`continuation_capability_token`] mints it.
 #[allow(clippy::too_many_arguments)]
 async fn mg_proxy_with(
     state: &AppState,
@@ -321,30 +329,43 @@ async fn mg_proxy_with(
         };
         (token, session, execution)
     };
+    let capability = if requires_capability_delegation(path) {
+        match continuation_capability_token(state, user, headers, retention).await {
+            Ok(minted) => minted,
+            Err(refusal) => return refusal,
+        }
+    } else {
+        None
+    };
     let url = format!("{}{}", state.model_gateway_url, path);
     if let Some(execution) = execution {
-        return proxy_model_json_with_data_plane(
+        return proxy_model_json_with_delegations(
             state,
             method,
             &url,
             body,
             token.as_deref(),
             None,
+            capability.as_deref(),
             None,
             Some(&execution),
             None,
             Some(&session),
+            None,
+            None,
+            None,
             user,
         )
         .await;
     }
-    proxy_model_json_with_session(
+    proxy_model_json_with_session_and_capability(
         state,
         method,
         &url,
         body,
         token.as_deref(),
         Some(&session),
+        capability.as_deref(),
         user,
     )
     .await
@@ -525,6 +546,32 @@ async fn continuation_retention_of(
     )
     .await
     .map_err(retention_refusal_response)
+}
+
+/// The `aud=capability-core` bearer of a continuation: the bearer a chat turn carries
+/// (`mint_turn_bearers`). model-gateway reads the org's agent policy with it before it resumes or
+/// continues a run, and in enforce mode it refuses `org_policy_unavailable` when the policy cannot be
+/// read with it. A waived continuation mints it with the fresh decision and requires it, as a waived
+/// turn does. Any other continuation mints it best-effort, as a turn does: a failed mint leaves the
+/// bearer off and model-gateway decides, so this BFF does not refuse the continuation itself.
+async fn continuation_capability_token(
+    state: &AppState,
+    user: &AuthenticatedUser,
+    headers: &HeaderMap,
+    retention: &TurnRetention,
+) -> Result<Option<String>, (StatusCode, Json<Value>)> {
+    match waived_decision(retention) {
+        Some(decision) => waived_service_token(
+            state,
+            user,
+            headers,
+            decision,
+            ModelServiceAudience::CapabilityCore,
+        )
+        .await
+        .map(Some),
+        None => Ok(best_effort_capability_token(state, user, headers).await),
+    }
 }
 
 // ── read handlers ────────────────────────────────────────────────────────────
@@ -1464,8 +1511,9 @@ pub(crate) const CONTINUE_RELAYED_ERRORS: &[(&str, u16, &str)] = &[
 ///
 /// The bearers are minted the way `chat::streams::stream_chat` mints them, because
 /// model-gateway's continue route verifies this same set (model, session, inference,
-/// execution, data plane). Cost, capability, ingestion and sandbox bearers are not
-/// part of a continuation and are not minted.
+/// execution, data plane) and reads the org's agent policy with the capability bearer as well
+/// (see [`continuation_capability_token`]). Cost, ingestion and sandbox bearers are not part of
+/// a continuation and are not minted.
 ///
 /// A refusal before the stream opens is relayed by its closed code
 /// ([`CONTINUE_RELAYED_ERRORS`]); the SSE body itself is relayed byte for byte, so
@@ -1576,6 +1624,13 @@ pub(crate) async fn continue_run(
             };
             (model, data_plane, inference, execution, session)
         };
+    // The capability bearer, minted as a turn mints it (see `continuation_capability_token`). In
+    // enforce mode model-gateway refuses a continuation whose org policy it cannot read with it.
+    let capability = match continuation_capability_token(&state, &user, &headers, &retention).await
+    {
+        Ok(minted) => minted,
+        Err(refusal) => return refusal.into_response(),
+    };
     let waived = waived_decision(&retention).is_some();
     // The org's standing posture, so the `x-zdr` header reaches model-gateway. The
     // gateway refuses a continuation under ZDR on its own verified claims as well. A waived
@@ -1605,7 +1660,7 @@ pub(crate) async fn continue_run(
             Some(upstream_body),
             model.as_deref(),
             data_plane.as_deref(),
-            None,
+            capability.as_deref(),
             Some(&inference),
             Some(&execution),
             None,
@@ -1628,7 +1683,7 @@ pub(crate) async fn continue_run(
         Some(upstream_body),
         model.as_deref(),
         data_plane.as_deref(),
-        None,
+        capability.as_deref(),
         Some(&inference),
         Some(&execution),
         None,
@@ -1684,8 +1739,9 @@ mod tests {
 
     use super::{
         continue_upstream_body, decide_upstream_body, is_retryable_decide_status,
-        mg_post_decide_with_retry_bounded, requires_execution_delegation,
-        verification_metrics_path, ContinueRunBody, CONTINUE_RELAYED_ERRORS,
+        mg_post_decide_with_retry_bounded, requires_capability_delegation,
+        requires_execution_delegation, verification_metrics_path, ContinueRunBody,
+        CONTINUE_RELAYED_ERRORS,
     };
 
     #[test]
@@ -1883,6 +1939,20 @@ mod tests {
         assert!(!requires_execution_delegation(
             "/v1/orchestration/runs/run-1/cancel"
         ));
+    }
+
+    #[test]
+    fn capability_delegation_is_required_only_for_a_resume() {
+        assert!(requires_capability_delegation(
+            "/v1/orchestration/runs/run-1/resume"
+        ));
+        for path in [
+            "/v1/orchestration/approvals/apr-1/decide",
+            "/v1/orchestration/plans/plan-1/approve",
+            "/v1/orchestration/runs/run-1/cancel",
+        ] {
+            assert!(!requires_capability_delegation(path), "{path}");
+        }
     }
 
     #[test]

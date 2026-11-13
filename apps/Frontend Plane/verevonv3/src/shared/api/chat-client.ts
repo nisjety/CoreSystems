@@ -1513,6 +1513,16 @@ export type ChatMessage = {
   role: 'user' | 'assistant'
   content: string
   model?: string
+  /**
+   * The customer-gateway connection this turn was written under (W4-BYO-6), from `model_connection_id`. Session Core keeps it
+   * on the question a send carried, and the server names it only on the owner's own read while the customer-gateway switch is on.
+   */
+  modelConnectionId?: string
+  /**
+   * The ChatGPT subscription connection this turn was written under (DEC-V-R8), from `subscription_connection_id`. The same
+   * rules as `modelConnectionId`.
+   */
+  subscriptionConnectionId?: string
   createdAt: string
   /**
    * The answer's persisted confidence score, flattened onto the message from
@@ -4499,17 +4509,38 @@ export type SideChatAnswer = {
 /**
  * Ask one read-only question about the open conversation (F-t3-069). Model Gateway answers from a snapshot of the
  * thread's active path and keeps nothing, so the answer exists only where the caller holds it. Resolves to `null`
- * while the gateway's side-chat switch is off (404 `side_chat_disabled`). Other refusals reject with the server's
- * typed `ApiError`, such as `scope_not_available_in_space` for a Space thread and `delegated_auth_unavailable` while
- * the model's credentials are unavailable. The question is checked against the action contract before it is sent.
+ * while the gateway's side-chat switch is off (404 `side_chat_disabled`). The question is checked against the action
+ * contract before it is sent.
+ *
+ * `model` is the model a connection thread (a customer gateway or a ChatGPT subscription) is served with (W4-BYO,
+ * DEC-V-R8). The gateway requires it on such a thread and does not use it on a platform one. It is sent only when one
+ * is given, so a platform thread's body is the question alone; a blank one is no model.
+ *
+ * Refusals reject with the server's typed `ApiError`, whose `code` the caller branches on. Permanent: the same question
+ * is refused again, so asking again cannot help. These are `model_not_entitled` (403), `side_chat_model_required` (400),
+ * `connection_ambiguous` (409), `side_chat_thread_retention_refused` (409), `scope_not_available_in_space` (409), the
+ * zero-retention `zdr_*` refusals of the Model Plane catalogue except its retryable ones (`zdr_decision_unavailable`,
+ * `zdr_inference_failed`), and the ChatGPT subscription's refusals that the person must act on first:
+ * `subscription_reauth_required` (409), `subscription_usage_limit` (429), `subscription_bad_request` (422), and
+ * `prompt_too_long` (413). Transient: asking again may work. These are `delegated_auth_unavailable` (503, which the gateway
+ * also answers for a refused credential, a 401 or an untyped 403), `rate_limited` (429), `subscription_upstream_unavailable`
+ * (503), `subscription_route_unavailable` (502), `side_chat_no_answer` (502, an empty answer), and any other upstream failure.
+ * The panel words the subscription refusals in the chat stream's own words (`streamFailurePresentation`), and keeps the retry
+ * line for the transient ones.
  */
-export async function askSideChat(threadId: string, question: string): Promise<SideChatAnswer | null> {
-  const request = threadSideChatAction.parse({ type: 'thread.side_chat', threadId, question })
+export async function askSideChat(threadId: string, question: string, model?: string): Promise<SideChatAnswer | null> {
+  const request = threadSideChatAction.parse({
+    type: 'thread.side_chat',
+    threadId,
+    question,
+    model: model?.trim() ? model : undefined,
+  })
+  const body = request.model === undefined ? { question: request.question } : { question: request.question, model: request.model }
   let raw: unknown
   try {
     raw = await requestJson<unknown>(
       `/api/v1/chat/threads/${encodeURIComponent(request.threadId)}/side-chat`,
-      { method: 'POST', body: JSON.stringify({ question: request.question }) },
+      { method: 'POST', body: JSON.stringify(body) },
     )
   } catch (error) {
     if (error instanceof ApiError && error.status === 404 && error.code === 'side_chat_disabled') return null
@@ -5116,6 +5147,8 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       role: item.role === 'assistant' ? 'assistant' : 'user',
       content: str(item.content) ?? '',
       model: str(item.model) ?? str(item.model_used),
+      // The connections the turn was written under (W4-BYO-6, DEC-V-R8), read by name. A key only for an id the server names.
+      ...connectionFieldsOf(item),
       createdAt: str(item.created_at) ?? str(item.createdAt) ?? '',
       sourceScope: (item.source_scope ?? objectValue(item.metadata)?.source_scope) === 'conversation' ? 'conversation' : 'workspace',
       // See `ChatInvokeRequest.retrievalScope`. Undefined (not `'auto'`) for
@@ -5140,6 +5173,19 @@ function normalizeThreadMessages(raw: unknown): ChatMessage[] {
       verification: normalizeVerification(item.verification),
       ...messageVersionField(item.version),
     }))
+}
+
+/**
+ * The connection ids a message names, read by name. A blank id is no connection, so a platform turn, and one recorded before
+ * the ids were stored, carries no key at all.
+ */
+function connectionFieldsOf(item: Record<string, unknown>): Pick<ChatMessage, 'modelConnectionId' | 'subscriptionConnectionId'> {
+  const modelConnectionId = str(item.model_connection_id)?.trim()
+  const subscriptionConnectionId = str(item.subscription_connection_id)?.trim()
+  return {
+    ...(modelConnectionId ? { modelConnectionId } : {}),
+    ...(subscriptionConnectionId ? { subscriptionConnectionId } : {}),
+  }
 }
 
 /** The `contextRefs` key for a turn that stored chips, and no key at all for one that did not. */

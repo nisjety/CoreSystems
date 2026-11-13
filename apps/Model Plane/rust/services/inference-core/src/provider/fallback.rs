@@ -120,6 +120,16 @@ pub struct FallbackChain {
     same_tier: bool,
 }
 
+/// The catalogue overlay that refuses a call before anything is sent, as admission checks them: the platform overlay
+/// first, then the caller's organisation overlay (V3-inf-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HidingOverlay {
+    /// The platform catalogue overlay (`INFERENCE_CATALOGUE_OVERLAY`).
+    Platform,
+    /// The caller's organisation overlay (`INFERENCE_ORG_OVERLAY`).
+    Organisation,
+}
+
 /// Switch for the route note (WS27-S7): what the budget did to a Verevon call, carried on the wire. Off
 /// unless the literal `true`, read once at startup, as the other inference switches are.
 const ROUTE_NOTE_ENV: &str = "INFERENCE_ROUTE_NOTE";
@@ -157,7 +167,7 @@ pub struct RouteNote {
     /// resolved no mode.
     pub complexity: Option<intent::Complexity>,
     /// Why the intent layer chose the model (see [`intent::Decision::reason`]). Empty when it
-    /// resolved no mode.
+    /// resolved no mode, and when a catalogue overlay moved the call off the model it chose.
     pub reason: &'static str,
 }
 
@@ -214,6 +224,25 @@ fn budget_route_note(
         mode: Some(decision.mode),
         complexity: Some(decision.complexity),
         reason: decision.reason(),
+    }
+}
+
+/// The note of an intent call a catalogue overlay moved off the model the intent layer chose (V3-inf-1). The budget
+/// reasons describe the chosen model, which is not the one served, so the note names no budget move and no reason.
+/// The mode, the complexity, the posture and the effort the budget applied still describe the call.
+fn overlay_route_note(
+    decision: &intent::Decision,
+    applied_effort: Option<effort::Level>,
+) -> RouteNote {
+    RouteNote {
+        budget_posture: decision.posture,
+        tier_shifted: false,
+        cheap_fallback_forced: false,
+        applied_effort,
+        role: None,
+        mode: Some(decision.mode),
+        complexity: Some(decision.complexity),
+        reason: "",
     }
 }
 
@@ -1447,9 +1476,14 @@ impl FallbackChain {
     /// to a concrete model, returning a rewritten request and, while the route
     /// note is on, what the budget did to it (WS27-S7). Returns `None` when the
     /// intent layer is off or the model is a pinned id (pass through).
+    ///
+    /// The pick is judged against both catalogue overlays here, as the walk judges every model it tries: a pick
+    /// either one hides gives way to the next visible candidate (see [`Self::overlay_substitute`]), and the route
+    /// note then describes the model served, not the pick (V3-inf-1).
     async fn resolve_intent(
         &self,
         req: &InferRequest,
+        org: Option<&OrgOverlay>,
     ) -> Option<(InferRequest, Option<RouteNote>)> {
         let policy = self.policy.load();
         if !policy.enabled {
@@ -1477,8 +1511,18 @@ impl FallbackChain {
             resolved_model = %decision.model,
             "verevon intent resolved"
         );
+        let substitute = self.overlay_substitute(req, org, &policy, &decision.model);
+        if let Some(served) = &substitute {
+            info!(
+                request_id = %req.request_id,
+                resolved_model = %decision.model,
+                served_model = %served,
+                "intent pick hidden by a catalogue overlay; served by the next visible candidate"
+            );
+        }
+        let served = substitute.as_ref().unwrap_or(&decision.model);
         let mut rewritten = req.clone();
-        rewritten.model.clone_from(&decision.model);
+        rewritten.model.clone_from(served);
         // What the budget cut, for the route note: the effort it clamped to, when a clamp fired.
         let mut applied_effort = None;
         if effort::budget_clamp_enabled() {
@@ -1519,8 +1563,14 @@ impl FallbackChain {
                 }
             }
         }
-        let note =
-            route_note_enabled().then(|| budget_route_note(&policy, &decision, applied_effort));
+        let moved = substitute.is_some();
+        let note = route_note_enabled().then(|| {
+            if moved {
+                overlay_route_note(&decision, applied_effort)
+            } else {
+                budget_route_note(&policy, &decision, applied_effort)
+            }
+        });
         Some((rewritten, note))
     }
 
@@ -1779,8 +1829,23 @@ impl FallbackChain {
         org: Option<&OrgOverlay>,
     ) -> Vec<String> {
         let policy = self.policy.load();
+        self.visible_candidates(&policy.tool_fallback_ladder, resolved, access, hint, org)
+    }
+
+    /// The candidates the walk may try after `resolved`, in their order: each one that is not `resolved`, is not
+    /// already listed, is deployed, is hidden by neither catalogue overlay and is not refused by the caller's
+    /// entitlement, bounded by [`MAX_TOOL_LADDER_STEPS`]. A candidate an overlay hides is dropped before the bound is
+    /// counted.
+    fn visible_candidates(
+        &self,
+        candidates: &[String],
+        resolved: &str,
+        access: Option<&RequestAccess>,
+        hint: &str,
+        org: Option<&OrgOverlay>,
+    ) -> Vec<String> {
         let mut ladder: Vec<String> = Vec::new();
-        for candidate in &policy.tool_fallback_ladder {
+        for candidate in candidates {
             if ladder.len() >= MAX_TOOL_LADDER_STEPS {
                 break;
             }
@@ -1793,12 +1858,41 @@ impl FallbackChain {
             {
                 continue;
             }
-            if access.is_some_and(|access| self.entitlement_refusal(access, candidate, hint).is_some()) {
+            if access
+                .is_some_and(|access| self.entitlement_refusal(access, candidate, hint).is_some())
+            {
                 continue;
             }
             ladder.push(candidate.clone());
         }
         ladder
+    }
+
+    /// The model an intent pick is served as when a catalogue overlay hides it: the first candidate the walk would try
+    /// after the pick that no overlay hides. The candidates are the tool ladder's rungs in their order, then the
+    /// policy's cheap fallback, each passing the checks the ladder makes. `None` when the pick is not hidden, and when
+    /// no candidate is visible: the pick then stays, and the walk refuses it as `model_hidden`, as before.
+    fn overlay_substitute(
+        &self,
+        req: &InferRequest,
+        org: Option<&OrgOverlay>,
+        policy: &RoutingPolicy,
+        pick: &str,
+    ) -> Option<String> {
+        if !(self.platform_hides(pick) || org_hides(org, pick)) {
+            return None;
+        }
+        let mut candidates = policy.tool_fallback_ladder.clone();
+        candidates.push(policy.cheap_fallback.clone());
+        self.visible_candidates(
+            &candidates,
+            pick,
+            req.access.as_deref(),
+            &req.provider_hint,
+            org,
+        )
+        .into_iter()
+        .next()
     }
 
     /// Why the caller's entitlement refuses `model` on every provider that could
@@ -1856,6 +1950,33 @@ impl FallbackChain {
         }
         let client = self.policy_client.as_ref()?;
         Some(client.org_overlay(org_id).await)
+    }
+
+    /// The overlay that refuses a call for `model` for this organisation, judged as admission judges it: an alias by
+    /// its target, and a retired Claude id by its successor. `None` when no overlay hides it, and for a model that
+    /// names no concrete id (an automatic, `verevon-*` or role id), which the routing layer answers for itself. Nothing
+    /// is sent. The access answer reads it, so it never reports as available a model that infer would refuse.
+    pub async fn hiding_overlay(&self, org_id: &str, model: &str) -> Option<HidingOverlay> {
+        if catalogue_overlay::is_reserved_id(model) {
+            return None;
+        }
+        let mut resolved = model.to_owned();
+        if catalogue_overlay::catalogue_overlay_enabled() {
+            let policy = self.policy.load();
+            let overlay = &policy.catalogue_overlay;
+            if !overlay.is_empty() {
+                let target = overlay.alias_target(model).map(str::to_owned);
+                let named = target.as_deref().unwrap_or(model);
+                if overlay.is_hidden(named) || overlay.is_hidden(served_model(named)) {
+                    return Some(HidingOverlay::Platform);
+                }
+                if let Some(target) = target {
+                    resolved = target;
+                }
+            }
+        }
+        let org = self.org_overlay_for(org_id).await;
+        org_hides(org.as_deref(), &resolved).then_some(HidingOverlay::Organisation)
     }
 
     /// The catalogue overlay at admission, while `INFERENCE_CATALOGUE_OVERLAY` is on.
@@ -2053,7 +2174,7 @@ impl FallbackChain {
         // (complexity + budget) before anything else. A pinned model or a
         // disabled intent layer leaves `req` untouched.
         let (intent_req, route_note) = self
-            .resolve_intent(req)
+            .resolve_intent(req, org)
             .await
             .map_or((None, None), |(resolved, note)| (Some(resolved), note));
         let route_note = attach_role(route_note, role_decision);
@@ -2608,7 +2729,7 @@ impl FallbackChain {
         let pinned = self.pinned_model(req)?;
         // Verevon intent layer — same resolution as the unary path.
         let (intent_req, route_note) = self
-            .resolve_intent(req)
+            .resolve_intent(req, org)
             .await
             .map_or((None, None), |(resolved, note)| (Some(resolved), note));
         let route_note = attach_role(route_note, role_decision);
@@ -3574,7 +3695,7 @@ mod resolution_tests {
             model: "gpt-4o-mini".into(),
             ..Default::default()
         };
-        assert!(chain.resolve_intent(&pinned).await.is_none());
+        assert!(chain.resolve_intent(&pinned, None).await.is_none());
     }
 
     #[tokio::test]
@@ -6182,6 +6303,63 @@ mod resolution_tests {
         };
         assert!(chain.role_candidate_admitted(&req, &catalogue, None, "gpt-4o-mini"));
         assert!(!chain.role_candidate_admitted(&req, &catalogue, Some(&org), "gpt-4o-mini"));
+    }
+
+    /// The intent layer judges its pick against the organisation's overlay as the walk does (V3-inf-1): a pick the
+    /// organisation hides gives way to the next visible rung, then to the cheap fallback when the ladder has none, and
+    /// stays when nothing is visible, so the walk refuses it as hidden. An organisation that hides nothing keeps it.
+    #[tokio::test]
+    async fn an_intent_pick_the_organisation_hides_gives_way_to_the_next_visible_candidate() {
+        use crate::provider::routing_policy::ComplexityModels;
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let chain = ladder_chain(&asked, vec![], vec![]);
+        let mut policy = RoutingPolicy::default();
+        policy.table.balance = ComplexityModels {
+            simple: "gpt-5-mini".to_owned(),
+            moderate: "gpt-5-mini".to_owned(),
+            complex: "gpt-5-mini".to_owned(),
+        };
+        policy.tool_fallback_ladder = vec!["gpt-4o-mini".to_owned(), "gpt-5-nano".to_owned()];
+        chain.policy_handle().store(Arc::new(policy.clone()));
+        let req = route_request("org-pick", "verevon-balance");
+
+        let hides_pick = OrgOverlay {
+            hidden: vec!["gpt-5-mini".to_owned()],
+            ..OrgOverlay::default()
+        };
+        let (moved, _) = chain
+            .resolve_intent(&req, Some(&hides_pick))
+            .await
+            .expect("the intent layer is on");
+        assert_eq!(moved.model, "gpt-4o-mini", "the hidden pick was kept");
+        let (kept, _) = chain
+            .resolve_intent(&req, None)
+            .await
+            .expect("the intent layer is on");
+        assert_eq!(
+            kept.model, "gpt-5-mini",
+            "an organisation that hides nothing moved the pick"
+        );
+
+        // A ladderless policy leaves the cheap fallback as the only candidate.
+        policy.tool_fallback_ladder.clear();
+        chain.policy_handle().store(Arc::new(policy.clone()));
+        let (cheap, _) = chain
+            .resolve_intent(&req, Some(&hides_pick))
+            .await
+            .expect("the intent layer is on");
+        assert_eq!(cheap.model, policy.cheap_fallback);
+
+        // With every candidate hidden the pick stays, and the walk refuses it.
+        let hides_every_candidate = OrgOverlay {
+            hidden: vec!["gpt-5-mini".to_owned(), policy.cheap_fallback.clone()],
+            ..OrgOverlay::default()
+        };
+        let (stays, _) = chain
+            .resolve_intent(&req, Some(&hides_every_candidate))
+            .await
+            .expect("the intent layer is on");
+        assert_eq!(stays.model, "gpt-5-mini");
     }
 
     #[tokio::test]

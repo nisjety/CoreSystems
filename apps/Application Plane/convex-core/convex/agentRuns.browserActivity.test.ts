@@ -6,7 +6,7 @@
  * identity), in the convex-test style: seed rows, call the function, read the
  * row back. Run with:
  *   cd "apps/Application Plane/convex-core" && npx tsx --test convex/agentRuns.browserActivity.test.ts
- * (the package `test` script only globs test/*.test.cjs).
+ * (the package `test` script runs it too, through its convex test glob).
  */
 
 import assert from "node:assert/strict";
@@ -111,6 +111,16 @@ const update = (overrides: Partial<BrowserActivityUpdate> = {}): BrowserActivity
   ...overrides,
 });
 
+/** The message a call rejects with, or "resolved" when it does not reject. */
+async function refusalOf(call: Promise<unknown>): Promise<string> {
+  try {
+    await call;
+    return "resolved";
+  } catch (error) {
+    return (error as Error).message;
+  }
+}
+
 test("the run owner sees browserActivity", async () => {
   const tables = seed();
   const writer = fakeCtx(null, tables);
@@ -146,11 +156,30 @@ test("non_owner_org_member_sees_no_browser_activity", async () => {
   assert.ok(tables.agentRuns[0].browserActivity);
 });
 
-test("a viewer outside the run's org is denied", async () => {
+test("a viewer outside the run's org gets the same answer as for an unknown run", async () => {
   const tables = seed();
   await upsertBrowserActivityHandler(fakeCtx(null, tables).ctx, update());
   const { ctx } = fakeCtx("outsider", tables);
-  await assert.rejects(getByRunIdHandler(ctx, { runId: "run-1" }), /Unauthorized/);
+  assert.equal(await getByRunIdHandler(ctx, { runId: "run-1" }), null);
+  assert.equal(await getByRunIdHandler(ctx, { runId: "run-404" }), null);
+});
+
+test("an unauthenticated caller gets the same refusal for a known and an unknown run, and no write happens", async () => {
+  const tables = seed();
+  await upsertBrowserActivityHandler(fakeCtx(null, tables).ctx, update());
+  const { ctx: anonymous, patches } = fakeCtx(null, tables);
+  assert.equal(await refusalOf(getByRunIdHandler(anonymous, { runId: "run-1" })), "Not authenticated");
+  assert.equal(await refusalOf(getByRunIdHandler(anonymous, { runId: "run-404" })), "Not authenticated");
+  assert.equal(
+    await refusalOf(rateHandler(anonymous, { runId: "run-1", externalOrgId: ORG, rating: "good" })),
+    "Not authenticated",
+  );
+  assert.equal(
+    await refusalOf(rateHandler(anonymous, { runId: "run-404", externalOrgId: ORG, rating: "good" })),
+    "Not authenticated",
+  );
+  assert.equal(patches.length, 0);
+  assert.equal(tables.agentRuns[0].rating, undefined);
 });
 
 test("both org list paths apply the same owner-only browser projection", async () => {
@@ -308,13 +337,37 @@ test("with the consumer switch off, the rate reply is the stored row unchanged",
   assert.deepEqual(reply, tables.agentRuns[0]);
 });
 
-test("a viewer outside the run's org cannot rate, and nothing is written", async () => {
+test("a viewer outside the run's org gets the unknown-run refusal, and nothing is written", async () => {
   const tables = seed();
   await upsertBrowserActivityHandler(fakeCtx(null, tables).ctx, update());
-  const { ctx } = fakeCtx("outsider", tables);
-  await assert.rejects(
-    rateHandler(ctx, { runId: "run-1", externalOrgId: ORG, rating: "good" }),
-    /Unauthorized/,
+  const { ctx, patches } = fakeCtx("outsider", tables);
+  assert.equal(
+    await refusalOf(rateHandler(ctx, { runId: "run-1", externalOrgId: ORG, rating: "good" })),
+    "Run not found",
+  );
+  assert.equal(
+    await refusalOf(rateHandler(ctx, { runId: "run-404", externalOrgId: ORG, rating: "good" })),
+    "Run not found",
+  );
+  assert.equal(patches.length, 0);
+  assert.equal(tables.agentRuns[0].rating, undefined);
+});
+
+test("the org mismatch is reported only to a member of the run's org", async () => {
+  const tables = seed();
+  await upsertBrowserActivityHandler(fakeCtx(null, tables).ctx, update());
+  // An outsider naming another org learns nothing about the run: the membership check comes first.
+  assert.equal(
+    await refusalOf(
+      rateHandler(fakeCtx("outsider", tables).ctx, { runId: "run-1", externalOrgId: "org-ext-2", rating: "good" }),
+    ),
+    "Run not found",
+  );
+  assert.equal(
+    await refusalOf(
+      rateHandler(fakeCtx("colleague", tables).ctx, { runId: "run-1", externalOrgId: "org-ext-2", rating: "good" }),
+    ),
+    "Run belongs to a different organization",
   );
   assert.equal(tables.agentRuns[0].rating, undefined);
 });

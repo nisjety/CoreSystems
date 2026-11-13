@@ -144,7 +144,8 @@ export const no = {
         empty: 'Ingen bekreftelser ennå.',
         load_failed: 'Bekreftelsene kunne ikke lastes.',
         truncated: 'Bare de nyeste radene vises.',
-        counts: (active: number, revoked: number) => `${active} aktive, ${revoked} trukket tilbake`,
+        counts: (active: number, superseded: number, revoked: number) =>
+          `${active} aktive, ${superseded} erstattet, ${revoked} trukket tilbake`,
         member: 'Medlem',
         provider: 'Leverandør',
         capability: 'Egenskap',
@@ -154,6 +155,7 @@ export const no = {
         acknowledged_at: 'Bekreftet',
         revoked_at: 'Trukket tilbake',
         status_active: 'Aktiv',
+        status_superseded: 'Erstattet',
         status_revoked: 'Trukket tilbake',
       },
     },

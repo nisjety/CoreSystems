@@ -13,6 +13,7 @@ const (
 	shippedRegistryFile = "flag-registry.json"
 	modelPlaneCompose   = "apps/Model Plane/deploy/docker-compose.yml"
 	controlPlaneCompose = "apps/Control Plane/docker-compose.yml"
+	verevonv3Compose    = "apps/Frontend Plane/verevonv3/docker-compose.yml"
 )
 
 // repoFile resolves a repository-relative path from this module, which lives at
@@ -41,7 +42,7 @@ func loadShipped(t *testing.T) *Registry {
 func scanRatchetedCompose(t *testing.T) map[string][]ComposeDecl {
 	t.Helper()
 	byHost := make(map[string][]ComposeDecl)
-	for _, rel := range []string{modelPlaneCompose, controlPlaneCompose} {
+	for _, rel := range []string{modelPlaneCompose, controlPlaneCompose, verevonv3Compose} {
 		f, err := os.Open(repoFile(rel))
 		if err != nil {
 			t.Fatalf("open %s: %v", rel, err)

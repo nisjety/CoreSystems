@@ -1042,6 +1042,13 @@ async fn the_action_surface_continuations_never_ask_and_never_waive() {
             }
         }
         assert!(bearers >= 1, "{action_id}: a bearer was sent");
+        if action_id == "orchestration.resume_run" {
+            assert_eq!(
+                capability_headers_sent(&upstreams, upstream_path).await,
+                vec![Some("Bearer plain-capability-core".to_owned())],
+                "{action_id}: the action surface resumes with the capability bearer as well"
+            );
+        }
         if !sent.body.is_empty() {
             let forwarded: Value = serde_json::from_slice(&sent.body).expect("json");
             assert!(
@@ -1050,5 +1057,254 @@ async fn the_action_surface_continuations_never_ask_and_never_waive() {
                 "{action_id}: the connection is never forwarded: {forwarded}"
             );
         }
+    }
+}
+
+// The capability bearer of a resume and of every continue form. A chat turn carries the bearer that
+// model-gateway reads the org's agent policy with (`x-capability-authorization`); a continuation
+// carries the same bearer, minted as the turn mints it. Without it, model-gateway in enforce mode
+// refuses the continuation `org_policy_unavailable` although the policy is readable.
+
+/// The `x-capability-authorization` header of each request model-gateway received on `upstream_path`,
+/// in arrival order: `None` for a request that carried none.
+async fn capability_headers_sent(
+    upstreams: &Upstreams,
+    upstream_path: &str,
+) -> Vec<Option<String>> {
+    upstreams
+        .model_gateway_requests()
+        .await
+        .iter()
+        .filter(|request| request.url.path() == upstream_path)
+        .map(|request| {
+            request
+                .headers
+                .get("x-capability-authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// The two continuation routes that carry the capability bearer: the resume and the continue.
+fn capability_routes() -> Vec<ContinuationRoute> {
+    continuation_routes()
+        .into_iter()
+        .filter(|route| route.uri.ends_with("/resume") || route.uri.ends_with("/continue"))
+        .collect()
+}
+
+/// An Auth Core double whose waiver-carrying mint at `mint_path` (`/api/<audience>/token`) answers
+/// `refusal` with a 412. Every other mint answers as [`Upstreams::start`] does.
+async fn auth_refusing_the_waived_mint_at(mint_path: &'static str, refusal: Value) -> MockServer {
+    let auth = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(mint_path))
+        .and(wm_header("x-retention-decision", DECISION))
+        .respond_with(ResponseTemplate::new(412).set_body_json(refusal))
+        .with_priority(1)
+        .mount(&auth)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/auth/get-session"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "user": {"id": "user-1", "email": "user@example.com", "emailVerified": true},
+            "session": {"activeOrganizationId": "org-1"}
+        })))
+        .mount(&auth)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/[a-z-]+/token$"))
+        .respond_with(|request: &wiremock::Request| {
+            let audience = request
+                .url
+                .path()
+                .split('/')
+                .nth(2)
+                .unwrap_or("")
+                .to_owned();
+            let kind = if request.headers.get("x-retention-decision").is_some() {
+                "waived"
+            } else {
+                "plain"
+            };
+            ResponseTemplate::new(200).set_body_json(json!({
+                "token": format!("{kind}-{audience}"), "expiresInSeconds": 300,
+            }))
+        })
+        .with_priority(5)
+        .mount(&auth)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/control-policy/internal-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "token": "policy-token", "expiresInSeconds": 300,
+        })))
+        .mount(&auth)
+        .await;
+    auth
+}
+
+#[tokio::test]
+async fn resume_and_every_continue_form_forward_the_capability_bearer_as_a_turn_does() {
+    let forms = [
+        (
+            "/api/v1/orchestration/runs/run-1/resume",
+            "/v1/orchestration/runs/run-1/resume",
+            None,
+        ),
+        (
+            "/api/v1/orchestration/runs/run-1/continue",
+            "/v1/orchestration/runs/run-1/continue",
+            Some(json!({ "approval_id": "apr-1", "claim_token": "claim-1" })),
+        ),
+        (
+            "/api/v1/orchestration/runs/run-1/continue",
+            "/v1/orchestration/runs/run-1/continue",
+            Some(json!({ "approval_id": "apr-1", "claim_token": "claim-1", "skipped": true })),
+        ),
+        (
+            "/api/v1/orchestration/runs/run-1/continue",
+            "/v1/orchestration/runs/run-1/continue",
+            Some(json!({
+                "approval_id": "", "claim_token": "claim-1", "question_id": "q-1",
+                "answers": [{ "item_id": "scope", "option_ids": ["main"], "text": "" }],
+                "question_skip": false,
+            })),
+        ),
+    ];
+    for (uri, upstream_path, body) in forms {
+        let upstreams = Upstreams::start().await;
+        let answer = if upstream_path.ends_with("/resume") {
+            ResponseTemplate::new(200).set_body_json(json!({ "data": { "ok": true } }))
+        } else {
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: {\"type\":\"done\"}\n\n")
+        };
+        upstreams.upstream("POST", upstream_path, answer).await;
+        let body = body.map(|body| body.to_string());
+        let mut state = upstreams.state(false);
+        state.continue_question_form = true;
+        let (status, answered) = send_raw(state, "POST", uri, body.as_deref()).await;
+        assert_eq!(status, 200, "{uri}: {}", String::from_utf8_lossy(&answered));
+        assert_eq!(
+            capability_headers_sent(&upstreams, upstream_path).await,
+            vec![Some("Bearer plain-capability-core".to_owned())],
+            "{uri}: the capability bearer is sent, as a turn sends it"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_waived_resume_and_continue_carry_a_capability_bearer_minted_with_the_decision() {
+    for route in capability_routes() {
+        let upstreams = Upstreams::start().await;
+        waived_decision(&upstreams).await;
+        upstreams
+            .upstream(
+                route.upstream_verb,
+                route.upstream_path,
+                route.upstream_answer(),
+            )
+            .await;
+        let (uri, body) = route.request(true);
+        let (status, answered) =
+            send_raw(upstreams.state(true), route.verb, &uri, body.as_deref()).await;
+        let answered = String::from_utf8_lossy(&answered).into_owned();
+        assert_eq!(status, 200, "{} {uri}: {answered}", route.verb);
+        assert_eq!(
+            capability_headers_sent(&upstreams, route.upstream_path).await,
+            vec![Some("Bearer waived-capability-core".to_owned())],
+            "{} {uri}: the capability bearer carries the waiver",
+            route.verb
+        );
+        let minted_with_decision = upstreams
+            .auth
+            .received_requests()
+            .await
+            .expect("recording on")
+            .iter()
+            .filter(|request| {
+                request.url.path() == "/api/capability-core/token"
+                    && request
+                        .headers
+                        .get("x-retention-decision")
+                        .and_then(|value| value.to_str().ok())
+                        == Some(DECISION)
+            })
+            .count();
+        assert_eq!(
+            minted_with_decision, 1,
+            "{} {uri}: the capability bearer is minted with the decision",
+            route.verb
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_waived_capability_mint_refusal_answers_resume_and_continue_with_nothing_upstream() {
+    let refusal = json!({ "error": {
+        "code": "zdr_waiver_route_mismatch", "message": "m", "retryable": false, "action": "none",
+    }});
+    for route in capability_routes() {
+        let mut upstreams = Upstreams::start().await;
+        upstreams.auth =
+            auth_refusing_the_waived_mint_at("/api/capability-core/token", refusal.clone()).await;
+        waived_decision(&upstreams).await;
+        upstreams
+            .upstream(
+                route.upstream_verb,
+                route.upstream_path,
+                route.upstream_answer(),
+            )
+            .await;
+        let (uri, body) = route.request(true);
+        let (status, answered) =
+            send_raw(upstreams.state(true), route.verb, &uri, body.as_deref()).await;
+        let answered: Value = serde_json::from_slice(&answered).unwrap_or(Value::Null);
+        assert_eq!(status, 412, "{} {uri}: {answered}", route.verb);
+        assert_eq!(answered, refusal, "{} {uri}", route.verb);
+        assert!(
+            upstreams.model_gateway_requests().await.is_empty(),
+            "{} {uri}: nothing goes upstream after a capability mint refusal",
+            route.verb
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failed_capability_mint_leaves_the_bearer_off_and_does_not_refuse_a_resume_or_continue() {
+    for route in capability_routes() {
+        let upstreams = Upstreams::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/capability-core/token"))
+            .respond_with(ResponseTemplate::new(503))
+            .with_priority(1)
+            .mount(&upstreams.auth)
+            .await;
+        upstreams
+            .upstream(
+                route.upstream_verb,
+                route.upstream_path,
+                route.upstream_answer(),
+            )
+            .await;
+        let (uri, body) = route.request(false);
+        let (status, answered) =
+            send_raw(upstreams.state(false), route.verb, &uri, body.as_deref()).await;
+        assert_eq!(
+            status,
+            200,
+            "{} {uri}: {}",
+            route.verb,
+            String::from_utf8_lossy(&answered)
+        );
+        assert_eq!(
+            capability_headers_sent(&upstreams, route.upstream_path).await,
+            vec![None],
+            "{} {uri}: a failed mint sends no capability bearer and the continuation still goes",
+            route.verb
+        );
     }
 }

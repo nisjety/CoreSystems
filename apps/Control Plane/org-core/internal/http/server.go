@@ -78,6 +78,12 @@ type Server struct {
 	// mounted.
 	orgFlagsOn bool
 	orgFlags   orgFlagService
+
+	// roleCapabilitiesOn mounts the member capability route (ORG_ROLE_CAPABILITIES_ENABLED, only
+	// "true" turns it on); roleCapabilities is the rbac read it answers from, set from rbacRepo.
+	// Off, the route answers 404.
+	roleCapabilitiesOn bool
+	roleCapabilities   roleCapabilityReader
 }
 
 func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository, authServiceURL, userServiceURL string) *Server {
@@ -112,6 +118,11 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 		s.callerRoles = orgService
 		s.webPolicy = orgService
 		s.orgFlags = orgService
+	}
+	if rbacRepo != nil {
+		// Assigned only when present, for the same reason: a typed-nil *Repository in the
+		// interface would defeat the member capability handler's nil check.
+		s.roleCapabilities = rbacRepo
 	}
 	if siemDestinationsEnabled(os.Getenv) {
 		s.siemEnabled = true
@@ -163,6 +174,7 @@ func NewServer(port int, orgService *orgcore.Service, rbacRepo *rbac.Repository,
 	s.keysOn = orgkeys.Enabled(os.Getenv)
 	s.retentionOn = retention.Enabled(os.Getenv)
 	s.orgFlagsOn = orgFlagsEnabled(os.Getenv)
+	s.roleCapabilitiesOn = roleCapabilitiesEnabled(os.Getenv)
 	s.setupRoutes()
 	s.httpServer = &http.Server{
 		Addr:              ":" + strconv.Itoa(port),
@@ -267,6 +279,13 @@ func (s *Server) setupRoutes() {
 	flagsGate := s.requireOrgFlagsEnabled()
 	s.router.GET("/orgs/:id/flags", flagsGate, s.getOrgFlags)
 	s.router.PUT("/orgs/:id/flags/:name", flagsGate, guard, s.putOrgFlag)
+
+	// The effective capabilities of the caller's own role (ORG_ROLE_CAPABILITIES_ENABLED): any
+	// active member reads the role it holds (org:read:self) on the signed-in user's delegation.
+	// The gateway's similarity-candidate check reads it here, since the internal read needs
+	// org:read:any. Every path answers 404 until the switch is on.
+	roleCapabilitiesGate := s.requireRoleCapabilitiesEnabled()
+	s.router.GET("/orgs/:id/roles/:roleName/capabilities", roleCapabilitiesGate, s.getMemberRoleCapabilities)
 
 	// SIEM destination config (WS06-S7): owner/admin CRUD. Every path answers 404
 	// until ORG_SIEM_DESTINATIONS_ENABLED is on. The handlers check the caller's

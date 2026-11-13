@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 const spies = vi.hoisted(() => ({
   listOrgZdrAcknowledgements: vi.fn(async () => ({
     items: [],
-    counts: { active: 0, revoked: 0 },
+    counts: { active: 0, superseded: 0, revoked: 0 },
     truncated: false,
   })),
   getConnectionZdr: vi.fn(async () => ({ requiresAcknowledgement: false })),

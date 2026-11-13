@@ -46,11 +46,31 @@ const DefaultOrgFiresPerHour = 120
 // DefaultMaxAuthAttempts is how many times a fire is asked of Control before it is refused.
 const DefaultMaxAuthAttempts = 3
 
-// fireWindow is the span the budgets count authorised fires over.
+// fireWindow is the span the budgets count authorised fires over. It also bounds the age of the webhook event a fire
+// answers: an event older than fireWindow is never authorised and never started (eventExpired).
 const fireWindow = time.Hour
 
-// Fire is one pending fire, with the trigger fields a decision reads. WakeFilter is the trigger's stored wake filter as
-// JSON, or nil for a trigger with none.
+// eventExpired reports whether the webhook event a fire answers is older than fireWindow at now. Its age only grows, so no
+// later decision could place such an event inside the window: a fire of it is refused, never authorised and never started.
+// A zero time is refused as well, because an unknown event time cannot be shown to be inside the window.
+func eventExpired(eventAt, now time.Time) bool {
+	return eventAt.Before(now.Add(-fireWindow))
+}
+
+// intakeFor settles a fire at the moment its event is consumed. The fire of a fresh event is pending, for the sweeper to
+// decide. The fire of an event already older than the window is never pending: it is recorded refused with
+// OutcomeFireExpired, so a backlog redelivered after an outage is closed at once and never queues ahead of fresh events.
+func intakeFor(eventAt, now time.Time) (status, outcome string, settledAt *time.Time) {
+	if !eventExpired(eventAt, now) {
+		return StatusPending, "", nil
+	}
+	settled := now
+	return StatusRefused, OutcomeFireExpired, &settled
+}
+
+// Fire is one pending fire, with the trigger fields a decision reads. EventAt is the webhook event's own creation time,
+// which the fire row keeps in created_at. WakeFilter is the trigger's stored wake filter as JSON, or nil for a trigger
+// with none.
 type Fire struct {
 	ID             string
 	TriggerID      string
@@ -61,6 +81,7 @@ type Fire struct {
 	MemberUserID   string
 	TriggerStatus  string
 	Attempts       int
+	EventAt        time.Time
 	WakeFilter     json.RawMessage
 }
 
@@ -120,11 +141,14 @@ func (l Limits) withDefaults() Limits {
 }
 
 // refusalFor names the reason a pending fire is refused before Control is asked, or is empty when it may be asked.
-// The trigger is checked first: a trigger paused or disabled since its event never fires.
-func refusalFor(fire Fire, counts Counts, limits Limits) string {
+// The trigger is checked first: a trigger paused or disabled since its event never fires. The event's age is checked
+// next, so an event older than the window is refused whatever the budgets say.
+func refusalFor(fire Fire, counts Counts, limits Limits, now time.Time) string {
 	switch {
 	case fire.TriggerStatus != "active":
 		return OutcomeTriggerNotActive
+	case eventExpired(fire.EventAt, now):
+		return OutcomeFireExpired
 	case counts.Trigger >= limits.TriggerPerHour:
 		return OutcomeTriggerBudget
 	case counts.Org >= limits.OrgPerHour:
@@ -134,13 +158,14 @@ func refusalFor(fire Fire, counts Counts, limits Limits) string {
 	}
 }
 
-// decide settles one pending fire. A refused fire never reaches Control. A fire whose trigger carries a wake filter must
-// also pass the wake gate first: a closed gate refuses it, and a payload that cannot be read leaves it pending, as an
-// authority error does. An authority error leaves the fire pending for a later sweep until it has used its attempts, and
-// then refuses it, so a Control outage cannot hold a fire open forever. The error is returned for the log: a refusal and
-// an outage look the same from here. A nil gate is the switch being off: stored filters are then ignored.
-func decide(ctx context.Context, authority cron.FireAuthorizer, gate wakeGate, fire Fire, counts Counts, limits Limits) (Settlement, error) {
-	if refusal := refusalFor(fire, counts, limits); refusal != "" {
+// decide settles one pending fire. A refused fire never reaches Control: a fire whose event is older than the window is
+// refused fire_expired before anything else is asked. A fire whose trigger carries a wake filter must also pass the wake
+// gate first: a closed gate refuses it, and a payload that cannot be read leaves it pending, as an authority error does.
+// An authority error leaves the fire pending for a later sweep until it has used its attempts, and then refuses it, so a
+// Control outage cannot hold a fire open forever. The error is returned for the log: a refusal and an outage look the same
+// from here. A nil gate is the switch being off: stored filters are then ignored.
+func decide(ctx context.Context, authority cron.FireAuthorizer, gate wakeGate, fire Fire, counts Counts, limits Limits, now time.Time) (Settlement, error) {
+	if refusal := refusalFor(fire, counts, limits, now); refusal != "" {
 		return Settlement{Status: StatusRefused, Outcome: refusal, Attempts: fire.Attempts}, nil
 	}
 	if gate != nil && len(fire.WakeFilter) > 0 {

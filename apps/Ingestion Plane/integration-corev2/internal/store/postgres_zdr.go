@@ -498,12 +498,32 @@ func (r *PostgresRepository) ListOrganizationConnectionZDRAcknowledgements(ctx c
 	if err != nil {
 		return ConnectionZDRAcknowledgementList{}, err
 	}
-	var active, revoked int64
-	if err := r.pool.QueryRow(ctx, `
-		SELECT count(*) FILTER (WHERE revoked_at IS NULL), count(*) FILTER (WHERE revoked_at IS NOT NULL)
+	// The counts are taken per text version, so a caller that holds the minimum can split the active rows. Versions
+	// are not compared in SQL: "v10" sorts before "v2", and the comparison is the zdr package's.
+	countRows, err := r.pool.Query(ctx, `
+		SELECT text_version, count(*) FILTER (WHERE revoked_at IS NULL), count(*) FILTER (WHERE revoked_at IS NOT NULL)
 		FROM integration_connection_zdr_acknowledgements
-		WHERE organization_id = $1`, organizationID).Scan(&active, &revoked); err != nil {
+		WHERE organization_id = $1
+		GROUP BY text_version`, organizationID)
+	if err != nil {
 		return ConnectionZDRAcknowledgementList{}, fmt.Errorf("count organisation zdr acknowledgements: %w", err)
 	}
-	return ConnectionZDRAcknowledgementList{Items: items, Active: int(active), Revoked: int(revoked)}, nil
+	defer countRows.Close()
+	list := ConnectionZDRAcknowledgementList{Items: items, ActiveByTextVersion: map[string]int{}}
+	for countRows.Next() {
+		var textVersion string
+		var active, revoked int64
+		if err := countRows.Scan(&textVersion, &active, &revoked); err != nil {
+			return ConnectionZDRAcknowledgementList{}, fmt.Errorf("scan organisation zdr acknowledgement counts: %w", err)
+		}
+		list.Active += int(active)
+		list.Revoked += int(revoked)
+		if active > 0 {
+			list.ActiveByTextVersion[textVersion] = int(active)
+		}
+	}
+	if err := countRows.Err(); err != nil {
+		return ConnectionZDRAcknowledgementList{}, fmt.Errorf("count organisation zdr acknowledgements: %w", err)
+	}
+	return list, nil
 }

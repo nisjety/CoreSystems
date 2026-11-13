@@ -11,7 +11,7 @@ import { sandboxHtmlDocument } from '@/shared/lib/sandbox-html'
 import { useI18n } from '@/shared/i18n'
 import { mediaTranscriptsEnabled, transcribeToDocument } from '@/shared/api/chat-client'
 import { ApiError, hasErrorCode } from '@/shared/api/http'
-import { isZdrCode } from '@/shared/api/zdr-refusals'
+import { REFUSAL_TEXT, isZdrCode } from '@/shared/api/zdr-refusals'
 import { transcriptAudioType } from '@/shared/actions/chat-transcript'
 
 /**
@@ -379,7 +379,7 @@ function formatBytes(bytes: number): string {
 }
 
 /** Why a transcript was not saved (W5-090-b). The reader sees the words for the reason, never the server's own text. */
-type TranscriptFailure = 'too_large' | 'unsupported' | 'unreadable' | 'empty' | 'zdr' | 'unavailable'
+type TranscriptFailure = 'too_large' | 'unsupported' | 'unreadable' | 'empty' | 'zdr' | 'decision_unavailable' | 'unavailable'
 
 /** Where a transcript request for one attachment stands on screen (W5-090-b). */
 type TranscriptOutcome =
@@ -396,6 +396,12 @@ const TRANSCRIPT_FAILURE_COPY: Record<TranscriptFailure, { no: string; en: strin
     no: 'Zero Data Retention gjelder, så opptaket kan ikke lagres som dokument.',
     en: 'Zero Data Retention applies, so this recording cannot be saved as a document.',
   },
+  // The retryable zero-retention outage: the organisation's settings could not be read, so the recording was not sent. Its words
+  // are the catalogue's, the same ones the chat stream shows for this code.
+  decision_unavailable: {
+    no: REFUSAL_TEXT.zdr_decision_unavailable.no,
+    en: REFUSAL_TEXT.zdr_decision_unavailable.en,
+  },
   unavailable: { no: 'Transkripsjonen kunne ikke lagres. Prøv igjen.', en: 'The transcript could not be saved. Try again.' },
 }
 
@@ -410,6 +416,8 @@ function transcriptFailureOf(error: unknown): TranscriptFailure {
   if (hasErrorCode(error, 'transcript_type_unsupported', 'unsupported_audio_type')) return 'unsupported'
   if (hasErrorCode(error, 'transcription_failed')) return 'unreadable'
   if (hasErrorCode(error, 'transcript_empty')) return 'empty'
+  // A retryable zero-retention answer is an outage, not a refusal of the recording: the route refuses it before anything is sent.
+  if (hasErrorCode(error, 'zdr_decision_unavailable')) return 'decision_unavailable'
   if (error instanceof ApiError && isZdrCode(error.code)) return 'zdr'
   return 'unavailable'
 }

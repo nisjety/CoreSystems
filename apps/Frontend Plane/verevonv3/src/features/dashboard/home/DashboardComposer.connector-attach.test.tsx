@@ -221,3 +221,136 @@ describe('personal connection ownership errors', () => {
     expect(screen.queryByText('Kunne ikke søke.')).toBeNull()
   })
 })
+
+// Pre-flight readability check (connector-picker spec §6.2): a picked PDF or Office file is read at pick time. A refusal
+// that names its reason (a code, or a 401, 403 or 429 with its own copy) keeps that reason. Any other refusal, including
+// imports-core's code-less {detail} answers, gets this file's read line, as does a failure nobody answered. Nothing is
+// attached in any of these cases.
+describe('a refusal from the pre-flight read', () => {
+  // The extraction route answers with the gateway envelope; every other request keeps the setup's empty 200.
+  function extractionAnswers(reply: () => Response | Error) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (!String(input).includes('/api/v1/chat/documents/extract')) {
+          return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } })
+        }
+        const answer = reply()
+        if (answer instanceof Error) throw answer
+        return answer
+      }),
+    )
+  }
+
+  function envelope(status: number, error: Record<string, unknown>): () => Response {
+    return () => new Response(JSON.stringify({ error }), { status, headers: { 'Content-Type': 'application/json' } })
+  }
+
+  // imports-core's read refusals: FastAPI's {detail} body, with no code.
+  function detailAnswer(status: number, detail: string): () => Response {
+    return () => new Response(JSON.stringify({ detail }), { status, headers: { 'Content-Type': 'application/json' } })
+  }
+
+  async function pickRapport() {
+    mockListConnectorPickerTabs.mockResolvedValue(oneMicrosoftTab)
+    mockBrowseConnection.mockResolvedValue({
+      providerKey: 'microsoft',
+      operation: 'drive.files',
+      result: { value: [{ id: 'item-1', name: 'Rapport.pdf', size: 12_345, file: { mimeType: 'application/pdf' } }] },
+    })
+    mockFetchConnectionContent.mockResolvedValue({
+      providerKey: 'microsoft',
+      operation: 'drive.file.content',
+      result: { content_base64: btoa('PDF bytes'), mime_type: 'application/pdf', size: 9, truncated: false },
+    })
+
+    renderComposer()
+    await openConnectorPicker()
+    fireEvent.click(await screen.findByText('Rapport.pdf'))
+    flush()
+  }
+
+  function expectNothingAttached() {
+    expect(document.querySelector('[data-attachment-source="onedrive"]')).toBeNull()
+  }
+
+  it('shows a zero-retention refusal of the read in its own words', async () => {
+    extractionAnswers(envelope(403, { code: 'zdr_feature_not_supported', message: 'Zero retention', feature: 'web_search' }))
+    await pickRapport()
+
+    await screen.findByText(/Dette støttes ikke med Zero Data Retention/)
+    expect(screen.queryByText(/Kunne ikke lese/)).toBeNull()
+    expectNothingAttached()
+  })
+
+  it('shows the service outage of the read in its own words', async () => {
+    // The gateway's own typed 502, sent when imports-core cannot be reached.
+    extractionAnswers(envelope(502, { code: 'upstream_unavailable', message: 'The upstream service is unavailable.' }))
+    await pickRapport()
+
+    await screen.findByText('Tjenesten er utilgjengelig akkurat nå. Prøv igjen om litt.')
+    expect(screen.queryByText(/Kunne ikke lese/)).toBeNull()
+    expectNothingAttached()
+  })
+
+  it('shows the rate limit with its retry time', async () => {
+    extractionAnswers(envelope(429, { code: 'rate_limited', message: 'Slow down', retryAfterSeconds: 30 }))
+    await pickRapport()
+
+    await screen.findByText('Det kommer for mange forespørsler akkurat nå. Prøv igjen om 30 sekunder.')
+    expect(screen.queryByText(/Kunne ikke lese/)).toBeNull()
+    expectNothingAttached()
+  })
+
+  it('reads a scanned PDF that imports-core refuses without a code as a failed read', async () => {
+    extractionAnswers(detailAnswer(422, 'No readable text found in Rapport.pdf'))
+    await pickRapport()
+
+    await screen.findByText('Kunne ikke lese «Rapport.pdf». Prøv igjen eller velg en annen fil.')
+    expect(screen.queryByText(/Noe gikk galt/)).toBeNull()
+    expectNothingAttached()
+  })
+
+  it('reads a code-less 404 as a failed read, not as a stale pick', async () => {
+    extractionAnswers(detailAnswer(404, 'Not Found'))
+    await pickRapport()
+
+    await screen.findByText('Kunne ikke lese «Rapport.pdf». Prøv igjen eller velg en annen fil.')
+    expect(screen.queryByText(/ikke lenger tilgjengelig/)).toBeNull()
+    expectNothingAttached()
+  })
+
+  it('reads a code-less 413 as a failed read', async () => {
+    extractionAnswers(detailAnswer(413, 'Document too large'))
+    await pickRapport()
+
+    await screen.findByText('Kunne ikke lese «Rapport.pdf». Prøv igjen eller velg en annen fil.')
+    expectNothingAttached()
+  })
+
+  it('keeps the rate-limit copy for a code-less 429', async () => {
+    extractionAnswers(detailAnswer(429, 'Too many requests'))
+    await pickRapport()
+
+    await screen.findByText('Det kommer for mange forespørsler akkurat nå. Prøv igjen om litt.')
+    expect(screen.queryByText(/Kunne ikke lese/)).toBeNull()
+    expectNothingAttached()
+  })
+
+  it('reads a code-less 410 as a failed read, since a gone status has no copy without a code', async () => {
+    // A 410 without a code has no copy of its own (a typed session-lost code does), so the read line is the honest one.
+    extractionAnswers(detailAnswer(410, 'Gone'))
+    await pickRapport()
+
+    await screen.findByText('Kunne ikke lese «Rapport.pdf». Prøv igjen eller velg en annen fil.')
+    expectNothingAttached()
+  })
+
+  it('keeps the generic read refusal for a failure nobody typed', async () => {
+    extractionAnswers(() => new TypeError('Failed to fetch'))
+    await pickRapport()
+
+    await screen.findByText('Kunne ikke lese «Rapport.pdf». Prøv igjen eller velg en annen fil.')
+    expectNothingAttached()
+  })
+})

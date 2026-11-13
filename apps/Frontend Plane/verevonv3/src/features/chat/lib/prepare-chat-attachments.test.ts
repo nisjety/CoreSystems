@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { prepareChatAttachments } from './prepare-chat-attachments'
 import { extractChatDocument, getAttachmentPolicy } from '@/shared/api/chat-client'
+import { ApiError } from '@/shared/api/api-error'
 import { LocalizedError, translateApiError } from '@/shared/i18n/errors'
 
 vi.mock('@/shared/api/chat-client', () => ({ extractChatDocument: vi.fn(), getAttachmentPolicy: vi.fn(() => undefined) }))
@@ -81,5 +82,36 @@ describe('complete attachment preparation before submission', () => {
     const result = await prepareChatAttachments([notYetExtracted])
     expect(result[0]?.extractedText).toBe('Freshly extracted text')
     expect(extractChatDocument).toHaveBeenCalledWith(notYetExtracted.name, 'SGVsbG8=', notYetExtracted.type)
+  })
+  describe('a refusal from the read keeps its own reason', () => {
+    const pdf = () => ({ ...file('source.pdf', ''), type: 'application/pdf', url: 'data:application/pdf;base64,SGVsbG8=' })
+    const norwegian = (noText: string) => noText
+    const fallback = { no: 'Kunne ikke sende. Prøv igjen.', en: 'Could not send. Please retry.' }
+    it.each([
+      ['a zero-retention refusal', new ApiError('Zero retention', 403, 'zdr_feature_not_supported')],
+      ['a document over the server limit', new ApiError('Too large', 413, 'too_large')],
+      ['a rate limit', new ApiError('Slow down', 429, null, { retryAfterSeconds: 30 })],
+    ])('passes %s from the extraction route on unchanged', async (_label, refusal) => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }))
+      vi.mocked(extractChatDocument).mockRejectedValueOnce(refusal)
+      const caught: unknown = await prepareChatAttachments([pdf()]).then(() => undefined, (error: unknown) => error)
+      expect(caught).toBe(refusal)
+      expect(translateApiError(caught, norwegian, fallback)).toBe(translateApiError(refusal, norwegian, fallback))
+      expect(translateApiError(caught, norwegian, fallback)).not.toContain('Kunne ikke lese')
+    })
+    it('passes a refusal the SPA wrote itself on unchanged', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }))
+      const refusal = new LocalizedError({ no: 'Velg en mindre fil.', en: 'Choose a smaller file.' })
+      vi.mocked(extractChatDocument).mockRejectedValueOnce(refusal)
+      await expect(prepareChatAttachments([pdf()])).rejects.toBe(refusal)
+    })
+    it('wraps a failure nobody typed in the read refusal, naming the file in both languages', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }))
+      vi.mocked(extractChatDocument).mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      const caught: unknown = await prepareChatAttachments([pdf()]).then(() => undefined, (error: unknown) => error)
+      expect(caught).toBeInstanceOf(LocalizedError)
+      expect((caught as LocalizedError).copy.no).toContain('Kunne ikke lese hele «source.pdf»')
+      expect((caught as LocalizedError).copy.en).toContain('Could not read all of “source.pdf”')
+    })
   })
 })

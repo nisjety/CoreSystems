@@ -13,6 +13,10 @@ services:
             CONTROL_PLANE_ENFORCEMENT: strict
             ALLOW_DEV_AUTH_BYPASS: "0"
             ALLOW_INSECURE_DEV_DEFAULTS: "0"
+            # V3-bff-4-rel2: the base compose passes these two through from the host env. Pinned on here so a
+            # host value of off cannot silence the ZDR sensitive-field log filter or the per-class rate limits.
+            GATEWAY_ZDR_LOG_FILTER: "on"
+            GATEWAY_RATE_CLASSES: "on"
             SPACE_DENIALS_TYPED: "false"
             SPACE_POLICY_ADMIN_API: "false"
             SPACE_MEMBERSHIP_WRITER_API: "false"
@@ -52,6 +56,17 @@ services:
             SPACE_RUN_LIVE_VIEW: "false"
             SPACE_RUN_LIVE_TEXT: "false"
             SPACE_RUN_MANAGER_STOP: "false"
+            # Dev-default-on Space switches (space_flag) that the base compose declares on: off in production.
+            SPACE_AGENT_WAKE_POLICY_API: "false"
+            SPACE_APPROVAL_SCOPES_ENABLED: "false"
+            CHAT_LOCALE_HINT: "false"
+            SPACE_ROOM_ARCHIVE_API: "false"
+            SPACE_TOOL_POLICY_EDITOR_ENABLED: "false"
+            SPACE_COMPOSER_DRAFTS_UI: "false"
+            SPACE_COMPOSER_MARKDOWN_UI: "false"
+            SPACE_HUMAN_MARKDOWN_UI: "false"
+            SPACE_ROOM_DIRECTORY_API: "false"
+            SPACE_TIMELINE_ANCHOR_UI: "false"
             MODEL_GATEWAY_DEV_BEARER: ""
             VEREVON_PUBLIC_ORIGIN: ${VEREVON_PUBLIC_ORIGIN:?VEREVON_PUBLIC_ORIGIN is required in production}
 

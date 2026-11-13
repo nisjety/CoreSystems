@@ -1433,7 +1433,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:80dbac5d6dde4dda24124873a35bcad202bf78d2f534f66587d5c156ad89dfd6",
+      "schemaHash": "sha256:85dacf6746c778493cdb49cad42af96c9c526ec67bd335eae814568bad19007a",
       "zdr_allowed": false
     },
     {
@@ -1446,7 +1446,7 @@
       "eligible": false,
       "executor": {},
       "hashBasis": "catalog_entry",
-      "schemaHash": "sha256:5e37314d40cfa40c406bac95750b2f158fc355a766be140b1bcc5729145990be",
+      "schemaHash": "sha256:786b50b489a572ea068c9b1a3bcd08099f8e919cd95cbebb3dc2fc860b5a2895",
       "zdr_allowed": false
     },
     {

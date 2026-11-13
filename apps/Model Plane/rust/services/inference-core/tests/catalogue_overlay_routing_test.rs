@@ -2,14 +2,17 @@
 //! layer (`verevon-*`), the platform role table (`verevon-role`), the tool ladder and the automatic provider default
 //! never serve a model the overlay hides, and a cached answer for a model that is now hidden is not served.
 //!
-//! This binary runs with `INFERENCE_CATALOGUE_OVERLAY=true`: the switch is read once per process, so every test
-//! sets it before the first chain call. The switch-off path is pinned in `catalogue_overlay_routing_off_test.rs`.
+//! This binary runs with `INFERENCE_CATALOGUE_OVERLAY=true` and `INFERENCE_ROUTE_NOTE=true`: each switch is read once
+//! per process, so every test sets them before the first chain call. The switch-off path is pinned in
+//! `catalogue_overlay_routing_off_test.rs`.
 //! Only the providers are doubles; the chain, its intent layer, role table and admission are the real ones.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Once};
 
 use inference_core::provider::catalogue_overlay::CatalogueOverlay;
-use inference_core::provider::fallback::{FallbackChain, ProviderRouterDyn};
+use inference_core::provider::fallback::{FallbackChain, HidingOverlay, ProviderRouterDyn};
+use inference_core::provider::intent::VerevonMode;
 use inference_core::provider::role::{RoleCall, ROLE_MODEL_ID};
 use inference_core::provider::routing_policy::{
     ComplexityModels, ModeTable, RoleEntry, RolePurpose, RoutingPolicy,
@@ -35,7 +38,10 @@ type Seen = Arc<Mutex<Vec<String>>>;
 
 fn switch_on() {
     static ONCE: Once = Once::new();
-    ONCE.call_once(|| std::env::set_var("INFERENCE_CATALOGUE_OVERLAY", "true"));
+    ONCE.call_once(|| {
+        std::env::set_var("INFERENCE_CATALOGUE_OVERLAY", "true");
+        std::env::set_var("INFERENCE_ROUTE_NOTE", "true");
+    });
 }
 
 /// A provider that lists `models`, serves the ids of its family, and records each model it is asked for.
@@ -545,4 +551,200 @@ async fn a_verevon_mode_with_the_intent_layer_off_moves_on_to_a_visible_default(
         ["claude-sonnet-5-5"],
         "the hidden default was called"
     );
+}
+
+/// A policy with no tool ladder: an intent pick has no rung after it, so the walk has nothing else to try.
+fn ladderless_policy(hidden: &[&str]) -> RoutingPolicy {
+    let mut policy = shared_policy(hidden);
+    policy.tool_fallback_ladder.clear();
+    policy
+}
+
+/// A hidden intent pick with no ladder is served by the policy's cheap fallback, a visible model the walk can try, so
+/// the call does not end as `model_hidden` while that model is visible.
+#[tokio::test]
+async fn a_ladderless_hidden_intent_pick_is_served_by_the_cheap_fallback() {
+    let seen = shared();
+    let chain = chain_with(
+        vec![("openai", Recording::openai(&seen))],
+        ladderless_policy(&["gpt-5-mini"]),
+    );
+    let response = chain
+        .infer(&request("verevon-balance"))
+        .await
+        .expect("the visible cheap fallback serves it");
+    assert_eq!(response.model_used, "gpt-4o-mini");
+    assert_eq!(calls(&seen), ["gpt-4o-mini"], "the hidden pick was called");
+}
+
+/// The stream path takes the same substitute: the cheap fallback is the model opened.
+#[tokio::test]
+async fn a_ladderless_hidden_intent_pick_is_opened_on_the_cheap_fallback() {
+    let seen = shared();
+    let chain = chain_with(
+        vec![("openai", Recording::openai(&seen))],
+        ladderless_policy(&["gpt-5-mini"]),
+    );
+    let _stream = chain
+        .infer_stream(&request("verevon-balance"))
+        .await
+        .expect("the visible cheap fallback streams it");
+    assert_eq!(calls(&seen), ["gpt-4o-mini"], "the hidden pick was opened");
+}
+
+/// A ladderless intent pick with no visible candidate left is refused as `model_hidden` before any provider is called.
+#[tokio::test]
+async fn a_ladderless_hidden_intent_pick_with_nothing_visible_is_refused_as_hidden() {
+    let seen = shared();
+    let chain = chain_with(
+        vec![("openai", Recording::openai(&seen))],
+        ladderless_policy(&["gpt-5-mini", "gpt-4o-mini"]),
+    );
+    let error = chain
+        .infer(&request("verevon-balance"))
+        .await
+        .expect_err("nothing visible serves it");
+    assert!(
+        matches!(error, ProviderError::ModelHidden { .. }),
+        "{error:?}"
+    );
+    assert!(calls(&seen).is_empty(), "a provider was called");
+}
+
+/// A hidden id with surrounding whitespace hides the model it names: the intent cell is not served, the first rung is.
+#[tokio::test]
+async fn a_padded_hidden_id_hides_the_model_it_names() {
+    let seen = shared();
+    let chain = chain_with(
+        vec![("openai", Recording::openai(&seen))],
+        shared_policy(&[" gpt-5-mini "]),
+    );
+    let response = chain
+        .infer(&request("verevon-balance"))
+        .await
+        .expect("the first visible rung serves it");
+    assert_eq!(response.model_used, "gpt-4o-mini");
+    assert_eq!(
+        calls(&seen),
+        ["gpt-4o-mini"],
+        "the padded hidden id did not hide the cell"
+    );
+}
+
+/// The route note of an intent call the overlay moved names the mode, but no budget move and no reason for the model
+/// the intent layer chose, which is not the one served.
+#[tokio::test]
+async fn the_route_note_of_a_call_the_overlay_moved_names_no_budget_move() {
+    let seen = shared();
+    let chain = chain_with(
+        vec![("openai", Recording::openai(&seen))],
+        shared_policy(&["gpt-5-mini"]),
+    );
+    let (response, note) = chain
+        .infer_noted(&request("verevon-balance"), false)
+        .await
+        .expect("the next visible rung serves it");
+    assert_eq!(response.model_used, "gpt-4o-mini");
+    let note = note.expect("the route note is on");
+    assert_eq!(note.mode, Some(VerevonMode::Balance));
+    assert_eq!(
+        note.reason, "",
+        "the note gives the reason of a model that was not served"
+    );
+    assert!(!note.tier_shifted && !note.cheap_fallback_forced);
+}
+
+/// An intent pick no overlay hides keeps the note it always had: its mode, and the reason the posture gives. No
+/// cost-core budget is wired in this binary, so the posture is unknown.
+#[tokio::test]
+async fn an_intent_pick_no_overlay_hides_keeps_its_route_note() {
+    let seen = shared();
+    let chain = chain_with(
+        vec![("openai", Recording::openai(&seen))],
+        shared_policy(&[]),
+    );
+    let (response, note) = chain
+        .infer_noted(&request("verevon-balance"), false)
+        .await
+        .expect("the cell serves it");
+    assert_eq!(response.model_used, "gpt-5-mini");
+    let note = note.expect("the route note is on");
+    assert_eq!(note.mode, Some(VerevonMode::Balance));
+    assert_eq!(note.reason, "posture_unknown");
+}
+
+/// The access verdict GetModelAccess answers with is `hiding_overlay`, and it judges a model as admission does
+/// (V3-inf-1): a hidden id is hidden whatever its case or padding, and an alias is judged by the model it stands for.
+#[tokio::test]
+async fn the_access_verdict_reports_a_model_the_platform_overlay_hides() {
+    let seen = shared();
+    let mut policy = shared_policy(&["gpt-5-mini", " gpt-5-nano "]);
+    policy.catalogue_overlay.aliases = BTreeMap::from([
+        ("hidden-alias".to_owned(), "gpt-5-mini".to_owned()),
+        ("visible-alias".to_owned(), "gpt-4o-mini".to_owned()),
+    ]);
+    let chain = chain_with(vec![("openai", Recording::openai(&seen))], policy);
+    assert_eq!(
+        chain.hiding_overlay("org-1", "gpt-5-mini").await,
+        Some(HidingOverlay::Platform)
+    );
+    assert_eq!(
+        chain.hiding_overlay("org-1", " GPT-5-MINI ").await,
+        Some(HidingOverlay::Platform)
+    );
+    assert_eq!(
+        chain.hiding_overlay("org-1", "gpt-5-nano").await,
+        Some(HidingOverlay::Platform),
+        "a padded hidden entry did not hide the model it names"
+    );
+    assert_eq!(
+        chain.hiding_overlay("org-1", "hidden-alias").await,
+        Some(HidingOverlay::Platform),
+        "an alias of a hidden model was not judged by its target"
+    );
+    assert_eq!(chain.hiding_overlay("org-1", "visible-alias").await, None);
+    assert_eq!(chain.hiding_overlay("org-1", "gpt-4o-mini").await, None);
+    assert!(calls(&seen).is_empty(), "a provider was called");
+}
+
+/// A retired Claude id is served as its successor, so the verdict judges it by the successor (V3-inf-1).
+#[tokio::test]
+async fn the_access_verdict_judges_a_retired_claude_id_by_its_successor() {
+    let seen = shared();
+    let chain = chain_with(
+        vec![("anthropic", Recording::anthropic(&seen))],
+        shared_policy(&["claude-sonnet-5-5"]),
+    );
+    assert_eq!(
+        chain
+            .hiding_overlay("org-1", "claude-sonnet-4-20250514")
+            .await,
+        Some(HidingOverlay::Platform),
+        "a retired id whose successor is hidden was not refused"
+    );
+    assert_eq!(
+        chain.hiding_overlay("org-1", "claude-haiku-5-5").await,
+        None
+    );
+}
+
+/// The ids the routing layer answers for itself are never judged by an overlay (V3-inf-1): an automatic call, an
+/// intent mode and the role table each pick a model and the walk judges that pick. The overlay here also lists those
+/// ids as hidden, which only the reserved-id check keeps from refusing them, and the verdict still names none of them.
+#[tokio::test]
+async fn the_access_verdict_leaves_the_ids_the_routing_layer_answers_for_itself() {
+    let seen = shared();
+    let chain = chain_with(
+        vec![("openai", Recording::openai(&seen))],
+        shared_policy(&[
+            "gpt-4o-mini",
+            "gpt-5-mini",
+            "verevon-balance",
+            ROLE_MODEL_ID,
+        ]),
+    );
+    for id in ["", "verevon-balance", ROLE_MODEL_ID] {
+        assert_eq!(chain.hiding_overlay("org-1", id).await, None, "{id:?}");
+    }
+    assert!(calls(&seen).is_empty(), "a provider was called");
 }

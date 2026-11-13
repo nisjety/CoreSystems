@@ -199,3 +199,14 @@ async fn with_the_switch_off_a_hidden_role_candidate_is_chosen_as_before() {
     assert_eq!(response.model_used, "gpt-5-nano");
     assert_eq!(calls(&seen), ["gpt-5-nano"]);
 }
+
+/// With the switch off the access verdict reads no overlay: a model the stored overlay hides is not reported as hidden,
+/// as infer serves it (V3-inf-1).
+#[tokio::test]
+async fn with_the_switch_off_the_access_verdict_reports_nothing_hidden() {
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    let chain = chain_with(&seen, policy(&["gpt-5-mini"]));
+    assert_eq!(chain.hiding_overlay("org-1", "gpt-5-mini").await, None);
+    assert_eq!(chain.hiding_overlay("org-1", "verevon-balance").await, None);
+    assert_eq!(chain.hiding_overlay("org-1", "gpt-5-mini ").await, None);
+}

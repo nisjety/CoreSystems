@@ -10,9 +10,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// recorder writes the pending fires one webhook event creates.
+// recorder writes the fires one webhook event creates. now is the consumer's clock: it decides whether the event is still
+// inside the window when it is recorded.
 type recorder interface {
-	record(ctx context.Context, event WebhookReceived) (int, error)
+	record(ctx context.Context, event WebhookReceived, now time.Time) (int, error)
 }
 
 // ledger opens a sweep batch over the fire table.
@@ -38,9 +39,12 @@ type pgStore struct {
 	wakeFilter bool
 }
 
-// record writes one pending fire for each active trigger bound to the event's connection, in one transaction. A
-// trigger that already has a fire for this webhook event keeps it, so a redelivered event writes nothing new.
-func (s pgStore) record(ctx context.Context, event WebhookReceived) (int, error) {
+// record writes one fire for each active trigger bound to the event's connection, in one transaction. The fire is pending
+// when the event is inside the window, and refused fire_expired when it is already older (intakeFor). Its created_at is
+// the event's own creation time, so the sweeper and the starter read the event's age from the row. A trigger that
+// already has a fire for this webhook event keeps it, so a redelivered event writes nothing new.
+func (s pgStore) record(ctx context.Context, event WebhookReceived, now time.Time) (int, error) {
+	status, outcome, settledAt := intakeFor(event.EventAt, now)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("begin trigger fire record: %w", err)
@@ -71,10 +75,11 @@ func (s pgStore) record(ctx context.Context, event WebhookReceived) (int, error)
 	recorded := 0
 	for _, triggerID := range triggerIDs {
 		tag, err := tx.Exec(ctx, `
-			INSERT INTO event_trigger_fires (id, trigger_id, org_id, webhook_event_id, status)
-			VALUES ($1, $2, $3, $4, 'pending')
+			INSERT INTO event_trigger_fires (id, trigger_id, org_id, webhook_event_id, status, outcome, created_at, settled_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			ON CONFLICT (trigger_id, webhook_event_id) DO NOTHING`,
-			"trgfire_"+uuid.New().String(), triggerID, event.OrgID, event.WebhookEventID)
+			"trgfire_"+uuid.New().String(), triggerID, event.OrgID, event.WebhookEventID,
+			status, outcome, event.EventAt, settledAt)
 		if err != nil {
 			return 0, fmt.Errorf("record trigger fire: %w", err)
 		}
@@ -102,7 +107,7 @@ type pgBatch struct {
 // The claim's SQL either side of the wake filter column. The column is named only when the wake gate is on, so a sweeper
 // without the gate reads nothing it does not need.
 const dueFiresSelect = `
-		SELECT f.id, f.trigger_id, f.org_id, f.webhook_event_id, f.attempts,
+		SELECT f.id, f.trigger_id, f.org_id, f.webhook_event_id, f.attempts, f.created_at,
 		       t.connection_id, t.space_ref, t.member_user_id, t.status, `
 
 const dueFiresFrom = `
@@ -114,7 +119,8 @@ const dueFiresFrom = `
 		FOR UPDATE OF f SKIP LOCKED`
 
 // due claims up to limit pending fires. A row another replica holds is skipped, so replicas never decide one fire
-// twice. The stored wake filter is read only when the wake gate is on; with it off every fire's filter is nil.
+// twice. The stored wake filter is read only when the wake gate is on; with it off every fire's filter is nil. Each
+// fire carries its event's creation time (created_at), which the decision checks against the window.
 func (b pgBatch) due(ctx context.Context, limit int) ([]Fire, error) {
 	wakeFilter := "NULL::jsonb"
 	if b.wakeFilter {
@@ -128,7 +134,7 @@ func (b pgBatch) due(ctx context.Context, limit int) ([]Fire, error) {
 	var fires []Fire
 	for rows.Next() {
 		var fire Fire
-		if err := rows.Scan(&fire.ID, &fire.TriggerID, &fire.OrgID, &fire.WebhookEventID, &fire.Attempts,
+		if err := rows.Scan(&fire.ID, &fire.TriggerID, &fire.OrgID, &fire.WebhookEventID, &fire.Attempts, &fire.EventAt,
 			&fire.ConnectionID, &fire.SpaceRef, &fire.MemberUserID, &fire.TriggerStatus, &fire.WakeFilter); err != nil {
 			return nil, fmt.Errorf("scan pending trigger fire: %w", err)
 		}

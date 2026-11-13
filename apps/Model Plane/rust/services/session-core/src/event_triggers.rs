@@ -572,7 +572,8 @@ pub(crate) async fn list_event_triggers(
 }
 
 /// Change one of the caller's triggers under a compare-and-set on its revision. A disabled trigger
-/// takes no change: its status is final.
+/// takes no change: its status is final. A change that moves the trigger out of `active` also settles
+/// its authorised fires that no run has started (see [`settle_unstarted_fires`]), in the same transaction.
 pub(crate) async fn update_event_trigger(
     pool: &PgPool,
     caller: &VerifiedIdentity,
@@ -598,6 +599,7 @@ pub(crate) async fn update_event_trigger(
     if trigger.status == "disabled" {
         return Err(Status::failed_precondition(TRIGGER_CLOSED));
     }
+    let before = trigger.status.clone();
 
     let wants = |path: &str| req.update_paths.iter().any(|named| named == path);
     if wants("name") {
@@ -643,8 +645,44 @@ pub(crate) async fn update_event_trigger(
     .fetch_one(&mut *tx)
     .await
     .map_err(internal)?;
+    if leaves_active(&before, &row.status) {
+        settle_unstarted_fires(&mut tx, &row.id).await?;
+    }
     tx.commit().await.map_err(internal)?;
     Ok(found(row))
+}
+
+/// Whether a change moves a trigger out of `active`. Only such a change settles the trigger's unstarted fires.
+fn leaves_active(before: &str, after: &str) -> bool {
+    before == "active" && after != "active"
+}
+
+/// The outcome a settled fire records once its trigger is no longer active. capability-core writes the same string for
+/// the same refusal (`OutcomeTriggerNotActive` in fire.go), so a fire refused by either service reads alike.
+const OUTCOME_TRIGGER_NOT_ACTIVE: &str = "trigger_not_active";
+
+/// Settles the authorised fires of `trigger_id` that no run has started, as refused with `trigger_not_active`, in the
+/// caller's transaction, so the status change and this settle commit together. The starter refuses such a fire only
+/// in a pass that finds the trigger inactive. A pause and a re-activation that both commit between two passes leave no
+/// such pass, and the fire would then start the run of an event that arrived while the trigger was active. The row
+/// matches the starter's own refusal (`refuse` in starter.go): status refused, the outcome, settled now. A fire with a
+/// task has started its run and is left alone. No switch is read here: the update is reached only through the RPC,
+/// which answers while EVENT_TRIGGERS_ENABLED is literal true, so this settle runs only when that switch is on.
+async fn settle_unstarted_fires(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    trigger_id: &str,
+) -> Result<(), Status> {
+    sqlx::query(
+        "UPDATE event_trigger_fires
+         SET status = 'refused', outcome = $2, settled_at = now()
+         WHERE trigger_id = $1 AND status = 'authorized' AND task_id IS NULL",
+    )
+    .bind(trigger_id)
+    .bind(OUTCOME_TRIGGER_NOT_ACTIVE)
+    .execute(&mut **tx)
+    .await
+    .map_err(internal)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -711,6 +749,17 @@ mod tests {
         let conflict = check_revision(3, 2).unwrap_err();
         assert_eq!(conflict.code(), tonic::Code::Aborted);
         assert_eq!(conflict.message(), REVISION_CONFLICT);
+    }
+
+    #[test]
+    fn event_trigger_leaving_active_settles_unstarted_fires() {
+        assert!(leaves_active("active", "paused"));
+        assert!(leaves_active("active", "disabled"));
+        assert!(!leaves_active("active", "active"));
+        assert!(!leaves_active("paused", "active"));
+        assert!(!leaves_active("paused", "paused"));
+        assert!(!leaves_active("paused", "disabled"));
+        assert_eq!(OUTCOME_TRIGGER_NOT_ACTIVE, "trigger_not_active");
     }
 
     #[test]
@@ -977,5 +1026,150 @@ mod tests {
         crate::gdpr::purge_organization_data(&pool, &other_org, None)
             .await
             .unwrap();
+    }
+
+    /// Inserts one fire of `trigger_id` in `status`, settled exactly when it is not pending (the table's CHECK), with a
+    /// task recorded on it when `task_id` is given. Returns the fire id.
+    async fn insert_fire(
+        pool: &PgPool,
+        org: &str,
+        trigger_id: &str,
+        status: &str,
+        outcome: &str,
+        task_id: Option<&str>,
+    ) -> String {
+        let id = format!("trgfire_{}", new_ulid());
+        sqlx::query(
+            "INSERT INTO event_trigger_fires
+             (id, trigger_id, org_id, webhook_event_id, status, outcome, settled_at, task_id, started_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(&id)
+        .bind(trigger_id)
+        .bind(org)
+        .bind(format!("evt_{}", new_ulid()))
+        .bind(status)
+        .bind(outcome)
+        .bind((status != "pending").then(Utc::now))
+        .bind(task_id)
+        .bind(task_id.map(|_| Utc::now()))
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// Asserts one fire's status, outcome, whether it is settled, and whether a task is recorded on it.
+    async fn assert_fire(pool: &PgPool, id: &str, want: (&str, &str, bool, bool)) {
+        let (status, outcome, settled, task): (String, String, bool, bool) = sqlx::query_as(
+            "SELECT status, outcome, settled_at IS NOT NULL, task_id IS NOT NULL
+             FROM event_trigger_fires WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (status.as_str(), outcome.as_str(), settled, task),
+            want,
+            "fire {id}"
+        );
+    }
+
+    /// A pause settles the trigger's authorised fires that no run has started, as refused `trigger_not_active`, and no
+    /// other fire: one with a task, a pending one, an already refused one and another trigger's keep their state. A
+    /// re-activation revives nothing, and disabling settles the same way.
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL to a disposable Postgres with session-core migrations"]
+    async fn event_trigger_pause_settles_unstarted_fires() {
+        let pool = connect().await;
+        let (org, owner) = fresh_identity();
+        let caller = VerifiedIdentity::user_for_test(&org, &owner);
+        let trigger = create_event_trigger(&pool, &caller, create_request(&org, "space-a"))
+            .await
+            .unwrap()
+            .trigger
+            .unwrap();
+        let other = create_event_trigger(&pool, &caller, create_request(&org, "space-a"))
+            .await
+            .unwrap()
+            .trigger
+            .unwrap();
+        let unstarted =
+            insert_fire(&pool, &org, &trigger.id, "authorized", "authorized", None).await;
+        let started = insert_fire(
+            &pool,
+            &org,
+            &trigger.id,
+            "authorized",
+            "authorized",
+            Some("task_started_1"),
+        )
+        .await;
+        let pending = insert_fire(&pool, &org, &trigger.id, "pending", "", None).await;
+        let refused = insert_fire(
+            &pool,
+            &org,
+            &trigger.id,
+            "refused",
+            "org_quota_reached",
+            None,
+        )
+        .await;
+        let elsewhere = insert_fire(&pool, &org, &other.id, "authorized", "authorized", None).await;
+        let change =
+            |trigger_id: &str, revision: u64, status: &str| pb::UpdateEventTriggerRequest {
+                org_id: org.clone(),
+                trigger_id: trigger_id.to_owned(),
+                expected_revision: revision,
+                update_paths: vec!["status".to_owned()],
+                status: status.to_owned(),
+                ..Default::default()
+            };
+
+        let paused = update_event_trigger(&pool, &caller, change(&trigger.id, 1, "paused"))
+            .await
+            .unwrap()
+            .trigger
+            .unwrap();
+        assert_eq!((paused.status.as_str(), paused.revision), ("paused", 2));
+        assert_fire(
+            &pool,
+            &unstarted,
+            ("refused", "trigger_not_active", true, false),
+        )
+        .await;
+        assert_fire(&pool, &started, ("authorized", "authorized", true, true)).await;
+        assert_fire(&pool, &pending, ("pending", "", false, false)).await;
+        assert_fire(
+            &pool,
+            &refused,
+            ("refused", "org_quota_reached", true, false),
+        )
+        .await;
+        assert_fire(&pool, &elsewhere, ("authorized", "authorized", true, false)).await;
+
+        let active = update_event_trigger(&pool, &caller, change(&trigger.id, 2, "active"))
+            .await
+            .unwrap()
+            .trigger
+            .unwrap();
+        assert_eq!((active.status.as_str(), active.revision), ("active", 3));
+        assert_fire(
+            &pool,
+            &unstarted,
+            ("refused", "trigger_not_active", true, false),
+        )
+        .await;
+
+        update_event_trigger(&pool, &caller, change(&other.id, 1, "disabled"))
+            .await
+            .unwrap();
+        assert_fire(
+            &pool,
+            &elsewhere,
+            ("refused", "trigger_not_active", true, false),
+        )
+        .await;
     }
 }

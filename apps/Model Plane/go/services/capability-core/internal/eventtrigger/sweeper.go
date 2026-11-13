@@ -87,9 +87,10 @@ func (s *Sweeper) sweepAndLog(ctx context.Context) {
 	}
 }
 
-// RunOnce decides one batch of pending fires and returns how many were authorised. An authority error belongs to one
-// fire and is retried by a later sweep, so it does not fail the sweep. A failed database step does fail it, and the
-// whole batch rolls back, so the next sweep decides the same fires again.
+// RunOnce decides one batch of pending fires and returns how many were authorised. A fire whose event has aged past the
+// window is refused fire_expired without asking Control. An authority error belongs to one fire and is retried by a later
+// sweep, so it does not fail the sweep. A failed database step does fail it, and the whole batch rolls back, so the next
+// sweep decides the same fires again.
 func (s *Sweeper) RunOnce(ctx context.Context) (int, error) {
 	b, err := s.ledger.begin(ctx)
 	if err != nil {
@@ -108,7 +109,7 @@ func (s *Sweeper) RunOnce(ctx context.Context) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-		settlement, authErr := decide(ctx, s.authority, s.wake, fire, counts, s.limits)
+		settlement, authErr := decide(ctx, s.authority, s.wake, fire, counts, s.limits, now)
 		if authErr != nil {
 			slog.Warn("event trigger fire could not be decided", "trigger_id", fire.TriggerID,
 				"status", settlement.Status, "attempts", settlement.Attempts, "error", authErr)

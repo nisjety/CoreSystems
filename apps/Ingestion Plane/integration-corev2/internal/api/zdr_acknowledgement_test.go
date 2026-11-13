@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 
@@ -778,5 +779,111 @@ func TestAcknowledgingTheCurrentTextAuditsTheSupersededRowWithItsReason(t *testi
 	superseded := auditOfType(drainAudit(t, rig.repo), "subscription_connection.zdr_acknowledgement_revoked")
 	if len(superseded) != 1 || superseded[0].Metadata["reason"] != store.ZDRRevokeTextVersionOutdated || superseded[0].Metadata["textVersion"] != "v1" {
 		t.Fatalf("superseded audit = %+v, want one row for the v1 acknowledgement with reason text_version_superseded", superseded)
+	}
+}
+
+// An active acknowledgement below the minimum is not in force, so the admin list shows it as superseded and does not
+// count it as active. The acknowledgement of the current text is the one counted as active.
+func TestTheAdminListLabelsAnAcknowledgementBelowTheMinimumAsSuperseded(t *testing.T) {
+	rig := newMatrixRig(t, matrixWording(t))
+	owner := matrixPrincipal(matrixOrg, matrixOwner)
+	admin := auth.Principal{UserID: "admin-1", OrganizationID: matrixOrg, PrincipalType: "user", Role: "admin"}
+	rig.connect(matrixConn, matrixOrg, matrixOwner, string(zdr.CapabilityNotSupported), true, 1)
+	rig.acknowledgeOldText(matrixOrg, matrixOwner, matrixConn)
+	rig.connect(matrixConnTwo, matrixOrg, matrixOwner, string(zdr.CapabilityNotSupported), true, 1)
+	if status, _ := rig.acknowledge(owner, matrixConnTwo); status != http.StatusCreated {
+		t.Fatalf("acknowledging the current text on the second connection answered %d, want 201", status)
+	}
+
+	status, _, body := rig.call(admin, http.MethodGet, "/api/v1/model-connections/zdr-acknowledgements", "")
+	if status != http.StatusOK {
+		t.Fatalf("admin listing: %d %v", status, body)
+	}
+	data := dataOf(body)
+	counts := data["counts"].(map[string]any)
+	if counts["active"] != float64(1) || counts["superseded"] != float64(1) || counts["revoked"] != float64(0) {
+		t.Fatalf("admin counts = %v, want active 1, superseded 1, revoked 0", counts)
+	}
+	statusByConnection := map[string]any{}
+	for _, raw := range data["items"].([]any) {
+		item := raw.(map[string]any)
+		statusByConnection[item["connectionId"].(string)] = item["status"]
+	}
+	if statusByConnection[matrixConn] != "superseded" || statusByConnection[matrixConnTwo] != "active" {
+		t.Fatalf("admin statuses = %v, want superseded for the v1 row and active for the v2 row", statusByConnection)
+	}
+}
+
+// The minimum is v1 while v2 is current, so an acknowledgement of v1 stays in force. When the member then acknowledges
+// the v2 text they were shown, the v2 acknowledgement is created (201) and supersedes the v1 row, with its audit row.
+// Only a repeat of the v2 acknowledgement is a replay.
+func TestAcknowledgingTheCurrentTextSupersedesAnOlderAcknowledgementInForce(t *testing.T) {
+	rig := newMatrixRig(t, matrixWordingWithMinimum(t, "v1"))
+	owner := matrixPrincipal(matrixOrg, matrixOwner)
+	rig.connect(matrixConn, matrixOrg, matrixOwner, string(zdr.CapabilityNotSupported), true, 1)
+	rig.acknowledgeOldText(matrixOrg, matrixOwner, matrixConn)
+	drainAudit(t, rig.repo)
+	oldID := activeAcks(t, rig.repo, matrixConn)[0].ID
+
+	if _, data, _ := rig.posture(owner, matrixConn); data["ackState"] != "acknowledged" || data["ackId"] != oldID || data["textVersion"] != "v1" {
+		t.Fatalf("posture on a v1 acknowledgement with minimum v1 = %v, want acknowledged on the v1 row", data)
+	}
+
+	status, _, body := rig.call(owner, http.MethodPost, ackPath(matrixConn)+"/zdr-acknowledgement",
+		ackBody(rig.digest(matrixConn), "v2", "no", "settings"))
+	ack, _ := dataOf(body)["acknowledgement"].(map[string]any)
+	if status != http.StatusCreated || ack["textVersion"] != "v2" || ack["state"] != "active" || ack["id"] == oldID {
+		t.Fatalf("acknowledging the v2 text answered %d with %v, want 201 and a new active v2 acknowledgement", status, ack)
+	}
+	superseded := auditOfType(drainAudit(t, rig.repo), "subscription_connection.zdr_acknowledgement_revoked")
+	if len(superseded) != 1 || superseded[0].Metadata["reason"] != store.ZDRRevokeTextVersionOutdated || superseded[0].Metadata["textVersion"] != "v1" {
+		t.Fatalf("superseded audit = %+v, want one row for the v1 acknowledgement with reason text_version_superseded", superseded)
+	}
+	ledger, err := rig.repo.ListConnectionZDRAcknowledgements(t.Context(), matrixConn, false)
+	if err != nil || len(ledger) != 2 {
+		t.Fatalf("ledger = (%+v, %v), want the superseded v1 row and the new v2 row", ledger, err)
+	}
+	if active := activeAcks(t, rig.repo, matrixConn); len(active) != 1 || active[0].TextVersion != "v2" {
+		t.Fatalf("active acknowledgements = %+v, want exactly one, on v2", active)
+	}
+
+	status, _, body = rig.call(owner, http.MethodPost, ackPath(matrixConn)+"/zdr-acknowledgement",
+		ackBody(rig.digest(matrixConn), "v2", "no", "settings"))
+	replay, _ := dataOf(body)["acknowledgement"].(map[string]any)
+	if status != http.StatusOK || dataOf(body)["created"] != false || replay["id"] != ack["id"] {
+		t.Fatalf("repeating the v2 acknowledgement answered %d with %v, want 200 replaying the new row", status, dataOf(body))
+	}
+	if _, data, _ := rig.posture(owner, matrixConn); data["ackState"] != "acknowledged" || data["textVersion"] != "v2" || data["ackId"] != ack["id"] {
+		t.Fatalf("posture after acknowledging v2 = %v, want acknowledged on the v2 row", data)
+	}
+}
+
+// A row is active only while its text is at or above the minimum: an active row below it is superseded, and a revoked
+// row is revoked whatever its text. This is the state the admin list and the summaries carry.
+func TestTheLedgerStateOfARowIsActiveSupersededOrRevoked(t *testing.T) {
+	revokedAt := time.Now().UTC()
+	cases := []struct {
+		name string
+		ack  store.ConnectionZDRAcknowledgement
+		want string
+	}{
+		{"active at the minimum", store.ConnectionZDRAcknowledgement{TextVersion: "v2"}, "active"},
+		{"active above the minimum", store.ConnectionZDRAcknowledgement{TextVersion: "v3"}, "active"},
+		{"active below the minimum", store.ConnectionZDRAcknowledgement{TextVersion: "v1"}, "superseded"},
+		{"revoked at the minimum", store.ConnectionZDRAcknowledgement{TextVersion: "v2", RevokedAt: &revokedAt}, "revoked"},
+		{"revoked below the minimum", store.ConnectionZDRAcknowledgement{TextVersion: "v1", RevokedAt: &revokedAt}, "revoked"},
+	}
+	for _, tc := range cases {
+		if got := zdrAckState(tc.ack, "v2"); got != tc.want {
+			t.Errorf("%s: state = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The counts split the active rows by the minimum by the number of the version, so v10 is at or above v2.
+func TestTheAdminCountsSplitActiveRowsByTheMinimumNumerically(t *testing.T) {
+	inForce, superseded := zdrActiveSplit(map[string]int{"v1": 2, "v2": 3, "v10": 1}, "v2")
+	if inForce != 4 || superseded != 2 {
+		t.Fatalf("split = (%d in force, %d superseded), want (4, 2)", inForce, superseded)
 	}
 }

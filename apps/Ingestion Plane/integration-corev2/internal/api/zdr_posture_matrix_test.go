@@ -132,6 +132,13 @@ func loadPostureMatrix(t *testing.T) matrixDocument {
 // version. The texts are the shipped ones; only the version they are filed under differs.
 func matrixWording(t *testing.T) *zdr.Wording {
 	t.Helper()
+	return matrixWordingWithMinimum(t, "v2")
+}
+
+// matrixWordingWithMinimum is the same two-version wording with v2 current and the given minimum, v1 or v2. With
+// v1 as the minimum, an acknowledgement of v1 stays in force while v2 is current.
+func matrixWordingWithMinimum(t *testing.T, minimum string) *zdr.Wording {
+	t.Helper()
 	assessor, err := zdr.Default()
 	if err != nil {
 		t.Fatalf("zdr.Default: %v", err)
@@ -163,7 +170,7 @@ func matrixWording(t *testing.T) *zdr.Wording {
 	index, err := json.Marshal(map[string]any{
 		"format":  "zdr-acknowledgement-wording/1",
 		"current": "v2",
-		"minimum": "v2",
+		"minimum": minimum,
 		"versions": map[string]any{
 			"v1": map[string]any{"status": "superseded", "files": v1Pins},
 			"v2": map[string]any{"status": "draft_pending_od_legal", "files": v2Pins},
@@ -177,8 +184,8 @@ func matrixWording(t *testing.T) *zdr.Wording {
 	if err != nil {
 		t.Fatalf("load the v1+v2 wording: %v", err)
 	}
-	if wording.Version() != "v2" || wording.MinimumVersion() != "v2" {
-		t.Fatalf("injected wording is %s with minimum %s, want v2 and v2", wording.Version(), wording.MinimumVersion())
+	if wording.Version() != "v2" || wording.MinimumVersion() != minimum {
+		t.Fatalf("injected wording is %s with minimum %s, want v2 and %s", wording.Version(), wording.MinimumVersion(), minimum)
 	}
 	return wording
 }

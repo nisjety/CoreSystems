@@ -1,5 +1,6 @@
-//! ZDR-Z-19b (waived chat turn) and the side chat relay, driven through the chat routes with a
-//! wiremock Auth Core, org-core and model-gateway.
+//! ZDR-Z-19b (waived chat turn), the side chat relay, and the AG-UI turn and its resume (the
+//! capability bearer of each), driven through the routes with a wiremock Auth Core, org-core and
+//! model-gateway.
 //!
 //! Auth Core's double mints a token named `waived-<audience>` only for a mint that carries
 //! `x-retention-decision: signed-decision-1`, and `plain-<audience>` for any other mint, so a bearer
@@ -14,7 +15,10 @@ use wiremock::{
     Mock, MockServer, ResponseTemplate,
 };
 
-use super::json_handlers;
+use super::{
+    json_handlers,
+    shared::tests::{assert_rule_answer, credential_rule_cases},
+};
 use crate::{
     cache::ResultCache,
     config::AppState,
@@ -371,6 +375,62 @@ async fn with_the_switch_off_no_decision_is_asked_and_the_org_raise_stays() {
     let invokes = upstreams.model_gateway_requests("/v1/invoke").await;
     let sent: Value = serde_json::from_slice(&invokes[0].body).expect("json");
     assert_eq!(sent["zdr"], json!(true), "the ZDR org raise is unchanged");
+}
+
+// The main JSON turn (`POST /api/v1/chat/invoke`) applies the one 401/403 rule too (V3-bff-3-rel2).
+
+/// A plain turn with the waiver switch off (the default), whose model-gateway answer is `status` and `reply`.
+async fn invoke_answering(status: u16, reply: Value) -> (u16, Value) {
+    let upstreams = Upstreams::start().await;
+    upstreams.mints().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/invoke"))
+        .respond_with(ResponseTemplate::new(status).set_body_json(reply))
+        .mount(&upstreams.model_gateway)
+        .await;
+    post_json(
+        upstreams.state(false),
+        "/api/v1/chat/invoke",
+        json!({ "content": "hello" }),
+    )
+    .await
+}
+
+/// A 401 would sign the person out, so the main JSON turn never relays one, and an untyped 403 (model-gateway's generic
+/// `forbidden`, or any 403 without a typed code) is answered as unavailable too. A typed 403 is relayed as sent.
+#[tokio::test]
+async fn the_main_json_turn_applies_the_one_credential_rule() {
+    for (label, status, reply, relayed) in credential_rule_cases() {
+        let (answered, body) = invoke_answering(status, reply.clone()).await;
+        assert_rule_answer(
+            label,
+            relayed,
+            &reply,
+            axum::http::StatusCode::from_u16(answered).expect("a status"),
+            &body,
+            "delegated_auth_unavailable",
+        );
+    }
+}
+
+/// Switch-off behaviour is unchanged: a success and every other refusal of the relay keep their status and body.
+#[tokio::test]
+async fn the_main_json_turn_relays_every_other_answer_unchanged() {
+    for (status, reply) in [
+        (200, json!({ "content": "hi" })),
+        (
+            409,
+            json!({ "error": { "code": "connection_ambiguous", "message": "m", "details": {} } }),
+        ),
+        (
+            412,
+            json!({ "error": { "code": "zdr_connection_not_acknowledged", "message": "m", "details": {} } }),
+        ),
+    ] {
+        let (answered, body) = invoke_answering(status, reply.clone()).await;
+        assert_eq!(answered, status, "{reply}");
+        assert_eq!(body, reply, "{reply}");
+    }
 }
 
 // Side chat relay.
@@ -1066,4 +1126,150 @@ fn a_waived_turn_that_names_a_space_after_resolution_is_refused_as_a_route_misma
             "{retention:?}: only a waived turn is checked"
         );
     }
+}
+
+// The AG-UI turn and its resume (`domains::ag_ui`). Both carry the capability bearer a native chat
+// turn and its resume carry: best effort, minted without a retention decision (an AG-UI turn asks
+// for none), so the bearer is plain. model-gateway reads the org's agent and PII policy with it.
+
+fn ag_ui_app(state: AppState) -> Router {
+    Router::new()
+        .route(
+            "/api/v1/ag-ui/stream",
+            post(crate::domains::ag_ui::stream_agent_ui),
+        )
+        .route(
+            "/api/v1/ag-ui/stream/{request_id}",
+            axum::routing::get(crate::domains::ag_ui::resume_agent_ui),
+        )
+        .layer(Extension(member()))
+        .with_state(state)
+}
+
+async fn send_app(app: Router, request: Request<Body>) -> (u16, Vec<u8>) {
+    let response = app.oneshot(request).await.expect("response");
+    let status = response.status().as_u16();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("body")
+        .to_bytes();
+    (status, bytes.to_vec())
+}
+
+async fn post_ag_ui(state: AppState, body: Value) -> (u16, Vec<u8>) {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/ag-ui/stream")
+        .header("content-type", "application/json")
+        .header("cookie", COOKIE)
+        .body(Body::from(body.to_string()))
+        .expect("request");
+    send_app(ag_ui_app(state), request).await
+}
+
+async fn get_ag_ui_resume(state: AppState, request_id: &str) -> (u16, Vec<u8>) {
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/ag-ui/stream/{request_id}"))
+        .header("cookie", COOKIE)
+        .body(Body::empty())
+        .expect("request");
+    send_app(ag_ui_app(state), request).await
+}
+
+/// The `x-capability-authorization` header of one request model-gateway received, if it carried one.
+fn capability_header(request: &wiremock::Request) -> Option<&str> {
+    request
+        .headers
+        .get("x-capability-authorization")
+        .and_then(|value| value.to_str().ok())
+}
+
+#[tokio::test]
+async fn an_ag_ui_turn_forwards_the_capability_bearer_as_a_native_turn_does() {
+    let mut shapes = Vec::new();
+    for switch in [false, true] {
+        let upstreams = Upstreams::start().await;
+        upstreams.mints().await;
+        mount_stream(&upstreams).await;
+        let (status, body) = post_ag_ui(
+            upstreams.state(switch),
+            json!({ "content": "hello", "model": "gpt-5" }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            200,
+            "switch={switch}: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let streams = upstreams.model_gateway_requests("/v1/invoke/stream").await;
+        assert_eq!(streams.len(), 1, "switch={switch}");
+        assert_eq!(
+            capability_header(&streams[0]),
+            Some("Bearer plain-capability-core"),
+            "switch={switch}: the AG-UI turn carries the capability bearer"
+        );
+        shapes.push(turn_shape(&streams[0]));
+    }
+    assert_eq!(
+        shapes[0], shapes[1],
+        "the waiver switch alone changed the AG-UI turn"
+    );
+}
+
+#[tokio::test]
+async fn an_ag_ui_resume_forwards_the_capability_bearer_as_the_native_resume_does() {
+    let upstreams = Upstreams::start().await;
+    upstreams.mints().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/invoke/resume/req-1"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: {\"type\":\"done\"}\n\n"),
+        )
+        .mount(&upstreams.model_gateway)
+        .await;
+    let (status, body) = get_ag_ui_resume(upstreams.state(false), "req-1").await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let resumes = upstreams
+        .model_gateway_requests("/v1/invoke/resume/req-1")
+        .await;
+    assert_eq!(resumes.len(), 1);
+    assert_eq!(
+        capability_header(&resumes[0]),
+        Some("Bearer plain-capability-core"),
+        "the AG-UI resume carries the capability bearer"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_capability_mint_leaves_the_ag_ui_turn_running_without_the_bearer() {
+    let upstreams = Upstreams::start().await;
+    upstreams.mints().await;
+    Mock::given(method("GET"))
+        .and(path("/api/capability-core/token"))
+        .respond_with(ResponseTemplate::new(503))
+        .with_priority(1)
+        .mount(&upstreams.auth)
+        .await;
+    mount_stream(&upstreams).await;
+    let (status, body) = post_ag_ui(
+        upstreams.state(false),
+        json!({ "content": "hello", "model": "gpt-5" }),
+    )
+    .await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    let streams = upstreams.model_gateway_requests("/v1/invoke/stream").await;
+    assert_eq!(streams.len(), 1);
+    assert_eq!(
+        capability_header(&streams[0]),
+        None,
+        "a failed mint sends no capability bearer and the turn still goes"
+    );
+    let inference = streams[0].headers.get("x-inference-authorization");
+    assert!(inference.is_some(), "the other delegated bearers still go");
 }

@@ -137,7 +137,8 @@ export const en = {
         empty: 'No acknowledgements yet.',
         load_failed: 'The acknowledgements could not be loaded.',
         truncated: 'Only the newest rows are shown.',
-        counts: (active: number, revoked: number) => `${active} active, ${revoked} withdrawn`,
+        counts: (active: number, superseded: number, revoked: number) =>
+          `${active} active, ${superseded} superseded, ${revoked} withdrawn`,
         member: 'Member',
         provider: 'Provider',
         capability: 'Capability',
@@ -147,6 +148,7 @@ export const en = {
         acknowledged_at: 'Confirmed',
         revoked_at: 'Withdrawn',
         status_active: 'Active',
+        status_superseded: 'Superseded',
         status_revoked: 'Withdrawn',
       },
     },

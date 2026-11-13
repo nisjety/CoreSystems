@@ -1,4 +1,4 @@
-import { HttpException, type Logger } from '@nestjs/common';
+import type { Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 
 import type { DirectNatsService } from '../nats/direct-nats.service';
@@ -6,16 +6,16 @@ import {
   isWaiverAudience,
   type AuthCoreAudience,
 } from './convex-token.service';
-import {
-  retentionDecisionRefusal,
-  retentionDecisionRefusalStatus,
-  type RetentionDecisionRefusalCode,
-} from './retention-decision.service';
+import { RetentionWaiverRefusal } from './retention-decision.refusal';
 import {
   RetentionDecisionUnavailableError,
   type RetentionDecisionSigner,
   type VerifiedRetentionDecision,
 } from './retention-decision.signer';
+
+// The typed refusal lives in retention-decision.refusal, which the token issuer
+// also throws. Re-exported here, where it was defined.
+export { RetentionWaiverRefusal };
 
 /**
  * Mint side of the per-connection ZDR waiver (ZDR.md 5.3, ZDR-Z-14b).
@@ -37,28 +37,6 @@ export const RETENTION_DECISION_HEADER_MAX_LENGTH = 4096;
 
 /** Durable audit event for one waiver token mint. */
 export const WAIVER_TOKEN_AUDIT_EVENT = 'retention_waiver_token_issued';
-
-/**
- * A refusal in the catalogue envelope `{ error: { code, message, retryable,
- * action } }`, with the catalogue's status (503 for `zdr_decision_unavailable`,
- * else 412), so the BFF can relay it as it is.
- */
-export class RetentionWaiverRefusal extends HttpException {
-  constructor(readonly code: RetentionDecisionRefusalCode) {
-    const entry = retentionDecisionRefusal(code);
-    super(
-      {
-        error: {
-          code: entry.code,
-          message: entry.message,
-          retryable: entry.retryable,
-          action: entry.action,
-        },
-      },
-      retentionDecisionRefusalStatus(code),
-    );
-  }
-}
 
 /** What the cookie session says; the decision must agree with all three. */
 export type WaiverSessionFacts = Readonly<{

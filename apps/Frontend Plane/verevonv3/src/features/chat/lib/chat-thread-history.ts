@@ -163,6 +163,8 @@ export type ChatThreadTranscriptTurn = {
   provider?: string
   /** Opaque user-owned model subscription connection id. */
   subscriptionConnectionId?: string
+  /** Opaque customer-gateway connection id this turn was served on (W4-BYO-6), kept so a reopened thread still knows it. */
+  modelConnectionId?: string
   outputTokens?: number
   /** Durable orchestration run id for an agentic/Do turn. */
   runId?: string
@@ -686,6 +688,7 @@ function normalizeTranscriptTurn(turn: ChatThreadTranscriptTurn): ChatThreadTran
     modelUsed: normalizeOptionalText(turn.modelUsed),
     provider: normalizeOptionalText(turn.provider),
     subscriptionConnectionId: normalizeOptionalText(turn.subscriptionConnectionId),
+    modelConnectionId: normalizeOptionalText(turn.modelConnectionId),
     outputTokens: normalizeOptionalNumber(turn.outputTokens),
     planMode: typeof turn.planMode === 'boolean' ? turn.planMode : undefined,
     grantedRung: normalizeGrantedRung(turn.grantedRung),
@@ -910,6 +913,7 @@ function isChatThreadTranscriptTurn(value: unknown): value is ChatThreadTranscri
     (record.modelUsed === undefined || typeof record.modelUsed === 'string') &&
     (record.provider === undefined || typeof record.provider === 'string') &&
     (record.subscriptionConnectionId === undefined || typeof record.subscriptionConnectionId === 'string') &&
+    (record.modelConnectionId === undefined || typeof record.modelConnectionId === 'string') &&
     (record.requestId === undefined || typeof record.requestId === 'string') &&
     (record.runId === undefined || typeof record.runId === 'string') &&
     (record.planMode === undefined || typeof record.planMode === 'boolean') &&

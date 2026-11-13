@@ -1,4 +1,5 @@
 import { ATTACHMENT_MAX_TOTAL_BYTES } from '@/features/chat/lib/attachment-policy'
+import { sideChatEnabled } from '@/features/chat/lib/side-chat-switch'
 import {
   chatLimitNoticesEnabled,
   isLimitCode,
@@ -23,6 +24,8 @@ import {
   type ResearchProvenance,
 } from '@/shared/api/chat-client'
 import { normalizeContextRefs } from '@/shared/actions/chat-context-refs'
+import { OPENAI_CODEX_SUBSCRIPTION_PROVIDER } from '@/shared/api/chatgpt-subscription-client'
+import { ApiError } from '@/shared/api/api-error'
 import {
   isModelEntitlementCode,
   type ModelEntitlementCode,
@@ -49,7 +52,7 @@ import {
 import { getSession } from '@/shared/session/session-store'
 import { supportQuestionFromPrompt } from '@/shared/chat/support-context-envelope'
 import { en as enStrings } from '@/shared/i18n/en'
-import { LocalizedError, ORG_POLICY_UNAVAILABLE_COPY } from '@/shared/i18n/errors'
+import { INTERNAL_FAILURE_COPY, LocalizedError, MODE_LOCKDOWN_COPY, ORG_POLICY_UNAVAILABLE_COPY } from '@/shared/i18n/errors'
 import { localeIntl, type Locale } from '@/shared/i18n/locales'
 import { no as noStrings } from '@/shared/i18n/no'
 import type { RunDetail } from '@/shared/api/runs-client'
@@ -97,6 +100,14 @@ import {
 
 export type { StreamFailureAction } from './chat-types'
 
+/**
+ * Whether a turn keeps the customer-gateway connection it was written under (W4-BYO-6). The customer-gateway switch keeps it
+ * for the regenerate, edit, continue and retry that replay it; the side chat keeps it for the side question that names its
+ * model. Either switch alone is enough, and with both off nothing is kept: the stored transcript and the reopened turns are
+ * what they were. Fixed per build, like every `VITE_` switch; only the literal `true` turns each one on.
+ */
+const connectionKeptEnabled = sideChatEnabled || import.meta.env.VITE_BYO_GATEWAY === 'true'
+
 export function messageToTurn(msg: ChatMessage): ChatTurn {
   const source = msg.role === 'user' ? splitInlinedAttachments(msg.content) : { text: msg.content, attachments: [] }
   return {
@@ -118,6 +129,7 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
     createdAt: msg.createdAt || '',
     streaming: false,
     model: msg.model,
+    ...serverConnectionFields(msg),
     // The message-tree position, on a versioned thread only (WS17 S9); the server sends none otherwise.
     ...(msg.version ? { version: msg.version } : {}),
     // Persisted answer quality, so a thread opened on a device that never saw
@@ -134,6 +146,22 @@ export function messageToTurn(msg: ChatMessage): ChatTurn {
       const url = `data:text/plain;charset=utf-8,${encodeURIComponent(file.content)}`
       return { id: `restored-${msg.id}-${index}`, name, type: 'text/plain', size: new TextEncoder().encode(file.content).length, url, previewUrl: url, extractedText: file.content }
     }),
+  }
+}
+
+/**
+ * The connections a server message was written under (W4-BYO-6, DEC-V-R8), so a reopened thread keeps the connection its
+ * regenerate, edit, continue and retry replay on without a local copy of the turn. A customer-gateway connection is kept with
+ * `connectionKeptEnabled`. A subscription connection is kept only with the side chat on, as it was before. Session Core stores
+ * a subscription id only on a subscription send, which names that provider, so a turn that carries one is on the ChatGPT
+ * subscription route.
+ */
+function serverConnectionFields(msg: ChatMessage): Pick<ChatTurn, 'modelConnectionId' | 'subscriptionConnectionId' | 'provider'> {
+  return {
+    ...(connectionKeptEnabled && msg.modelConnectionId ? { modelConnectionId: msg.modelConnectionId } : {}),
+    ...(sideChatEnabled && msg.subscriptionConnectionId
+      ? { subscriptionConnectionId: msg.subscriptionConnectionId, provider: OPENAI_CODEX_SUBSCRIPTION_PROVIDER }
+      : {}),
   }
 }
 
@@ -600,7 +628,9 @@ function limitStreamPresentation(
  * words say plain chat still works, and no retry is offered. `org_policy_unavailable`
  * (C-14-mg-rel1) is a Do turn refused before any model ran while the organisation's agent
  * policy cannot be read: nothing ran, and a retry is offered, since the policy may be readable
- * again. `prompt_too_long`, `inference_stream_error` and `model_plane_unavailable` are translated too;
+ * again. `mode_lockdown` (the agent mode allows no agent run) and `internal` (the service's own failure) are worded
+ * from errors.ts: the first ran nothing and offers no retry, the second does not say whether it was saved and offers a retry.
+ * `prompt_too_long`, `inference_stream_error` and `model_plane_unavailable` are translated too;
  * the last one's server text is raw transport detail and is never shown.
  * With VITE_CHAT_LIMIT_NOTICES on, `budget_exceeded`, `quota_exceeded`, `run_ceiling_reached` and `rate_limited` are
  * worded for the reader's role by `limitNotice` instead, and the server's text is not shown for them.
@@ -671,6 +701,25 @@ export function streamFailurePresentation(
         unsaved: true,
         unavailable: false,
         action: 'none',
+      }
+    case 'mode_lockdown':
+      // The agent mode that applies here allows no agent run, so a Do turn was refused before any run existed: nothing was
+      // run or saved. The same turn would be refused the same way, so no retry is offered. The server's text is English
+      // and is never shown.
+      return {
+        message: tr(MODE_LOCKDOWN_COPY.no, MODE_LOCKDOWN_COPY.en),
+        unsaved: true,
+        unavailable: false,
+        action: 'none',
+      }
+    case 'internal':
+      // The service's own unexpected failure, which a retry can clear, so a retry is offered: the copy says to try again.
+      // Whether the answer was saved is not known, so nothing is claimed about it. The server's text is never shown.
+      return {
+        message: tr(INTERNAL_FAILURE_COPY.no, INTERNAL_FAILURE_COPY.en),
+        unsaved: false,
+        unavailable: false,
+        action: 'retry',
       }
     case 'attachments_not_sent':
       // Raised by the client itself before anything was sent: the ChatGPT
@@ -982,6 +1031,8 @@ export function turnsToTranscript(turns: ChatTurn[]): ChatThreadTranscriptTurn[]
       modelUsed: turn.modelUsed,
       provider: turn.provider,
       subscriptionConnectionId: turn.subscriptionConnectionId,
+      // Written only while a connection is kept (connectionKeptEnabled): with both switches off the stored transcript is unchanged.
+      ...(connectionKeptEnabled ? { modelConnectionId: turn.modelConnectionId } : {}),
       requestId: turn.requestId,
       runId: turn.runId,
       planMode: turn.planMode,
@@ -1056,6 +1107,9 @@ export function transcriptTurnToChatTurn(turn: ChatThreadTranscriptTurn): ChatTu
     modelUsed: turn.modelUsed,
     provider: turn.provider,
     subscriptionConnectionId: turn.subscriptionConnectionId,
+    // Restored only while a connection is kept (connectionKeptEnabled), so a reopened thread's regenerate, edit and continue
+    // requests stay on the connection the turn was written under. With both switches off the turn is what it was.
+    ...(connectionKeptEnabled ? { modelConnectionId: turn.modelConnectionId } : {}),
     requestId: turn.requestId,
     runId: turn.runId,
     planMode: turn.planMode,
@@ -1254,6 +1308,7 @@ export function mergeServerTurnsWithCachedMetadata(
       modelUsed: serverTurn.modelUsed ?? cachedTurn.modelUsed,
       provider: serverTurn.provider ?? cachedTurn.provider,
       subscriptionConnectionId: serverTurn.subscriptionConnectionId ?? cachedTurn.subscriptionConnectionId,
+      ...(connectionKeptEnabled ? { modelConnectionId: serverTurn.modelConnectionId ?? cachedTurn.modelConnectionId } : {}),
       requestId: serverTurn.requestId ?? cachedTurn.requestId,
       runId: serverTurn.runId ?? cachedTurn.runId,
       planMode: serverTurn.planMode ?? cachedTurn.planMode,
@@ -1657,7 +1712,9 @@ export async function inlineTextAttachments(
       }
       total += content.length
       out.push({ name: attachment.name?.trim() || 'vedlegg.txt', content })
-    } catch {
+    } catch (error) {
+      // A typed refusal from the read keeps its own words; only a failure nobody typed gets the read refusal.
+      if (error instanceof ApiError || error instanceof LocalizedError) throw error
       throw new LocalizedError({
         no: `Kunne ikke lese hele «${attachment.name}». Utkastet er beholdt; prøv igjen med et lesbart, mindre vedlegg.`,
         en: `Could not read all of “${attachment.name}”. Your draft has been kept; try again with a readable, smaller attachment.`,
@@ -1732,7 +1789,9 @@ export async function toStreamAttachments(
       }
       parsed = parseDataUrl(dataUrl)
       if (!parsed || !parsed.base64) throw new Error('invalid image encoding')
-    } catch {
+    } catch (error) {
+      // A typed refusal from the read keeps its own words; only a failure nobody typed gets the read refusal.
+      if (error instanceof ApiError || error instanceof LocalizedError) throw error
       throw new LocalizedError({
         no: `Kunne ikke lese bildet «${attachment.name}». Prøv igjen eller fjern bildet.`,
         en: `Could not read the image “${attachment.name}”. Try again or remove the image.`,
@@ -1763,7 +1822,9 @@ async function toStreamFile(
       data_base64: parsed.base64,
       mime_type: attachment.type || parsed.mime || 'application/octet-stream',
     }
-  } catch {
+  } catch (error) {
+    // A typed refusal from the read keeps its own words; only a failure nobody typed gets the read refusal.
+    if (error instanceof ApiError || error instanceof LocalizedError) throw error
     throw new LocalizedError({
       no: `Kunne ikke lese «${attachment.name}». Prøv igjen eller fjern filen.`,
       en: `Could not read “${attachment.name}”. Try again or remove the file.`,

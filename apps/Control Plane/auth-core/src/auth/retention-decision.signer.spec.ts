@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative, resolve, sep } from 'node:path';
 
 import {
   FileKeyRetentionDecisionSigner,
@@ -25,9 +25,24 @@ import {
   createRetentionDecisionSigner,
   type RetentionDecisionClaims,
 } from './retention-decision.signer';
+import { isVerifiedRetentionDecision } from './retention-decision.verified';
 
 // ZDR-Z-14s: the dedicated decision signer. Two test keypairs are generated
 // here; no key material is checked in.
+
+/** The factory's name, which the guard below scans for. */
+const FACTORY_NAME = 'createVerifiedRetentionDecision';
+
+/** Every TypeScript source file under a directory, recursively. */
+function sourceFilesUnder(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return sourceFilesUnder(path);
+    return entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')
+      ? [path]
+      : [];
+  });
+}
 
 type Pair = { privateKey: KeyObject; publicKey: KeyObject };
 
@@ -300,7 +315,37 @@ describe('RetentionDecisionSigner (ZDR-Z-14s)', () => {
     ).toThrow(RetentionDecisionInvalidError);
   });
 
-  it('keeps the decision type dependency-free, the issuer off the signer, and the factory with the signer alone', () => {
+  it('the brand accepts only what the factory built, never a copy or a prototype-linked object', () => {
+    const s = signer();
+    const verified = s.verify(s.sign(CLAIMS).token);
+    expect(isVerifiedRetentionDecision(verified)).toBe(true);
+    const copy = { ...verified };
+    const prototypeLinked = Object.assign(
+      Object.create(VerifiedRetentionDecision.prototype) as object,
+      { ...verified },
+    );
+    // Both pass an instanceof check. Only the brand tells them apart.
+    expect(copy).not.toBeInstanceOf(VerifiedRetentionDecision);
+    expect(prototypeLinked).toBeInstanceOf(VerifiedRetentionDecision);
+    expect(isVerifiedRetentionDecision(copy)).toBe(false);
+    expect(isVerifiedRetentionDecision(prototypeLinked)).toBe(false);
+    expect(isVerifiedRetentionDecision(null)).toBe(false);
+    expect(isVerifiedRetentionDecision(undefined)).toBe(false);
+    expect(isVerifiedRetentionDecision('waived')).toBe(false);
+  });
+
+  it('the typed refusal module imports neither the signer, the decision service nor the issuer', () => {
+    const source = readFileSync(
+      join(__dirname, 'retention-decision.refusal.ts'),
+      'utf8',
+    );
+    expect(source).not.toContain("from './retention-decision.signer'");
+    expect(source).not.toContain("from './retention-decision.service'");
+    expect(source).not.toContain("from './convex-token.service'");
+    expect(source).not.toContain("from './retention-waiver-mint'");
+  });
+
+  it('keeps the decision type dependency-free, the issuer off the signer, and the factory with the signer alone under src', () => {
     const dir = __dirname;
     const verifiedSource = readFileSync(
       join(dir, 'retention-decision.verified.ts'),
@@ -313,17 +358,18 @@ describe('RetentionDecisionSigner (ZDR-Z-14s)', () => {
     );
     expect(issuerSource).toContain("from './retention-decision.verified'");
     expect(issuerSource).not.toContain("from './retention-decision.signer'");
-    const builders = readdirSync(dir)
-      .filter((name) => name.endsWith('.ts') && !name.endsWith('.spec.ts'))
-      .filter((name) =>
-        readFileSync(join(dir, name), 'utf8').includes(
-          'createVerifiedRetentionDecision',
-        ),
-      )
+    // The factory is reachable from any module under src/, so every TypeScript
+    // file there is scanned. Only the module that defines it and the signer may
+    // name it. This file is skipped: it quotes the name to scan for it.
+    const srcRoot = join(dir, '..');
+    const builders = sourceFilesUnder(srcRoot)
+      .filter((file) => resolve(file) !== resolve(__filename))
+      .filter((file) => readFileSync(file, 'utf8').includes(FACTORY_NAME))
+      .map((file) => relative(srcRoot, file).split(sep).join('/'))
       .sort();
     expect(builders).toEqual([
-      'retention-decision.signer.ts',
-      'retention-decision.verified.ts',
+      'auth/retention-decision.signer.ts',
+      'auth/retention-decision.verified.ts',
     ]);
   });
 });

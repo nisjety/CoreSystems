@@ -206,7 +206,7 @@ async fn invoke_chat_json(
     };
     // Same rule as the streaming path: mark before dispatch, so a ZDR turn that
     // fails still leaves the thread non-persistable.
-    shared::proxy_model_json_with_data_plane_request_timeout(
+    let (status, Json(payload)) = shared::proxy_model_json_with_data_plane_request_timeout(
         &state,
         Method::POST,
         &url,
@@ -221,7 +221,21 @@ async fn invoke_chat_json(
         request_timeout,
         &user,
     )
-    .await
+    .await;
+    // The one 401/403 rule of every model-gateway relay (`shared::hides_credential_refusal`): a refused delegated
+    // credential is answered as unavailable, never as a 401 that would sign the person out. A typed refusal of the turn
+    // (`model_not_entitled`, or a zero-retention `zdr_*` code) is relayed with its status and body, since a retry would
+    // not change it.
+    if shared::hides_credential_refusal(status, &payload) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(error(
+                "delegated_auth_unavailable",
+                "Chat authentication is temporarily unavailable",
+            )),
+        );
+    }
+    (status, Json(payload))
 }
 
 pub(crate) async fn cancel_invocation(
@@ -598,16 +612,10 @@ async fn side_chat_reply(
         user,
     )
     .await;
-    // A refused delegated credential is not the browser's session, so it is answered as unavailable, not as a 401
-    // that would sign the person out. `assistant_navigation` follows the same rule. The one 403 that is relayed is
-    // model-gateway's typed refusal of this side chat (see `is_typed_side_chat_refusal`): a retry would not change
-    // it, and the person should be told why the side chat cannot run.
-    let credential_refused = match status {
-        StatusCode::UNAUTHORIZED => true,
-        StatusCode::FORBIDDEN => !is_typed_side_chat_refusal(&payload),
-        _ => false,
-    };
-    let (status, payload) = if credential_refused {
+    // The one 401/403 rule of every model-gateway relay (`shared::hides_credential_refusal`): a refused delegated
+    // credential is answered as unavailable, not as a 401 that would sign the person out, and model-gateway's typed
+    // refusal of this side chat is relayed with its status and body, since a retry would not change it.
+    let (status, payload) = if shared::hides_credential_refusal(status, &payload) {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             error(
@@ -619,17 +627,6 @@ async fn side_chat_reply(
         (status, payload)
     };
     (status, Json(payload)).into_response()
-}
-
-/// Whether a 403 body is model-gateway's typed refusal of a side chat: the model-entitlement refusal
-/// (`model_not_entitled`), or a zero-retention one (`zdr_*`, the credential refusals of a connection route included).
-/// Model Gateway's generic `forbidden` (a Session Core permission refusal: a thread the caller does not own, or a
-/// delegated scope it lacks) is not one, so it keeps the unavailable answer.
-fn is_typed_side_chat_refusal(payload: &Value) -> bool {
-    payload
-        .pointer("/error/code")
-        .and_then(Value::as_str)
-        .is_some_and(|code| code == "model_not_entitled" || code.starts_with("zdr_"))
 }
 
 /// Marks an answer that must not be kept: the question and the answer are the person's own conversation text.

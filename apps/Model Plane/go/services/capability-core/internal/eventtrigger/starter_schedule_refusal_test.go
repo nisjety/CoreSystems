@@ -18,12 +18,14 @@ import (
 // schedule condition of each claim, and pin the claim query with a capturing transaction, so no database is needed.
 
 // schedGateFire is one authorised, unstarted fire the in-memory ledger holds. triggerStatus is the status of the trigger the
-// fire belongs to.
+// fire belongs to. deleted reports that its schedule is soft-deleted, and eventAt is when its webhook event was created.
 type schedGateFire struct {
 	candidate     StartCandidate
 	enabled       bool
+	deleted       bool
 	triggerStatus string
 	settledAt     time.Time
+	eventAt       time.Time
 	status        string
 	outcome       string
 	taskID        string
@@ -63,17 +65,24 @@ func (b *schedGateBatch) claim(excluded []string, match func(*schedGateFire) boo
 }
 
 // The claims partition the authorised fires by trigger, schedule state and window, as their SQL does: next and nextDisabled
-// need an active trigger and a fire authorised inside the window, nextInactive needs a paused or disabled trigger, and
-// nextExpired takes an active trigger's fire authorised before the window.
+// need an active trigger, a schedule that is not soft-deleted and a fire authorised and created inside the window;
+// nextDeleted takes an active trigger's fire whose schedule is soft-deleted, whatever its age; nextInactive needs a paused
+// or disabled trigger; and nextExpired takes an active trigger's fire authorised, or created, before the window.
 func (b *schedGateBatch) next(_ context.Context, excluded []string, notBefore time.Time) (*StartCandidate, error) {
 	return b.claim(excluded, func(f *schedGateFire) bool {
-		return f.triggerStatus == "active" && f.enabled && !f.settledAt.Before(notBefore)
+		return f.triggerStatus == "active" && f.enabled && !f.deleted && schedGateInWindow(f, notBefore)
 	}), nil
 }
 
 func (b *schedGateBatch) nextDisabled(_ context.Context, excluded []string, notBefore time.Time) (*StartCandidate, error) {
 	return b.claim(excluded, func(f *schedGateFire) bool {
-		return f.triggerStatus == "active" && !f.enabled && !f.settledAt.Before(notBefore)
+		return f.triggerStatus == "active" && !f.enabled && !f.deleted && schedGateInWindow(f, notBefore)
+	}), nil
+}
+
+func (b *schedGateBatch) nextDeleted(_ context.Context, excluded []string) (*StartCandidate, error) {
+	return b.claim(excluded, func(f *schedGateFire) bool {
+		return f.triggerStatus == "active" && f.deleted
 	}), nil
 }
 
@@ -83,8 +92,13 @@ func (b *schedGateBatch) nextInactive(_ context.Context, excluded []string) (*St
 
 func (b *schedGateBatch) nextExpired(_ context.Context, excluded []string, notBefore time.Time) (*StartCandidate, error) {
 	return b.claim(excluded, func(f *schedGateFire) bool {
-		return f.triggerStatus == "active" && f.settledAt.Before(notBefore)
+		return f.triggerStatus == "active" && (f.settledAt.Before(notBefore) || f.eventAt.Before(notBefore))
 	}), nil
+}
+
+// schedGateInWindow is the window the claims bind: the fire was authorised and its event created no earlier than notBefore.
+func schedGateInWindow(f *schedGateFire, notBefore time.Time) bool {
+	return !f.settledAt.Before(notBefore) && !f.eventAt.Before(notBefore)
 }
 
 func (b *schedGateBatch) insert(_ context.Context, candidate StartCandidate, _ string, _ time.Time) (string, error) {
@@ -142,6 +156,7 @@ func schedGateAuthorised(fireID string, enabled bool) *schedGateFire {
 		enabled:       enabled,
 		triggerStatus: "active",
 		settledAt:     time.Now().UTC(),
+		eventAt:       time.Now().UTC(),
 		status:        "authorized",
 	}
 }

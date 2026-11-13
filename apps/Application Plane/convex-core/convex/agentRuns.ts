@@ -10,7 +10,8 @@
  *     `useQuery(api.agentRuns.listForOrg, { externalOrgId, limit })`.
  *     Returns runs newest-first, capped at the supplied limit.
  *   - `getByRunId` (query) — single-run lookup for drilldowns; returns
- *     `browserActivity` to the run owner only (WS10.S7a).
+ *     `browserActivity` to the run owner only (WS10.S7a). An unknown run and
+ *     a run the viewer cannot see both return `null`.
  *   - `upsertBrowserActivity` (internalMutation) — WS10.S7a browser trace
  *     projection; patches an existing row only (see its comment).
  *
@@ -22,7 +23,7 @@
 
 import { v } from "convex/values";
 import { internalMutation, mutation, query } from "./_generated/server";
-import { requireViewerMembership } from "./authz";
+import { requireIdentity, requireViewerMembership } from "./authz";
 
 const statusValidator = v.union(
   v.literal("started"),
@@ -132,21 +133,40 @@ export const listForOrg = query({
 });
 
 /**
+ * `requireViewerMembership` for a lookup that must not reveal whether an org
+ * exists: a viewer who is not a member of the org, or an org that is missing
+ * or deleted, gets `null`. Any other failure still throws.
+ */
+async function viewerMembershipOrNull(ctx: any, externalOrgId: string) {
+  try {
+    return await requireViewerMembership(ctx, externalOrgId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message === "Unauthorized" || message === "Organization not found") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
  * Single-run lookup. Any member of the run's org gets the row; the
  * `browserActivity` projection is owner-only in v1 (WS10.S7a, ADR-8 part 2,
- * "projections only narrow"): it is returned only when the viewer resolved
- * by `requireViewerMembership` is the run's `externalUserId`.
+ * "projections only narrow"): it is returned only when the viewer is the
+ * run's `externalUserId`.
+ *
+ * The caller is authenticated before the row is read. An unknown run and a
+ * run in an org the viewer is not in both answer `null`, so the reply does
+ * not reveal which run ids exist.
  */
 export async function getByRunIdHandler(ctx: any, args: { runId: string }) {
+  const { externalAuthId } = await requireIdentity(ctx);
   const run = await ctx.db
     .query("agentRuns")
     .withIndex("by_run", (q: any) => q.eq("runId", args.runId))
     .unique();
   if (!run) return null;
-  const { externalAuthId } = await requireViewerMembership(
-    ctx,
-    run.externalOrgId,
-  );
+  if (!(await viewerMembershipOrNull(ctx, run.externalOrgId))) return null;
   return projectRunForViewer(run, externalAuthId);
 }
 
@@ -328,6 +348,8 @@ export const upsertBrowserActivity = internalMutation({
  * Permission model: caller must belong to the same org as the run.
  * The HTTP route in verevon (`/api/agents/runs/[runId]/rate`) validates
  * `actor.orgId === run.externalOrgId` before invoking this mutation.
+ * The caller is authenticated before the lookup. An unknown run and a run
+ * in an org the caller is not in both throw `Run not found`.
  */
 const ratingValidator = v.union(
   v.literal("good"),
@@ -344,14 +366,18 @@ export async function rateHandler(
     note?: string;
   },
 ) {
+  const { externalAuthId } = await requireIdentity(ctx);
   const existing = await ctx.db
     .query("agentRuns")
     .withIndex("by_run", (q: any) => q.eq("runId", args.runId))
     .unique();
-  if (!existing) {
+  const viewer = existing
+    ? await viewerMembershipOrNull(ctx, existing.externalOrgId)
+    : null;
+  // An unknown run and a run in an org the viewer is not in get the same refusal.
+  if (!existing || !viewer) {
     throw new Error("Run not found");
   }
-  const { externalAuthId } = await requireViewerMembership(ctx, existing.externalOrgId);
   if (existing.externalOrgId !== args.externalOrgId) {
     throw new Error("Run belongs to a different organization");
   }

@@ -544,6 +544,11 @@ func organizationProxyScopes(method string, rest []string) []string {
 		((method == http.MethodPost && (rest[3] == "mark-exported" || rest[3] == "acknowledge")) ||
 			(method == http.MethodGet && rest[3] == "status")):
 		return []string{"org:deletion:self"}
+	// The effective capabilities of the caller's own role (ORG_ROLE_CAPABILITIES_ENABLED): any
+	// active member reads the role it holds, on behalf of a signed user only (:self). The
+	// internal read of the same capabilities is org:read:any, which the gateway can never hold.
+	case len(rest) == 4 && rest[1] == "roles" && rest[3] == "capabilities" && method == http.MethodGet:
+		return []string{"org:read:self"}
 	default:
 		return nil
 	}

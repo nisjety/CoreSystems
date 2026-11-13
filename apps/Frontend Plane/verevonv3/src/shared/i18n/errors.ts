@@ -22,7 +22,7 @@ import { isSpaceDenial, presentSpaceDenialText } from '@/shared/api/space-denial
 import { en as enStrings } from './en'
 import { no as noStrings } from './no'
 
-import { isZdrRefusalCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
+import { REFUSAL_TEXT, isZdrRefusalCode, zdrRefusalPresentation } from '@/shared/api/zdr-refusals'
 
 type ErrorCopy = {
   no: string
@@ -76,6 +76,28 @@ export class LocalizedError extends Error {
 export const ORG_POLICY_UNAVAILABLE_COPY: ErrorCopy = {
   no: 'Organisasjonens agentpolicy kan ikke leses akkurat nå, så agenten startet ikke. Ingenting ble kjørt.',
   en: 'The agent policy for this organisation cannot be read right now, so the agent did not start. Nothing was run.',
+}
+
+/**
+ * The agent mode that applies here allows no agent run (`mode_lockdown`): a Do turn refused before any run exists, so
+ * nothing was run. The mode may be the chat's own choice or the organisation's cap, so the words name the mode, not either
+ * source. The chat stream reads these words from here (chat-normalizers.ts), and so does any route that passes the code to
+ * the page; the server's English text is never shown.
+ */
+export const MODE_LOCKDOWN_COPY: ErrorCopy = {
+  no: 'Agentmodusen som gjelder her tillater ikke agentkjøringer, så agenten startet ikke. Vanlig chat fungerer som før. Ingenting ble kjørt.',
+  en: 'The agent mode that applies here does not allow agent runs, so the agent did not start. Plain chat works as before. Nothing was run.',
+}
+
+/**
+ * An unexpected failure inside the service (`internal`), as the chat stream words it (chat-normalizers.ts). It is not an
+ * ERROR_COPY entry on purpose: over HTTP a 5xx is answered by its status class, so each caller keeps its own sentence, which
+ * names what failed (the Quarry INTERNAL passthrough is pinned the same way in gateway-error-codes.test.ts). Whether anything
+ * was saved is not known, so the words claim nothing about it.
+ */
+export const INTERNAL_FAILURE_COPY: ErrorCopy = {
+  no: 'Forespørselen kunne ikke fullføres. Prøv igjen, eller kontakt support hvis problemet vedvarer.',
+  en: 'The request could not be completed. Try again, or contact support if the problem persists.',
 }
 
 export const ERROR_COPY: Record<string, ErrorCopy> = {
@@ -227,6 +249,54 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     en: 'Your organisation has paused agent runs. Plain chat works as before. Nothing was run.',
   },
   org_policy_unavailable: ORG_POLICY_UNAVAILABLE_COPY,
+  mode_lockdown: MODE_LOCKDOWN_COPY,
+  // The approval and question continuations (`chat.run.continue`; the BFF relays these codes over HTTP, CONTINUE_RELAYED_ERRORS).
+  // What each says about the approval or the answer follows its effect in chat-run-continue-contract.ts: an UNSPENT code says
+  // nothing was run; an UNKNOWN code says the spend is not known, so the words send the reader to follow the run.
+  continue_disabled: {
+    no: 'Fortsettelse av godkjente kjøringer er ikke slått på. Vi vet ikke om kjøringen fortsatte, så følg kjøringen i tråden.',
+    en: 'Continuing approved runs is not switched on. We do not know whether the run continued, so follow the run in the thread.',
+  },
+  not_resumable: {
+    no: 'Kjøringen kan ikke fortsettes. Vi vet ikke om godkjenningen ble brukt, så følg kjøringen i tråden.',
+    en: 'This run cannot be continued. We do not know whether the approval was used, so follow the run in the thread.',
+  },
+  approval_not_granted: {
+    no: 'Godkjenningen er ikke gitt, så kjøringen fortsatte ikke. Ingenting ble kjørt.',
+    en: 'The approval was not given, so the run did not continue. Nothing was run.',
+  },
+  approval_not_resumable: {
+    no: 'Godkjenningen er ikke i en tilstand der kjøringen kan fortsette. Ingenting ble kjørt.',
+    en: 'The approval is not in a state that lets the run continue. Nothing was run.',
+  },
+  continuation_already_consumed: {
+    no: 'Denne godkjenningen er allerede brukt. Se på kjøringen for å se hva som ble av den.',
+    en: 'This approval has already been used. Check the run to see what became of it.',
+  },
+  continue_unavailable: {
+    no: 'Vi kunne ikke bekrefte om kjøringen fortsatte. Prøv igjen, eller følg kjøringen i tråden.',
+    en: 'We could not confirm that the run continued. Try again, or follow the run in the thread.',
+  },
+  question_not_found: {
+    no: 'Fant ikke spørsmålet i denne kjøringen. Svaret ble ikke lagret.',
+    en: 'The question was not found in this run. The answer was not saved.',
+  },
+  question_expired: {
+    no: 'Spørsmålet har utløpt og kan ikke besvares lenger. Svaret ble ikke lagret.',
+    en: 'The question has expired and can no longer be answered. The answer was not saved.',
+  },
+  question_already_answered: {
+    no: 'Spørsmålet er allerede besvart. Svaret ble ikke lagret.',
+    en: 'The question has already been answered. The answer was not saved.',
+  },
+  invalid_answer: {
+    no: 'Svaret passer ikke til spørsmålet. Endre svaret og prøv igjen.',
+    en: 'The answer does not fit the question. Change the answer and try again.',
+  },
+  question_not_resumable: {
+    no: 'Spørsmålet er ikke i en tilstand der kjøringen kan fortsette. Følg kjøringen i tråden.',
+    en: 'The question is not in a state that lets the run continue. Follow the run in the thread.',
+  },
   shipping_auth_unavailable: { no: 'Fraktintegrasjonen er ikke koblet til ennå.', en: 'The shipping integration is not connected yet.' },
   social_core_unavailable: { no: 'Sosiale medier-tjenesten er utilgjengelig akkurat nå.', en: 'The social service is unavailable right now.' },
   search_provider_unconfigured: { no: 'Søketjenesten er ikke satt opp ennå.', en: 'The search provider is not configured yet.' },
@@ -630,6 +700,12 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
     no: 'Kunne ikke kontrollere hvilke leverandører som har registrert ZDR-godkjenning, så Zero Data Retention kan ikke slås på akkurat nå. Prøv igjen om litt, eller fortsett uten og slå det på senere.',
     en: 'We could not check which providers have a recorded ZDR attestation, so Zero Data Retention cannot be turned on right now. Try again shortly, or carry on without it and turn it on later.',
   },
+  // The catalogue's own words for three zero-retention refusals that the BFF relays (DECISION_REFUSAL_CODES) and the chat stream
+  // carries. They are read from REFUSAL_TEXT, so they cannot drift from it. describeApiError and the stream words these codes from
+  // the catalogue before this table, so no sentence on screen changes; the entries make the table complete for a direct lookup.
+  zdr_connection_not_acknowledged: { no: REFUSAL_TEXT.zdr_connection_not_acknowledged.no, en: REFUSAL_TEXT.zdr_connection_not_acknowledged.en },
+  zdr_posture_mismatch: { no: REFUSAL_TEXT.zdr_posture_mismatch.no, en: REFUSAL_TEXT.zdr_posture_mismatch.en },
+  zdr_waiver_route_mismatch: { no: REFUSAL_TEXT.zdr_waiver_route_mismatch.no, en: REFUSAL_TEXT.zdr_waiver_route_mismatch.en },
 
 
   // Rooms (Spaces), agents, schedules and instructions (gateway `spaces.rs`, `agent_actions.rs`,
@@ -968,6 +1044,18 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   connection_not_found: {
     no: 'Vi fant ingen tilkobling for denne tjenesten ennå. Koble den til først, og prøv igjen.',
     en: 'We found no connection for this service yet. Connect it first, and try again.',
+  },
+  // The side chat's own typed refusals (F-t3-069, W4-BYO and DEC-V-R8). Model Gateway refuses each one before any model
+  // call, so each says that no model was sent to, and none offers a retry: the same question would be refused again.
+  // `connection_ambiguous` and `scope_not_available_in_space` are not here: other routes send them too, so the side chat
+  // words them in its own panel (SideChatPanel), and a chat turn that gets one keeps the generic copy.
+  side_chat_model_required: {
+    no: 'Sidespørsmål i en samtale på en egen tilkobling trenger modellen tilkoblingen bruker, og ingen modell ble oppgitt. Forespørselen ble ikke sendt til en modell.',
+    en: 'A side question in a chat on its own connection needs the model that connection serves, and none was given. The request was not sent to a model.',
+  },
+  side_chat_thread_retention_refused: {
+    no: 'Sidespørsmål er ikke tilgjengelig for en samtale der en kjøring har Zero Data Retention eller et unntak fra det. Forespørselen ble ikke sendt til en modell.',
+    en: 'Side questions are not available for a chat that holds a run under zero data retention or under a waiver. The request was not sent to a model.',
   },
   invalid_name: {
     no: 'Organisasjonen trenger et navn. Skriv inn et navn og prøv igjen.',
@@ -1432,6 +1520,15 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   research_run_conflict: { no: 'Research-kjøringen kan ikke endres i den tilstanden den er i nå. Last inn på nytt.', en: 'The research run cannot be changed in its current state. Reload to see it.' },
   invalid_trace_types: { no: 'Hendelsestypene i filteret er ugyldige.', en: 'The event types in the filter are not valid.' },
   export_too_large: { no: 'Eksporten er for stor. Velg færre felt eller en mindre grense.', en: 'The export is too large. Choose fewer fields or a smaller limit.' },
+  // The live view of a Space run (the room's relayed codes, domains/spaces/run_live.rs). The room's own words for two of them are
+  // in room-run-grammar.ts and are the same sentences.
+  run_stream_expired: { no: 'Live-visningen av denne kjøringen er avsluttet.', en: 'The live view of this run has ended.' },
+  too_many_live_views: { no: 'For mange live-visninger er åpne.', en: 'Too many live views are open.' },
+  run_live_unavailable: {
+    no: 'Live-visningen av kjøringen er midlertidig utilgjengelig.',
+    en: 'The live view of the run is temporarily unavailable.',
+    retryable: true,
+  },
   sidebar_too_large: { no: 'Sidepanelets oppsett er for stort til å lagres.', en: 'The sidebar layout is too large to save.' },
   skip_authority_unavailable: { no: 'Siden kunne ikke hoppes over på en trygg måte. Kjøringen venter fortsatt.', en: 'The page could not be skipped safely. The run is still waiting.' },
   space_reminders_disabled: { no: 'Påminnelser i rom er ikke slått på.', en: 'Space reminders are not turned on.' },
@@ -1478,7 +1575,6 @@ export const ERROR_COPY: Record<string, ErrorCopy> = {
   media_transcripts_disabled: { no: 'Transkribering av opptak er ikke slått på.', en: 'Transcribing recordings is not turned on.' },
   transcript_empty: { no: 'Fant ingen tale i opptaket. Prøv med et nytt opptak.', en: 'No speech was found in the recording. Try a new recording.' },
   transcript_not_saved: { no: 'Transkripsjonen kunne ikke lagres som dokument. Prøv igjen.', en: 'The transcript could not be saved as a document. Try again.' },
-  zdr_transcript_refused: { no: 'Null datalagring gjelder, så opptaket kan ikke lagres som et transkripsjonsdokument.', en: 'Zero Data Retention applies, so this recording cannot be saved as a transcript document.' },
   transcription_unavailable: { no: 'Transkribering er midlertidig utilgjengelig. Prøv igjen om litt.', en: 'Transcription is temporarily unavailable. Try again shortly.' },
   transcription_failed: { no: 'Opptaket kunne ikke transkriberes. Prøv et nytt opptak.', en: 'The recording could not be transcribed. Try a new recording.' },
   invalid_thread_id: { no: 'Samtalen er ikke gyldig. Åpne den på nytt og prøv igjen.', en: 'The conversation is not valid. Open it again and try again.' },

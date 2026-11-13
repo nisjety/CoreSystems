@@ -61,8 +61,16 @@ export function OrgZdrAcknowledgementsSection() {
   )
 
   const localeTag = () => (i18n.locale() === 'no' ? 'nb-NO' : 'en-US')
-  const statusLabel = (item: OrgZdrAcknowledgementItem) =>
-    item.status === 'active' ? copy().status_active : copy().status_revoked
+  const statusLabel = (item: OrgZdrAcknowledgementItem) => {
+    switch (item.status) {
+      case 'active':
+        return copy().status_active
+      case 'superseded':
+        return copy().status_superseded
+      default:
+        return copy().status_revoked
+    }
+  }
   const secondary = (item: OrgZdrAcknowledgementItem) =>
     [
       `${copy().provider}: ${item.providerKey}`,
@@ -94,7 +102,7 @@ export function OrgZdrAcknowledgementsSection() {
         >
           {(list) => (
             <>
-              <p class="verevon-settings-panel-note">{copy().counts(list().counts.active, list().counts.revoked)}</p>
+              <p class="verevon-settings-panel-note">{copy().counts(list().counts.active, list().counts.superseded, list().counts.revoked)}</p>
               <Show when={list().items.length > 0} fallback={<p class="verevon-settings-panel-note">{copy().empty}</p>}>
                 <div class="verevon-settings-row-divider">
                   <For each={list().items}>

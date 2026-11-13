@@ -15,9 +15,10 @@ import (
 )
 
 // The pause the starter must honour is a row change, and the claim that refuses the fire is SQL, so this test runs the
-// starter against a real Postgres. The scratch schema carries the columns the claims, the refusal and cron.InsertFire
-// read and write: the session-core tables event_triggers and event_trigger_fires (migrations 0113, 0114, 0118 and 0119)
-// and the cron tables as the cron integration test declares them.
+// starter against a real Postgres. The scratch schema carries the columns the claims, the refusal, the intake
+// (pgStore.record) and cron.InsertFire read and write: the session-core tables event_triggers and event_trigger_fires
+// (migrations 0113, 0114, 0118 and 0119) and the cron tables as the cron integration test declares them. event_triggers
+// has the created_at column migration 0113 declares, which the intake's trigger match orders by.
 //
 // Run with: go test -tags integration -run TestPausedAndDisabledTriggerFiresAreRefusedOnPostgres
 //   ./internal/eventtrigger/
@@ -67,6 +68,7 @@ CREATE TABLE event_triggers (
     event_type TEXT NOT NULL,
     name TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('active', 'paused', 'disabled')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     schedule_id TEXT NULL
 );
 CREATE TABLE event_trigger_fires (

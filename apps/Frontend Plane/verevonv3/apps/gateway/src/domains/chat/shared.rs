@@ -554,6 +554,32 @@ pub(crate) fn delegated_auth_unavailable(
     )
 }
 
+/// The one 401/403 rule of every model-gateway relay (V3-bff-3). True when the relay must answer its own unavailable
+/// envelope instead of model-gateway's answer.
+///
+/// A 401, and a 403 that is not a typed refusal, describes the caller's delegated credential rather than the browser's
+/// session, so it is never relayed: the relay answers it as unavailable, and never as a session-expiry 401 that would
+/// sign the person out. A typed 403 is relayed with its status and body, because a retry would not change it and the
+/// person should be told why the feature cannot run. The typed ones are model-gateway's `model_not_entitled` and the
+/// zero-retention `zdr_*` catalogue codes. Its generic `forbidden` (a Session Core permission refusal: a thread the
+/// caller does not own, or a delegated scope it lacks) is not typed, and stays hidden.
+pub(crate) fn hides_credential_refusal(status: StatusCode, payload: &Value) -> bool {
+    match status {
+        StatusCode::UNAUTHORIZED => true,
+        StatusCode::FORBIDDEN => !is_typed_model_refusal(payload),
+        _ => false,
+    }
+}
+
+/// Whether a 403 body is one of model-gateway's typed refusals: the model-entitlement refusal (`model_not_entitled`),
+/// or a zero-retention one (`zdr_*`, the credential refusals of a connection route included).
+fn is_typed_model_refusal(payload: &Value) -> bool {
+    payload
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .is_some_and(|code| code == "model_not_entitled" || code.starts_with("zdr_"))
+}
+
 /// Which chat handler is minting the bearers of a turn. The two send different delegated headers
 /// upstream, so a mint is made only for a header the handler actually sends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1196,12 +1222,12 @@ pub(crate) async fn proxy_model_json_with_delegations(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use axum::{
         http::{HeaderMap, HeaderValue, StatusCode},
         Json,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use crate::{
         audience_tokens::{
@@ -2437,5 +2463,91 @@ mod tests {
         assert_eq!(out, json!({"message": "hei"}));
         // A non-object body passes through.
         assert_eq!(with_viewer_locale(json!("x"), true), json!("x"));
+    }
+
+    /// The one 401/403 rule (V3-bff-3): a 401 is never relayed, and a 403 is relayed only when it is a typed refusal
+    /// (`model_not_entitled` or a zero-retention `zdr_*` code). The generic `forbidden`, an untyped 403 and a 403 with
+    /// no body stay hidden. Other statuses are the relay's own business.
+    #[test]
+    fn the_one_credential_rule_relays_only_a_typed_403() {
+        let refusal = |code: &str| json!({ "error": { "code": code, "message": "refused" } });
+        for body in [
+            refusal("model_not_entitled"),
+            refusal("zdr_posture_mismatch"),
+            refusal("zdr_waiver_route_mismatch"),
+        ] {
+            assert!(
+                !super::hides_credential_refusal(StatusCode::FORBIDDEN, &body),
+                "a typed 403 is relayed: {body}"
+            );
+        }
+        for body in [
+            refusal("forbidden"),
+            refusal("zdr"),
+            json!({}),
+            json!({ "error": { "code": 7 } }),
+            json!("zdr_posture_mismatch"),
+        ] {
+            assert!(
+                super::hides_credential_refusal(StatusCode::FORBIDDEN, &body),
+                "an untyped 403 is hidden: {body}"
+            );
+        }
+        for body in [
+            json!({}),
+            refusal("model_not_entitled"),
+            refusal("zdr_posture_mismatch"),
+        ] {
+            assert!(
+                super::hides_credential_refusal(StatusCode::UNAUTHORIZED, &body),
+                "a 401 is never relayed: {body}"
+            );
+        }
+        assert!(!super::hides_credential_refusal(
+            StatusCode::PRECONDITION_FAILED,
+            &refusal("zdr_posture_mismatch")
+        ));
+        assert!(!super::hides_credential_refusal(
+            StatusCode::NOT_FOUND,
+            &refusal("forbidden")
+        ));
+    }
+
+    /// The rows the one 401/403 rule is tested against (V3-bff-3), shared by every relay that applies it: the four
+    /// answers as (label, upstream status, upstream body, relayed). A typed 403 is relayed as sent; an untyped 403 and a
+    /// 401 are hidden, even when the 401 carries a typed body.
+    pub(crate) fn credential_rule_cases() -> Vec<(&'static str, u16, Value, bool)> {
+        let refusal =
+            |code: &str| json!({ "error": { "code": code, "message": "refused", "details": {} } });
+        vec![
+            ("a typed 403", 403, refusal("model_not_entitled"), true),
+            (
+                "a zero-retention 403",
+                403,
+                refusal("zdr_posture_mismatch"),
+                true,
+            ),
+            ("an untyped 403", 403, refusal("forbidden"), false),
+            ("a 401", 401, refusal("zdr_posture_mismatch"), false),
+        ]
+    }
+
+    /// The browser's answer to one case: a relayed refusal arrives as sent, and a hidden one as the route's own
+    /// unavailable envelope, `hidden_code`.
+    pub(crate) fn assert_rule_answer(
+        label: &str,
+        relayed: bool,
+        sent: &Value,
+        answered: StatusCode,
+        body: &Value,
+        hidden_code: &str,
+    ) {
+        if relayed {
+            assert_eq!(answered, StatusCode::FORBIDDEN, "{label}");
+            assert_eq!(body, sent, "{label}: a typed refusal is relayed as sent");
+        } else {
+            assert_eq!(answered, StatusCode::SERVICE_UNAVAILABLE, "{label}");
+            assert_eq!(body["error"]["code"], hidden_code, "{label}");
+        }
     }
 }

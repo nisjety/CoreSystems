@@ -15,11 +15,42 @@ import (
 // starter_fire_window_integration_test.go pins the same behaviour against Postgres.
 
 // windowedFire is an authorised fire of an active trigger, authorised settledAgo before now, whose schedule has the given
-// enabled state.
+// enabled state. Its webhook event was created as it was authorised, so the event is as old as the fire.
 func windowedFire(fireID string, enabled bool, now time.Time, settledAgo time.Duration) *schedGateFire {
 	f := schedGateAuthorised(fireID, enabled)
 	f.settledAt = now.Add(-settledAgo)
+	f.eventAt = f.settledAt
 	return f
+}
+
+// The start window and the event window are one span: the claims bind the window to both the authorisation and the event,
+// and the sweeper's event check reads fireWindow. This pins them equal, so a change to one must change the other.
+func TestTheStartWindowIsTheBudgetWindow(t *testing.T) {
+	if fireStartWindow != fireWindow {
+		t.Fatalf("fireStartWindow = %v; want fireWindow = %v, the span the budgets and the event age share", fireStartWindow, fireWindow)
+	}
+}
+
+// A fire authorised inside the window whose webhook event was created before it is refused fire_expired, writes no task, and
+// is not started, as an event older than the window never starts a run whatever the authorisation's age. The fresh fire of
+// the same trigger still starts in the same pass.
+func TestAFireWhoseEventAgedOutBeforeItsStartIsRefusedWithoutStartingIt(t *testing.T) {
+	now := time.Now().UTC()
+	aged := windowedFire("trgfire_event_aged", true, now, time.Minute)
+	aged.eventAt = now.Add(-fireWindow - time.Minute)
+	fresh := windowedFire("trgfire_event_fresh", true, now, time.Minute)
+	l := &schedGateLedger{fires: []*schedGateFire{aged, fresh}}
+	started, err := windowedStarter(l, now).RunOnce(context.Background())
+	if err != nil || started != 1 {
+		t.Fatalf("RunOnce = %d, %v; want one run started (the fresh event) and no error", started, err)
+	}
+	if aged.status != "refused" || aged.outcome != OutcomeFireExpired || aged.taskID != "" {
+		t.Fatalf("aged fire is %s with outcome %q and task %q; want refused with %q and no task",
+			aged.status, aged.outcome, aged.taskID, OutcomeFireExpired)
+	}
+	if fresh.status != "started" || l.tasks != 1 {
+		t.Fatalf("fresh fire is %s with %d tasks; want started with one task", fresh.status, l.tasks)
+	}
 }
 
 // windowedStarter is a starter over the ledger whose clock reads now.
@@ -168,6 +199,10 @@ func TestTheStartClaimsBindTheWindowAndTheExpiredClaimTakesOnlyOlderFires(t *tes
 		if !strings.Contains(sql, "f.settled_at >= $3") {
 			t.Fatalf("%s does not bound the claim to the start window; an older fire would be started:\n%s", c.name, sql)
 		}
+		if !strings.Contains(sql, "f.created_at >= $3") {
+			t.Fatalf("%s does not bound the claim to the window of the event; an event older than the window would be started:\n%s",
+				c.name, sql)
+		}
 		if len(c.tx.args) != 3 || c.tx.args[1] != c.state {
 			t.Fatalf("%s binds %v; want the schedule state %t and the window", c.name, c.tx.args, c.state)
 		}
@@ -180,6 +215,7 @@ func TestTheStartClaimsBindTheWindowAndTheExpiredClaimTakesOnlyOlderFires(t *tes
 	for _, want := range []string{
 		"FROM event_trigger_fires f",
 		"f.settled_at < $2",
+		"f.created_at < $2",
 		"t.status = 'active' AND t.schedule_id IS NOT NULL",
 		"FOR UPDATE OF f, t SKIP LOCKED",
 	} {

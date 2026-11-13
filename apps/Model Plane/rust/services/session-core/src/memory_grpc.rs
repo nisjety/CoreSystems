@@ -60,6 +60,15 @@ fn map_thread_ownership_error(error: &sqlx::Error) -> Status {
     Status::internal("thread ownership lookup failed")
 }
 
+/// The status of a revocation erasure that failed (V3-sc-1): a legal-hold refusal keeps its typed code, and
+/// anything else is internal with the message it always had.
+fn agent_erasure_status(error: anyhow::Error) -> Status {
+    match error.downcast::<crate::gdpr::ErasureHoldError>() {
+        Ok(hold) => hold.into_status(),
+        Err(other) => Status::internal(other.to_string()),
+    }
+}
+
 pub(crate) struct MemoryGrpc {
     pool: PgPool,
     letta: Option<LettaMemoryAdapter>,
@@ -1286,9 +1295,10 @@ impl MemoryService for MemoryGrpc {
                 "space_id and agent_subject_id name no agent",
             ));
         }
-        let erased = crate::space_memory::erase_agent_memory(&self.pool, org_id, space_id, agent_subject_id)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let erased =
+            crate::space_memory::erase_agent_memory(&self.pool, org_id, space_id, agent_subject_id)
+                .await
+                .map_err(agent_erasure_status)?;
         // Ids and a count only, never content: who erased which agent's notes in which Space.
         tracing::info!(
             org_id,
@@ -3369,6 +3379,40 @@ mod tests {
             assert_eq!(merged.len(), 1);
             assert_eq!(merged[0].withheld_reason, "room_origin_unverified");
             assert_eq!(merged[0].origin_space_ref, "space-room-1");
+        }
+
+        /// V3-sc-1: a legal-hold refusal of a revocation reaches the caller with its typed code. Any other failure
+        /// stays internal and keeps its message.
+        #[test]
+        fn a_revocation_refused_by_a_hold_keeps_its_typed_code() {
+            let trailer = |status: &Status| {
+                status
+                    .metadata()
+                    .get(crate::run_phase::ERROR_CODE_TRAILER)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+            };
+            let held =
+                agent_erasure_status(anyhow::Error::from(crate::gdpr::ErasureHoldError::OrgHeld));
+            assert_eq!(held.code(), tonic::Code::FailedPrecondition);
+            assert_eq!(
+                trailer(&held).as_deref(),
+                Some(crate::gdpr::ERASURE_BLOCKED_LEGAL_HOLD)
+            );
+
+            let unanswered = agent_erasure_status(anyhow::Error::from(
+                crate::gdpr::ErasureHoldError::Unavailable("org-core unreachable".to_owned()),
+            ));
+            assert_eq!(unanswered.code(), tonic::Code::Unavailable);
+            assert_eq!(
+                trailer(&unanswered).as_deref(),
+                Some(crate::gdpr::ERASURE_HOLD_CHECK_UNAVAILABLE)
+            );
+
+            let failed = agent_erasure_status(anyhow::Error::from(sqlx::Error::PoolTimedOut));
+            assert_eq!(failed.code(), tonic::Code::Internal);
+            assert_eq!(failed.message(), sqlx::Error::PoolTimedOut.to_string());
+            assert_eq!(trailer(&failed), None);
         }
     }
 }

@@ -269,6 +269,15 @@ impl WebToolsClient {
         let value = self
             .post("/v1/extract", &body, org_id, EXTRACT_SCOPES)
             .await?;
+        // The page may have ended on another host than the one asked for, by a redirect. The org's domain rules apply to
+        // where it ended too, so they are checked before any of its text is handed on (EP-9 W3).
+        if let Some(refusal) = self
+            .site
+            .final_url_refusal(org_id, url, extract_final_url(&value), WEB_FETCH_TOOL)
+            .await
+        {
+            return Err(refusal);
+        }
         let markdown = extract_markdown(url, &value)?;
         // With the reader on, the complete page comes back so the loop can hold it for reading. The loop
         // cuts it to the head itself when it holds nothing (`result_handles::inline_text`).
@@ -983,6 +992,19 @@ fn extract_markdown(url: &str, value: &Value) -> Result<String, String> {
     Ok(markdown.to_owned())
 }
 
+/// The address an extract reply says the page ended on, or `""` when it names none (pure). The reply carries it on the first
+/// result as `final_url`. The edge does not send that field yet, so an absent one is read as the requested URL, and the
+/// check passes until it does. An empty answer is read as the requested URL by [`SitePolicy::final_url_refusal`].
+fn extract_final_url(value: &Value) -> &str {
+    value
+        .get("results")
+        .and_then(Value::as_array)
+        .and_then(|results| results.first())
+        .and_then(|result| result.get("final_url"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
 /// Whether the long-page reader is switched on in this process.
 #[must_use]
 pub fn reader_enabled() -> bool {
@@ -1101,6 +1123,18 @@ pub(crate) mod tests {
     fn extract_no_results_is_error() {
         assert!(extract_markdown("https://x", &json!({ "results": [] })).is_err());
         assert!(extract_markdown("https://x", &json!({})).is_err());
+    }
+
+    #[test]
+    fn extract_reads_the_final_url_of_the_first_result_or_none() {
+        let landed = json!({"results": [
+            {"url": "https://a.example/", "status": "fetched", "markdown": "x", "final_url": "https://b.example/"}
+        ]});
+        assert_eq!(extract_final_url(&landed), "https://b.example/");
+        let silent = json!({"results": [{"url": "https://a.example/", "status": "fetched", "markdown": "x"}]});
+        assert_eq!(extract_final_url(&silent), "");
+        assert_eq!(extract_final_url(&json!({"results": []})), "");
+        assert_eq!(extract_final_url(&json!({})), "");
     }
 
     #[test]
@@ -1721,13 +1755,18 @@ mod site_policy_tests {
         org
     }
 
-    /// The policy in enforcement against `org`, with a fresh cache.
-    fn enforcing(org: &MockServer) -> SitePolicy {
+    /// The policy in `mode` against `org`, with a fresh cache.
+    fn under(mode: WebDomainPolicyMode, org: &MockServer) -> SitePolicy {
         SitePolicy::new(
-            WebDomainPolicyMode::Enforce,
+            mode,
             SiteOwner::new(&org.uri(), "execution-core", "org-core-test-token"),
             Arc::new(SiteChecker::default()),
         )
+    }
+
+    /// The policy in enforcement against `org`, with a fresh cache.
+    fn enforcing(org: &MockServer) -> SitePolicy {
+        under(WebDomainPolicyMode::Enforce, org)
     }
 
     fn blocked_and_open() -> Value {
@@ -1823,5 +1862,141 @@ mod site_policy_tests {
             )
             .await
             .is_err_and(|refusal| refusal.contains("'example.org'")));
+    }
+
+    /// The text of the page a fetch of `REQUESTED` reads, so a test can see whether it reached the model.
+    const LANDED: &str = "landed page text LANDED-MARKER-7f3a";
+    const REQUESTED: &str = "https://example.com/start";
+
+    /// The extract reply for `REQUESTED`: the page's markdown, and the address it ended on when the edge names one.
+    fn extract_reply(final_url: Option<&str>) -> Value {
+        let mut item = json!({"url": REQUESTED, "status": "fetched", "markdown": LANDED});
+        if let Some(final_url) = final_url {
+            item["final_url"] = json!(final_url);
+        }
+        json!({"results": [item], "count": 1, "requested": 1})
+    }
+
+    /// `web_fetch` of `REQUESTED` against a quarry-edge that answers `reply`, with the org's rules in `mode`.
+    async fn fetch_through(
+        mode: WebDomainPolicyMode,
+        org: &MockServer,
+        reply: Value,
+    ) -> Result<String, String> {
+        let edge = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/extract"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(reply))
+            .mount(&edge)
+            .await;
+        let auth = MockServer::start().await;
+        mint_mock(ORG, "extract:read", minted("extract-token"))
+            .mount(&auth)
+            .await;
+        let mut client = quarry_client(&edge.uri(), &auth.uri());
+        client.site = under(mode, org);
+        client.fetch(REQUESTED, ORG, false).await
+    }
+
+    async fn asked(org: &MockServer) -> usize {
+        org.received_requests().await.unwrap_or_default().len()
+    }
+
+    #[tokio::test]
+    async fn a_redirect_onto_a_blocked_host_is_refused_under_enforce() {
+        let org = org_core(blocked_and_open()).await;
+        let reply = extract_reply(Some("https://example.org/landing?q=private-query"));
+        let refusal = fetch_through(WebDomainPolicyMode::Enforce, &org, reply)
+            .await
+            .expect_err("a page that ended on a blocked host is refused");
+        assert!(refusal.starts_with("org_site_blocked: "), "{refusal}");
+        assert!(refusal.contains("'example.org'"), "{refusal}");
+        assert!(refusal.contains("'web_fetch'"), "{refusal}");
+        assert!(
+            !refusal.contains(LANDED),
+            "the page text is not returned: {refusal}"
+        );
+        assert!(
+            !refusal.contains("private-query"),
+            "no query in the refusal: {refusal}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_onto_a_blocked_host_is_read_under_shadow_and_off() {
+        for mode in [WebDomainPolicyMode::Shadow, WebDomainPolicyMode::Off] {
+            let org = org_core(blocked_and_open()).await;
+            let reply = extract_reply(Some("https://example.org/landing"));
+            let text = fetch_through(mode, &org, reply)
+                .await
+                .unwrap_or_else(|error| panic!("{mode:?}: {error}"));
+            assert!(text.contains(LANDED), "{mode:?}: {text}");
+            // The requested host is asked under both. The landed host is asked only where the rules are read.
+            let expected = if mode == WebDomainPolicyMode::Off {
+                0
+            } else {
+                2
+            };
+            assert_eq!(asked(&org).await, expected, "{mode:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_or_absent_final_url_is_the_requested_url_and_asks_org_core_only_for_it() {
+        for reply in [
+            extract_reply(None),
+            extract_reply(Some("")),
+            extract_reply(Some("   ")),
+            extract_reply(Some("https://EXAMPLE.com/other")),
+        ] {
+            let org = org_core(blocked_and_open()).await;
+            let text = fetch_through(WebDomainPolicyMode::Enforce, &org, reply)
+                .await
+                .expect("the requested page is read");
+            assert!(text.contains(LANDED), "{text}");
+            assert_eq!(asked(&org).await, 1, "only the requested host is asked");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_redirect_onto_another_allowed_host_is_read_under_enforce() {
+        let org = org_core(json!([
+            {"host": "example.com", "effective": "ask", "cap": "act", "source": "default"},
+            {"host": "example.net", "effective": "read", "cap": "read", "source": "default"}
+        ]))
+        .await;
+        let reply = extract_reply(Some("https://example.net/landing"));
+        let text = fetch_through(WebDomainPolicyMode::Enforce, &org, reply)
+            .await
+            .expect("a landing on an allowed host is read");
+        assert!(text.contains(LANDED), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_final_url_with_no_host_is_refused_under_enforce() {
+        let org = org_core(blocked_and_open()).await;
+        let refusal = fetch_through(
+            WebDomainPolicyMode::Enforce,
+            &org,
+            extract_reply(Some("not a url")),
+        )
+        .await
+        .expect_err("a page that ended where no host can be named is refused");
+        assert!(refusal.contains("cannot be checked"), "{refusal}");
+    }
+
+    #[tokio::test]
+    async fn a_blocked_landing_is_named_even_when_the_reply_carries_no_text() {
+        let org = org_core(blocked_and_open()).await;
+        let reply = json!({"results": [{
+            "url": REQUESTED,
+            "status": "blocked",
+            "markdown": "",
+            "final_url": "https://example.org/landing"
+        }], "count": 1, "requested": 1});
+        let refusal = fetch_through(WebDomainPolicyMode::Enforce, &org, reply)
+            .await
+            .expect_err("the landed host is refused before the empty reply is read");
+        assert!(refusal.starts_with("org_site_blocked: "), "{refusal}");
     }
 }
