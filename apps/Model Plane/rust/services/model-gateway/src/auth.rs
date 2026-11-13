@@ -4733,7 +4733,8 @@ mod tests {
         include_str!("../tests/fixtures/auth-core/quarry-token-claims.golden.sha256");
 
     /// The nine delegated user bearers, each with the audience it is minted for.
-    const DELEGATED_USER_BEARERS: [(&str, &str); 9] = [
+    // Ten: Teach mode's `aud=quarry` bearer (F-t3-081, W5-081-c) is checked like every other one.
+    const DELEGATED_USER_BEARERS: [(&str, &str); 10] = [
         ("x-data-plane-authorization", "data-plane"),
         ("x-ingestion-authorization", "ingestion"),
         ("x-capability-authorization", "capability-core"),
@@ -4743,6 +4744,7 @@ mod tests {
         ("x-execution-authorization", "execution-core"),
         ("x-browser-authorization", "browser-broker"),
         ("x-sandbox-authorization", "sandbox-manager"),
+        ("x-quarry-authorization", "quarry"),
     ];
 
     /// The user claims Auth Core really minted for one golden case, with the
@@ -4935,7 +4937,7 @@ mod tests {
             assert_eq!(
                 status,
                 StatusCode::OK,
-                "all nine user bearers at zdr={zdr}: {body}"
+                "all ten user bearers at zdr={zdr}: {body}"
             );
         }
         clear_env();

@@ -160,5 +160,13 @@ pub mod web_extraction;
 pub mod zdr_features;
 pub mod zdr_posture;
 pub mod zdr_precheck;
+
+// Test-only modules written in the verification phase, kept apart from the production files they cover.
+#[cfg(test)]
+mod domain_rules_tests;
+#[cfg(test)]
+mod judge_credential_tests;
+#[cfg(test)]
+mod judge_route_tests;
 #[cfg(test)]
 mod side_chat_failure_tests;

@@ -715,6 +715,32 @@ mod tests {
         assert_eq!(zdr["data"]["artifact_editing"], false);
     }
 
+    /// W3-EP-2-S7-fe: `deep_research_knowledge` follows its own switch and nothing else, and a ZDR caller is
+    /// never offered it, whatever the other capabilities say.
+    #[test]
+    fn deep_research_knowledge_follows_its_switch_and_is_never_offered_under_zdr() {
+        for (mode, editing) in [
+            (ArtifactRevisionsMode::On, true),
+            (ArtifactRevisionsMode::Off, false),
+        ] {
+            let base = |zdr| capabilities_for(mode, editing, zdr);
+            assert!(with_deep_research_switch(base(false), true, false).deep_research_knowledge);
+            assert!(!with_deep_research_switch(base(false), false, false).deep_research_knowledge);
+            assert!(!with_deep_research_switch(base(true), true, true).deep_research_knowledge);
+            // The switch changes this one field and no other.
+            let mut on = with_deep_research_switch(base(false), true, false);
+            on.deep_research_knowledge = false;
+            assert_eq!(on, base(false));
+        }
+        let json = serde_json::to_value(with_deep_research_switch(
+            capabilities_for(ArtifactRevisionsMode::Off, false, false),
+            true,
+            false,
+        ))
+        .expect("serialises");
+        assert_eq!(json["deep_research_knowledge"], true, "{json}");
+    }
+
     #[tokio::test]
     async fn the_capabilities_route_answers_every_key_in_the_envelope() {
         let state = state_with(FakeStore::default(), ArtifactRevisionsMode::On).await;

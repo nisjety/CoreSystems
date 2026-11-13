@@ -28725,3 +28725,121 @@ mod authored_kinds_tests {
         assert!(body.contains("crate::skills::usable_space_skills("));
     }
 }
+
+/// W2-WS14-S5-g: the question form of `/continue`, as pure checks. The preflight table refuses anything but the question
+/// form before any read; the read-before-write judgement writes nothing for a question already answered and refuses a
+/// question of another run or delivery; the refusal frame names the run and never says `approval_spent`.
+#[cfg(test)]
+mod question_form_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::{QuestionState, RunQuestion};
+
+    #[test]
+    fn question_form_preflight_table() {
+        let max = mp_contracts::user_question::MAX_ITEMS;
+        // (resume_on, approval_id, skipped, question_id, claim, skip, answers) -> expected
+        let cases: [(bool, &str, bool, &str, &str, bool, usize, Result<(), (StatusCode, &str)>); 12] = [
+            (true, "", false, "q-1", "claim", false, 1, Ok(())),
+            (true, "", false, "q-1", "claim", true, 0, Ok(())),
+            (true, "", false, "q-1", "claim", false, max, Ok(())),
+            (false, "", false, "q-1", "claim", false, 1, Err((StatusCode::CONFLICT, "continue_disabled"))),
+            // The switch is checked first, so a malformed body with the switch off is still `continue_disabled`.
+            (false, "appr-1", true, "", "", true, 3, Err((StatusCode::CONFLICT, "continue_disabled"))),
+            (true, "appr-1", false, "q-1", "claim", false, 1, Err((StatusCode::BAD_REQUEST, "continue_incomplete"))),
+            (true, "", true, "q-1", "claim", false, 1, Err((StatusCode::BAD_REQUEST, "continue_incomplete"))),
+            (true, "", false, "  ", "claim", false, 1, Err((StatusCode::BAD_REQUEST, "continue_incomplete"))),
+            (true, "", false, "q-1", " ", false, 1, Err((StatusCode::BAD_REQUEST, "continue_incomplete"))),
+            // Exactly one of a skip or answers.
+            (true, "", false, "q-1", "claim", true, 1, Err((StatusCode::BAD_REQUEST, "continue_incomplete"))),
+            (true, "", false, "q-1", "claim", false, 0, Err((StatusCode::BAD_REQUEST, "continue_incomplete"))),
+            (true, "", false, "q-1", "claim", false, max + 1, Err((StatusCode::BAD_REQUEST, "continue_incomplete"))),
+        ];
+        for (index, (on, approval, skipped, question, claim, skip, answers, want)) in cases.into_iter().enumerate() {
+            assert_eq!(
+                question_form_preflight(on, approval, skipped, question, claim, skip, answers),
+                want,
+                "case {index}"
+            );
+        }
+    }
+
+    fn question(state: QuestionState, delivery: &str, run_id: &str) -> RunQuestion {
+        RunQuestion {
+            id: "q-1".to_owned(),
+            run_id: run_id.to_owned(),
+            state: state as i32,
+            delivery: delivery.to_owned(),
+            ..Default::default()
+        }
+    }
+
+    fn disposition(question: Option<&RunQuestion>) -> Result<&'static str, (StatusCode, &'static str)> {
+        question_disposition(question, "run-1").map(|found| match found {
+            QuestionDisposition::Record => "record",
+            QuestionDisposition::AlreadyRecorded => "already",
+        })
+    }
+
+    #[test]
+    fn an_answered_question_launches_without_a_write_and_a_foreign_one_is_refused() {
+        let resume = mp_contracts::user_question::DELIVERY_RESUME;
+        assert_eq!(disposition(None), Err((StatusCode::NOT_FOUND, "question_not_found")));
+        assert_eq!(disposition(Some(&question(QuestionState::Requested, resume, "run-1"))), Ok("record"));
+        for done in [QuestionState::Answered, QuestionState::Skipped] {
+            assert_eq!(disposition(Some(&question(done, resume, "run-1"))), Ok("already"), "{done:?}");
+        }
+        for gone in [QuestionState::Expired, QuestionState::Cancelled] {
+            assert_eq!(
+                disposition(Some(&question(gone, resume, "run-1"))),
+                Err((StatusCode::GONE, "question_expired")),
+                "{gone:?}"
+            );
+        }
+        // Another run's question, or one delivered as a next message, is never resumed here.
+        assert_eq!(
+            disposition(Some(&question(QuestionState::Requested, resume, "run-2"))),
+            Err((StatusCode::CONFLICT, "question_not_resumable"))
+        );
+        assert_eq!(
+            disposition(Some(&question(QuestionState::Requested, "next_message", "run-1"))),
+            Err((StatusCode::CONFLICT, "question_not_resumable"))
+        );
+        assert_eq!(
+            disposition(Some(&question(QuestionState::Unspecified, resume, "run-1"))),
+            Err((StatusCode::CONFLICT, "question_not_resumable"))
+        );
+    }
+
+    #[test]
+    fn a_question_resume_names_no_approval_and_carries_the_claim() {
+        let resume = question_resume("q-1", "{\"skipped\":true}".to_owned(), "claim-1");
+        assert_eq!(resume.mode, "loop");
+        assert_eq!(resume.question_id, "q-1");
+        assert_eq!(resume.claim_token, "claim-1");
+        assert!(resume.approval_id.is_empty(), "{resume:?}");
+    }
+
+    #[tokio::test]
+    async fn a_question_refusal_frame_names_the_run_and_never_says_approval_spent() {
+        use axum::response::IntoResponse;
+        for &token in CONTINUE_QUESTION_FRAME_REFUSALS {
+            let event = question_refusal_event("req-1", "run-42", token);
+            let body = Sse::new(futures::stream::iter([Ok::<_, Infallible>(event)]))
+                .into_response()
+                .into_body();
+            let bytes = axum::body::to_bytes(body, usize::MAX).await.expect("body");
+            let text = String::from_utf8(bytes.to_vec()).expect("utf-8");
+            let data = text
+                .lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .expect("a data line");
+            let frame: Value = serde_json::from_str(data).expect("json");
+            assert_eq!(frame["code"], token, "{frame}");
+            assert_eq!(frame["run_id"], "run-42", "{frame}");
+            assert_eq!(frame["question_continue"], true, "{frame}");
+            assert_eq!(frame["retryable"], false, "{frame}");
+            assert!(frame.get("approval_spent").is_none(), "{frame}");
+            assert!(!text.contains("approval_spent"), "{text}");
+        }
+    }
+}

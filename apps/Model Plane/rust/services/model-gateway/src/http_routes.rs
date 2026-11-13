@@ -4886,6 +4886,9 @@ enum BrowserSuggestionMode {
 
 mod desktop_browser_planner;
 
+#[cfg(test)]
+mod owner_actions_admitted_route_tests;
+
 #[derive(Debug, Deserialize)]
 struct AiSpeechRequest {
     operation: Option<String>,
@@ -19821,6 +19824,99 @@ mod run_owner_publish_tests {
         (state, publisher)
     }
 
+    /// F-f06-01: a sandbox-manager stand-in that counts connections and drops each one, so any sandbox
+    /// RPC the workspace routes make is visible as a connection.
+    async fn counting_sandbox_manager() -> (
+        tonic::transport::Channel,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind counting sandbox manager");
+        let address = listener.local_addr().expect("counting sandbox manager address");
+        let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = connections.clone();
+        let handle = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        let channel = Endpoint::from_shared(format!("http://{address}"))
+            .expect("sandbox manager endpoint")
+            .connect_lazy();
+        (channel, connections, handle)
+    }
+
+    /// F-f06-01: the thread workspace routes ask Session Core who owns the thread before any sandbox RPC.
+    /// A thread that is not the caller's answers 404 (the same as a missing one), a lookup that cannot be
+    /// answered fails closed with 503, and neither reaches sandbox-manager. The owner reaches it.
+    #[tokio::test]
+    async fn thread_workspace_routes_check_the_owner_before_any_sandbox_rpc() {
+        let (mut state, _) = test_state().await;
+        let (channel, connections, handle) = counting_sandbox_manager().await;
+        state.sandbox_client =
+            mp_contracts::model_plane::v1::sandbox_manager_client::SandboxManagerClient::new(channel);
+        let session = || VerifiedModelBearer::for_test("test-session-bearer");
+        let sandbox = || VerifiedSandboxBearer::for_test("sandbox-token");
+
+        for (thread, org, user, want, body) in [
+            ("thread-of-someone-else", "org-owner", "user-owner", StatusCode::NOT_FOUND, "thread not found"),
+            ("thread-owned-1", "org-owner", "user-stranger", StatusCode::NOT_FOUND, "thread not found"),
+            ("thread-owned-1", "org-other", "user-owner", StatusCode::NOT_FOUND, "thread not found"),
+            (
+                "thread-lookup-fails",
+                "org-owner",
+                "user-owner",
+                StatusCode::SERVICE_UNAVAILABLE,
+                "thread ownership could not be checked",
+            ),
+        ] {
+            let (status, Json(error)) = get_thread_workspace(
+                State(state.clone()),
+                Extension(claims(org, user)),
+                sandbox(),
+                session(),
+                Path(thread.to_owned()),
+            )
+            .await
+            .expect_err("GET is refused");
+            assert_eq!((status, error["error"].as_str()), (want, Some(body)), "GET {thread} {org} {user}");
+            let (status, Json(error)) = delete_thread_workspace(
+                State(state.clone()),
+                Extension(claims(org, user)),
+                sandbox(),
+                session(),
+                Path(thread.to_owned()),
+            )
+            .await
+            .expect_err("DELETE is refused");
+            assert_eq!((status, error["error"].as_str()), (want, Some(body)), "DELETE {thread} {org} {user}");
+        }
+        assert_eq!(
+            connections.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no sandbox RPC follows a refused or unanswered ownership check"
+        );
+
+        // The owner passes the check and reaches sandbox-manager (which this stand-in drops).
+        let owner = delete_thread_workspace(
+            State(state.clone()),
+            Extension(claims("org-owner", "user-owner")),
+            sandbox(),
+            session(),
+            Path("thread-owned-1".to_owned()),
+        )
+        .await;
+        assert!(owner.is_err(), "the dropped connection fails the RPC");
+        assert!(
+            connections.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the owner's request reaches sandbox-manager"
+        );
+        handle.abort();
+    }
+
     fn descriptor(effort_levels: &[&str]) -> ModelDescriptor {
         ModelDescriptor {
             id: "gpt-5-mini".to_owned(),
@@ -24000,6 +24096,25 @@ mod space_post_wire_tests {
         assert_eq!(only_count["reply_count"], 1);
         assert!(only_count.get("last_author_subject_id").is_none());
     }
+
+    /// W3-EP-7-S5-b: a thread listing relays the goal's status as one of the six closed tokens, spelled as
+    /// session-core spells it, and omits the key for no goal or a token this build does not name, so the
+    /// listing never carries anything but a closed status word.
+    #[test]
+    fn thread_summary_relays_a_closed_goal_status_and_omits_anything_else() {
+        for token in ["active", "paused", "met", "budget_reached", "turns_reached", "blocked"] {
+            let mut listed = summary(0, "");
+            listed.goal_status = goal_status_token(token);
+            let json = serde_json::to_value(listed).expect("serialises");
+            assert_eq!(json["goal_status"], token, "{json}");
+        }
+        for other in ["", "ACTIVE", " active", "cleared", "Find three suppliers", "met\n"] {
+            let mut listed = summary(0, "");
+            listed.goal_status = goal_status_token(other);
+            let json = serde_json::to_value(listed).expect("serialises");
+            assert!(json.get("goal_status").is_none(), "{other:?}: {json}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -25682,5 +25797,90 @@ mod mcp_app_tool_call_route_tests {
         let (status, body) = post_json(app(false, false), "/v1/mcp-apps/tool-call", BODY).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["error"]["code"], "delegated_credential_required");
+    }
+}
+
+/// W2-WS13-S6-gw-grants / W2-WS13-S7-gw-proposals: the owner's read of a standing grant or a rule proposal is a pure
+/// allowlist projection. The gate's own keys (the action key, the call digest) and server-internal fields (the
+/// proposal's policy id, a confirm's claim) never leave the gateway, and unknown enum values read as closed words.
+#[cfg(test)]
+mod approval_projection_tests {
+    use super::*;
+    use mp_contracts::model_plane::v1::{
+        ApprovalRuleProposal, ApprovalRuleProposalState, ApprovalScopeGrant,
+    };
+
+    const SECRET_KEY: &str = "execute_provider_action:message.send";
+
+    fn grant(scope: i32) -> ApprovalScopeGrant {
+        ApprovalScopeGrant {
+            id: "grant-1".to_owned(),
+            thread_id: "thread-1".to_owned(),
+            run_id: String::new(),
+            scope,
+            tool_name: "send_email".to_owned(),
+            action_key: SECRET_KEY.to_owned(),
+            effect_class: "external_write".to_owned(),
+            created_from_approval_id: "appr-1".to_owned(),
+            cause_code: "not_a_known_cause".to_owned(),
+            use_count: 2,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_grant_projection_names_only_its_allowlisted_fields() {
+        let value = approval_grant_value(&grant(ApprovalScope::Thread as i32));
+        let keys: std::collections::BTreeSet<&str> =
+            value.as_object().expect("object").keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            [
+                "id", "thread_id", "run_id", "scope", "tool_name", "effect_class", "cause_code",
+                "created_from_approval_id", "created_at", "expires_at", "revoked_at", "use_count",
+                "last_used_at",
+            ]
+            .into_iter()
+            .collect()
+        );
+        assert!(!value.to_string().contains(SECRET_KEY), "the action key leaked: {value}");
+        assert_eq!(value["scope"], "thread");
+        assert_eq!(value["run_id"], Value::Null, "an empty id reads as null");
+        assert_ne!(value["cause_code"], "not_a_known_cause", "the cause goes through the closed vocabulary");
+        assert_eq!(approval_grant_value(&grant(ApprovalScope::Run as i32))["scope"], "run");
+        assert_eq!(approval_grant_value(&grant(ApprovalScope::Once as i32))["scope"], Value::Null);
+        assert_eq!(approval_grant_value(&grant(99))["scope"], Value::Null);
+    }
+
+    fn proposal(state: i32) -> ApprovalRuleProposal {
+        ApprovalRuleProposal {
+            id: "prop-1".to_owned(),
+            tool_name: "mcp__fixture__create_note".to_owned(),
+            tool_digest: "sha256:abc".to_owned(),
+            capability_id: String::new(),
+            state,
+            created_from_approval_id: "appr-internal-1".to_owned(),
+            policy_id: "policy-internal-9".to_owned(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_proposal_projection_hides_the_claim_and_the_policy_id() {
+        let value = approval_rule_proposal_value(&proposal(ApprovalRuleProposalState::Confirming as i32));
+        assert_eq!(value["state"], "proposed", "a confirm's claim is server-internal");
+        assert_eq!(value["capability_id"], Value::Null);
+        let text = value.to_string();
+        assert!(!text.contains("policy-internal-9"), "{text}");
+        assert!(!text.contains("appr-internal-1"), "{text}");
+        for (state, word) in [
+            (ApprovalRuleProposalState::Proposed as i32, "proposed"),
+            (ApprovalRuleProposalState::Confirmed as i32, "confirmed"),
+            (ApprovalRuleProposalState::Dismissed as i32, "dismissed"),
+            (ApprovalRuleProposalState::Unspecified as i32, "proposed"),
+            (77, "proposed"),
+        ] {
+            assert_eq!(approval_rule_proposal_value(&proposal(state))["state"], word, "{state}");
+        }
     }
 }
