@@ -755,3 +755,28 @@ func TestAGDPROrganisationDeleteErasesTheLedger(t *testing.T) {
 		t.Fatal("organisation purge left the capability record")
 	}
 }
+
+// Acknowledging the current text takes the row below the minimum out of force with its own audit row, which
+// names the reason, and leaves exactly one active acknowledgement: the new one, on the current text.
+func TestAcknowledgingTheCurrentTextAuditsTheSupersededRowWithItsReason(t *testing.T) {
+	rig := newMatrixRig(t, matrixWording(t))
+	owner := matrixPrincipal(matrixOrg, matrixOwner)
+	rig.connect(matrixConn, matrixOrg, matrixOwner, string(zdr.CapabilityNotSupported), true, 1)
+	rig.acknowledgeOldText(matrixOrg, matrixOwner, matrixConn)
+	drainAudit(t, rig.repo)
+
+	if status, _ := rig.acknowledge(owner, matrixConn); status != http.StatusCreated {
+		t.Fatalf("acknowledging the current text answered %d, want 201", status)
+	}
+	rows, err := rig.repo.ListConnectionZDRAcknowledgements(t.Context(), matrixConn, false)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("ledger = (%+v, %v), want the superseded row and the new one", rows, err)
+	}
+	if active := activeAcks(t, rig.repo, matrixConn); len(active) != 1 || active[0].TextVersion != "v2" {
+		t.Fatalf("active acknowledgements = %+v, want exactly one, on v2", active)
+	}
+	superseded := auditOfType(drainAudit(t, rig.repo), "subscription_connection.zdr_acknowledgement_revoked")
+	if len(superseded) != 1 || superseded[0].Metadata["reason"] != store.ZDRRevokeTextVersionOutdated || superseded[0].Metadata["textVersion"] != "v1" {
+		t.Fatalf("superseded audit = %+v, want one row for the v1 acknowledgement with reason text_version_superseded", superseded)
+	}
+}

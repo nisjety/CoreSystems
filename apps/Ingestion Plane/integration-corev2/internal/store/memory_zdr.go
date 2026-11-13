@@ -173,6 +173,29 @@ func (r *MemoryRepository) RevokeConnectionZDRAcknowledgements(_ context.Context
 	return revoked, nil
 }
 
+func (r *MemoryRepository) RevokeConnectionZDRAcknowledgement(_ context.Context, connectionID, acknowledgementID, reason string, at time.Time) (ConnectionZDRAcknowledgement, error) {
+	if !ValidZDRRevokeReason(reason) {
+		return ConnectionZDRAcknowledgement{}, invalidZDR("revoke reason %q is not one of %s", reason, strings.Join(zdrRevokeReasons, ", "))
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	at = at.UTC()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for index, ack := range r.zdrAcks {
+		if ack.ID != acknowledgementID || ack.ConnectionID != connectionID || ack.RevokedAt != nil {
+			continue
+		}
+		stamp := at
+		ack.RevokedAt = &stamp
+		ack.RevokeReason = reason
+		r.zdrAcks[index] = ack
+		return cloneZDRAcknowledgement(ack), nil
+	}
+	return ConnectionZDRAcknowledgement{}, ErrNotFound
+}
+
 func (r *MemoryRepository) PurgeOrganizationConnectionZDR(_ context.Context, organizationID string) (ConnectionZDRPurgeResult, error) {
 	organizationID = strings.TrimSpace(organizationID)
 	if organizationID == "" {

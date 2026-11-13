@@ -381,9 +381,12 @@ VENDORED=(
   # ZDR-Z-03c: the BFF gateway's copy of the posture matrix and its pin (tests/fixtures).
   "apps/Frontend Plane/verevonv3/apps/gateway/tests/fixtures/zdr-posture-matrix.json|apps/Model Plane/api/contracts/zdr-posture-matrix.json"
   "apps/Frontend Plane/verevonv3/apps/gateway/tests/fixtures/zdr-posture-matrix.json.sha256|apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256"
+  # ZDR-Z-12-13: integration-corev2's copy for the acknowledgement states (internal/api/zdr_posture_matrix_test.go).
+  "apps/Ingestion Plane/integration-corev2/internal/api/testdata/zdr-posture-matrix.json|apps/Model Plane/api/contracts/zdr-posture-matrix.json"
+  "apps/Ingestion Plane/integration-corev2/internal/api/testdata/zdr-posture-matrix.json.sha256|apps/Model Plane/api/contracts/zdr-posture-matrix.json.sha256"
 
-  # Not vendored yet: conversation-core (Z-03d) and integration-corev2 (Z-13) have no copy in the tree, so their
-  # CONSUMERS rows stay pending until a copy and its pin land.
+  # Not vendored yet: conversation-core (Z-03d) has no copy in the tree, so its CONSUMERS row stays pending
+  # until a copy and its pin land.
 
   # Z-05b: the SPA's copy of the refusal catalogue and its pin. zdr-refusals.ts renders every
   # code from it, and zdr-refusals.test.ts reads the copy inside the Frontend tree.

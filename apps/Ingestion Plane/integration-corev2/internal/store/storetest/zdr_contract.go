@@ -386,6 +386,47 @@ func RunConnectionZDRContract(t *testing.T, h ZDRHarness) {
 		}
 	})
 
+	t.Run("one acknowledgement is revoked by id for its own connection, once, and frees its digest", func(t *testing.T) {
+		f := newFixture(t, h)
+		rec := f.apply(1).Record
+		first := f.acknowledge(rec.Digest)
+
+		// Another connection of the same member names none of this connection's rows.
+		elsewhere := f.seedConnection(f.org, f.user)
+		if _, err := f.repo.ApplyConnectionZDRAssessment(ctx, assessmentFor(elsewhere, zdr.CapabilityNotSupported, zdr.BasisProviderTermsKnown, 1)); err != nil {
+			t.Fatalf("assess the other connection: %v", err)
+		}
+		if _, err := f.repo.RevokeConnectionZDRAcknowledgement(ctx, elsewhere, first.ID, store.ZDRRevokeTextVersionOutdated, time.Time{}); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("revoking another connection's acknowledgement = %v, want ErrNotFound", err)
+		}
+		if active := f.ledger(true); len(active) != 1 || active[0].ID != first.ID || active[0].RevokedAt != nil {
+			t.Fatalf("a revoke through another connection changed the ledger: %+v", active)
+		}
+
+		revoked, err := f.repo.RevokeConnectionZDRAcknowledgement(ctx, f.conn, first.ID, store.ZDRRevokeTextVersionOutdated, time.Time{})
+		if err != nil || revoked.ID != first.ID || revoked.RevokedAt == nil || revoked.RevokeReason != store.ZDRRevokeTextVersionOutdated {
+			t.Fatalf("revoke by id = (%+v, %v), want the row revoked as text_version_superseded", revoked, err)
+		}
+		if _, err := f.repo.RevokeConnectionZDRAcknowledgement(ctx, f.conn, first.ID, store.ZDRRevokeOwnerRevoked, time.Time{}); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("a second revoke of the same row = %v, want ErrNotFound", err)
+		}
+		if _, err := f.repo.RevokeConnectionZDRAcknowledgement(ctx, f.conn, first.ID, "because", time.Time{}); !errors.Is(err, store.ErrInvalidZDR) {
+			t.Fatalf("revoke by id with an invented reason = %v, want ErrInvalidZDR", err)
+		}
+		if rows := f.ledger(false); len(rows) != 1 || rows[0].RevokeReason != store.ZDRRevokeTextVersionOutdated {
+			t.Fatalf("a revoked row was revoked again: %+v", rows)
+		}
+
+		// The revoked row left the active index, so the same digest can take a new active acknowledgement.
+		second := f.acknowledge(rec.Digest)
+		if second.ID == first.ID {
+			t.Fatal("a new acknowledgement reused the revoked row")
+		}
+		if active := f.ledger(true); len(active) != 1 || active[0].ID != second.ID {
+			t.Fatalf("active rows after re-acknowledging = %+v, want only the new one", active)
+		}
+	})
+
 	t.Run("the ledger is newest first and can be limited to the active rows", func(t *testing.T) {
 		f := newFixture(t, h)
 		rec := f.apply(1).Record
