@@ -936,7 +936,7 @@ pub const BUDGET_REACHED: &str = "budget_reached";
 /// Whether the child token budget is enforced, from an already-read env value: only `true`.
 #[must_use]
 pub fn parse_budget_enforced(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| value.trim() == "true")
+    raw == Some("true")
 }
 
 /// The child token budget, from an already-read env value: unset, unparsable or zero falls back
@@ -960,7 +960,7 @@ pub const MAX_RESULT_SCHEMA_BYTES: usize = 8 * 1024;
 /// Whether typed per-item results are on, from an already-read env value: only the literal `true`.
 #[must_use]
 pub fn parse_typed_results_enabled(raw: Option<&str>) -> bool {
-    raw.is_some_and(|value| value.trim() == "true")
+    raw == Some("true")
 }
 
 /// Whether typed per-item results are on for this deployment right now.
@@ -1696,5 +1696,56 @@ mod tests {
             refused
         );
         assert_eq!(retry_item_goal("", "", "run-parent", label, "look up A"), refused);
+    }
+}
+
+/// 3.4 switch sweep: `SUBAGENT_TYPED_RESULTS_ENABLED` and `WIDE_RESEARCH_CHILD_BUDGET_ENFORCED` are
+/// documented as on for the literal `true` only; off, a fan-out call parses as it always did.
+#[cfg(test)]
+mod switch_literal {
+    use super::*;
+
+    const NOT_TRUE: [&str; 11] = [
+        "", "false", "1", "on", "yes", "TRUE", "True", " true", "true ", "true\n", "\ttrue",
+    ];
+
+    #[test]
+    fn only_the_literal_true_switches_typed_results_on() {
+        assert!(parse_typed_results_enabled(Some("true")));
+        assert!(!parse_typed_results_enabled(None));
+        for value in NOT_TRUE {
+            assert!(
+                !parse_typed_results_enabled(Some(value)),
+                "{value:?} must leave typed results off"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_literal_true_enforces_the_child_budget() {
+        assert!(parse_budget_enforced(Some("true")));
+        assert!(!parse_budget_enforced(None));
+        for value in NOT_TRUE {
+            assert!(
+                !parse_budget_enforced(Some(value)),
+                "{value:?} must leave the child budget unenforced"
+            );
+        }
+    }
+
+    /// Off (the process default here), a `result_schema` is ignored entirely: even a malformed one
+    /// parses, and the request carries none.
+    #[test]
+    fn off_ignores_result_schema_even_a_malformed_one() {
+        if std::env::var_os(TYPED_RESULTS_ENV).is_some() {
+            return; // only meaningful with the switch unset
+        }
+        let request = parse_fan_out(
+            r#"{"items":[{"goal":"price of X"}],"result_schema":"not an object"}"#,
+            8,
+        )
+        .expect("off: a malformed result_schema is not refused");
+        assert!(request.result_schema.is_none());
+        assert_eq!(request.items.len(), 1);
     }
 }

@@ -1648,6 +1648,17 @@
       "codePath": "apps/Control Plane/auth-core/src/auth/web-policy.ts"
     },
     {
+      "name": "WIDE_RESEARCH_CHILD_BUDGET_ENFORCED",
+      "kind": "switch",
+      "owner": "model-plane",
+      "source": "compose",
+      "default": "false",
+      "purpose": "Wave 3 EP-2 S9: enforces the child token budget of one wide-research fan-out call (WIDE_RESEARCH_CHILD_TOKEN_BUDGET). Only the literal true enforces it; off, a spent budget is logged and every item still starts.",
+      "declarations": [
+        { "service": "execution-core", "env": "WIDE_RESEARCH_CHILD_BUDGET_ENFORCED", "default": "false" }
+      ]
+    },
+    {
       "name": "WIDE_RESEARCH_FAN_OUT_ENABLED",
       "kind": "switch",
       "owner": "model-plane",
