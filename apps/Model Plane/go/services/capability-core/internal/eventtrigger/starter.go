@@ -44,8 +44,12 @@ const (
 	// it. The fire is refused, not left authorised, so switching the schedule back on never starts a run for an event
 	// that arrived while it was off.
 	OutcomeScheduleDisabled = "schedule_disabled"
-	// OutcomeFireExpired marks a fire the starter reaches more than fireStartWindow after its authorisation. The fire is
-	// refused, not left authorised, so no later start runs for an event the budget that admitted it no longer covers.
+	// OutcomeScheduleDeleted marks a fire whose bound schedule is soft-deleted. A deleted schedule starts nothing, so the
+	// fire is refused at the first pass that finds it, whatever its age, and is never left authorised.
+	OutcomeScheduleDeleted = "schedule_deleted"
+	// OutcomeFireExpired marks a fire the starter reaches more than fireStartWindow after its authorisation, or whose
+	// webhook event is more than fireStartWindow old. The fire is refused, not left authorised, so no later start runs for
+	// an event the budget that admitted it no longer covers.
 	OutcomeFireExpired = "fire_expired"
 )
 
@@ -68,18 +72,21 @@ type starterLedger interface {
 // startBatch is one transaction that starts at most one fire: the claim, the task, and the record of the task commit
 // together, so a failure leaves the fire authorised and unstarted for the next pass.
 type startBatch interface {
-	// next claims one authorised, unstarted fire, authorised no earlier than notBefore, whose trigger is active and names a
-	// live, enabled schedule, skipping the fire ids in excluded. It returns nil when there is none.
+	// next claims one authorised, unstarted fire, authorised and created no earlier than notBefore, whose trigger is active
+	// and names a live, enabled schedule, skipping the fire ids in excluded. It returns nil when there is none.
 	next(ctx context.Context, excluded []string, notBefore time.Time) (*StartCandidate, error)
 	// nextDisabled claims one authorised, unstarted fire under the same conditions as next, except that its schedule is
 	// switched off or auto-paused. The caller refuses it. It returns nil when there is none.
 	nextDisabled(ctx context.Context, excluded []string, notBefore time.Time) (*StartCandidate, error)
+	// nextDeleted claims one authorised, unstarted fire of an active trigger whose bound schedule is soft-deleted, whatever
+	// the fire's age, skipping the fire ids in excluded. The caller refuses it. It returns nil when there is none.
+	nextDeleted(ctx context.Context, excluded []string) (*StartCandidate, error)
 	// nextInactive claims one authorised, unstarted fire of a paused or disabled trigger that names a schedule, skipping
 	// the fire ids in excluded. The caller refuses it. It returns nil when there is none.
 	nextInactive(ctx context.Context, excluded []string) (*StartCandidate, error)
 	// nextExpired claims one authorised, unstarted fire of an active trigger that names a schedule, authorised before
-	// notBefore, whatever its schedule's state, skipping the fire ids in excluded. The caller refuses it. It returns nil
-	// when there is none.
+	// notBefore or whose event was created before it, whatever its schedule's state, skipping the fire ids in excluded.
+	// The caller refuses it. It returns nil when there is none.
 	nextExpired(ctx context.Context, excluded []string, notBefore time.Time) (*StartCandidate, error)
 	// insert writes the scheduled-run task and its pending cron fire, and returns the task id.
 	insert(ctx context.Context, candidate StartCandidate, fireKey string, now time.Time) (string, error)
@@ -92,8 +99,9 @@ type startBatch interface {
 }
 
 // Starter starts one budgeted scheduled run for each authorised fire of a trigger that names a schedule. It refuses a
-// fire whose schedule is switched off or auto-paused, a fire whose trigger is paused or disabled, and a fire authorised
-// more than fireStartWindow earlier. It writes the same task and cron fire rows a cron fire writes (cron.InsertFire),
+// fire whose schedule is switched off, auto-paused or soft-deleted, a fire whose trigger is paused or disabled, and a fire
+// authorised more than fireStartWindow earlier or whose webhook event was created more than fireStartWindow earlier. It
+// writes the same task and cron fire rows a cron fire writes (cron.InsertFire),
 // under a fire key that carries the trigger and the webhook event, so the workflow dispatcher asks Control afresh and
 // session-core prepares the run exactly as for a cron fire. The starter holds and passes on no credential. The run is
 // bounded by the existing run budget and by the hourly trigger and org limits the sweeper already applied when it
@@ -192,9 +200,9 @@ func (s *Starter) startOne(ctx context.Context, excluded []string) (string, bool
 
 	// nextInactive comes first, so a fire of a paused or disabled trigger is refused in the first pass that finds it, not
 	// after the enabled fires ahead of it. Then next claims a fire of an active trigger whose schedule is enabled and whose
-	// authorisation is inside the window, and nextDisabled one whose schedule is switched off or auto-paused. Last comes
-	// nextExpired, so a backlog of expired fires never holds back a fire that can still start. The starter refuses the
-	// inactive, disabled and expired ones.
+	// authorisation and event are inside the window, and nextDisabled one whose schedule is switched off or auto-paused.
+	// nextDeleted takes one whose schedule is soft-deleted, whatever its age. Last comes nextExpired, so a backlog of expired
+	// fires never holds back a fire that can still start. The starter refuses the inactive, disabled, deleted and expired ones.
 	candidate, err := b.nextInactive(ctx, excluded)
 	if err != nil {
 		return "", false, err
@@ -213,6 +221,14 @@ func (s *Starter) startOne(ctx context.Context, excluded []string) (string, bool
 			return "", false, err
 		}
 		scheduleDisabled = candidate != nil
+	}
+	scheduleDeleted := false
+	if candidate == nil {
+		candidate, err = b.nextDeleted(ctx, excluded)
+		if err != nil {
+			return "", false, err
+		}
+		scheduleDeleted = candidate != nil
 	}
 	fireExpired := false
 	if candidate == nil {
@@ -242,7 +258,9 @@ func (s *Starter) startOne(ctx context.Context, excluded []string) (string, bool
 
 	// The checks run in this order, as the sweeper checks the trigger first. The window comes second and needs nothing of
 	// the schedule, so an expired fire is refused without reading its key, its consent or its schedule, which only a start
-	// needs. The fire key, the consent and the schedule follow. The first that fails names the refusal.
+	// needs. The fire key, the consent and the schedule follow, and a soft-deleted schedule is refused after them, as a
+	// disabled one is. The first that fails names the refusal. Every claim loads the schedule, so the consent is always read
+	// from the schedule the fire names.
 	fireKey := FireKeyPrefix + candidate.TriggerID + ":" + candidate.WebhookEventID
 	switch {
 	case triggerInactive:
@@ -253,6 +271,8 @@ func (s *Starter) startOne(ctx context.Context, excluded []string) (string, bool
 		return refuseWith(OutcomeFireKeyInvalid)
 	case cron.ApprovalContractLapsed(candidate.Schedule.Template, now):
 		return refuseWith(OutcomeApprovalExpired)
+	case scheduleDeleted:
+		return refuseWith(OutcomeScheduleDeleted)
 	case scheduleDisabled:
 		return refuseWith(OutcomeScheduleDisabled)
 	}
@@ -297,11 +317,12 @@ type pgStartBatch struct {
 	tx pgx.Tx
 }
 
-// next claims one authorised fire whose schedule is enabled, authorised no earlier than notBefore. The trigger must still be
-// active and name a schedule that is live and enabled, in the fire's org, and the trigger member's own in the trigger's
-// Space, which is what the binding was checked against. A fire that fails any of these is left authorised and untouched,
-// except the three the starter refuses: one whose schedule is only switched off or auto-paused (nextDisabled), one whose
-// trigger is paused or disabled (nextInactive), and one authorised before the window (nextExpired).
+// next claims one authorised fire whose schedule is enabled, authorised and created no earlier than notBefore. The trigger
+// must still be active and name a schedule that is live and enabled, in the fire's org, and the trigger member's own in the
+// trigger's Space, which is what the binding was checked against. A fire that fails any of these is left authorised and
+// untouched, except the four the starter refuses: one whose schedule is only switched off or auto-paused (nextDisabled),
+// one whose schedule is soft-deleted (nextDeleted), one whose trigger is paused or disabled (nextInactive), and one
+// authorised, or whose event was created, before the window (nextExpired).
 func (b pgStartBatch) next(ctx context.Context, excluded []string, notBefore time.Time) (*StartCandidate, error) {
 	return b.claim(ctx, excluded, true, notBefore)
 }
@@ -310,6 +331,42 @@ func (b pgStartBatch) next(ctx context.Context, excluded []string, notBefore tim
 // auto-paused. The starter refuses it, so switching that schedule back on never starts a run for the old event.
 func (b pgStartBatch) nextDisabled(ctx context.Context, excluded []string, notBefore time.Time) (*StartCandidate, error) {
 	return b.claim(ctx, excluded, false, notBefore)
+}
+
+// nextDeleted claims one authorised fire of an active trigger whose bound schedule is soft-deleted, whatever the fire's age.
+// A soft-deleted schedule starts nothing, so the starter refuses the fire schedule_deleted at once rather than leaving it
+// authorised. It binds no window, because the refusal does not depend on age. It reads the schedule as claim does, so the
+// consent is checked against the schedule the fire names. The schedule, the trigger and the fire are locked with the claim,
+// as claim locks them.
+func (b pgStartBatch) nextDeleted(ctx context.Context, excluded []string) (*StartCandidate, error) {
+	if excluded == nil {
+		// A NULL array would make the exclusion unknown and match nothing.
+		excluded = []string{}
+	}
+	var c StartCandidate
+	err := b.tx.QueryRow(ctx, `
+		SELECT f.id, f.trigger_id, f.webhook_event_id,
+		       s.id, s.org_id, s.space_ref, s.creator_subject_id, s.template_digest, s.task_template
+		FROM event_trigger_fires f
+		JOIN event_triggers t ON t.id = f.trigger_id
+		JOIN cron_schedules s ON s.id = t.schedule_id
+		WHERE f.status = 'authorized' AND f.task_id IS NULL
+		  AND NOT (f.id = ANY($1::text[]))
+		  AND t.status = 'active' AND t.schedule_id IS NOT NULL
+		  AND s.deleted_at IS NOT NULL
+		ORDER BY f.settled_at, f.id
+		LIMIT 1
+		FOR UPDATE OF f, s, t SKIP LOCKED`, excluded).Scan(
+		&c.FireID, &c.TriggerID, &c.WebhookEventID,
+		&c.Schedule.ID, &c.Schedule.OrgID, &c.Schedule.SpaceRef, &c.Schedule.SubjectID,
+		&c.Schedule.TemplateDigest, &c.Schedule.Template)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("claim authorised fire of a deleted schedule: %w", err)
+	}
+	return &c, nil
 }
 
 // nextInactive claims one authorised fire of a trigger that names a schedule and is paused or disabled. The starter
@@ -342,10 +399,11 @@ func (b pgStartBatch) nextInactive(ctx context.Context, excluded []string) (*Sta
 	return &c, nil
 }
 
-// nextExpired claims one authorised fire of an active trigger that names a schedule, authorised before notBefore. It takes
-// the fire whatever its schedule's state, since a refused fire never starts and needs only its trigger. The starter refuses
-// it fire_expired, so a run switch turned on after a long pause never starts the run of an event the budget that admitted
-// it no longer covers.
+// nextExpired claims one authorised fire of an active trigger that names a schedule, authorised before notBefore or whose
+// webhook event was created before it. It takes the fire whatever its schedule's state, since a refused fire never starts
+// and needs only its trigger. The starter refuses it fire_expired, so a run switch turned on after a long pause never starts
+// the run of an event the budget that admitted it no longer covers, and an authorised fire whose event has aged out never
+// starts.
 func (b pgStartBatch) nextExpired(ctx context.Context, excluded []string, notBefore time.Time) (*StartCandidate, error) {
 	if excluded == nil {
 		// A NULL array would make the exclusion unknown and match nothing.
@@ -359,7 +417,7 @@ func (b pgStartBatch) nextExpired(ctx context.Context, excluded []string, notBef
 		WHERE f.status = 'authorized' AND f.task_id IS NULL
 		  AND NOT (f.id = ANY($1::text[]))
 		  AND t.status = 'active' AND t.schedule_id IS NOT NULL
-		  AND f.settled_at < $2
+		  AND (f.settled_at < $2 OR f.created_at < $2)
 		ORDER BY f.settled_at, f.id
 		LIMIT 1
 		FOR UPDATE OF f, t SKIP LOCKED`, excluded, notBefore).Scan(&c.FireID, &c.TriggerID, &c.WebhookEventID)
@@ -373,11 +431,12 @@ func (b pgStartBatch) nextExpired(ctx context.Context, excluded []string, notBef
 }
 
 // claim is the query behind next and nextDisabled. Both claim the same fires under the same conditions and differ only
-// in the bound schedule's enabled state, so the two cannot drift apart. Both take only fires authorised no earlier than
-// notBefore: an older fire is nextExpired's. The schedule and the trigger rows are locked with the fire, as the cron
-// sweeper locks the schedules it fires and session-core locks a trigger it updates, so a switch-off or a pause either waits
-// for the task to be written or is seen by the claim. A row another replica holds is skipped, so replicas never start one
-// fire twice.
+// in the bound schedule's enabled state, so the two cannot drift apart. Both take only fires authorised and created no
+// earlier than notBefore: an older fire, or one of an event older than the window, is nextExpired's. A soft-deleted
+// schedule is never claimed here; nextDeleted takes it. The schedule and the trigger rows are locked with the fire, as the
+// cron sweeper locks the schedules it fires and session-core locks a trigger it updates, so a switch-off or a pause either
+// waits for the task to be written or is seen by the claim. A row another replica holds is skipped, so replicas never start
+// one fire twice.
 func (b pgStartBatch) claim(ctx context.Context, excluded []string, enabled bool, notBefore time.Time) (*StartCandidate, error) {
 	if excluded == nil {
 		// A NULL array would make the exclusion unknown and match nothing.
@@ -396,6 +455,7 @@ func (b pgStartBatch) claim(ctx context.Context, excluded []string, enabled bool
 		  AND s.deleted_at IS NULL
 		  AND s.enabled = $2
 		  AND f.settled_at >= $3
+		  AND f.created_at >= $3
 		  AND s.org_id = f.org_id
 		  AND s.space_ref = t.space_ref
 		  AND s.creator_subject_id = t.member_user_id

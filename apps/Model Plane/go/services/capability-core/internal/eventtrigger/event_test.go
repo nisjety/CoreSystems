@@ -3,11 +3,20 @@ package eventtrigger
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 const validEnvelope = `{"type":"verevon.ingestion.integration.webhook_received","organizationId":" org-1 ",` +
 	`"connectionId":"conn-1","providerKey":"whatsapp","data":{"eventType":"message","webhookEventId":"wh-1",` +
 	`"normalizedBy":"meta"}}`
+
+// timedEnvelope is validEnvelope with the createdAt integration-corev2 stamps on every webhook_received event.
+const timedEnvelope = `{"type":"verevon.ingestion.integration.webhook_received","organizationId":" org-1 ",` +
+	`"connectionId":"conn-1","createdAt":"2026-11-08T11:59:30Z","providerKey":"whatsapp","data":{"eventType":"message",` +
+	`"webhookEventId":"wh-1","normalizedBy":"meta"}}`
+
+// eventCreatedAt is the createdAt timedEnvelope carries.
+var eventCreatedAt = time.Date(2026, 11, 8, 11, 59, 30, 0, time.UTC)
 
 func TestParseWebhookReceivedReadsOnlyTheMetadata(t *testing.T) {
 	got, err := ParseWebhookReceived([]byte(validEnvelope))
@@ -17,6 +26,26 @@ func TestParseWebhookReceivedReadsOnlyTheMetadata(t *testing.T) {
 	want := WebhookReceived{OrgID: "org-1", ConnectionID: "conn-1", WebhookEventID: "wh-1"}
 	if got != want {
 		t.Fatalf("ParseWebhookReceived = %+v; want %+v", got, want)
+	}
+}
+
+func TestParseWebhookReceivedReadsTheEventsCreationTime(t *testing.T) {
+	got, err := ParseWebhookReceived([]byte(timedEnvelope))
+	if err != nil {
+		t.Fatalf("ParseWebhookReceived: %v", err)
+	}
+	if !got.EventAt.Equal(eventCreatedAt) || got.WebhookEventID != "wh-1" {
+		t.Fatalf("ParseWebhookReceived = %+v; want the envelope's createdAt %v", got, eventCreatedAt)
+	}
+}
+
+func TestParseWebhookReceivedLeavesTheTimeZeroWhenTheEnvelopeHasNoCreationTime(t *testing.T) {
+	got, err := ParseWebhookReceived([]byte(validEnvelope))
+	if err != nil {
+		t.Fatalf("ParseWebhookReceived: %v", err)
+	}
+	if !got.EventAt.IsZero() {
+		t.Fatalf("EventAt = %v; want zero, so the consumer falls back to the broker's time", got.EventAt)
 	}
 }
 

@@ -2,9 +2,11 @@
 //
 // A durable consumer of integration-corev2's webhook_received event records one pending fire for each live
 // trigger bound to that event's connection, keyed on the webhook event id, so a redelivered event adds nothing.
-// A sweeper then decides each pending fire: the trigger must still be active, the trigger and its org must be
-// under their hourly budgets, a trigger with a wake filter must pass the wake gate (wakegate.go), and Control must
-// authorise the fire afresh through the same FireAuthorizer the cron sweeper uses. An authorised fire is recorded as
+// An event already older than the hourly window is recorded refused (fire_expired) instead, so a backlog that a
+// redelivery brings after an outage never becomes pending. A sweeper then decides each pending fire: the trigger
+// must still be active, the event must still be inside the window, the trigger and its org must be under their
+// hourly budgets, a trigger with a wake filter must pass the wake gate (wakegate.go), and Control must authorise
+// the fire afresh through the same FireAuthorizer the cron sweeper uses. An authorised fire is recorded as
 // authorized, and the starter turns it into a budgeted run. The wake gate alone reads a webhook body, and only for a
 // trigger that carries a filter: it holds the body in memory for one decision and never stores or logs it.
 package eventtrigger
@@ -13,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -30,17 +33,21 @@ const (
 // maxIDChars is the longest org, connection or webhook event id the fire table keeps.
 const maxIDChars = 128
 
-// WebhookReceived is the part of a webhook_received event this package reads.
+// WebhookReceived is the part of a webhook_received event this package reads. EventAt is when the event was created:
+// the envelope's createdAt, which integration-corev2 stamps when it publishes. It is zero when the envelope carries none,
+// and the consumer then takes the broker's time for the message.
 type WebhookReceived struct {
 	OrgID          string
 	ConnectionID   string
 	WebhookEventID string
+	EventAt        time.Time
 }
 
 // webhookEnvelope is integration-corev2's events.Event as the webhook_received message carries it.
 type webhookEnvelope struct {
 	OrganizationID string         `json:"organizationId"`
 	ConnectionID   string         `json:"connectionId"`
+	CreatedAt      time.Time      `json:"createdAt"`
 	Data           map[string]any `json:"data"`
 }
 
@@ -55,6 +62,7 @@ func ParseWebhookReceived(payload []byte) (WebhookReceived, error) {
 		OrgID:          strings.TrimSpace(env.OrganizationID),
 		ConnectionID:   strings.TrimSpace(env.ConnectionID),
 		WebhookEventID: textField(env.Data, "webhookEventId"),
+		EventAt:        env.CreatedAt.UTC(),
 	}
 	required := []struct{ name, value string }{
 		{"organizationId", event.OrgID},

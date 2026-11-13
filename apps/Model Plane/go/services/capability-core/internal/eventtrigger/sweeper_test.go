@@ -112,10 +112,11 @@ func (a *fakeAuthorizer) AuthorizeFire(_ context.Context, intent cron.FireIntent
 	return a.err
 }
 
-// pendingRow is a pending fire of an active trigger bound to one connection, Space and member.
+// pendingRow is a pending fire of an active trigger bound to one connection, Space and member. Its event was created at
+// the sweep's clock, so the event is inside the window.
 func pendingRow(fireID, triggerID, eventID string) memRow {
 	fire := Fire{ID: fireID, TriggerID: triggerID, OrgID: testOrg, WebhookEventID: eventID,
-		ConnectionID: "conn-1", SpaceRef: "space-a", MemberUserID: "member-1", TriggerStatus: "active"}
+		ConnectionID: "conn-1", SpaceRef: "space-a", MemberUserID: "member-1", TriggerStatus: "active", EventAt: testNow}
 	return memRow{fire: fire, status: StatusPending}
 }
 
@@ -272,17 +273,17 @@ func TestNewSweeperNeedsADatabaseAndAnAuthorizer(t *testing.T) {
 func TestRefusalChecksTheTriggerBeforeTheBudgets(t *testing.T) {
 	fire := pendingRow("trgfire_1", "trg_1", "wh-1").fire
 	fire.TriggerStatus = "disabled"
-	if got := refusalFor(fire, Counts{Trigger: 99, Org: 99}, testLimits); got != OutcomeTriggerNotActive {
+	if got := refusalFor(fire, Counts{Trigger: 99, Org: 99}, testLimits, testNow); got != OutcomeTriggerNotActive {
 		t.Fatalf("refusalFor = %q; want trigger_not_active", got)
 	}
 	fire.TriggerStatus = "active"
-	if got := refusalFor(fire, Counts{Trigger: 3}, testLimits); got != OutcomeTriggerBudget {
+	if got := refusalFor(fire, Counts{Trigger: 3}, testLimits, testNow); got != OutcomeTriggerBudget {
 		t.Fatalf("refusalFor = %q; want trigger_budget_reached", got)
 	}
-	if got := refusalFor(fire, Counts{Org: 5}, testLimits); got != OutcomeOrgQuota {
+	if got := refusalFor(fire, Counts{Org: 5}, testLimits, testNow); got != OutcomeOrgQuota {
 		t.Fatalf("refusalFor = %q; want org_quota_reached", got)
 	}
-	if got := refusalFor(fire, Counts{Trigger: 2, Org: 4}, testLimits); got != "" {
+	if got := refusalFor(fire, Counts{Trigger: 2, Org: 4}, testLimits, testNow); got != "" {
 		t.Fatalf("refusalFor = %q; a fire inside both budgets may be asked", got)
 	}
 }
